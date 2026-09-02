@@ -47,17 +47,10 @@ def make_run(tmp_path):
                 if route_path.removeprefix("run/") in evidence.get("source_paths", []):
                     evidence["source_paths"].remove(route_path.removeprefix("run/"))
                     evidence["source_paths"].append(route_path)
-    receipt["status"] = "closed"
     receipt["checkpoint"].update({"current_slice": "closed", "next_action": "authorised cleanup", "in_flight": []})
     receipt["human_gates"]["acceptance"] = {"status": "approved", "approver": "human", "evidence": "acceptance-approval"}
     receipt["human_gates"]["release"] = {"status": "approved", "approver": "human", "evidence": "release-approval"}
     receipt["evidence"].append({"id": "observation-result", "kind": "observation", "gate": "citation-audit", "status": "pass", "method": "observed comparable use", "artifact_id": "evidence-bundle", "source_paths": ["input"], "observed_at": "2026-07-10T12:00:00Z", "measured_value": 1})
-    receipt["state_history"].extend([
-        {"state": "accepted", "at": "2026-07-10T00:09:00Z", "evidence_ids": ["acceptance-approval"]},
-        {"state": "awaiting_release", "at": "2026-07-10T00:10:00Z", "evidence_ids": ["acceptance-approval"]},
-        {"state": "observing", "at": "2026-07-10T00:11:00Z", "evidence_ids": ["release-approval"]},
-        {"state": "closed", "at": "2026-07-11T00:11:00Z", "evidence_ids": ["observation-result"]},
-    ])
     receipt["observation"].update({"status": "pass", "started_at": "2026-07-10T00:11:00Z", "ended_at": "2026-07-11T00:11:00Z", "observed_events": 1, "evidence_ids": ["observation-result"]})
     (run / "scratch.tmp").write_text("remove")
     (run / "intent.md").write_text("intent")

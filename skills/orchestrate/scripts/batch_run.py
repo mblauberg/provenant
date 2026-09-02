@@ -30,8 +30,12 @@ sys.path.insert(0, str(REPO_ROOT / "skills"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _shared.bounded_process import stop_process_group
 from dispatch_run import (
+    ACCESS_MODES,
     ATTEMPT_ID_RE,
     AttemptEvidenceError,
+    WORKTREE_WRITE_ADAPTERS,
+    WorktreeLeaseError,
+    resolve_writer_worktree,
     digest,
     ensure_manifest_appendable,
     ensure_owned_directory,
@@ -196,6 +200,7 @@ def _load_manifest(
 
     workspace = Path.cwd().resolve()
     seen: set[str] = set()
+    claimed_worktrees: set[Path] = set()
     loaded: list[dict[str, Any]] = []
     for index, task in enumerate(tasks):
         if not isinstance(task, dict):
@@ -254,18 +259,41 @@ def _load_manifest(
         role = task.get("role", "worker")
         if not isinstance(role, str) or not role:
             raise BatchInputError(f"task {task_id} role must be a non-empty string")
-        source_writing = task.get("source_writing", False)
-        if not isinstance(source_writing, bool):
-            raise BatchInputError(f"task {task_id} source_writing must be boolean")
-        if task.get("access_mode", "read_only") != "read_only":
-            raise BatchInputError(f"task {task_id} supports only read_only access_mode")
-        if "non_overlapping" in task or "worktree_isolated" in task:
-            raise BatchInputError(f"task {task_id} writer isolation declarations are unsupported")
-        if source_writing:
-            raise BatchInputError("source_writing tasks are unsupported in this read-only release")
+        access_mode = task.get("access_mode", "read_only")
+        if access_mode not in ACCESS_MODES:
+            raise BatchInputError(f"task {task_id} access_mode must be one of {', '.join(ACCESS_MODES)}")
+        worktree = task.get("worktree")
+        if access_mode == "worktree_write":
+            if adapter not in WORKTREE_WRITE_ADAPTERS:
+                raise BatchInputError(f"task {task_id} worktree_write is unsupported for adapter {adapter}")
+            if not isinstance(worktree, str) or not worktree:
+                raise BatchInputError(f"task {task_id} worktree_write requires a worktree path")
+            try:
+                resolved_worktree = resolve_writer_worktree(Path(worktree))
+            except WorktreeLeaseError as exc:
+                raise BatchInputError(f"task {task_id} worktree is invalid: {exc}") from exc
+            # One writer per worktree. Two tasks in the same batch naming the same
+            # worktree are a shared write, and the batch is refused before launch
+            # rather than left to race for the lease.
+            if resolved_worktree in claimed_worktrees:
+                raise BatchInputError(f"task {task_id} shares a worktree with another writer task")
+            claimed_worktrees.add(resolved_worktree)
+            worktree = str(resolved_worktree)
+        elif worktree is not None:
+            raise BatchInputError(f"task {task_id} worktree requires worktree_write access_mode")
+        if any(name in task for name in ("source_writing", "non_overlapping", "worktree_isolated")):
+            raise BatchInputError(
+                f"task {task_id} writer isolation declarations are unsupported; "
+                "use access_mode worktree_write with a worktree"
+            )
         timeout = _finite_timeout(task.get("timeout"))
         normalized = dict(task)
-        normalized.update({"id": task_id, "adapter": adapter, "role": role, "timeout": timeout})
+        normalized.update({
+            "id": task_id, "adapter": adapter, "role": role, "timeout": timeout,
+            "access_mode": access_mode,
+        })
+        if worktree is not None:
+            normalized["worktree"] = worktree
         if git_evidence is not None:
             normalized["git_evidence"] = git_evidence
         if prompt is not None:
@@ -346,7 +374,8 @@ def _command(task: dict[str, Any], run_dir: Path) -> list[str]:
                        ("risk_tier", "--risk-tier"),
                        ("model_override_tier", "--model-override-tier"),
                        ("reviewer_id", "--reviewer-id"),
-                       ("effort", "--effort"), ("retry_of", "--retry-of")):
+                       ("effort", "--effort"), ("retry_of", "--retry-of"),
+                       ("access_mode", "--access-mode"), ("worktree", "--worktree")):
         if task.get(name):
             command.extend((flag, str(task[name])))
     if task.get("git_evidence"):
@@ -681,9 +710,10 @@ def parser() -> argparse.ArgumentParser:
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Manifest schema v1: {\"schema_version\":1,\"tasks\":[{\"id\":\"task-1\",\"prompt_file\":\"prompt.md\",\"adapter\":\"codex\",\"alias\":\"scout\",\"role\":\"worker\"}]}.
 Each task uses ordinary intent and exactly one of prompt_file/prompt plus one
-route selector (alias, task_class or model). Read-only tasks may run together;
-source_writing is rejected in this read-only release; partitioned/worktree-isolated
-writers are deferred. Agy tasks may also name a run-owned git_evidence packet.""",
+route selector (alias, task_class or model). Tasks default to read_only access;
+a task may set access_mode worktree_write with a worktree it owns exclusively, and
+two tasks may never name the same worktree. Agy tasks may also name a run-owned
+git_evidence packet.""",
     )
     root.add_argument("--run-dir", type=Path, required=True)
     root.add_argument("--manifest", type=Path, required=True)

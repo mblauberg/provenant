@@ -27,18 +27,18 @@ cases:
     tags: [composition]
     expected:
       primary_skill: ui-ux-design
-      companion_skills: [web-stack-conventions]
+      companion_skills: [engineering-docs]
     note: >-
-      Original frontend-review boundary case (WCAG-companion). Companion
-      supplies current WCAG 2.2 facts; this skill still owns the review
-      workflow and the finding contract, per references/review.md.
+      Original frontend-review boundary case (WCAG-companion). The companion
+      places the recorded findings; this skill still owns the review workflow
+      and the finding contract, per references/review.md.
   - id: r003
     relation: boundary
     prompt: "Capture Lighthouse accessibility and performance scores for this page and flag any claim in the report that the scan alone cannot support."
     tags: [composition]
     expected:
       primary_skill: ui-ux-design
-      companion_skills: [web-stack-conventions]
+      companion_skills: [engineering-docs]
     note: >-
       Lighthouse-evidence companion to r002: a Lighthouse run is one
       evidence lane, not a substitute for manual inspection or a standards

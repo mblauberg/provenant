@@ -6,6 +6,12 @@ Accepted (wording user-approved 2026-07-20). Lands with PR 4 of the
 [disclosure-refactor spec](../specs/harness/disclosure-refactor.md), which
 also amends `MAINTAINING.md`.
 
+Amended 2026-09-02 (issue #761): the contract-test half of the first Decision
+bullet is narrowed. Trigger fixtures remain mandatory for every skill change;
+a contract test is required only for an invariant a script, validator or CI
+gate evaluates at runtime. `MAINTAINING.md` §"Change a skill" step 7 is the
+live statement of the rule.
+
 ## Context
 
 `MAINTAINING.md` requires frozen held-out eval comparisons (candidate vs

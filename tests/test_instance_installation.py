@@ -255,6 +255,39 @@ def test_validate_summary_is_non_mutating_and_reports_seed_state(tmp_path):
     assert not (instance_root / ".agent-fabric" / "product-root.json").exists()
 
 
+def test_validate_counts_and_names_the_instance_custom_skills(tmp_path):
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    for name in ("uml-diagrams", "playwright"):
+        skill = instance_root / "custom-skills" / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Instance-owned test skill.\n---\n"
+        )
+    (instance_root / "custom-skills" / "not-a-skill").mkdir()
+
+    summary = run("validate", product, instance_root, "--summary")
+    document = run("validate", product, instance_root)
+
+    assert summary.returncode == 0, summary.stderr
+    assert "custom-skills=2" in summary.stdout
+    assert json.loads(document.stdout)["custom_skills"] == [
+        "playwright",
+        "uml-diagrams",
+    ]
+
+
+def test_validate_reports_zero_custom_skills_without_the_directory(tmp_path):
+    product = build_product(tmp_path)
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+
+    result = run("validate", product, instance_root, "--summary")
+
+    assert result.returncode == 0, result.stderr
+    assert "custom-skills=0" in result.stdout
+
+
 def test_the_pointer_is_rewritten_rather_than_seeded_once(tmp_path):
     """Relocating the product is always a re-run of the installer."""
     product = build_product(tmp_path)
@@ -487,7 +520,9 @@ def test_the_installer_seeds_a_scratch_instance_root(tmp_path):
     shutil.copytree(ROOT / "config", product / "config", symlinks=True)
     (product / "package.json").write_text(json.dumps({"version": "0.0.1"}) + "\n")
     (product / "AGENTS.md").write_text("# doctrine\n")
-    (product / "config" / "installation.json").unlink()
+    # The product repository does not track a desired state, but a working
+    # checkout of it may carry an untracked one; the copied tree must not.
+    (product / "config" / "installation.json").unlink(missing_ok=True)
     instance_root = tmp_path / "instance"
     instance_root.mkdir()
 

@@ -17,9 +17,15 @@ node_modules/
 # Transient review snapshots (build scratch, contains node_modules)
 .review-snapshots/
 
+# The desired state is instance-owned (ADR 0019): the installer writes it into
+# the instance root and the user commits it there. A copy tracked in the product
+# repository would seed a fused default into every fresh clone, so the product
+# tree ignores its own.
+config/installation.json
+
 # Installation receipts are machine-local: absolute target roots, per-entry
 # digests and timestamps for this machine only (ADR 0019). The committed
-# artifact is the path-free desired state at config/installation.json.
+# artifact is the path-free desired state, which lives in the instance root.
 .agent-harness-installation.json
 .agent-harness-workflows-installation.json
 # The pointer to this machine's product checkout, rewritten on every install.

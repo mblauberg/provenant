@@ -46,100 +46,17 @@ def timestamp(offset: timedelta) -> str:
     return (datetime.now(UTC) + offset).isoformat().replace("+00:00", "Z")
 
 
-def test_transition_to_observing_requires_active_or_passing_observation(tmp_path):
+def test_bind_refuses_to_replace_the_observation_plan_after_release(tmp_path):
     support = helpers()
     run_dir = support.initialise(tmp_path)
     receipt_path = run_dir / "RUN.json"
     receipt = json.loads(receipt_path.read_text())
-    receipt["status"] = "awaiting_release"
     receipt["human_gates"]["release"] = {
-        "status": "approved",
-        "approver": "human-owner",
-        "evidence": "release-approval",
+        "status": "approved", "approver": "human-owner", "evidence": "release-approval",
     }
     receipt["evidence"].append({
-        "id": "release-approval",
-        "kind": "human",
-        "gate": "human-release",
+        "id": "release-approval", "kind": "human", "gate": "human-release",
         "status": "pass",
-    })
-    assert receipt["observation"]["status"] == "planned"
-    receipt_path.write_text(json.dumps(receipt))
-
-    result = run_cli(
-        tmp_path,
-        "transition",
-        "--run-dir",
-        str(run_dir),
-        "--to",
-        "observing",
-        "--evidence",
-        "release-approval",
-    )
-
-    assert result.returncode == 1
-    assert "observation status active or pass" in result.stderr
-
-
-def test_transition_to_closed_clears_checkpoint_in_flight(tmp_path):
-    support = helpers()
-    run_dir = support.initialise(tmp_path)
-    receipt_path = run_dir / "RUN.json"
-    receipt = json.loads(receipt_path.read_text())
-    observing_at = timestamp(timedelta(seconds=-3))
-    observed_at = timestamp(timedelta(seconds=-2))
-    receipt["status"] = "observing"
-    receipt["state_history"].append({
-        "state": "observing",
-        "at": observing_at,
-        "evidence_ids": [],
-        "risk_tier": receipt["risk_tier"],
-    })
-    receipt["observation"].update({
-        "status": "pass",
-        "started_at": observing_at,
-        "ended_at": observed_at,
-        "observed_events": 1,
-        "evidence_ids": ["observation-1"],
-    })
-    receipt["evidence"].append({
-        "id": "observation-1",
-        "kind": "observation",
-        "gate": "citation-audit",
-        "status": "pass",
-        "observed_at": observed_at,
-        "measured_value": 1,
-    })
-    receipt["checkpoint"]["in_flight"] = ["observation-monitor"]
-    receipt_path.write_text(json.dumps(receipt))
-
-    result = run_cli(
-        tmp_path,
-        "transition",
-        "--run-dir",
-        str(run_dir),
-        "--to",
-        "closed",
-        "--evidence",
-        "observation-1",
-    )
-
-    assert result.returncode == 0, result.stderr
-    closed = json.loads(receipt_path.read_text())
-    assert closed["checkpoint"]["in_flight"] == []
-
-
-def test_bind_refuses_to_replace_observation_after_its_lifecycle_gate(tmp_path):
-    support = helpers()
-    run_dir = support.initialise(tmp_path)
-    receipt_path = run_dir / "RUN.json"
-    receipt = json.loads(receipt_path.read_text())
-    receipt["status"] = "observing"
-    receipt["state_history"].append({
-        "state": "observing",
-        "at": timestamp(timedelta(seconds=-1)),
-        "evidence_ids": [],
-        "risk_tier": receipt["risk_tier"],
     })
     receipt["observation"]["status"] = "active"
     original = json.loads(json.dumps(receipt["observation"]))
@@ -160,7 +77,7 @@ def test_bind_refuses_to_replace_observation_after_its_lifecycle_gate(tmp_path):
     )
 
     assert result.returncode == 1
-    assert "observation lifecycle gate has passed" in result.stderr
+    assert "observation gate is already closed" in result.stderr
     assert json.loads(receipt_path.read_text())["observation"] == original
 
 
@@ -200,7 +117,7 @@ def test_rebuild_refuses_to_mutate_a_referenced_sibling_digest(tmp_path):
     row = next(item for item in receipt["evidence"] if item["id"] == "tests")
     original_digest = row["result"]["receipt_digest"]
     row["method"] = "changed after citation"
-    receipt["state_history"][0]["evidence_ids"] = ["tests"]
+    receipt["measures"]["outcome"] = [{"id": "task-success", "evidence_id": "tests"}]
     receipt_path.write_text(json.dumps(receipt))
 
     result = run_cli(
@@ -214,7 +131,7 @@ def test_rebuild_refuses_to_mutate_a_referenced_sibling_digest(tmp_path):
     )
 
     assert result.returncode == 1
-    assert "tests is referenced by state_history[0]" in result.stderr
+    assert "tests is referenced by measures" in result.stderr
     current = json.loads(receipt_path.read_text())
     current_row = next(item for item in current["evidence"] if item["id"] == "tests")
     assert current_row["result"]["receipt_digest"] == original_digest
@@ -518,13 +435,14 @@ def test_closed_run_refuses_artifact_and_checkpoint_mutations(tmp_path):
     run_dir = support.initialise(tmp_path)
     receipt_path = run_dir / "RUN.json"
     receipt = json.loads(receipt_path.read_text())
-    receipt["status"] = "closed"
-    receipt["state_history"].append({
-        "state": "closed",
-        "at": timestamp(timedelta(seconds=-1)),
-        "evidence_ids": [],
-        "risk_tier": receipt["risk_tier"],
+    receipt["human_gates"]["release"] = {
+        "status": "approved", "approver": "human-owner", "evidence": "release-approval",
+    }
+    receipt["evidence"].append({
+        "id": "release-approval", "kind": "human", "gate": "human-release",
+        "status": "pass",
     })
+    receipt["observation"]["status"] = "pass"
     receipt_path.write_text(json.dumps(receipt))
     (tmp_path / "late.json").write_text("{}\n")
 
@@ -591,13 +509,14 @@ def test_closed_run_refuses_manual_evidence_mutations(tmp_path):
     assert executed.returncode == 0, executed.stderr
     receipt_path = run_dir / "RUN.json"
     receipt = json.loads(receipt_path.read_text())
-    receipt["status"] = "closed"
-    receipt["state_history"].append({
-        "state": "closed",
-        "at": timestamp(timedelta(seconds=-1)),
-        "evidence_ids": [],
-        "risk_tier": receipt["risk_tier"],
+    receipt["human_gates"]["release"] = {
+        "status": "approved", "approver": "human-owner", "evidence": "release-approval",
+    }
+    receipt["evidence"].append({
+        "id": "release-approval", "kind": "human", "gate": "human-release",
+        "status": "pass",
     })
+    receipt["observation"]["status"] = "pass"
     receipt_path.write_text(json.dumps(receipt))
     before_receipt = receipt_path.read_bytes()
     before_files = sorted(
@@ -656,101 +575,6 @@ def test_closed_run_refuses_manual_evidence_mutations(tmp_path):
         for path in run_dir.iterdir()
         if path.is_file() and path.name != ".RUN.lock"
     ) == before_files
-
-
-@pytest.mark.parametrize(
-    "mutation", [
-        "valid",
-        "artifact-id",
-        "artifact-digest",
-        "approval-digest",
-        "live-bytes",
-    ],
-)
-def test_substantial_approved_gate_binds_design_approval_artifact(tmp_path, mutation):
-    support = helpers()
-    (tmp_path / "intent.md").write_text("# Intent\n")
-    initialised = run_cli(
-        tmp_path, *support.init_args(), "--risk-tier", "substantial",
-    )
-    assert initialised.returncode == 0, initialised.stderr
-    run_dir = tmp_path / ".agent-run" / "DEL-TEST"
-    intent_approved = run_cli(
-        tmp_path,
-        "evidence",
-        "human",
-        "--run-dir",
-        str(run_dir),
-        "--id",
-        "intent-approval",
-        "--gate",
-        "intent-approval",
-        "--artifact-id",
-        "intent",
-        "--approver",
-        "human-owner",
-        "--source",
-        "intent.md",
-    )
-    assert intent_approved.returncode == 0, intent_approved.stderr
-    artifact_id = "intent"
-    if mutation == "artifact-id":
-        (tmp_path / "approval.json").write_text('{"approved":true}\n')
-        added = support.add_artifact(
-            tmp_path, run_dir, "approval", "approval.json"
-        )
-        assert added.returncode == 0, added.stderr
-        artifact_id = "approval"
-    approved = run_cli(
-        tmp_path,
-        "evidence",
-        "human",
-        "--run-dir",
-        str(run_dir),
-        "--id",
-        "design-approval",
-        "--gate",
-        "design-approval",
-        "--artifact-id",
-        artifact_id,
-        "--approver",
-        "human-owner",
-        "--source",
-        "intent.md",
-    )
-    assert approved.returncode == 0, approved.stderr
-    receipt_path = run_dir / "RUN.json"
-    if mutation == "artifact-digest":
-        receipt = json.loads(receipt_path.read_text())
-        intent = next(
-            item for item in receipt["artifacts"] if item["id"] == "intent"
-        )
-        intent["digest"] = "sha256:" + "b" * 64
-        receipt_path.write_text(json.dumps(receipt))
-    elif mutation == "approval-digest":
-        receipt = json.loads(receipt_path.read_text())
-        design_approval = next(
-            item for item in receipt["evidence"]
-            if item["id"] == "design-approval"
-        )
-        design_approval["artifact_digest"] = "sha256:" + "b" * 64
-        receipt_path.write_text(json.dumps(receipt))
-    elif mutation == "live-bytes":
-        (tmp_path / "intent.md").write_text("# Changed intent\n")
-    scoped = run_cli(
-        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "scoped",
-    )
-    assert scoped.returncode == 0, scoped.stderr
-
-    result = run_cli(
-        tmp_path, "transition", "--run-dir", str(run_dir), "--to", "approved",
-    )
-
-    if mutation == "valid":
-        assert result.returncode == 0, result.stderr
-    else:
-        assert result.returncode == 1
-        assert "approved design gate is not satisfied" in result.stderr
 
 
 def review_args(
@@ -1088,21 +912,13 @@ def test_bind_refuses_to_change_closed_observation_results(tmp_path):
     original = json.loads(json.dumps(receipt["observation"]))
     original["status"] = "pass"
     receipt["observation"] = original
-    receipt["status"] = "closed"
-    receipt["state_history"].extend([
-        {
-            "state": "observing",
-            "at": timestamp(timedelta(seconds=-2)),
-            "evidence_ids": [],
-            "risk_tier": receipt["risk_tier"],
-        },
-        {
-            "state": "closed",
-            "at": timestamp(timedelta(seconds=-1)),
-            "evidence_ids": [],
-            "risk_tier": receipt["risk_tier"],
-        },
-    ])
+    receipt["human_gates"]["release"] = {
+        "status": "approved", "approver": "human-owner", "evidence": "release-approval",
+    }
+    receipt["evidence"].append({
+        "id": "release-approval", "kind": "human", "gate": "human-release",
+        "status": "pass",
+    })
     receipt_path.write_text(json.dumps(receipt))
     replacement = json.loads(json.dumps(original))
     replacement["status"] = "fail"

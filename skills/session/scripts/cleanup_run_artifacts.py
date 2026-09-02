@@ -34,6 +34,16 @@ def _delivery_validator():
     return module
 
 
+def _run_shape():
+    path = SKILLS_ROOT / "deliver" / "scripts" / "delivery_run_shape.py"
+    spec = importlib.util.spec_from_file_location("cleanup_run_shape", path)
+    if not spec or not spec.loader:
+        raise CleanupError("cannot load the delivery run shape module")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _utc(value: Any, field: str) -> datetime:
     if not isinstance(value, str) or not value.endswith("Z"):
         raise CleanupError(f"{field} must be a UTC timestamp")
@@ -70,8 +80,11 @@ def cleanup(
         )
     except validator.Invalid as exc:
         raise CleanupError(f"valid terminal delivery receipt required: {exc}") from exc
-    if run.get("status") != "closed":
-        raise CleanupError("valid terminal delivery receipt required: status must be closed")
+    if not _run_shape().run_closed(run):
+        raise CleanupError(
+            "valid terminal delivery receipt required: the run must have an approved "
+            "release gate and a settled observation",
+        )
     if execute and (not authorised_by or not authority_evidence):
         raise CleanupError("execute requires explicit cleanup authority and evidence")
     now = now or datetime.now(timezone.utc)

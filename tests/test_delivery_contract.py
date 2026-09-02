@@ -97,38 +97,13 @@ def terminalise_reference_evaluation(run, status="failed"):
 
 
 def with_repair_cycles(candidate, cycles):
-    candidate["state_history"] = candidate["state_history"][:-1]
-    minute = 6
-    for _ in range(cycles):
-        candidate["state_history"].extend([
-            {
-                "state": "repairing",
-                "at": f"2026-07-10T00:{minute:02d}:00Z",
-                "evidence_ids": ["tests"],
-            },
-            {
-                "state": "verifying",
-                "at": f"2026-07-10T00:{minute + 1:02d}:00Z",
-                "evidence_ids": ["tests"],
-            },
-            {
-                "state": "reviewing",
-                "at": f"2026-07-10T00:{minute + 2:02d}:00Z",
-                "evidence_ids": ["tests"],
-            },
-        ])
-        minute += 3
-    candidate["state_history"].append({
-        "state": "awaiting_acceptance",
-        "at": f"2026-07-10T00:{minute:02d}:00Z",
-        "evidence_ids": [item["id"] for item in candidate["evidence"]],
-    })
     candidate["repair_cycles"] = cycles
     return candidate
 
 
 def at_risk_tier(candidate, risk_tier):
     candidate["risk_tier"] = risk_tier
+    candidate["initial_risk_tier"] = risk_tier
     if risk_tier == "routine":
         candidate["risk_assessment"] = {
             "blast_radius": "local",
@@ -524,78 +499,18 @@ def test_live_hash_check_rejects_artifact_changed_after_approval(tmp_path):
         module.validate(candidate, ROOT, receipt_dir=tmp_path, verify_hashes=True)
 
 
-def test_state_history_cannot_jump_a_mandatory_gate():
+def test_unapproved_run_needs_no_completed_evidence():
     module = load_validator()
     candidate = fixture()
-    candidate["state_history"] = [
-        {"state": "draft", "at": "2026-07-10T00:00:00Z", "evidence_ids": []},
-        {"state": "executing", "at": "2026-07-10T00:01:00Z", "evidence_ids": []},
-        {"state": "awaiting_acceptance", "at": "2026-07-10T00:02:00Z", "evidence_ids": ["tests"]},
-    ]
-    with pytest.raises(module.Invalid, match="invalid lifecycle transition"):
-        module.validate(candidate, ROOT)
-
-
-def test_history_must_start_at_draft_and_honest_draft_needs_no_future_results():
-    module = load_validator()
-    candidate = fixture()
-    candidate["state_history"] = [candidate["state_history"][-1]]
-    with pytest.raises(module.Invalid, match="start at draft"):
-        module.validate(candidate, ROOT)
-
-    candidate = fixture()
-    candidate["status"] = "draft"
-    candidate["state_history"] = [candidate["state_history"][0]]
     candidate["intent"]["approval"] = {"status": "pending", "approver": "", "evidence": ""}
     candidate["design"]["status"] = "draft"
+    candidate["human_gates"]["acceptance"] = {"status": "pending", "approver": "", "evidence": ""}
     candidate["evidence"] = [item for item in candidate["evidence"] if item["kind"] == "human"]
     candidate["reviews"] = []
     candidate["measures"] = {"outcome": [], "trajectory": []}
     candidate["assurance"] = {"stochastic_required": False, "reason": "not decided", "evaluations": []}
     candidate["security"] = {"status": "pending", "reason": "", "policy_sha256": candidate["security"]["policy_sha256"], "changed_surfaces": [], "checks": [], "agentic_risks": []}
     module.validate(candidate, ROOT)
-
-
-def test_recoverable_side_state_records_its_own_resume_contract():
-    module = load_validator()
-    candidate = fixture()
-    candidate["status"] = "executing"
-    candidate["state_history"] = candidate["state_history"][:4] + [
-        {"state": "blocked", "at": "2026-07-10T00:04:00Z", "evidence_ids": [], "reason": "provider unavailable", "recovery": "retry local route", "resume_state": "executing"},
-        {"state": "executing", "at": "2026-07-10T00:05:00Z", "evidence_ids": []},
-    ]
-    candidate["evidence"] = [item for item in candidate["evidence"] if item["kind"] == "human"]
-    candidate["reviews"] = []
-    candidate["measures"] = {"outcome": [], "trajectory": []}
-    candidate["security"]["status"] = "pending"
-    for check in candidate["security"]["checks"]:
-        check["status"] = "pending"
-        check["evidence_id"] = ""
-    module.validate(candidate, ROOT)
-
-    jumped = fixture()
-    jumped["status"] = "blocked"
-    jumped["state_history"].append({
-        "state": "blocked", "at": "2026-07-10T00:09:00Z", "evidence_ids": [],
-        "reason": "blocked", "recovery": "resume review", "resume_state": "closed",
-    })
-    jumped["degradation"] = {"reason": "blocked", "recovery": "resume review"}
-    with pytest.raises(module.Invalid, match="resume the state"):
-        module.validate(jumped, ROOT)
-
-
-def test_repair_cycle_count_must_match_history():
-    module = load_validator()
-    candidate = fixture()
-    candidate["state_history"] = candidate["state_history"][:-1] + [
-        {"state": "repairing", "at": "2026-07-10T00:06:30Z", "evidence_ids": ["tests"]},
-        {"state": "verifying", "at": "2026-07-10T00:07:00Z", "evidence_ids": ["tests"]},
-        {"state": "reviewing", "at": "2026-07-10T00:08:00Z", "evidence_ids": ["tests"]},
-        {"state": "awaiting_acceptance", "at": "2026-07-10T00:09:00Z", "evidence_ids": [item["id"] for item in candidate["evidence"]]},
-    ]
-    candidate["repair_cycles"] = 0
-    with pytest.raises(module.Invalid, match="repair_cycles"):
-        module.validate(candidate, ROOT)
 
 
 @pytest.mark.parametrize(
@@ -1108,14 +1023,7 @@ def test_profile_gate_cannot_be_satisfied_by_wrong_evidence_kind():
 def test_closed_run_requires_observation_contract_and_accepted_human_gate():
     module = load_validator()
     candidate = fixture()
-    candidate["status"] = "closed"
     candidate["checkpoint"].update({"current_slice": "closed", "next_action": "cycle closed", "in_flight": []})
-    candidate["state_history"].extend([
-        {"state": "accepted", "at": "2026-07-10T00:09:00Z", "evidence_ids": ["acceptance-approval"]},
-        {"state": "awaiting_release", "at": "2026-07-10T00:10:00Z", "evidence_ids": ["acceptance-approval"]},
-        {"state": "observing", "at": "2026-07-10T00:11:00Z", "evidence_ids": ["release-approval"]},
-        {"state": "closed", "at": "2026-07-11T00:11:00Z", "evidence_ids": []},
-    ])
     candidate["human_gates"]["acceptance"] = {"status": "approved", "approver": "human", "evidence": "acceptance-approval"}
     candidate["human_gates"]["release"] = {"status": "approved", "approver": "human", "evidence": "release-approval"}
     candidate["observation"] = None
@@ -1124,9 +1032,7 @@ def test_closed_run_requires_observation_contract_and_accepted_human_gate():
 
     candidate = fixture()
     candidate["human_gates"]["acceptance"] = {"status": "approved", "approver": "human", "evidence": "intent-approval"}
-    candidate["status"] = "accepted"
     candidate["checkpoint"].update({"current_slice": "accepted", "next_action": "prepare release", "in_flight": []})
-    candidate["state_history"].append({"state": "accepted", "at": "2026-07-10T00:09:00Z", "evidence_ids": ["intent-approval"]})
     with pytest.raises(module.Invalid, match="human acceptance"):
         module.validate(candidate, ROOT)
 
@@ -1144,18 +1050,10 @@ def test_closed_crucial_or_incident_cycle_requires_retrospective_linkage(tmp_pat
     workspace_root = tmp_path / "agent-product"
     candidate = fixture("agent-product", workspace_root)
     candidate["risk_tier"] = "crucial"
-    candidate["status"] = "closed"
     candidate["checkpoint"].update({"current_slice": "closed", "next_action": "cycle closed", "in_flight": []})
-    candidate["state_history"].extend([
-        {"state": "accepted", "at": "2026-07-10T00:09:00Z", "evidence_ids": ["acceptance-approval"]},
-        {"state": "awaiting_release", "at": "2026-07-10T00:10:00Z", "evidence_ids": ["acceptance-approval"]},
-        {"state": "observing", "at": "2026-07-10T00:11:00Z", "evidence_ids": ["release-approval"]},
-        {"state": "closed", "at": "2026-07-11T00:11:00Z", "evidence_ids": ["observation"]},
-    ])
     candidate["human_gates"]["acceptance"] = {"status": "approved", "approver": "human", "evidence": "acceptance-approval"}
     candidate["human_gates"]["release"] = {"status": "approved", "approver": "human", "evidence": "release-approval"}
     candidate["evidence"].append({"id": "observation-result", "kind": "observation", "gate": "task-success", "status": "pass", "method": "reference-observation", "artifact_id": "evidence-bundle", "source_paths": ["input"], "observed_at": "2026-07-10T12:00:00Z", "measured_value": 1})
-    candidate["state_history"][-1]["evidence_ids"] = ["observation-result"]
     candidate["observation"]["status"] = "pass"
     candidate["observation"].update({"started_at": "2026-07-10T00:11:00Z", "ended_at": "2026-07-11T00:11:00Z", "observed_events": 1, "evidence_ids": ["observation-result"]})
     candidate["retrospective"] = None
@@ -1169,14 +1067,7 @@ def test_required_retrospective_cannot_borrow_another_delivery_cycle(tmp_path):
     shutil.copytree(ROOT / "config", product_root / "config")
     candidate = fixture("agent-product", tmp_path)
     candidate["risk_tier"] = "crucial"
-    candidate["status"] = "closed"
     candidate["checkpoint"].update({"current_slice": "closed", "next_action": "cycle closed", "in_flight": []})
-    candidate["state_history"].extend([
-        {"state": "accepted", "at": "2026-07-10T00:09:00Z", "evidence_ids": ["acceptance-approval"]},
-        {"state": "awaiting_release", "at": "2026-07-10T00:10:00Z", "evidence_ids": ["acceptance-approval"]},
-        {"state": "observing", "at": "2026-07-10T00:11:00Z", "evidence_ids": ["release-approval"]},
-        {"state": "closed", "at": "2026-07-11T00:11:00Z", "evidence_ids": ["observation-result"]},
-    ])
     candidate["human_gates"]["acceptance"] = {"status": "approved", "approver": "human", "evidence": "acceptance-approval"}
     candidate["human_gates"]["release"] = {"status": "approved", "approver": "human", "evidence": "release-approval"}
     candidate["evidence"].append({
@@ -1224,27 +1115,21 @@ def test_required_retrospective_cannot_borrow_another_delivery_cycle(tmp_path):
         )
 
 
-def test_checkpoint_and_observation_substates_follow_lifecycle_state():
+def test_observation_status_follows_the_recorded_release_gate():
     module = load_validator()
     candidate = fixture()
-    candidate["status"] = "observing"
-    candidate["state_history"].extend([
-        {"state": "accepted", "at": "2026-07-10T00:09:00Z", "evidence_ids": ["acceptance-approval"]},
-        {"state": "awaiting_release", "at": "2026-07-10T00:10:00Z", "evidence_ids": ["acceptance-approval"]},
-        {"state": "observing", "at": "2026-07-10T00:11:00Z", "evidence_ids": ["release-approval"]},
-    ])
-    candidate["human_gates"]["acceptance"] = {"status": "approved", "approver": "human", "evidence": "acceptance-approval"}
     candidate["human_gates"]["release"] = {"status": "approved", "approver": "human", "evidence": "release-approval"}
-    candidate["checkpoint"].update({"current_slice": "observing", "next_action": "complete observation", "in_flight": []})
     candidate["observation"]["status"] = "planned"
-    with pytest.raises(module.Invalid, match="observing.*active or pass"):
+    with pytest.raises(module.Invalid, match="released run requires an active"):
         module.validate(candidate, ROOT)
 
     candidate["observation"]["status"] = "active"
     module.validate(candidate, ROOT)
-    candidate["checkpoint"]["current_slice"] = "awaiting-acceptance"
-    with pytest.raises(module.Invalid, match="checkpoint.current_slice"):
-        module.validate(candidate, ROOT)
+
+    unreleased = fixture()
+    unreleased["observation"]["status"] = "active"
+    with pytest.raises(module.Invalid, match="unreleased run requires planned"):
+        module.validate(unreleased, ROOT)
 
 
 def test_closed_checkpoint_is_terminal_and_only_references_known_artifacts():
@@ -1340,12 +1225,11 @@ def test_stochastic_binding_anchors_plan_before_execution_then_completes(tmp_pat
     anchored_values = (complete_row["evaluation_id"], complete_row["plan_digest"])
 
     planned = copy.deepcopy(complete)
-    planned["status"] = "executing"
-    planned["state_history"] = planned["state_history"][:4]
     planned["checkpoint"].update({
         "current_slice": "executing", "next_action": "run frozen evaluation",
         "in_flight": ["evaluation"],
     })
+    planned["human_gates"]["acceptance"] = {"status": "pending", "approver": "", "evidence": ""}
     planned["reviews"] = []
     planned["measures"] = {"outcome": [], "trajectory": []}
     planned["evidence"] = [
@@ -1409,13 +1293,11 @@ def test_terminal_evaluation_is_retained_but_cannot_satisfy_acceptance(
     workspace_root = tmp_path / terminal_status
     candidate = fixture("agent-product")
     terminalise_reference_evaluation(candidate, terminal_status)
-    awaiting_transition = copy.deepcopy(candidate["state_history"][-1])
-    candidate["status"] = "reviewing"
-    candidate["state_history"] = candidate["state_history"][:-1]
     candidate["checkpoint"].update({
         "current_slice": "reviewing", "next_action": "decide whether to retry",
         "in_flight": [],
     })
+    candidate["human_gates"]["acceptance"] = {"status": "pending", "approver": "", "evidence": ""}
     materialiser.materialise_reference_run(
         candidate, workspace_root, ROOT,
         evaluation_repetitions=2, evaluation_sample_size=1,
@@ -1425,11 +1307,10 @@ def test_terminal_evaluation_is_retained_but_cannot_satisfy_acceptance(
     )
 
     awaiting = copy.deepcopy(candidate)
-    awaiting["status"] = "awaiting_acceptance"
-    awaiting["state_history"].append(awaiting_transition)
     awaiting["checkpoint"].update({
         "current_slice": "awaiting-acceptance", "next_action": "human acceptance",
     })
+    awaiting["human_gates"]["acceptance"] = {"status": "approved", "approver": "human", "evidence": "acceptance-approval"}
     with pytest.raises(module.Invalid, match="at least one complete passing evaluation"):
         module.validate(
             awaiting, ROOT, workspace_root=workspace_root, verify_hashes=True,
@@ -1483,8 +1364,6 @@ def test_fresh_complete_plan_after_failed_evaluation_can_satisfy_acceptance(tmp_
         "plan_digest": "sha256:" + "e" * 64,
     }
     candidate["assurance"]["evaluations"].append(retry)
-    candidate["state_history"][-2]["at"] = "2026-07-10T00:07:30Z"
-    candidate["state_history"][-1]["at"] = "2026-07-10T00:08:00Z"
 
     materialiser.materialise_reference_run(candidate, workspace_root, ROOT)
     materialiser.materialise_evaluation_binding(
@@ -1496,20 +1375,12 @@ def test_fresh_complete_plan_after_failed_evaluation_can_satisfy_acceptance(tmp_
         repetitions=3, sample_size=10, time_offset_minutes=2,
     )
 
-    first_execution = next(
-        item["at"] for item in candidate["state_history"] if item["state"] == "executing"
-    )
-    assert retry["anchored_at"] > first_execution
-
     planned_retry = copy.deepcopy(candidate)
-    planned_retry["status"] = "executing"
-    planned_retry["state_history"] = planned_retry["state_history"][:5] + [{
-        "state": "executing", "at": "2026-07-10T00:05:30Z", "evidence_ids": [],
-    }]
     planned_retry["checkpoint"].update({
         "current_slice": "executing", "next_action": "run fresh evaluation plan",
         "in_flight": ["EVAL-RETRY"],
     })
+    planned_retry["human_gates"]["acceptance"] = {"status": "pending", "approver": "", "evidence": ""}
     planned_retry_binding = planned_retry["assurance"]["evaluations"][1]
     planned_retry_binding.update({
         "status": "planned", "evaluation_artifact_id": "",

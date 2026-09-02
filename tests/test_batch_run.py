@@ -172,7 +172,7 @@ def task(tmp_path: Path, task_id: str, **values: str) -> dict:
     prompt = tmp_path / f"{task_id}.md"
     prompt.write_text("\n".join(f"{key}={value}" for key, value in values.items()) + "\n", encoding="utf-8")
     result = {'id': task_id, 'prompt_file': str(prompt), 'adapter': 'codex', 'alias': 'scout', 'role': 'worker'}
-    for key in ('source_writing', 'non_overlapping', 'worktree_isolated', 'provider_family', 'access_mode'):
+    for key in ('source_writing', 'non_overlapping', 'worktree_isolated', 'provider_family', 'access_mode', 'worktree'):
         if key in values:
             result[key] = values[key]
     return result
@@ -282,13 +282,12 @@ def test_default_concurrency_scales_down_for_small_manifest(tmp_path, monkeypatc
     assert summary['concurrency'] == 1
 
 
-def test_batch_help_states_read_only_writer_boundary(tmp_path, monkeypatch):
+def test_batch_help_states_the_writer_boundary(tmp_path, monkeypatch):
     module = load_module()
     help_text = module.parser().format_help()
-    assert 'Read-only tasks may run together' in help_text
-    assert 'source_writing is rejected' in help_text
-    assert 'partitioned/worktree-isolated' in help_text
-    assert 'writers are deferred' in help_text
+    assert 'default to read_only access' in help_text
+    assert 'access_mode worktree_write' in help_text
+    assert 'never name the same worktree' in help_text
 
 
 def test_batch_forwards_lifecycle_risk_and_model_override_separately(tmp_path, monkeypatch):
@@ -1049,3 +1048,56 @@ def test_artifact_failure_cleans_unindexed_batch_directory_and_releases_lock(tmp
         import fcntl
         fcntl.flock(reopened.fileno(), fcntl.LOCK_UN)
         reopened.close()
+
+
+def make_worktree(root: Path, name: str) -> Path:
+    worktree = root / name
+    worktree.mkdir()
+    subprocess.run(['git', 'init', '-q'], cwd=worktree, check=True)
+    return worktree.resolve()
+
+
+def test_batch_rejects_two_writer_tasks_sharing_one_worktree(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    module = load_module()
+    worktree = make_worktree(tmp_path, 'shared')
+    tasks = [
+        task(tmp_path, name, access_mode='worktree_write', worktree=str(worktree))
+        for name in ('writer-a', 'writer-b')
+    ]
+    for value in tasks:
+        value['adapter'] = 'codex'
+    with pytest.raises(module.BatchInputError, match='shares a worktree'):
+        module.load_manifest(task_manifest(tmp_path, tasks), concurrency=2)
+
+
+def test_batch_forwards_the_writer_route_and_defaults_to_read_only(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    module = load_module()
+    worktree = make_worktree(tmp_path, 'owned')
+    writer = task(tmp_path, 'writer', access_mode='worktree_write', worktree=str(worktree))
+    reader = task(tmp_path, 'reader')
+    loaded = module.load_manifest(task_manifest(tmp_path, [writer, reader]), concurrency=2)
+
+    by_id = {value['id']: value for value in loaded}
+    assert by_id['writer']['access_mode'] == 'worktree_write'
+    assert by_id['writer']['worktree'] == str(worktree)
+    assert by_id['reader']['access_mode'] == 'read_only'
+    assert 'worktree' not in by_id['reader']
+
+    command = module._command(by_id['writer'], tmp_path / 'run')
+    assert '--access-mode' in command
+    assert command[command.index('--access-mode') + 1] == 'worktree_write'
+    assert command[command.index('--worktree') + 1] == str(worktree)
+    reader_command = module._command(by_id['reader'], tmp_path / 'run')
+    assert reader_command[reader_command.index('--access-mode') + 1] == 'read_only'
+    assert '--worktree' not in reader_command
+
+
+def test_batch_rejects_a_worktree_without_the_writer_access_mode(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    module = load_module()
+    worktree = make_worktree(tmp_path, 'unclaimed')
+    value = task(tmp_path, 'reader', worktree=str(worktree))
+    with pytest.raises(module.BatchInputError, match='requires worktree_write'):
+        module.load_manifest(task_manifest(tmp_path, [value]), concurrency=1)

@@ -8,15 +8,9 @@ import math
 from pathlib import Path
 from typing import Any
 
+from delivery_run_shape import release_approved, run_closed
 from delivery_validation_common import (
-    AGENTIC_RISKS, LIFECYCLE_CONTRACT, NORMAL_STATES, _list, _mapping, _utc, fail,
-)
-
-
-CLOSE_GATE = next(
-    row["close_gate"]
-    for row in LIFECYCLE_CONTRACT["transitions"]
-    if row["transition"] == "observing -> closed"
+    AGENTIC_RISKS, _list, _mapping, _utc, fail,
 )
 
 def _validate_security(run: dict[str, Any], registry: dict[str, Any], profile: dict[str, Any], artifacts: dict[str, dict[str, Any]], evidence: dict[str, dict[str, Any]], *, required: bool, product_root: Path) -> None:
@@ -90,23 +84,19 @@ def _validate_gates_observation(run: dict[str, Any], evidence: dict[str, dict[st
             fail(not gate.get("approver") or not gate.get("evidence"), f"human {name} approval requires approver and evidence")
             linked = evidence.get(gate.get("evidence"))
             fail(not linked or linked.get("kind") != "human" or linked.get("status") != "pass" or linked.get("gate") != f"human-{name}", f"human {name} approval must link matching passing human evidence")
-    if run.get("status") in {"accepted", "awaiting_release", "observing", "closed"}:
-        fail(acceptance.get("status") != CLOSE_GATE["acceptance"], "accepted state requires human acceptance")
-        accepted_transition = next(item for item in run["state_history"] if item["state"] == "accepted")
-        fail(acceptance.get("evidence") not in accepted_transition["evidence_ids"], "accepted transition must cite its human acceptance evidence")
-    if run.get("status") in {"observing", "closed"}:
-        fail(release.get("status") != CLOSE_GATE["release"], "observation requires separate human release authority")
-        observing_transition = next(item for item in run["state_history"] if item["state"] == "observing")
-        fail(release.get("evidence") not in observing_transition["evidence_ids"], "observing transition must cite its human release evidence")
+    released = release_approved(run)
+    closed = run_closed(run)
+    fail(
+        released and acceptance.get("status") != "approved",
+        "release approval requires recorded human acceptance",
+    )
     observation = run.get("observation")
     fail(not isinstance(observation, dict), "observation contract is required")
     observation_status = observation.get("status")
-    if run.get("status") == "observing":
-        fail(observation_status not in {"active", "pass"}, "observing state requires observation status active or pass")
-    elif run.get("status") == "closed":
-        fail(observation_status != CLOSE_GATE["observation"], "closed state requires observation status pass")
-    elif run.get("status") in NORMAL_STATES:
-        fail(observation_status not in {"planned", "not_applicable"}, "pre-release lifecycle states require planned or not_applicable observation")
+    if released:
+        fail(observation_status not in {"active", "pass", "not_applicable"}, "a released run requires an active, passing or not applicable observation")
+    else:
+        fail(observation_status not in {"planned", "not_applicable"}, "an unreleased run requires planned or not_applicable observation")
     if observation_status == "not_applicable":
         fail(not observation.get("reason"), "observation not_applicable requires profile justification")
     else:
@@ -126,14 +116,11 @@ def _validate_gates_observation(run: dict[str, Any], evidence: dict[str, dict[st
             threshold = _mapping(raw, f"observation.thresholds.{signal}")
             limit = threshold.get("limit")
             fail(set(threshold) != {"direction", "limit"} or threshold.get("direction") not in {"gte", "lte", "eq"} or isinstance(limit, bool) or not isinstance(limit, (int, float)) or not math.isfinite(limit), f"observation threshold {signal} is invalid")
-        if run.get("status") == "closed":
+        if closed:
             fail(observation.get("status") != "pass", "closed run requires passing observation")
             started = _utc(observation.get("started_at"), "observation.started_at")
             ended = _utc(observation.get("ended_at"), "observation.ended_at")
             fail(ended <= started, "observation window must be increasing")
-            observing_at = _utc(next(item for item in run["state_history"] if item["state"] == "observing")["at"], "observing transition")
-            closed_at = _utc(next(item for item in run["state_history"] if item["state"] == "closed")["at"], "closed transition")
-            fail(started < observing_at or ended > closed_at, "observation window must fall between observing and closed transitions")
             if window["kind"] == "duration":
                 fail((ended - started).total_seconds() < minimum, "observation duration is shorter than the declared window")
             else:
@@ -153,8 +140,6 @@ def _validate_gates_observation(run: dict[str, Any], evidence: dict[str, dict[st
                 fail(not passed, f"observation evidence {evidence_id} misses its threshold")
             observed_gates = {evidence[evidence_id].get("gate") for evidence_id in evidence_ids}
             fail(not set(signals) <= observed_gates, "observation evidence must cover every declared signal")
-            closed_transition = next(item for item in run["state_history"] if item["state"] == "closed")
-            fail(not set(evidence_ids) <= set(closed_transition["evidence_ids"]), "closed transition must cite its observation evidence")
 
 def _validate_high_stakes(run: dict[str, Any], registry: dict[str, Any], evidence: dict[str, dict[str, Any]]) -> None:
     if run.get("high_stakes") is not True:

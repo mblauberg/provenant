@@ -3,9 +3,14 @@
 `RUN.json` with `contract: delivery-run` and `schema_version: 1` is the single
 canonical lifecycle receipt. The profile registry
 declares minimum deterministic and judgement gates; project profiles may add
-requirements. `status` is the live state and `state_history` is its ordered,
-timestamped proof. Side states (`blocked`, `cancelled`, `degraded`) require a
-reason and recovery instruction and cannot replace a mandatory gate.
+requirements. The receipt is flat: it records what the run did, not the order
+in which it did it. `delivery_run_shape.py` declares the field set and its
+types, and both the producer and the validator check it, so an unknown,
+missing or wrong-typed field is refused on write and on read. Progress is read
+from the gates the receipt records: `intent.approval`, `design.status`,
+`authority`, `human_gates.acceptance`, `human_gates.release` and
+`observation.status`. Each gate demands its own evidence; none of them
+certifies an ordering the writer could not prove.
 
 ## Fabric relationship binding
 
@@ -125,7 +130,7 @@ profile justification.
 ## Merged software binding
 
 After a pull request merges, a software receipt may add the closed
-`software_delivery` binding while it remains `awaiting_acceptance`. Its
+`software_delivery` binding, but only before human acceptance is recorded. Its
 canonical artifact uses new-form `git_revision` (`repository`, `commit`,
 `tree`) with no second archive or per-file digest. Validation applies the exact
 native-object and closed-runner rules above and rejects digest fields on this

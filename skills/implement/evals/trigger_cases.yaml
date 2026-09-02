@@ -9,4 +9,4 @@ cases:
   - {id: q132, relation: negative, prompt: "Promote the accepted build to production under the approved rollout plan.", tags: [adjacent], expected: {primary_skill: release, companion_skills: []}}
   - {id: q133, relation: boundary, prompt: "Implement this approved observable behaviour with a witnessed right-reason failing test first.", tags: [composition], expected: {primary_skill: implement, companion_skills: [tdd]}}
   - {id: q134, relation: boundary, prompt: "Implement this approved behaviour-preserving module simplification with equivalence evidence.", tags: [composition], expected: {primary_skill: implement, companion_skills: [refactor]}}
-  - {id: q135, relation: boundary, prompt: "Implement and verify the approved React performance fix against the recorded baseline.", tags: [composition], expected: {primary_skill: implement, companion_skills: [react-performance]}}
+  - {id: q135, relation: boundary, prompt: "Implement and verify the approved performance fix against the recorded baseline, then review the diff read-only.", tags: [composition], expected: {primary_skill: implement, companion_skills: [code-review]}}

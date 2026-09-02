@@ -54,7 +54,7 @@ inventing.
    `"$(provenant root)/skills/deliver/scripts/validate_delivery.py"
    .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes` (plus
    digest-bound `--project-policy` when used).
-   `awaiting_acceptance` is machine-ready, not complete.
+   A receipt that clears the machine gates is machine-ready, not complete.
 8. User acceptance and external release are separate. Define observation
    before release; close only after its evidence window passes. Feed incidents
    into `retrospect`.

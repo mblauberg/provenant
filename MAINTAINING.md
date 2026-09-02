@@ -86,7 +86,7 @@ Documentation claims sit in three tiers, and the third is deliberate:
    explicit write envelope. `implement` owns end-to-end delivery and
    verification.
 3. Use a consistent kebab-case capability name. Related writing skills use
-   parallel names: `engineering-writing`, `academic-writing`, `legal-writing`.
+   parallel names: `engineering-writing`, `natural-writing`, `legal-writing`.
 4. Keep portable frontmatter to `name` and `description`. Put provenance in a
    notice and provider UI metadata in a validated sidecar. Metadata and tool
    lists may narrow invocation but never grant authority.
@@ -96,8 +96,15 @@ Documentation claims sit in three tiers, and the third is deliberate:
 6. Keep `SKILL.md` roughly 500 words or less. Move depth into narrowly named
    references loaded only when needed and deterministic behaviour into scripts.
 7. Add positive, negative and boundary fixtures with exact primary and companion
-   routes, plus contract tests for machine-enforceable invariants. Trigger
-   fixtures and contract tests remain mandatory for every skill change.
+   routes. Trigger fixtures are mandatory for every skill change. A contract
+   test is mandatory only where the change introduces or alters an invariant a
+   script, validator or CI gate evaluates at runtime, so that violating it fails
+   a command rather than a reviewer's reading. A change confined to wording,
+   ordering, examples or explanation adds no contract test; the fixture set and
+   the harness gates carry it. Assert parsed structure (fixture routes, JSON
+   policy values, resolved paths) or a script's output, exit code or side
+   effect. Never assert the text of a document. See `skills/tdd` for the
+   exclusion list.
 8. Under [ADR 0014](docs/adr/0014-comparative-skill-evals-on-suspicion.md),
    frozen held-out comparative evals are conditional. Run them when a routing
    regression is suspected or observed in use; a change rewrites
@@ -136,7 +143,7 @@ exception, because an attribution must name the file it covers.
 
 `natural-writing` is the writing hub and single owner of the shared prose
 doctrine (tiered anti-AI taxonomy, Australian-English house style, condense pass
-and claim discipline); `engineering-writing`, `academic-writing` and
+and claim discipline) plus academic prose; `engineering-writing` and
 `legal-writing` keep only their domain overlay and link back to the hub. Change
 the shared doctrine in the hub, not in a domain skill. The hub's
 `skills/natural-writing/scripts/style_lint.py` owns the shared lint vocabulary
@@ -169,7 +176,8 @@ validator. A new domain should compose an existing base profile and a domain
 skill first. Add a base profile only when its artifacts, deterministic gates,
 judgement gates and release meaning are materially distinct.
 
-Trigger fixtures and contract tests remain mandatory. The ADR 0014 eval
+Trigger fixtures remain mandatory. Contract tests follow the
+machine-enforced-invariant test in **Change a skill** step 7. The ADR 0014 eval
 triggers under **Change a skill** apply unchanged. When they fire here, use the
 held-out portfolio and lifecycle dataset with repeated trials, recording raw
 numerator and denominator, model and harness versions.

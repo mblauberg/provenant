@@ -20,10 +20,8 @@ def load(path: Path, name: str):
 
 
 DELIVERY = load(ROOT / "skills/deliver/scripts/validate_delivery.py", "continuity_delivery")
-RELEASE = load(ROOT / "skills/release/scripts/validate_release.py", "continuity_release")
 REFERENCE = load(ROOT / "skills/deliver/scripts/reference_runs.py", "continuity_reference")
 MATERIALISE = load(ROOT / "skills/deliver/scripts/reference_evaluation.py", "continuity_materialise")
-RELEASE_FIXTURE = load(ROOT / "tests/test_release.py", "continuity_release_fixture")
 
 
 def git(root: Path, *args: str, text: bool = True):
@@ -128,26 +126,9 @@ def convert_source_to_legacy_archive(run: dict, workspace: Path) -> dict:
     return artifact
 
 
-def accept_for_release(run: dict, *, observing: bool = False) -> None:
-    run["human_gates"]["acceptance"] = {
-        "status": "approved", "approver": "human", "evidence": "acceptance-approval",
-    }
-    run["state_history"].extend([
-        {"state": "accepted", "at": "2026-07-10T00:09:00Z", "evidence_ids": ["acceptance-approval"]},
-        {"state": "awaiting_release", "at": "2026-07-10T00:10:00Z", "evidence_ids": ["acceptance-approval"]},
-    ])
-    run["status"] = "awaiting_release"
-    run["checkpoint"].update({"current_slice": "awaiting-release", "next_action": "await release authority"})
-    if observing:
-        run["human_gates"]["release"] = {
-            "status": "approved", "approver": "human", "evidence": "release-approval",
-        }
-        run["state_history"].append({
-            "state": "observing", "at": "2026-07-10T00:11:00Z", "evidence_ids": ["release-approval"],
-        })
-        run["status"] = "observing"
-        run["checkpoint"].update({"current_slice": "observing", "next_action": "observe release"})
-        run["observation"]["status"] = "active"
+def before_acceptance(run: dict) -> None:
+    """The binder runs before human acceptance is recorded."""
+    run["human_gates"]["acceptance"] = {"status": "pending", "approver": "", "evidence": ""}
 
 
 def test_merged_software_binding_rejects_reviewed_tree_drift(tmp_path):
@@ -407,91 +388,6 @@ def test_git_artifact_shape_rejects_extra_digest_fields_by_presence(tmp_path, va
 
     with pytest.raises(DELIVERY.Invalid, match="must use commit and tree without digest fields"):
         DELIVERY.validate(run, ROOT, workspace_root=tmp_path, verify_hashes=True)
-
-def test_merged_software_delivery_progresses_through_ready_and_complete_release_validation(tmp_path):
-    ready_workspace = tmp_path / "ready"
-    run = merged_software_delivery(ready_workspace)
-    accept_for_release(run)
-    (ready_workspace / "RUN.json").write_text(json.dumps(run))
-    release = RELEASE_FIXTURE.valid_receipt()
-    release["action_type"] = "activate"
-    release["target"] = {
-        "id": "local-agent-fabric", "kind": "environment",
-        "environment_tier": "development", "disclosure": "private",
-    }
-    release["release_authority"].update({
-        "action_types": ["activate"], "target_ids": ["local-agent-fabric"],
-        "target_environment_tiers": ["development"], "external_communication": False,
-    })
-    source_revision = next(
-        item for item in run["artifacts"] if item["id"] == "merged-source"
-    )["git_revision"]
-    release["artifact"] = {
-        "id": "merged-source",
-        "git_revision": source_revision,
-        "acceptance_receipt": "RUN.json",
-    }
-    release["release_authority"]["artifact_ids"] = ["merged-source"]
-    assert RELEASE.validate(release, "ready", workspace_root=ready_workspace) == []
-    release["artifact"]["git_revision"] = {**source_revision, "tree": "0" * 40}
-    assert "artifact.git_revision must match the accepted delivery Git revision" in RELEASE.validate(
-        release, "ready", workspace_root=ready_workspace,
-    )
-    release["artifact"]["git_revision"] = source_revision
-
-    complete_workspace = tmp_path / "complete"
-    run = merged_software_delivery(complete_workspace)
-    accept_for_release(run, observing=True)
-    (complete_workspace / "RUN.json").write_text(json.dumps(run))
-    complete = RELEASE_FIXTURE.complete_receipt()
-    complete.update({"action_type": release["action_type"], "target": release["target"]})
-    complete["release_authority"].update(release["release_authority"])
-    complete["artifact"] = {
-        "id": "merged-source",
-        "git_revision": next(
-            item for item in run["artifacts"] if item["id"] == "merged-source"
-        )["git_revision"],
-        "acceptance_receipt": "RUN.json",
-    }
-    assert RELEASE.validate(complete, "complete", workspace_root=complete_workspace) == []
-
-
-def test_frozen_legacy_git_archive_receipt_can_reach_release_readiness(tmp_path):
-    run = merged_software_delivery(tmp_path)
-    source = convert_source_to_legacy_archive(run, tmp_path)
-    accept_for_release(run)
-    (tmp_path / "RUN.json").write_text(json.dumps(run))
-    release = RELEASE_FIXTURE.valid_receipt()
-    release["action_type"] = "activate"
-    release["target"] = {
-        "id": "local-agent-fabric", "kind": "environment",
-        "environment_tier": "development", "disclosure": "private",
-    }
-    release["release_authority"].update({
-        "action_types": ["activate"], "target_ids": ["local-agent-fabric"],
-        "target_environment_tiers": ["development"], "external_communication": False,
-        "artifact_ids": ["merged-source"],
-    })
-    release["artifact"] = {
-        "id": "merged-source", "digest": source["digest"],
-        "acceptance_receipt": "RUN.json",
-    }
-
-    assert RELEASE.validate(release, "ready", workspace_root=tmp_path) == []
-
-
-def test_release_refuses_legacy_software_receipt_without_post_merge_binding(tmp_path):
-    run = REFERENCE.make_reference_run("software", ROOT)
-    MATERIALISE.materialise_reference_run(run, tmp_path, ROOT)
-    accept_for_release(run)
-    (tmp_path / "RUN.json").write_text(json.dumps(run))
-    release = RELEASE_FIXTURE.valid_receipt()
-    RELEASE_FIXTURE.bind_accepted_artifact(release, run)
-    assert "software promotion requires the canonical post-merge delivery binding" in RELEASE.validate(
-        release, "ready", workspace_root=tmp_path,
-    )
-
-
 def test_binder_materialises_the_post_merge_chain_without_advancing_acceptance(tmp_path):
     run = merged_software_delivery(tmp_path)
     pr = json.loads((tmp_path / "evidence/github-pr.json").read_text())
@@ -509,6 +405,7 @@ def test_binder_materialises_the_post_merge_chain_without_advancing_acceptance(t
         item for item in run["security"]["artifact_surfaces"] if item["artifact_id"] != "merged-source"
     ]
     del run["software_delivery"]
+    before_acceptance(run)
     for artifact_id in generated - {"merged-source"}:
         (tmp_path / "evidence" / f"{artifact_id}.json").unlink()
     receipt = tmp_path / "RUN.json"
@@ -570,7 +467,6 @@ def test_binder_materialises_the_post_merge_chain_without_advancing_acceptance(t
     results = [first.communicate(), second.communicate()]
     assert sorted((first.returncode, second.returncode)) == [0, 1], results
     bound = json.loads(receipt.read_text())
-    assert bound["status"] == "awaiting_acceptance"
     assert bound["human_gates"]["acceptance"]["status"] == "pending"
     merged_source = next(item for item in bound["artifacts"] if item["id"] == "merged-source")
     assert merged_source["media_type"] == "application/x-git-revision"

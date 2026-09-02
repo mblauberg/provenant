@@ -48,15 +48,19 @@ receipt; link safe relative artifacts and SHA-256 digests.
 7. Preserve bounded failures and route product defects to `implement`, unclear
    requirements to `scope`, and operational regressions to `diagnose`.
 
-Validate the receipt with:
+Before you call a receipt final, read it against this checklist:
 
-```sh
-"$(provenant root)/skills/evaluate/scripts/validate_evaluation.py" \
-  EVALUATION.json --verify-hashes --require-pass \
-  --expected-evaluation-id "$EVALUATION_ID" \
-  --expected-plan-digest "$FROZEN_PLAN_DIGEST" \
-  --expected-delivery-run-id "$DELIVERY_RUN_ID"
-```
+- `plan.digest` still matches the plan frozen before results were seen, and
+  `plan.frozen_at` precedes the first attempt;
+- every declared artifact resolves to a safe relative path whose live SHA-256
+  matches its recorded digest;
+- attempts, case rows, exclusions and grader records account for the whole
+  frozen schedule, with no silent drops;
+- reported aggregates recompute from the retained rows;
+- `status` matches the threshold comparison, and `pass` is claimed only when
+  every applicable threshold and regression margin held;
+- the enclosing delivery run, evaluation ID and plan digest match the binding
+  the delivery receipt records.
 
 `pass` is a machine assurance result for the named distribution, not general
 safety or user acceptance. Attach it to the canonical delivery receipt; only

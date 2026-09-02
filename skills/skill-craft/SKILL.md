@@ -45,6 +45,10 @@ Both branches follow this without restating it in two voices:
 - **Trigger fixtures:** positive, negative, boundary and composition cases.
   A keyword match is a candidate, not ground truth. Changes to routing text
   re-run the held-out set.
+- **Contract-test boundary:** a contract test protects a machine-enforced
+  invariant, never the prose that describes it. If the invariant has no
+  enforcing script, the correct output is either an enforcing script or
+  nothing, not an assertion about wording.
 - **Failure taxonomy:** name the failure, don't just gesture at quality:
   premature-completion, duplication, sediment, sprawl, no-op, negation-only.
 - **Description contract:** front-load the first 250 characters with trigger

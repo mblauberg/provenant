@@ -1,9 +1,10 @@
 # Claim discipline and evidence
 
 `natural-writing` owns this evidence-classification schema for the writing
-family. `academic-writing` and `engineering-writing` link here and add only
-their own domain extensions (reproducibility statements and small-sample
-statistics; README feature-list scoping). `legal-writing` uses a distinct,
+family. `engineering-writing` links here and adds only its own domain
+extension (README feature-list scoping); the academic extension
+(reproducibility statements, small-sample statistics, results claims) is in
+[academic-prose.md](academic-prose.md). `legal-writing` uses a distinct,
 non-overlapping schema: the Legal Function Test owned by the `legal-writing`
 skill, because a legal document classifies
 sentences by legal function (relief, contention, source-backed fact), not by

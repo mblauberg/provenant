@@ -23,9 +23,10 @@ from typing import Any
 SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
-import delivery_receipt_lifecycle as lifecycle
+import delivery_receipt_commands as commands
 import delivery_receipt_paths as paths
 import delivery_receipt_process as process_runner
+import delivery_run_shape as shape
 
 PRODUCT_ROOT = Path(__file__).resolve().parents[3]
 TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "templates" / "RUN.template.json"
@@ -41,15 +42,18 @@ BIND_SECTIONS = dict(
     **{"assurance-plan": "assurance", "security-plan": "security",
        "observation-plan": "observation", "software-delivery": "software_delivery"},
 )
-BIND_GATE_STATES = {
-    "design": "approved",
-    "incident": "closed",
-    "measures": "awaiting_acceptance",
-    "retrospective": "closed",
-    "assurance-plan": "awaiting_acceptance",
-    "security-plan": "awaiting_acceptance",
-    "observation-plan": "observing",
-    "software-delivery": "accepted",
+# Each bound section closes once the flat gate it depends on is recorded
+# approved. There is no ordering machine: the receipt says which gates closed,
+# and a bound section may not be rewritten after its gate.
+BIND_GATES = {
+    "design": lambda run: run.get("design", {}).get("status") == "approved",
+    "incident": shape.run_closed,
+    "measures": shape.acceptance_approved,
+    "retrospective": shape.run_closed,
+    "assurance-plan": shape.acceptance_approved,
+    "security-plan": shape.acceptance_approved,
+    "observation-plan": shape.release_approved,
+    "software-delivery": shape.acceptance_approved,
 }
 OBSERVATION_PLAN_FIELDS = (
     "window", "signals", "thresholds", "owner", "containment", "privacy",
@@ -182,6 +186,7 @@ def run_lock(run_dir: Path) -> Iterator[None]:
 
 
 def write_json_atomic(path: Path, value: dict[str, Any]) -> None:
+    shape.check_shape(value, ReceiptError)
     root = path.parent
     temporary: Path | None = None
     try:
@@ -229,20 +234,11 @@ def load_run(run_dir: Path) -> dict[str, Any]:
         run = json.loads((run_dir / "RUN.json").read_text())
     except (OSError, json.JSONDecodeError) as exc:
         raise ReceiptError(f"RUN.json is unreadable: {exc}") from exc
-    if (
-        not isinstance(run, dict)
-        or run.get("contract") != "delivery-run"
-        or run.get("schema_version") != 1
-    ):
-        raise ReceiptError("RUN.json must be a canonical delivery-run v1 receipt")
-    return run
+    return shape.check_shape(run, ReceiptError)
 
 
 def ensure_immutable_risk(run: dict[str, Any], workspace: Path) -> None:
-    history = run.get("state_history")
-    if not isinstance(history, list) or not history or not isinstance(history[0], dict):
-        raise ReceiptError("state_history must retain its initial draft row")
-    initial = history[0].get("risk_tier")
+    initial = run.get("initial_risk_tier")
     if initial not in RISKS or run.get("risk_tier") != initial:
         raise ReceiptError("risk tier is immutable after init")
     derived = derive_risk(run.get("risk_assessment", {}))
@@ -291,7 +287,7 @@ def ensure_immutable_risk(run: dict[str, Any], workspace: Path) -> None:
 
 
 def ensure_run_open(run: dict[str, Any]) -> None:
-    if run.get("status") == "closed":
+    if shape.run_closed(run):
         raise ReceiptError("closed run is immutable")
 
 
@@ -474,8 +470,8 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
         "run_id": run_id,
         "fabric_relationships": relationships,
         "profile": args.profile,
-        "status": "draft",
         "risk_tier": declared,
+        "initial_risk_tier": declared,
         "chair_family": args.chair_family,
         "risk_assessment": assessment,
         "risk_override": override,
@@ -490,12 +486,6 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
             "owner": authority.get("approved_by") or "human-maintainer",
             "retention": "project-policy",
         }, *([override_artifact] if override_artifact else [])],
-        "state_history": [{
-            "state": "draft",
-            "at": timestamp,
-            "evidence_ids": [],
-            "risk_tier": declared,
-        }],
         "evidence": [override_evidence] if override_evidence else [],
         "reviews": [],
         "repair_cycles": 0,
@@ -504,17 +494,15 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
         "artifact": intent_relative,
         "digest": intent_digest,
         "decision_owner": authority.get("approved_by") or "human-maintainer",
-        "approval": {
-            "status": "approved",
-            "approver": authority.get("approved_by") or "",
-            "evidence": "intent-approval",
-        },
+        # The flat receipt records approval only once the approving evidence
+        # exists, so init cannot self-certify its own intent.
+        "approval": {"status": "pending", "approver": "", "evidence": ""},
     }
     run["design"]["artifact_id"] = "intent"
     run["design"]["digest"] = intent_digest
     run["checkpoint"] = {
         "generation": 0,
-        "current_slice": "draft",
+        "current_slice": "scope",
         "next_action": "complete scope and authority",
         "in_flight": [],
         "artifact_paths": ["RUN.json"],
@@ -536,19 +524,11 @@ def command_bind(args: argparse.Namespace) -> dict[str, Any]:
     value = load_json_argument(args.from_json, args.section)
 
     def apply(run: dict[str, Any], _run_dir: Path, _workspace: Path) -> dict[str, Any]:
-        gate_state = BIND_GATE_STATES[args.section]
-        gate_passed = any(
-            isinstance(item, dict) and item.get("state") == gate_state
-            for item in run.get("state_history", [])
-        )
+        gate_passed = BIND_GATES[args.section](run)
         replacement = run.get(section) != value
         if args.section == "observation-plan" and gate_passed:
             current = run.get(section)
-            closed = any(
-                isinstance(item, dict) and item.get("state") == "closed"
-                for item in run.get("state_history", [])
-            )
-            if not closed:
+            if not shape.run_closed(run):
                 replacement = (
                     not isinstance(current, dict)
                     or any(current.get(field) != value.get(field)
@@ -556,7 +536,7 @@ def command_bind(args: argparse.Namespace) -> dict[str, Any]:
                 )
         if gate_passed and replacement:
             name = args.section.removesuffix("-plan")
-            raise ReceiptError(f"{name} lifecycle gate has passed")
+            raise ReceiptError(f"{name} gate is already closed")
         run[section] = value
         return {"section": args.section}
 
@@ -869,9 +849,6 @@ def command_evidence_human(args: argparse.Namespace) -> dict[str, Any]:
 
 def evidence_references(run: dict[str, Any], evidence_id: str) -> list[str]:
     references: list[str] = []
-    for index, item in enumerate(run.get("state_history", [])):
-        if isinstance(item, dict) and evidence_id in item.get("evidence_ids", []):
-            references.append(f"state_history[{index}]")
     for index, item in enumerate(run.get("reviews", [])):
         if isinstance(item, dict) and item.get("evidence_id") == evidence_id:
             references.append(f"reviews[{index}]")
@@ -879,7 +856,7 @@ def evidence_references(run: dict[str, Any], evidence_id: str) -> list[str]:
     if isinstance(authority, dict) and authority.get("evidence") == evidence_id:
         references.append("authority")
     for field, value in run.items():
-        if field in {"evidence", "state_history", "reviews", "authority"}:
+        if field in {"evidence", "reviews", "authority"}:
             continue
         if _contains_evidence_reference(value, evidence_id):
             references.append(field)
@@ -938,27 +915,27 @@ def command_evidence_rebuild(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def profile_judgement_gate(profile: str) -> str:
-    return lifecycle.profile_judgement_gate(profile, PROFILE_PATH, ReceiptError)
+    return commands.profile_judgement_gate(profile, PROFILE_PATH, ReceiptError)
 
 
 def add_review_artifact(
     run: dict[str, Any], workspace: Path, *, artifact_id: str, path: str,
 ) -> tuple[dict[str, Any], str, str, bytes]:
-    return lifecycle.add_review_artifact(
+    return commands.add_review_artifact(
         run, workspace, artifact_id=artifact_id, path=path, api=globals(),
     )
 
 
 def command_review_add(args: argparse.Namespace) -> dict[str, Any]:
-    return lifecycle.command_review_add(args, globals())
+    return commands.command_review_add(args, globals())
 
 
-def command_transition(args: argparse.Namespace) -> dict[str, Any]:
-    return lifecycle.command_transition(args, globals())
+def command_repair(args: argparse.Namespace) -> dict[str, Any]:
+    return commands.command_repair(args, globals())
 
 
 def build_parser() -> argparse.ArgumentParser:
-    return lifecycle.build_parser(globals())
+    return commands.build_parser(globals())
 
 
 def main(argv: list[str] | None = None) -> int:

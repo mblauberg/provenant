@@ -120,7 +120,7 @@
   "current_routing_regression": {
     "attempts_started": 0,
     "cases": 18,
-    "catalogue_owner_count": 32,
+    "catalogue_owner_count": 25,
     "dataset": "routing-holdout.yaml",
     "evaluation_id": "skill-portfolio-catalogue-20260821-live",
     "infrastructure_fixture": {

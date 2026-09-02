@@ -105,7 +105,6 @@ def make_reference_run(profile_name: str, root: Path = ROOT, *, high_stakes: boo
             "qualified_domain_review": {"status": "pass", "evidence_id": "high-domain-review", "domain": "reference-domain", "reviewer": "qualified-reference-reviewer", "qualification": "scenario-fixture-authority"},
             "explicit_human_action_gate": {"status": "pass", "evidence_id": "high-action", "action": "accept-reference-artifact", "approved_by": "human-maintainer"},
         }
-    history_states = ("draft", "scoped", "approved", "executing", "verifying", "reviewing", "awaiting_acceptance")
     return {
         "schema_version": 1,
         "contract": "delivery-run",
@@ -119,8 +118,8 @@ def make_reference_run(profile_name: str, root: Path = ROOT, *, high_stakes: boo
             "lead_agent_id": "not_applicable",
         },
         "profile": profile_name,
-        "status": "awaiting_acceptance",
         "risk_tier": "substantial",
+        "initial_risk_tier": "substantial",
         "chair_family": "openai",
         "risk_assessment": {
             "blast_radius": "multi-module",
@@ -183,18 +182,6 @@ def make_reference_run(profile_name: str, root: Path = ROOT, *, high_stakes: boo
             "containment": "discard inert reference artifacts",
             "one_way_doors": [],
         },
-        "state_history": [
-            {
-                "state": state,
-                "at": f"2026-07-10T00:{index:02d}:00Z",
-                "evidence_ids": (
-                    [*deterministic_ids, *judgement_by_family["openai"], *judgement_by_family["anthropic"]]
-                    if state == "awaiting_acceptance"
-                    else deterministic_ids if state in {"verifying", "reviewing"} else []
-                ),
-            }
-            for index, state in enumerate(history_states)
-        ],
         "evidence": evidence,
         "measures": {
             "outcome": [{"id": profile["required_measures"]["outcome"][0], "status": "pass", "value": 1, "target": "pass", "aggregation": "single-reference", "evidence_kind": "deterministic", "evidence_id": deterministic_id}],
@@ -229,7 +216,7 @@ def make_reference_run(profile_name: str, root: Path = ROOT, *, high_stakes: boo
         },
         "high_stakes_controls": high_stakes_controls,
         "human_gates": {
-            "acceptance": {"status": "pending", "approver": "", "evidence": ""},
+            "acceptance": {"status": "approved", "approver": "human-maintainer", "evidence": "acceptance-approval"},
             "release": {"status": "pending", "approver": "", "evidence": ""},
         },
         "observation": {
@@ -251,7 +238,7 @@ def make_reference_run(profile_name: str, root: Path = ROOT, *, high_stakes: boo
         "repair_cycles": 0,
         "escaped_defect": False,
         "human_corrections": [],
-        "checkpoint": {"generation": 0, "current_slice": "awaiting-acceptance", "next_action": "human acceptance", "in_flight": [], "artifact_paths": ["RUN.json"]},
+        "checkpoint": {"generation": 0, "current_slice": "accepted", "next_action": "human release", "in_flight": [], "artifact_paths": ["RUN.json"]},
         "degradation": None,
     }
 

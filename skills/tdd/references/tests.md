@@ -43,6 +43,10 @@ Red flags:
 - Test breaks when refactoring without behavior change
 - Test name describes HOW not WHAT
 - Verifying through external means instead of interface
+- Reads a `.md` file and asserts a sentence, a phrase or a phrase count
+- Asserts a constant equals its own literal instead of the behaviour that
+  depends on it
+- Would still pass if the feature were deleted and only the document remained
 
 ```typescript
 // BAD: Bypasses interface to verify
@@ -59,3 +63,33 @@ test("createUser makes user retrievable", async () => {
   expect(retrieved.name).toBe("Alice");
 });
 ```
+
+## Not observable behaviour
+
+Prose is not a contract. Documentation, `SKILL.md` and reference wording, ADR
+and specification text, commit and PR bodies, and the literal values of
+configuration keys are not behaviour and earn no test. A test that greps a
+document, asserts an exact sentence or counts occurrences of a phrase can only
+fail when a maintainer rewords something deliberately: it fires on every
+intentional edit and sleeps through every defect.
+
+Before writing any test, name the production change that would make it fail. If
+the only answer is "someone changed the text", there is no test to write.
+
+Where a document carries a machine-checkable invariant (a route in a fixture, a
+JSON policy value, a path that must resolve, a schema field) test the parsed
+structure, or run the script and assert its output, exit code or side effect.
+Never assert the source text itself.
+
+## Where a test lives
+
+Before writing a test, find how this repository already tests the unit under
+change: its layout, naming convention, focused-test command and full-suite
+command. Put the new test in the existing file that owns that unit's behaviour.
+
+A new test file is justified only when a new unit of production behaviour has no
+owning file: a new module, script or entry point. A new file is never justified
+by a review, an audit finding, an issue number or a documentation pass. Those
+add cases to the owning file, or add nothing. Name test files after the
+behaviour they protect, never after the process that prompted them. One test
+asserts one behaviour; if the name needs "and", split it.

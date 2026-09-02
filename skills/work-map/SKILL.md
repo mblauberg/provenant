@@ -54,9 +54,8 @@ What the route is intended to deliver. Link the owning specification.
 - **One map writer.** One chair updates the route after checking declared owners.
 - Archive a route map under the project's archival policy only when the
   declared workflow-state owner records that disposition.
-- Validate an authored map with
-  `python3 "$(provenant root)/skills/work-map/scripts/validate_work_map.py" <EFFORT-file>`
-  before handoff.
+- Before handoff, check the map keeps the three headings, links only, and no
+  red flag below.
 
 ## Red flags
 

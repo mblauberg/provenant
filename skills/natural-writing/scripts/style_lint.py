@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Shared prose-style lint engine for the writing family.
 
-Owned by `natural-writing`. `academic-writing`, `engineering-writing` and
-`legal-writing` import this module from their own thin wrapper scripts and
-pass domain-specific phrase/pattern overlays (LaTeX safety, engineering
-process language, legal filing bans) rather than re-implementing the
-overlapping regex engine three times.
+Owned by `natural-writing`. Its own academic wrapper plus
+`engineering-writing` and `legal-writing` import this module from thin wrapper
+scripts and pass domain-specific phrase/pattern overlays (LaTeX safety,
+engineering process language, legal filing bans) rather than re-implementing
+the overlapping regex engine three times.
 
 This module supplies:
 

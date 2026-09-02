@@ -30,14 +30,6 @@ def frontmatter_name(path: Path) -> str:
     return match.group(1).strip()
 
 
-def markdown_table_row(text: str, label: str) -> list[str]:
-    for line in text.splitlines():
-        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
-        if cells and cells[0] == label:
-            return cells
-    raise AssertionError(f"missing Markdown table row: {label}")
-
-
 def test_lifecycle_skills_are_portable_and_named_for_their_directory():
     for name in ("implement", "code-review"):
         skill = ROOT / "skills" / name / "SKILL.md"
@@ -372,7 +364,7 @@ def test_checker_canonicalises_the_macos_var_alias(tmp_path):
 def test_dispatchers_use_the_stable_product_command_and_local_skill_helpers():
     dispatcher = (ROOT / "skills" / "orchestrate" / "scripts" / "cf_dispatch.sh").read_text()
     assert 'resolve_routing' in dispatcher  # tries provenant, falls back to model_route.py
-    assert '"$SCRIPT_DIR/codex_capabilities.py"' in dispatcher
+    assert '"$SCRIPT_DIR/capabilities.py" codex' in dispatcher
     assert '-c service_tier="default"' in dispatcher
     assert "AGENTS_ROOT" not in dispatcher
     assert "HARNESS_ROOT" not in dispatcher
@@ -380,91 +372,6 @@ def test_dispatchers_use_the_stable_product_command_and_local_skill_helpers():
 
 def test_default_agent_run_directory_is_ignored_in_the_harness_repo():
     assert ".agent-run/" in (ROOT / ".gitignore").read_text().splitlines()
-
-
-def test_configured_workspace_execution_is_family_agnostic_but_assurance_is_explicit():
-    harness = (ROOT / "HARNESS.md").read_text()
-    scope = (ROOT / "skills/scope/SKILL.md").read_text()
-    compact_scope = " ".join(scope.lower().split())
-    routing = (ROOT / "skills/orchestrate/references/routing-and-tiers.md").read_text()
-    orchestrate = (ROOT / "skills/orchestrate/SKILL.md").read_text()
-
-    assert "ordinary workspace content" in harness
-    assert "ordinary authorised workspace content" in compact_scope
-    assert "family separation" in harness
-    assert "family-separation" in scope
-    assert "family separation" in routing
-    assert "family separation" in orchestrate
-    assert "family separation is an assurance property" in " ".join(harness.split())
-    assert "without a family-separation gate" in compact_scope
-    assert "assurance claim" in routing
-    assert "execution freedom" in orchestrate
-
-
-def test_dispatch_manifest_and_delivery_run_have_distinct_owners():
-    adr = (ROOT / "docs/adr/0021-configured-workspace-dispatch-boundaries.md").read_text()
-
-    assert "compact dispatch manifest" in adr
-    assert "is not a delivery `RUN.json`" in adr
-    assert "one dispatch owner" in adr.lower()
-    assert "Fabric remains a thin coordination and dispatch façade" in adr
-    assert "does not implement provider routes" in " ".join(adr.lower().split())
-
-
-def test_dispatch_owner_boundaries_distinguish_assurance_from_ordinary_execution():
-    orchestrate = (ROOT / "skills/orchestrate/SKILL.md").read_text()
-    thin_cli = (ROOT / "docs/adr/0013-thin-provenant-cli.md").read_text()
-    adr = (ROOT / "docs/adr/0021-configured-workspace-dispatch-boundaries.md").read_text()
-    index = (ROOT / "docs/adr/README.md").read_text()
-    harness = (ROOT / "HARNESS.md").read_text()
-
-    orchestrate_compact = " ".join(orchestrate.lower().split())
-    adr_compact = " ".join(adr.split())
-    dispatch_evidence = markdown_table_row(adr, "Dispatch evidence")
-    assert "ordinary configured-provider cli dispatch may use same-family routes" in orchestrate_compact
-    assert "same-family cli only for auth/preflight smoke tests" not in orchestrate_compact
-    assert "orchestration adapter" in thin_cli
-    assert "direct official provider CLIs" in thin_cli
-    assert "scripts/model-route" in adr
-    assert "cf_dispatch" in adr
-    assert "Provider-invocation adapter" in adr
-    assert "skills/orchestrate/scripts/dispatch_run.py" in adr
-    assert "skills/orchestrate/scripts/batch_run.py" in adr
-    assert "does not implement" in adr
-    assert "delegates provider invocation to `cf_dispatch.sh`" in adr
-    assert "ordinary intent/policy interface" in adr
-    assert "ordinary single-dispatch intent/policy mode" in adr_compact.lower()
-    assert "MANIFEST.md" in adr
-    assert "RUN_RECEIPT.json" in adr
-    assert "run_dir_finalize.py" in adr
-    assert len(dispatch_evidence) == 3
-    assert "validated and indexed by `dispatch_run.py`" in dispatch_evidence[1]
-    assert "`run_controls.py` owns retained-attempt validation" in dispatch_evidence[1]
-    assert "`run_dir_finalize.py` invokes" in dispatch_evidence[2]
-    assert "does not own the attempt schema" in dispatch_evidence[2]
-    assert "parallel lifecycle ledger" in adr
-    assert "attempt.json" in adr
-    assert "delivery `RUN.json` may reference the orchestration receipt" in adr_compact
-    assert "amended by ADRs 0020–0022" in index
-    assert "ordinary dispatch runner" in adr.lower()
-    assert "fixed bounded batch" in adr.lower()
-    assert "builds on `dispatch_run.py`" in adr.lower()
-    assert "remains the assurance path" in adr_compact.lower()
-    assert "[#690]" in adr and "[#692]" in adr
-    assert "secrets" in harness.lower()
-
-
-def test_thin_cli_and_fabric_decisions_share_one_dispatch_owner():
-    index = (ROOT / "docs/adr/README.md").read_text()
-    thin_cli = (ROOT / "docs/adr/0013-thin-provenant-cli.md").read_text()
-    fabric_facade = (ROOT / "docs/adr/0022-thin-fabric-mcp-execution-facade.md").read_text()
-
-    assert "0021" in index and "0022" in index
-    assert "0021-configured-workspace-dispatch-boundaries.md" in thin_cli
-    assert "bounded dispatch and batch commands" in thin_cli
-    assert "exactly two execution tools" in fabric_facade
-    assert "delegate unchanged" in fabric_facade
-    assert "Direct CLI execution remains supported" in fabric_facade
 
 
 @pytest.mark.skipif(shutil.which("mmdc") is None, reason="optional local Mermaid CLI is absent")

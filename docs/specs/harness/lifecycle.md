@@ -89,32 +89,26 @@ delivery cycle. No status may jump a missing gate.
 
 ### Delivery kernel
 
-The delivery kernel is a domain-neutral contract, validator and stable state
-machine. It orchestrates existing capabilities; it does not contain domain
-expertise. The state graph below is the human-readable projection of the
-runtime-owned delivery contract:
+The delivery kernel is a domain-neutral contract and validator. It orchestrates
+existing capabilities; it does not contain domain expertise. `RUN.json` is a
+flat record of what a run did, checked for shape and for the evidence each
+recorded gate demands. There is no transition graph: a receipt written by the
+agent that performed the run cannot certify its own ordering.
 
-#### State graph
+#### Recorded gates
 
-```text
-draft -> scoped
-scoped -> approved
-approved -> executing
-executing -> verifying
-verifying -> reviewing
-verifying -> executing
-reviewing -> repairing
-reviewing -> awaiting_acceptance
-repairing -> verifying
-awaiting_acceptance -> accepted
-awaiting_acceptance -> repairing
-accepted -> awaiting_release
-awaiting_release -> observing
-observing -> closed
-```
+The gates a receipt records, each an independent flat fact:
 
-`blocked`, `cancelled` and `degraded` are side states with reasons and recovery
-instructions. `degraded` never disguises a mandatory missing gate.
+- `intent.approval` and `design.status`, each bound to a digested artifact and
+  to passing human approval evidence.
+- `authority`, bound to passing human authority-approval evidence.
+- `human_gates.acceptance`, which requires the profile's deterministic and
+  judgement evidence, the review ladder, the security surfaces and the measures.
+- `human_gates.release`, which requires acceptance.
+- `observation`, which a released run must have active or passing, and a closed
+  run must have passing inside its declared window.
+- `retrospective`, required for a closed run by risk, incident, escaped defect
+  or repeated-correction policy.
 
 `implement` remains the software profile and supported direct entry point. It
 uses the same canonical receipt; there is no parallel implementation schema or

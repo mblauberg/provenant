@@ -6,10 +6,34 @@ import hashlib
 from pathlib import Path
 from typing import Any
 
+from delivery_run_shape import recorded_timestamps
 from delivery_validation_common import (
-    EVALUATION_BINDING_FIELDS, _digest, _evaluate_validator, _list,
+    EVALUATION_BINDING_FIELDS, _digest, _list,
     _load_bound_json, _mapping, _utc, fail, Invalid,
 )
+
+
+def _verify_nested_artifacts(receipt: dict[str, Any], receipt_dir: Path, index: int) -> None:
+    """Bind an evaluation receipt's own artifacts to their live bytes."""
+    base = receipt_dir.resolve()
+    for position, raw in enumerate(_list(receipt.get("artifacts", []), f"evaluation {index}.artifacts")):
+        item = _mapping(raw, f"evaluation {index}.artifacts[{position}]")
+        name = item.get("id") or position
+        path = item.get("path")
+        if not isinstance(path, str) or not path:
+            continue
+        digest = item.get("digest")
+        _digest(digest, f"evaluation {index} artifact {name} digest")
+        try:
+            nested = (base / path).resolve(strict=True)
+            nested.relative_to(base)
+            actual = "sha256:" + hashlib.sha256(nested.read_bytes()).hexdigest()
+        except (OSError, ValueError) as exc:
+            raise Invalid(
+                f"evaluation {index} artifact {name} is unreadable or outside the receipt directory: {exc}",
+            ) from exc
+        fail(actual != digest, f"evaluation {index} artifact {name} digest mismatch")
+
 
 def _validate_measures_assurance(
     run: dict[str, Any], profile: dict[str, Any], evidence: dict[str, dict[str, Any]],
@@ -53,9 +77,9 @@ def _validate_measures_assurance(
         fail(not evaluations, "stochastic assurance requires evaluations")
     seen_evaluation_ids: set[str] = set()
     seen_artifact_ids: set[str] = set()
-    history_times = [
-        _utc(item.get("at"), f"state_history[{index}].at")
-        for index, item in enumerate(run["state_history"])
+    recorded_times = [
+        _utc(value, "recorded timestamp")
+        for value in recorded_timestamps(run)
     ]
     complete_count = 0
     for index, raw in enumerate(evaluations):
@@ -70,7 +94,7 @@ def _validate_measures_assurance(
             f"evaluation {index}.status must be planned, complete, failed or incomplete",
         )
         anchored_at = _utc(item.get("anchored_at"), f"evaluation {index}.anchored_at")
-        fail(anchored_at > max(history_times), f"evaluation {index}.anchored_at is after the current checkpoint")
+        fail(bool(recorded_times) and anchored_at > max(recorded_times), f"evaluation {index}.anchored_at is after the newest recorded evidence")
         evaluation_id = item.get("evaluation_id")
         fail(not isinstance(evaluation_id, str) or not evaluation_id, f"evaluation {index}.evaluation_id is required")
         fail(evaluation_id in seen_evaluation_ids, f"evaluation {index}.evaluation_id is duplicate")
@@ -132,25 +156,19 @@ def _validate_measures_assurance(
         actual_digest = "sha256:" + hashlib.sha256(raw_receipt).hexdigest()
         fail(actual_digest != evaluation_digest, f"evaluation {index} artifact digest does not match live bytes")
         receipt = _load_bound_json(raw_receipt, f"evaluation {index} artifact")
-        validator = _evaluate_validator()
-        try:
-            errors = validator.validate(
-                receipt,
-                receipt_dir=target.parent,
-                verify_hashes=True,
-                require_pass=binding_status == "complete",
-                expected_evaluation_id=evaluation_id,
-                expected_plan_digest=plan_digest,
-                expected_delivery_run_id=run["run_id"],
-            )
-        except Exception as exc:  # The subordinate validator must fail closed.
-            raise Invalid(f"evaluation {index} validator failed: {exc}") from exc
-        fail(not isinstance(errors, list), f"evaluation {index} validator returned an invalid result")
         fail(
-            bool(errors),
-            f"evaluation {index} failed its machine gate: "
-            + "; ".join(str(error) for error in errors[:5]),
+            receipt.get("evaluation_id") != evaluation_id,
+            f"evaluation {index} evaluation_id does not match expected_evaluation_id",
         )
+        fail(
+            _mapping(receipt.get("decision"), f"evaluation {index}.decision").get("enclosing_delivery_run_id") != run["run_id"],
+            f"evaluation {index} decision.enclosing_delivery_run_id does not match expected_delivery_run_id",
+        )
+        fail(
+            _mapping(receipt.get("plan"), f"evaluation {index}.plan").get("digest") != plan_digest,
+            f"evaluation {index} plan.digest does not match expected_plan_digest",
+        )
+        _verify_nested_artifacts(receipt, target.parent, index)
         expected_receipt_status = {
             "complete": "pass", "failed": "fail", "incomplete": "incomplete",
         }[binding_status]
@@ -162,8 +180,8 @@ def _validate_measures_assurance(
             receipt.get("updated_at"), f"evaluation {index}.updated_at",
         )
         fail(
-            receipt_updated_at > max(history_times),
-            f"evaluation {index} receipt completes after the current delivery checkpoint",
+            bool(recorded_times) and receipt_updated_at > max(recorded_times),
+            f"evaluation {index} receipt completes after the newest recorded evidence",
         )
         plan = _mapping(receipt.get("plan"), f"evaluation {index}.plan")
         frozen_at = _utc(plan.get("frozen_at"), f"evaluation {index}.plan.frozen_at")

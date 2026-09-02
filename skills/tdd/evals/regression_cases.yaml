@@ -1,0 +1,33 @@
+# Regression coverage for the prose exclusion added under issue #761: see
+# "Prose is not a contract" in SKILL.md and "Not observable behaviour" in
+# references/tests.md. Structurally validated by the generic route-fixture
+# harness, but not held to trigger_cases.yaml's fixed 3 positive / 3 negative /
+# 3 boundary distribution or its q262-q270 block.
+#
+# Do not fold these back into trigger_cases.yaml; that would break its fixed
+# 3/3/3 contract or force dropping another case to make room.
+schema_version: 1
+target_skill: tdd
+cases:
+  - id: r001
+    relation: negative
+    prompt: "Reword the caveat paragraph in this reference document so it reads more clearly; no code or behaviour changes."
+    tags: [adjacent, docs-only]
+    expected:
+      primary_skill: engineering-writing
+      companion_skills: []
+    note: >-
+      A documentation-only rewording changes no observable behaviour, so it
+      earns no test and tdd must not fire. Prose is not a contract; see the
+      exclusion in SKILL.md and references/tests.md.
+  - id: r002
+    relation: negative
+    prompt: "Update MAINTAINING.md to describe the new review step, then add a test asserting that the new sentence is present in the file."
+    tags: [adjacent, docs-only, change-detector]
+    expected:
+      primary_skill: engineering-docs
+      companion_skills: []
+    note: >-
+      The requested test can only fail when a maintainer rewords the document,
+      so there is no test to write and tdd declines rather than producing a
+      change detector. engineering-docs owns the documentation edit itself.

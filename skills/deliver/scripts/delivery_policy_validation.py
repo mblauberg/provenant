@@ -385,6 +385,19 @@ def validate_risk(
 
 
 @lru_cache(maxsize=1)
+def _run_shape_module():
+    spec = importlib.util.spec_from_file_location(
+        "delivery_run_shape_for_policy",
+        Path(__file__).with_name("delivery_run_shape.py"),
+    )
+    if spec is None or spec.loader is None:
+        raise RuntimeError("delivery run shape module is unavailable")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@lru_cache(maxsize=1)
 def _authority_mapping_module():
     spec = importlib.util.spec_from_file_location(
         "delivery_authority_mapping", AUTHORITY_MAPPING_PATH,
@@ -413,13 +426,12 @@ def validate_authority(
     except mapper.AuthorityMappingError as exc:
         raise invalid_type(str(exc)) from exc
     expiry = _utc(authority.get("expires_at"), "authority.expires_at", invalid_type)
-    history_times = [
-        _utc(item.get("at"), "state_history.at", invalid_type)
-        for item in run.get("state_history", [])
-        if isinstance(item, dict)
+    recorded_times = [
+        _utc(value, "recorded timestamp", invalid_type)
+        for value in _run_shape_module().recorded_timestamps(run)
     ]
     _fail(
-        bool(history_times) and expiry <= max(history_times),
-        "authority must cover the current run checkpoint",
+        bool(recorded_times) and expiry <= max(recorded_times),
+        "authority must cover every timestamp the run records",
         invalid_type,
     )
