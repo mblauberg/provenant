@@ -1869,7 +1869,7 @@ def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
     # Workhorse is deliberately not proportionate on OpenAI. Luna is cheap enough
     # that the family raises worker+workhorse to high in role_effort_defaults, so
     # the tier difference against flagship is the model, not the effort. See
-    # docs/model-preferences.md.
+    # docs/model-dossier.md.
     expected = {"flagship": "high", "workhorse": "high", "scout": "low"}
     snapshot = write_codex_capability_snapshot(tmp_path)
     for alias, effort in expected.items():
