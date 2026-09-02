@@ -8,11 +8,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 MUTATION = re.compile(r"sys\.path\.(insert|append)\b")
 
-# `test_install_skills` runs a probe under `python -I`, which ignores
-# PYTHONPATH by design. The probe's whole assertion is that the installed
-# per-entry layout is a sufficient import root for a caller who names it, so
-# the caller's `sys.path` is the subject under test, not a bootstrap.
-EXEMPT = {"tests/test_install_skills.py"}
+# Both files run a probe under `python -I`, which ignores PYTHONPATH by design
+# and, since it implies `-P`, also drops the script-directory entry a real
+# invocation gets. Each probe's whole assertion is about the import root the
+# caller names, so the caller's `sys.path` is the subject under test inside a
+# quoted `-c` snippet, not a bootstrap in the test module itself.
+EXEMPT = {
+    "tests/test_install_skills.py",
+    "tests/test_shared_library_bootstrap.py",
+}
 
 
 def _sources(directory: str):

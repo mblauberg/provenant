@@ -651,9 +651,20 @@ def test_installed_per_entry_layout_is_a_sufficient_import_root_for_shared(tmp_p
     assert result.stdout.strip().startswith(str(target))
 
 
+# Every skill entry point that carries an import bootstrap. Running the whole
+# set from the materialised installed catalogue is the standing proof that the
+# bootstraps work from an installed instance root and not only from the repo
+# (#755). A shorter list lets one entry point ship a bootstrap that resolves in
+# the repo and fails once installed.
 CONSUMERS = (
     "orchestrate/scripts/run_dir_finalize.py",
+    "orchestrate/scripts/dispatch_run.py",
+    "orchestrate/scripts/batch_run.py",
+    "orchestrate/scripts/run_controls.py",
+    "orchestrate/scripts/capabilities.py",
     "deliver/scripts/validate_delivery.py",
+    "deliver/scripts/delivery_receipt.py",
+    "implement/scripts/checkpoint_run.py",
 )
 
 

@@ -14,6 +14,10 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# The shared library sits one level above this skill and is not reachable
+# from the script's own directory, so this entry point establishes it. It is
+# established here rather than inherited from any sibling, so the import order
+# below is not load-bearing (#755).
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 from _shared.review_ladder import (
     REVIEW_PLAN_STATUSES,
@@ -27,6 +31,8 @@ from _shared.custody import (
     read_contained_regular, unlink_contained_regular,
 )
 
+# The script's own directory, for the sibling modules below. A direct
+# invocation supplies it; an import by file does not (#755).
 SCRIPTS_ROOT = Path(__file__).resolve().parent
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))

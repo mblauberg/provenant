@@ -20,6 +20,10 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+# This module is both an entry point and the receipt library that
+# `implement` imports, so it cannot rely on being the script whose directory
+# Python puts on `sys.path` for free. It establishes its own directory so its
+# sibling modules resolve however it was reached (#755).
 SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
