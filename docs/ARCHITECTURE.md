@@ -456,7 +456,9 @@ thereafter ([ADR 0019](adr/0019-installed-file-class-ownership.md)).
 `scripts/instance_installation.py` owns the instance side. It writes the
 path-free, committable desired state at `config/installation.json`: product
 name, version and install mode, `fused` when the instance root and product root
-are one tree. It seeds `AGENTS.md`, `config/model-preferences.json` and
+are one tree. That file is instance-owned, so the product repository does not
+track one; a tracked copy would hand every fresh clone a fused default that the
+clone has not earned. It seeds `AGENTS.md`, `config/model-preferences.json` and
 `config/model-routing.json` only when they are absent. Neither the desired state
 nor a seeded file is rewritten by a later install; Git is the drift detector,
 so there is no hash-drift check and no merge. The installation receipt stays the
