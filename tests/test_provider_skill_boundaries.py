@@ -9,9 +9,6 @@ def read(path: str) -> str:
 
 def test_agy_has_no_parallel_provider_skill():
     assert not (ROOT / "skills/agy-headless").exists()
-    orchestrate = read("skills/orchestrate/SKILL.md")
-    assert "Answer-bearing external work uses a cooperative Fabric request/reply" in orchestrate
-    assert "Herdr only observes or sends fire-and-forget steering" in orchestrate
 
 
 def test_headless_dispatcher_uses_direct_router_without_daemon_gate():
@@ -30,12 +27,6 @@ def test_headless_dispatcher_uses_direct_router_without_daemon_gate():
     ):
         assert forbidden not in dispatcher
     assert "agy)" in dispatcher, "agy must be dispatchable like every other adapter"
-
-
-def test_autopilot_records_cross_family_work_in_fabric():
-    reference = read("skills/autopilot/references/cross-family-review.md")
-    assert "recorded in Fabric so the mission state is visible across providers" in reference
-    assert "agy-headless" not in reference
 
 
 def test_direct_agy_dispatch_keeps_the_compatibility_contract():

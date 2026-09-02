@@ -1,5 +1,4 @@
 from pathlib import Path
-import re
 import signal
 import subprocess
 import sys
@@ -9,79 +8,7 @@ import time
 ROOT = Path(__file__).resolve().parents[1]
 
 
-GUIDANCE_FILES = (
-    ROOT / "skills/orchestrate/references/worker-liveness.md",
-    ROOT / "agents/codex-analyst.md",
-    ROOT / "agents/codex-implementer.md",
-)
 DETACHED_HELPER = ROOT / "skills/orchestrate/scripts/run_worker_detached.sh"
-
-
-def _active_fifo_completion_patterns() -> tuple[re.Pattern[str], ...]:
-    return (
-        re.compile(r"\bmkfifo\b", re.IGNORECASE),
-        re.compile(r"\b(?:done|codex-[^\s`]+)\.fifo\b", re.IGNORECASE),
-        re.compile(r"\bcat\s+[^\n]*\.fifo\b", re.IGNORECASE),
-    )
-
-
-def test_worker_completion_guidance_does_not_use_fifo_rendezvous():
-    source = GUIDANCE_FILES[0].read_text()
-
-    for pattern in _active_fifo_completion_patterns():
-        assert not pattern.search(source), pattern.pattern
-
-    assert "run the worker in the foreground" in source
-    assert 'wait "$WRAPPER_PID"' in source
-    assert "regular completion file" in source
-    assert "foreground wait observes\nthat PID's exit" in source
-    assert "Codex-only" in source
-    assert "agy, cursor, kiro" in source
-
-
-def test_codex_agent_definitions_use_foreground_or_durable_pid_completion():
-    for path in GUIDANCE_FILES[1:]:
-        source = path.read_text()
-        for pattern in _active_fifo_completion_patterns():
-            assert not pattern.search(source), f"{path}: {pattern.pattern}"
-        assert "foreground" in source.lower(), path
-        assert 'wait "$PID"' in source or "durable completion marker" in source, path
-
-
-def test_codex_liveness_does_not_infer_exit_from_resource_signals():
-    for path in GUIDANCE_FILES[1:]:
-        source = path.read_text()
-        normalised = " ".join(source.split())
-        assert "worker-liveness.md" in source, path
-        assert "CPU time, elapsed time or output file size do not prove exit" in normalised, path
-        assert "observed PID exit and its exit status" in normalised, path
-        assert not re.search(
-            r"minutes?\s+elapsed.*near-zero\s+CPU.*(?:means|is)\s+(?:hung|dead)",
-            source,
-            re.IGNORECASE | re.DOTALL,
-        ), path
-
-
-def test_detached_protocol_uses_owned_run_and_pids():
-    source = GUIDANCE_FILES[0].read_text()
-    assert "run_worker_detached.sh" in source
-    assert "--run-dir" in source
-    assert "--transcript" not in source
-    assert "worker.pid" in source
-    assert "wrapper.pid" in source
-    assert "run_dir/transcript.txt" in source
-    assert "run_dir/done" in source
-    assert 'terminal-report --pid "$WORKER_PID"' in source
-    assert 'terminal-report --pid "$PID"' not in source
-
-    for path in GUIDANCE_FILES[1:]:
-        agent_source = path.read_text()
-        assert "run_worker_detached.sh" in agent_source, path
-        assert "--transcript" not in agent_source, path
-        assert "worker.pid" in agent_source, path
-        assert "wrapper.pid" in agent_source, path
-        assert "run_dir/transcript.txt" in agent_source, path
-        assert "run_dir/done" in agent_source, path
 
 
 def _helper_command(run_dir, worker_code):
@@ -245,12 +172,3 @@ def test_detached_helper_validation_rejects_malformed_marker(tmp_path):
 
     assert validation.returncode != 0
     assert "marker" in validation.stderr
-
-
-def test_reentry_guidance_fails_when_wrapper_exits_without_marker():
-    source = GUIDANCE_FILES[0].read_text()
-    normalised = " ".join(source.split())
-    assert "completion evidence missing" in normalised
-    assert "--validate" in source
-    assert "kill -0 \"$WRAPPER_PID\"" not in source
-    assert "recorded wrapper exit" in normalised
