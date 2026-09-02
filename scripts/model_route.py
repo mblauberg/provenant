@@ -34,6 +34,9 @@ COMPATIBILITY_ADAPTER_IDS = {
     "opencode": "opencode-acp",
     "pi": "pi-rpc",
 }
+# The wire formats a provider CLI can be told to speak. Anything else is a
+# configuration error rather than a value to pass through to the CLI.
+ENDPOINT_WIRE_APIS = frozenset({"responses", "chat"})
 TRUSTED_CAPABILITY_SOURCES = {
     "codex debug models": "codex",
     "claude subscription canary": "claude",
@@ -156,12 +159,17 @@ def check_adapter_compatibility(
 def resolve_endpoint_profile(
     name: str, adapter: str, catalog: dict[str, Any]
 ) -> tuple[dict[str, Any], str]:
-    """Resolve a named Anthropic-compatible endpoint into route fields.
+    """Resolve a named third-party endpoint into route fields.
 
     The profile carries the base URL and the name of the environment variable
     holding the token. The token itself is never read into the route: the
     dispatcher reads the named variable when it builds the provider command, so
     no credential reaches a record, a run file or the catalogue.
+
+    ``wire_api`` is optional and names the request format the endpoint speaks.
+    An Anthropic-compatible endpoint omits it; an OpenAI-compatible one declares
+    it, because the Codex CLI needs the wire format stated in the provider
+    configuration it is handed.
     """
     endpoints = catalog.get("endpoints")
     profile = endpoints.get(name) if isinstance(endpoints, dict) else None
@@ -171,6 +179,7 @@ def resolve_endpoint_profile(
     token_env = profile.get("token_env")
     family = profile.get("model_family")
     adapters = profile.get("adapters")
+    wire_api = profile.get("wire_api")
     if (
         not isinstance(base_url, str)
         or not base_url.startswith("https://")
@@ -180,18 +189,22 @@ def resolve_endpoint_profile(
         or not family.strip()
         or not isinstance(adapters, list)
         or not all(isinstance(item, str) and item.strip() for item in adapters)
+        or (wire_api is not None and wire_api not in ENDPOINT_WIRE_APIS)
     ):
         return {}, "endpoint_config_invalid"
     if adapter not in adapters:
         return {}, "endpoint_adapter_unsupported"
     if not os.environ.get(token_env, "").strip():
         return {}, "endpoint_token_missing"
-    return {
+    resolved = {
         "endpoint_profile": name,
         "endpoint_base_url": base_url,
         "endpoint_token_env": token_env,
         "model_family": family,
-    }, ""
+    }
+    if wire_api is not None:
+        resolved["endpoint_wire_api"] = wire_api
+    return resolved, ""
 
 
 def emit(record: dict[str, Any], code: int) -> int:

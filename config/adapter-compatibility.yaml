@@ -49,8 +49,16 @@ adapters:
       platforms:
         - darwin-arm64
     model_family_constraints:
+      # The families below openai are reachable only through an endpoint
+      # profile in `config/model-routing.json` that lists `codex` among its
+      # adapters. The profile is passed to the CLI as an inline provider
+      # override; without `--endpoint` the catalogue's `fixed_model_family`
+      # still pins the adapter to openai.
       allowed:
         - openai
+        - zhipu
+        - moonshot
+        - deepseek
       requires_explicit_model: true
     official_source_url: "https://github.com/openai/codex"
 

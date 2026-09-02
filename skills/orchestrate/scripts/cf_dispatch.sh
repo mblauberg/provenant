@@ -135,6 +135,11 @@ case "$ACCESS_MODE" in
 esac
 
 CLAUDE_MODE_FLAGS=(--permission-mode plan --tools "Read,Grep,Glob")
+# A fixed identifier for the provider codex is told to use when a dispatch names
+# an endpoint profile. The profile name is carried as the provider's display
+# name instead, so a profile name containing characters that a TOML dotted path
+# would have to quote cannot reshape the override.
+CODEX_ENDPOINT_PROVIDER_ID="provenant_endpoint"
 CLAUDE_SYSTEM_PROMPT="You are a non-interactive independent verifier. You may use only Read, Grep, and Glob to inspect the requested workspace. Fabric MCP tools are not exposed to this direct verifier invocation. Do not mutate files, use shell commands, call Task/tool/function abstractions, or launch subagents. Return only the file-backed verification result requested by the supplied prompt; the caller owns any Fabric correlation."
 # A writer lane has to be able to run its own tests and commit its own work, so
 # the write tools are named on the permission allow-list rather than left to the
@@ -554,6 +559,7 @@ keys = (
     "fallback_model", "catalog_model", "model_selection",
     "model_override_tier", "policy_override", "alias", "reason",
     "endpoint_profile", "endpoint_base_url", "endpoint_token_env",
+    "endpoint_wire_api",
 )
 with fields_path.open("wb") as handle:
     for key in keys:
@@ -591,6 +597,7 @@ PY
       endpoint_profile) endpoint_profile="$value";;
       endpoint_base_url) endpoint_base_url="$value";;
       endpoint_token_env) endpoint_token_env="$value";;
+      endpoint_wire_api) endpoint_wire_api="$value";;
       *) return 1;;
     esac
   done <"$fields_path"
@@ -605,7 +612,7 @@ agy_has_unsafe_arg() {
 }
 
 run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/1
-  local tool="$1" model="$2" effort="$3" route_effort_input="$3" tmpdir="$4" raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier route_model_override_tier route_alias route_reason endpoint_profile endpoint_base_url endpoint_token_env agy_status agy_dir agy_prompt_bytes
+  local tool="$1" model="$2" effort="$3" route_effort_input="$3" tmpdir="$4" raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier route_model_override_tier route_alias route_reason endpoint_profile endpoint_base_url endpoint_token_env endpoint_wire_api agy_status agy_dir agy_prompt_bytes
   model="$(resolve_model "$tool" "$model")"
   raw="$tmpdir/raw"
   diag="$tmpdir/diag"
@@ -630,6 +637,7 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
   endpoint_profile=""
   endpoint_base_url=""
   endpoint_token_env=""
+  endpoint_wire_api=""
   requested_effort="$effort"
   effort_source=""
   effort_capability_source=""
@@ -778,6 +786,24 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
           fi ;;
         codex)
           guarantee="enforced"
+          # `--ignore-user-config` stays on every codex route: a dispatched run
+          # must never inherit the user's own `~/.codex/config.toml`. A named
+          # endpoint profile therefore supplies its provider inline instead, as
+          # `-c` overrides, which codex honours with the flag set. The token is
+          # named, not passed: `env_key` tells codex which variable to read, so
+          # the credential never reaches an argument vector or a record.
+          local -a codex_provider_flags=()
+          if [ -n "$endpoint_base_url" ] && [ -n "$endpoint_token_env" ]; then
+            codex_provider_flags=(
+              -c "model_providers.${CODEX_ENDPOINT_PROVIDER_ID}.name=$endpoint_profile"
+              -c "model_providers.${CODEX_ENDPOINT_PROVIDER_ID}.base_url=$endpoint_base_url"
+              -c "model_providers.${CODEX_ENDPOINT_PROVIDER_ID}.env_key=$endpoint_token_env"
+            )
+            [ -n "$endpoint_wire_api" ] && codex_provider_flags+=(
+              -c "model_providers.${CODEX_ENDPOINT_PROVIDER_ID}.wire_api=$endpoint_wire_api"
+            )
+            codex_provider_flags+=(-c "model_provider=${CODEX_ENDPOINT_PROVIDER_ID}")
+          fi
           if ! require_cmd codex "$diag"; then
             status="tool_not_found"
             rc=127
@@ -789,10 +815,12 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
             codex exec -s workspace-write --cd "$WORKTREE" --ignore-user-config --ignore-rules \
               --ephemeral -c service_tier="default" \
               ${WORKTREE_GIT_COMMON:+-c sandbox_workspace_write.writable_roots="[\"$WORKTREE_GIT_COMMON\"]"} \
+              ${codex_provider_flags[@]+"${codex_provider_flags[@]}"} \
               ${model:+-m "$model"} ${effort:+-c model_reasoning_effort="$effort"} \
               - <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
           else
-            codex exec -s read-only --ignore-user-config --ignore-rules --ephemeral -c service_tier="default" ${model:+-m "$model"} \
+            codex exec -s read-only --ignore-user-config --ignore-rules --ephemeral -c service_tier="default" \
+              ${codex_provider_flags[@]+"${codex_provider_flags[@]}"} ${model:+-m "$model"} \
               ${effort:+-c model_reasoning_effort="$effort"} \
               - <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
           fi ;;

@@ -2761,3 +2761,135 @@ def test_named_endpoint_reaches_the_claude_writer_route_environment():
     assert record["model_family"] == "zhipu"
     assert "base=https://api.z.ai/api/anthropic" in recorded
     assert "token=endpoint-token-fixture" in recorded
+
+
+CODEX_ARGV_STUB = """\
+#!/usr/bin/env bash
+if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+  printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
+  exit 0
+fi
+printf '%s\n' "$@" > {args_file}
+cat >/dev/null
+echo OK
+"""
+
+
+def run_codex_dispatch(extra_args=None, extra_env=None, instance_root=None):
+    """Dispatch to codex with a stub that records its own argument vector."""
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        args_file = tmp / "codex.args"
+        write_executable(
+            bin_dir / "codex", CODEX_ARGV_STUB.format(args_file=args_file)
+        )
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        if instance_root is not None:
+            env["AGENT_FABRIC_INSTANCE_ROOT"] = str(instance_root)
+        env.update(extra_env or {})
+        command = [
+            str(SCRIPT), "--tool", "codex", "--orchestrator-family", "anthropic",
+            "--out", str(tmp / "out.txt"), "--prompt", "Review",
+        ]
+        command.extend(extra_args or [])
+        result = subprocess.run(
+            command, cwd=td, env=env, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        recorded = (
+            args_file.read_text(encoding="utf-8").splitlines()
+            if args_file.exists()
+            else []
+        )
+        return result, recorded
+
+
+CODEX_ENDPOINT_PROFILE = {
+    "base_url": "https://api.deepseek.com/v1",
+    "token_env": "DEEPSEEK_API_KEY",
+    "model_family": "deepseek",
+    "wire_api": "responses",
+    "adapters": ["codex"],
+}
+
+
+def codex_endpoint_instance(tmp, name="deepseek-openai", profile=None):
+    """An instance root whose catalogue carries one codex endpoint profile."""
+    instance = tmp / "instance"
+    (instance / "config").mkdir(parents=True)
+    for config_name in ("model-routing.json", "model-preferences.json"):
+        shutil.copy2(
+            PRODUCT_ROOT / "config" / config_name, instance / "config" / config_name
+        )
+    catalog_path = instance / "config" / "model-routing.json"
+    catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    catalog["endpoints"][name] = dict(profile or CODEX_ENDPOINT_PROFILE)
+    catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
+    return instance
+
+
+def test_ordinary_codex_dispatch_still_ignores_user_config():
+    """No endpoint named, so the user's own codex config stays out of the run."""
+    result, recorded = run_codex_dispatch(extra_args=["--model", "gpt-5.6-luna"])
+
+    assert result.returncode == 0, result.stderr
+    record = json.loads(result.stdout)
+    assert record["status"] == "ok"
+    assert record["model_family"] == "openai"
+    assert "--ignore-user-config" in recorded
+    assert not [arg for arg in recorded if arg.startswith("model_provider")]
+
+
+def test_codex_endpoint_profile_supplies_the_provider_inline():
+    with tempfile.TemporaryDirectory() as td:
+        instance = codex_endpoint_instance(Path(td))
+        result, recorded = run_codex_dispatch(
+            extra_args=["--model", "deepseek-3.2"],
+            extra_env={
+                "CF_DISPATCH_ENDPOINT": "deepseek-openai",
+                "DEEPSEEK_API_KEY": "endpoint-token-fixture",
+            },
+            instance_root=instance,
+        )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    record = json.loads(result.stdout)
+    assert record["status"] == "ok"
+    assert record["model_family"] == "deepseek"
+    assert record["resolved_model"] == "deepseek-3.2"
+    # The flag that discards the user's config stays on, and the provider the
+    # run needs arrives inline instead of from `~/.codex/config.toml`.
+    assert "--ignore-user-config" in recorded
+    assert "model_providers.provenant_endpoint.name=deepseek-openai" in recorded
+    assert (
+        "model_providers.provenant_endpoint.base_url=https://api.deepseek.com/v1"
+        in recorded
+    )
+    assert "model_providers.provenant_endpoint.env_key=DEEPSEEK_API_KEY" in recorded
+    assert "model_providers.provenant_endpoint.wire_api=responses" in recorded
+    assert "model_provider=provenant_endpoint" in recorded
+    # The credential is named, never carried: it reaches codex through the
+    # environment variable the profile names, not through an argument or record.
+    assert "endpoint-token-fixture" not in "\n".join(recorded)
+    assert "endpoint-token-fixture" not in result.stdout
+
+
+def test_codex_endpoint_with_an_unusable_wire_api_dispatches_nothing():
+    profile = dict(CODEX_ENDPOINT_PROFILE, wire_api="grpc")
+    with tempfile.TemporaryDirectory() as td:
+        instance = codex_endpoint_instance(Path(td), profile=profile)
+        result, recorded = run_codex_dispatch(
+            extra_args=["--model", "deepseek-3.2"],
+            extra_env={
+                "CF_DISPATCH_ENDPOINT": "deepseek-openai",
+                "DEEPSEEK_API_KEY": "endpoint-token-fixture",
+            },
+            instance_root=instance,
+        )
+
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["status"] == "endpoint_config_invalid"
+    assert recorded == []
