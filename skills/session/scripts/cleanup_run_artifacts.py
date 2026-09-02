@@ -17,16 +17,16 @@ class CleanupError(ValueError):
     pass
 
 
-# `scripts/lib/roots.py` is the single resolver for the product root (#754).
+# `skills/_shared/roots.py` is the single resolver for the product root (#754).
 # The fallback loads that one file when this script is run directly by path and
 # the product root is not on `sys.path`: it locates the resolver, it does not
 # decide the root, and it leaves import resolution untouched (#755).
 try:
-    from scripts.lib.roots import product_root
+    from _shared.roots import product_root
 except ModuleNotFoundError:  # pragma: no cover - direct invocation by path
     import importlib.util as _roots_util
     _roots_spec = _roots_util.spec_from_file_location(
-        "provenant_roots", Path(__file__).resolve().parents[3] / "scripts" / "lib" / "roots.py"
+        "provenant_roots", Path(__file__).resolve().parents[2] / "_shared" / "roots.py"
     )
     _roots_module = _roots_util.module_from_spec(_roots_spec)
     _roots_spec.loader.exec_module(_roots_module)

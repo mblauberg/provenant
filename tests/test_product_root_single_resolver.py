@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-RESOLVER = ROOT / "scripts" / "lib" / "roots.py"
+RESOLVER = ROOT / "skills" / "_shared" / "roots.py"
 
 # Scripts that read product-rooted configuration. Each must resolve the root
 # through `scripts.lib.roots.product_root`, not by counting `..` itself.
@@ -82,7 +82,7 @@ def test_consumers_do_not_re_derive_the_product_root(relative):
     source = (ROOT / relative).read_text()
 
     assert "roots import product_root" in source or "roots.product_root" in source, (
-        f"{relative} must resolve the product root through scripts/lib/roots.py"
+        f"{relative} must resolve the product root through the one resolver"
     )
     offenders = [
         line
