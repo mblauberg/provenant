@@ -39,6 +39,12 @@ cross-tracker routes, not a second current-work owner.
 
 - Pointer: [`docs/`](docs/)
 
+### Change history
+
+- Owns: `git log` for what changed and when; [`docs/adr/`](docs/adr/) for why
+- There is no changelog file; see [ADR
+  0024](docs/adr/0024-git-log-and-adrs-own-history.md)
+
 ### Specifications
 
 - Owns: `non-derivable-intent`

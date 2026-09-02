@@ -35,13 +35,20 @@ try:
         SCHEMA_VERSION as POINTER_SCHEMA_VERSION,
         write_pointer_file,
     )
-except ModuleNotFoundError:  # invoked as a script rather than as a package
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from lib.product_root_resolver import (  # type: ignore[no-redef]
-        POINTER_RELATIVE_PATH,
-        SCHEMA_VERSION as POINTER_SCHEMA_VERSION,
-        write_pointer_file,
+except ModuleNotFoundError:  # pragma: no cover - invoked as a script by path
+    # Load the one resolver from its own file. Repairing `sys.path` here would
+    # change how every later import in the process resolves; this binds exactly
+    # the module named and leaves the rest alone (#755).
+    import importlib.util as _resolver_util
+    _resolver_spec = _resolver_util.spec_from_file_location(
+        "provenant_product_root_resolver",
+        Path(__file__).resolve().parent / "lib" / "product_root_resolver.py",
     )
+    _resolver = _resolver_util.module_from_spec(_resolver_spec)
+    _resolver_spec.loader.exec_module(_resolver)
+    POINTER_RELATIVE_PATH = _resolver.POINTER_RELATIVE_PATH
+    POINTER_SCHEMA_VERSION = _resolver.SCHEMA_VERSION
+    write_pointer_file = _resolver.write_pointer_file
 
 
 ROOT = Path(__file__).resolve().parents[1]

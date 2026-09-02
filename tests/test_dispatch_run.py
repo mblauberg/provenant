@@ -1607,3 +1607,169 @@ def test_worktree_writer_route_is_refused_for_assurance_and_unsupported_adapters
         tmp_path, run_dir, prompt, "--access-mode", "worktree_write", "--worktree", str(tmp_path / "absent"),
     )
     assert json.loads(invalid.stdout)["status"] == "worktree_invalid"
+
+
+def test_provider_deadline_is_passed_below_the_owner_deadline(tmp_path: Path) -> None:
+    """The caller's deadline reaches the dispatcher, shortened so the provider exits first."""
+    module = load_dispatch_module()
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Reply exactly OK\n", encoding="utf-8")
+    args = module.parser().parse_args([
+        "--run-dir", str(tmp_path), "--task-id", "deadline", "--adapter", "agy",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--timeout", "900",
+    ])
+    command = module.build_command(args, prompt, tmp_path / "result.md")
+    assert "--timeout-seconds" in command
+    passed = int(command[command.index("--timeout-seconds") + 1])
+    assert passed == 895
+    assert 0 < passed < args.timeout_seconds
+    # A short deadline still leaves the provider a positive whole second.
+    assert module.provider_timeout_seconds(2.0) == 1
+    assert module.provider_timeout_seconds(0.25) == 1
+
+
+def test_agy_arm_receives_the_deadline_and_reports_a_typed_timeout(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "agytimeout")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Reply exactly OK\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    args_file = tmp_path / "agy.args"
+    write_executable(
+        bin_dir / "agy",
+        f"""#!/usr/bin/env bash
+        if [ "$1" = "models" ]; then
+          printf 'gemini-3.7-flash-high\\ngemini-3.7-flash-medium\\ngemini-3.7-flash-low\\n'
+          exit 0
+        fi
+        printf '%s\\n' "$@" > {args_file}
+        sleep 30
+        """,
+    )
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
+    result = subprocess.run(
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "agytimeout", "--adapter", "agy",
+         "--prompt-file", str(prompt), "--model", "gemini-3.7-flash", "--role", "worker",
+         "--effort", "medium",
+         "--intent", "ordinary", "--timeout", "3"],
+        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    assert result.returncode != 0
+    record = json.loads(result.stdout)
+    assert record["status"] == "timed_out"
+    assert record["failure_code"] in {"timeout", "deadline_exceeded"}
+    passed = args_file.read_text(encoding="utf-8").splitlines()
+    assert "--print-timeout" in passed
+    assert passed[passed.index("--print-timeout") + 1] == "2s"
+
+
+def test_provider_reported_timeout_is_typed_rather_than_an_empty_result(tmp_path: Path) -> None:
+    """A deadline the provider enforced itself is a timeout, not a result defect."""
+    run_dir = make_run(tmp_path, "providertimeout")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Reply exactly OK\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_executable(
+        bin_dir / "agy",
+        """#!/usr/bin/env bash
+        if [ "$1" = "models" ]; then
+          printf 'gemini-3.7-flash-high\ngemini-3.7-flash-medium\ngemini-3.7-flash-low\n'
+          exit 0
+        fi
+        printf '%s\n' '{"status":"ERROR","response":"","error":"print timeout of 2s exceeded"}'
+        """,
+    )
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
+    result = subprocess.run(
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "providertimeout", "--adapter", "agy",
+         "--prompt-file", str(prompt), "--model", "gemini-3.7-flash", "--role", "worker",
+         "--effort", "medium",
+         "--intent", "ordinary", "--timeout", "60"],
+        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    assert result.returncode != 0
+    record = json.loads(result.stdout)
+    assert record["route"]["status"] == "timeout"
+    assert record["status"] == "timed_out"
+    assert record["failure_code"] == "provider_timeout"
+    assert record["process"]["observed_exit"] is True
+
+
+def test_claude_arm_short_timeout_reports_a_timeout_not_a_receipt_failure(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "claudetimeout")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Reply exactly OK\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_executable(
+        bin_dir / "claude",
+        """#!/usr/bin/env bash
+        # A partial answer on the wire, then silence: the shape that used to be
+        # published as a corrupt receipt when the owner killed the group.
+        printf 'PART'
+        sleep 30
+        """,
+    )
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
+    result = subprocess.run(
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "claudetimeout", "--adapter", "claude",
+         "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+         "--intent", "ordinary", "--timeout", "2"],
+        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+    assert result.returncode != 0
+    record = json.loads(result.stdout)
+    assert record["status"] == "timed_out"
+    assert record["failure_code"] in {"timeout", "deadline_exceeded"}
+    assert record["failure_code"] not in {
+        "adapter_receipt_invalid", "result_missing_or_empty", "terminal_envelope_invalid",
+        "result_integrity_error", "empty_result",
+    }
+
+
+def test_result_missing_past_the_provider_deadline_is_a_timeout_not_a_result_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The deadline is checked before a missing or partial result is diagnosed."""
+    module = load_dispatch_module()
+    run_dir = make_run(tmp_path, "deadlinenet")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Reply exactly OK\n", encoding="utf-8")
+    adapter = tmp_path / "adapter.sh"
+    write_executable(
+        adapter,
+        """#!/usr/bin/env bash
+        while [ "$#" -gt 0 ]; do
+          case "$1" in
+            --out) out="$2"; shift 2;;
+            *) shift;;
+          esac
+        done
+        # Past the provider deadline (1s of a 2s owner budget), under the owner's,
+        # and with nothing to publish.
+        sleep 1.4
+        : > "$out"
+        printf '{"tool":"claude","adapter":"claude","execution_intent":"ordinary","resolved_model":"test-model","provider_family":"test-family","model_family":"test-family","endpoint_provider":"test-provider","identity_source":"test-fixture","status":"ok","exit":0,"output_path":"%s","output_digest":"","read_only_guarantee":"none","cross_family":false,"certification_eligible":false}\n' "$out"
+        """,
+    )
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "deadlinenet", "--adapter", "claude",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--timeout", "2",
+    ])
+    monkeypatch.chdir(tmp_path)
+    assert module.dispatch(args) == 1
+    record = json.loads(
+        (run_dir / "dispatch/tasks/deadlinenet/attempt-001/attempt.json").read_text()
+    )
+    assert record["status"] == "timed_out"
+    assert record["failure_code"] not in {
+        "result_missing_or_empty", "adapter_receipt_invalid", "terminal_envelope_invalid",
+    }
+    assert record["process"]["observed_exit"] is True

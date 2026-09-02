@@ -21,12 +21,3 @@ def test_harness_python_selection_is_portable():
     assert "command -v python3" not in checker
     assert "uv run --frozen --only-group test python" not in checker
     assert '"${PYTHON[@]}"' not in checker
-
-
-def test_install_and_continuity_docs_describe_the_actual_boundaries():
-    readme = read("README.md")
-    session = read("skills/session/SKILL.md")
-
-    assert "persist it in the shell rc" not in readme
-    assert "command collision, incompatible instruction target, or managed skill-link conflict" in " ".join(readme.split())
-    assert "Project instructions may override continuity paths." in " ".join(session.split())

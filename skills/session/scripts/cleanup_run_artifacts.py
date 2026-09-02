@@ -8,7 +8,6 @@ from datetime import datetime, timezone
 import hashlib
 import importlib.util
 import json
-import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -18,9 +17,22 @@ class CleanupError(ValueError):
     pass
 
 
-PRODUCT_ROOT = Path(
-    os.environ.get("AGENT_FABRIC_PRODUCT_ROOT", Path(__file__).resolve().parents[3])
-).expanduser()
+# `skills/_shared/roots.py` is the single resolver for the product root (#754).
+# The fallback loads that one file when this script is run directly by path and
+# the product root is not on `sys.path`: it locates the resolver, it does not
+# decide the root, and it leaves import resolution untouched (#755).
+try:
+    from _shared.roots import product_root
+except ModuleNotFoundError:  # pragma: no cover - direct invocation by path
+    import importlib.util as _roots_util
+    _roots_spec = _roots_util.spec_from_file_location(
+        "provenant_roots", Path(__file__).resolve().parents[2] / "_shared" / "roots.py"
+    )
+    _roots_module = _roots_util.module_from_spec(_roots_spec)
+    _roots_spec.loader.exec_module(_roots_module)
+    product_root = _roots_module.product_root
+
+PRODUCT_ROOT = product_root()
 SKILLS_ROOT = Path(__file__).resolve().parents[2]
 
 

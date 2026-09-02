@@ -649,10 +649,15 @@ export interface DatabaseDiagnostic {
   error?: string;
 }
 
+// Deliberately no ctime. A concurrent writer's read-write open of the database
+// advances the inode's ctime on Darwin without changing a byte, so including it
+// here would make the snapshot loop report an unchanged database as changed and
+// fail a read-only diagnostic. Identity is still pinned by dev, ino, size and
+// mtime, and any real write moves size or mtime. Same reasoning as #742.
 const fileVersion = (path: string): string | null => {
   try {
     const value = statSync(path, { bigint: true });
-    return [value.dev, value.ino, value.size, value.mtimeNs, value.ctimeNs].join(":");
+    return [value.dev, value.ino, value.size, value.mtimeNs].join(":");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw error;

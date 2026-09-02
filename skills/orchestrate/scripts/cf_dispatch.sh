@@ -40,6 +40,11 @@ Options:
   --reviewer-id ID             Stable worker/reviewer identity for receipt binding.
   --model MODEL                Optional model passed to adapter.
   --effort EFFORT              Optional effort passed to adapter.
+  --timeout-seconds N          Provider deadline in whole seconds, where the CLI
+                               accepts one. Only agy does (--print-timeout); the
+                               claude and codex headless CLIs expose no timeout
+                               flag, so on those arms the calling owner's own
+                               deadline is the only bound.
   --add-dir PATH               Additional agy read directory; repeatable.
   --access-mode MODE           read_only (default) or worktree_write.
   --worktree PATH              Git worktree root the writer owns exclusively.
@@ -63,6 +68,7 @@ INSTALLED_OUTPUT_DEVICE=""
 INSTALLED_OUTPUT_INODE=""
 AGY_ADD_DIRS=()
 ACCESS_MODE="read_only"
+TIMEOUT_SECONDS=""
 WORKTREE=""
 WORKTREE_GIT_COMMON=""
 need_value() {
@@ -78,6 +84,7 @@ while [ $# -gt 0 ]; do
     --effort) need_value "$@"; EFFORT="$2"; shift 2;;
     --add-dir) need_value "$@"; AGY_ADD_DIRS+=("$2"); shift 2;;
     --access-mode) need_value "$@"; ACCESS_MODE="$2"; shift 2;;
+    --timeout-seconds) need_value "$@"; TIMEOUT_SECONDS="$2"; shift 2;;
     --worktree) need_value "$@"; WORKTREE="$2"; shift 2;;
     --out) need_value "$@"; OUT="$2"; shift 2;;
     --prompt) need_value "$@"; PROMPT="$2"; shift 2;;
@@ -98,6 +105,39 @@ case "$INTENT" in
   assurance|ordinary) ;;
   *) echo "invalid intent: $INTENT" >&2; exit 2;;
 esac
+
+# The caller's deadline, in whole seconds. Only the arms whose CLI accepts a
+# headless timeout consume it; the rest stay bounded by the calling owner.
+case "$TIMEOUT_SECONDS" in
+  "") ;;
+  0*|*[!0-9]*) echo "invalid timeout-seconds: $TIMEOUT_SECONDS" >&2; exit 2;;
+esac
+
+# Adapters with an executing arm in run_one, and adapters the catalogue declares
+# for routing but this dispatcher cannot execute. Both lists are bound to
+# DISPATCH_ADAPTERS in runtime/fabric/src/execution.ts and to the "dispatch"
+# field in config/model-routing.json by runtime/fabric/tests/adapter-registry.test.ts,
+# so the three cannot drift.
+DISPATCH_IMPLEMENTED_ADAPTERS="agy claude codex copilot cursor kiro"
+DISPATCH_DORMANT_ADAPTERS="opencode"
+# An adapter with neither an arm nor a declared dormant route is an input error,
+# refused here rather than after a temporary directory, prompt staging and route
+# resolution have already been paid for.
+known_adapter() {
+  local candidate="$1" known
+  for known in $DISPATCH_IMPLEMENTED_ADAPTERS $DISPATCH_DORMANT_ADAPTERS; do
+    [ "$candidate" = "$known" ] && return 0
+  done
+  return 1
+}
+# Unquoted on purpose: --chain is a space-separated list of tool:model:effort
+# specs, and an empty TOOL or CHAIN contributes no word at all.
+for candidate in ${TOOL:-} ${CHAIN:-}; do
+  known_adapter "${candidate%%:*}" || {
+    echo "unimplemented adapter: ${candidate%%:*} (known: $DISPATCH_IMPLEMENTED_ADAPTERS $DISPATCH_DORMANT_ADAPTERS)" >&2
+    exit 2
+  }
+done
 
 # Access mode is the only writable route. It stays off by default, is refused for
 # assurance work, and demands a Git worktree root the caller has already given the
@@ -135,6 +175,11 @@ case "$ACCESS_MODE" in
 esac
 
 CLAUDE_MODE_FLAGS=(--permission-mode plan --tools "Read,Grep,Glob")
+# A fixed identifier for the provider codex is told to use when a dispatch names
+# an endpoint profile. The profile name is carried as the provider's display
+# name instead, so a profile name containing characters that a TOML dotted path
+# would have to quote cannot reshape the override.
+CODEX_ENDPOINT_PROVIDER_ID="provenant_endpoint"
 CLAUDE_SYSTEM_PROMPT="You are a non-interactive independent verifier. You may use only Read, Grep, and Glob to inspect the requested workspace. Fabric MCP tools are not exposed to this direct verifier invocation. Do not mutate files, use shell commands, call Task/tool/function abstractions, or launch subagents. Return only the file-backed verification result requested by the supplied prompt; the caller owns any Fabric correlation."
 # A writer lane has to be able to run its own tests and commit its own work, so
 # the write tools are named on the permission allow-list rather than left to the
@@ -298,6 +343,22 @@ then
 fi
 PROMPT_ARG=""
 IFS= read -r -d '' PROMPT_ARG <"$PROMPT_TMP" || true
+PROMPT_BYTES="$(wc -c <"$PROMPT_TMP" | tr -d ' ')"
+# agy, cursor, kiro and copilot have no file-backed prompt input, so the prompt
+# goes in as one argv value. That puts it under the kernel's argument limits, and
+# the binding one is per-string, not total: Linux caps a single argv element at
+# MAX_ARG_STRLEN, 32 pages = 128 KiB, and refuses the exec with E2BIG, while
+# darwin has no per-string cap and allows 1 MiB in total. So a prompt that works
+# on a developer's Mac fails on a Linux runner. Take the smaller limit on both,
+# with room for the flags, and fail closed with a typed status: a brief silently
+# clipped by the kernel would be reviewed as if it were complete.
+ARGV_PROMPT_LIMIT=126976
+argv_prompt_too_large() {
+  local tool="$1" diag_path="$2"
+  [ "$PROMPT_BYTES" -gt "$ARGV_PROMPT_LIMIT" ] || return 1
+  echo "$tool prompt is ${PROMPT_BYTES} bytes, over the 124 KiB single-argument ceiling; pass the material by reference instead" >"$diag_path"
+  return 0
+}
 
 strip_ansi() { sed $'s/\x1b\\[[0-9;?]*[A-Za-z]//g'; }
 json_escape() {
@@ -364,7 +425,7 @@ verify_installed_output() {
 }
 emit_record() {
   local tool="$1" model="$2" effort="$3" status="$4" rc="$5" path="$6" guarantee="$7"
-  local family="${8:-}" endpoint="${9:-}" identity="${10:-}" effort_substitution="${11:-}"
+  local family="${8:-}" endpoint_provider="${9:-}" identity="${10:-}" effort_substitution="${11:-}"
   local requested_effort="${12:-}" effort_source="${13:-}" effort_capability_source="${14:-}" cross cert
   local substitution="${15:-}" requested_model="${16:-$model}" fallback_model="${17:-}"
   local catalog_model="${18:-}" model_selection="${19:-}"
@@ -373,7 +434,7 @@ emit_record() {
   local reason="${23:-}"
   local output_digest=""
   model="$(resolve_model "$tool" "$model")"
-  [ -n "$endpoint" ] || endpoint="$(endpoint_provider "$tool")"
+  [ -n "$endpoint_provider" ] || endpoint_provider="$(endpoint_provider "$tool")"
   [ -n "$identity" ] || identity="unresolved"
   if [ -n "$path" ]; then
     if verify_installed_output "$path"; then
@@ -418,7 +479,7 @@ emit_record() {
     "$(printf '%s' "$ORCH_FAMILY" | json_escape)" \
     "$(printf '%s' "$family" | json_escape)" \
     "$(printf '%s' "$family" | json_escape)" \
-    "$(printf '%s' "$endpoint" | json_escape)" \
+    "$(printf '%s' "$endpoint_provider" | json_escape)" \
     "$(printf '%s' "$identity" | json_escape)" \
     "$(printf '%s' "$catalog_model" | json_escape)" \
     "$(printf '%s' "$model_selection" | json_escape)" \
@@ -437,6 +498,30 @@ ORCH_FAMILY="$(normalise_family "$ORCH_FAMILY")"
 # Specific failure signatures only. Do not treat any mention of "quota" as a failure.
 fail_sig='(Authentication required|Please sign in|Please( run)? login|not logged in|not authenticated|Unauthorized|insufficient_quota|quota exceeded|rate limit exceeded|usage limit reached)'
 model_fail_sig='(model[^[:cntrl:]]*(unavailable|not available|not found|unsupported|does not exist)|unknown model|capacity|overloaded)'
+# The single product-root derivation in this script (#754). It mirrors the
+# precedence in scripts/lib/roots.py, which a shell script cannot import: an
+# explicit AGENT_FABRIC_PRODUCT_ROOT wins, because a caller who set it knows
+# better than any derivation; then the repository this script physically lives
+# in, so a linked worktree tests its own config; then the checkout layout above
+# skills/<skill>/scripts.
+resolve_product_root() {
+  local derived
+  if [ -n "${AGENT_FABRIC_PRODUCT_ROOT:-}" ]; then
+    printf '%s\n' "$AGENT_FABRIC_PRODUCT_ROOT"
+    return 0
+  fi
+  derived="$(cd "$SCRIPT_DIR" && git rev-parse --show-toplevel 2>/dev/null || true)"
+  if [ -n "$derived" ]; then
+    printf '%s\n' "$derived"
+    return 0
+  fi
+  if [ -d "$SCRIPT_DIR/../../.." ]; then
+    printf '%s\n' "$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)"
+    return 0
+  fi
+  return 1
+}
+
 require_cmd() {
   local cmd="$1" diag="$2"
   if ! command -v "$cmd" >/dev/null 2>&1; then
@@ -457,13 +542,8 @@ resolve_routing() {
   # The installed `provenant` resolves config from wherever it was installed from,
   # which is not this checkout when the dispatcher runs inside a linked worktree.
   # Pin it to the tree this script actually lives in, so a worktree's config edits
-  # are the ones under test. A caller who has already set the variable knows better
-  # than this derivation, so never override an explicit value.
-  if [ -n "${AGENT_FABRIC_PRODUCT_ROOT:-}" ]; then
-    product_root="$AGENT_FABRIC_PRODUCT_ROOT"
-  else
-    product_root="$(cd "$SCRIPT_DIR" && git rev-parse --show-toplevel 2>/dev/null || true)"
-  fi
+  # are the ones under test.
+  product_root="$(resolve_product_root || true)"
 
   route_args=(--adapter "$tool" --role "$role" --lead-family "$lead_family")
   if [ -n "$task_class" ]; then
@@ -491,19 +571,8 @@ resolve_routing() {
     return $?
   fi
 
-  # Fall back to scripts/model_route.py from product root
-  # Locate product root via git if possible, else try relative to this script
-  if [ -n "$product_root" ]; then
-    if [ -f "$product_root/scripts/model_route.py" ]; then
-      cmd=(python3 "$product_root/scripts/model_route.py" "resolve" "${route_args[@]}")
-      AGENT_FABRIC_PRODUCT_ROOT="$product_root" "${cmd[@]}" 2>>"$diag_file"
-      return $?
-    fi
-  fi
-
-  # Try relative path from script directory (should resolve to product root)
-  if [ -f "$SCRIPT_DIR/../../../scripts/model_route.py" ]; then
-    product_root="$(CDPATH= cd -- "$SCRIPT_DIR/../../.." && pwd)"
+  # Fall back to scripts/model_route.py under the one resolved product root.
+  if [ -n "$product_root" ] && [ -f "$product_root/scripts/model_route.py" ]; then
     cmd=(python3 "$product_root/scripts/model_route.py" "resolve" "${route_args[@]}")
     AGENT_FABRIC_PRODUCT_ROOT="$product_root" "${cmd[@]}" 2>>"$diag_file"
     return $?
@@ -554,6 +623,7 @@ keys = (
     "fallback_model", "catalog_model", "model_selection",
     "model_override_tier", "policy_override", "alias", "reason",
     "endpoint_profile", "endpoint_base_url", "endpoint_token_env",
+    "endpoint_wire_api",
 )
 with fields_path.open("wb") as handle:
     for key in keys:
@@ -591,6 +661,7 @@ PY
       endpoint_profile) endpoint_profile="$value";;
       endpoint_base_url) endpoint_base_url="$value";;
       endpoint_token_env) endpoint_token_env="$value";;
+      endpoint_wire_api) endpoint_wire_api="$value";;
       *) return 1;;
     esac
   done <"$fields_path"
@@ -605,7 +676,7 @@ agy_has_unsafe_arg() {
 }
 
 run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/1
-  local tool="$1" model="$2" effort="$3" route_effort_input="$3" tmpdir="$4" raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier route_model_override_tier route_alias route_reason endpoint_profile endpoint_base_url endpoint_token_env agy_status agy_dir agy_prompt_bytes
+  local tool="$1" model="$2" effort="$3" route_effort_input="$3" tmpdir="$4" raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier route_model_override_tier route_alias route_reason endpoint_profile endpoint_base_url endpoint_token_env endpoint_wire_api agy_status agy_dir agy_prompt_bytes
   model="$(resolve_model "$tool" "$model")"
   raw="$tmpdir/raw"
   diag="$tmpdir/diag"
@@ -630,6 +701,7 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
   endpoint_profile=""
   endpoint_base_url=""
   endpoint_token_env=""
+  endpoint_wire_api=""
   requested_effort="$effort"
   effort_source=""
   effort_capability_source=""
@@ -778,6 +850,24 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
           fi ;;
         codex)
           guarantee="enforced"
+          # `--ignore-user-config` stays on every codex route: a dispatched run
+          # must never inherit the user's own `~/.codex/config.toml`. A named
+          # endpoint profile therefore supplies its provider inline instead, as
+          # `-c` overrides, which codex honours with the flag set. The token is
+          # named, not passed: `env_key` tells codex which variable to read, so
+          # the credential never reaches an argument vector or a record.
+          local -a codex_provider_flags=()
+          if [ -n "$endpoint_base_url" ] && [ -n "$endpoint_token_env" ]; then
+            codex_provider_flags=(
+              -c "model_providers.${CODEX_ENDPOINT_PROVIDER_ID}.name=$endpoint_profile"
+              -c "model_providers.${CODEX_ENDPOINT_PROVIDER_ID}.base_url=$endpoint_base_url"
+              -c "model_providers.${CODEX_ENDPOINT_PROVIDER_ID}.env_key=$endpoint_token_env"
+            )
+            [ -n "$endpoint_wire_api" ] && codex_provider_flags+=(
+              -c "model_providers.${CODEX_ENDPOINT_PROVIDER_ID}.wire_api=$endpoint_wire_api"
+            )
+            codex_provider_flags+=(-c "model_provider=${CODEX_ENDPOINT_PROVIDER_ID}")
+          fi
           if ! require_cmd codex "$diag"; then
             status="tool_not_found"
             rc=127
@@ -789,10 +879,12 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
             codex exec -s workspace-write --cd "$WORKTREE" --ignore-user-config --ignore-rules \
               --ephemeral -c service_tier="default" \
               ${WORKTREE_GIT_COMMON:+-c sandbox_workspace_write.writable_roots="[\"$WORKTREE_GIT_COMMON\"]"} \
+              ${codex_provider_flags[@]+"${codex_provider_flags[@]}"} \
               ${model:+-m "$model"} ${effort:+-c model_reasoning_effort="$effort"} \
               - <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
           else
-            codex exec -s read-only --ignore-user-config --ignore-rules --ephemeral -c service_tier="default" ${model:+-m "$model"} \
+            codex exec -s read-only --ignore-user-config --ignore-rules --ephemeral -c service_tier="default" \
+              ${codex_provider_flags[@]+"${codex_provider_flags[@]}"} ${model:+-m "$model"} \
               ${effort:+-c model_reasoning_effort="$effort"} \
               - <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
           fi ;;
@@ -801,6 +893,9 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
           if ! require_cmd cursor-agent "$diag"; then
             status="tool_not_found"
             rc=127
+          elif argv_prompt_too_large cursor "$diag"; then
+            status="prompt_too_large"
+            rc=1
           else
             cursor-agent -p --trust --mode ask --sandbox enabled --output-format text \
               ${model:+--model "$model"} "$PROMPT_ARG" </dev/null >"$raw" 2>"$diag"; rc=$?
@@ -817,7 +912,13 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
           else
             local -a agy_cmd
             agy_cmd=(agy --output-format json --disable-slash-commands --sandbox)
-            if [ -n "${CF_DISPATCH_AGY_TIMEOUT:-}" ]; then
+            # The caller's deadline wins, because it is the one the dispatch
+            # owner will enforce by killing this process group. The environment
+            # override stays as an escape hatch for a direct call that passes no
+            # --timeout-seconds.
+            if [ -n "$TIMEOUT_SECONDS" ]; then
+              agy_cmd+=(--print-timeout "${TIMEOUT_SECONDS}s")
+            elif [ -n "${CF_DISPATCH_AGY_TIMEOUT:-}" ]; then
               agy_cmd+=(--print-timeout "${CF_DISPATCH_AGY_TIMEOUT}")
             else
               agy_cmd+=(--print-timeout 900s)
@@ -849,18 +950,10 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
               # with none it exits 2 on "flag needs an argument", and `--print -`
               # is worse than useless, because agy treats the dash as the literal
               # prompt, ignores stdin and answers it -- exit 0, plausible prose,
-              # wrong question. So the prompt goes in as one argv value.
-              #
-              # That puts it under the kernel's argument limits, and the binding
-              # one is per-string, not total. Linux caps a single argv element at
-              # MAX_ARG_STRLEN, 32 pages = 128 KiB, and refuses the exec with
-              # E2BIG; darwin has no per-string cap and allows 1 MiB in total, so
-              # a prompt that works on a developer's Mac can fail on a Linux
-              # runner. Take the smaller limit on both, with room for the flags.
-              agy_prompt_bytes=$(wc -c <"$PROMPT_TMP")
-              if [ "$agy_prompt_bytes" -gt 126976 ]; then
-                status="error"
-                echo "agy prompt is ${agy_prompt_bytes} bytes, over the 124 KiB single-argument ceiling; pass the material with --add-dir instead" >"$diag"
+              # wrong question. So the prompt goes in as one argv value, under
+              # the shared single-argument ceiling.
+              if argv_prompt_too_large agy "$diag"; then
+                status="prompt_too_large"
                 rc=1
               else
                 agy_cmd+=(--print "$PROMPT_ARG")
@@ -868,7 +961,8 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
               fi
             fi
           fi
-          if [ "${status:-}" != "tool_not_found" ] && [ "${status:-}" != "unsafe_by_default" ] && [ "${status:-}" != "error" ]; then
+          if [ "${status:-}" != "tool_not_found" ] && [ "${status:-}" != "unsafe_by_default" ] \
+            && [ "${status:-}" != "error" ] && [ "${status:-}" != "prompt_too_large" ]; then
             agy_status="$(python3 - "$raw" "$diag" "$clean" "$rc" <<'PY'
 import json
 import re
@@ -991,6 +1085,9 @@ PY
             if ! require_cmd kiro-cli "$diag"; then
               status="tool_not_found"
               rc=127
+            elif argv_prompt_too_large kiro "$diag"; then
+              status="prompt_too_large"
+              rc=1
             else
               kiro-cli chat --no-interactive ${model:+--model "$model"} ${effort:+--effort "$effort"} \
                 "$PROMPT_ARG" </dev/null >"$raw" 2>"$diag"; rc=$?
@@ -1007,6 +1104,9 @@ PY
             if ! require_cmd copilot "$diag"; then
               status="tool_not_found"
               rc=127
+            elif argv_prompt_too_large copilot "$diag"; then
+              status="prompt_too_large"
+              rc=1
             else
               copilot -p "$PROMPT_ARG" --mode plan --silent --disable-builtin-mcps \
                 --available-tools='' --disallow-temp-dir ${model:+--model "$model"} ${effort:+--effort "$effort"} \

@@ -25,7 +25,17 @@ const DEFAULT_WAIT_SECONDS = 55;
 const DEFAULT_TIMEOUT_SECONDS = 900;
 const FIRST_ATTEMPT_ID = "attempt-001";
 const FIRST_BATCH_ID = "batch-001";
-const SUPPORTED_ADAPTERS = new Set(["agy", "claude", "codex", "cursor", "kiro", "opencode"]);
+/**
+ * Adapters this front door can actually run: each has an executing arm in
+ * skills/orchestrate/scripts/cf_dispatch.sh and is marked `"dispatch":
+ * "implemented"` in config/model-routing.json. Adapters the catalogue declares
+ * for routing but the dispatcher cannot execute are absent on purpose, so they
+ * are a typed input error here rather than a refusal paid for with a run
+ * directory, prompt staging and route resolution. tests/adapter-registry.test.ts
+ * binds this list to the catalogue and to the dispatcher.
+ */
+export const DISPATCH_ADAPTERS = ["agy", "claude", "codex", "copilot", "cursor", "kiro"] as const;
+const SUPPORTED_ADAPTERS = new Set<string>(DISPATCH_ADAPTERS);
 const DISPATCH_TERMINAL_STATUSES = new Set(["succeeded", "failed", "blocked", "timed_out", "cancelled"]);
 const BATCH_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const RESERVED_UNTYPED_STATUSES = new Set([
@@ -210,6 +220,9 @@ async function initialiseRun(identity: Identity, env: NodeJS.ProcessEnv, root: s
 function normaliseRoute(input: RouteInput, identity: Identity): NormalisedRoute {
   const adapter = input.adapter ?? (SUPPORTED_ADAPTERS.has(identity.provider) ? identity.provider : undefined);
   if (adapter === undefined) throw new Error("adapter is required when the Fabric seat is not a provider adapter");
+  if (!SUPPORTED_ADAPTERS.has(adapter)) {
+    throw new Error(`adapter must be one of ${DISPATCH_ADAPTERS.join(", ")}`);
+  }
   const mode = input.mode ?? "read_only";
   if (!ACCESS_MODES.includes(mode)) throw new Error(`mode must be one of ${ACCESS_MODES.join(", ")}`);
   if (mode === "worktree_write" && input.worktree === undefined) {

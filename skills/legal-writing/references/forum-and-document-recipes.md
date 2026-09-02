@@ -50,6 +50,10 @@ conflict and escalate it.
 | Correspondence | Communicate a practical legal step | Request, position, deadline, attachments and next step | Unnecessary pleading, threats or concessions |
 | Annexure or exhibit index | Navigate source material | Exact labels, titles, dates, page ranges and source identity | Analysis or a substitute for the source |
 | Internal advice or case note | Analyse options and risk | Assumptions, uncertainty, competing readings and verification gaps | Material presented externally without review and authority |
+| Statutory declaration | Declare a fact outside a proceeding under a declarations Act | Prescribed wording, first-person facts, identified attachments | Argument, opinion the declarant cannot give, uncertain facts |
+| Deed or agreement | Create, vary or release obligations | Parties, defined terms, operative obligations, execution blocks | Advocacy, unverified recitals, obligations hidden in recitals |
+| Letter of demand or pre-action letter | Require an act or payment and create a record | Identity, dated facts, legal basis, the act required, the deadline | Threats without instruction or basis, misstatement of legal effect |
+| Tribunal application or contentions | Start or frame a merits review | The decision under review, the statutory criteria, the disposition sought | Judicial review grounds, court costs assumptions, ceremonial advocacy |
 
 ## Orders And Minutes
 
@@ -72,6 +76,12 @@ source in the submissions or internal verification record. Put reasons in
 submissions, not in the operative order.
 
 ## Affidavits And Witness Statements
+
+For a statutory declaration, or for the choice between a declaration, an
+affidavit and a witness statement, load `statutory-declarations.md`. For a
+tribunal rather than a court, load `tribunals-and-merits-review.md`. For a
+deed, agreement or other transactional instrument, load
+`deeds-and-agreements.md`.
 
 - Use the source's required person, oath or affirmation language and template.
 - State facts the deponent or witness can properly give, with dates and document
@@ -120,7 +130,9 @@ A speaking outline should be a navigation layer over filed material: issue,
 answer, exact record pinpoints and the expected question. Do not create a second
 argument or add an unfiled point without authority and procedural verification.
 
-For correspondence, load `legal-correspondence-style.md`. Match the recipient
+For correspondence, load `legal-correspondence-style.md`, and
+`demands-and-pre-action-correspondence.md` for a demand, a pre-action letter or
+a settlement offer. Match the recipient
 and existing thread, state the practical request and deadline early, list only
 the material actually attached or linked, and preserve any authorised
 non-admission, privilege, settlement or rights language exactly.

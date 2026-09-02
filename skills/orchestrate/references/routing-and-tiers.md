@@ -150,6 +150,15 @@ one. A route naming an unknown profile, an adapter the profile does not list, or
 a token variable that is unset fails closed with a typed status and dispatches
 nothing.
 
+A profile listing `codex` among its adapters reaches an OpenAI-compatible
+endpoint instead, and must also declare `wire_api` (Codex 0.146 accepts only
+`responses`). Codex keeps `--ignore-user-config` on every route, so the provider
+is passed inline as `-c model_providers.provenant_endpoint.*` overrides plus
+`-c model_provider=provenant_endpoint` rather than read from the operator's own
+`config.toml`. The token stays named: `env_key` tells Codex which variable to
+read, so no credential reaches an argument vector. See
+[ADR 0023](../../../docs/adr/0023-codex-custom-providers-inline-config.md).
+
 ## Default stack & fallback chains
 
 Default once this skill triggers: **native same-harness workers + at least one different-family
