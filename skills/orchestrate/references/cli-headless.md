@@ -82,7 +82,20 @@ fail closed as `same_family_forbidden`. Successful
 cross-family certification requires `status=ok`, `cross_family=true`, and `read_only_guarantee=enforced`
 or `oauth_safe_mode`.
 
-`scripts/cf_dispatch.sh` is conservative by design:
+`scripts/cf_dispatch.sh` defaults to `--access-mode read_only` and is
+conservative on that route by design. `--access-mode worktree_write` with
+`--worktree PATH` is the one writable route: it is ordinary-intent only,
+supported for `claude` and `codex` only, requires a Git worktree root, and drops
+`read_only_guarantee` to `none`. `dispatch_run.py` holds an exclusive lease on
+that worktree for the provider's lifetime, so a second writer is refused with
+`worktree_busy`, and `batch_run.py` refuses a manifest naming one worktree
+twice. On that route `claude` runs with `--permission-mode acceptEdits`,
+`--add-dir` on the worktree and a writer system prompt, with the worktree as its
+working directory; `codex` runs `exec -s workspace-write --cd PATH` and adds the
+common Git directory as a writable root so a linked worktree can still be
+committed from inside the sandbox.
+
+On the default read-only route:
 
 - `claude`: first tries API-key-safe `--bare`, `--disable-slash-commands`,
   `--no-session-persistence`, `--permission-mode plan`, and only the safe read

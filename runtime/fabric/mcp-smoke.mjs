@@ -288,7 +288,7 @@ try {
     name: "fabric_dispatch",
     arguments: {
       prompt: "inspect the fixture",
-      model: "gpt-fixture",
+      alias: "workhorse",
       wait_seconds: 5,
     },
   }));
@@ -302,7 +302,26 @@ try {
     resolve(dispatched.paths.run_dir, "dispatch_run.py.invocation.json"), "utf8",
   ));
   assert.equal(invocation.cwd, realpathSync(workspace));
-  assert.ok(invocation.argv.includes("gpt-fixture"));
+  assert.ok(invocation.argv.includes("workhorse"));
+  // The reduced surface always states the access mode and defaults it to read_only.
+  assert.equal(invocation.argv[invocation.argv.indexOf("--access-mode") + 1], "read_only");
+  assert.ok(!invocation.argv.includes("--worktree"));
+
+  const writer = payload(await executor.callTool({
+    name: "fabric_dispatch",
+    arguments: {
+      prompt: "inspect the fixture",
+      mode: "worktree_write",
+      worktree: workspace,
+      wait_seconds: 5,
+    },
+  }));
+  assert.equal(writer.status, "succeeded");
+  const writerInvocation = JSON.parse(readFileSync(
+    resolve(writer.paths.run_dir, "dispatch_run.py.invocation.json"), "utf8",
+  ));
+  assert.equal(writerInvocation.argv[writerInvocation.argv.indexOf("--access-mode") + 1], "worktree_write");
+  assert.equal(writerInvocation.argv[writerInvocation.argv.indexOf("--worktree") + 1], workspace);
 
   // The Python selector may borrow the primary checkout's environment for a
   // linked worktree, but inherited Git redirects must not steer that lookup to
@@ -368,9 +387,26 @@ try {
     arguments: { tasks: [{ id: "invalid", adapter: "codex" }] },
   }));
   assert.equal(readdirSync(resolve(workspace, ".agent-run")).length, runCount);
+  // Removed assurance selectors are typed input errors, not silently ignored.
+  for (const removed of [{ model: "gpt-fixture" }, { task_class: "review" }, { role: "reviewer" },
+    { effort: "high" }, { orchestrator_family: "openai" }, { risk_tier: "crucial" },
+    { model_override_tier: "crucial" }, { reviewer_id: "reviewer-1" }]) {
+    await expectToolError(executor.callTool({
+      name: "fabric_dispatch",
+      arguments: { prompt: "removed parameter", ...removed },
+    }));
+    await expectToolError(executor.callTool({
+      name: "fabric_batch",
+      arguments: { tasks: [{ id: "removed", prompt: "removed parameter", adapter: "codex", ...removed }] },
+    }));
+  }
   await expectToolError(executor.callTool({
     name: "fabric_dispatch",
-    arguments: { prompt: "invalid route", alias: "workhorse", model: "duplicate" },
+    arguments: { prompt: "writer without a worktree", mode: "worktree_write" },
+  }));
+  await expectToolError(executor.callTool({
+    name: "fabric_dispatch",
+    arguments: { prompt: "worktree without the writer mode", worktree: workspace },
   }));
   assert.equal(readdirSync(resolve(workspace, ".agent-run")).length, runCount);
 

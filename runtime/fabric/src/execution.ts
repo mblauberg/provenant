@@ -34,17 +34,19 @@ const RESERVED_UNTYPED_STATUSES = new Set([
   "running",
 ]);
 
+export const ACCESS_MODES = ["read_only", "worktree_write"] as const;
+export type AccessMode = (typeof ACCESS_MODES)[number];
+
+/**
+ * The whole routing surface: who runs it, which route, and how much access it
+ * gets. Assurance selectors are deliberately absent, because this front door
+ * always dispatches ordinary work and cannot honour them.
+ */
 export interface RouteInput {
   adapter?: string;
   alias?: string;
-  task_class?: string;
-  model?: string;
-  role?: string;
-  effort?: string;
-  orchestrator_family?: string;
-  risk_tier?: string;
-  model_override_tier?: string;
-  reviewer_id?: string;
+  mode?: AccessMode;
+  worktree?: string;
 }
 
 export interface DispatchInput extends RouteInput {
@@ -92,7 +94,13 @@ interface CancelSpec {
   env: NodeJS.ProcessEnv;
 }
 
-type NormalisedRoute = Required<Pick<RouteInput, "adapter" | "role">> & Omit<RouteInput, "adapter" | "role">;
+interface NormalisedRoute {
+  adapter: string;
+  alias: string;
+  role: string;
+  access_mode: AccessMode;
+  worktree?: string;
+}
 
 const activeOwners = new Set<StartedOwner>();
 
@@ -202,19 +210,20 @@ async function initialiseRun(identity: Identity, env: NodeJS.ProcessEnv, root: s
 function normaliseRoute(input: RouteInput, identity: Identity): NormalisedRoute {
   const adapter = input.adapter ?? (SUPPORTED_ADAPTERS.has(identity.provider) ? identity.provider : undefined);
   if (adapter === undefined) throw new Error("adapter is required when the Fabric seat is not a provider adapter");
-  const selectors = [input.alias, input.task_class, input.model].filter((value) => value !== undefined);
-  if (selectors.length > 1) throw new Error("provide at most one of alias, task_class or model");
+  const mode = input.mode ?? "read_only";
+  if (!ACCESS_MODES.includes(mode)) throw new Error(`mode must be one of ${ACCESS_MODES.join(", ")}`);
+  if (mode === "worktree_write" && input.worktree === undefined) {
+    throw new Error("mode worktree_write requires the worktree it owns");
+  }
+  if (mode !== "worktree_write" && input.worktree !== undefined) {
+    throw new Error("worktree requires mode worktree_write");
+  }
   return {
     adapter,
-    role: input.role ?? "worker",
-    ...(input.task_class !== undefined
-      ? { task_class: input.task_class }
-      : input.model !== undefined ? { model: input.model } : { alias: input.alias ?? "workhorse" }),
-    ...(input.effort === undefined ? {} : { effort: input.effort }),
-    ...(input.orchestrator_family === undefined ? {} : { orchestrator_family: input.orchestrator_family }),
-    ...(input.risk_tier === undefined ? {} : { risk_tier: input.risk_tier }),
-    ...(input.model_override_tier === undefined ? {} : { model_override_tier: input.model_override_tier }),
-    ...(input.reviewer_id === undefined ? {} : { reviewer_id: input.reviewer_id }),
+    alias: input.alias ?? "workhorse",
+    role: "worker",
+    access_mode: mode,
+    ...(input.worktree === undefined ? {} : { worktree: input.worktree }),
   };
 }
 
