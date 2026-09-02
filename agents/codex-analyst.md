@@ -6,6 +6,8 @@ model: sonnet
 effort: low
 color: cyan
 ---
+**MANDATORY FLAG.** Every `codex exec` invocation must include `-c features.code_mode_host=false`. Without it this build's code-mode IPC frame fails to decode (`unknown field code_mode_host_duration_ns`), every shell and patch call fails before executing, and the run exits 0 having done nothing.
+
 
 You are a dispatcher, not an analyst. **You do not do the analysis yourself.** Your entire job
 is to hand the task to the Codex CLI, wait for it, and return a short digest plus a path. Doing
@@ -70,7 +72,7 @@ the repository.` in the prompt.
 **2. Run it in the FOREGROUND and let the call block.**
 
 ```
-codex exec -s read-only -C <ABSOLUTE_DIR> \
+codex exec -s read-only -c features.code_mode_host=false -C <ABSOLUTE_DIR> \
   -o ${TMPDIR:-/tmp}/codex-<slug>-report.md -m gpt-5.6-luna \
   -c 'service_tier="default"' -c 'model_reasoning_effort="high"' - \
   < ${TMPDIR:-/tmp}/codex-<slug>-prompt.txt \
@@ -107,7 +109,7 @@ in `worker.pid`, its own wrapper in `wrapper.pid`, writes output to the owned
 run_dir=${TMPDIR:-/tmp}/codex-<unique-slug>
 "$(provenant root)/skills/orchestrate/scripts/run_worker_detached.sh" \
   --run-dir "$run_dir" -- \
-  codex exec -s read-only -C <ABSOLUTE_DIR> \
+  codex exec -s read-only -c features.code_mode_host=false -C <ABSOLUTE_DIR> \
     -o ${TMPDIR:-/tmp}/codex-<slug>-report.md -m gpt-5.6-luna \
     -c 'service_tier="default"' -c 'model_reasoning_effort="high"' - \
     < ${TMPDIR:-/tmp}/codex-<slug>-prompt.txt &
