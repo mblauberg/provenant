@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import copy
 import fcntl
-import hashlib
 import json
 import os
 import re
@@ -16,21 +15,55 @@ import sys
 import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-# This module is both an entry point and the receipt library that
-# `implement` imports, so it cannot rely on being the script whose directory
-# Python puts on `sys.path` for free. It establishes its own directory so its
-# sibling modules resolve however it was reached (#755).
+# This module is an entry point that the suite also imports by file, so it
+# cannot rely on being the script whose directory Python puts on `sys.path`
+# for free. It establishes its own directory so its sibling modules resolve
+# however it was reached (#755).
 SCRIPTS_DIR = str(Path(__file__).resolve().parent)
 if SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, SCRIPTS_DIR)
+# The shared library sits two levels up. This module establishes it itself
+# rather than inheriting a sibling's repair, so the import resolves the same
+# way however the producer is reached (#755).
+SKILLS_ROOT = str(Path(__file__).resolve().parents[2])
+if SKILLS_ROOT not in sys.path:
+    sys.path.insert(0, SKILLS_ROOT)
 import delivery_receipt_commands as commands
-import delivery_receipt_paths as paths
 import delivery_receipt_process as process_runner
 import delivery_run_shape as shape
+
+import _shared.workspace_paths as paths
+# The run-state invariants are enforced by `implement` as well as by this
+# skill, so they live in the shared library and are re-exported here: every
+# caller of `delivery_receipt.ReceiptError`, `RISKS`, `derive_risk` and the
+# rest keeps the name it already used. This is a plain import rather than the
+# import-or-file-load pattern used below, because the module carries a type:
+# loading it twice would give two `ReceiptError` classes, and an `except
+# ReceiptError` would silently stop catching the other one (#755).
+import _shared.delivery_run_invariants as invariants
+
+# Re-exported one by one, and by attribute off a single module object, so the
+# names below are the very objects the shared module defines. `ReceiptError`
+# in particular has to stay one class: a second one would mean an `except
+# ReceiptError` here silently ceasing to catch a refusal raised through the
+# `implement` checkpoint writer, and the reverse.
+ReceiptError = invariants.ReceiptError
+RISKS = invariants.RISKS
+RISK_POLICY_PATH = invariants.risk_policy_path()
+digest_bytes = invariants.digest_bytes
+_utc = invariants._utc
+_reject_future_timestamp = invariants._reject_future_timestamp
+safe_workspace_path = invariants.safe_workspace_path
+ensure_allowed_artifact_target = invariants.ensure_allowed_artifact_target
+load_risk_policy = invariants.load_risk_policy
+derive_risk = invariants.derive_risk
+validate_override = invariants.validate_override
+ensure_immutable_risk = invariants.ensure_immutable_risk
+ensure_run_open = invariants.ensure_run_open
 
 # `skills/_shared/roots.py` is the single resolver for the product root (#754).
 # The fallback loads that one file when this script is run directly by path and
@@ -49,12 +82,10 @@ except ModuleNotFoundError:  # pragma: no cover - direct invocation by path
 
 PRODUCT_ROOT = product_root()
 TEMPLATE_PATH = Path(__file__).resolve().parents[1] / "templates" / "RUN.template.json"
-RISK_POLICY_PATH = PRODUCT_ROOT / "config" / "risk-policy.json"
 PROFILE_PATH = PRODUCT_ROOT / "config" / "delivery-profiles.json"
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 SAFE_CLASSES = {"canonical", "evidence", "handoff", "scratch", "external"}
 REVIEW_ROLES = {"targeted", "other-primary", "distinct-family"}
-RISKS = ("routine", "substantial", "crucial", "terminal")
 BIND_SECTIONS = dict(
     design="design", incident="incident", measures="measures",
     retrospective="retrospective",
@@ -86,33 +117,8 @@ DEFAULT_ARTIFACT_TYPES = dict(
     document="markdown", **{"agent-product": "policy"},
 )
 
-class ReceiptError(ValueError):
-    """A refused producer operation."""
-
-
 def utc_now() -> str:
     return datetime.utcnow().isoformat() + "Z"  # noqa: DTZ003 - adjudicated clock format
-
-
-def digest_bytes(raw: bytes) -> str:
-    return "sha256:" + hashlib.sha256(raw).hexdigest()
-
-
-def _utc(value: Any, field: str) -> datetime:
-    if not isinstance(value, str) or not value.endswith("Z"):
-        raise ReceiptError(f"{field} must be a UTC timestamp")
-    try:
-        parsed = datetime.fromisoformat(value[:-1])
-    except ValueError as exc:
-        raise ReceiptError(f"{field} must be an ISO UTC timestamp") from exc
-    if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
-
-
-def _reject_future_timestamp(value: Any, field: str) -> None:
-    if _utc(value, field) > datetime.now(timezone.utc) + timedelta(minutes=5):
-        raise ReceiptError(f"{field} exceeds the future timestamp tolerance")
 
 
 def require_identifier(value: str, field: str) -> str:
@@ -144,16 +150,6 @@ def load_json_argument(value: str, field: str) -> dict[str, Any]:
     if not isinstance(parsed, dict):
         raise ReceiptError(f"{field} must be a JSON object")
     return parsed
-
-
-def safe_workspace_path(workspace: Path, value: str, field: str) -> tuple[Path, str]:
-    return paths.safe_workspace_path(workspace, value, field, ReceiptError)
-
-
-def ensure_allowed_artifact_target(
-    run: dict[str, Any], workspace: Path, target: Path,
-) -> None:
-    paths.ensure_within_scope(run, workspace, target, "artifact", ReceiptError)
 
 
 def ensure_allowed_source_target(
@@ -256,60 +252,6 @@ def load_run(run_dir: Path) -> dict[str, Any]:
     return shape.check_shape(run, ReceiptError)
 
 
-def ensure_immutable_risk(run: dict[str, Any], workspace: Path) -> None:
-    initial = run.get("initial_risk_tier")
-    if initial not in RISKS or run.get("risk_tier") != initial:
-        raise ReceiptError("risk tier is immutable after init")
-    derived = derive_risk(run.get("risk_assessment", {}))
-    override = run.get("risk_override")
-    if RISKS.index(initial) < RISKS.index(derived):
-        if not isinstance(override, dict):
-            raise ReceiptError("approved human risk override is missing")
-        validate_override(override, derived)
-    if isinstance(override, dict) and override.get("status") == "approved":
-        validate_override(override, derived)
-        linked = [
-            item for item in run.get("evidence", [])
-            if isinstance(item, dict)
-            and item.get("id") == override.get("evidence")
-            and item.get("kind") == "human"
-            and item.get("status") == "pass"
-            and item.get("gate") == "risk-override"
-        ]
-        if len(linked) != 1:
-            raise ReceiptError("approved human risk override evidence is missing")
-        artifact_id = linked[0].get("artifact_id")
-        artifacts = [
-            item for item in run.get("artifacts", [])
-            if isinstance(item, dict) and item.get("id") == artifact_id
-        ]
-        if len(artifacts) != 1 or not artifacts[0].get("path"):
-            raise ReceiptError("approved human risk override artifact is missing")
-        target, _relative = safe_workspace_path(
-            workspace, artifacts[0]["path"], "risk override artifact",
-        )
-        ensure_allowed_artifact_target(run, workspace, target)
-        raw = target.read_bytes() if target.is_file() else b""
-        if not raw or artifacts[0].get("digest") != digest_bytes(raw):
-            raise ReceiptError(
-                "risk override artifact digest does not match live bytes"
-            )
-    corrections = run.get("human_corrections")
-    if not isinstance(corrections, list):
-        raise ReceiptError("human_corrections must be a list")
-    for index, correction in enumerate(corrections):
-        if not isinstance(correction, dict):
-            raise ReceiptError(f"human_corrections[{index}] must be an object")
-        _reject_future_timestamp(
-            correction.get("at"), f"human_corrections[{index}].at",
-        )
-
-
-def ensure_run_open(run: dict[str, Any]) -> None:
-    if shape.run_closed(run):
-        raise ReceiptError("closed run is immutable")
-
-
 def mutate_run(
     run_dir_value: str | Path,
     mutation: Callable[[dict[str, Any], Path, Path], dict[str, Any] | None],
@@ -325,46 +267,6 @@ def mutate_run(
         ensure_immutable_risk(run, workspace)
         write_json_atomic(run_dir / "RUN.json", run)
         return result
-
-
-def load_risk_policy() -> dict[str, Any]:
-    try:
-        policy = json.loads(RISK_POLICY_PATH.read_text())
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ReceiptError(f"risk policy is unreadable: {exc}") from exc
-    if (
-        not isinstance(policy, dict)
-        or policy.get("tier_order") != list(RISKS)
-        or not isinstance(policy.get("factors"), dict)
-    ):
-        raise ReceiptError("risk policy is invalid")
-    return policy
-
-
-def derive_risk(assessment: dict[str, Any]) -> str:
-    policy = load_risk_policy()
-    factors = policy["factors"]
-    if set(assessment) != set(factors):
-        raise ReceiptError("risk-assessment must cover every policy factor")
-    index = 0
-    for factor, mappings in factors.items():
-        selected = assessment.get(factor)
-        if selected not in mappings:
-            raise ReceiptError(f"risk-assessment.{factor} is invalid")
-        index = max(index, RISKS.index(mappings[selected]))
-    return RISKS[index]
-
-
-def validate_override(value: dict[str, Any], derived: str) -> None:
-    if (
-        value.get("status") != "approved"
-        or not value.get("approved_by")
-        or not value.get("evidence")
-        or not value.get("reason")
-    ):
-        raise ReceiptError(
-            f"risk tier below derived {derived} requires an approved human override"
-        )
 
 
 def materialise_risk_override(
