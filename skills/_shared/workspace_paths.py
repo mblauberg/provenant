@@ -5,8 +5,9 @@ inside the workspace, and it must fall within the authority scope declared for
 its kind. Both are security boundaries, so they live in one module rather than
 being restated at each call site.
 
-The error type is injected the same way `delivery_receipt_process` takes it, so
-this module stays free of a back-import into the producer.
+The error type is injected rather than imported, so this module stays free of a
+back-import into any skill: it is shared by the delivery receipt producer, the
+delivery validator and the run-state invariants (#755).
 """
 
 from __future__ import annotations

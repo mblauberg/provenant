@@ -13,17 +13,15 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-# A deliberate reach across a skill boundary: the run-state invariants
-# `ensure_immutable_risk` and `ensure_run_open` belong to the delivery receipt
-# owner, and re-implementing them here would let the two drift. The `deliver`
-# catalogue entry is therefore a hard dependency of this script. Relocating
-# those invariants into `_shared` would remove the reach, but they close over
-# most of `delivery_receipt`, so that is a refactor of the receipt owner and
-# not a path change (#755).
-DELIVERY_SCRIPTS = str(Path(__file__).resolve().parents[2] / "deliver" / "scripts")
-if DELIVERY_SCRIPTS not in sys.path:
-    sys.path.insert(0, DELIVERY_SCRIPTS)
-import delivery_receipt as receipt_producer
+# The run-state invariants `ensure_immutable_risk` and `ensure_run_open` are
+# enforced by the delivery receipt producer and by this writer, and
+# re-implementing them here would let the two drift. They live in the shared
+# library, so this script establishes that library one level above the skill
+# rather than reaching into another skill's `scripts/` directory (#755).
+SKILLS_ROOT = str(Path(__file__).resolve().parents[2])
+if SKILLS_ROOT not in sys.path:
+    sys.path.insert(0, SKILLS_ROOT)
+from _shared.delivery_run_invariants import ensure_immutable_risk, ensure_run_open
 
 
 def fsync_directory(path: Path) -> None:
@@ -45,8 +43,8 @@ def _update_locked(path: Path, current_slice: str, next_action: str, in_flight: 
         if root.parent.name == ".agent-run"
         else root
     ).resolve()
-    receipt_producer.ensure_immutable_risk(run, workspace)
-    receipt_producer.ensure_run_open(run)
+    ensure_immutable_risk(run, workspace)
+    ensure_run_open(run)
     checkpoint = run.get("checkpoint")
     if not isinstance(checkpoint, dict):
         raise ValueError("RUN.json checkpoint must be an object")  # noqa: TRY004
