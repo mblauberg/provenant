@@ -859,7 +859,7 @@ def test_agy_task_class_uses_its_runtime_capability_producer():
             bin_dir / "agy",
             f"""#!/usr/bin/env bash
             if [ "$1" = "models" ]; then
-              printf 'gemini-3.7-flash-high\ngemini-3.7-flash-medium\ngemini-3.7-flash-low\n'
+              printf 'gemini-3.8-flash-high\ngemini-3.8-flash-medium\ngemini-3.8-flash-low\n'
               exit 0
             fi
             printf '%s\n' "$@" > {args_file}
@@ -885,7 +885,7 @@ def test_agy_task_class_uses_its_runtime_capability_producer():
         assert result.returncode == 0, result.stderr + result.stdout
         assert record["status"] == "ok"
         assert record["route_alias"] == "scout"
-        assert record["resolved_model"] == "gemini-3.7-flash"
+        assert record["resolved_model"] == "gemini-3.8-flash"
         assert record["provider_family"] == "google"
         assert record["effort"] == "low"
         assert record["effort_capability_source"] == "runtime-model-catalog"
