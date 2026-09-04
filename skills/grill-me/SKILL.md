@@ -3,6 +3,8 @@ name: grill-me
 description: "Use when the user asks to be grilled or wants one-question-at-a-time stress testing of a plan or design. Not for writing the final spec or implementing it; use scope or implement."
 ---
 
+# Grill me
+
 Interview the highest-leverage unresolved branch first. Resolve dependent
 decisions one at a time; do not exhaustively interrogate low-value detail. For
 each question, give the evidence already known, 2–3 concrete options when useful,

@@ -1,18 +1,11 @@
 # Architecture decision records
 
-Decisions ratified by the user on 2026-07-13. Each ADR is the canonical owner
-of its decision; supporting scoping evidence, challenge history and rejected
+Each ADR is the canonical owner of its decision and carries its own status and
+ratification date. Supporting scoping evidence, challenge history and rejected
 alternatives remain available in Git history without forming a live
-cross-reference dependency. ADRs 0009–0010 were ratified later, on 2026-07-15;
-ADRs 0011–0012 were ratified on 2026-07-16; ADR 0013 was ratified on
-2026-07-18; ADR 0014 was ratified on 2026-07-20; ADRs 0015–0016 were ratified
-on 2026-07-21; ADRs 0017–0018 were ratified on 2026-07-28; ADR 0019 was
-ratified on 2026-07-30 and amended on 2026-07-31; ADR 0020 was ratified on
-2026-08-02 and amended on 2026-09-01 via issue 721; ADR 0021 was ratified on
-2026-08-29; ADR 0022 was ratified on 2026-09-01 through issue 725. ADR 0024 was
-ratified on 2026-09-02 through issue 765. The user-approved 2026-08-31
-issue-native amendments to ADRs 0011 and 0017 in issue 711 were noted as
-consistent with ADR 0009.
+cross-reference dependency; per [ADR
+0024](0024-git-log-and-adrs-own-history.md), Git log owns when a decision
+changed, so this index does not restate a ratification chronology.
 Pre-ADR-0020 implementation
 paths in retained decisions are
 historical evidence; the current Fabric owner is

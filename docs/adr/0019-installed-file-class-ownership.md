@@ -359,13 +359,11 @@ The command/path detail below predates ADR 0020. It is retained as decision
 evidence; use the current Fabric README named in the cutover note above.
 
 The layering paragraph above names `provenant status`. No such command exists
-and none was ever accepted: `scripts/provenant` delegates `route`, `worktree`,
-`check`, `fabric`, `doctor` and `project` only, and anything else exits 2, which
-matches the command set ADR 0013 accepted. The diagnostic meant is
-`provenant fabric status` (`runtime/agent-fabric/src/cli/main.ts`), which is how
-every other document writes it. `provenant doctor` and
-`agent-fabric adapter executable` are named correctly, and the layering claim
-itself is unchanged.
+and none was ever accepted: `scripts/provenant` delegates `help`, `root`,
+`route`, `worktree`, `check`, `fabric`, `dispatch`, `batch` and `run` only, and
+anything else exits 2, which matches the command set ADR 0013 accepted. The
+diagnostic meant is `provenant fabric status`, which is how every other document
+writes it. The layering claim itself is unchanged.
 
 ## Rejected
 

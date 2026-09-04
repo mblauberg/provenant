@@ -14,7 +14,8 @@ entire pack belongs here. This review therefore adapts individual ideas only
 when they have a distinct trigger, authority boundary, output and verification
 gate.
 
-The current portfolio has 32 skills, generated in the
+The portfolio held 32 skills at this decision's evidence cut-off; later
+consolidations brought it to the count generated in the
 [repository README](../../README.md#skill-library). Since this decision's
 evidence cut-off, `frontend-design` and `frontend-review` consolidated into
 `ui-ux-design`, `autonomous-lab` became `autopilot`, and `skill-audit` and

@@ -70,16 +70,6 @@ lightweight advisory dispatch.
 - No concurrent writer batch without a demonstrated workflow that cannot use
   serial or isolated writers.
 
-## Remaining work
-
-These are independently deliverable and do not block use of the merged core.
-Optional setup and adapter-specific follow-ups do not block it either.
-
-| Issue | Scope |
-|---|---|
-| [#720](https://github.com/mblauberg/provenant/issues/720) | Finish provider-native session continuation through #726 and simple Agy headless authority through #741. |
-| [#686](https://github.com/mblauberg/provenant/issues/686) | Consider read-only workspace discovery later, only once a concrete consumer exists. |
-
 ## Related decisions
 
 - [ADR 0019](../../adr/0019-installed-file-class-ownership.md): installed

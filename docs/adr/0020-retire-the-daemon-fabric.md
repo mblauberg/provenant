@@ -1,7 +1,8 @@
 # ADR 0020 — Retire the daemon fabric for a daemonless SQLite bus
 
 **Status:** Accepted 2026-08-02 (user); supersedes [ADR
-0002](0002-capability-compiled-execution-authority.md) and [ADR
+0002](0002-capability-compiled-execution-authority.md), [ADR
+0015](0015-bootstrap-paired-task-completion-evidence-bound-reply.md) and [ADR
 0018](0018-accept-portal-stdio-v1-launch-custody.md); amended by [ADR
 0022](0022-thin-fabric-mcp-execution-facade.md) on 2026-09-01
 

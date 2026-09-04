@@ -16,9 +16,9 @@ paths. Fallbacks: handoffs `docs/handoffs/`, archive `docs/archive/`.
 
 ## Start
 
-For substantial work, reopen disk state; distrust injected state. Resume using
-declared owners and the digest-bound handoff, reading only relevant docs/open
-decisions. User gates stay unanswered until decided.
+For substantial work, reopen disk state; distrust injected state. Resume in the
+order `work-map` owns: declared owners, then the fallback or cross-tracker map,
+then the digest-bound handoff, reading only relevant docs/open decisions. User gates stay unanswered until decided.
 Bounded work may continue within authority.
 
 ## Checkpoint
