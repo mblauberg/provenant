@@ -10,10 +10,12 @@ when it is not conventional application code.
 
 ## Reporting
 
-Use GitHub's private vulnerability-reporting or draft security-advisory flow
-for this repository. Do not put credentials, private prompts, personal data or
-exploit details in a public issue. If private reporting is unavailable, open a
-content-free issue asking the maintainers to enable a private channel.
+Report privately through GitHub private vulnerability reporting at
+<https://github.com/mblauberg/provenant/security/advisories/new>. Do not put
+credentials, private prompts, personal data or exploit details in a public
+issue. If private reporting is unavailable, open a content-free issue at
+<https://github.com/mblauberg/provenant/issues> asking the maintainers to open
+a private channel.
 
 Include the affected revision and path, expected authority boundary, minimal
 reproduction, impact and any safe mitigation. Remove real secrets and personal

@@ -37,11 +37,11 @@ None of them is a stage the work passes through.
 ```mermaid
 flowchart TB
     accTitle: The three parts and the delivery loop they serve
-    accDescr: A user request enters the delivery loop, which runs scope, implement, verify and review, and produces a scoped, verified, independently reviewed change. Three parts act on that loop concurrently rather than in sequence. HARNESS.md, the constitution, sets the rules — authority, lifecycle and review pressure. The skills library supplies the procedure, one SKILL.md per task loaded when the task matches. Cross-provider dispatch runs and reviews the work, with Claude Code and Codex as primaries reviewing each other and Fabric providing messages, tasks, activity and a thin front door to the existing dispatch owners.
+    accDescr: A user request enters the delivery loop, which runs scope, implement, verify and review, and produces a scoped, verified, independently reviewed change. Three parts act on that loop concurrently rather than in sequence. HARNESS.md, the constitution, sets the rules: authority, lifecycle and review pressure. The skills library supplies the procedure, one SKILL.md per task loaded when the task matches. Cross-provider dispatch runs and reviews the work, with Claude Code and Codex as primaries reviewing each other and Fabric providing messages, tasks, activity and a thin front door to the existing dispatch owners.
     U(["User request"]) --> LOOP["Delivery loop<br/>scope · implement · verify · review"]
     LOOP --> OUT(["Scoped, verified,<br/>independently reviewed change"])
-    H["HARNESS.md — the constitution<br/>authority · lifecycle · review pressure"] -. "sets the rules" .-> LOOP
-    SK["Skills library — 25 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
+    H["HARNESS.md: the constitution<br/>authority · lifecycle · review pressure"] -. "sets the rules" .-> LOOP
+    SK["Skills library: 25 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
     F["Cross-provider dispatch<br/>Claude Code and Codex review each other;<br/>Fabric coordinates and can start existing dispatch owners"] -. "runs and reviews the work" .-> LOOP
     classDef out fill:#1f6f43,stroke:#4fd08a,color:#ffffff,stroke-width:2px
     class OUT out
@@ -221,7 +221,7 @@ Each task has a front-door skill; the agent loads it when a request matches.
 | Find a root cause | [`diagnose`](skills/diagnose/SKILL.md) |
 | Review without changing the code | [`code-review`](skills/code-review/SKILL.md) |
 | Coordinate parallel agents | [`orchestrate`](skills/orchestrate/SKILL.md) |
-| Promote an accepted artifact | [`release`](skills/release/SKILL.md) |
+| Promote an accepted artefact | [`release`](skills/release/SKILL.md) |
 
 ## Lifecycle
 
@@ -268,9 +268,10 @@ distinct-family review at `crucial`, and adversarial pressure at `terminal`.
 [`HARNESS.md`](HARNESS.md) is the single source of truth for the thresholds.
 
 Solo `routine` work still completes, but `substantial` and above cannot reach
-acceptance with the other-primary leg missing. Distinct-family review is
-advisory when available; a skipped terminal distinct-family leg records its
-reason. Evidence and corroboration, not model votes, make a finding blocking.
+acceptance with the other-primary leg missing. Distinct-family review applies
+from `crucial` upwards when available; a skipped distinct-family leg records
+its reason. Evidence and corroboration, not model votes, make a finding
+blocking.
 
 **Durable boundaries hold regardless of tier:**
 

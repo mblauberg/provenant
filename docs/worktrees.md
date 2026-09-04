@@ -3,7 +3,7 @@
 The project constitution (`HARNESS.md`) is a standing user-approved envelope:
 creating linked worktrees for implementation work needs no per-instance
 approval. That authority still does not imply authority to delete a branch,
-force-remove state or let agents write overlapping scopes — each of those
+force-remove state or let agents write overlapping scopes, and each of those
 remains separately gated. Merge authority is repo-based; see the repository's
 workflow runbook (for this repo, `docs/runbooks/github-workflow.md`).
 
@@ -18,7 +18,7 @@ primary checkout:
 
 All agent platforms use that same directory. Never place linked worktrees in a
 platform cache, `/tmp`, a home-level pool, the current linked worktree, or an
-artifact `scaffolds/` directory. A nested repository or submodule owns its own
+artefact `scaffolds/` directory. A nested repository or submodule owns its own
 `.worktrees`. Multi-repository work uses one authorised worktree per repository.
 
 Project instructions may strengthen this invariant. Only a direct user
@@ -58,7 +58,7 @@ run contract requires them. A removal receipt emits only `status`, `name` and
 ## Ownership and cleanup
 
 - One stage owner writes a worktree at a time. Sibling agents use separate
-  worktrees or artifact-only scopes.
+  worktrees or artefact-only scopes.
 - Worktrees share Git objects, configuration and hooks; they are not security
   sandboxes. Secrets, LFS and submodules need their own deliberate setup.
 - A filesystem copy of a linked worktree keeps its `.git` pointer and can still
@@ -96,7 +96,7 @@ branch is merged into the integration branch, the agent that observed the merge
 prunes that branch's own artefacts without a further user gate. This is standing
 across every project the harness is loaded into: a merged worktree left behind
 is stale state that later agents mistake for live work, and each one carries its
-own uninherited dependency tree — in this repository roughly 400 MB apiece.
+own uninherited dependency tree, in this repository roughly 400 MB apiece.
 
 Prune immediately after the merge, in this order:
 
@@ -143,7 +143,7 @@ Constraints that keep this narrow:
   helper acts on its own current repository unless given `--repo`. A prune run
   from the wrong checkout, or against a detached HEAD, silently moves the wrong
   ref. Step 1 is not optional.
-- **Prove the merge, not the status — and use the proof that fits the merge.**
+- **Prove the merge, not the status, and use the proof that fits the merge.**
   For a merge commit,
   `git merge-base --is-ancestor <merged-branch> <integration-branch>` exiting 0
   is the proof, because it names both refs explicitly and is cheap.
@@ -168,6 +168,13 @@ Constraints that keep this narrow:
   its head and base refs are the branches in front of you. Verify `headRefName`
   and `baseRefName` too. Never infer a merge from a green pull request or a
   passing suite.
+- **`git cherry` is trustworthy in one direction only.** It compares patch ids,
+  so a leading `-` proves an equivalent patch is already upstream and is sound
+  grounds for closing or dropping that commit. A leading `+` proves only that
+  no patch-identical commit was found, which is not the same as the work being
+  outstanding: upstream work reshaped on the way in, including by a squash
+  merge, still reports `+`. Close on `-`, and settle a `+` by reading the
+  current upstream content and comparing behaviour.
 - **Only that branch's artefacts.** The authority covers the worktree created
   for the merged branch, that branch's local ref, and stale remote-tracking refs
   for branches the forge already deleted. It does not extend to any other
@@ -191,13 +198,13 @@ Constraints that keep this narrow:
   After a merge commit, use `-d`; if Git refuses despite step 3 passing,
   something disagrees with your model of the repository, so stop and report.
   After a squash merge whose content gate in step 3 came back empty, `-D` is the
-  correct command and is covered by this standing authority — the proof has
+  correct command and is covered by this standing authority; the proof has
   already been made, and `-d` cannot see it. `-D` on a branch whose step-3 gate
   did *not* pass is still a force-delete needing separate authority.
   Worktree removal stays unforced either way: a dirty worktree is unconsumed
   work, not debris.
 - **Retention beats reclamation.** Where a repository requires a run directory,
-  receipt or artifact to survive the merge, that requirement wins; prune only
+  receipt or artefact to survive the merge, that requirement wins; prune only
   after it is satisfied. Check the repository's own workflow runbook.
 - **The primary checkout stays on the integration branch.** Pruning never leaves
   it on a deleted or detached ref.

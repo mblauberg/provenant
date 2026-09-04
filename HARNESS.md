@@ -15,18 +15,18 @@ approved authority may permit paired-primary mode, but one chair and one stage o
 Agent Fabric owns project-scoped durable messages, shared tasks and activity. Its thin MCP
 dispatch/batch front door delegates to the same orchestration owners that execute direct provider
 CLIs; it does not implement provider mechanics. Answer-bearing coordination uses a correlated Fabric exchange where
-available, otherwise a named degraded artifact records the direct result and collection path.
+available, otherwise a named degraded artefact records the direct result and collection path.
 Fabric claim/ack records enforce message-delivery ownership and redelivery, not provider liveness
 or completion. Herdr observes and sends fire-and-forget steering only. Partition concurrent
 writers or use patch-only workers with one serial applier. Authors and decision-makers must not
 certify their own surface. Receipts declare independence and record provider family; family
-separation is an assurance property, not a restriction on ordinary execution.
+separation is an assurance property requiring stronger evidence, not a restriction on ordinary
+execution.
 
 An authorised chair over a configured workspace may send ordinary workspace content to any
 configured provider family. This default excludes credential and authentication stores,
 secrets, unrelated paths and explicitly denied content. It remains bounded by path and write scopes,
-resource limits, platform rules and external-action gates. A separate assurance claim may
-require family separation and stronger evidence; ordinary provider execution does not require it.
+resource limits, platform rules and external-action gates.
 
 ## Lifecycle and user gates
 

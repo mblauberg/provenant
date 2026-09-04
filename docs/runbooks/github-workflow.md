@@ -72,13 +72,13 @@ handled.
    reason or integrated pull request is recorded.
 
 Reach for a Mermaid diagram whenever it makes a change faster to understand than
-prose — GitHub renders Mermaid in issues, pull requests and comments. Flows and
+prose: GitHub renders Mermaid in issues, pull requests and comments. Flows and
 roundtrips, before/after refactors, state machines, decision trees for open
 decisions, and cross-issue dependencies are strong candidates; a table is the
 right visual for tabular data. Prefer one wherever it saves reviewer attention,
 not only when prose would be hard. Skip it only when the change is simple enough
 that prose is already clear at a glance. Keep every diagram small, legible and
-captioned — a diagram that does not save the reader time is noise, so cut it.
+captioned, because a diagram that does not save the reader time is noise, so cut it.
 
 ## Mechanics
 
@@ -134,8 +134,8 @@ Open the pull request against `main` and link the issue per the rule in
 no user or external-action gate, otherwise `References #N` with the issue left
 open. The body must follow the repository template
 ([`.github/pull_request_template.md`](../../.github/pull_request_template.md));
-`gh pr create --body` bypasses the template, so fill a copy — evidence rows
-bound to the exact head SHA and the independent-review block included — and
+`gh pr create --body` bypasses the template, so fill a copy, with evidence rows
+bound to the exact head SHA and the independent-review block included, and
 pass it explicitly:
 
 ```sh
@@ -306,26 +306,10 @@ Afterwards:
 2. Confirm the issue closed (`Closes #N`) or close it with its terminal reason
    recorded, and confirm Status is `Done`.
 3. Prune the merged branch's artefacts. This is the last step of the merge, not
-   a later sweep — see [Post-merge
-   pruning](../worktrees.md#post-merge-pruning) for the standing authority and
-   its limits. Run the complete repository, branch and merge gate before
-   removing the clean worktree or deleting the local branch. Follow the
-   method-specific proof and deletion commands in [Post-merge
-   pruning](../worktrees.md#post-merge-pruning); do not run the merge-commit and
-   squash-merge paths as one sequence.
-
-   Scope a squash-merge diff to the paths the branch touched. Unscoped, it also
-   reports everything `main` gained after the branch was cut, which reads as
-   divergence when the branch is merely behind.
-
-   `git cherry <upstream> <head>` is the other tool reached for here, and its
-   two signs are not equally trustworthy. It compares patch ids, so a leading
-   `-` proves an equivalent patch is already upstream and is sound grounds for
-   closing or dropping that commit. A leading `+` proves only that no
-   patch-identical commit was found, which is not the same as the work being
-   outstanding: upstream work that was reshaped on the way in, including by a
-   squash merge, still reports `+`. Close on `-`, and settle a
-   `+` by reading the current upstream content and comparing behaviour.
+   a later sweep. [Post-merge pruning](../worktrees.md#post-merge-pruning) owns
+   the standing authority, the method-specific proof gates and the deletion
+   commands; run the complete repository, branch and merge gate first, and do
+   not run the merge-commit and squash-merge paths as one sequence.
 
    One repository-specific retention rule overrides this: a substantial software
    change's canonical `delivery-run` receipt directory must survive the merge

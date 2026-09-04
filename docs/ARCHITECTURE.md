@@ -66,7 +66,7 @@ which is advisory and recorded when unavailable or skipped.
 ```mermaid
 flowchart TB
     accTitle: The full delivery lifecycle and its three user gates
-    accDescr: Session prepares context and scope produces the specification, risk tier and authority. A user gate approves the specification or sends it back to scope. Inside the deliver kernel, execute runs implement, tdd, refactor or diagnose, then deterministic verification runs, then a separate conditional evaluate gate runs only when behaviour is stochastic or judgement bearing, then independent targeted review and other-primary review run in fresh contexts that never authored the work. Review pressure scales with risk according to HARNESS.md, with stronger targeted and adversarial pressure at terminal. A failed check or blocking finding returns to execute under the risk-tier repair budget: routine 2 cycles, substantial 4, and crucial and terminal 5 — a guardrail against unbounded loops, not a target. The user acceptance gate accepts, rescopes or stops. Any external action needs a separate user authorisation before release and observation. A failed observation opens diagnose. Every path that returns work to scope, a structural review finding, a rescope at the acceptance gate, diagnostic evidence and the retrospect flywheel, converges on one back-to-scope collector rather than five separate return edges.
+    accDescr: Session prepares context and scope produces the specification, risk tier and authority. A user gate approves the specification or sends it back to scope. Inside the deliver kernel, execute runs implement, tdd, refactor or diagnose, then deterministic verification runs, then a separate conditional evaluate gate runs only when behaviour is stochastic or judgement bearing, then independent targeted review and other-primary review run in fresh contexts that never authored the work. Review pressure scales with risk according to HARNESS.md, with stronger targeted and adversarial pressure at terminal. A failed check or blocking finding returns to execute under the risk-tier repair budget: routine 2 cycles, substantial 4, and crucial and terminal 5, a guardrail against unbounded loops, not a target. The user acceptance gate accepts, rescopes or stops. Any external action needs a separate user authorisation before release and observation. A failed observation opens diagnose. Every path that returns work to scope, a structural review finding, a rescope at the acceptance gate, diagnostic evidence and the retrospect flywheel, converges on one back-to-scope collector rather than five separate return edges.
     SE(["session"]) --> SC["scope<br/>spec, risk tier, authority"]
     SC --> G1{{"USER GATE<br/>approve spec, risk tier, one-way doors"}}
     G1 -. "send back" .-> SC
@@ -224,7 +224,14 @@ relief is a user-approved risk downgrade carrying an approver, a reason and
 evidence. Provider-backed external workers, including the other primary and
 distinct families, are dispatched through Fabric MCP or the direct command
 line. Both front doors delegate to the same `orchestrate` owners; Fabric does
-not implement provider mechanics.
+not implement provider mechanics. Dispatching a worker and claiming
+independence are separate things: ordinary dispatch records that it makes no
+independence claim, and the Fabric MCP execution tools reject an assurance
+selector as a typed input error, so a review leg that must carry an
+independence claim runs the assurance path in
+`skills/orchestrate/scripts/cf_dispatch.sh` ([ADR
+0021](adr/0021-configured-workspace-dispatch-boundaries.md), [ADR
+0022](adr/0022-thin-fabric-mcp-execution-facade.md)).
 
 The picture below separates the legs that can block a run from the legs that
 cannot.
@@ -406,25 +413,24 @@ uses the target project only for authorised source work and project-local live
 state; it adds no package, workspace, service, registration, seat, or install
 lifecycle.
 
-Every installed file class has one owner: a product-shipped projection, an
+Every installed file has one owner: a product-shipped projection, an
 instance-owned file, or a product template seeded once and instance-owned
-thereafter ([ADR 0019](adr/0019-installed-file-class-ownership.md)).
+thereafter. Machine-local derived state is the fourth class and belongs to
+neither repository ([ADR 0019](adr/0019-installed-file-class-ownership.md)).
 `scripts/instance_installation.py` owns the instance side. It writes the
 path-free, committable desired state at `config/installation.json`: product
 name, version and install mode, `fused` when the instance root and product root
-are one tree. That file is instance-owned, so the product repository does not
-track one; a tracked copy would hand every fresh clone a fused default that the
-clone has not earned. It seeds `AGENTS.md`, `config/model-preferences.json` and
-`config/model-routing.json` only when they are absent. Neither the desired state
-nor a seeded file is rewritten by a later install; Git is the drift detector,
-so there is no hash-drift check and no merge. The installation receipt stays the
-opposite artifact: absolute target roots and digests for one machine, ignored
-and never committed. The same class holds `.agent-fabric/product-root.json`, the pointer
-to this machine's product checkout, rewritten on every install so that
-committed instance state never carries an absolute machine path and relocating
-the product is always a re-run of the installer. Split-layout startup binds the
-product root for shipped runtime and compatibility owners and `${AGENTS_HOME}`;
-the instance root owns its seeded routing and preference configuration.
+are one tree, which is why the product repository tracks no copy of its own. It
+seeds `AGENTS.md`, `config/model-preferences.json` and
+`config/model-routing.json` only when they are absent, and a later install
+rewrites neither the desired state nor a seeded file, leaving Git as the drift
+detector. Machine-local state holds the installation receipt, with absolute
+target roots and digests for one machine, and `.agent-fabric/product-root.json`,
+the pointer to this machine's product checkout rewritten on every install so
+that committed instance state never carries an absolute machine path.
+Split-layout startup binds the product root for shipped runtime and
+compatibility owners and `${AGENTS_HOME}`; the instance root owns its seeded
+routing and preference configuration.
 
 The canonical skill catalogue is also a constrained interface. Every skill has
 balanced positive, negative and boundary routes; descriptions place the trigger
