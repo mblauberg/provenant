@@ -144,13 +144,15 @@ not read an absent `Watch out for` as an endorsement.
 - **Reach:** `agy` adapter, `google` family. Reached through `agy` only; there
   is no gemini-cli route in this harness.
 
-### Gemini 3.5 Flash (Google)
+### Gemini 3.8 Flash (Google)
 
 - **Good at:** cheap fan-out, alongside Luna and Sonnet. A third cheap opinion
-  from a different family.
+  from a different family. The default behind every Google alias, so an
+  unqualified Gemini route lands here.
 - **Watch out for:** nothing recorded.
 - **Cost:** cheap.
-- **Reach:** `agy` adapter (preferred), `cursor` as fallback; `google` family.
+- **Reach:** the `agy` adapter, `google` family. `cursor` does not serve Google
+  models itself; its fallback map delegates them back to `agy`.
 
 ### Gemini 3.1 Pro (Google)
 
@@ -161,7 +163,8 @@ not read an absent `Watch out for` as an endorsement.
 - **Watch out for:** a polish pass is where substance quietly drifts. The chair
   keeps the last word on meaning; take the voice, re-check the facts.
 - **Cost:** not recorded.
-- **Reach:** `agy` adapter (preferred), `cursor` as fallback; `google` family.
+- **Reach:** the `agy` adapter, `google` family. `cursor` delegates Google
+  models to `agy` rather than serving them itself.
 
 ## Categories
 
@@ -260,11 +263,12 @@ flagship-only escape hatch.
 **Orchestration stays with Anthropic**, at flagship and high effort. Decomposition,
 synthesis and final calls are the chair's job.
 
-**Gemini 3.1 Pro for writing style, naturalisation and polish passes, not for
-core changes.** It is chosen for voice, not for reasoning. Use it to make prose
-read naturally; do not hand it the logic. `gemini-3.7-flash` is the cheap,
-genuinely different family for cross-family review legs, and is reachable at
-`-high`, `-medium` and `-low`.
+**Gemini for writing style, naturalisation and polish passes, not for core
+changes.** It is chosen for voice, not for reasoning. Use it to make prose read
+naturally; do not hand it the logic. `gemini-3.8-flash` is the default across
+every Gemini alias: it is cheap, genuinely a different family for cross-family
+review legs, and reachable at `-high`, `-medium` and `-low`. Reserve
+`gemini-3.1-pro-high` for registers carrying legal or regulatory risk.
 
 **Critical review has no fixed family.** The cross-family obligation is relative
 to whoever chairs the run, so the right second family depends on the first. Do
@@ -273,7 +277,7 @@ and record it.
 
 ## Reaching Gemini
 
-Invoke it as `agy --add-dir DIR --model gemini-3.7-flash-high -p PROMPT`.
+Invoke it as `agy --add-dir DIR --model gemini-3.8-flash-high -p PROMPT`.
 The model flag is `--model`, not `-m`, and the value is the identifier shown
 by `agy models`. Never pass `--dangerously-skip-permissions`; `agy` prints that
 suggestion on every denial, and following it hands Gemini every tool at once.
@@ -311,6 +315,9 @@ assessment; until then, route these on the hard axis alone.
 | Fable | `anthropic` crucial and terminal override for synthesis and adjudication, effort capped at medium | needs owner review |
 | Grok | reachable through the `cursor` adapter, `xai` family | needs owner review |
 | Cursor Composer | reachable through the `cursor` adapter | needs owner review |
+| DeepSeek | `deepseek` endpoint, reached through the `claude` adapter | needs owner review |
+| Moonshot Kimi | `moonshot-kimi` endpoint, reached through the `claude` adapter | needs owner review |
+| Zhipu GLM | `zai-glm` endpoint, reached through the `claude` adapter | needs owner review |
 
 ## Recording the preference
 
