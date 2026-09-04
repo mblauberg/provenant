@@ -81,14 +81,15 @@ exposes only that directory through `--add-dir`, and records its checkout
 identity. The injected instruction tells Gemini to read the packet and not
 invoke shell, Git or other tools. A provider denial remains a failed review.
 
-Use a Gemini model only. On 2026-08-22, agy 1.1.17 listed
-`gemini-3.7-flash-{high,medium,low}`, `gemini-3.6-flash-{high,medium,low}`,
-`gemini-3.5-flash-{high,medium,low}` and `gemini-3.1-pro-{high,low}`, plus
+Use a Gemini model only. On 2026-09-04, agy listed
+`gemini-3.8-flash-{high,medium,low}`, `gemini-3.7-flash-{high,medium,low}`,
+`gemini-3.6-flash-{high,medium,low}` and `gemini-3.1-pro-{high,low}`, plus
 non-Gemini models. Never select a Claude,
 GPT or other non-Gemini identifier for this cross-family review. In the
-dispatcher example below, `gemini-3.7-flash` is the harness routing alias and
-`--effort medium` is passed separately. A raw agy call must use the
-effort-suffixed identifier returned by `agy models`.
+dispatcher example below, `gemini-3.8-flash` is the harness routing alias and
+`--effort medium` is passed separately. `agy models` is the authority on which
+identifiers exist; `config/model-routing.json` is the authority on which one a
+route selects by default.
 
 What headless mode cannot do is prompt for permission, so any tool it has not
 been granted is auto-denied, and **one denied call discards the entire turn**,
@@ -119,7 +120,7 @@ a clipped brief be reviewed as though whole. Large material belongs behind
 
 ```
 "$(provenant root)/skills/orchestrate/scripts/cf_dispatch.sh" --tool agy \
-  --model gemini-3.7-flash --effort medium \
+  --model gemini-3.8-flash --effort medium \
   --orchestrator-family anthropic \
   --add-dir <ABSOLUTE_REPO> \
   --out ${TMPDIR:-/tmp}/agy-<slug>-out.txt \

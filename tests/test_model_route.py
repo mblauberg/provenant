@@ -106,11 +106,16 @@ def test_python_floor_rejects_missing_interpreter(harness_script, runner):
 
 def resolve(*args):
     arguments = [str(SCRIPT), "resolve", *args]
+    # The router reads its catalogue from the instance root, which defaults to
+    # ~/.agents. Left unpinned these cases route against whatever catalogue the
+    # developer happens to have installed, so they pass or fail on the machine
+    # rather than on the repository. CI already pins the same variable.
     result = subprocess.run(
         arguments,
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        env={**os.environ, "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT)},
     )
     return result, json.loads(result.stdout) if result.stdout else None
 
@@ -2854,7 +2859,7 @@ def test_agy_task_class_uses_fresh_preferred_family_capabilities(tmp_path):
     assert result.returncode == 0
     assert route["status"] == "ok"
     assert route["alias"] == "scout"
-    assert route["resolved_model"] == "gemini-3.7-flash"
+    assert route["resolved_model"] == "gemini-3.8-flash"
     assert route["model_family"] == "google"
     assert route["identity_source"] == "runtime-capability+catalog"
     assert route["effort"] == "low"
@@ -2882,7 +2887,7 @@ def test_agy_broker_records_google_to_anthropic_substitution(tmp_path):
     assert route["status"] == "ok"
     assert route["resolved_model"] == "haiku"
     assert route["model_family"] == "anthropic"
-    assert route["substitution"] == "gemini-3.7-flash unavailable; used haiku"
+    assert route["substitution"] == "gemini-3.8-flash unavailable; used haiku"
 
 
 def test_disabled_opencode_route_fails_closed_with_configured_reason():
@@ -2919,9 +2924,10 @@ def test_google_flash_defaults_track_the_current_agy_catalogue():
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
     google = catalog["families"]["google"]
 
-    assert google["aliases"]["workhorse"] == ["gemini-3.7-flash"]
-    assert google["aliases"]["scout"] == ["gemini-3.7-flash"]
-    assert google["per_model_efforts"]["gemini-3.7-flash"] == [
+    assert google["aliases"]["flagship"] == ["gemini-3.8-flash"]
+    assert google["aliases"]["workhorse"] == ["gemini-3.8-flash"]
+    assert google["aliases"]["scout"] == ["gemini-3.8-flash"]
+    assert google["per_model_efforts"]["gemini-3.8-flash"] == [
         "low",
         "medium",
         "high",
@@ -3152,6 +3158,10 @@ def write_agy_capability_snapshot(tmp_path, models=None):
             },
             "gemini-3.7-flash": {
                 "resolved_model": "gemini-3.7-flash",
+                "supported_efforts": ["low", "medium", "high"],
+            },
+            "gemini-3.8-flash": {
+                "resolved_model": "gemini-3.8-flash",
                 "supported_efforts": ["low", "medium", "high"],
             },
         }
