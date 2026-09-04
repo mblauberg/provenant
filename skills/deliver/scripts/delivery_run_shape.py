@@ -13,6 +13,7 @@ shape the reader rejects.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 # Every top-level field of a flat delivery receipt, with the JSON types it may
@@ -120,13 +121,28 @@ def check_shape(run: Any, error_type: type[Exception]) -> dict[str, Any]:
     return run
 
 
-def gate_approved(run: dict[str, Any], *path: str) -> bool:
-    value: Any = run
-    for key in path:
-        if not isinstance(value, dict):
-            return False
-        value = value.get(key)
-    return isinstance(value, dict) and value.get("status") == "approved"
+# `gate_approved`, `release_approved` and `run_closed` moved to the shared
+# library because the closed-run invariant is enforced by `implement` as well
+# as by this skill, and one definition is the point. They are re-exported here
+# so every existing `from delivery_run_shape import ...` caller is unaffected.
+# This module is loaded by file by callers outside `deliver`, so the shared
+# module is reached the way `delivery_validation_common` reaches its own: by
+# import where the skills root is already an import root, and by file
+# otherwise. `run_gates` carries pure functions and no package-relative
+# import, so the file load cannot split a type identity (#755).
+try:
+    from _shared.run_gates import gate_approved, release_approved, run_closed
+except ModuleNotFoundError:  # pragma: no cover - direct invocation by path
+    import importlib.util as _gates_util
+    _gates_spec = _gates_util.spec_from_file_location(
+        "provenant_run_gates",
+        Path(__file__).resolve().parents[2] / "_shared" / "run_gates.py",
+    )
+    _gates = _gates_util.module_from_spec(_gates_spec)
+    _gates_spec.loader.exec_module(_gates)
+    gate_approved = _gates.gate_approved
+    release_approved = _gates.release_approved
+    run_closed = _gates.run_closed
 
 
 def intent_approved(run: dict[str, Any]) -> bool:
@@ -135,20 +151,6 @@ def intent_approved(run: dict[str, Any]) -> bool:
 
 def acceptance_approved(run: dict[str, Any]) -> bool:
     return gate_approved(run, "human_gates", "acceptance")
-
-
-def release_approved(run: dict[str, Any]) -> bool:
-    return gate_approved(run, "human_gates", "release")
-
-
-def run_closed(run: dict[str, Any]) -> bool:
-    """A run is closed when release is approved and observation has settled."""
-    observation = run.get("observation")
-    settled = (
-        isinstance(observation, dict)
-        and observation.get("status") in {"pass", "not_applicable"}
-    )
-    return release_approved(run) and settled
 
 
 # Timestamp fields a receipt records. The newest of them is the run's clock:

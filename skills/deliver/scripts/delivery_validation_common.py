@@ -45,6 +45,19 @@ except ModuleNotFoundError:  # pragma: no cover - direct invocation by path
     _ladder_spec.loader.exec_module(_ladder)
     PRIMARY_FAMILIES = _ladder.PRIMARY_FAMILIES
     check_review_ladder = _ladder.check_review_ladder
+# Workspace containment is loaded the same way and for the same reason: it
+# carries pure functions and takes its error type as an argument, so a file
+# load cannot split a type identity across the two paths (#755).
+try:
+    from _shared.workspace_paths import ensure_within_scope, safe_workspace_path
+except ModuleNotFoundError:  # pragma: no cover - direct invocation by path
+    _paths_spec = importlib.util.spec_from_file_location(
+        "provenant_workspace_paths", SKILLS_ROOT / "_shared" / "workspace_paths.py"
+    )
+    _paths = importlib.util.module_from_spec(_paths_spec)
+    _paths_spec.loader.exec_module(_paths)
+    ensure_within_scope = _paths.ensure_within_scope
+    safe_workspace_path = _paths.safe_workspace_path
 POLICY_VALIDATION_PATH = Path(__file__).with_name("delivery_policy_validation.py")
 DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")

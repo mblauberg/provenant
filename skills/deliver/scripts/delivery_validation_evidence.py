@@ -7,10 +7,10 @@ import math
 from pathlib import Path
 from typing import Any
 
-from delivery_receipt_paths import ensure_within_scope, safe_workspace_path
 from delivery_validation_common import (
     Invalid, _digest, _inside, _list, _mapping, _policy_validation_module,
-    _safe_path, _utc, fail, _load_bound_json,
+    _safe_path, _utc, ensure_within_scope, fail, safe_workspace_path,
+    _load_bound_json,
 )
 
 def _validate_evidence(
