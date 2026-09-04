@@ -219,7 +219,7 @@ def test_live_readme_skill_counts_match_the_discovered_catalogue():
     ).read_text()
 
     assert readme.count(f"<!--skills-->{len(skills)}<!--/skills-->") == 2
-    assert f"Skills library — {len(skills)} Agent Skills" in readme
+    assert f"Skills library: {len(skills)} Agent Skills" in readme
     assert f"<summary>All {len(skills)} skills</summary>" in readme
     assert f"[Current {len(skills)}-owner holdout]" in owner_readme
     assert f"Its {len(skills)}-owner count is checked" in owner_readme

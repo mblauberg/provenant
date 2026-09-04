@@ -3,10 +3,10 @@
 Read [`AGENTS.md`](AGENTS.md), [`HARNESS.md`](HARNESS.md) and
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) before changing the harness.
 Inspect the live diff and preserve unrelated work. `HARNESS.md` owns lifecycle,
-risk, authority, orchestration and review policy; [`docs/worktrees.md`](docs/worktrees.md)
-owns branch and linked-worktree operation. Use the repository process
-declaration below for issue intake, workflow state, pull-request linking and
-user gates.
+risk, authority, orchestration, review policy and user gates;
+[`docs/worktrees.md`](docs/worktrees.md) owns branch and linked-worktree
+operation. Use the repository process declaration below for issue intake,
+workflow state and pull-request linking.
 
 Agent merges are authorised for this repository; mechanics remain in the
 GitHub work-item workflow. This is Provenant-local process, not harness
@@ -109,7 +109,7 @@ Documentation claims sit in three tiers, and the third is deliberate:
    ordering, examples or explanation adds no contract test; the fixture set and
    the harness gates carry it. Assert parsed structure (fixture routes, JSON
    policy values, resolved paths) or a script's output, exit code or side
-   effect. Never assert the text of a document. See `skills/tdd` for the
+   effect. Never assert the text of a document. See `tdd` for the
    exclusion list.
 8. Under [ADR 0014](docs/adr/0014-comparative-skill-evals-on-suspicion.md),
    frozen held-out comparative evals are conditional. Run them when a routing
@@ -139,7 +139,7 @@ Choose the smallest correct owner: an always-loaded project rule, occasional
 skill, deterministic script or hook, external MCP or app capability, or stable
 independently versioned plugin. Do not import popular packs wholesale. Extract
 only licensed, evidence-backed mechanisms into the nearest owner; create a skill
-only when its trigger, authority, artifact and gate remain distinct.
+only when its trigger, authority, artefact and gate remain distinct.
 
 Nothing outside a skill may name a file under that skill's `references/`
 directory. Cross-skill references use the skill name only. This is a review
@@ -169,9 +169,9 @@ live backup folders as the normal safety boundary.
 Record current skill ownership in the managed installation manifest.
 Test the reconciliation path; do not rely on users deleting or replacing
 global links by hand. Run `scripts/manage_installation.py plan --target
-<skills-dir>`, then `reconcile --target <skills-dir>`. Reconciliation retires
-safe managed leftovers and preserves unmanaged paths; the manifest is the
-current ownership record.
+<skills-dir>`, then `scripts/manage_installation.py reconcile --target
+<skills-dir>`. Reconciliation retires safe managed leftovers and preserves
+unmanaged paths; the manifest is the current ownership record.
 Never claim or overwrite an unmanaged target.
 
 ## Change the delivery kernel
