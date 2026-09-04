@@ -2,7 +2,7 @@
 
 Canonical requirements specification for the Provenant execution core. It is
 the merged baseline, not a plan: every requirement below describes shipped
-behaviour unless it is listed under [Remaining work](#remaining-work). This
+behaviour, and GitHub owns whatever is still outstanding. This
 file grants no authority; current user and project instructions plus an
 authorised run are still required.
 

@@ -76,7 +76,7 @@ The other-primary leg remains required from substantial upwards; skipped distinc
 
 ## Load depth only when triggered
 
-- intake / specification → `scope`; defect investigation → `diagnose`; route and work state → `work-map`
+- intake / specification → `scope`; defect investigation → `diagnose`
 - orchestration / routing / Herdr → `orchestrate`; implementation / review → `implement`, `code-review`; lifecycle / profile → `deliver`
 - context hygiene / compaction → `session`; promotion / assurance → `release`, `evaluate`; retrospect → `retrospect`; governance → `MAINTAINING.md`
 - any reader-facing prose, including correspondence → `natural-writing`, which routes on to its specialists; drafting under another skill's lead does not exempt the prose
