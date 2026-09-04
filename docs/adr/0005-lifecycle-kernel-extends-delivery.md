@@ -2,6 +2,12 @@
 
 **Status:** Accepted 2026-07-13; amended 2026-07-15
 
+> **Current-reader note.** "Project kernel decisions into Fabric" below is
+> daemon-era. ADR 0020 retired that projection and ADR 0021 confined Fabric to
+> coordination and ordinary dispatch, so Fabric enforces no lifecycle rule.
+> `deliver` and the canonical `delivery-run` receipt are the current lifecycle
+> authority. The rest of this decision stands.
+
 ## Context
 
 Lifecycle, review and authority rules are repeated across `HARNESS.md`,
