@@ -38,8 +38,14 @@ scripts/worktree create NAME --human-authorised --new-branch BRANCH \
 scripts/worktree create NAME --human-authorised --existing-branch BRANCH
 scripts/worktree list
 scripts/worktree check
+scripts/worktree validate-context
+scripts/worktree verify-claim
 scripts/worktree remove NAME --human-authorised
 ```
+
+`validate-context` rejects invalid linked-worktree metadata before a lane
+trusts its own checkout; `verify-claim` enforces claim verification at an
+acceptance boundary.
 
 The helper resolves the primary checkout through Git's common directory, checks
 the name and protected root, and refuses unsafe creation/removal. A create
@@ -75,7 +81,9 @@ run contract requires them. A removal receipt emits only `status`, `name` and
   the installed command, because a clean tree is not evidence that anything
   outside the tree still works.
 - Before removal, confirm a clean status, no live agent/pane and no unconsumed
-  handoff. Use `git worktree remove`, never filesystem deletion.
+  handoff. Use `scripts/worktree remove NAME --human-authorised`, never raw
+  `git worktree remove` and never filesystem deletion: the helper runs the
+  safety checks that removal depends on.
 - Force removal of a dirty worktree, and deletion of an unmerged branch, require
   separate user authority. Post-merge cleanup does not; see below.
 - `.worktrees/` is protected infrastructure: context cleaners, broad backups
@@ -186,8 +194,8 @@ Constraints that keep this narrow:
   correct command and is covered by this standing authority — the proof has
   already been made, and `-d` cannot see it. `-D` on a branch whose step-3 gate
   did *not* pass is still a force-delete needing separate authority.
-  `git worktree remove` stays unforced either way — a dirty worktree is
-  unconsumed work, not debris.
+  Worktree removal stays unforced either way: a dirty worktree is unconsumed
+  work, not debris.
 - **Retention beats reclamation.** Where a repository requires a run directory,
   receipt or artifact to survive the merge, that requirement wins; prune only
   after it is satisfied. Check the repository's own workflow runbook.

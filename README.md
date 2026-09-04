@@ -259,20 +259,18 @@ full lifecycle lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## What the harness guarantees
 
-**Review pressure scales with the risk tier the work is scoped at:**
-
-| Risk | Minimum review pressure |
-|---|---|
-| `routine` | chair plus objective and native checks |
-| `substantial` | multiple targeted lenses plus a strong other-primary review |
-| `crucial` | substantial coverage plus a distinct-family review when available |
-| `terminal` | all preceding coverage with stronger targeted and adversarial pressure |
+**Review pressure scales with the risk tier the work is scoped at.** Four tiers
+run from `routine` through `substantial` and `crucial` to `terminal`, each
+adding pressure to the one below: the chair plus objective and native checks at
+the bottom,
+targeted lenses and an other-primary review from `substantial` up, a
+distinct-family review at `crucial`, and adversarial pressure at `terminal`.
+[`HARNESS.md`](HARNESS.md) is the single source of truth for the thresholds.
 
 Solo `routine` work still completes, but `substantial` and above cannot reach
 acceptance with the other-primary leg missing. Distinct-family review is
 advisory when available; a skipped terminal distinct-family leg records its
 reason. Evidence and corroboration, not model votes, make a finding blocking.
-The canonical ladder lives in [`HARNESS.md`](HARNESS.md).
 
 **Durable boundaries hold regardless of tier:**
 

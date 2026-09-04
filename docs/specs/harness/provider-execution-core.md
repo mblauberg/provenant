@@ -2,7 +2,7 @@
 
 Canonical requirements specification for the Provenant execution core. It is
 the merged baseline, not a plan: every requirement below describes shipped
-behaviour unless it is listed under [Remaining work](#remaining-work). This
+behaviour, and GitHub owns whatever is still outstanding. This
 file grants no authority; current user and project instructions plus an
 authorised run are still required.
 
@@ -69,16 +69,6 @@ lightweight advisory dispatch.
   advisory batches.
 - No concurrent writer batch without a demonstrated workflow that cannot use
   serial or isolated writers.
-
-## Remaining work
-
-These are independently deliverable and do not block use of the merged core.
-Optional setup and adapter-specific follow-ups do not block it either.
-
-| Issue | Scope |
-|---|---|
-| [#720](https://github.com/mblauberg/provenant/issues/720) | Finish provider-native session continuation through #726 and simple Agy headless authority through #741. |
-| [#686](https://github.com/mblauberg/provenant/issues/686) | Consider read-only workspace discovery later, only once a concrete consumer exists. |
 
 ## Related decisions
 

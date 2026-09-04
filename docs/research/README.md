@@ -6,12 +6,15 @@ links and verify volatile provider or model claims at the live runtime.
 
 ## Durable references
 
-- [Agent continuity and checkpointing](agent-continuity-and-checkpointing.md)
 - [Evidence-based provider routing](evidence-based-provider-routing.md)
 - [Native orchestration and discovery surfaces](native-orchestration-and-discovery-surfaces.md)
-- [Provider adapter and runtime boundaries](provider-adapter-and-runtime-boundaries.md)
 
 ## Dated evidence and decisions
+
+- [Agent continuity and checkpointing](agent-continuity-and-checkpointing.md)
+  : historical pre-ADR-0020 reference, not current implementation authority
+- [Provider adapter and runtime boundaries](provider-adapter-and-runtime-boundaries.md)
+  : historical pre-ADR-0020 reference, not current implementation authority
 
 - [Agentic delivery harness: 2026 research synthesis](agentic-sdlc-harness-2026.md)
   : pre-implementation baseline, evidence cut-off 10 July 2026

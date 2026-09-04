@@ -32,7 +32,7 @@ CLIENT_LABELS = {"opencode": "OpenCode"}
 # front whichever model the operator picks. Agy has a separate seat for stable
 # addressing, but a dispatch receipt must establish whether its selected model
 # is Google, Anthropic or another supported family.
-CLIENT_SEATS = {"cursor": "codex", "agy": "agy", "kiro": "codex"}
+CLIENT_SEATS = {"cursor": "codex", "agy": "agy", "kiro": "codex", "opencode": "codex"}
 
 
 class RegistrationError(ValueError):
@@ -657,7 +657,7 @@ def main(argv: list[str] | None = None) -> int:
                 registration(
                     agents_home,
                     state_directory,
-                    "codex",
+                    CLIENT_SEATS["opencode"],
                     "opencode",
                     shim_path=shim_path,
                     instance_root=instance_root,

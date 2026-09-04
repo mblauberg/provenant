@@ -30,6 +30,11 @@ require family separation and stronger evidence; ordinary provider execution doe
 
 ## Lifecycle and user gates
 
+Name the front door before acting: `scope` for new or changed work, `diagnose`
+for a defect, `session` when context hygiene is the problem, `deliver` to carry
+an already-approved non-software outcome through to acceptance. Unsettled scope
+goes to `scope` whatever the artefact. Then follow the chain.
+
 `session → scope → user spec/one-way-door gate → deliver profile → implement/domain execution
 [name governing skill; invoke tdd for observable change | diagnose] → deterministic verification → evaluate when needed → independent review +
 bounded repair → user acceptance → release authority → release + observe → retrospect`; on
@@ -48,11 +53,16 @@ permission. A standing user-approved envelope covers routine version control: im
 branches and linked worktrees (parallel included) need no per-instance approval, one writer
 each; merge authority is repo-based, agent merges following the repository's own workflow
 surface. An authorised merge prunes its own worktree and merged refs; other deletion,
-force-removal, history rewrites and shared-branch pushes outside authorised merges stay gated. Route every dispatch by task class to `flagship`, `workhorse` or `scout`,
-binding identity, effort and receipt; runtime governs, catalogues cache, mechanics live in
-`orchestrate`. Durable knowledge belongs in project state, specs, ADRs and runbooks;
-harness-private memory holds only cross-project preferences. Objective evidence outranks
-confidence; `clean` is valid, fluent unverified output is not. A user correction names a class, not an instance: sweep every artefact in scope for the same defect and report what the sweep found.
+force-removal, history rewrites and shared-branch pushes outside authorised merges stay gated.
+
+Route every dispatch by task class to `flagship`, `workhorse` or `scout`, binding identity,
+effort and receipt; runtime governs, catalogues cache, mechanics live in `orchestrate`.
+Durable knowledge belongs in project state, specs, ADRs and runbooks; harness-private memory
+holds only cross-project preferences. Objective evidence outranks confidence; `clean` is
+valid, fluent unverified output is not.
+
+A user correction names a class, not an instance: sweep every artefact in scope for the same
+defect and report what the sweep found.
 
 | Risk | Minimum review pressure |
 |---|---|
@@ -66,6 +76,7 @@ The other-primary leg remains required from substantial upwards; skipped distinc
 
 ## Load depth only when triggered
 
+- intake / specification → `scope`; defect investigation → `diagnose`
 - orchestration / routing / Herdr → `orchestrate`; implementation / review → `implement`, `code-review`; lifecycle / profile → `deliver`
 - context hygiene / compaction → `session`; promotion / assurance → `release`, `evaluate`; retrospect → `retrospect`; governance → `MAINTAINING.md`
 - any reader-facing prose, including correspondence → `natural-writing`, which routes on to its specialists; drafting under another skill's lead does not exempt the prose

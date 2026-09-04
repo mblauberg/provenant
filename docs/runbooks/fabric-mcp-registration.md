@@ -60,8 +60,8 @@ registry never overrides that decision.
 | Kiro | `~/.kiro/settings/mcp.json` |
 | OpenCode | `~/.config/opencode/opencode.jsonc` |
 
-Claude Code and Codex take the `claude` and `codex` seats. Cursor and Kiro share
-the `codex` seat by design while keeping their own client label, so their
+Claude Code and Codex take the `claude` and `codex` seats. Cursor, Kiro and
+OpenCode share the `codex` seat by design while keeping their own client label, so their
 messages are addressed separately without inventing a provider identity: they
 are brokers that front whichever model the operator selects, so they have no
 family of their own to record.
