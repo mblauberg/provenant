@@ -261,7 +261,8 @@ full lifecycle lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 **Review pressure scales with the risk tier the work is scoped at.** Four tiers
 run from `routine` through `substantial` and `crucial` to `terminal`, each
-adding pressure to the one below: objective and native checks at the bottom,
+adding pressure to the one below: the chair plus objective and native checks at
+the bottom,
 targeted lenses and an other-primary review from `substantial` up, a
 distinct-family review at `crucial`, and adversarial pressure at `terminal`.
 [`HARNESS.md`](HARNESS.md) is the single source of truth for the thresholds.

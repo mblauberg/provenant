@@ -12,9 +12,10 @@ routing, delegation or memory decisions.
   its own worktree and merged refs; other deletion, force-removal, rewrites and
   shared-branch pushes need user authority.
 - **Fabric:** messages, shared tasks, activity and a dispatch/batch front door
-  for agents in one project. Identity derives from the working directory;
-  registered worktrees share their repository's project while keeping their own
-  cwd. `AGENT_FABRIC_LABEL` gives several agents of one provider separate
+  for agents in one project. Execution tools delegate to the orchestration
+  owners and keep full output in run files. Identity derives from the working
+  directory; registered worktrees share their repository's project while
+  keeping their own cwd. `AGENT_FABRIC_LABEL` gives several agents of one provider separate
   inboxes.
 - **CLI:** use `provenant help` for discovery; route answer-bearing external
   work through the `orchestrate` skill and Fabric.

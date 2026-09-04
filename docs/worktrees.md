@@ -43,6 +43,10 @@ scripts/worktree verify-claim
 scripts/worktree remove NAME --human-authorised
 ```
 
+`validate-context` rejects invalid linked-worktree metadata before a lane
+trusts its own checkout; `verify-claim` enforces claim verification at an
+acceptance boundary.
+
 The helper resolves the primary checkout through Git's common directory, checks
 the name and protected root, and refuses unsafe creation/removal. A create
 receipt emits `primary_root`, `worktree_root`, `common_git_dir`, `head_revision`

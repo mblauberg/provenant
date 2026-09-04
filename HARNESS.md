@@ -31,8 +31,9 @@ require family separation and stronger evidence; ordinary provider execution doe
 ## Lifecycle and user gates
 
 Name the front door before acting: `scope` for new or changed work, `diagnose`
-for a defect, `deliver` for a non-software artefact, `session` when context
-hygiene is the problem. Then follow the chain.
+for a defect, `session` when context hygiene is the problem, `deliver` to carry
+an already-approved non-software outcome through to acceptance. Unsettled scope
+goes to `scope` whatever the artefact. Then follow the chain.
 
 `session → scope → user spec/one-way-door gate → deliver profile → implement/domain execution
 [name governing skill; invoke tdd for observable change | diagnose] → deterministic verification → evaluate when needed → independent review +
@@ -75,7 +76,7 @@ The other-primary leg remains required from substantial upwards; skipped distinc
 
 ## Load depth only when triggered
 
-- intake / specification → `scope`; defect investigation → `diagnose`
+- intake / specification → `scope`; defect investigation → `diagnose`; route and work state → `work-map`
 - orchestration / routing / Herdr → `orchestrate`; implementation / review → `implement`, `code-review`; lifecycle / profile → `deliver`
 - context hygiene / compaction → `session`; promotion / assurance → `release`, `evaluate`; retrospect → `retrospect`; governance → `MAINTAINING.md`
 - any reader-facing prose, including correspondence → `natural-writing`, which routes on to its specialists; drafting under another skill's lead does not exempt the prose
