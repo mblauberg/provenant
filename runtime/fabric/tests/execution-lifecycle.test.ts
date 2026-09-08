@@ -239,6 +239,79 @@ describe("owner records", () => {
 });
 
 describe("cancellation", () => {
+  it("prints an unconfirmed stop reason from dispatch kill", async () => {
+    const runDir = join(workspace, ".agent-run", "mcp-cli-reason");
+    mkdirSync(runDir, { recursive: true });
+    const provider = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    provider.unref();
+    const providerPid = provider.pid!;
+    spawnedPids.push(providerPid);
+    const wrapperPath = join(temporaryDirectory, "cli-wrapper.mjs");
+    const wrapperPidPath = join(temporaryDirectory, "cli-wrapper.pid");
+    const releasePath = join(temporaryDirectory, "cli-wrapper.release");
+    const cliPath = join(packageRoot, "src", "cli.ts");
+    writeFileSync(wrapperPath, `
+      import { existsSync, writeFileSync } from "node:fs";
+      writeFileSync(${JSON.stringify(wrapperPidPath)}, String(process.pid));
+      await new Promise((resolveWait) => {
+        const timer = setInterval(() => {
+          if (!existsSync(${JSON.stringify(releasePath)})) return;
+          clearInterval(timer);
+          resolveWait();
+        }, 10);
+      });
+      process.argv = [process.execPath, ${JSON.stringify(cliPath)}, "dispatch", "kill", ${JSON.stringify(runDir)}];
+      await import(${JSON.stringify(cliPath)});
+    `);
+    const cli = spawn(process.execPath, ["--import", tsxLoader, wrapperPath], {
+      cwd: workspace,
+      env: ownerEnvironment,
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    let stdout = "";
+    cli.stdout.setEncoding("utf8");
+    cli.stdout.on("data", (chunk: string) => { stdout += chunk; });
+    const finished = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveFinished) => {
+      cli.once("close", (code, signal) => resolveFinished({ code, signal }));
+    });
+    const cliPid = Number((await waitForFile(wrapperPidPath)).trim());
+    const providerStartedAt = processStartedAt(providerPid);
+    expect(providerStartedAt).not.toBeNull();
+    const runToken = "cli-unconfirmed-token";
+    writeFileSync(join(runDir, OWNER_RECORD_NAME), JSON.stringify({
+      schema_version: 1,
+      kind: "dispatch",
+      run_dir: runDir,
+      workspace,
+      run_token: runToken,
+      owner_pid: 999_971,
+      owner_pgid: 999_971,
+      owner_started_at: null,
+      host_pid: 999_972,
+      host_started_at: null,
+      started_at: new Date().toISOString(),
+      owner_stdout: `${runDir}-owner.stdout.jsonl`,
+      owner_stderr: `${runDir}-owner.stderr.log`,
+      task_id: "cli-unconfirmed-task",
+    }) + "\n");
+    // The CLI refuses to signal its own process group, leaving this provider
+    // live and making the recorded stop outcome explicitly unconfirmed.
+    writeFileSync(join(runDir, "dispatch-provider.json"), JSON.stringify({
+      run_token: runToken,
+      provider_pid: providerPid,
+      provider_pgid: cliPid,
+      provider_started_at: providerStartedAt,
+    }) + "\n");
+    writeFileSync(releasePath, "go\n");
+
+    expect(await finished).toEqual({ code: 1, signal: null });
+    expect(stdout).toContain("still running");
+    expect(alive(providerPid)).toBe(true);
+  }, 40_000);
+
   it("signals the owner process group, so the provider child dies too", async () => {
     const started = await startSleepingRun("sleep with provider");
     const runDir = String((started.paths as Record<string, string>).run_dir);
