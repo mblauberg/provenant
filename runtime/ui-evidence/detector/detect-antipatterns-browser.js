@@ -3,15 +3,20 @@
  * Copyright (c) 2026 Paul Bakaus
  * SPDX-License-Identifier: Apache-2.0
  *
- * GENERATED -- do not edit. Source: cli/engine/browser/injected/index.mjs
- * Rebuild: node scripts/build-browser-detector.js
+ * GENERATED -- do not edit. Sources:
+ *   detector/shared/constants.mjs, detector/registry/antipatterns.mjs,
+ *   detector/shared/color.mjs, detector/rules/checks.mjs, and
+ *   detector/browser/injected/index.mjs.
+ * Rebuild: node runtime/ui-evidence/build-browser-detector.mjs
+ *
+ * Modified for Provenant.
  *
  * Usage: <script src="detect-antipatterns-browser.js"></script>
  * Re-scan: window.impeccableScan()
  */
 (function () {
 if (typeof window === 'undefined') return;
-// --- cli/engine/shared/constants.mjs ---
+// --- detector/shared/constants.mjs ---
 // ─── Section 1: Constants ───────────────────────────────────────────────────
 
 const SAFE_TAGS = new Set([
@@ -99,7 +104,7 @@ const KNOWN_SERIF_FONTS = new Set([
   'freight display', 'freight text',
 ]);
 
-// --- cli/engine/registry/antipatterns.mjs ---
+// --- detector/registry/antipatterns.mjs ---
 const ANTIPATTERNS = [
   // ── AI slop: tells that something was AI-generated ──
   {
@@ -352,7 +357,7 @@ const ANTIPATTERNS = [
   },
 ];
 
-// --- cli/engine/shared/color.mjs ---
+// --- detector/shared/color.mjs ---
 // ─── Section 2: Color Utilities ─────────────────────────────────────────────
 
 function isNeutralColor(color) {
@@ -467,7 +472,7 @@ function colorToHex(c) {
   return '#' + [c.r, c.g, c.b].map(v => v.toString(16).padStart(2, '0')).join('');
 }
 
-// --- cli/engine/rules/checks.mjs ---
+// --- detector/rules/checks.mjs ---
 const DETECTOR_IS_BROWSER = typeof window !== 'undefined';
 
 // ─── Section 3: Pure Detection ──────────────────────────────────────────────
@@ -2337,7 +2342,7 @@ function checkPageLayout(doc, win) {
   return findings;
 }
 
-// --- cli/engine/browser/injected/index.mjs ---
+// --- detector/browser/injected/index.mjs ---
 const IS_BROWSER = typeof window !== 'undefined';
 
 // ─── Section 7: Browser UI (IS_BROWSER only) ────────────────────────────────
