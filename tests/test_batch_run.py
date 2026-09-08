@@ -105,6 +105,7 @@ def fake_dispatch(path: Path) -> None:
         requested_status = values.get('status', 'succeeded')
         status = 'failed' if requested_status == 'empty' else requested_status
         outcome = 'result_missing_or_empty' if requested_status == 'empty' else status
+        exit_code = {'false': False, 'float': 0.0}.get(values.get('process_exit'), 0)
         question = {'code': 'needs_input', 'prompt': values['question']} if status == 'blocked' else None
         attempt_dir = pathlib.Path(ns.run_dir) / 'dispatch/tasks' / ns.task_id / 'attempt-001'
         attempt_dir.mkdir(parents=True, exist_ok=True)
@@ -151,7 +152,7 @@ def fake_dispatch(path: Path) -> None:
                    'result': result,
                    'stderr': {'path': str(stderr_path.relative_to(ns.run_dir)),
                               'digest': 'sha256:' + hashlib.sha256(stderr_path.read_bytes()).hexdigest()},
-                   'process': {'observed_exit': True, 'exit_code': 0},
+                   'process': {'observed_exit': True, 'exit_code': exit_code},
                    'attempt_digest_path': str((attempt_dir / 'attempt.sha256').relative_to(ns.run_dir))}
         if question is not None:
             attempt['question'] = question
@@ -560,6 +561,29 @@ def test_batch_rejects_incomplete_success_evidence_before_summary(tmp_path, monk
         'dispatch_exit': 0, 'receipt_invalid': True,
         'message': summary['tasks'][0]['message'],
     }]
+
+
+@pytest.mark.parametrize('process_exit', ['false', 'float'])
+def test_batch_rejects_non_integer_zero_exit_before_summary(tmp_path, monkeypatch, process_exit):
+    """A successful child must retain a real integer process exit code."""
+    monkeypatch.chdir(tmp_path)
+    run_dir = make_run(tmp_path, f'non-integer-exit-{process_exit}')
+    dispatch = tmp_path / 'fake-dispatch'
+    fake_dispatch(dispatch)
+    module = load_module()
+    module.DISPATCH_RUN = dispatch
+    counter = tmp_path / 'counter'
+    counter.write_text('0', encoding='utf-8')
+    monkeypatch.setenv('BATCH_COUNTER', str(counter))
+    manifest = task_manifest(tmp_path, [task(tmp_path, 'probe', process_exit=process_exit)])
+
+    assert module.batch(args(module, run_dir, manifest, 1)) == 1
+
+    summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
+    assert summary['tasks'][0]['status'] == 'failed'
+    assert summary['tasks'][0]['outcome'] == 'child_receipt_invalid'
+    assert summary['tasks'][0]['receipt_invalid'] is True
+    assert summary['tasks'][0]['message'] == 'successful attempt does not prove exit 0'
 
 
 def test_real_dispatch_timeout_retains_typed_non_success_attempt(tmp_path, monkeypatch):

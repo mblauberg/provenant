@@ -184,6 +184,35 @@ def test_retained_success_rejects_malformed_adapter_receipt(tmp_path: Path) -> N
     assert finalizer._validate_dispatch_evidence(run_dir) == errors
 
 
+@pytest.mark.parametrize("exit_code", [False, 0.0])
+def test_retained_success_rejects_non_integer_zero_exit(tmp_path: Path, exit_code: object) -> None:
+    """Controls and finalisation require the dispatch owner's exact exit evidence."""
+    run_dir = make_run(tmp_path)
+    attempt = write_attempt(run_dir)
+    record = json.loads(attempt.read_text(encoding="utf-8"))
+    record["process"]["exit_code"] = exit_code
+    attempt.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    attempt.with_name("attempt.sha256").write_text(
+        f"{file_digest(attempt)}  attempt.json\n", encoding="utf-8"
+    )
+    module_spec = importlib.util.spec_from_file_location("run_controls_invalid_exit", SCRIPT)
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+
+    errors = module.validate_retained_dispatch(run_dir)
+
+    assert errors == [
+        "dispatch attempt dispatch/tasks/task-1/attempt-001/attempt.json: "
+        "successful attempt does not prove exit 0"
+    ]
+    finalizer_spec = importlib.util.spec_from_file_location("run_dir_finalize_invalid_exit", FINALIZE)
+    assert finalizer_spec and finalizer_spec.loader
+    finalizer = importlib.util.module_from_spec(finalizer_spec)
+    finalizer_spec.loader.exec_module(finalizer)
+    assert finalizer._validate_dispatch_evidence(run_dir) == errors
+
+
 def write_executable(path: Path, body: str) -> None:
     path.write_text(textwrap.dedent(body), encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)

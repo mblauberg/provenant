@@ -61,7 +61,8 @@ def validate_successful_attempt(
     process = record.get("process")
     if not isinstance(process, dict) or process.get("observed_exit") is not True:
         raise AttemptEvidenceError("successful attempt does not prove process exit")
-    if process.get("exit_code") != 0:
+    exit_code = process.get("exit_code")
+    if not isinstance(exit_code, int) or isinstance(exit_code, bool) or exit_code != 0:
         raise AttemptEvidenceError("successful attempt does not prove exit 0")
     result = record.get("result")
     result_bytes = payloads.get("result")
