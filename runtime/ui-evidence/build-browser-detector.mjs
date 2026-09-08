@@ -93,7 +93,9 @@ function browserChecks(source, relativePath) {
   if (!source.startsWith(checksImports)) {
     fail(relativePath, 'imports must match the supported local browser dependencies');
   }
-  return stripTerminalNamedExport(source.slice(checksImports.length), relativePath);
+  const browserSource = stripTerminalNamedExport(source.slice(checksImports.length), relativePath);
+  assertNoEsmDeclarations(browserSource, relativePath);
+  return browserSource;
 }
 
 function sourceForBrowser(relativePath, source) {

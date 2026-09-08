@@ -52,10 +52,13 @@ test('browser detector rebuild is deterministic and detects shared-rule drift', 
   const checks = path.join(fixture, 'detector', 'rules', 'checks.mjs');
   await writeFile(
     checks,
-    (await readFile(checks, 'utf8')).replace("../shared/color.mjs", 'unexpected-package'),
+    (await readFile(checks, 'utf8')).replace(
+      "} from '../shared/color.mjs';\n",
+      "} from '../shared/color.mjs';\nimport 'unexpected-package';\n",
+    ),
   );
   await assert.rejects(
     renderBrowserDetector({ runtimeRoot: fixture }),
-    /imports must match the supported local browser dependencies/,
+    /contains an unsupported ESM declaration/,
   );
 });
