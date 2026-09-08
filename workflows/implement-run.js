@@ -386,7 +386,8 @@ const boot = await agent(
     `build an ABSOLUTE run-dir path <workspace-root>/.agent-run/<runId> so the run dir never lands ` +
     `under a nested subproject. ${runIdClause}\n` +
     '   Write the approved intent to a non-empty workspace-relative file, then initialise RUN.json with the installed `deliver` producer from the workspace root:\n' +
-    `   "$(provenant root)/skills/deliver/scripts/delivery_receipt.py" init --run-dir ".agent-run/<runId>" --run-id "<runId>" --profile software --chair-family anthropic --risk-tier ${minimumRisk} --risk-assessment "<risk-assessment.json>" --intent "<approved-intent-file>" --authority "<authority.json>".\n` +
+    `   Compute <declared-risk> as the higher of the derived risk-assessment tier and the requested ${minimumRisk} floor, then run: ` +
+    '"$(provenant root)/skills/deliver/scripts/delivery_receipt.py" init --run-dir ".agent-run/<runId>" --run-id "<runId>" --profile software --chair-family anthropic --risk-tier "<declared-risk>" --risk-assessment "<risk-assessment.json>" --intent "<approved-intent-file>" --authority "<authority.json>".\n' +
     '   The authority input is the current Authority V2 object from the approved task. It must bound the exact source and artifact paths, expiry, disclosure, secrets, deployment, irreversible actions, network and budget; do not invent wider authority.\n' +
     '   Then run: "$(provenant root)/skills/orchestrate/scripts/run_dir_init.sh" "<abs run-dir>" --force\n' +
     '   and ALSO run: mkdir -p "<abs run-dir>/patches"   (the patch-emitting builder writes there; ' +
