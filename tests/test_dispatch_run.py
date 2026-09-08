@@ -514,12 +514,13 @@ def test_dispatch_owner_keeps_lifecycle_risk_separate_from_model_override(tmp_pa
     )
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
+    env["AGENT_FABRIC_INSTANCE_ROOT"] = str(ROOT)
 
     result = subprocess.run(
         [
             str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "fable",
             "--adapter", "claude", "--prompt-file", str(prompt),
-            "--model", "fable", "--role", "synthesis",
+            "--model", "claude-fable-5-1", "--role", "synthesis",
             "--risk-tier", "routine", "--model-override-tier", "crucial",
         ],
         cwd=tmp_path, env=env, text=True,
@@ -533,8 +534,8 @@ def test_dispatch_owner_keeps_lifecycle_risk_separate_from_model_override(tmp_pa
     assert attempt["requested_route"]["model_override_tier"] == "crucial"
     assert attempt["route"]["risk_tier"] == "routine"
     assert attempt["route"]["model_override_tier"] == "crucial"
-    assert attempt["route"]["resolved_model"] == "fable"
-    assert attempt["route"]["policy_override"] == "crucial-fable-synthesis-adjudication"
+    assert attempt["route"]["resolved_model"] == "claude-fable-5-1"
+    assert attempt["route"]["policy_override"] == "crucial-claude-fable-5-1-synthesis-adjudication"
 
 
 def test_batch_child_defers_shared_manifest_append(tmp_path: Path, monkeypatch) -> None:
@@ -719,6 +720,65 @@ def test_incomplete_success_receipt_is_fail_closed(tmp_path: Path, monkeypatch) 
         (run_dir / "dispatch/tasks/incomplete-success/attempt-001/attempt.json").read_text()
     )
     assert record["failure_code"] == "adapter_receipt_invalid"
+
+
+def test_reentry_rejects_tampered_success_adapter_receipt(tmp_path: Path, monkeypatch) -> None:
+    """Manifest repair is intentionally narrow; re-entry still revalidates success."""
+    run_dir = make_run(tmp_path, "reentry-invalid-success")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("revalidate retained success\n", encoding="utf-8")
+    adapter = tmp_path / "success-adapter"
+    write_success_adapter(adapter)
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    monkeypatch.chdir(tmp_path)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "reentry", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    assert module.dispatch(args) == 0
+    attempt = run_dir / "dispatch/tasks/reentry/attempt-001/attempt.json"
+    receipt = attempt.with_name("adapter-receipt.json")
+    receipt.write_text("{}\n", encoding="utf-8")
+    record = json.loads(attempt.read_text(encoding="utf-8"))
+    record["route"]["adapter_receipt"]["digest"] = "sha256:" + hashlib.sha256(receipt.read_bytes()).hexdigest()
+    attempt.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    attempt.with_name("attempt.sha256").write_text(
+        "sha256:" + hashlib.sha256(attempt.read_bytes()).hexdigest() + "  attempt.json\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(module.AttemptEvidenceError, match="successful adapter receipt is invalid"):
+        module.reconcile_manifest(run_dir)
+
+
+@pytest.mark.parametrize("exit_code", [False, 0.0])
+def test_reentry_rejects_non_integer_zero_exit(tmp_path: Path, monkeypatch, exit_code: object) -> None:
+    """Re-entry requires the exact terminal exit proof before repairing a manifest."""
+    run_dir = make_run(tmp_path, "reentry-invalid-exit")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("revalidate retained success\n", encoding="utf-8")
+    adapter = tmp_path / "success-adapter"
+    write_success_adapter(adapter)
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    monkeypatch.chdir(tmp_path)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "reentry", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    assert module.dispatch(args) == 0
+    attempt = run_dir / "dispatch/tasks/reentry/attempt-001/attempt.json"
+    record = json.loads(attempt.read_text(encoding="utf-8"))
+    record["process"]["exit_code"] = exit_code
+    attempt.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    attempt.with_name("attempt.sha256").write_text(
+        "sha256:" + hashlib.sha256(attempt.read_bytes()).hexdigest() + "  attempt.json\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(module.AttemptEvidenceError, match="successful attempt does not prove exit 0"):
+        module.reconcile_manifest(run_dir)
 
 
 def test_typed_adapter_auth_and_missing_tool_outcomes_are_preserved(tmp_path: Path, monkeypatch) -> None:

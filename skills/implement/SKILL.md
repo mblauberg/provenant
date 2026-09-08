@@ -41,9 +41,9 @@ reconciliation run.
    `evaluate` and attach its passing receipt.
 4. Invoke read-only `code-review` under the current `HARNESS.md` risk ladder.
    Record adapter, actual family, omissions and substitutions.
-5. Repair blockers, then repeat verification and review. Stop at scaled
-   budget per risk tier (see `run-contract.md`). Budgets are guardrails, not
-   targets; return evidence to user or `scope` on drift.
+5. Repair blockers, then repeat verification and review under the `deliver`
+   receipt contract's scaled budget. Return evidence to user or `scope` on
+   drift.
 6. Update owned docs for behavioural, architectural, operational or decision
    change. For substantial+ apply `session`: refresh recovery checkpoint,
    audit context, graduate durable findings and classify retained/ephemeral
@@ -61,17 +61,13 @@ reconciliation run.
 - Reviewed source stays immutable; separately authorised artifacts and Fabric
   communication stay bounded.
 - Record missing legs as failed/unavailable; never filter them. Review coverage
-  blocks whenever the HARNESS ladder is unsatisfied; missing other-primary
-  coverage blocks from `substantial` up.
+  blocks whenever the HARNESS ladder is unsatisfied.
 - Objective evidence outranks reviewer confidence; adjudicate conclusions,
   never vote.
 - Substantial+ starts a fresh implementation session bound to approved digests.
 - Clearing every machine gate is not acceptance. Record the receipt's
   `human_gates.acceptance` approval only after explicit user acceptance.
 
-## Adapter-absent path
+## Portable artifact
 
-Without optional Console, Herdr or GitHub, use canonical project artifacts and
-emit the skill-owned [portable kind](portable-workflow.v1.json). It proves only
-that a context object existed, never implementation evidence, acceptance or
-promotion authority. Retain and identify the canonical context separately.
+Use the skill-owned [implementation checkpoint schema](portable-workflow.v1.json).

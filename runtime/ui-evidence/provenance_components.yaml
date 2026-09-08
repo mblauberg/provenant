@@ -6,6 +6,7 @@ components:
     prefixes: [detector/]
     marker_required_exact:
       - detector/detect-antipatterns.mjs
+      - detector/detect-antipatterns-browser.js
       - detector/cli/main.mjs
       - detector/engines/browser/detect-url.mjs
       - detector/engines/static-html/detect-html.mjs
@@ -19,5 +20,5 @@ components:
     modification: Moved into a private product runtime without changing detector behaviour; modified files carry neutral local modification notices.
   - id: ui-evidence-runtime-shell
     origin: harness-original
-    exact: [README.md, detect.mjs, provenance_components.yaml]
-    description: Private runtime entrypoint, ownership record, and architecture note.
+    exact: [README.md, build-browser-detector.mjs, build-browser-detector.test.mjs, detect.mjs, provenance_components.yaml]
+    description: Private runtime entrypoint, deterministic browser-bundle builder and test, ownership record, and architecture note.

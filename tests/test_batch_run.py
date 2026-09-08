@@ -105,6 +105,7 @@ def fake_dispatch(path: Path) -> None:
         requested_status = values.get('status', 'succeeded')
         status = 'failed' if requested_status == 'empty' else requested_status
         outcome = 'result_missing_or_empty' if requested_status == 'empty' else status
+        exit_code = {'false': False, 'float': 0.0}.get(values.get('process_exit'), 0)
         question = {'code': 'needs_input', 'prompt': values['question']} if status == 'blocked' else None
         attempt_dir = pathlib.Path(ns.run_dir) / 'dispatch/tasks' / ns.task_id / 'attempt-001'
         attempt_dir.mkdir(parents=True, exist_ok=True)
@@ -113,23 +114,30 @@ def fake_dispatch(path: Path) -> None:
         stderr_path = attempt_dir / 'stderr.log'
         stderr_path.write_text('', encoding='utf-8')
         adapter_path = attempt_dir / 'adapter-receipt.json'
+        result = None
+        result_path = attempt_dir / 'result.md'
+        if status == 'succeeded' and values.get('missing_result') != '1':
+            result_path.write_text('OK\\n', encoding='utf-8')
+            result = {'path': str(result_path.relative_to(ns.run_dir)),
+                      'digest': 'sha256:' + hashlib.sha256(result_path.read_bytes()).hexdigest()}
         adapter = {'tool': ns.adapter, 'adapter': ns.adapter, 'execution_intent': ns.intent,
                    'resolved_model': 'fixture-model', 'provider_family': ns.adapter,
                    'model_family': ns.adapter, 'endpoint_provider': ns.adapter,
                    'identity_source': 'fixture', 'status': 'ok', 'exit': 0,
+                   'output_path': str(result_path),
+                   'output_digest': result['digest'] if result is not None else '',
                    'read_only_guarantee': 'none', 'cross_family': False,
                    'certification_eligible': False}
+        if values.get('malformed_adapter') == '1':
+            adapter = {}
         adapter_path.write_text(json.dumps(adapter) + '\\n', encoding='utf-8')
-        result = None
-        result_path = attempt_dir / 'result.md'
-        if status == 'succeeded':
-            result_path.write_text('OK\\n', encoding='utf-8')
-            result = {'path': str(result_path.relative_to(ns.run_dir)),
-                      'digest': 'sha256:' + hashlib.sha256(result_path.read_bytes()).hexdigest()}
-        route = {**adapter, 'adapter_receipt': {'path': str(adapter_path.relative_to(ns.run_dir)),
+        route = {'adapter': ns.adapter, 'execution_intent': ns.intent,
+                 'provider_family': ns.adapter, 'resolved_model': 'fixture-model',
+                 'adapter_receipt': {'path': str(adapter_path.relative_to(ns.run_dir)),
                 'digest': 'sha256:' + hashlib.sha256(adapter_path.read_bytes()).hexdigest()}}
         attempt_rel = str((attempt_dir / 'attempt.json').relative_to(ns.run_dir))
-        attempt = {'schema_version': 1, 'record_type': 'dispatch-attempt', 'task_id': ns.task_id, 'attempt_id': 'attempt-001',
+        attempt = {'schema_version': 1, 'record_type': 'dispatch-attempt', 'run_id': pathlib.Path(ns.run_dir).name,
+                   'task_id': ns.task_id, 'attempt_id': 'attempt-001',
                    'attempt_path': attempt_rel, 'status': status, 'outcome': outcome,
                    'finished_at': '2026-08-29T00:00:00Z',
                    'requested_route': {'intent': ns.intent, 'adapter': ns.adapter,
@@ -144,6 +152,7 @@ def fake_dispatch(path: Path) -> None:
                    'result': result,
                    'stderr': {'path': str(stderr_path.relative_to(ns.run_dir)),
                               'digest': 'sha256:' + hashlib.sha256(stderr_path.read_bytes()).hexdigest()},
+                   'process': {'observed_exit': True, 'exit_code': exit_code},
                    'attempt_digest_path': str((attempt_dir / 'attempt.sha256').relative_to(ns.run_dir))}
         if question is not None:
             attempt['question'] = question
@@ -297,7 +306,7 @@ def test_batch_forwards_lifecycle_risk_and_model_override_separately(tmp_path, m
     prompt.write_text('synthesise\n', encoding='utf-8')
     manifest = task_manifest(tmp_path, [{
         'id': 'fable', 'prompt_file': str(prompt), 'adapter': 'claude',
-        'model': 'fable', 'role': 'synthesis', 'risk_tier': 'routine',
+        'model': 'claude-fable-5-1', 'role': 'synthesis', 'risk_tier': 'routine',
         'model_override_tier': 'crucial',
     }])
     module = load_module()
@@ -362,6 +371,7 @@ def test_real_full_chain_keeps_lifecycle_risk_separate_from_model_override(
     tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
     run_dir = make_run(tmp_path, 'real-route-metadata')
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
@@ -379,7 +389,7 @@ def test_real_full_chain_keeps_lifecycle_risk_separate_from_model_override(
         'id': 'full-chain',
         'prompt_file': str(prompt),
         'adapter': 'claude',
-        'model': 'fable',
+        'model': 'claude-fable-5-1',
         'role': 'synthesis',
         'risk_tier': 'routine',
         'model_override_tier': 'crucial',
@@ -398,10 +408,10 @@ def test_real_full_chain_keeps_lifecycle_risk_separate_from_model_override(
     assert attempt['requested_route']['model_override_tier'] == 'crucial'
     assert attempt['route']['risk_tier'] == 'routine'
     assert attempt['route']['model_override_tier'] == 'crucial'
-    assert attempt['route']['resolved_model'] == 'fable'
+    assert attempt['route']['resolved_model'] == 'claude-fable-5-1'
     assert attempt['route']['route_alias'] == 'flagship'
-    assert attempt['route']['policy_override'] == 'crucial-fable-synthesis-adjudication'
-    assert '--model\nfable\n' in claude_args.read_text(encoding='utf-8')
+    assert attempt['route']['policy_override'] == 'crucial-claude-fable-5-1-synthesis-adjudication'
+    assert '--model\nclaude-fable-5-1\n' in claude_args.read_text(encoding='utf-8')
     assert '--effort\nmedium\n' in claude_args.read_text(encoding='utf-8')
 
 
@@ -527,6 +537,53 @@ def test_retained_non_success_attempt_allows_partial_route_and_question(tmp_path
     wrong_record = {**record, 'attempt_path': wrong_rel, 'attempt_digest': module.digest(wrong_path)}
     with pytest.raises(module.BatchInputError, match='identity'):
         module._validate_child_record(current, wrong_record, run_dir, -15)
+
+
+@pytest.mark.parametrize('failure', ['missing_result', 'malformed_adapter'])
+def test_batch_rejects_incomplete_success_evidence_before_summary(tmp_path, monkeypatch, failure):
+    """A claimed success needs a retained result and a successful adapter receipt."""
+    monkeypatch.chdir(tmp_path)
+    run_dir = make_run(tmp_path, f'incomplete-success-{failure}')
+    dispatch = tmp_path / 'fake-dispatch'
+    fake_dispatch(dispatch)
+    module = load_module()
+    module.DISPATCH_RUN = dispatch
+    counter = tmp_path / 'counter'
+    counter.write_text('0', encoding='utf-8')
+    monkeypatch.setenv('BATCH_COUNTER', str(counter))
+    manifest = task_manifest(tmp_path, [task(tmp_path, 'probe', **{failure: '1'})])
+
+    assert module.batch(args(module, run_dir, manifest, 1)) == 1
+
+    summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
+    assert summary['tasks'] == [{
+        'task_id': 'probe', 'status': 'failed', 'outcome': 'child_receipt_invalid',
+        'dispatch_exit': 0, 'receipt_invalid': True,
+        'message': summary['tasks'][0]['message'],
+    }]
+
+
+@pytest.mark.parametrize('process_exit', ['false', 'float'])
+def test_batch_rejects_non_integer_zero_exit_before_summary(tmp_path, monkeypatch, process_exit):
+    """A successful child must retain a real integer process exit code."""
+    monkeypatch.chdir(tmp_path)
+    run_dir = make_run(tmp_path, f'non-integer-exit-{process_exit}')
+    dispatch = tmp_path / 'fake-dispatch'
+    fake_dispatch(dispatch)
+    module = load_module()
+    module.DISPATCH_RUN = dispatch
+    counter = tmp_path / 'counter'
+    counter.write_text('0', encoding='utf-8')
+    monkeypatch.setenv('BATCH_COUNTER', str(counter))
+    manifest = task_manifest(tmp_path, [task(tmp_path, 'probe', process_exit=process_exit)])
+
+    assert module.batch(args(module, run_dir, manifest, 1)) == 1
+
+    summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
+    assert summary['tasks'][0]['status'] == 'failed'
+    assert summary['tasks'][0]['outcome'] == 'child_receipt_invalid'
+    assert summary['tasks'][0]['receipt_invalid'] is True
+    assert summary['tasks'][0]['message'] == 'successful attempt does not prove exit 0'
 
 
 def test_real_dispatch_timeout_retains_typed_non_success_attempt(tmp_path, monkeypatch):

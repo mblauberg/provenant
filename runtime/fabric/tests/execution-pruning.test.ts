@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import {
   chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
   rmSync, utimesSync, writeFileSync,
@@ -12,7 +12,13 @@ import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { cancelActiveExecutions, dispatchConfiguredProvider } from "../src/execution.js";
-import { DEFAULT_RETENTION_HOURS, OWNER_RECORD_NAME, retentionHours } from "../src/run-registry.js";
+import {
+  DEFAULT_RETENTION_HOURS,
+  OWNER_RECORD_NAME,
+  processStartedAt,
+  pruneDispatchRuns,
+  retentionHours,
+} from "../src/run-registry.js";
 import type { Identity } from "../src/identity.js";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
@@ -198,6 +204,51 @@ describe("run directory pruning", () => {
     expect(existsSync(runDir), "an in-flight run was pruned").toBe(true);
     expect(existsSync(join(runDir, OWNER_RECORD_NAME))).toBe(true);
     expect(runDirectories()).toContain(runDir.split("/").pop());
+  });
+
+  it("keeps an aged run while its recorded provider session is live", () => {
+    const aged = ageRun("mcp-live-provider", 24 * 30);
+    const provider = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    provider.unref();
+    const providerPid = provider.pid;
+    expect(providerPid).toBeDefined();
+    spawnedPids.push(providerPid!);
+    const providerStartedAt = processStartedAt(providerPid!);
+    expect(providerStartedAt).not.toBeNull();
+    const runToken = "live-provider-token";
+    writeFileSync(join(aged.runDir, OWNER_RECORD_NAME), JSON.stringify({
+      schema_version: 1,
+      kind: "dispatch",
+      run_dir: aged.runDir,
+      workspace,
+      run_token: runToken,
+      owner_pid: 999_991,
+      owner_pgid: 999_991,
+      owner_started_at: null,
+      host_pid: 999_992,
+      host_started_at: null,
+      started_at: new Date().toISOString(),
+      owner_stdout: aged.stdout,
+      owner_stderr: aged.stderr,
+      task_id: "live-provider-task",
+    }, null, 2) + "\n");
+    writeFileSync(join(aged.runDir, "dispatch-provider.json"), JSON.stringify({
+      run_token: runToken,
+      provider_pid: providerPid,
+      provider_pgid: providerPid,
+      provider_started_at: providerStartedAt,
+    }, null, 2) + "\n");
+    const when = new Date(Date.now() - 24 * 3_600_000 * 30);
+    utimesSync(aged.runDir, when, when);
+    utimesSync(aged.stdout, when, when);
+    utimesSync(aged.stderr, when, when);
+
+    expect(pruneDispatchRuns(workspace, {})).toStrictEqual([]);
+    expect(existsSync(aged.runDir)).toBe(true);
+    expect(alive(providerPid!)).toBe(true);
   });
 });
 

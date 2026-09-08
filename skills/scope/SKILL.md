@@ -74,10 +74,6 @@ Before handoff, record decided/parked branches, exclusions, risk/authority and
 anchored evidence, with user approval of the spec and one-way doors. The
 execution handoff is digest-bound; any change creates a new revision and gate.
 
-## Adapter-absent path
+## Portable artifact
 
-Without optional Console, Herdr or GitHub, use canonical project artifacts and
-emit the skill-owned kind in
-[portable-workflow.v1.json](portable-workflow.v1.json). The runner validates
-declared fields, including `accepted_artifact_identity`. Output proves context
-only, not scope evidence or approval.
+Use the skill-owned [scope handoff schema](portable-workflow.v1.json).

@@ -18,6 +18,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "skills/orchestrate/scripts/run_controls.py"
+FINALIZE = ROOT / "skills/orchestrate/scripts/run_dir_finalize.py"
 INIT = ROOT / "skills/orchestrate/scripts/run_dir_init.sh"
 CLI = ROOT / "scripts/provenant"
 
@@ -43,7 +44,6 @@ def write_attempt(
     stderr_path = attempt_dir / "stderr.log"
     stderr_path.write_text("diagnostic\n", encoding="utf-8")
     adapter_path = attempt_dir / "adapter-receipt.json"
-    adapter_path.write_text("{}\n", encoding="utf-8")
     result_path = attempt_dir / "result.md"
     result_ref = None
     if status == "blocked" and question is not None and result in (None, "question\n"):
@@ -54,6 +54,18 @@ def write_attempt(
     if result is not None:
         result_path.write_text(result, encoding="utf-8")
         result_ref = {"path": str(result_path.relative_to(run_dir)), "digest": file_digest(result_path)}
+    adapter = {}
+    if status == "succeeded":
+        adapter = {
+            "tool": "codex", "adapter": "codex", "execution_intent": "ordinary",
+            "resolved_model": "fixture-model", "provider_family": "fixture-provider",
+            "model_family": "fixture-model", "endpoint_provider": "fixture-provider",
+            "identity_source": "fixture", "output_path": str(result_path),
+            "output_digest": result_ref["digest"] if result_ref is not None else "",
+            "read_only_guarantee": "none", "status": "ok", "exit": 0,
+            "cross_family": False, "certification_eligible": False,
+        }
+    adapter_path.write_text(json.dumps(adapter) + "\n", encoding="utf-8")
     record = {
         "schema_version": 1,
         "record_type": "dispatch-attempt",
@@ -68,7 +80,11 @@ def write_attempt(
             "risk_tier": "substantial", "model_override_tier": "",
             "reviewer_id": "reviewer-1", "effort": "high",
         },
-        "route": {"adapter_receipt": {"path": str(adapter_path.relative_to(run_dir)), "digest": file_digest(adapter_path)}},
+        "route": {
+            **({field: adapter[field] for field in ("adapter", "execution_intent", "provider_family", "resolved_model")}
+               if status == "succeeded" else {}),
+            "adapter_receipt": {"path": str(adapter_path.relative_to(run_dir)), "digest": file_digest(adapter_path)},
+        },
         "prompt": {"path": str(prompt_path.relative_to(run_dir)), "digest": file_digest(prompt_path)},
         "stderr": {"path": str(stderr_path.relative_to(run_dir)), "digest": file_digest(stderr_path)},
         "result": result_ref,
@@ -136,6 +152,65 @@ def test_retained_git_evidence_path_digest_and_payload_are_validated(tmp_path: P
     (attempt_dir / "attempt.sha256").write_text(f"{file_digest(attempt)}  attempt.json\n", encoding="utf-8")
     with pytest.raises(module.ControlError, match="does not match its attempt"):
         module._attempt(run_dir, "task-1", "attempt-001")
+
+
+def test_retained_success_rejects_malformed_adapter_receipt(tmp_path: Path) -> None:
+    """Controls and finalisation must not trust a success record by itself."""
+    run_dir = make_run(tmp_path)
+    attempt = write_attempt(run_dir)
+    adapter = attempt.with_name("adapter-receipt.json")
+    adapter.write_text("{}\n", encoding="utf-8")
+    record = json.loads(attempt.read_text(encoding="utf-8"))
+    record["route"]["adapter_receipt"]["digest"] = file_digest(adapter)
+    attempt.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    attempt.with_name("attempt.sha256").write_text(
+        f"{file_digest(attempt)}  attempt.json\n", encoding="utf-8"
+    )
+    module_spec = importlib.util.spec_from_file_location("run_controls_invalid_success", SCRIPT)
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+
+    errors = module.validate_retained_dispatch(run_dir)
+
+    assert errors == [
+        "dispatch attempt dispatch/tasks/task-1/attempt-001/attempt.json: "
+        "successful adapter receipt is invalid"
+    ]
+    finalizer_spec = importlib.util.spec_from_file_location("run_dir_finalize_invalid_success", FINALIZE)
+    assert finalizer_spec and finalizer_spec.loader
+    finalizer = importlib.util.module_from_spec(finalizer_spec)
+    finalizer_spec.loader.exec_module(finalizer)
+    assert finalizer._validate_dispatch_evidence(run_dir) == errors
+
+
+@pytest.mark.parametrize("exit_code", [False, 0.0])
+def test_retained_success_rejects_non_integer_zero_exit(tmp_path: Path, exit_code: object) -> None:
+    """Controls and finalisation require the dispatch owner's exact exit evidence."""
+    run_dir = make_run(tmp_path)
+    attempt = write_attempt(run_dir)
+    record = json.loads(attempt.read_text(encoding="utf-8"))
+    record["process"]["exit_code"] = exit_code
+    attempt.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    attempt.with_name("attempt.sha256").write_text(
+        f"{file_digest(attempt)}  attempt.json\n", encoding="utf-8"
+    )
+    module_spec = importlib.util.spec_from_file_location("run_controls_invalid_exit", SCRIPT)
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+
+    errors = module.validate_retained_dispatch(run_dir)
+
+    assert errors == [
+        "dispatch attempt dispatch/tasks/task-1/attempt-001/attempt.json: "
+        "successful attempt does not prove exit 0"
+    ]
+    finalizer_spec = importlib.util.spec_from_file_location("run_dir_finalize_invalid_exit", FINALIZE)
+    assert finalizer_spec and finalizer_spec.loader
+    finalizer = importlib.util.module_from_spec(finalizer_spec)
+    finalizer_spec.loader.exec_module(finalizer)
+    assert finalizer._validate_dispatch_evidence(run_dir) == errors
 
 
 def write_executable(path: Path, body: str) -> None:

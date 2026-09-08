@@ -185,13 +185,14 @@ gh project field-list 2 --owner mblauberg --format json \
 ### Merge
 
 Before queueing merge for a substantial software change, validate its one
-canonical `delivery-run` receipt in `awaiting_acceptance` and retain the entire
-ignored run directory. Do not remove the worktree or discard that directory
-after GitHub merges it. This is a receipt-continuity gate, not user acceptance
-or promotion authority. When post-merge GitHub binding is in scope, its already
-approved Authority V2 envelope must allowlist `api.github.com` tool egress and
-grant use-without-disclosure of the `github-cli-auth` secret reference; the
-binder never infers those grants from the operator's login.
+canonical `delivery-run` receipt and retain the entire ignored run directory.
+Do not remove the worktree or discard that directory after GitHub merges it.
+The flat receipt records gates; it has no authoritative acceptance state
+transition. This is a receipt-continuity gate, not user acceptance or promotion
+authority. When post-merge GitHub binding is in scope, its already approved
+Authority V2 envelope must allowlist `api.github.com` tool egress and grant
+use-without-disclosure of the `github-cli-auth` secret reference; the binder
+never infers those grants from the operator's login.
 
 Merge authority is repo-based. Review pressure follows [`HARNESS.md`](../../HARNESS.md):
 targeted lenses plus the other-primary leg are load-bearing from substantial up;
@@ -210,6 +211,25 @@ runs on `if: always()`, succeeds only when every job in its live `needs:` list
 either succeeded or was skipped by the path filter, and fails closed on any
 failure or cancellation. "CI is green" means exactly this one context; no
 other check is required.
+
+### Merge author identity
+
+For an agent-initiated merge, derive the authenticated GitHub account's noreply
+address at command time, pass it to `gh pr merge --author-email`, then verify
+the generated merge commit's recorded author. This is the forward-only
+repository practice tracked by #807.
+
+```sh
+pr=<number>
+author_email="$(gh api user --jq '"\(.id)+\(.login)@users.noreply.github.com"')"
+gh pr merge "$pr" --merge --author-email "$author_email"
+merge_sha="$(gh pr view "$pr" --json mergeCommit --jq '.mergeCommit.oid')"
+test "$(gh api "repos/{owner}/{repo}/commits/$merge_sha" --jq '.commit.author.email')" = "$author_email"
+```
+
+For an auto-merge, run the last two lines after GitHub has created the merge
+commit. A mismatch is a publication check failure: stop before claiming the
+merge is ready and record the generated author evidence.
 
 Read that check's state correctly. `gh pr view <n> --json statusCheckRollup`
 leaves `.conclusion` as an empty string while a check is still running, so a
@@ -276,8 +296,7 @@ Afterwards:
 1. For a software delivery, sync the primary checkout and copy the retained run
    directory into the same workspace-relative `.agent-run/<id>/` location.
    After the merge commit's main-branch `ci-status` succeeds, bind the exact
-   merge, PR and review evidence while the receipt remains
-   `awaiting_acceptance`:
+   merge, PR and review evidence before human acceptance is recorded:
 
    ```sh
    skills/implement/scripts/bind_merged_delivery.py \
@@ -300,8 +319,8 @@ Afterwards:
    lazy-fetch missing promisor objects; local PR, CI and review JSON remain
    SHA-256 verified. Do not
    request acceptance or promotion authority until validation passes. Explicit
-   user acceptance advances this same receipt to `accepted` and then
-   `awaiting_release`; release binds the same exact artifact identity and never
+   user acceptance records `human_gates.acceptance` on this receipt. Release
+   records its separate gate against the same exact artifact identity and never
    reconstructs it.
 2. Confirm the issue closed (`Closes #N`) or close it with its terminal reason
    recorded, and confirm Status is `Done`.

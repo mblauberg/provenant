@@ -33,6 +33,7 @@ from typing import Any
 # holds the linked skills is not itself named "skills" (#755).
 SKILLS_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SKILLS_ROOT))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 CF_DISPATCH = Path(__file__).with_name("cf_dispatch.sh")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
@@ -49,8 +50,9 @@ from _shared.bounded_process import stop_process_group
 from _shared.custody import (
     OwnedFileError, OwnedLinkError, atomic_write_contained, contained_regular_path,
     ensure_contained_directory, create_contained_directory, open_contained_regular, read_bound_bytes,
-    unlink_contained_regular,
+    read_contained_regular, unlink_contained_regular,
 )
+from attempt_evidence import AttemptEvidenceError as SharedAttemptEvidenceError, successful_adapter_error, validate_successful_attempt
 
 class AttemptEvidenceError(ValueError):
     """A retained attempt cannot be reconciled without inventing evidence."""
@@ -258,36 +260,7 @@ def valid_regular_result(run_dir: Path, path: Path) -> bool:
 def success_receipt_error(
     adapter: dict[str, Any], args: argparse.Namespace, result_path: Path, result_digest: str
 ) -> str | None:
-    required = (
-        "tool", "adapter", "execution_intent", "resolved_model", "provider_family",
-        "model_family", "endpoint_provider", "identity_source", "output_path", "output_digest",
-        "read_only_guarantee",
-    )
-    if any(not isinstance(adapter.get(field), str) or not adapter[field] for field in required):
-        return "successful adapter receipt is missing route identity"
-    if adapter["tool"] != args.tool or adapter["adapter"] != args.tool:
-        return "successful adapter receipt does not match the requested adapter"
-    if adapter["execution_intent"] != args.intent:
-        return "successful adapter receipt does not match the requested intent"
-    try:
-        output_matches = Path(adapter["output_path"]).resolve() == result_path.resolve()
-    except (OSError, ValueError):
-        output_matches = False
-    if not output_matches or adapter["output_digest"] != result_digest:
-        return "successful adapter receipt does not match the retained output"
-    if (
-        not isinstance(adapter.get("exit"), int)
-        or isinstance(adapter["exit"], bool)
-        or adapter["exit"] != 0
-    ):
-        return "successful adapter receipt must record exit 0"
-    if not isinstance(adapter.get("cross_family"), bool) or not isinstance(
-        adapter.get("certification_eligible"), bool
-    ):
-        return "successful adapter receipt is missing assurance flags"
-    if args.intent == "ordinary" and adapter["certification_eligible"]:
-        return "ordinary execution cannot be certification eligible"
-    return None
+    return successful_adapter_error(adapter, args.tool, args.intent, result_path, result_digest)
 
 
 class _JSONObject(dict[str, Any]):
@@ -562,6 +535,19 @@ def reconcile_manifest(run_dir: Path, custody=None) -> None:
                     f"attempt evidence digest does not match {attempt_path}: "
                     + ", ".join(mismatched_digests)
                 )
+            if record.get("status") == "succeeded":
+                try:
+                    _adapter_rel, _adapter_path, adapter_bytes = read_contained_regular(
+                        run_dir, expected["adapter"], label="adapter receipt"
+                    )
+                    _result_rel, _result_path, result_bytes = read_contained_regular(
+                        run_dir, expected["result"], label="result"
+                    )
+                    validate_successful_attempt(run_dir, record, {
+                        "adapter_receipt": adapter_bytes, "result": result_bytes,
+                    })
+                except (OSError, ValueError, SharedAttemptEvidenceError) as exc:
+                    raise AttemptEvidenceError(str(exc)) from exc
             missing = [(kind, path) for kind, path in rows if f"| {path} |" not in existing]
             if not missing:
                 continue
