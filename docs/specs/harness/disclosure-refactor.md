@@ -6,9 +6,11 @@ history; `.agent-run/` artifacts are not normative dependencies.
 
 ## Requirements
 
-1. The ambient layer contains only `AGENTS.md` and `HARNESS.md`. `AGENTS.md`
-   stays minimal; `HARNESS.md` is the compact constitution for topology,
-   lifecycle, user gates, risk, Git, routing and memory.
+1. `AGENTS.md` and `HARNESS.md` are the only ambient doctrine owners.
+   `AGENTS.md` stays minimal; `HARNESS.md` is the compact constitution for
+   topology, lifecycle, user gates, risk, Git, routing and memory. A
+   provider-bootstrap import shim may point only to those owners and adds no
+   policy.
 2. Operational depth has one skill owner: compaction and checkpoints in
    `session`, routing and degradation in `orchestrate`, and receipt detail in
    `deliver`. Ambient files name skills, then load depth only when triggered.
@@ -40,10 +42,12 @@ history; `.agent-run/` artifacts are not normative dependencies.
 
 Static final-tree requirements:
 
-- Ambient files contain no dates, repository-relative `docs/`, `config/` or
-  `scripts/` paths, or `skills/<x>/references/` paths outside the owning skill.
-  Cross-references use skill names. The resolver line exists only in
-  `HARNESS.md`; PATH-resolved `provenant` invocations are not location-bearing.
+- Ambient doctrine owners contain no dates, repository-relative `docs/`,
+  `config/` or `scripts/` paths, or `skills/<x>/references/` paths outside the
+  owning skill. Cross-references use skill names. A provider-bootstrap import
+  shim contains only imports of the doctrine owners. The resolver line exists
+  only in `HARNESS.md`; PATH-resolved `provenant` invocations are not
+  location-bearing.
 - The final skill catalogue stays within its approved cap and is reviewed
   against the source catalogue.
 - The former migration inventory is not a permanent full-tree checker;
