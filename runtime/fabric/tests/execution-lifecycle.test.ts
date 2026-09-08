@@ -239,9 +239,37 @@ describe("orphan reaping", () => {
     // Nothing has reaped it yet: the orphan is exactly the defect.
     expect(alive(providerPid)).toBe(true);
 
-    const reaped = reapOrphanedRuns(workspace);
+    const reaped = await reapOrphanedRuns(workspace);
     expect(reaped.length).toBeGreaterThan(0);
     await waitFor(() => !alive(providerPid), "the orphaned provider outlived its dead host");
+  }, 40_000);
+
+  it("keeps the owner record until an orphan that ignores SIGTERM is killed", async () => {
+    const host = spawn(process.execPath, ["--import", tsxLoader, hostWorker, workspace, "ignore SIGTERM"], {
+      env: ownerEnvironment,
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    let stdout = "";
+    host.stdout.setEncoding("utf8");
+    host.stdout.on("data", (chunk: string) => { stdout += chunk; });
+    await waitFor(() => stdout.includes("\n"), "the host never reported its run");
+    const started = JSON.parse(stdout.split("\n")[0]!) as Record<string, unknown>;
+    const runDir = String((started.paths as Record<string, string>).run_dir);
+    const ownerPid = Number(started.pid);
+    spawnedPids.push(ownerPid);
+    await waitForFile(join(runDir, "sleeping.pid"));
+
+    host.kill("SIGKILL");
+    await waitFor(() => host.exitCode !== null || host.signalCode !== null, "the host never died");
+
+    const reaping = reapOrphanedRuns(workspace);
+    await waitForFile(join(runDir, "term-ignored.marker"));
+    expect(existsSync(join(runDir, OWNER_RECORD_NAME))).toBe(true);
+
+    const [reaped] = await reaping;
+    expect(reaped?.escalated).toBe(true);
+    expect(alive(ownerPid)).toBe(false);
+    expect(existsSync(join(runDir, OWNER_RECORD_NAME))).toBe(false);
   }, 40_000);
 
   it("reaps orphans on the dispatch path without a daemon", async () => {
@@ -276,7 +304,7 @@ describe("orphan reaping", () => {
     const providerPid = await waitForPid(join(runDir, "provider.pid"));
     spawnedPids.push(Number(started.pid));
 
-    expect(reapOrphanedRuns(workspace)).toStrictEqual([]);
+    await expect(reapOrphanedRuns(workspace)).resolves.toStrictEqual([]);
     await delay(100);
     expect(alive(providerPid)).toBe(true);
     expect(listRecordedRuns(workspace).some((run) => run.run_dir === runDir)).toBe(true);

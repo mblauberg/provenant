@@ -28,6 +28,8 @@ export const RUN_ROOT_NAME = ".agent-run";
 export const DEFAULT_RETENTION_HOURS = 168;
 /** Long enough for a cooperative owner to publish evidence, short enough to end. */
 const ESCALATION_MS = 3_000;
+/** SIGKILL is asynchronous too; leave the durable record behind if it is not observed. */
+const STOP_CONFIRMATION_MS = 100;
 
 export interface OwnerRecord {
   schema_version: 1;
@@ -248,6 +250,14 @@ function runStillAlive(run: RecordedRun): boolean {
     processMatches(run.provider.provider_pid, run.provider.provider_started_at);
 }
 
+async function waitForRunStop(run: RecordedRun, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (runStillAlive(run) && Date.now() < deadline) {
+    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
+  }
+  return !runStillAlive(run);
+}
+
 /**
  * Graceful first, then final. The owner publishes its evidence on SIGTERM; a
  * group that ignores it is killed rather than left behind.
@@ -261,13 +271,14 @@ export async function terminateRecordedRun(
     return { run_dir: run.run_dir, signalled: false, escalated: false, reason: "not running" };
   }
   const signalled = signalRecordedRun(run, "SIGTERM");
-  const deadline = Date.now() + escalationMs;
-  while (runStillAlive(run) && Date.now() < deadline) {
-    await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-  }
+  await waitForRunStop(run, escalationMs);
   let escalated = false;
   if (runStillAlive(run)) {
     escalated = signalRecordedRun(run, "SIGKILL");
+    await waitForRunStop(run, STOP_CONFIRMATION_MS);
+  }
+  if (runStillAlive(run)) {
+    return { run_dir: run.run_dir, signalled, escalated, reason: "still running" };
   }
   removeOwnerRecord(run.run_dir);
   return { run_dir: run.run_dir, signalled, escalated };
@@ -275,17 +286,15 @@ export async function terminateRecordedRun(
 
 /**
  * The reaper, on the dispatch path rather than in a daemon: any run whose host
- * is gone but whose processes are not is signalled now, and its record cleared.
+ * is gone but whose processes are not is stopped through the bounded termination
+ * owner. Its record remains until that owner observes the processes have stopped.
  */
-export function reapOrphanedRuns(workspace: string): TerminationOutcome[] {
-  const reaped: TerminationOutcome[] = [];
-  for (const run of listRecordedRuns(workspace)) {
-    if (!run.orphaned) continue;
-    const signalled = signalRecordedRun(run, "SIGTERM");
-    removeOwnerRecord(run.run_dir);
-    reaped.push({ run_dir: run.run_dir, signalled, escalated: false, reason: "host gone" });
-  }
-  return reaped;
+export async function reapOrphanedRuns(workspace: string): Promise<TerminationOutcome[]> {
+  const orphans = listRecordedRuns(workspace).filter((run) => run.orphaned);
+  return await Promise.all(orphans.map(async (run) => ({
+    ...await terminateRecordedRun(run),
+    reason: "host gone",
+  })));
 }
 
 /**
@@ -332,8 +341,8 @@ function newestMtimeMs(paths: string[]): number {
  * Only `mcp-` directories are touched: run directories from other
  * orchestration paths share this root and are not this front door's to delete.
  * Liveness decides before age does, so a run still in flight is never pruned
- * however old its directory looks. That liveness is the owner record from
- * #746, not a second mechanism invented here.
+ * however old its directory looks. That liveness comes from the owner record
+ * and its provider record, not a second mechanism invented here.
  */
 export function pruneDispatchRuns(workspace: string, env: NodeJS.ProcessEnv): string[] {
   const cutoff = Date.now() - retentionHours(env) * 3_600_000;
@@ -345,10 +354,14 @@ export function pruneDispatchRuns(workspace: string, env: NodeJS.ProcessEnv): st
       const metadata = lstatSync(runDir);
       if (!metadata.isDirectory() || metadata.isSymbolicLink()) continue;
       const record = readOwnerRecord(runDir);
-      if (record !== undefined && (
-        processMatches(record.owner_pid, record.owner_started_at) ||
-        processMatches(record.host_pid, record.host_started_at)
-      )) continue;
+      if (record !== undefined) {
+        const provider = readProviderRecord(runDir, record.run_token);
+        if (
+          processMatches(record.owner_pid, record.owner_started_at) ||
+          processMatches(record.host_pid, record.host_started_at) ||
+          (provider !== null && processMatches(provider.provider_pid, provider.provider_started_at))
+        ) continue;
+      }
       const siblings = siblingPaths(root, name);
       if (newestMtimeMs([runDir, ...siblings]) > cutoff) continue;
       rmSync(runDir, { recursive: true, force: true });

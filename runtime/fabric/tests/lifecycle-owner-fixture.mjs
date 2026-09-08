@@ -41,7 +41,15 @@ const startProvider = () => {
   writeFileSync(join(runDir, "provider.pid"), `${provider.pid}\n`);
 };
 
-const sleepUntilSignalled = () => {
+const sleepUntilSignalled = ({ ignoreTerm = false } = {}) => {
+  if (ignoreTerm) {
+    process.on("SIGTERM", () => {
+      writeFileSync(join(runDir, "term-ignored.marker"), "SIGTERM\n");
+    });
+    writeFileSync(join(runDir, "sleeping.pid"), `${process.pid}\n`);
+    setInterval(() => undefined, 1000);
+    return;
+  }
   process.once("SIGTERM", () => {
     writeFileSync(join(runDir, "cancelled.marker"), "cancelled\n");
     process.exit(143);
@@ -64,6 +72,10 @@ if (owner === "dispatch_run.py") {
     mkdirSync(join(runDir, "dispatch", "tasks", taskId, "attempt-001"), { recursive: true });
     startProvider();
     sleepUntilSignalled();
+  } else if (prompt === "ignore SIGTERM") {
+    mkdirSync(join(runDir, "dispatch", "tasks", taskId, "attempt-001"), { recursive: true });
+    startProvider();
+    sleepUntilSignalled({ ignoreTerm: true });
   } else if (prompt === "sleep before the attempt directory") {
     // Deliberately no attempt directory: this is the cold-start shape, where
     // the cooperative canceller has nothing to act on.

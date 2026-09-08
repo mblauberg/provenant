@@ -237,10 +237,10 @@ function createRunDirectory(identity: Identity): string {
  * a run it has just ended can age out on the same pass. Neither step is ever
  * allowed to fail a dispatch.
  */
-function maintainRunRoot(identity: Identity, env: NodeJS.ProcessEnv): void {
+async function maintainRunRoot(identity: Identity, env: NodeJS.ProcessEnv): Promise<void> {
   const workspace = canonical(identity.cwd);
   try {
-    reapOrphanedRuns(workspace);
+    await reapOrphanedRuns(workspace);
   } catch { /* Reaping is best effort; the run it protects still starts. */ }
   try {
     pruneDispatchRuns(workspace, env);
@@ -249,7 +249,7 @@ function maintainRunRoot(identity: Identity, env: NodeJS.ProcessEnv): void {
 
 async function initialiseRun(identity: Identity, env: NodeJS.ProcessEnv, root: string): Promise<string> {
   const owner = executableOwner(root, "skills/orchestrate/scripts/run_dir_init.sh");
-  maintainRunRoot(identity, env);
+  await maintainRunRoot(identity, env);
   const runDir = createRunDirectory(identity);
   try {
     await execFileAsync(owner, [runDir], {
