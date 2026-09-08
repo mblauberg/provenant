@@ -104,11 +104,12 @@ the same graph available at lower efforts:
 Use a driver script only when repeatability, resume state, or a large slice list justifies the extra
 surface. Otherwise, native subagents plus run-dir files are the Codex-native path.
 
-**User gate mechanics.** Neither native subagent collaboration nor an explicit-wave script can pause a
-live Codex run mid-collaboration and block on user approval. Realise the contract's user gate by
-ending the run at the gate-adjacent stage and recording `awaiting-user` in the run-dir manifest/receipt;
-a user-approved follow-up invocation continues the graph. It is a new run reading the prior run-dir
-state, not an in-process resume of a suspended session.
+**User gate mechanics.** The chair uses the current harness's user-input surface
+when approval is missing. If asynchronous input is available, keep dependent
+work paused while independent work continues; elapsed time is not approval.
+When that surface is unavailable, record the pending decision in the run
+checkpoint and end the turn. Resume only after the user's answer arrives.
+Subagent status and workflow progress never stand in for user approval.
 
 GPT-5.6 Programmatic Tool Calling is a separate Responses API substrate for
 bounded, tool-heavy stages with predictable data flow. It can run generated
