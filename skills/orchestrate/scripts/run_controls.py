@@ -39,6 +39,7 @@ from dispatch_run import (
     remove_cancellation_marker,
     worker_question_envelope_bytes,
 )
+from attempt_evidence import AttemptEvidenceError, validate_successful_attempt
 from _shared.custody import OwnedFileError, open_contained_regular, read_contained_regular
 
 
@@ -493,53 +494,11 @@ def _attempt(run_dir: Path, task_id: str, attempt_id: str) -> tuple[dict[str, An
 def _validate_successful_adapter(
     run_dir: Path, record: dict[str, Any], payloads: dict[str, bytes]
 ) -> None:
-    """Validate successful adapter claims against the already-read evidence bytes."""
-    adapter_bytes = payloads.get("adapter_receipt")
-    if adapter_bytes is None:
-        raise ControlError("successful attempt has no adapter receipt")
+    """Translate shared retained-success evidence failures into control errors."""
     try:
-        lines = [line for line in adapter_bytes.decode("utf-8").splitlines() if line.strip()]
-        adapter = json.loads(lines[-1]) if lines else None
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise ControlError("successful adapter receipt is not valid JSON") from exc
-    if not isinstance(adapter, dict) or adapter.get("status") != "ok":
-        raise ControlError("successful adapter receipt is invalid")
-    route = record.get("route")
-    if not isinstance(route, dict):
-        raise ControlError("successful attempt route is invalid")
-    required = (
-        "tool", "adapter", "execution_intent", "resolved_model", "provider_family",
-        "model_family", "endpoint_provider", "identity_source", "output_path", "output_digest",
-        "read_only_guarantee",
-    )
-    if any(not isinstance(adapter.get(field), str) or not adapter[field] for field in required):
-        raise ControlError("successful adapter receipt is missing route identity")
-    requested = record.get("requested_route")
-    expected_adapter = requested.get("adapter") if isinstance(requested, dict) else None
-    expected_intent = requested.get("intent") if isinstance(requested, dict) else None
-    if adapter["tool"] != expected_adapter or adapter["adapter"] != expected_adapter:
-        raise ControlError("successful adapter receipt does not match the requested adapter")
-    if adapter["execution_intent"] != expected_intent:
-        raise ControlError("successful adapter receipt does not match the requested intent")
-    for field in ("adapter", "execution_intent", "provider_family", "resolved_model"):
-        if route.get(field) != adapter.get(field):
-            raise ControlError(f"successful attempt route disagrees with adapter receipt: {field}")
-    result = record.get("result")
-    result_bytes = payloads.get("result")
-    if not isinstance(result, dict) or result_bytes is None:
-        raise ControlError("successful adapter receipt has no retained result")
-    try:
-        output_matches = Path(adapter["output_path"]).resolve() == (run_dir / result["path"]).resolve()
-    except (OSError, TypeError, ValueError):
-        output_matches = False
-    if not output_matches or adapter["output_digest"] != _digest_bytes(result_bytes):
-        raise ControlError("successful adapter receipt does not match the retained output")
-    if not isinstance(adapter.get("exit"), int) or isinstance(adapter["exit"], bool) or adapter["exit"] != 0:
-        raise ControlError("successful adapter receipt must record exit 0")
-    if not isinstance(adapter.get("cross_family"), bool) or not isinstance(adapter.get("certification_eligible"), bool):
-        raise ControlError("successful adapter receipt is missing assurance flags")
-    if expected_intent == "ordinary" and adapter["certification_eligible"]:
-        raise ControlError("ordinary execution cannot be certification eligible")
+        validate_successful_attempt(run_dir, record, payloads)
+    except AttemptEvidenceError as exc:
+        raise ControlError(str(exc)) from exc
 
 
 def _continuation(record: dict[str, Any]) -> str:

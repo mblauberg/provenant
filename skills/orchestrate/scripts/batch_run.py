@@ -51,6 +51,7 @@ from dispatch_run import (
     create_cancellation_marker,
     remove_cancellation_marker,
 )
+from attempt_evidence import AttemptEvidenceError as SharedAttemptEvidenceError, validate_successful_attempt
 from _shared.custody import (
     OwnedFileError, atomic_write_contained, contained_regular_path, open_contained_regular,
     read_bound_bytes, read_contained_regular,
@@ -479,6 +480,7 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
         if status == "succeeded" and route.get("adapter") != task["adapter"]:
             raise BatchInputError(f"successful child adapter does not match task: {task_id}")
         adapter_receipt = route.get("adapter_receipt")
+        adapter_bytes = None
         if status == "succeeded" and not isinstance(adapter_receipt, dict):
             raise BatchInputError(f"successful child adapter receipt is missing: {task_id}")
         if adapter_receipt is not None:
@@ -514,6 +516,16 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
                 raise BatchInputError(f"child result path does not match retained attempt: {task_id}")
         elif record.get("result") is not None:
             raise BatchInputError(f"child result receipt does not match retained attempt: {task_id}")
+        if status == "succeeded":
+            try:
+                validate_successful_attempt(
+                    run_dir, attempt, {
+                        "adapter_receipt": adapter_bytes,
+                        **({"result": result_bytes} if retained_result is not None else {}),
+                    },
+                )
+            except SharedAttemptEvidenceError as exc:
+                raise BatchInputError(str(exc)) from exc
         return {
             "task_id": task_id, "status": status, "outcome": outcome,
             "dispatch_exit": process_exit, "attempt_path": attempt_path,
@@ -631,7 +643,7 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
     reconciliation_error = None
     try:
         reconcile_manifest(run_dir, custody)
-    except (AttemptEvidenceError, OSError) as exc:
+    except (AttemptEvidenceError, OSError, ValueError) as exc:
         reconciliation_error = str(exc)
     # A late request must not rewrite a naturally all-terminal batch as
     # cancelled.  Cancellation is evidenced by a task outcome, not by the
