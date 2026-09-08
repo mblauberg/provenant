@@ -51,6 +51,7 @@ const REPAIR_BUDGETS = Object.freeze({
   crucial: 5,
   terminal: 5,
 })
+const RISK_TIERS = Object.freeze(['routine', 'substantial', 'crucial', 'terminal'])
 
 // ---------------------------------------------------------------------------
 // Structured-output schemas (each agent that returns data is forced through one).
@@ -344,6 +345,8 @@ function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary') {
 // ---------------------------------------------------------------------------
 
 const task = (args && args.task) || ''
+const riskHint = String((args && args.risk) || '').toLowerCase()
+const minimumRisk = ['crucial', 'terminal'].includes(riskHint) ? riskHint : 'substantial'
 const requiresOtherPrimary = true
 const specApproved = !!(args && args.specApproved)
 const designStatus = (args && args.designStatus) || ''
@@ -383,7 +386,7 @@ const boot = await agent(
     `build an ABSOLUTE run-dir path <workspace-root>/.agent-run/<runId> so the run dir never lands ` +
     `under a nested subproject. ${runIdClause}\n` +
     '   Write the approved intent to a non-empty workspace-relative file, then initialise RUN.json with the installed `deliver` producer from the workspace root:\n' +
-    '   "$(provenant root)/skills/deliver/scripts/delivery_receipt.py" init --run-dir ".agent-run/<runId>" --run-id "<runId>" --profile software --chair-family anthropic --risk-assessment "<risk-assessment.json>" --intent "<approved-intent-file>" --authority "<authority.json>".\n' +
+    `   "$(provenant root)/skills/deliver/scripts/delivery_receipt.py" init --run-dir ".agent-run/<runId>" --run-id "<runId>" --profile software --chair-family anthropic --risk-tier ${minimumRisk} --risk-assessment "<risk-assessment.json>" --intent "<approved-intent-file>" --authority "<authority.json>".\n` +
     '   The authority input is the current Authority V2 object from the approved task. It must bound the exact source and artifact paths, expiry, disclosure, secrets, deployment, irreversible actions, network and budget; do not invent wider authority.\n' +
     '   Then run: "$(provenant root)/skills/orchestrate/scripts/run_dir_init.sh" "<abs run-dir>" --force\n' +
     '   and ALSO run: mkdir -p "<abs run-dir>/patches"   (the patch-emitting builder writes there; ' +
@@ -418,11 +421,15 @@ const runDir = boot.runDir
 const gitCwd = boot.gitCwd || ''
 const conv = boot.conventions || {}
 const models = boot.modelRoutes
-if (!boot.riskPreflightPassed || !['substantial', 'crucial', 'terminal'].includes(boot.effectiveRisk)) {
-  log('Risk/authority preflight failed. No source mutation is authorised.')
+const effectiveRisk = boot.effectiveRisk
+if (
+  !boot.riskPreflightPassed
+  || !['substantial', 'crucial', 'terminal'].includes(effectiveRisk)
+  || RISK_TIERS.indexOf(effectiveRisk) < RISK_TIERS.indexOf(minimumRisk)
+) {
+  log('Risk/authority preflight failed or returned a tier below the requested floor. No source mutation is authorised.')
   return
 }
-const effectiveRisk = boot.effectiveRisk
 const maxRepairCycles = REPAIR_BUDGETS[effectiveRisk]
 log(`Run dir: ${runDir} | repo: ${boot.repoRoot} | test lane: ${conv.testLane || '(none found)'}`)
 
