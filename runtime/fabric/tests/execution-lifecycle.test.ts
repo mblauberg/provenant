@@ -107,12 +107,16 @@ function fabricCli(args: string[]): string {
   });
 }
 
-function fabricCliOutput(args: string[]): string {
+function fabricCliOutput(args: string[]): { status: 0 | 1; stdout: string } {
   try {
-    return fabricCli(args);
+    return { status: 0, stdout: fabricCli(args) };
   } catch (error) {
-    const stdout = error && typeof error === "object" && "stdout" in error ? error.stdout : undefined;
-    if (typeof stdout === "string") return stdout;
+    const result = error && typeof error === "object"
+      ? error as { signal?: unknown; status?: unknown; stdout?: unknown }
+      : undefined;
+    if (result?.status === 1 && result.signal === null && typeof result.stdout === "string") {
+      return { status: 1, stdout: result.stdout };
+    }
     throw error;
   }
 }
@@ -425,8 +429,15 @@ describe("cancellation", () => {
     expect(existsSync(attemptDirectory), "the cold-start scenario needs no attempt directory").toBe(false);
 
     // A fresh process holds no in-memory owner, only the recorded run.
-    const killed = JSON.parse(fabricCliOutput(["dispatch", "kill", runDir, "--json"])) as Record<string, unknown>;
+    const result = fabricCliOutput(["dispatch", "kill", runDir, "--json"]);
+    const killed = JSON.parse(result.stdout) as Record<string, unknown>;
     expect(killed.signalled).toBe(true);
+    if (killed.reason === "still running") {
+      expect(result.status).toBe(1);
+    } else {
+      expect(result.status).toBe(0);
+      expect(killed.reason).toBeUndefined();
+    }
     await waitFor(() => !alive(providerPid), "the provider survived a cold-start kill");
     await waitFor(() => !alive(ownerPid) || existsSync(join(runDir, "cancelled.marker")),
       "the owner survived a cold-start kill");
