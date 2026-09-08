@@ -67,6 +67,7 @@ INSTALLED_OUTPUT_DIGEST=""
 INSTALLED_OUTPUT_DEVICE=""
 INSTALLED_OUTPUT_INODE=""
 AGY_ADD_DIRS=()
+AGY_SANDBOX_JSON=null
 ACCESS_MODE="read_only"
 TIMEOUT_SECONDS=""
 WORKTREE=""
@@ -354,9 +355,9 @@ PROMPT_BYTES="$(wc -c <"$PROMPT_TMP" | tr -d ' ')"
 # clipped by the kernel would be reviewed as if it were complete.
 ARGV_PROMPT_LIMIT=126976
 argv_prompt_too_large() {
-  local tool="$1" diag_path="$2"
-  [ "$PROMPT_BYTES" -gt "$ARGV_PROMPT_LIMIT" ] || return 1
-  echo "$tool prompt is ${PROMPT_BYTES} bytes, over the 124 KiB single-argument ceiling; pass the material by reference instead" >"$diag_path"
+  local tool="$1" diag_path="$2" prompt_bytes="${3:-$PROMPT_BYTES}"
+  [ "$prompt_bytes" -gt "$ARGV_PROMPT_LIMIT" ] || return 1
+  echo "$tool effective prompt is ${prompt_bytes} bytes, over the 124 KiB single-argument ceiling; pass the material by reference instead" >"$diag_path"
   return 0
 }
 
@@ -454,7 +455,7 @@ emit_record() {
   [ -n "$ORCH_FAMILY" ] && valid_family "$ORCH_FAMILY" && [ -n "$family" ] && [ "$ORCH_FAMILY" != "$family" ] && cross="true"
   cert="false"
   [ "$INTENT" = "assurance" ] && [ "$status" = "ok" ] && [ -n "$output_digest" ] && [ "$cross" = "true" ] && { [ "$guarantee" = "enforced" ] || [ "$guarantee" = "oauth_safe_mode" ]; } && cert="true"
-  printf '{"tool":"%s","adapter":"%s","adapter_gate":"direct-cli","execution_intent":"%s","model":"%s","requested_model":"%s","resolved_model":"%s","fallback_model":"%s","requested_effort":"%s","effort":"%s","effort_source":"%s","effort_capability_source":"%s","effort_substitution":"%s","substitution":"%s","status":"%s","reason":"%s","exit":%s,"output_path":"%s","output_digest":"%s","read_only_guarantee":"%s","access_mode":"%s","worktree":"%s","orchestrator_family":"%s","provider_family":"%s","model_family":"%s","endpoint_provider":"%s","identity_source":"%s","catalog_model":"%s","model_selection":"%s","route_alias":"%s","reviewer_id":"%s","risk_tier":"%s","model_override_tier":"%s","policy_override":"%s","cross_family":%s,"certification_eligible":%s}\n' \
+  printf '{"tool":"%s","adapter":"%s","adapter_gate":"direct-cli","execution_intent":"%s","model":"%s","requested_model":"%s","resolved_model":"%s","fallback_model":"%s","requested_effort":"%s","effort":"%s","effort_source":"%s","effort_capability_source":"%s","effort_substitution":"%s","substitution":"%s","status":"%s","reason":"%s","exit":%s,"output_path":"%s","output_digest":"%s","read_only_guarantee":"%s","provider_sandbox":%s,"access_mode":"%s","worktree":"%s","orchestrator_family":"%s","provider_family":"%s","model_family":"%s","endpoint_provider":"%s","identity_source":"%s","catalog_model":"%s","model_selection":"%s","route_alias":"%s","reviewer_id":"%s","risk_tier":"%s","model_override_tier":"%s","policy_override":"%s","cross_family":%s,"certification_eligible":%s}\n' \
     "$(printf '%s' "$tool" | json_escape)" \
     "$(printf '%s' "$tool" | json_escape)" \
     "$(printf '%s' "$INTENT" | json_escape)" \
@@ -474,6 +475,7 @@ emit_record() {
     "$(printf '%s' "$path" | json_escape)" \
     "$(printf '%s' "$output_digest" | json_escape)" \
     "$(printf '%s' "$guarantee" | json_escape)" \
+    "$AGY_SANDBOX_JSON" \
     "$(printf '%s' "$ACCESS_MODE" | json_escape)" \
     "$(printf '%s' "$WORKTREE" | json_escape)" \
     "$(printf '%s' "$ORCH_FAMILY" | json_escape)" \
@@ -714,6 +716,11 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
     status="unsafe_by_default"
     echo "agy refused: --dangerously-skip-permissions is not allowed on the read-only route" >"$diag"
     rc=1
+  elif [ "$tool" = "agy" ] && [ "${CF_DISPATCH_AGY_SANDBOX-0}" != "0" ] && [ "${CF_DISPATCH_AGY_SANDBOX-0}" != "1" ]; then
+    guarantee="none"
+    status="invalid_configuration"
+    echo "CF_DISPATCH_AGY_SANDBOX must be 0 or 1" >"$diag"
+    rc=1
   elif [ -n "$ORCH_FAMILY" ] && ! valid_family "$ORCH_FAMILY"; then
     guarantee="none"
     status="invalid_orchestrator_family"
@@ -911,7 +918,14 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
             rc=127
           else
             local -a agy_cmd
-            agy_cmd=(agy --output-format json --disable-slash-commands --sandbox)
+            agy_cmd=(agy --output-format json --disable-slash-commands)
+            # Ordinary work inherits the operator's Agy permissions. The optional
+            # terminal sandbox never establishes filesystem read-only enforcement.
+            AGY_SANDBOX_JSON=false
+            if [ "$INTENT" = "assurance" ] || [ "${CF_DISPATCH_AGY_SANDBOX-0}" = "1" ]; then
+              agy_cmd+=(--sandbox)
+              AGY_SANDBOX_JSON=true
+            fi
             # The caller's deadline wins, because it is the one the dispatch
             # owner will enforce by killing this process group. The environment
             # override stays as an escape hatch for a direct call that passes no
@@ -952,11 +966,18 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
               # prompt, ignores stdin and answers it -- exit 0, plausible prose,
               # wrong question. So the prompt goes in as one argv value, under
               # the shared single-argument ceiling.
-              if argv_prompt_too_large agy "$diag"; then
+              local agy_prompt agy_prompt_bytes
+              printf -v agy_prompt '%s\n%s\n%s\n\n%s\n%s' \
+                "Workspace root: $(pwd -P)" \
+                "Resolve relative paths against this root unless the task names another base; use absolute paths or an explicit cwd in terminal commands." \
+                "Do not modify files or run commands that mutate state." \
+                "Task:" "$PROMPT_ARG"
+              agy_prompt_bytes="$(printf '%s' "$agy_prompt" | wc -c | tr -d ' ')"
+              if argv_prompt_too_large agy "$diag" "$agy_prompt_bytes"; then
                 status="prompt_too_large"
                 rc=1
               else
-                agy_cmd+=(--print "$PROMPT_ARG")
+                agy_cmd+=(--print "$agy_prompt")
                 "${agy_cmd[@]}" >"$raw" 2>"$diag"; rc=$?
               fi
             fi
@@ -1015,9 +1036,16 @@ else:
         provider_status = envelope.get("status")
         response = envelope.get("response")
         error_value = envelope.get("error")
+        denied_actions = envelope.get("denied_actions")
         error = "" if error_value is None else str(error_value).strip()
         if not isinstance(provider_status, str) or not isinstance(response, str):
             status = "invalid_envelope"
+            response = ""
+        elif denied_actions is not None and not isinstance(denied_actions, list):
+            status = "invalid_envelope"
+            response = ""
+        elif denied_actions:
+            status = "permission_denied"
             response = ""
         elif provider_status.upper() == "SUCCESS" and error:
             status = "auth_or_quota_error" if auth.search(error) else "error"
@@ -1050,6 +1078,8 @@ clean_path.write_text(response if status == "ok" else "", encoding="utf-8")
 if status != "ok":
     notes = ["agy dispatch failed: status=%s exit=%d" % (status, exit_code)]
     detail = error if envelope else ""
+    if envelope and status == "permission_denied" and envelope.get("denied_actions"):
+        notes.append("provider denied_actions: " + json.dumps(envelope["denied_actions"], ensure_ascii=True)[:2000])
     if detail:
         notes.append("provider error: %s" % detail)
     elif (

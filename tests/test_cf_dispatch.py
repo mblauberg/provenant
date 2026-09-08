@@ -40,6 +40,7 @@ DISPATCH_SCHEMA = {
     "output_path",
     "output_digest",
     "read_only_guarantee",
+    "provider_sandbox",
     "orchestrator_family",
     "provider_family",
     "endpoint_provider",
@@ -846,7 +847,9 @@ def test_agy_direct_route_dispatches_json_sandbox_and_file_prompt():
         assert str(allowed_one) in args
         assert str(allowed_two) in args
         # agy has no file-backed prompt input, so the prompt is one argv value.
-        assert args[args.index("--print") + 1] == "Reply exactly AGY OK"
+        assert args[args.index("--print") + 1] == f"Workspace root: {tmp.resolve()}"
+        assert "Do not modify files or run commands that mutate state." in args
+        assert args[-1] == "Reply exactly AGY OK"
 
 
 def test_agy_task_class_uses_its_runtime_capability_producer():
@@ -1003,7 +1006,7 @@ def test_agy_oversized_prompt_fails_closed_instead_of_truncating():
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         out = tmp / "out.txt"
         big_prompt = tmp / "big-prompt.txt"
-        big_prompt.write_text("x" * 200_000, encoding="utf-8")
+        big_prompt.write_text("x" * 126_975, encoding="utf-8")
         result = subprocess.run(
             [
                 str(SCRIPT), "--tool", "agy",
@@ -1433,7 +1436,7 @@ def test_prompt_file_trailing_newlines_reach_argv_adapter_byte_for_byte():
         )
 
         assert result.returncode == 0, result.stderr + result.stdout
-        assert received.read_bytes() == prompt.read_bytes()
+        assert received.read_bytes().split(b"\nTask:\n", 1)[1] == prompt.read_bytes()
 
 
 def test_nul_prompt_file_is_rejected_before_provider_execution():
@@ -3084,3 +3087,103 @@ def test_timeout_seconds_rejects_a_value_that_is_not_a_positive_integer():
             assert result.returncode == 2, value
             assert "invalid timeout-seconds" in result.stderr, value
             assert "SHOULD NOT RUN" not in result.stderr, value
+
+
+def test_agy_denied_actions_never_publish_partial_success():
+    cases = [
+        ({}, "ok"),
+        ({"denied_actions": None}, "ok"),
+        ({"denied_actions": []}, "ok"),
+        ({"denied_actions": ["fixture permission refusal"]}, "permission_denied"),
+        ({"denied_actions": [{"tool": "fixture-read", "permission": "unsandboxed"}]}, "permission_denied"),
+        ({"denied_actions": "refused"}, "invalid_envelope"),
+        ({"denied_actions": False}, "invalid_envelope"),
+        ({"denied_actions": {}}, "invalid_envelope"),
+    ]
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "agy", """#!/usr/bin/env bash
+        if [ "$1" = "models" ]; then
+          printf 'gemini-3.8-flash-low\\n'
+          exit 0
+        fi
+        printf '%s' "$AGY_TEST_ENVELOPE"
+        """)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{env['PATH']}"
+        for index, (extra, expected) in enumerate(cases):
+            env["AGY_TEST_ENVELOPE"] = json.dumps({"status": "SUCCESS", "response": "PARTIAL RESULT", **extra})
+            out = tmp / f"result-{index}.txt"
+            result = subprocess.run(
+                [str(SCRIPT), "--intent", "ordinary", "--tool", "agy",
+                 "--model", "gemini-3.8-flash", "--effort", "low",
+                 "--out", str(out), "--prompt", "Read the fixture"],
+                cwd=tmp, env=env, text=True, capture_output=True,
+            )
+            record = json.loads(result.stdout)
+            assert record["status"] == expected, (extra, record)
+            assert (result.returncode == 0) == (expected == "ok")
+            if expected == "ok":
+                assert out.read_text() == "PARTIAL RESULT"
+            else:
+                assert "PARTIAL RESULT" not in out.read_text()
+                assert record["certification_eligible"] is False
+                if expected == "permission_denied":
+                    assert "denied_actions" in out.read_text()
+
+
+def test_agy_sandbox_setting_is_explicit_and_assurance_stays_bounded():
+    with tempfile.TemporaryDirectory(prefix="agy workspace ") as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        args_file = tmp / "args.json"
+        prompt = "Read the fixture: café\n\n"
+        prompt_file = tmp / "prompt.txt"
+        prompt_file.write_text(prompt, encoding="utf-8")
+        write_executable(bin_dir / "agy", f"""#!/usr/bin/env python3
+import json,sys
+from pathlib import Path
+if sys.argv[1:] == ['models']:
+    print('gemini-3.8-flash-low')
+else:
+    Path({str(args_file)!r}).write_text(json.dumps(sys.argv[1:]))
+    print(json.dumps({{'status':'SUCCESS','response':'READ OK'}}))
+""")
+        for index, (intent, setting, expected) in enumerate([
+            ("ordinary", None, False), ("ordinary", "0", False),
+            ("ordinary", "1", True), ("assurance", None, True),
+            ("assurance", "0", True), ("ordinary", "false", None),
+            ("ordinary", "", None),
+        ]):
+            env = fabric_free_env()
+            env.pop("CF_DISPATCH_AGY_SANDBOX", None)
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+            if setting is not None:
+                env["CF_DISPATCH_AGY_SANDBOX"] = setting
+            if args_file.exists():
+                args_file.unlink()
+            result = subprocess.run([
+                str(SCRIPT), "--intent", intent, "--tool", "agy", "--alias", "scout",
+                "--orchestrator-family", "openai", "--out", str(tmp / f"out-{index}"),
+                "--prompt-file", str(prompt_file),
+            ], cwd=tmp, env=env, text=True, capture_output=True)
+            record = json.loads(result.stdout)
+            if expected is None:
+                assert result.returncode != 0
+                assert record["status"] == "invalid_configuration"
+                assert not args_file.exists()
+                continue
+            assert result.returncode == 0, result.stdout + result.stderr
+            argv = json.loads(args_file.read_text())
+            assert ("--sandbox" in argv) is expected
+            assert "--dangerously-skip-permissions" not in argv
+            effective_prompt = argv[argv.index("--print") + 1]
+            assert effective_prompt.startswith(f"Workspace root: {tmp.resolve()}\n")
+            assert "Do not modify files or run commands that mutate state." in effective_prompt
+            assert effective_prompt.split("\nTask:\n", 1)[1] == prompt
+            assert record["provider_sandbox"] is expected
+            assert record["read_only_guarantee"] == "prompt_only"
+            assert record["certification_eligible"] is False

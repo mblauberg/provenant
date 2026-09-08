@@ -171,8 +171,10 @@ the same failure directly.
 
 **4. Verify the source survived.** Re-run the checksum. `agy` holds broad local write permissions,
 so "rewrite this document" can be taken literally and edit the original in place. The repository
-records agy as `prompt_only`, not `enforced`, because `--sandbox` is not a read-only boundary
-(agy 1.1.11, checked 2026-08-09), so nothing stops that but the checksum you are about to run.
+records Agy as `prompt_only`, not `enforced`: neither the operator's ordinary permissions nor
+`--sandbox` guarantees read-only access. The dispatcher offers `CF_DISPATCH_AGY_SANDBOX=1`
+and always adds the sandbox for assurance; this raw stylist invocation uses its own explicit
+flags. Verify the source checksum after either route.
 Editing the source is the one outcome this agent must never produce.
 
 If the checksum changed, say so immediately and prominently. Do not attempt to repair the file

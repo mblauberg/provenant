@@ -632,7 +632,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             family_aliases.get("aliases") if isinstance(family_aliases, dict) else None
         )
         if not fixed_family or not isinstance(family_aliases, dict):
-            if args.adapter != "agy" or not args.task_class or not capability_models:
+            if args.adapter != "agy" or not capability_models:
                 return emit_route(
                     {**base, "status": "model_required_for_broker", "endpoint_provider": endpoint},
                     2,

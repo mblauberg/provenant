@@ -117,15 +117,24 @@ On the default read-only route:
   separate capability and is never inferred for the CLI. The tier is pinned explicitly rather than left to
   `--ignore-user-config`, so the guarantee does not depend on that flag
   surviving a future edit.
-- `agy`: `--sandbox --output-format json --disable-slash-commands`, with
-  `--model`/`--effort` as separate flags and repeatable `--add-dir` for read
-  material (also settable as a colon-separated `CF_DISPATCH_AGY_ADD_DIR`).
-  These flags do not enforce read-only access, so the dispatcher reports
-  `prompt_only`: the prompt asks agy not to mutate, but local permissions can
-  still allow writes. A write probe under agy 1.1.10's dispatcher flags
-  succeeded and created the file, and `--mode plan` did the same. stdout and
-  stderr stay separate so a permission denial cannot masquerade as an empty
-  success. `--dangerously-skip-permissions` is refused.
+- `agy`: `--output-format json --disable-slash-commands`, with `--model`/`--effort`
+  as separate flags and repeatable `--add-dir` for read material (also settable
+  as a colon-separated `CF_DISPATCH_AGY_ADD_DIR`). Ordinary calls inherit the
+  operator's Agy permissions by default. Set `CF_DISPATCH_AGY_SANDBOX=1` in the
+  launching CLI or MCP server environment to add `--sandbox`; `0` is the ordinary
+  default, and other values fail before execution. Assurance always adds
+  `--sandbox`, including when this setting is `0`. The shared adapter applies
+  this setting to direct, batch and persistent MCP calls; no client-specific
+  routing option is needed. The receipt's `provider_sandbox` records the flag.
+  Neither mode enforces read-only access: `read_only_guarantee` stays
+  `prompt_only`, and certification remains ineligible. The adapter prefixes the
+  task with its actual workspace root, relative-path guidance and a no-mutation
+  instruction; operator permissions can still allow writes. It never adds
+  `--dangerously-skip-permissions`. A nonempty JSON `denied_actions` list or a
+  recognised stderr permission denial fails as `permission_denied`, retaining
+  diagnostics and suppressing partial success. Malformed denial fields fail as
+  `invalid_envelope`. Alias-only MCP routes use the freshly discovered Agy model
+  list and the configured preferred family, just as task-class routes do.
 - `cursor`: `--mode ask --sandbox enabled`; current help documents ask as
   read-only, while current headless plan mode can exit without an answer.
 - `kiro`: execution is disabled by checked-in compatibility policy. The legacy
@@ -313,7 +322,7 @@ Each CLI emits different wrappers: banners, JSONL, token footers, ANSI, stats, o
 dispatcher should produce:
 
 ```
-{"tool":"...","adapter":"...","model":"...","resolved_model":"...","catalog_model":"...","model_selection":"...","requested_effort":"...","effort":"...","effort_source":"...","effort_capability_source":"...","effort_substitution":"...","substitution":"...","status":"...","reason":"...","exit":0,"output_path":"...","output_digest":"sha256:...","read_only_guarantee":"enforced|oauth_safe_mode|best_effort|prompt_only|none","orchestrator_family":"...","provider_family":"...","model_family":"...","endpoint_provider":"...","identity_source":"...","risk_tier":"...","model_override_tier":"...","cross_family":true,"certification_eligible":true}
+{"tool":"...","adapter":"...","model":"...","resolved_model":"...","catalog_model":"...","model_selection":"...","requested_effort":"...","effort":"...","effort_source":"...","effort_capability_source":"...","effort_substitution":"...","substitution":"...","status":"...","reason":"...","exit":0,"output_path":"...","output_digest":"sha256:...","read_only_guarantee":"enforced|oauth_safe_mode|best_effort|prompt_only|none","provider_sandbox":null,"orchestrator_family":"...","provider_family":"...","model_family":"...","endpoint_provider":"...","identity_source":"...","risk_tier":"...","model_override_tier":"...","cross_family":true,"certification_eligible":true}
 ```
 
 `status` is the resolver/dispatcher vocabulary, not a hand-maintained subset:
