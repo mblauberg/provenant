@@ -603,7 +603,12 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         selected_override_model = (
             args.model_override.get("models", [""])[0] if args.model_override else ""
         )
-        if args.model_override and not model_has_alias(model, selected_override_model):
+        model_matches_override = (
+            model.casefold() == selected_override_model.casefold()
+            if selected_override_model.casefold().startswith("claude-")
+            else model_has_alias(model, selected_override_model)
+        )
+        if args.model_override and not model_matches_override:
             return emit_route({**base, "status": "risk_tier_model_mismatch"}, 1)
         if fixed_family and family != fixed_family:
             return emit_route(

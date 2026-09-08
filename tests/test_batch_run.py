@@ -297,7 +297,7 @@ def test_batch_forwards_lifecycle_risk_and_model_override_separately(tmp_path, m
     prompt.write_text('synthesise\n', encoding='utf-8')
     manifest = task_manifest(tmp_path, [{
         'id': 'fable', 'prompt_file': str(prompt), 'adapter': 'claude',
-        'model': 'fable', 'role': 'synthesis', 'risk_tier': 'routine',
+        'model': 'claude-fable-5-1', 'role': 'synthesis', 'risk_tier': 'routine',
         'model_override_tier': 'crucial',
     }])
     module = load_module()
@@ -362,6 +362,7 @@ def test_real_full_chain_keeps_lifecycle_risk_separate_from_model_override(
     tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
     run_dir = make_run(tmp_path, 'real-route-metadata')
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
@@ -379,7 +380,7 @@ def test_real_full_chain_keeps_lifecycle_risk_separate_from_model_override(
         'id': 'full-chain',
         'prompt_file': str(prompt),
         'adapter': 'claude',
-        'model': 'fable',
+        'model': 'claude-fable-5-1',
         'role': 'synthesis',
         'risk_tier': 'routine',
         'model_override_tier': 'crucial',
@@ -398,10 +399,10 @@ def test_real_full_chain_keeps_lifecycle_risk_separate_from_model_override(
     assert attempt['requested_route']['model_override_tier'] == 'crucial'
     assert attempt['route']['risk_tier'] == 'routine'
     assert attempt['route']['model_override_tier'] == 'crucial'
-    assert attempt['route']['resolved_model'] == 'fable'
+    assert attempt['route']['resolved_model'] == 'claude-fable-5-1'
     assert attempt['route']['route_alias'] == 'flagship'
-    assert attempt['route']['policy_override'] == 'crucial-fable-synthesis-adjudication'
-    assert '--model\nfable\n' in claude_args.read_text(encoding='utf-8')
+    assert attempt['route']['policy_override'] == 'crucial-claude-fable-5-1-synthesis-adjudication'
+    assert '--model\nclaude-fable-5-1\n' in claude_args.read_text(encoding='utf-8')
     assert '--effort\nmedium\n' in claude_args.read_text(encoding='utf-8')
 
 

@@ -1101,6 +1101,27 @@ def test_risk_tier_override_occupant_cannot_match_versioned_alias_candidate(
     assert route["status"] == "risk_tier_config_invalid"
 
 
+def test_versioned_fable_override_rejects_a_different_versioned_alias_candidate(
+    tmp_path, monkeypatch, capsys
+):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    family = catalog["families"]["anthropic"]
+    family["aliases"]["flagship"] = ["claude-fable-5-2"]
+    family["role_overrides"] = {}
+    catalog_path = tmp_path / "model-routing.json"
+    catalog_path.write_text(json.dumps(catalog))
+    monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+
+    result = router.main([
+        "resolve", "--adapter", "claude", "--alias", "flagship", "--role", "worker",
+    ])
+
+    route = json.loads(capsys.readouterr().out)
+    assert result == 2
+    assert route["status"] == "risk_tier_config_invalid"
+
+
 @pytest.mark.parametrize(
     ("occupant", "explicit_model"),
     (
@@ -1393,6 +1414,17 @@ def test_fable_5_1_is_the_only_medium_capped_anthropic_override_model(risk_tier)
     assert accepted_route["resolved_model"] == "claude-fable-5-1"
     assert rejected.returncode == 1
     assert rejected_route["status"] == "risk_tier_model_mismatch"
+
+
+def test_fable_5_1_override_rejects_a_different_version():
+    result, route = resolve(
+        "--adapter", "claude", "--alias", "flagship", "--role", "synthesis",
+        "--model-override-tier", "crucial", "--model", "claude-fable-5-10",
+        "--effort", "medium", "--available-model", "claude-fable-5-10",
+    )
+
+    assert result.returncode == 1
+    assert route["status"] == "risk_tier_model_mismatch"
 
 
 @pytest.mark.parametrize(
