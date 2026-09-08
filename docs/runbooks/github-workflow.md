@@ -221,7 +221,7 @@ repository practice tracked by #807.
 
 ```sh
 pr=<number>
-author_email="$(gh api user --jq '\"\(.id)+\(.login)@users.noreply.github.com\"')"
+author_email="$(gh api user --jq '"\(.id)+\(.login)@users.noreply.github.com"')"
 gh pr merge "$pr" --merge --author-email "$author_email"
 merge_sha="$(gh pr view "$pr" --json mergeCommit --jq '.mergeCommit.oid')"
 test "$(gh api "repos/{owner}/{repo}/commits/$merge_sha" --jq '.commit.author.email')" = "$author_email"
