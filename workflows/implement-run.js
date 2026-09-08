@@ -392,7 +392,7 @@ const boot = await agent(
     'run_dir_init.sh scaffolds findings/ crossfamily/ traces/ but NOT patches/).\n' +
     '   If run_dir_init.sh is unavailable or fails, return no runDir and stop; do not create an incomplete fallback.\n' +
     `   Copy the global deliver RUN.template.json to <abs run-dir>/RUN.json immediately. Set contract=delivery-run, ` +
-    `schema_version=1, profile=software, risk_tier=${receiptRisk}, status=executing, approved intent/design/authority evidence. ` +
+    `schema_version=1, profile=software, risk_tier=${receiptRisk}, and approved intent/design/authority evidence. ` +
     `Fill every risk_assessment factor from config/risk-policy.json conservatively; never lower the supplied tier. ` +
     `Fill authority from this human-requested task only: bounded source/artifact paths (when the run dir is inside repoRoot, ` +
     `artifact_write_paths must include that exact repo-relative run-dir subtree), expiry, prohibited paths/actions, ` +
@@ -763,13 +763,15 @@ const apply = await agent(
     `\nPatches: ${patchDigest}\nReview verdicts and dispatcher lineage: ${JSON.stringify(reviews)}\n` +
     `Verify outcome: ${JSON.stringify(verify || {})}\nRepo root: ${boot.repoRoot}\n` +
     `Before mutating, read the existing live ${runDir}/RUN.json receipt created at bootstrap; do not recreate or replace it. ` +
-    `For effectiveRisk=terminal, apply nothing: preserve recommendation evidence, leave status=executing/current_slice=awaiting-apply-approval, ` +
+    `For effectiveRisk=terminal, apply nothing: preserve recommendation evidence, set checkpoint ` +
+    `current_slice=awaiting-apply-approval/next_action=request explicit apply authority/in_flight=[], ` +
     `return machineGatePassed=false, and do not pretend the final implementation gate ran. ` +
-    `For non-terminal runs only, after all patch apply/escalate decisions and narrow re-checks, update status=awaiting_acceptance, the human-approved ` +
+    `For non-terminal runs only, after all patch apply/escalate decisions and narrow re-checks, update the human-approved ` +
     `spec/design status, risk/authority profile, assurance receipt/status, acceptance criteria with evidence, ` +
     `implementation outcome with repo_root=${boot.repoRoot}, base_revision=${boot.baseRevision}, preexisting_paths=[], ` +
     `every applied path's add|modify|delete operation and SHA-256, and the validator's canonical result_revision; exact verification results, ` +
-    `repair_cycles=${repairCycles}, current_slice, next_action, empty in_flight IDs and artifact_paths. ` +
+    `repair_cycles=${repairCycles}, checkpoint current_slice=human-gate/next_action=request explicit human acceptance/in_flight=[] and artifact_paths. ` +
+    `Keep human_gates.acceptance.status=pending; only explicit human acceptance may set that gate to approved. ` +
     `Then run the global session context_audit.py read-only and record context_hygiene status, audit command + exit code, ` +
     `graduation/archive/cleanup actions and retained recovery artifacts. Never remove unknown or pre-existing files. ` +
     `Update ${runDir}/RUN_RECEIPT.json task/owner, artifact retention and owned/handed-off pane fields; leave its ` +

@@ -212,6 +212,25 @@ either succeeded or was skipped by the path filter, and fails closed on any
 failure or cancellation. "CI is green" means exactly this one context; no
 other check is required.
 
+### Merge author identity
+
+For an agent-initiated merge, derive the authenticated GitHub account's noreply
+address at command time, pass it to `gh pr merge --author-email`, then verify
+the generated merge commit's recorded author. This is the forward-only
+repository practice tracked by #807.
+
+```sh
+pr=<number>
+author_email="$(gh api user --jq '\"\(.id)+\(.login)@users.noreply.github.com\"')"
+gh pr merge "$pr" --merge --author-email "$author_email"
+merge_sha="$(gh pr view "$pr" --json mergeCommit --jq '.mergeCommit.oid')"
+test "$(gh api "repos/{owner}/{repo}/commits/$merge_sha" --jq '.commit.author.email')" = "$author_email"
+```
+
+For an auto-merge, run the last two lines after GitHub has created the merge
+commit. A mismatch is a publication check failure: stop before claiming the
+merge is ready and record the generated author evidence.
+
 Read that check's state correctly. `gh pr view <n> --json statusCheckRollup`
 leaves `.conclusion` as an empty string while a check is still running, so a
 `jq` expression that only guards against `null` treats a running check as
