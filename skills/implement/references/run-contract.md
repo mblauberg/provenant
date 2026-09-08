@@ -13,16 +13,8 @@ review. Stochastic or judgement-bearing product behaviour also links an
 `evaluate` receipt.
 
 The receipt is flat: it records approvals, artifacts, evidence, reviews and
-gates, not a transition history. Record a repair with
-`delivery_receipt.py repair --reason ...`, under a budget scaled by risk tier:
-`routine` allows 2 cycles, `substantial` 4, and `crucial` and `terminal` 5.
-`validate_delivery.py` enforces the applicable budget against
-`repair_cycles`. The budget is a guardrail against unbounded loops, not
-a target to spend — converge as soon as checks and review pass. Exceeding the
-budget means the run is stuck: stop and return evidence to the user or `scope`,
-the same trigger `docs/runbooks/github-workflow.md` uses for the merge-gate
-escalation. A new requirement, authority expansion or one-way-door decision
-returns to `scope`; it is not a repair.
+gates, not a transition history. The `deliver` receipt contract owns repair
+recording, its shared risk-tier budget and the back-to-`scope` boundary.
 
 Validate from the project root:
 

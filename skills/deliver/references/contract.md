@@ -12,6 +12,16 @@ from the gates the receipt records: `intent.approval`, `design.status`,
 `observation.status`. Each gate demands its own evidence; none of them
 certifies an ordering the writer could not prove.
 
+## Repair budget
+
+Record each repair with `delivery_receipt.py repair --reason ...`. The shared
+risk-tier ceiling is two cycles for `routine`, four for `substantial`, and five
+for `crucial` or `terminal`. `validate_delivery.py` enforces
+`repair_cycles`. The ceiling is a guardrail, not a target: stop and return
+evidence to the user or `scope` when it is exceeded. A new requirement,
+authority expansion or one-way-door decision returns to `scope`; it is not a
+repair.
+
 ## Fabric relationship binding
 
 New receipts declare the optional-in-v1 `fabric_relationships` object. Omission

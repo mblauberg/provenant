@@ -9,10 +9,9 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
 
 Decompose -> waves -> reduce -> gate.
 
-Claude subagent definitions are versioned separately from skill provider
-metadata in `agents/`: `agy-reviewer.md`, `agy-stylist.md`, `codex-analyst.md`
-and `codex-implementer.md`. `install-harness --platform claude` manages them
-under `~/.claude/agents/`.
+Provider-specific adapter definitions and installer mechanics are owned by
+their adapter and installer surfaces; discover their current capabilities at
+runtime.
 
 ## Rules
 
@@ -83,9 +82,10 @@ passing topology.
 
 ## Worker Contract
 
-Every worker gets task class, route (`tier`, `model`, `effort`, route receipt),
-identity, objective, authority, paths, output, checks, stop and budget;
-validate payloads, never infer permission. See
+Every worker gets identity, objective, authority, paths, output, checks, stop
+and budget. Where an adapter exposes them, record task class and route (`tier`,
+`model`, `effort`, receipt); an ordinary alias-only route records its alias and
+capability limit. Validate payloads, never infer permission. See
 [orchestration-contract.md](references/orchestration-contract.md).
 
 ## Autonomous-implementation mode
@@ -109,8 +109,6 @@ Load relevant [references](references/) only:
 coordination is unavailable, record its result as a named degraded artifact;
 it is not itself a Fabric round trip.
 
-## Adapter-absent path
+## Portable artifact
 
-Without adapters, emit the skill-owned [portable kind](portable-workflow.v1.json).
-It proves context only, not evidence, route state or ownership. Keep context
-separate. Validate `accepted_artifact_identity`.
+Use the skill-owned [coordination summary schema](portable-workflow.v1.json).

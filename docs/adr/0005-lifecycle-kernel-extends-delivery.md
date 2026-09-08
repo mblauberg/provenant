@@ -37,3 +37,16 @@ not a required executable minimum.
 - Amendment-history cleanup follows the [standalone semantic specification
   decision](0009-standalone-semantic-specifications.md); current contracts are
   discovered through the [specification index](../specs/README.md).
+
+## Risks and controls
+
+| Risk | Control |
+|---|---|
+| Kernel becomes a bloated mega-skill | Stable state machine only; profiles and references hold depth. |
+| Generic gates weaken domain requirements | Profiles may strengthen only; high-stakes release is always user action. |
+| Receipt ceremony overwhelms small tasks | Risk threshold; routine one-shot work may use an ephemeral receipt or none. |
+| Local history escapes its requested scope | Read in place, never commit raw history and keep sharing/export behind explicit destination and content authority. |
+| Evals optimise to their own fixtures | Conditional held-outs, repeated trials, mixed graders and user calibration. |
+| Multi-agent cost exceeds value | Decomposability gate, one writer and proportional lanes. |
+| Concurrent agent-fabric work conflicts | Fabric coordinates; one writer and explicit write partitions protect shared surfaces. |
+| Research becomes stale | Dated evidence cut-off, 90-day decision expiry and retrospective refresh proposal. |

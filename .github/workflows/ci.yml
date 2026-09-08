@@ -79,6 +79,7 @@ jobs:
               - '.gitignore'
               - 'ACKNOWLEDGEMENTS.md'
               - 'AGENTS.md'
+              - 'CLAUDE.md'
               - 'HARNESS.md'
               - 'LICENSE'
               - 'LICENSES/**'

@@ -73,10 +73,6 @@ material cross-project changes return through user-approved scope. Finish with
 a table: finding, evidence, root cause, change, regression gate,
 owner/destination, status (`promote`, `experiment`, `defer`, `reject`).
 
-## Adapter-absent path
+## Portable artifact
 
-Without optional Console, Herdr or GitHub, use canonical project artifacts and
-emit the skill-owned kind in
-[portable-workflow.v1.json](portable-workflow.v1.json). It proves context
-existence only, not retrospective evidence. Keep context separate. Improvements
-require authority.
+Use the skill-owned [retrospective receipt schema](portable-workflow.v1.json).

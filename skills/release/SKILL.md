@@ -76,9 +76,6 @@ Users own production promotion, external sending, public publication,
 irreversible disclosure or data changes, and acceptance of degraded safeguards.
 Agent may prepare and verify; it may execute only within explicit authority.
 
-## Adapter-absent path
+## Portable artifact
 
-Console, Herdr and GitHub are optional. Use canonical project artifacts and
-emit the skill-owned artifact kind in
-[portable-workflow.v1.json](portable-workflow.v1.json). It proves context only,
-not release evidence, authority or deployment. Keep canonical context separate.
+Use the skill-owned [promotion receipt schema](portable-workflow.v1.json).

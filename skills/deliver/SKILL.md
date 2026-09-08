@@ -1,6 +1,6 @@
 ---
 name: deliver
-description: "Use for taking an approved research, analysis, document, or agent-product outcome through evidence, review, and user acceptance. Not for software-only work, unsettled scope, or release; use implement, scope, or release."
+description: "Use for taking an approved research, analysis, document, or agent-product outcome through evidence, review, and user acceptance. For a software change, unsettled scope, or release, use implement, scope, or release."
 ---
 
 # Deliver
@@ -48,8 +48,9 @@ inventing.
    Substantial+ follows `HARNESS.md`: targeted lenses plus the other primary;
    distinct-family review when available, with terminal pressure made
    stronger and skipped optional legs recorded.
-6. Repair under a risk-tier scaled budget defined by the `implement` skill's
-   run contract. Scope/design drift returns to the user gate.
+6. Repair under the risk-tier scaled budget in [the receipt
+   contract](references/contract.md). Scope/design drift returns to the user
+   gate.
 7. Validate from the project root with
    `"$(provenant root)/skills/deliver/scripts/validate_delivery.py"
    .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes` (plus
@@ -74,11 +75,6 @@ link to it but never replace its canonical acceptance evidence.
 For audience-ready HTML, apply the
 [interactive-document boundary](references/interactive-documents.md).
 
-## Adapter-absent path
+## Portable artifact
 
-Console, Herdr and GitHub are optional. Continue from canonical project
-artifacts and emit the skill-owned artifact kind in
-[portable-workflow.v1.json](portable-workflow.v1.json). That filesystem
-artifact proves only that a context object existed. Retain and identify the
-canonical context separately; this output is not itself workflow evidence,
-acceptance or release authority.
+Use the skill-owned [delivery receipt schema](portable-workflow.v1.json).
