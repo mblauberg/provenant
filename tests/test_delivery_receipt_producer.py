@@ -23,6 +23,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 PRODUCER = ROOT / "skills" / "deliver" / "scripts" / "delivery_receipt.py"
 VALIDATOR = ROOT / "skills" / "deliver" / "scripts" / "validate_delivery.py"
+CHECKPOINT = ROOT / "skills" / "implement" / "scripts" / "checkpoint_run.py"
 
 
 def load(path: Path, name: str):
@@ -39,6 +40,10 @@ def load_producer():
 
 def load_validator():
     return load(VALIDATOR, "validate_delivery_for_producer")
+
+
+def load_checkpoint():
+    return load(CHECKPOINT, "checkpoint_run_for_producer")
 
 
 def run_cli(workspace: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -421,6 +426,35 @@ def test_producer_run_reaches_a_validator_clean_closed_receipt(tmp_path):
     receipt = json.loads((run_dir / "RUN.json").read_text())
     assert receipt["human_gates"]["release"]["status"] == "approved"
     assert receipt["observation"]["status"] == "pass"
+
+
+def test_implement_checkpoints_preserve_a_complete_producer_receipt(tmp_path):
+    """A real open receipt survives successive implement recovery checkpoints."""
+    run_dir = deliver_run(tmp_path)
+    checkpoint = load_checkpoint()
+
+    first = checkpoint.update(
+        run_dir / "RUN.json", "review", "run verification", ["reviewer-2"],
+        ["review.md"],
+    )
+    second = checkpoint.update(
+        run_dir / "RUN.json", "human-gate", "request human acceptance", [], [],
+    )
+
+    assert first == {"path": str(run_dir / "RUN.json"), "generation": 2, "verified": True}
+    assert second == {"path": str(run_dir / "RUN.json"), "generation": 3, "verified": True}
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    assert receipt["checkpoint"] == {
+        "generation": 3,
+        "current_slice": "human-gate",
+        "next_action": "request human acceptance",
+        "in_flight": [],
+        "artifact_paths": ["RUN.json", "intent.md", "review.md"],
+    }
+    assert "updated_at" not in receipt
+
+    validated = validate(run_dir, tmp_path)
+    assert validated.returncode == 0, validated.stderr + validated.stdout
 
 
 # --------------------------------------------------------------------------
