@@ -721,6 +721,36 @@ def test_incomplete_success_receipt_is_fail_closed(tmp_path: Path, monkeypatch) 
     assert record["failure_code"] == "adapter_receipt_invalid"
 
 
+def test_reentry_rejects_tampered_success_adapter_receipt(tmp_path: Path, monkeypatch) -> None:
+    """Manifest repair is intentionally narrow; re-entry still revalidates success."""
+    run_dir = make_run(tmp_path, "reentry-invalid-success")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("revalidate retained success\n", encoding="utf-8")
+    adapter = tmp_path / "success-adapter"
+    write_success_adapter(adapter)
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    monkeypatch.chdir(tmp_path)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "reentry", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    assert module.dispatch(args) == 0
+    attempt = run_dir / "dispatch/tasks/reentry/attempt-001/attempt.json"
+    receipt = attempt.with_name("adapter-receipt.json")
+    receipt.write_text("{}\n", encoding="utf-8")
+    record = json.loads(attempt.read_text(encoding="utf-8"))
+    record["route"]["adapter_receipt"]["digest"] = "sha256:" + hashlib.sha256(receipt.read_bytes()).hexdigest()
+    attempt.write_text(json.dumps(record, sort_keys=True) + "\n", encoding="utf-8")
+    attempt.with_name("attempt.sha256").write_text(
+        "sha256:" + hashlib.sha256(attempt.read_bytes()).hexdigest() + "  attempt.json\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(module.AttemptEvidenceError, match="successful adapter receipt is invalid"):
+        module.reconcile_manifest(run_dir)
+
+
 def test_typed_adapter_auth_and_missing_tool_outcomes_are_preserved(tmp_path: Path, monkeypatch) -> None:
     module = load_dispatch_module()
     prompt = tmp_path / "prompt.md"

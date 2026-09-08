@@ -113,23 +113,30 @@ def fake_dispatch(path: Path) -> None:
         stderr_path = attempt_dir / 'stderr.log'
         stderr_path.write_text('', encoding='utf-8')
         adapter_path = attempt_dir / 'adapter-receipt.json'
+        result = None
+        result_path = attempt_dir / 'result.md'
+        if status == 'succeeded' and values.get('missing_result') != '1':
+            result_path.write_text('OK\\n', encoding='utf-8')
+            result = {'path': str(result_path.relative_to(ns.run_dir)),
+                      'digest': 'sha256:' + hashlib.sha256(result_path.read_bytes()).hexdigest()}
         adapter = {'tool': ns.adapter, 'adapter': ns.adapter, 'execution_intent': ns.intent,
                    'resolved_model': 'fixture-model', 'provider_family': ns.adapter,
                    'model_family': ns.adapter, 'endpoint_provider': ns.adapter,
                    'identity_source': 'fixture', 'status': 'ok', 'exit': 0,
+                   'output_path': str(result_path),
+                   'output_digest': result['digest'] if result is not None else '',
                    'read_only_guarantee': 'none', 'cross_family': False,
                    'certification_eligible': False}
+        if values.get('malformed_adapter') == '1':
+            adapter = {}
         adapter_path.write_text(json.dumps(adapter) + '\\n', encoding='utf-8')
-        result = None
-        result_path = attempt_dir / 'result.md'
-        if status == 'succeeded':
-            result_path.write_text('OK\\n', encoding='utf-8')
-            result = {'path': str(result_path.relative_to(ns.run_dir)),
-                      'digest': 'sha256:' + hashlib.sha256(result_path.read_bytes()).hexdigest()}
-        route = {**adapter, 'adapter_receipt': {'path': str(adapter_path.relative_to(ns.run_dir)),
+        route = {'adapter': ns.adapter, 'execution_intent': ns.intent,
+                 'provider_family': ns.adapter, 'resolved_model': 'fixture-model',
+                 'adapter_receipt': {'path': str(adapter_path.relative_to(ns.run_dir)),
                 'digest': 'sha256:' + hashlib.sha256(adapter_path.read_bytes()).hexdigest()}}
         attempt_rel = str((attempt_dir / 'attempt.json').relative_to(ns.run_dir))
-        attempt = {'schema_version': 1, 'record_type': 'dispatch-attempt', 'task_id': ns.task_id, 'attempt_id': 'attempt-001',
+        attempt = {'schema_version': 1, 'record_type': 'dispatch-attempt', 'run_id': pathlib.Path(ns.run_dir).name,
+                   'task_id': ns.task_id, 'attempt_id': 'attempt-001',
                    'attempt_path': attempt_rel, 'status': status, 'outcome': outcome,
                    'finished_at': '2026-08-29T00:00:00Z',
                    'requested_route': {'intent': ns.intent, 'adapter': ns.adapter,
@@ -144,6 +151,7 @@ def fake_dispatch(path: Path) -> None:
                    'result': result,
                    'stderr': {'path': str(stderr_path.relative_to(ns.run_dir)),
                               'digest': 'sha256:' + hashlib.sha256(stderr_path.read_bytes()).hexdigest()},
+                   'process': {'observed_exit': True, 'exit_code': 0},
                    'attempt_digest_path': str((attempt_dir / 'attempt.sha256').relative_to(ns.run_dir))}
         if question is not None:
             attempt['question'] = question
@@ -527,6 +535,30 @@ def test_retained_non_success_attempt_allows_partial_route_and_question(tmp_path
     wrong_record = {**record, 'attempt_path': wrong_rel, 'attempt_digest': module.digest(wrong_path)}
     with pytest.raises(module.BatchInputError, match='identity'):
         module._validate_child_record(current, wrong_record, run_dir, -15)
+
+
+@pytest.mark.parametrize('failure', ['missing_result', 'malformed_adapter'])
+def test_batch_rejects_incomplete_success_evidence_before_summary(tmp_path, monkeypatch, failure):
+    """A claimed success needs a retained result and a successful adapter receipt."""
+    monkeypatch.chdir(tmp_path)
+    run_dir = make_run(tmp_path, f'incomplete-success-{failure}')
+    dispatch = tmp_path / 'fake-dispatch'
+    fake_dispatch(dispatch)
+    module = load_module()
+    module.DISPATCH_RUN = dispatch
+    counter = tmp_path / 'counter'
+    counter.write_text('0', encoding='utf-8')
+    monkeypatch.setenv('BATCH_COUNTER', str(counter))
+    manifest = task_manifest(tmp_path, [task(tmp_path, 'probe', **{failure: '1'})])
+
+    assert module.batch(args(module, run_dir, manifest, 1)) == 1
+
+    summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
+    assert summary['tasks'] == [{
+        'task_id': 'probe', 'status': 'failed', 'outcome': 'child_receipt_invalid',
+        'dispatch_exit': 0, 'receipt_invalid': True,
+        'message': summary['tasks'][0]['message'],
+    }]
 
 
 def test_real_dispatch_timeout_retains_typed_non_success_attempt(tmp_path, monkeypatch):
