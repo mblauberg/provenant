@@ -247,7 +247,8 @@ slices.** It is the sole OpenAI flagship candidate: Sol is not an automatic
 fallback. Give Astra the work that is genuinely hard or where a miss is
 expensive; everything below that belongs to Luna at raised effort.
 
-**Anthropic minds are for judgement, not volume.** Keep Opus and Fable for
+**Anthropic minds are for judgement, not volume.** Keep Opus and Claude Fable
+5.1 (`claude-fable-5-1`) for
 chairing, adjudication, synthesis and critical review, and reach for them less
 often on lower-stakes tasks: Haiku and Sonnet are not priced well enough to be
 the cheap alternative, so menial and high-token slices route to Luna instead.
@@ -308,7 +309,7 @@ assessment; until then, route these on the hard axis alone.
 |---|---|---|
 | Haiku | `anthropic` scout alias | needs owner review |
 | GPT-5.6 Terra | `openai` workhorse alias | needs owner review |
-| Fable | `anthropic` crucial and terminal override for synthesis and adjudication, effort capped at medium | needs owner review |
+| Claude Fable 5.1 | `anthropic` crucial and terminal override for synthesis and adjudication, effort capped at medium | needs owner review |
 | Grok | reachable through the `cursor` adapter, `xai` family | needs owner review |
 | Cursor Composer | reachable through the `cursor` adapter | needs owner review |
 | DeepSeek | `deepseek` endpoint, reached through the `claude` adapter | needs owner review |

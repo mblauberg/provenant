@@ -89,7 +89,8 @@ string silently degrades an eligibility gate into a substring test. A task-class
 route whose effort differs from its probe policy's `minimum_effort` fails as
 `task_class_config_invalid`: the probe evidences exactly one effort, so a
 divergence is a configuration error and must not surface as the provider fault
-`effort_capability_unverified`. Fable currently occupies both configured tiers.
+`effort_capability_unverified`. Claude Fable 5.1 (`claude-fable-5-1`) currently
+occupies both configured tiers.
 Astra leads for Codex and is the only OpenAI flagship candidate, so Sol cannot
 be selected as a silent fallback. The native Codex app exposes Astra at `low`
 through `ultra`; its API route supports through `max`. Runtime capability

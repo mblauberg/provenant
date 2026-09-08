@@ -26,14 +26,14 @@
         "crucial": {
           "roles": ["synthesis", "adjudication"],
           "alias": "flagship",
-          "models": ["fable"],
+          "models": ["claude-fable-5-1"],
           "default_effort": "medium",
           "maximum_effort": "medium"
         },
         "terminal": {
           "roles": ["synthesis", "adjudication"],
           "alias": "flagship",
-          "models": ["fable"],
+          "models": ["claude-fable-5-1"],
           "default_effort": "medium",
           "maximum_effort": "medium"
         }

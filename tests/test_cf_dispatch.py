@@ -438,7 +438,7 @@ def test_claude_other_primary_uses_opus_without_implicit_fable_route():
     assert output.strip() == "OPUS OK"
 
 
-def test_claude_crucial_synthesis_dispatches_explicit_fable_override():
+def test_claude_crucial_synthesis_dispatches_explicit_fable_5_1_override():
     stub = """\
         #!/usr/bin/env bash
         model=""
@@ -446,7 +446,7 @@ def test_claude_crucial_synthesis_dispatches_explicit_fable_override():
           if [ "$1" = "--model" ]; then model="$2"; shift 2; else shift; fi
         done
         cat >/dev/null
-        [ "$model" = "fable" ] || exit 9
+        [ "$model" = "claude-fable-5-1" ] || exit 9
         echo "FABLE OK"
     """
     result, record, output = run_dispatch_with_stub(
@@ -454,14 +454,14 @@ def test_claude_crucial_synthesis_dispatches_explicit_fable_override():
         role="synthesis",
         extra_args=[
             "--risk-tier", "crucial", "--model-override-tier", "crucial",
-            "--model", "fable", "--effort", "medium",
+            "--model", "claude-fable-5-1", "--effort", "medium",
         ],
     )
     assert result.returncode == 0, result.output
-    assert record["resolved_model"] == "fable"
+    assert record["resolved_model"] == "claude-fable-5-1"
     assert record["risk_tier"] == "crucial"
     assert record["model_override_tier"] == "crucial"
-    assert record["policy_override"] == "crucial-fable-synthesis-adjudication"
+    assert record["policy_override"] == "crucial-claude-fable-5-1-synthesis-adjudication"
     assert output.strip() == "FABLE OK"
 
 
