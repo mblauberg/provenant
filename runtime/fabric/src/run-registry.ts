@@ -291,10 +291,10 @@ export async function terminateRecordedRun(
  */
 export async function reapOrphanedRuns(workspace: string): Promise<TerminationOutcome[]> {
   const orphans = listRecordedRuns(workspace).filter((run) => run.orphaned);
-  return await Promise.all(orphans.map(async (run) => ({
-    ...await terminateRecordedRun(run),
-    reason: "host gone",
-  })));
+  return await Promise.all(orphans.map(async (run) => {
+    const outcome = await terminateRecordedRun(run);
+    return outcome.reason === "still running" ? outcome : { ...outcome, reason: "host gone" };
+  }));
 }
 
 /**

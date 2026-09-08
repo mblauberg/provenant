@@ -23,7 +23,6 @@ import {
   pruneDispatchRuns,
   reapOrphanedRuns,
   readProviderRecord,
-  removeOwnerRecord,
   signalRunGroup,
   terminateRecordedRun,
   writeOwnerRecord,
@@ -352,11 +351,12 @@ function startOwner(
     child.once("error", (error) => { spawnError = error.message; });
     child.once("close", (exitCode, signal) => {
       activeOwners.delete(started);
-      removeOwnerRecord(runDir);
-      for (const path of cleanupPaths) {
-        try { unlinkSync(path); } catch { /* Exact staging input may already be absent. */ }
-      }
-      resolveCompletion({ exitCode, signal, ...(spawnError === undefined ? {} : { error: spawnError }) });
+      void terminateStartedRun(started).finally(() => {
+        for (const path of cleanupPaths) {
+          try { unlinkSync(path); } catch { /* Exact staging input may already be absent. */ }
+        }
+        resolveCompletion({ exitCode, signal, ...(spawnError === undefined ? {} : { error: spawnError }) });
+      });
     });
   });
   started = {
@@ -420,6 +420,18 @@ function recordedRun(started: StartedOwner): RecordedRun | undefined {
   };
 }
 
+/** Use the durable record even after its owner exits, while a provider may remain. */
+async function terminateStartedRun(started: StartedOwner): Promise<void> {
+  const run = recordedRun(started);
+  if (run !== undefined) {
+    await terminateRecordedRun(run);
+    return;
+  }
+  if (started.child.exitCode === null && started.child.signalCode === null) {
+    started.child.kill("SIGTERM");
+  }
+}
+
 async function requestOwnerCancellation(started: StartedOwner): Promise<void> {
   if (started.cancellation !== undefined) return await started.cancellation;
   started.cancellation = (async () => {
@@ -428,7 +440,10 @@ async function requestOwnerCancellation(started: StartedOwner): Promise<void> {
       && !cancellationTargetReady(started.cancelSpec.targetDirectory) && Date.now() < deadline) {
       await new Promise((resolveWait) => setTimeout(resolveWait, 25));
     }
-    if (started.child.exitCode !== null || started.child.signalCode !== null) return;
+    if (started.child.exitCode !== null || started.child.signalCode !== null) {
+      await terminateStartedRun(started);
+      return;
+    }
     if (cancellationTargetReady(started.cancelSpec.targetDirectory)) {
       try {
         await execFileAsync(started.cancelSpec.command, started.cancelSpec.args, {
@@ -441,15 +456,9 @@ async function requestOwnerCancellation(started: StartedOwner): Promise<void> {
         // The owner still receives a bounded graceful signal below.
       }
     }
-    if (started.child.exitCode !== null || started.child.signalCode !== null) return;
     // The owner leads a process group and may hold a provider in a session of
-    // its own. Signalling the pid alone would leave both behind.
-    const run = recordedRun(started);
-    if (run === undefined) {
-      started.child.kill("SIGTERM");
-      return;
-    }
-    await terminateRecordedRun(run);
+    // its own. Its durable record remains actionable after the owner exits.
+    await terminateStartedRun(started);
   })();
   await started.cancellation;
 }
