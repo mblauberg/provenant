@@ -2,8 +2,8 @@
 // A dispatch owner that behaves like the real one where run lifecycle is
 // concerned: it spawns a provider child in its own process group, records both
 // pids in the run directory, and stays alive until something signals it.
-import { spawn } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 
 const value = (flag) => {
@@ -39,9 +39,26 @@ const startProvider = () => {
   ], { stdio: "ignore" });
   provider.unref();
   writeFileSync(join(runDir, "provider.pid"), `${provider.pid}\n`);
+  const providerStartedAt = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(provider.pid)], {
+    encoding: "utf8",
+  }).trim();
+  writeFileSync(join(runDir, "dispatch-provider.json"), JSON.stringify({
+    run_token: process.env.PROVENANT_RUN_TOKEN,
+    provider_pid: provider.pid,
+    provider_pgid: process.pid,
+    provider_started_at: providerStartedAt,
+  }) + "\n");
 };
 
-const sleepUntilSignalled = () => {
+const sleepUntilSignalled = ({ ignoreTerm = false } = {}) => {
+  if (ignoreTerm) {
+    process.on("SIGTERM", () => {
+      writeFileSync(join(runDir, "term-ignored.marker"), "SIGTERM\n");
+    });
+    writeFileSync(join(runDir, "sleeping.pid"), `${process.pid}\n`);
+    setInterval(() => undefined, 1000);
+    return;
+  }
   process.once("SIGTERM", () => {
     writeFileSync(join(runDir, "cancelled.marker"), "cancelled\n");
     process.exit(143);
@@ -64,6 +81,20 @@ if (owner === "dispatch_run.py") {
     mkdirSync(join(runDir, "dispatch", "tasks", taskId, "attempt-001"), { recursive: true });
     startProvider();
     sleepUntilSignalled();
+  } else if (prompt === "ignore SIGTERM") {
+    mkdirSync(join(runDir, "dispatch", "tasks", taskId, "attempt-001"), { recursive: true });
+    startProvider();
+    sleepUntilSignalled({ ignoreTerm: true });
+  } else if (prompt === "exit with provider") {
+    mkdirSync(join(runDir, "dispatch", "tasks", taskId, "attempt-001"), { recursive: true });
+    startProvider();
+    // Let Fabric persist the owner record before this owner disappears.
+    const ownerRecord = join(runDir, "dispatch-owner.json");
+    const waitForOwnerRecord = setInterval(() => {
+      if (!existsSync(ownerRecord)) return;
+      clearInterval(waitForOwnerRecord);
+      process.exit(0);
+    }, 10);
   } else if (prompt === "sleep before the attempt directory") {
     // Deliberately no attempt directory: this is the cold-start shape, where
     // the cooperative canceller has nothing to act on.
