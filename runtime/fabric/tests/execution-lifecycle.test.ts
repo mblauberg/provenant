@@ -204,6 +204,38 @@ describe("owner records", () => {
     expect(alive(providerPid)).toBe(false);
     expect(existsSync(join(runDir, OWNER_RECORD_NAME))).toBe(false);
   }, 40_000);
+
+  it("holds owner cleanup through host shutdown until a resistant provider stops", async () => {
+    const started = await dispatchConfiguredProvider(
+      { adapter: "codex", prompt: "exit with resistant provider", task_id: "shutdown-provider", wait_seconds: 0 },
+      identity,
+      new AbortController().signal,
+      ownerEnvironment,
+    );
+    const runDir = String((started.paths as Record<string, string>).run_dir);
+    const providerPid = await waitForPid(join(runDir, "provider.pid"));
+    const ownerRecord = JSON.parse(await waitForFile(join(runDir, OWNER_RECORD_NAME))) as {
+      run_token: string;
+    };
+    const providerRecord = JSON.parse(await waitForFile(join(runDir, "dispatch-provider.json"))) as {
+      run_token: string;
+      provider_started_at: string;
+    };
+    expect(providerRecord.run_token).toBe(ownerRecord.run_token);
+    expect(processStartedAt(providerPid)).toBe(providerRecord.provider_started_at);
+    expect(Number(execFileSync("/bin/ps", ["-o", "pgid=", "-p", String(providerPid)], {
+      encoding: "utf8",
+    }).trim())).toBe(providerPid);
+    writeFileSync(join(runDir, "exit-owner.release"), "exit\n");
+    await waitFor(() => !alive(Number(started.pid)), "the owner never exited");
+    await delay(200);
+    expect(alive(providerPid)).toBe(true);
+
+    await cancelActiveExecutions();
+
+    expect(alive(providerPid)).toBe(false);
+    expect(existsSync(join(runDir, OWNER_RECORD_NAME))).toBe(false);
+  }, 40_000);
 });
 
 describe("cancellation", () => {
