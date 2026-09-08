@@ -344,12 +344,7 @@ function crossFamilyDispatchHint(runDir, gitCwd, kind = 'primary') {
 // ---------------------------------------------------------------------------
 
 const task = (args && args.task) || ''
-const riskHint = (args && args.risk) || 'unspecified'
-const normalisedRisk = String(riskHint).toLowerCase()
 const requiresOtherPrimary = true
-const receiptRisk = ['crucial', 'terminal'].includes(normalisedRisk)
-  ? normalisedRisk
-  : 'substantial'
 const specApproved = !!(args && args.specApproved)
 const designStatus = (args && args.designStatus) || ''
 const acceptanceCriteria = (args && args.acceptanceCriteria) || []
@@ -385,27 +380,21 @@ const runIdClause = runId
 const boot = await agent(
   'Bootstrap a dynamic-workflow run.\n' +
     `1. Resolve the WORKSPACE ROOT (the dir that holds .work/, or the outermost project dir if none) and ` +
-    `build an ABSOLUTE run-dir path <workspace-root>/.work/wf/implement/<runId> so the run dir never lands ` +
+    `build an ABSOLUTE run-dir path <workspace-root>/.agent-run/<runId> so the run dir never lands ` +
     `under a nested subproject. ${runIdClause}\n` +
-    '   Then run: "$(provenant root)/skills/orchestrate/scripts/run_dir_init.sh" "<abs run-dir>"\n' +
+    '   Write the approved intent to a non-empty workspace-relative file, then initialise RUN.json with the installed `deliver` producer from the workspace root:\n' +
+    '   "$(provenant root)/skills/deliver/scripts/delivery_receipt.py" init --run-dir ".agent-run/<runId>" --run-id "<runId>" --profile software --chair-family anthropic --risk-assessment "<risk-assessment.json>" --intent "<approved-intent-file>" --authority "<authority.json>".\n' +
+    '   The authority input is the current Authority V2 object from the approved task. It must bound the exact source and artifact paths, expiry, disclosure, secrets, deployment, irreversible actions, network and budget; do not invent wider authority.\n' +
+    '   Then run: "$(provenant root)/skills/orchestrate/scripts/run_dir_init.sh" "<abs run-dir>" --force\n' +
     '   and ALSO run: mkdir -p "<abs run-dir>/patches"   (the patch-emitting builder writes there; ' +
     'run_dir_init.sh scaffolds findings/ crossfamily/ traces/ but NOT patches/).\n' +
-    '   If run_dir_init.sh is unavailable or fails, return no runDir and stop; do not create an incomplete fallback.\n' +
-    `   Copy the global deliver RUN.template.json to <abs run-dir>/RUN.json immediately. Set contract=delivery-run, ` +
-    `schema_version=1, profile=software, risk_tier=${receiptRisk}, and approved intent/design/authority evidence. ` +
-    `Fill every risk_assessment factor from config/risk-policy.json conservatively; never lower the supplied tier. ` +
-    `Fill authority from this human-requested task only: bounded source/artifact paths (when the run dir is inside repoRoot, ` +
-    `artifact_write_paths must include that exact repo-relative run-dir subtree), expiry, prohibited paths/actions, ` +
-    `external_disclosure, secrets, deployment=false, irreversible_actions=false and explicit ignored_path_exemptions. Do not invent broader authority. ` +
-    `Capture git HEAD before mutation as implementation.base_revision and return it as baseRevision; fill implementation.repo_root. ` +
-    `Require a clean source baseline: if tracked or untracked source changes already exist, fail preflight instead of hiding them in preexisting_paths. ` +
-    `Bind the named human approval to matching human evidence and the canonical spec digest. ` +
-    `Run deliver/scripts/validate_delivery.py <RUN.json> --workspace-root <repo-root>; return riskPreflightPassed=true only on exit 0, and return the receipt risk as effectiveRisk. ` +
-    `Set assurance evaluation_required when behaviour is AI/stochastic/judgement-bearing; otherwise explain not-required. ` +
-    `Set pair.mode=solo for this single-lead workflow. ` +
-    `design status=${designStatus}, updated_at, and checkpoint generation=0/current_slice=bootstrap/` +
-    `next_action=understand/in_flight=[]/artifact_paths=[RUN.json]. Leave implementation, verification and ` +
-    `context_hygiene pending.\n` +
+    '   If producer initialisation or run_dir_init.sh fails, return no runDir and stop; do not create a manual or incomplete fallback.\n' +
+    `   Use only delivery producer commands to bind the approved intent and design evidence, authority approval evidence, assurance plan and later artifacts, evidence and reviews. ` +
+    `Keep human_gates.acceptance pending. The delivery receipt is flat: do not add status, updated_at, pair, implementation, verification or context_hygiene fields. ` +
+    `Set assurance.stochastic_required from the approved evaluation need and record its reason through the producer; do not add evaluation_required. ` +
+    `Capture git HEAD before mutation and return it as baseRevision; require a clean source baseline before source mutation. ` +
+    `Run deliver/scripts/validate_delivery.py <RUN.json> --workspace-root <workspace-root>; return riskPreflightPassed=true only on exit 0, and return the receipt risk as effectiveRisk. ` +
+    `The producer owns checkpoint generation=0/current_slice=scope/next_action=complete scope and authority/in_flight=[]/artifact_paths=[RUN.json].\n` +
     `2. Identify the project root that the task targets and report it as repoRoot. Task: """${task}"""\n` +
     '3. Find a git repo dir usable as cwd for codex cross-family dispatch (report gitCwd; "" if none).\n' +
     '4. Discover conventions WITHOUT assuming a stack: read Makefile, package.json, pyproject, AGENTS.md, ' +
@@ -468,8 +457,8 @@ async function checkpoint(currentSlice, nextAction, inFlight, artifactPaths) {
 async function failRun(reason) {
   const result = await agent(
     `Close the failed workflow run at ${runDir} without touching source. Update RUN.json checkpoint to ` +
-      `current_slice=failed, next_action=human inspect failure receipt, in_flight=[], and add the reason to ` +
-      `unresolved_blockers. Classify every run artifact in MANIFEST.md with stable IDs/status/retention. Update ` +
+      `current_slice=failed, next_action=human inspect failure receipt, in_flight=[], then record the reason in ` +
+      `findings/failure.md. Classify every run artifact in MANIFEST.md with stable IDs/status/retention. Update ` +
       `RUN_RECEIPT.json task/owner and clear or hand off owned panes, then run run_dir_finalize.py --status failed ` +
       `--reason ${JSON.stringify(reason)}. Re-open both receipts and return path, generation and verified=true only ` +
       'when the run is terminal failed with empty in_flight.',
@@ -766,14 +755,11 @@ const apply = await agent(
     `For effectiveRisk=terminal, apply nothing: preserve recommendation evidence, set checkpoint ` +
     `current_slice=awaiting-apply-approval/next_action=request explicit apply authority/in_flight=[], ` +
     `return machineGatePassed=false, and do not pretend the final implementation gate ran. ` +
-    `For non-terminal runs only, after all patch apply/escalate decisions and narrow re-checks, update the human-approved ` +
-    `spec/design status, risk/authority profile, assurance receipt/status, acceptance criteria with evidence, ` +
-    `implementation outcome with repo_root=${boot.repoRoot}, base_revision=${boot.baseRevision}, preexisting_paths=[], ` +
-    `every applied path's add|modify|delete operation and SHA-256, and the validator's canonical result_revision; exact verification results, ` +
-    `repair_cycles=${repairCycles}, checkpoint current_slice=human-gate/next_action=request explicit human acceptance/in_flight=[] and artifact_paths. ` +
+    `For non-terminal runs only, after all patch apply/escalate decisions and narrow re-checks, use the delivery producer to bind the approved design, declared artifacts, ` +
+    `deterministic evidence, applicable assurance rows and review records. Record repairs through the producer, then set checkpoint ` +
+    `current_slice=human-gate/next_action=request explicit human acceptance/in_flight=[] and current artifact paths. ` +
     `Keep human_gates.acceptance.status=pending; only explicit human acceptance may set that gate to approved. ` +
-    `Then run the global session context_audit.py read-only and record context_hygiene status, audit command + exit code, ` +
-    `graduation/archive/cleanup actions and retained recovery artifacts. Never remove unknown or pre-existing files. ` +
+    `Then run the global session context_audit.py read-only; retain its recovery artifacts and record session results in the separate RUN_RECEIPT, never in RUN.json. Never remove unknown or pre-existing files. ` +
     `Update ${runDir}/RUN_RECEIPT.json task/owner, artifact retention and owned/handed-off pane fields; leave its ` +
     `status=active while this change awaits human acceptance. Record unresolved blockers and every reviewer lane ` +
     `including failures. Every complete review_plan row must preserve its explicit wrapper verdict and the ` +

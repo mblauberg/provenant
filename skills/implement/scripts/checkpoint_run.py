@@ -9,7 +9,6 @@ import json
 import os
 import sys
 import tempfile
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -82,7 +81,6 @@ def _update_locked(path: Path, current_slice: str, next_action: str, in_flight: 
         "in_flight": in_flight,
         "artifact_paths": merged,
     })
-    run["updated_at"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     temp_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile("w", dir=root, prefix=".RUN.", suffix=".tmp", delete=False) as handle:
