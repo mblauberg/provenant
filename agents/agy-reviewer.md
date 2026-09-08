@@ -48,8 +48,9 @@ tokens on a second read of the same diff.
 Agy may use an Agent Fabric identity for stable addressing, not model-family
 proof. When Fabric is used, the caller records the correlation; the dispatch
 receipt and output file remain the execution evidence. The dispatcher records
-this route as `prompt_only`, not `enforced`, because `--sandbox` is not a
-read-only guarantee. Unless a live capability probe demonstrates otherwise,
+this route as `prompt_only`, not `enforced`. Ordinary dispatch inherits the
+operator's Agy permissions; `CF_DISPATCH_AGY_SANDBOX=1` adds `--sandbox`, and
+assurance always adds it. Neither mode guarantees read-only access. Unless a live capability probe demonstrates otherwise,
 treat Agy as write-capable and verify the tree or output file rather than
 trusting status alone. It remains a genuine independent opinion, but is not
 certification eligible. A missing Fabric identity does not block a direct

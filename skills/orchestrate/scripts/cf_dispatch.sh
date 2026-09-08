@@ -357,7 +357,7 @@ ARGV_PROMPT_LIMIT=126976
 argv_prompt_too_large() {
   local tool="$1" diag_path="$2" prompt_bytes="${3:-$PROMPT_BYTES}"
   [ "$prompt_bytes" -gt "$ARGV_PROMPT_LIMIT" ] || return 1
-  echo "$tool prompt is ${prompt_bytes} bytes, over the 124 KiB single-argument ceiling; pass the material by reference instead" >"$diag_path"
+  echo "$tool effective prompt is ${prompt_bytes} bytes, over the 124 KiB single-argument ceiling; pass the material by reference instead" >"$diag_path"
   return 0
 }
 
@@ -716,7 +716,7 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
     status="unsafe_by_default"
     echo "agy refused: --dangerously-skip-permissions is not allowed on the read-only route" >"$diag"
     rc=1
-  elif [ "$tool" = "agy" ] && [ "${CF_DISPATCH_AGY_SANDBOX:-0}" != "0" ] && [ "${CF_DISPATCH_AGY_SANDBOX:-0}" != "1" ]; then
+  elif [ "$tool" = "agy" ] && [ "${CF_DISPATCH_AGY_SANDBOX-0}" != "0" ] && [ "${CF_DISPATCH_AGY_SANDBOX-0}" != "1" ]; then
     guarantee="none"
     status="invalid_configuration"
     echo "CF_DISPATCH_AGY_SANDBOX must be 0 or 1" >"$diag"
@@ -922,7 +922,7 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
             # Ordinary work inherits the operator's Agy permissions. The optional
             # terminal sandbox never establishes filesystem read-only enforcement.
             AGY_SANDBOX_JSON=false
-            if [ "$INTENT" = "assurance" ] || [ "${CF_DISPATCH_AGY_SANDBOX:-0}" = "1" ]; then
+            if [ "$INTENT" = "assurance" ] || [ "${CF_DISPATCH_AGY_SANDBOX-0}" = "1" ]; then
               agy_cmd+=(--sandbox)
               AGY_SANDBOX_JSON=true
             fi

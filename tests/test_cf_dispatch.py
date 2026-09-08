@@ -40,6 +40,7 @@ DISPATCH_SCHEMA = {
     "output_path",
     "output_digest",
     "read_only_guarantee",
+    "provider_sandbox",
     "orchestrator_family",
     "provider_family",
     "endpoint_provider",
@@ -3155,6 +3156,7 @@ else:
             ("ordinary", None, False), ("ordinary", "0", False),
             ("ordinary", "1", True), ("assurance", None, True),
             ("assurance", "0", True), ("ordinary", "false", None),
+            ("ordinary", "", None),
         ]):
             env = fabric_free_env()
             env.pop("CF_DISPATCH_AGY_SANDBOX", None)

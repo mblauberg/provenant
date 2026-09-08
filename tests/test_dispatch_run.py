@@ -199,10 +199,20 @@ def test_agy_git_evidence_is_copied_into_attempt_and_bound_to_prompt(tmp_path: P
     )
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Review the supplied change.\n", encoding="utf-8")
-    adapter = tmp_path / "agy-adapter"
-    write_evidence_adapter(adapter)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    received = tmp_path / "agy-argv.json"
+    write_executable(bin_dir / "agy", f"""#!/usr/bin/env python3
+import json, sys
+from pathlib import Path
+if sys.argv[1:] == ["models"]:
+    print("gemini-3.8-flash-medium")
+else:
+    Path({str(received)!r}).write_text(json.dumps(sys.argv[1:]))
+    print(json.dumps({{"status": "SUCCESS", "response": "OK"}}))
+""")
+    monkeypatch.setenv("PATH", f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
     module = load_dispatch_module()
-    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("CF_DISPATCH_AGY_ADD_DIR", str(tmp_path / "unrelated"))
     args = module.parser().parse_args([
@@ -226,6 +236,13 @@ def test_agy_git_evidence_is_copied_into_attempt_and_bound_to_prompt(tmp_path: P
     assert evidence["checkout"]["diff_from"] == "HEAD"
     assert evidence["checkout"]["paths"] == ["file.txt"]
     assert "read the supplied evidence files" in (run_dir / attempt["prompt"]["path"]).read_text().lower()
+    argv = json.loads(received.read_text())
+    effective_prompt = argv[argv.index("--print") + 1]
+    assert effective_prompt.startswith(f"Workspace root: {tmp_path.resolve()}\n")
+    assert str(evidence_path) in effective_prompt
+    assert argv[argv.index("--add-dir") + 1] == str(evidence_path.parent)
+    assert "Use file-reading tools only; do not invoke shell or Git" in effective_prompt
+    assert effective_prompt.endswith(prompt.read_text())
     module.reconcile_manifest(run_dir)
 
 

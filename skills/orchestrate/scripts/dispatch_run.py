@@ -1041,9 +1041,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         except (OSError, OwnedFileError, AttemptEvidenceError) as exc:
             return fail(run_dir, "git_evidence_invalid", str(exc))
         prompt_bytes = (
-            b"Read the supplied evidence files under evidence/. In particular, read "
-            b"evidence/git-evidence.md. Do not invoke shell, Git, or any other tools; "
-            b"answer from the supplied files.\n\n"
+            (f"Read the supplied evidence files under {evidence_dir}. In particular, read "
+             f"{evidence_path}. Use file-reading tools only; do not invoke shell or Git; "
+             "answer from the supplied files.\n\n").encode("utf-8")
             + (prompt_bytes or b"")
         )
     try:
