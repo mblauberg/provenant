@@ -61,7 +61,7 @@ def fake_agy(tmp_path, *, stderr="", listing="gemini-3.1-pro-high\ngemini-3.1-pr
 
 def fake_claude(
     tmp_path, *, auth_method="claude.ai", model_usage=None, is_error=False,
-    effort_warning=False, stderr_warning=False,
+    effort_warning=False, stderr_warning=False, expected_alias="opus",
 ):
     return write_executable(tmp_path / "claude", f'''#!/usr/bin/env python3
 import json
@@ -72,7 +72,7 @@ if sys.argv[1:3] == ["auth", "status"]:
         "email": "secret@example.com", "orgId": "secret-org"
     }}))
 else:
-    required = ["-p", "--safe-mode", "--no-session-persistence", "--permission-mode", "plan", "--tools", "", "--model", "opus", "--effort", "medium", "--output-format", "json"]
+    required = ["-p", "--safe-mode", "--no-session-persistence", "--permission-mode", "plan", "--tools", "", "--model", {expected_alias!r}, "--effort", "medium", "--output-format", "json"]
     assert all(item in sys.argv[1:] for item in required)
     if {effort_warning!r}:
         print("Warning: Unknown --effort value 'medium' - ignoring it and using the default effort.", file=sys.stderr)
@@ -315,6 +315,31 @@ def test_claude_canary_emits_scrubbed_runtime_provenance(tmp_path):
     }
     assert "secret@example.com" not in encoded
     assert "secret-org" not in encoded
+
+
+def test_claude_canary_matches_a_full_versioned_model_id_exactly(tmp_path):
+    output = tmp_path / "capabilities.json"
+    model = "claude-fable-5-1"
+
+    assert MODULE.main([
+        "claude", "--out", str(output), "--bin", str(fake_claude(
+            tmp_path, expected_alias=model, model_usage={model: {"inputTokens": 1}}
+        )), "--alias", model, "--effort", "medium",
+    ]) == 0
+
+    assert json.loads(output.read_text())["models"][model]["resolved_model"] == model
+
+
+def test_claude_canary_rejects_a_different_version_for_a_full_model_id(tmp_path):
+    output = tmp_path / "capabilities.json"
+
+    assert MODULE.main([
+        "claude", "--out", str(output), "--bin", str(fake_claude(
+            tmp_path, expected_alias="claude-fable-5-1",
+            model_usage={"claude-fable-5-0": {"inputTokens": 1}},
+        )), "--alias", "claude-fable-5-1", "--effort", "medium",
+    ]) == 1
+    assert not output.exists()
 
 
 @pytest.mark.parametrize(

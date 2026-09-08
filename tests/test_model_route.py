@@ -164,8 +164,8 @@ def capability_snapshot(models, source="codex debug models"):
 def write_codex_capability_snapshot(tmp_path, *, observed_at=None, models=None):
     if models is None:
         models = {
-            "gpt-5.6-sol": {
-                "resolved_model": "gpt-5.6-sol",
+            "gpt-6-astra": {
+                "resolved_model": "gpt-6-astra",
                 "supported_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
             },
             "gpt-5.6-terra": {
@@ -948,6 +948,17 @@ def test_special_model_override_uses_an_explicit_non_lifecycle_input():
     assert route["resolved_model"] == model
 
 
+@pytest.mark.parametrize("model", ("fable", "claude-fable-5-0"))
+def test_versioned_fable_override_reserves_generic_and_older_model_ids(model):
+    result, route = resolve(
+        "--adapter", "claude", "--alias", "flagship", "--role", "worker",
+        "--model", model, "--available-model", model, "--effort", "high",
+    )
+
+    assert result.returncode == 1
+    assert route["status"] == "risk_tier_override_required"
+
+
 def test_retargeted_override_occupant_requires_explicit_risk_tier(
     tmp_path, monkeypatch, capsys
 ):
@@ -1000,13 +1011,14 @@ def test_retargeting_one_tier_keeps_occupant_gated_by_another_tier(
     catalog["families"]["anthropic"]["risk_tier_overrides"]["crucial"]["models"] = [
         "claude-newcomer"
     ]
+    terminal_model = catalog["families"]["anthropic"]["risk_tier_overrides"]["terminal"]["models"][0]
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
-        "--role", "worker", "--model", "fable",
+        "--role", "worker", "--model", terminal_model,
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -1295,7 +1307,7 @@ def test_capability_resolved_override_occupant_records_explicit_risk_tier(
     router = load_router()
     catalog_path = Path(ROOT / "config" / "model-routing.json")
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
-    resolved_model = f"claude-opus-4-6-{RISK_OVERRIDE_MODEL}"
+    resolved_model = RISK_OVERRIDE_MODEL
     snapshot = capability_snapshot({
         RISK_OVERRIDE_MODEL: {
             "resolved_model": resolved_model,
@@ -1358,6 +1370,29 @@ def test_override_occupant_requires_explicit_bounded_risk_route(
         f"{risk_tier}-{model}-{'-'.join(override['roles'])}"
     )
     assert route["effort"] == effort
+
+
+@pytest.mark.parametrize("risk_tier", ("crucial", "terminal"))
+def test_fable_5_1_is_the_only_medium_capped_anthropic_override_model(risk_tier):
+    override = CATALOG["families"]["anthropic"]["risk_tier_overrides"][risk_tier]
+    assert override["models"] == ["claude-fable-5-1"]
+    assert override["default_effort"] == override["maximum_effort"] == "medium"
+
+    accepted, accepted_route = resolve(
+        "--adapter", "claude", "--alias", override["alias"], "--role", override["roles"][0],
+        "--model-override-tier", risk_tier, "--model", "claude-fable-5-1",
+        "--effort", "medium", "--available-model", "claude-fable-5-1",
+    )
+    rejected, rejected_route = resolve(
+        "--adapter", "claude", "--alias", override["alias"], "--role", override["roles"][0],
+        "--model-override-tier", risk_tier, "--model", "fable",
+        "--effort", "medium", "--available-model", "fable",
+    )
+
+    assert accepted.returncode == 0
+    assert accepted_route["resolved_model"] == "claude-fable-5-1"
+    assert rejected.returncode == 1
+    assert rejected_route["status"] == "risk_tier_model_mismatch"
 
 
 @pytest.mark.parametrize(
@@ -1808,7 +1843,7 @@ def test_malformed_override_fails_closed_without_a_fixed_model_family(
 
 def test_account_default_aliases_resolve_to_account_default_dispatch(tmp_path):
     expected = {
-        "flagship": "gpt-5.6-sol",
+        "flagship": "gpt-6-astra",
         "workhorse": "gpt-5.6-luna",
         "scout": "gpt-5.6-luna",
     }
@@ -1835,7 +1870,7 @@ def test_account_default_adapter_ignores_runtime_selectable_model_list(tmp_path)
     )
     assert result.returncode == 0
     assert route["resolved_model"] == ""
-    assert route["catalog_model"] == "gpt-5.6-sol"
+    assert route["catalog_model"] == "gpt-6-astra"
     assert route["model_selection"] == "account-default"
 
 
@@ -1894,8 +1929,8 @@ def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
         # raises worker+workhorse in role_effort_defaults, the same way
         # critical-review and orchestration are raised below.
         ("legwork", "workhorse", "high", "gpt-5.6-luna"),
-        ("critical-review", "flagship", "max", "gpt-5.6-sol"),
-        ("orchestration", "flagship", "ultra", "gpt-5.6-sol"),
+        ("critical-review", "flagship", "max", "gpt-6-astra"),
+        ("orchestration", "flagship", "ultra", "gpt-6-astra"),
     ),
 )
 def test_task_classes_bind_codex_runtime_identity(
@@ -2175,8 +2210,8 @@ def test_task_class_rejects_explicit_model_override():
 def test_task_class_rejects_effective_effort_below_policy_floor(tmp_path):
     snapshot = tmp_path / "caps.json"
     snapshot.write_text(json.dumps(capability_snapshot({
-        "gpt-5.6-sol": {
-            "resolved_model": "gpt-5.6-sol",
+        "gpt-6-astra": {
+            "resolved_model": "gpt-6-astra",
             "supported_efforts": ["low"],
         },
     })))
@@ -2283,7 +2318,7 @@ def test_role_default_cannot_lower_task_class_effort(tmp_path, monkeypatch, caps
     catalog_path.write_text(json.dumps(catalog))
     snapshot = tmp_path / "caps.json"
     snapshot.write_text(json.dumps(capability_snapshot({
-        "gpt-5.6-sol": {"resolved_model": "gpt-5.6-sol", "supported_efforts": ["high"]},
+        "gpt-6-astra": {"resolved_model": "gpt-6-astra", "supported_efforts": ["high"]},
     })))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
 
@@ -2395,8 +2430,8 @@ def test_noneligible_ultra_fallback_reports_runtime_capability_source(
     snapshot = write_codex_capability_snapshot(
         tmp_path,
         models={
-            "gpt-5.6-sol": {
-                "resolved_model": "gpt-5.6-sol",
+            "gpt-6-astra": {
+                "resolved_model": "gpt-6-astra",
                 "supported_efforts": ["max"],
             },
         },
@@ -2523,8 +2558,8 @@ def test_capability_snapshot_controls_default_fallback(
     monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
     snapshot = tmp_path / "caps.json"
     snapshot.write_text(json.dumps(capability_snapshot({
-            "gpt-5.6-sol": {
-                "resolved_model": "gpt-5.6-sol",
+            "gpt-6-astra": {
+                "resolved_model": "gpt-6-astra",
                 "supported_efforts": ["high", "xhigh", "max"],
             }
         })))
@@ -2548,8 +2583,8 @@ def test_default_effort_fallback_chooses_highest_supported_effort_at_or_below_re
     snapshot = write_codex_capability_snapshot(
         tmp_path,
         models={
-            "gpt-5.6-sol": {
-                "resolved_model": "gpt-5.6-sol",
+            "gpt-6-astra": {
+                "resolved_model": "gpt-6-astra",
                 "supported_efforts": ["max", "medium"],
             },
         },
@@ -2612,7 +2647,7 @@ def test_fresh_openai_snapshot_without_alias_candidate_fails_closed(
     route = json.loads(capsys.readouterr().out)
     assert result == 1
     assert route["status"] == "no_candidate_available"
-    assert route["candidates"] == ["gpt-5.6-sol"]
+    assert route["candidates"] == ["gpt-6-astra"]
     assert route["requested_effort"] == "ultra"
     assert route["effort"] == "ultra"
 
@@ -2620,8 +2655,8 @@ def test_fresh_openai_snapshot_without_alias_candidate_fails_closed(
 def test_explicit_unsupported_effort_fails_against_runtime_snapshot(tmp_path):
     snapshot = tmp_path / "caps.json"
     snapshot.write_text(json.dumps(capability_snapshot({
-            "gpt-5.6-sol": {
-                "resolved_model": "gpt-5.6-sol",
+            "gpt-6-astra": {
+                "resolved_model": "gpt-6-astra",
                 "supported_efforts": ["high", "xhigh", "max"],
             }
         })))

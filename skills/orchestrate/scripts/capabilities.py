@@ -269,12 +269,18 @@ def discover_claude(binary: str, options: argparse.Namespace) -> tuple[dict[str,
         or not isinstance(usage, dict)
     ):
         raise ValueError("Claude canary returned an ambiguous or unsuccessful result")
-    alias_token = alias.casefold()
+    normalized_alias = alias.casefold()
     matching_models = [
         model for model in usage
         if isinstance(model, str)
         and model.casefold().startswith("claude-")
-        and alias_token in model.casefold().split("-")
+        and (
+            model.casefold() == normalized_alias
+            or (
+                "-" not in normalized_alias
+                and normalized_alias in model.casefold().split("-")
+            )
+        )
     ]
     if len(matching_models) != 1:
         raise ValueError("Claude canary did not identify one primary runtime model")

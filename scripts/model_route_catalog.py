@@ -37,6 +37,24 @@ def model_has_alias(model: str, alias: str) -> bool:
     return alias.casefold() in model.casefold()
 
 
+def risk_tier_override_reserves_model(model: str, occupant: str) -> bool:
+    """Return whether an override occupant reserves an explicit model identity.
+
+    A versioned occupant also reserves its generic and older versioned spelling.
+    The check derives that stable name from the configured occupant, rather than
+    maintaining a second model catalogue for it.
+    """
+    if model_has_alias(model, occupant):
+        return True
+
+    def stable_name(identifier: str) -> tuple[str, ...]:
+        words = tuple(re.findall(r"[a-z]+", identifier.casefold()))
+        return words[1:] if len(words) > 1 and words[0] == "claude" else words
+
+    occupant_name = stable_name(occupant)
+    return bool(occupant_name) and stable_name(model) == occupant_name
+
+
 def capability_key_matches_model(
     adapter: str, key: str, resolved_model: str, *, is_alias: bool
 ) -> bool:
@@ -46,6 +64,8 @@ def capability_key_matches_model(
     if adapter == "claude":
         if is_alias:
             return normalized_model.startswith(f"claude-{normalized_key}-")
+        if normalized_key.startswith("claude-"):
+            return normalized_model == normalized_key
         return (
             normalized_model.startswith("claude-")
             and normalized_key in normalized_model.split("-")

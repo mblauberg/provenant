@@ -438,7 +438,7 @@ def test_claude_other_primary_uses_opus_without_implicit_fable_route():
     assert output.strip() == "OPUS OK"
 
 
-def test_claude_crucial_synthesis_dispatches_explicit_fable_override():
+def test_claude_crucial_synthesis_dispatches_explicit_fable_5_1_override():
     stub = """\
         #!/usr/bin/env bash
         model=""
@@ -446,7 +446,7 @@ def test_claude_crucial_synthesis_dispatches_explicit_fable_override():
           if [ "$1" = "--model" ]; then model="$2"; shift 2; else shift; fi
         done
         cat >/dev/null
-        [ "$model" = "fable" ] || exit 9
+        [ "$model" = "claude-fable-5-1" ] || exit 9
         echo "FABLE OK"
     """
     result, record, output = run_dispatch_with_stub(
@@ -454,14 +454,14 @@ def test_claude_crucial_synthesis_dispatches_explicit_fable_override():
         role="synthesis",
         extra_args=[
             "--risk-tier", "crucial", "--model-override-tier", "crucial",
-            "--model", "fable", "--effort", "medium",
+            "--model", "claude-fable-5-1", "--effort", "medium",
         ],
     )
     assert result.returncode == 0, result.output
-    assert record["resolved_model"] == "fable"
+    assert record["resolved_model"] == "claude-fable-5-1"
     assert record["risk_tier"] == "crucial"
     assert record["model_override_tier"] == "crucial"
-    assert record["policy_override"] == "crucial-fable-synthesis-adjudication"
+    assert record["policy_override"] == "crucial-claude-fable-5-1-synthesis-adjudication"
     assert output.strip() == "FABLE OK"
 
 
@@ -1895,7 +1895,7 @@ def test_resolved_role_effort_reaches_codex_adapter_and_receipt():
             bin_dir / "codex",
             f'''#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{{"effort":"high"}},{{"effort":"xhigh"}}]}}]}}'
+              printf '%s\n' '{{"models":[{{"slug":"gpt-6-astra","supported_reasoning_levels":[{{"effort":"high"}},{{"effort":"xhigh"}}]}}]}}'
               exit 0
             fi
             printf '%s\\n' "$@" > {args_file}
@@ -1930,12 +1930,12 @@ def test_resolved_role_effort_reaches_codex_adapter_and_receipt():
         assert record["requested_effort"] == "max"
         assert record["effort"] == "xhigh"
         assert record["effort_capability_source"] == "runtime-model-catalog"
-        assert record["resolved_model"] == "gpt-5.6-sol"
+        assert record["resolved_model"] == "gpt-6-astra"
         assert record["catalog_model"] == ""
         assert record["model_selection"] == ""
         args = args_file.read_text(encoding="utf-8").splitlines()
         assert "-m" in args
-        assert "gpt-5.6-sol" in args
+        assert "gpt-6-astra" in args
         assert "service_tier=default" in args
         assert "model_reasoning_effort=xhigh" in args
 
@@ -2004,7 +2004,7 @@ def test_critical_review_role_still_defaults_to_flagship():
             bin_dir / "codex",
             f'''#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"medium"}}]}},{{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{{"effort":"max"}}]}}]}}'
+              printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"medium"}}]}},{{"slug":"gpt-6-astra","supported_reasoning_levels":[{{"effort":"max"}}]}}]}}'
               exit 0
             fi
             printf '%s\\n' "$@" > {args_file}
@@ -2037,7 +2037,7 @@ def test_critical_review_role_still_defaults_to_flagship():
         record = json.loads(result.stdout)
         assert result.returncode == 0, result.stderr
         assert record["route_alias"] == "flagship"
-        assert record["resolved_model"] == "gpt-5.6-sol"
+        assert record["resolved_model"] == "gpt-6-astra"
 
 
 def test_codex_capability_discovery_failure_blocks_execution_with_receipt():

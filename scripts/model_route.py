@@ -93,6 +93,7 @@ EFFORT_ORDER = _catalog_validation.EFFORT_ORDER
 ALIAS_ORDER = _catalog_validation.ALIAS_ORDER
 infer_family = _catalog_validation.infer_family
 model_has_alias = _catalog_validation.model_has_alias
+risk_tier_override_reserves_model = _catalog_validation.risk_tier_override_reserves_model
 capability_key_matches_model = _catalog_validation.capability_key_matches_model
 ultra_eligible_roles_are_valid = _catalog_validation.ultra_eligible_roles_are_valid
 risk_tier_override_is_well_formed = _catalog_validation.risk_tier_override_is_well_formed
@@ -738,7 +739,8 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         if isinstance(candidate, str) and candidate.strip()
     ]
     is_risk_override_model = any(
-        model_has_alias(model, candidate) for candidate in configured_override_models
+        risk_tier_override_reserves_model(model, candidate)
+        for candidate in configured_override_models
     )
     if is_risk_override_model and not args.model_override:
         return emit_route({**base, "status": "risk_tier_override_required"}, 1)

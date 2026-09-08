@@ -49,7 +49,7 @@ The receipt's resolved `effort` is authoritative for the adapter invocation.
 `--risk-tier` is lifecycle metadata retained in the dispatch receipt; it never
 selects a model. The rare configured special-model route uses the independent
 `--model-override-tier` option and records that value separately.
-GPT-5.6 efforts are capability-gated per model. The Codex execution adapter
+Codex efforts are capability-gated per model. The Codex execution adapter
 captures `codex debug models` through `capabilities.py codex` and supplies the
 snapshot to the resolver. The ChatGPT-subscription Codex route resolves an
 explicit model from runtime capability evidence, uses the dated catalogue for
@@ -64,6 +64,8 @@ unsupported requests fail as
 `effort_unsupported`; a role default may degrade with `effort_substitution`
 using the declared fallback order over runtime-supported efforts at or below
 the request, or fail as `no_effort_available` when none exists.
+Operators can inspect that same live snapshot without a dispatch through
+`provenant capabilities codex --out /tmp/codex-capabilities.json`.
 Claude task-class routing captures one alias-and-effort capability through
 `capabilities.py claude`. The producer requires logged-in `claude.ai`
 subscription auth and runs a bounded `--safe-mode`, no-tools,
@@ -111,7 +113,8 @@ On the default read-only route:
 - `codex`: `exec -s read-only --ignore-user-config --ignore-rules --ephemeral`
   with `-c service_tier="default"` pinned; the route resolves a runtime-capable
   model and passes it with `-m`, alongside the resolved reasoning-effort
-  control. The tier is pinned explicitly rather than left to
+  control. Astra's API route supports through `max`; native-app `ultra` is a
+  separate capability and is never inferred for the CLI. The tier is pinned explicitly rather than left to
   `--ignore-user-config`, so the guarantee does not depend on that flag
   surviving a future edit.
 - `agy`: `--sandbox --output-format json --disable-slash-commands`, with
