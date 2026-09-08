@@ -2914,22 +2914,30 @@ def test_agy_accepts_only_explicit_gemini_routing():
     assert forbidden_route["status"] == "adapter_family_forbidden"
 
 
-def test_agy_task_class_uses_fresh_preferred_family_capabilities(tmp_path):
+@pytest.mark.parametrize("selector,alias,effort", [
+    ("--task-class", "mechanical", "low"),
+    ("--alias", "scout", "low"),
+    ("--alias", "workhorse", "medium"),
+    ("--alias", "flagship", "high"),
+])
+def test_agy_routes_use_fresh_preferred_family_capabilities(tmp_path, selector, alias, effort):
     snapshot = write_agy_capability_snapshot(tmp_path)
 
     result, route = resolve(
-        "--adapter", "agy", "--task-class", "mechanical", "--role", "worker",
+        "--adapter", "agy", selector, alias, "--role", "worker",
         "--lead-family", "openai", "--require-distinct",
         "--capabilities-file", str(snapshot),
     )
 
     assert result.returncode == 0
     assert route["status"] == "ok"
-    assert route["alias"] == "scout"
+    assert route["alias"] == ("scout" if selector == "--task-class" else alias)
     assert route["resolved_model"] == "gemini-3.8-flash"
     assert route["model_family"] == "google"
     assert route["identity_source"] == "runtime-capability+catalog"
-    assert route["effort"] == "low"
+    assert route["effort"] == effort
+    if selector == "--alias":
+        assert "task_class" not in route
     assert route["effort_capability_source"] == "runtime-model-catalog"
 
 

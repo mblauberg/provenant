@@ -161,7 +161,9 @@ three routing parameters and nothing else: `adapter`, `alias` and `mode`, with
 rather than accepted and ignored, both schemas are strict, so a removed
 parameter is a typed input error, and intent is always ordinary. Both default to
 the current provider seat, the `workhorse` route, the `worker` role and
-`read_only` access. A worker that must write takes `mode: "worktree_write"` with
+`read_only` requested access. The adapter receipt records the actual
+`read_only_guarantee`; Agy is `prompt_only`, even with its optional sandbox.
+A worker that must write takes `mode: "worktree_write"` with
 a `worktree` it owns exclusively; two writer tasks may never name one worktree.
 They create the run directory automatically, delegate to `dispatch_run.py` or
 `batch_run.py`, and return compact status, route and absolute artifact paths;

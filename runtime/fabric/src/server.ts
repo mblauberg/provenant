@@ -228,7 +228,8 @@ server.registerTool(
     description:
       "Start one ordinary configured-provider task: the prompt, the adapter and alias that route " +
       "it, and the access mode it runs under. Run custody is automatic and full prompt, result and " +
-      "diagnostics stay in named files. Reads are read_only; a worker that must write takes mode " +
+      "diagnostics stay in named files. read_only is requested access; inspect the adapter receipt for " +
+      "read_only_guarantee (Agy: prompt_only). A worker that must write takes mode " +
       "worktree_write with a worktree it owns exclusively. The response is compact; set wait_seconds " +
       "to 0 for immediate start or up to 55 for a terminal result and actual route when it finishes.",
     inputSchema: z.strictObject({
