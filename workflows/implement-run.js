@@ -390,6 +390,7 @@ const boot = await agent(
     '"$(provenant root)/skills/deliver/scripts/delivery_receipt.py" init --run-dir ".agent-run/<runId>" --run-id "<runId>" --profile software --chair-family anthropic --risk-tier "<declared-risk>" --risk-assessment "<risk-assessment.json>" --intent "<approved-intent-file>" --authority "<authority.json>".\n' +
     '   The authority input is the current Authority V2 object from the approved task. It must bound the exact source and artifact paths, expiry, disclosure, secrets, deployment, irreversible actions, network and budget; do not invent wider authority.\n' +
     '   Then run: "$(provenant root)/skills/orchestrate/scripts/run_dir_init.sh" "<abs run-dir>" --force\n' +
+    '   Set RUN_RECEIPT.json review_plan.risk_tier to the risk_tier in RUN.json so both receipts describe the same run.\n' +
     '   and ALSO run: mkdir -p "<abs run-dir>/patches"   (the patch-emitting builder writes there; ' +
     'run_dir_init.sh scaffolds findings/ crossfamily/ traces/ but NOT patches/).\n' +
     '   If producer initialisation or run_dir_init.sh fails, return no runDir and stop; do not create a manual or incomplete fallback.\n' +
