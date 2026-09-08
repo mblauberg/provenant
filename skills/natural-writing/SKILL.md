@@ -60,8 +60,8 @@ voice-matching rubric or genre guidance,
 [claim-discipline.md](references/claim-discipline.md) for observed, inferred,
 limitation and pending claims. For academic prose load
 [academic-prose.md](references/academic-prose.md): register, citation-key
-preservation, evidence altitude and thesis AI tells. LaTeX invariants and
-chapter structure live in `engineering-writing`.
+preservation, evidence altitude and thesis AI tells. LaTeX command and layout
+invariants live in `engineering-writing`.
 
 ## Bright-line rules
 

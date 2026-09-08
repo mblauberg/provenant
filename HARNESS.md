@@ -55,8 +55,11 @@ each; merge authority is repo-based, agent merges following the repository's own
 surface. An authorised merge prunes its own worktree and merged refs; other deletion,
 force-removal, history rewrites and shared-branch pushes outside authorised merges stay gated.
 
-Route every dispatch by task class to `flagship`, `workhorse` or `scout`, binding identity,
-effort and receipt; runtime governs, catalogues cache, mechanics live in `orchestrate`.
+Route every dispatch by task class to `flagship`, `workhorse` or `scout` where
+the adapter exposes that selection, binding the actual route fields and receipt.
+An ordinary alias-only adapter route records its alias and capability limit;
+never invent task-class, role or effort fields. Runtime governs, catalogues
+cache, mechanics live in `orchestrate`.
 Durable knowledge belongs in project state, specs, ADRs and runbooks; harness-private memory
 holds only cross-project preferences. Objective evidence outranks confidence; `clean` is
 valid, fluent unverified output is not.
@@ -80,3 +83,11 @@ The other-primary leg remains required from substantial upwards; skipped distinc
 - orchestration / routing / Herdr → `orchestrate`; implementation / review → `implement`, `code-review`; lifecycle / profile → `deliver`
 - context hygiene / compaction → `session`; promotion / assurance → `release`, `evaluate`; retrospect → `retrospect`; governance → `MAINTAINING.md`
 - any reader-facing prose, including correspondence → `natural-writing`, which routes on to its specialists; drafting under another skill's lead does not exempt the prose
+
+## Portable fallback
+
+Optional adapters do not displace canonical project artifacts. A skill's
+portable artifact proves only that its declared context existed; retain the
+canonical context separately. It is not evidence, route or task state,
+acceptance, or authority, and its schema must require
+`accepted_artifact_identity`.

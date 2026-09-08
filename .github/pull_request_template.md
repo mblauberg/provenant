@@ -54,8 +54,8 @@ rerun both against the new head.
 | --- | --- | --- | --- | --- |
 | Harness style | `scripts/check-harness` | | | |
 | Fabric typecheck, tests, build | `npm run check` | | | |
-| Fabric evaluation | `npm run test:evaluation` | | | |
-| Fabric load | `npm run test:load` | | | |
+| Fabric package-install smoke | `npm run test:package-install --workspace @local/fabric` | | | `N/A` if package installation is unaffected |
+| Fabric MCP smoke | `node runtime/fabric/mcp-smoke.mjs` | | | `N/A` if MCP/runtime behaviour is unaffected |
 | Production dependency audit | `npm run audit` | | | |
 | Contract and cutover | | | | |
 | Security and operations | | | | |

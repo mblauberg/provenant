@@ -1,6 +1,6 @@
 ---
 name: engineering-writing
-description: "Use for drafting or condensing software-engineering and academic-artefact prose such as requirements/specs, READMEs, commits, PRs, runbooks, errors, design notes, and thesis or paper LaTeX, chapters and captions. Not for general or Australian legal prose."
+description: "Use for drafting or condensing software-engineering artefacts such as requirements/specs, READMEs, commits, PRs, runbooks, errors, design notes, and thesis or paper LaTeX invariants. Not for general, academic-prose, or Australian legal writing; use natural-writing or legal-writing."
 ---
 
 # Engineering writing
@@ -14,10 +14,9 @@ Australian English default, the anti-AI taxonomy and the condense pass. See
 `references/process.md`, `references/style-standard.md` and
 `references/engineer-voice.md` for where each hub link applies.
 
-It also owns the artefact side of academic writing: thesis and paper LaTeX
-invariants, chapter and section structure, research voice, and whole-chapter
-review. Academic register, citation discipline, claim wording and the thesis
-AI tells stay with the hub's academic prose reference.
+It owns thesis and paper LaTeX command and layout invariants. Academic prose,
+chapter structure, research voice, citation discipline, claim wording and
+thesis AI tells stay with the hub's academic prose reference.
 
 ## Workflow
 
@@ -28,7 +27,7 @@ AI tells stay with the hub's academic prose reference.
    for already-decided pre-build content, [architecture and communication](references/architecture-and-presentations.md)
    for approved designs, ADRs, presentations and briefs, or
    [academic artefacts](references/academic-artefacts.md) for thesis and paper
-   LaTeX, chapters and captions. Do not load more than one.
+   LaTeX command and layout invariants. Do not load more than one.
 3. Structure before sentences: front-load the point, use decision-oriented
    headings and one idea or requirement per unit, then move wrong-home material.
 4. Lock facts, logic, stance, evidence, obligations, behaviour, identifiers,

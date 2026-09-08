@@ -66,8 +66,10 @@ Only when the tracker is GitHub issues and the remote host is confirmed:
 4. **PR template:** copy
    [`templates/pull_request_template.md`](templates/pull_request_template.md)
    into `.github/` and adapt evidence rows; retain decision and review sections.
-5. **Work-item runbook:** copy [the doctrine](references/doctrine.md) into the
-   target, adding its mechanics; the project decides merge authority.
+5. **Work-item runbook:** copy [the doctrine](references/doctrine.md) to the
+   target's declared work-item runbook path (default
+   `docs/runbooks/github-workflow.md`), adding its mechanics; the project
+   decides merge authority.
 6. **Project board:** create the [six-status board](references/project-board.md).
 7. **CODEOWNERS/Dependabot:** adapt to the stack; the
    [`Dependabot` template](templates/dependabot.yml) keeps its dependency label.

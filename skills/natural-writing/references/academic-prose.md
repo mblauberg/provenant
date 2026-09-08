@@ -6,8 +6,8 @@ citation-heavy argument. It is the academic overlay on this skill's hub
 doctrine, so load the hub material first ([au-english.md](au-english.md),
 [anti-ai-taxonomy.md](anti-ai-taxonomy.md), [condense-pass.md](condense-pass.md)
 and [claim-discipline.md](claim-discipline.md)) and add only what follows. For
-LaTeX invariants, chapter structure and whole-thesis review, use the
-`engineering-writing` skill's academic artefacts reference.
+LaTeX command and layout invariants, use the `engineering-writing` skill's
+academic artefacts reference.
 
 The target venue, institution, supervisor-approved style, project glossary and
 local citation conventions take precedence over these defaults. Do not
@@ -225,6 +225,32 @@ language rather than scholarship.
 **Reviewer and viva dialogue.** In a response to reviewers or viva preparation,
 drop generic flattery openers such as `You are absolutely right` and `Great
 question`. Answer the substantive point directly.
+
+## Research voice and structure
+
+Use precise verbs that name what was done, measured or remains uncertain. Keep
+one term for one concept, attach implementation detail only where it supports
+the argument, and replace prestige language with the actual claim, method or
+limitation.
+
+Structure a thesis or paper around the reader's job: an abstract states the
+problem, method, result boundary and limitation; an introduction establishes
+the problem, gap, contribution and roadmap; a literature review synthesises
+rather than catalogues; methodology states reproducible inclusion, evaluation
+and deviation rules; results report before interpretation; discussion ties an
+interpretation to a research question, evidence and limitation; and conclusions
+pair each supported contribution with its limitation. Captions state what is
+shown, its scope, unit or metric, claim status and any caveat. Put extended
+implementation detail, manifests and validation outputs in appendices.
+
+For a full chapter or work, first lock source closure, claims, citations and
+validation commands. Review chapters independently for unsupported claims,
+citation misuse, technical meaning, concision, evidence boundaries and markup
+breakage; then review the whole work for coherent contribution logic and
+chapter-boundary drift. Preserve labels, macros, result commands, citation
+keys, equations, tables and file paths unless the user explicitly authorises a
+structural change. Run the applicable citation, budget, style and build checks,
+and report any skipped checks.
 
 ## Modes
 

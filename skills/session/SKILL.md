@@ -70,9 +70,6 @@ Staleness stays visible.
 Put project knowledge in project docs; follow
 [context-hygiene.md](references/context-hygiene.md) for lightweight private memory.
 
-## Adapter-absent path
+## Portable artifact
 
-Without adapters, emit the skill-owned kind in
-[portable-workflow.v1.json](portable-workflow.v1.json). Validate
-`accepted_artifact_identity`. Output proves context only, not handoff or task
-truth. Keep canonical context separate.
+Use the skill-owned [session handoff schema](portable-workflow.v1.json).
