@@ -350,8 +350,8 @@ function startOwner(
     let spawnError: string | undefined;
     child.once("error", (error) => { spawnError = error.message; });
     child.once("close", (exitCode, signal) => {
-      activeOwners.delete(started);
       void terminateStartedRun(started).finally(() => {
+        activeOwners.delete(started);
         for (const path of cleanupPaths) {
           try { unlinkSync(path); } catch { /* Exact staging input may already be absent. */ }
         }
