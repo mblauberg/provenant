@@ -107,6 +107,16 @@ function fabricCli(args: string[]): string {
   });
 }
 
+function fabricCliOutput(args: string[]): string {
+  try {
+    return fabricCli(args);
+  } catch (error) {
+    const stdout = error && typeof error === "object" && "stdout" in error ? error.stdout : undefined;
+    if (typeof stdout === "string") return stdout;
+    throw error;
+  }
+}
+
 async function startSleepingRun(prompt: string): Promise<Record<string, unknown>> {
   const started = await dispatchConfiguredProvider(
     { adapter: "codex", prompt, task_id: "sleeping-task", wait_seconds: 0 },
@@ -312,6 +322,87 @@ describe("cancellation", () => {
     expect(alive(providerPid)).toBe(true);
   }, 40_000);
 
+  it("fails dispatch kill after signalling only the owner of a live provider", async () => {
+    const runDir = join(workspace, ".agent-run", "mcp-cli-signalled-owner");
+    mkdirSync(runDir, { recursive: true });
+    const owner = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    owner.unref();
+    const ownerPid = owner.pid!;
+    spawnedPids.push(ownerPid);
+    const provider = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
+      detached: true,
+      stdio: "ignore",
+    });
+    provider.unref();
+    const providerPid = provider.pid!;
+    spawnedPids.push(providerPid);
+    const wrapperPath = join(temporaryDirectory, "cli-signalled-wrapper.mjs");
+    const wrapperPidPath = join(temporaryDirectory, "cli-signalled-wrapper.pid");
+    const releasePath = join(temporaryDirectory, "cli-signalled-wrapper.release");
+    const cliPath = join(packageRoot, "src", "cli.ts");
+    writeFileSync(wrapperPath, `
+      import { existsSync, writeFileSync } from "node:fs";
+      writeFileSync(${JSON.stringify(wrapperPidPath)}, String(process.pid));
+      await new Promise((resolveWait) => {
+        const timer = setInterval(() => {
+          if (!existsSync(${JSON.stringify(releasePath)})) return;
+          clearInterval(timer);
+          resolveWait();
+        }, 10);
+      });
+      process.argv = [process.execPath, ${JSON.stringify(cliPath)}, "dispatch", "kill", ${JSON.stringify(runDir)}];
+      await import(${JSON.stringify(cliPath)});
+    `);
+    const cli = spawn(process.execPath, ["--import", tsxLoader, wrapperPath], {
+      cwd: workspace,
+      env: ownerEnvironment,
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    let stdout = "";
+    cli.stdout.setEncoding("utf8");
+    cli.stdout.on("data", (chunk: string) => { stdout += chunk; });
+    const finished = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolveFinished) => {
+      cli.once("close", (code, signal) => resolveFinished({ code, signal }));
+    });
+    const cliPid = Number((await waitForFile(wrapperPidPath)).trim());
+    const ownerStartedAt = processStartedAt(ownerPid);
+    const providerStartedAt = processStartedAt(providerPid);
+    expect(ownerStartedAt).not.toBeNull();
+    expect(providerStartedAt).not.toBeNull();
+    const runToken = "cli-signalled-owner-token";
+    writeFileSync(join(runDir, OWNER_RECORD_NAME), JSON.stringify({
+      schema_version: 1,
+      kind: "dispatch",
+      run_dir: runDir,
+      workspace,
+      run_token: runToken,
+      owner_pid: ownerPid,
+      owner_pgid: ownerPid,
+      owner_started_at: ownerStartedAt,
+      host_pid: 999_973,
+      host_started_at: null,
+      started_at: new Date().toISOString(),
+      owner_stdout: `${runDir}-owner.stdout.jsonl`,
+      owner_stderr: `${runDir}-owner.stderr.log`,
+      task_id: "cli-signalled-owner-task",
+    }) + "\n");
+    writeFileSync(join(runDir, "dispatch-provider.json"), JSON.stringify({
+      run_token: runToken,
+      provider_pid: providerPid,
+      provider_pgid: cliPid,
+      provider_started_at: providerStartedAt,
+    }) + "\n");
+    writeFileSync(releasePath, "go\n");
+
+    expect(await finished).toEqual({ code: 1, signal: null });
+    expect(stdout).toContain("still running");
+    expect(alive(ownerPid)).toBe(false);
+    expect(alive(providerPid)).toBe(true);
+  }, 40_000);
+
   it("signals the owner process group, so the provider child dies too", async () => {
     const started = await startSleepingRun("sleep with provider");
     const runDir = String((started.paths as Record<string, string>).run_dir);
@@ -334,7 +425,7 @@ describe("cancellation", () => {
     expect(existsSync(attemptDirectory), "the cold-start scenario needs no attempt directory").toBe(false);
 
     // A fresh process holds no in-memory owner, only the recorded run.
-    const killed = JSON.parse(fabricCli(["dispatch", "kill", runDir, "--json"])) as Record<string, unknown>;
+    const killed = JSON.parse(fabricCliOutput(["dispatch", "kill", runDir, "--json"])) as Record<string, unknown>;
     expect(killed.signalled).toBe(true);
     await waitFor(() => !alive(providerPid), "the provider survived a cold-start kill");
     await waitFor(() => !alive(ownerPid) || existsSync(join(runDir, "cancelled.marker")),

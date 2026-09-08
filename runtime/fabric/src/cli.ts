@@ -125,7 +125,7 @@ if (command === "dispatch") {
       console.log(`${run.run_id} ${state}${outcome.escalated ? " (escalated to SIGKILL)" : ""}` +
         `${outcome.reason !== undefined && outcome.reason !== state ? ` (${outcome.reason})` : ""}`);
     }
-    process.exit(outcome.signalled ? 0 : 1);
+    process.exit(outcome.signalled && outcome.reason !== "still running" ? 0 : 1);
   }
   console.error(`fabric: usage: fabric dispatch <list|kill> ...`);
   process.exit(2);

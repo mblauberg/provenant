@@ -29,10 +29,10 @@ if (owner === "run_dir_init.sh") {
 const runDir = value("--run-dir");
 
 /**
- * A provider in its own session. It answers only its own SIGTERM, so a record
- * must retain the provider group after the owner exits.
+ * A provider may lead its own session. It answers only its own SIGTERM, so a
+ * record must retain the provider group after the owner exits.
  */
-const startProvider = ({ ignoreTerm = false } = {}) => {
+const startProvider = ({ ignoreTerm = false, detached = false } = {}) => {
   const providerEnvironment = {
     ...process.env,
     PROVIDER_READY_MARKER: join(runDir, "provider-ready.marker"),
@@ -43,7 +43,7 @@ const startProvider = ({ ignoreTerm = false } = {}) => {
     ignoreTerm
       ? "const { writeFileSync } = require('node:fs'); process.on('SIGTERM', () => writeFileSync(process.env.PROVIDER_TERM_MARKER, 'SIGTERM\\n')); writeFileSync(process.env.PROVIDER_READY_MARKER, 'ready\\n'); setInterval(() => undefined, 1000);"
       : "const { writeFileSync } = require('node:fs'); process.on('SIGTERM', () => process.exit(143)); writeFileSync(process.env.PROVIDER_READY_MARKER, 'ready\\n'); setInterval(() => undefined, 1000);",
-  ], { detached: true, stdio: "ignore", env: providerEnvironment });
+  ], { detached, stdio: "ignore", env: providerEnvironment });
   provider.unref();
   writeFileSync(join(runDir, "provider.pid"), `${provider.pid}\n`);
   const providerStartedAt = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(provider.pid)], {
@@ -52,7 +52,7 @@ const startProvider = ({ ignoreTerm = false } = {}) => {
   writeFileSync(join(runDir, "dispatch-provider.json"), JSON.stringify({
     run_token: process.env.PROVENANT_RUN_TOKEN,
     provider_pid: provider.pid,
-    provider_pgid: provider.pid,
+    provider_pgid: detached ? provider.pid : process.pid,
     provider_started_at: providerStartedAt,
   }) + "\n");
 };
@@ -110,7 +110,7 @@ if (owner === "dispatch_run.py") {
     exitAfterOwnerRecord();
   } else if (prompt === "exit with resistant provider") {
     mkdirSync(join(runDir, "dispatch", "tasks", taskId, "attempt-001"), { recursive: true });
-    startProvider({ ignoreTerm: true });
+    startProvider({ ignoreTerm: true, detached: true });
     exitAfterOwnerRecord({ release: true });
   } else if (prompt === "sleep before the attempt directory") {
     // Deliberately no attempt directory: this is the cold-start shape, where
