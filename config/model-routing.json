@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_date": "2026-09-04",
+  "catalog_date": "2026-09-08",
   "task_class_routes": {
     "mechanical": {"alias": "scout", "effort": "low", "role": "worker"},
     "legwork": {"alias": "workhorse", "effort": "medium", "role": "worker"},
@@ -41,7 +41,7 @@
     },
     "openai": {
       "aliases": {
-        "flagship": ["gpt-5.6-sol"],
+        "flagship": ["gpt-6-astra"],
         "workhorse": ["gpt-5.6-luna", "gpt-5.6-terra"],
         "scout": ["gpt-5.6-luna"]
       },

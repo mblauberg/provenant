@@ -1,13 +1,14 @@
 # Codex subagents (Codex-only layer)
 
-Verified against OpenAI Codex/GPT-5.6 docs on 2026-07-10:
+Verified against OpenAI Codex and model docs on 2026-09-08:
 
 - `https://learn.chatgpt.com/docs/agent-configuration/subagents`
 - `https://developers.openai.com/api/docs/guides/latest-model`
 - `https://developers.openai.com/api/docs/guides/tools-multi-agent`
+- `https://developers.openai.com/api/docs/models/gpt-6-astra`
 
 Codex subagents are native parallel workers inside a Codex session. For eligible
-models/accounts, GPT-5.6 `ultra` uses maximum reasoning and proactively delegates
+models/accounts, native `ultra` uses maximum reasoning and proactively delegates
 suitable work to subagents. At other effort levels, make fan-out concrete in the
 prompt. Ultra/native multi-agent is a first-class workflow substrate, but Codex
 does not execute Claude Code dynamic workflow JavaScript unchanged: keep the
@@ -30,8 +31,9 @@ project uses them. Do not assume a custom agent exists; discover current tools a
 
 ## Routing rules
 
-- Prefer a GPT-5.6 flagship Codex lead at `ultra` for substantial-to-terminal
-  orchestration when the runtime exposes it. Record a fallback to `max`,
+- Prefer a GPT-6 Astra flagship Codex lead at `ultra` for substantial-to-terminal
+  orchestration when the native runtime exposes it. The API route supports
+  Astra through `max`; record a fallback to `max`,
   `xhigh` or `high`; do not assume the entitlement exists.
 - Use Codex native subagents for same-harness fan-out. Do not use `codex exec` as a substitute for
   Codex subagents inside Codex.
@@ -65,7 +67,7 @@ Good Codex worker prompt fields:
 role:              explorer | worker | default
 task-class:        mechanical | legwork | critical-review | orchestration
 tier:              scout | workhorse | flagship
-catalog-model:     Luna | Terra | Sol
+catalog-model:     Astra | Luna | Terra
 effort:            <effective effort from route receipt>
 route-receipt:     <path or receipt identity>
 scope:             <files / sources / task slice>
@@ -76,10 +78,10 @@ output-path:       <run-dir>/findings/<name>.md
 return:            3-6 bullets, surprises, unresolved, file path
 ```
 
-For subscription-native Codex workers, omit the literal transport `model` and bind the resolved `effort`.
-Retain Luna/Terra/Sol as the catalogue identity in the
-receipt. If the native surface cannot bind that effort, stop or use an
-authorised adapter and record the substitution. Do not silently inherit the
+When the native Codex surface exposes model and effort overrides, bind both to
+the resolved route. Retain Astra/Luna/Terra as the catalogue identity in the
+receipt. If the native surface cannot bind either field, stop or use an
+authorised adapter and record the substitution; do not silently inherit the
 chair route. Explicit chair inheritance is valid only when the dispatch and
 receipt say so.
 

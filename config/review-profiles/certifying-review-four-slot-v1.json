@@ -10,7 +10,7 @@
           "adapterClass": "primary-native",
           "adapterId": "codex-app-server",
           "providerFamily": "openai",
-          "model": "gpt-5.6-sol",
+          "model": "gpt-6-astra",
           "requiredActualEndpointProvider": "openai",
           "requestedEffort": "max",
           "resolvedEffort": {
@@ -133,7 +133,7 @@
           "adapterClass": "equal-primary",
           "adapterId": "codex-app-server",
           "providerFamily": "openai",
-          "model": "gpt-5.6-sol",
+          "model": "gpt-6-astra",
           "requiredActualEndpointProvider": "openai",
           "requestedEffort": "max",
           "resolvedEffort": {

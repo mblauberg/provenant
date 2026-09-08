@@ -72,6 +72,9 @@ raise SystemExit(int(os.environ.get("PROVENANT_TEST_EXIT", "0")))
     batch_owner = checkout / "skills/orchestrate/scripts/batch_run.py"
     batch_owner.write_text(recorder)
     batch_owner.chmod(0o755)
+    capabilities_owner = checkout / "skills/orchestrate/scripts/capabilities.py"
+    capabilities_owner.write_text(recorder)
+    capabilities_owner.chmod(0o755)
     fabric_bin = checkout / "runtime" / "fabric" / "bin"
     fabric_bin.mkdir(parents=True)
     for owner in ("fabric", "fabric-mcp"):
@@ -174,6 +177,17 @@ def test_route_preserves_argv_environment_stdio_and_exit_status_through_symlink(
         "marker": "kept",
         "stdin": "input bytes\n",
     }
+
+
+def test_capabilities_delegates_to_the_existing_discovery_owner(tmp_path):
+    _, command = make_checkout(tmp_path)
+
+    result = invoke(
+        command, "capabilities", "codex", "--out", "capabilities.json", cwd=tmp_path
+    )
+
+    assert result.returncode == 0
+    assert json.loads(result.stdout)["argv"][1:] == ["codex", "--out", "capabilities.json"]
 
 
 def test_root_prints_the_resolved_product_checkout(tmp_path):

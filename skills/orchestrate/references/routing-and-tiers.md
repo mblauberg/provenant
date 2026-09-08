@@ -63,19 +63,11 @@ window.
 | **workhorse** | research legwork, drafting, ordinary review, diff analysis, source mapping | medium |
 | **flagship** | sparingly: decomposition, final synthesis, resolving disagreements, hard/high-stakes calls | high |
 
-Current durable aliases (verify against runtime before execution):
-
-| Family | flagship | workhorse | scout |
-|---|---|---|---|
-| Claude | Opus | Opus, Sonnet | Haiku |
-| OpenAI GPT-5.6 | Sol | Terra, Luna | Luna |
-| Google Gemini | 3.1 Pro | 3.7 Flash | 3.7 Flash |
-
-Where an alias lists more than one model the order is the resolution order, so
-the first is the default and the rest stay admissible. That order is the only
-thing that makes a standing preference in `docs/model-dossier.md` take
-effect automatically; prose alone does not move it. Change both together or
-they will disagree.
+Concrete alias candidates and their resolution order live only in
+`config/model-routing.json`; verify them against runtime before execution.
+The first configured candidate is the default and later candidates remain
+admissible. `docs/model-dossier.md` records advisory preferences, so prose
+alone does not move a default.
 
 Opus is Claude's default flagship and high-effort critical reviewer, and is also
 the default workhorse at low or medium effort, where it tends to beat Sonnet at
@@ -97,10 +89,14 @@ string silently degrades an eligibility gate into a substring test. A task-class
 route whose effort differs from its probe policy's `minimum_effort` fails as
 `task_class_config_invalid`: the probe evidences exactly one effort, so a
 divergence is a configuration error and must not surface as the provider fault
-`effort_capability_unverified`. Fable currently occupies both configured tiers. Sol leads for
-Codex. Eligible Sol lead/orchestrator routes may use Ultra; runtime model
-capabilities decide the effective effort and every fallback is recorded. Claude
-and Codex are equal primary families.
+`effort_capability_unverified`. Fable currently occupies both configured tiers.
+Astra leads for Codex and is the only OpenAI flagship candidate, so Sol cannot
+be selected as a silent fallback. The native Codex app exposes Astra at `low`
+through `ultra`; its API route supports through `max`. Runtime capability
+evidence decides what a CLI can dispatch, and every substitution is recorded.
+Luna remains the first cheap workhorse and scout catalogue candidate. Native
+legwork may select Terra at `high` when that surface exposes the explicit
+override. Claude and Codex are equal primary families.
 
 Effort rule: **medium by default**; **high for verification, adversarial, and high-stakes** calls
 (that's where subtle errors hide); reserve the very highest effort for isolated single-shot calls —
@@ -127,7 +123,7 @@ overrides a reservation, tier or compatibility gate.
 
 When a dossier entry actually decided between two admissible routes, name that
 entry's heading in the run receipt and the worker brief, for example
-`dossier: GPT-5.6 Sol`. Record nothing when no entry informed the choice; an
+`dossier: GPT-6 Astra`. Record nothing when no entry informed the choice; an
 unapplied preference is not evidence the dossier helped. The resolver receipt
 from `scripts/model-route` has a fixed schema with no advisory field, so the
 citation lives in the chair-authored run receipt and worker brief, never in

@@ -97,27 +97,23 @@ not read an absent `Watch out for` as an endorsement.
 - **Cost:** flagship-tier; not separately characterised.
 - **Reach:** `claude` and `agy` adapters, `anthropic` family.
 
-### GPT-5.6 Sol (OpenAI flagship)
+### GPT-6 Astra (OpenAI flagship)
 
-- **Good at:** correctness. Finding edge cases. Precision on a well-scoped
-  slice. The owner's phrasing: *"gpt-5.6 loves to over-engineer but is very good
-  at being correct."*
-- **Watch out for:** over-engineers a loose brief, and chases the 0.0001% case.
-  Give it a tight scope or it will invent one, and the one it invents will be
-  larger than yours.
+- **Good at:** the hard, high-stakes slice: correctness, edge cases and precise
+  work on a tight scope.
+- **Watch out for:** no standing behavioural note yet. Keep the brief tight and
+  record new evidence rather than carrying Sol's profile forward by assumption.
 - **Cost:** flagship-tier.
-- **Reach:** `codex` adapter (preferred), `cursor` as fallback; `openai` family.
+- **Reach:** `codex` adapter (preferred), `openai` family. The native Codex app
+  exposes `low` through `ultra`; the Responses API supports through `max`.
+  Treat those as separate surfaces and probe the CLI before dispatch.
 
 ### GPT-5.6 Luna (OpenAI workhorse and scout)
 
-- **Good at:** a cheaper Sol with similar limitations. Since the roughly 80%
-  price cut of July 2026 it is the family workhorse of choice at `high` or
-  `xhigh` effort, and the preferred destination for high-token legwork across
-  families. Still the fan-out pick where you want several Sol-shaped opinions
-  and cannot pay for several Sols.
-- **Watch out for:** the same over-engineering tendency as Sol, at lower
-  capability. A loose brief gets the same sprawl with less of the correctness
-  that redeems it; raised effort narrows that gap but a tight brief closes it.
+- **Good at:** cheap, high-token legwork at `high` or `xhigh` effort, and
+  fan-out where several bounded opinions are worth more than one flagship call.
+- **Watch out for:** can over-engineer a loose brief. Raised effort narrows the
+  gap, but a tight brief closes it.
   Effort must be raised explicitly at dispatch, because the catalogue's
   task-class efforts would hand it `medium`.
 - **Cost:** cheap, and far cheaper than it was; the point of using it.
@@ -246,10 +242,10 @@ Reach for `xhigh` or `max` explicitly when a leg deserves it, and record the
 model and effort pair in the receipt. A cheap model with the effort dial up
 beats a dearer model at medium.
 
-**`gpt-5.6-sol` stays the OpenAI flagship, reserved for critical and
-high-stakes slices.** Give it the work that is genuinely hard or where a miss
-is expensive; everything below that now belongs to Luna at raised effort.
-Getting this backwards wastes both.
+**`gpt-6-astra` is the OpenAI flagship, reserved for critical and high-stakes
+slices.** It is the sole OpenAI flagship candidate: Sol is not an automatic
+fallback. Give Astra the work that is genuinely hard or where a miss is
+expensive; everything below that belongs to Luna at raised effort.
 
 **Anthropic minds are for judgement, not volume.** Keep Opus and Fable for
 chairing, adjudication, synthesis and critical review, and reach for them less

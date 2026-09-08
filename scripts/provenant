@@ -80,7 +80,7 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|root|route|worktree|check|fabric|dispatch|batch|run> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|capabilities|worktree|check|fabric|dispatch|batch|run> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
@@ -91,6 +91,8 @@ Thin front door; each command delegates to its existing owner:
   root           print the resolved product checkout
   route ...      scripts/model-route ... (low-level resolver; capability-bound
                  aliases need a fresh snapshot, normally supplied by dispatch)
+  capabilities ...
+                 skills/orchestrate/scripts/capabilities.py ...
   worktree ...   scripts/worktree ...
   check ...      scripts/check-harness ...
   fabric ...     runtime/fabric/bin/fabric ...
@@ -304,6 +306,7 @@ def main(arguments: list[str]) -> int:
 
     owners = {
         "route": "scripts/model-route",
+        "capabilities": "skills/orchestrate/scripts/capabilities.py",
         "worktree": "scripts/worktree",
         "check": "scripts/check-harness",
         "fabric": FABRIC_CLI,

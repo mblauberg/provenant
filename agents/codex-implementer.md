@@ -99,8 +99,8 @@ again through you.
 **2. Run Codex in the foreground and let the call block.**
 
 ```
-codex exec -s workspace-write -c features.code_mode_host=false -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
-  -c service_tier=default -c model_reasoning_effort=xhigh - \
+codex exec -s workspace-write -c features.code_mode_host=false -C <ABSOLUTE_WORKTREE> -m gpt-5.6-terra \
+  -c service_tier=default -c model_reasoning_effort=high - \
   < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt \
   > ${TMPDIR:-/tmp}/codex-<slug>-transcript.txt 2>&1
 STATUS=$?
@@ -126,8 +126,8 @@ durable completion marker atomically to `run_dir/done`:
 run_dir=${TMPDIR:-/tmp}/codex-<unique-slug>
 "$(provenant root)/skills/orchestrate/scripts/run_worker_detached.sh" \
   --run-dir "$run_dir" -- \
-  codex exec -s workspace-write -c features.code_mode_host=false -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
-    -c service_tier=default -c model_reasoning_effort=xhigh - \
+  codex exec -s workspace-write -c features.code_mode_host=false -C <ABSOLUTE_WORKTREE> -m gpt-5.6-terra \
+    -c service_tier=default -c model_reasoning_effort=high - \
     < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt &
 WRAPPER_PID=$!
 wait "$WRAPPER_PID"
@@ -245,14 +245,14 @@ that is the most important sentence in your report.
 
 ## Choosing the model
 
-- `-m gpt-5.6-luna` is the default workhorse for this high-token implementation legwork at
-  `xhigh` effort.
-- `-m gpt-5.6-terra` is the fallback when a Luna run has failed or Luna is unavailable.
-- `-m gpt-5.6-sol` remains available for genuinely critical slices, usually when the caller asks
-  for it explicitly.
+- `-m gpt-5.6-terra` at `high` is the native legwork/workhorse route currently
+  exposed by the app and CLI.
+- `-m gpt-5.6-luna` remains the cheap catalogue workhorse and scout route; use
+  it only when the selected surface and receipt resolve it.
+- `gpt-6-astra` is the flagship for genuinely critical slices. Sol is never a
+  silent fallback.
 
-Luna shares Sol's tendency to over-engineer. A loose brief gets the same sprawl with less of the
-correctness that redeems it, so keep the implementation brief tight.
+Luna can over-engineer a loose brief, so keep the implementation brief tight.
 
 These names go stale. `codex debug models` is the headless discovery command and returns JSON
 with a `models` list, each entry carrying a `slug` and `supported_reasoning_levels` with per-model
@@ -264,9 +264,9 @@ model tried. Do not guess a replacement, and do not fall back to writing the cod
 The fast service tier is prohibited. Never enable it for any reason. It is a config key, not a
 CLI flag, so it is inherited silently unless pinned. It buys about 1.5x speed for roughly double
 the usage, which is never worth it, least of all for a background dispatch nobody is watching.
-Every invocation must pin `-c service_tier=default` and `-c model_reasoning_effort=xhigh`.
-Luna supports `low`, `medium`, `high`, `xhigh` and `max`, but not `ultra`; Sol and Terra also
-support `ultra`.
+Every invocation must pin `-c service_tier=default` and `-c model_reasoning_effort=high`.
+Probe per-model efforts immediately before dispatch. Astra's native-app
+`ultra` and API `max` ceilings are distinct; do not infer either one for the CLI.
 
 ## Liveness
 

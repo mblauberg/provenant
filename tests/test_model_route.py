@@ -164,8 +164,8 @@ def capability_snapshot(models, source="codex debug models"):
 def write_codex_capability_snapshot(tmp_path, *, observed_at=None, models=None):
     if models is None:
         models = {
-            "gpt-5.6-sol": {
-                "resolved_model": "gpt-5.6-sol",
+            "gpt-6-astra": {
+                "resolved_model": "gpt-6-astra",
                 "supported_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
             },
             "gpt-5.6-terra": {
@@ -1808,7 +1808,7 @@ def test_malformed_override_fails_closed_without_a_fixed_model_family(
 
 def test_account_default_aliases_resolve_to_account_default_dispatch(tmp_path):
     expected = {
-        "flagship": "gpt-5.6-sol",
+        "flagship": "gpt-6-astra",
         "workhorse": "gpt-5.6-luna",
         "scout": "gpt-5.6-luna",
     }
@@ -1835,7 +1835,7 @@ def test_account_default_adapter_ignores_runtime_selectable_model_list(tmp_path)
     )
     assert result.returncode == 0
     assert route["resolved_model"] == ""
-    assert route["catalog_model"] == "gpt-5.6-sol"
+    assert route["catalog_model"] == "gpt-6-astra"
     assert route["model_selection"] == "account-default"
 
 
@@ -1894,8 +1894,8 @@ def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
         # raises worker+workhorse in role_effort_defaults, the same way
         # critical-review and orchestration are raised below.
         ("legwork", "workhorse", "high", "gpt-5.6-luna"),
-        ("critical-review", "flagship", "max", "gpt-5.6-sol"),
-        ("orchestration", "flagship", "ultra", "gpt-5.6-sol"),
+        ("critical-review", "flagship", "max", "gpt-6-astra"),
+        ("orchestration", "flagship", "ultra", "gpt-6-astra"),
     ),
 )
 def test_task_classes_bind_codex_runtime_identity(
@@ -2175,8 +2175,8 @@ def test_task_class_rejects_explicit_model_override():
 def test_task_class_rejects_effective_effort_below_policy_floor(tmp_path):
     snapshot = tmp_path / "caps.json"
     snapshot.write_text(json.dumps(capability_snapshot({
-        "gpt-5.6-sol": {
-            "resolved_model": "gpt-5.6-sol",
+        "gpt-6-astra": {
+            "resolved_model": "gpt-6-astra",
             "supported_efforts": ["low"],
         },
     })))
@@ -2283,7 +2283,7 @@ def test_role_default_cannot_lower_task_class_effort(tmp_path, monkeypatch, caps
     catalog_path.write_text(json.dumps(catalog))
     snapshot = tmp_path / "caps.json"
     snapshot.write_text(json.dumps(capability_snapshot({
-        "gpt-5.6-sol": {"resolved_model": "gpt-5.6-sol", "supported_efforts": ["high"]},
+        "gpt-6-astra": {"resolved_model": "gpt-6-astra", "supported_efforts": ["high"]},
     })))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
 
@@ -2395,8 +2395,8 @@ def test_noneligible_ultra_fallback_reports_runtime_capability_source(
     snapshot = write_codex_capability_snapshot(
         tmp_path,
         models={
-            "gpt-5.6-sol": {
-                "resolved_model": "gpt-5.6-sol",
+            "gpt-6-astra": {
+                "resolved_model": "gpt-6-astra",
                 "supported_efforts": ["max"],
             },
         },
@@ -2523,8 +2523,8 @@ def test_capability_snapshot_controls_default_fallback(
     monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
     snapshot = tmp_path / "caps.json"
     snapshot.write_text(json.dumps(capability_snapshot({
-            "gpt-5.6-sol": {
-                "resolved_model": "gpt-5.6-sol",
+            "gpt-6-astra": {
+                "resolved_model": "gpt-6-astra",
                 "supported_efforts": ["high", "xhigh", "max"],
             }
         })))
@@ -2548,8 +2548,8 @@ def test_default_effort_fallback_chooses_highest_supported_effort_at_or_below_re
     snapshot = write_codex_capability_snapshot(
         tmp_path,
         models={
-            "gpt-5.6-sol": {
-                "resolved_model": "gpt-5.6-sol",
+            "gpt-6-astra": {
+                "resolved_model": "gpt-6-astra",
                 "supported_efforts": ["max", "medium"],
             },
         },
@@ -2612,7 +2612,7 @@ def test_fresh_openai_snapshot_without_alias_candidate_fails_closed(
     route = json.loads(capsys.readouterr().out)
     assert result == 1
     assert route["status"] == "no_candidate_available"
-    assert route["candidates"] == ["gpt-5.6-sol"]
+    assert route["candidates"] == ["gpt-6-astra"]
     assert route["requested_effort"] == "ultra"
     assert route["effort"] == "ultra"
 
@@ -2620,8 +2620,8 @@ def test_fresh_openai_snapshot_without_alias_candidate_fails_closed(
 def test_explicit_unsupported_effort_fails_against_runtime_snapshot(tmp_path):
     snapshot = tmp_path / "caps.json"
     snapshot.write_text(json.dumps(capability_snapshot({
-            "gpt-5.6-sol": {
-                "resolved_model": "gpt-5.6-sol",
+            "gpt-6-astra": {
+                "resolved_model": "gpt-6-astra",
                 "supported_efforts": ["high", "xhigh", "max"],
             }
         })))
