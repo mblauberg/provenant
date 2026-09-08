@@ -390,7 +390,7 @@ const boot = await agent(
     '"$(provenant root)/skills/deliver/scripts/delivery_receipt.py" init --run-dir ".agent-run/<runId>" --run-id "<runId>" --profile software --chair-family anthropic --risk-tier "<declared-risk>" --risk-assessment "<risk-assessment.json>" --intent "<approved-intent-file>" --authority "<authority.json>".\n' +
     '   The authority input is the current Authority V2 object from the approved task. It must bound the exact source and artifact paths, expiry, disclosure, secrets, deployment, irreversible actions, network and budget; do not invent wider authority.\n' +
     '   Then run: "$(provenant root)/skills/orchestrate/scripts/run_dir_init.sh" "<abs run-dir>" --force\n' +
-    '   Set RUN_RECEIPT.json review_plan.risk_tier to the risk_tier in RUN.json so both receipts describe the same run.\n' +
+    '   Set RUN_RECEIPT.json review_plan.risk_tier and review_plan.chair_family from the corresponding RUN.json fields so both receipts describe the same run.\n' +
     '   and ALSO run: mkdir -p "<abs run-dir>/patches"   (the patch-emitting builder writes there; ' +
     'run_dir_init.sh scaffolds findings/ crossfamily/ traces/ but NOT patches/).\n' +
     '   If producer initialisation or run_dir_init.sh fails, return no runDir and stop; do not create a manual or incomplete fallback.\n' +
@@ -770,7 +770,7 @@ const apply = await agent(
     `Keep human_gates.acceptance.status=pending; only explicit human acceptance may set that gate to approved. ` +
     `Then run the global session context_audit.py read-only; retain its recovery artifacts and record session results in the separate RUN_RECEIPT, never in RUN.json. Never remove unknown or pre-existing files. ` +
     `Update ${runDir}/RUN_RECEIPT.json task/owner, artifact retention and owned/handed-off pane fields; leave its ` +
-    `status=active while this change awaits human acceptance. Record unresolved blockers and every reviewer lane ` +
+    `status=active while this change awaits human acceptance. Set review_plan.concurrency_ceiling=${REVIEW_ANGLES.length} to match the configured review wave. Record unresolved blockers and every reviewer lane ` +
     `including failures. Every complete review_plan row must preserve its explicit wrapper verdict and the ` +
     `exact worker/provider REVIEW_SCHEMA object at the existing dispatcher output_path, retaining its ` +
     `run-relative path and sha256 digest as terminal_result alongside the dispatcher route receipt's observed exit and ` +
@@ -783,10 +783,9 @@ const apply = await agent(
     `role=targeted for fresh targeted lenses, role=other-primary only for a certified ` +
     `OpenAI-family reviewer with its exact route_receipt path, output sha256 and reviewed_revision, and role=distinct-family for advisory distinct-family attempts including failed/unavailable ` +
     `status plus reason. For terminal work, apply stronger targeted and adversarial pressure; if a distinct family is skipped, record distinct_family_coverage_reason. ` +
-    `Distinct-family failure never replaces other-primary coverage. Populate review_council from at least two distinct blind ` +
-    `targeted/other-primary review artifacts, ${JSON.stringify(councilChallenge || {})}, and ${JSON.stringify(councilReduction || {})}; ` +
-    `record distinct paths, output SHA-256 values, actor family/adapter/review role, final reviewed_revision and post_repair_review; ` +
-    `name the correctness lens exactly correctness-spec. Run ` +
+    `Distinct-family failure never replaces other-primary coverage. Write the council challenge ${JSON.stringify(councilChallenge || {})} ` +
+    `and reduction ${JSON.stringify(councilReduction || {})} to findings/review-council.md and bind that artifact through the delivery producer; ` +
+    `do not add a review_council field to either receipt. Preserve the distinct review artifacts and their existing lineage. Run ` +
     '"$(provenant root)/skills/deliver/scripts/validate_delivery.py" ' + `"${runDir}/RUN.json" --workspace-root "${gitCwd}" --verify-hashes. ` +
     `If validation fails, machineGatePassed=false, stop further mutation and escalate with the validator output; ` +
     `preserve any already-applied, independently checked low-risk patch honestly.\n` +
