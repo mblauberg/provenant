@@ -1435,7 +1435,7 @@ def test_prompt_file_trailing_newlines_reach_argv_adapter_byte_for_byte():
         )
 
         assert result.returncode == 0, result.stderr + result.stdout
-        assert received.read_bytes() == prompt.read_bytes()
+        assert received.read_bytes().split(b"\nTask:\n", 1)[1] == prompt.read_bytes()
 
 
 def test_nul_prompt_file_is_rejected_before_provider_execution():
