@@ -514,12 +514,13 @@ def test_dispatch_owner_keeps_lifecycle_risk_separate_from_model_override(tmp_pa
     )
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
+    env["AGENT_FABRIC_INSTANCE_ROOT"] = str(ROOT)
 
     result = subprocess.run(
         [
             str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "fable",
             "--adapter", "claude", "--prompt-file", str(prompt),
-            "--model", "fable", "--role", "synthesis",
+            "--model", "claude-fable-5-1", "--role", "synthesis",
             "--risk-tier", "routine", "--model-override-tier", "crucial",
         ],
         cwd=tmp_path, env=env, text=True,
@@ -533,8 +534,8 @@ def test_dispatch_owner_keeps_lifecycle_risk_separate_from_model_override(tmp_pa
     assert attempt["requested_route"]["model_override_tier"] == "crucial"
     assert attempt["route"]["risk_tier"] == "routine"
     assert attempt["route"]["model_override_tier"] == "crucial"
-    assert attempt["route"]["resolved_model"] == "fable"
-    assert attempt["route"]["policy_override"] == "crucial-fable-synthesis-adjudication"
+    assert attempt["route"]["resolved_model"] == "claude-fable-5-1"
+    assert attempt["route"]["policy_override"] == "crucial-claude-fable-5-1-synthesis-adjudication"
 
 
 def test_batch_child_defers_shared_manifest_append(tmp_path: Path, monkeypatch) -> None:

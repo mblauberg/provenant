@@ -178,7 +178,9 @@ def risk_tier_overrides_are_valid(
             occupant in ALIAS_ORDER
             or infer_family(occupant, catalog) is None
             or any(
-                model_has_alias(candidate, occupant) or model_has_alias(occupant, candidate)
+                model_has_alias(candidate, occupant)
+                or model_has_alias(occupant, candidate)
+                or risk_tier_override_reserves_model(candidate, occupant)
                 for candidate in candidates
             )
         ):
