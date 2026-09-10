@@ -1938,11 +1938,11 @@ def test_catalog_and_compatibility_mismatch_fails_closed(
 
 
 def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
-    # Workhorse is deliberately not proportionate on OpenAI. Luna is cheap enough
-    # that the family raises worker+workhorse to high in role_effort_defaults, so
-    # the tier difference against flagship is the model, not the effort. See
-    # docs/model-dossier.md.
-    expected = {"flagship": "high", "workhorse": "high", "scout": "low"}
+    # Workhorse and scout are deliberately not proportionate on OpenAI. Luna is
+    # cheap enough that the family raises both worker aliases to high in
+    # role_effort_defaults, so the tier difference against flagship is the
+    # model, not the effort. See docs/model-dossier.md.
+    expected = {"flagship": "high", "workhorse": "high", "scout": "high"}
     snapshot = write_codex_capability_snapshot(tmp_path)
     for alias, effort in expected.items():
         result, route = resolve(
@@ -1956,13 +1956,14 @@ def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
 @pytest.mark.parametrize(
     ("task_class", "alias", "effort", "resolved_model"),
     (
-        ("mechanical", "scout", "low", "gpt-5.6-luna"),
-        # Luna at high, not the task class default of medium: the OpenAI family
-        # raises worker+workhorse in role_effort_defaults, the same way
+        # Luna at high on both worker aliases, not the task-class floors of
+        # low and medium: the OpenAI family raises worker+scout and
+        # worker+workhorse in role_effort_defaults, the same way
         # critical-review and orchestration are raised below.
+        ("mechanical", "scout", "high", "gpt-5.6-luna"),
         ("legwork", "workhorse", "high", "gpt-5.6-luna"),
-        ("critical-review", "flagship", "max", "gpt-6-astra"),
-        ("orchestration", "flagship", "ultra", "gpt-6-astra"),
+        ("critical-review", "flagship", "xhigh", "gpt-6-astra"),
+        ("orchestration", "flagship", "xhigh", "gpt-6-astra"),
     ),
 )
 def test_task_classes_bind_codex_runtime_identity(
@@ -2255,7 +2256,7 @@ def test_task_class_rejects_effective_effort_below_policy_floor(tmp_path):
 
     assert result.returncode == 1
     assert route["status"] == "task_class_effort_below_floor"
-    assert route["requested_effort"] == "max"
+    assert route["requested_effort"] == "xhigh"
     assert route["effort"] == ""
 
 
@@ -2365,7 +2366,7 @@ def test_role_default_cannot_lower_task_class_effort(tmp_path, monkeypatch, caps
     assert route["effort_source"] == "task-class"
 
 
-def test_openai_route_without_runtime_snapshot_fails_closed(
+def test_explicit_ultra_without_runtime_snapshot_fails_closed(
     monkeypatch, capsys
 ):
     router = load_router()
@@ -2373,6 +2374,7 @@ def test_openai_route_without_runtime_snapshot_fails_closed(
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "--effort", "ultra",
     ])
 
     route = json.loads(capsys.readouterr().out)
@@ -2382,7 +2384,7 @@ def test_openai_route_without_runtime_snapshot_fails_closed(
     assert route["effort"] == ""
 
 
-def test_stale_openai_capability_snapshot_fails_closed(
+def test_explicit_ultra_with_stale_openai_capability_snapshot_fails_closed(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
@@ -2394,6 +2396,7 @@ def test_stale_openai_capability_snapshot_fails_closed(
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "--effort", "ultra",
         "--capabilities-file", str(snapshot),
     ])
 
@@ -2411,10 +2414,10 @@ def test_openai_catalog_declares_effort_policy_only():
     assert "ultra_eligible_models" not in family
     assert family["ultra_eligible_roles"] == ["lead", "orchestrator"]
     assert family["role_effort_defaults"] == {
-        "lead": {"flagship": "ultra"},
-        "orchestrator": {"flagship": "ultra"},
-        "critical-review": {"flagship": "max"},
-        "worker": {"workhorse": "high"},
+        "lead": {"flagship": "xhigh"},
+        "orchestrator": {"flagship": "xhigh"},
+        "critical-review": {"flagship": "xhigh"},
+        "worker": {"workhorse": "high", "scout": "high"},
     }
     assert family["effort_fallback_order"] == ["max", "xhigh", "high", "medium", "low"]
 
@@ -2429,7 +2432,7 @@ def test_cli_headless_enumerates_no_effort_available():
     )
 
 
-def test_fresh_openai_snapshot_accepts_ultra_role_default(
+def test_fresh_openai_snapshot_accepts_explicit_ultra_effort(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
@@ -2438,6 +2441,7 @@ def test_fresh_openai_snapshot_accepts_ultra_role_default(
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
+        "--effort", "ultra",
         "--capabilities-file", str(snapshot),
     ])
 
@@ -2505,7 +2509,7 @@ def test_ultra_eligible_roles_must_be_a_list_of_role_names(
     assert "ultra_eligible_roles must be a list" in route["message"]
 
 
-def test_explicit_effort_overrides_codex_ultra_default(tmp_path):
+def test_explicit_effort_overrides_codex_xhigh_default(tmp_path):
     snapshot = write_codex_capability_snapshot(tmp_path)
     result, route = resolve(
         "--adapter", "codex", "--alias", "flagship", "--role", "lead", "--effort", "high",
@@ -2579,7 +2583,7 @@ def test_caller_efforts_do_not_replace_openai_capability_snapshot():
     )
     assert result.returncode == 1
     assert route["status"] == "capability_discovery_failed"
-    assert route["requested_effort"] == "ultra"
+    assert route["requested_effort"] == "xhigh"
     assert route["effort"] == ""
 
 
@@ -2592,7 +2596,9 @@ def test_capability_snapshot_controls_default_fallback(
     snapshot.write_text(json.dumps(capability_snapshot({
             "gpt-6-astra": {
                 "resolved_model": "gpt-6-astra",
-                "supported_efforts": ["high", "xhigh", "max"],
+                # max is present so the test proves the default steps down
+                # to high rather than up past the xhigh ceiling.
+                "supported_efforts": ["medium", "high", "max"],
             }
         })))
     result = router.main([
@@ -2601,11 +2607,11 @@ def test_capability_snapshot_controls_default_fallback(
     ])
     route = json.loads(capsys.readouterr().out)
     assert result == 0
-    assert route["requested_effort"] == "ultra"
-    assert route["effort"] == "max"
+    assert route["requested_effort"] == "xhigh"
+    assert route["effort"] == "high"
     assert route["effort_capability_source"] == "runtime-model-catalog"
     assert route["effort_substitution"] == (
-        "ultra unavailable (runtime/model capability); used max"
+        "xhigh unavailable (runtime/model capability); used high"
     )
 
 
@@ -2655,7 +2661,7 @@ def test_task_class_effort_fallback_never_escalates_when_only_higher_effort_is_s
 
     assert route["status"] == "no_effort_available"
     assert result.returncode == 1
-    assert route["requested_effort"] == "low"
+    assert route["requested_effort"] == "high"
     assert route["effort"] == ""
     assert route["effort_substitution"] == ""
 
@@ -2680,8 +2686,8 @@ def test_fresh_openai_snapshot_without_alias_candidate_fails_closed(
     assert result == 1
     assert route["status"] == "no_candidate_available"
     assert route["candidates"] == ["gpt-6-astra"]
-    assert route["requested_effort"] == "ultra"
-    assert route["effort"] == "ultra"
+    assert route["requested_effort"] == "xhigh"
+    assert route["effort"] == "xhigh"
 
 
 def test_explicit_unsupported_effort_fails_against_runtime_snapshot(tmp_path):

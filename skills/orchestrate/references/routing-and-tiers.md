@@ -92,12 +92,15 @@ divergence is a configuration error and must not surface as the provider fault
 `effort_capability_unverified`. Claude Fable 5.1 (`claude-fable-5-1`) currently
 occupies both configured tiers.
 Astra leads for Codex and is the only OpenAI flagship candidate, so Sol cannot
-be selected as a silent fallback. The native Codex app exposes Astra at `low`
-through `ultra`; its API route supports through `max`. Runtime capability
-evidence decides what a CLI can dispatch, and every substitution is recorded.
-Luna remains the first cheap workhorse and scout catalogue candidate. Native
-legwork may select Terra at `high` when that surface exposes the explicit
-override. Claude and Codex are equal primary families.
+be selected as a silent fallback. The standing policy runs Astra between `low`
+and `xhigh` for critical review and for legwork that needs judgement. The
+native Codex CLI reports `max` and `ultra` for Astra and the Responses API
+stops at `max`; those are separate surfaces, only the runtime capability probe
+decides what the adapter can dispatch, and the catalogue defaults to neither.
+Every substitution is recorded. Luna is the only workhorse and scout catalogue candidate, run at
+`high` by default and raised to `xhigh` or `max` for mechanical and legwork
+slices that warrant it. Sol and Terra are not catalogue routes. Claude and
+Codex are equal primary families.
 
 Effort rule: **medium by default**; **high for verification, adversarial, and high-stakes** calls
 (that's where subtle errors hide); reserve the very highest effort for isolated single-shot calls —

@@ -114,8 +114,9 @@ not read an absent `Watch out for` as an endorsement.
   fan-out where several bounded opinions are worth more than one flagship call.
 - **Watch out for:** can over-engineer a loose brief. Raised effort narrows the
   gap, but a tight brief closes it.
-  Effort must be raised explicitly at dispatch, because the catalogue's
-  task-class efforts would hand it `medium`.
+  The catalogue's worker defaults hand it `high` on both the `workhorse` and
+  `scout` aliases; raise to `xhigh` or `max` explicitly when the brief
+  warrants it.
 - **Cost:** cheap, and far cheaper than it was; the point of using it.
 - **Reach:** `codex` adapter, `openai` family, `workhorse` and `scout` aliases.
 
@@ -227,7 +228,7 @@ inventories, mechanical sweeps: these are cheaper there and Claude's budget is
 better spent on judgement. Luna's price was cut by roughly 80% in July 2026,
 which makes Luna at `high` or `xhigh` the best value in the family for
 high-token work; go to `max` when a leg genuinely deserves it. `gpt-5.6-terra`
-stays admissible but is no longer the preferred default.
+was dropped from the catalogue on 2026-09-10; the owner does not need it.
 
 That is the old standing wish made real by the price cut. The mechanical caveat
 that used to block it was that effort is fixed per task class, so ordering Luna
@@ -243,9 +244,12 @@ model and effort pair in the receipt. A cheap model with the effort dial up
 beats a dearer model at medium.
 
 **`gpt-6-astra` is the OpenAI flagship, reserved for critical and high-stakes
-slices.** It is the sole OpenAI flagship candidate: Sol is not an automatic
-fallback. Give Astra the work that is genuinely hard or where a miss is
-expensive; everything below that belongs to Luna at raised effort.
+slices and for legwork that needs judgement.** Run it between `low` and
+`xhigh`; `max` and `ultra` exist on the surfaces but are not the standing
+policy. It is the sole OpenAI flagship candidate: Sol is not an automatic
+fallback and is not a catalogue route. Give Astra the work that is genuinely
+hard or where a miss is expensive; everything below that belongs to Luna at
+raised effort.
 
 **Anthropic minds are for judgement, not volume.** Keep Opus and Claude Fable
 5.1 (`claude-fable-5-1`) for
@@ -257,8 +261,10 @@ over Sonnet at a higher one. The catalogue lists Opus under
 `anthropic.aliases.workhorse` so this is a real option rather than a
 flagship-only escape hatch.
 
-**Orchestration stays with Anthropic**, at flagship and high effort. Decomposition,
-synthesis and final calls are the chair's job.
+**Orchestration stays with the chair's own family**, at flagship effort:
+Anthropic at high effort when Claude is the chair, and Astra at `xhigh` when a
+Codex lead orchestrates. Decomposition, synthesis and final calls are the
+chair's job.
 
 **Gemini for writing style, naturalisation and polish passes, not for core
 changes.** It is chosen for voice, not for reasoning. Use it to make prose read
@@ -308,7 +314,6 @@ assessment; until then, route these on the hard axis alone.
 | Model | Configured position | Status |
 |---|---|---|
 | Haiku | `anthropic` scout alias | needs owner review |
-| GPT-5.6 Terra | `openai` workhorse alias | needs owner review |
 | Claude Fable 5.1 | `anthropic` crucial and terminal override for synthesis and adjudication, effort capped at medium | needs owner review |
 | Grok | reachable through the `cursor` adapter, `xai` family | needs owner review |
 | Cursor Composer | reachable through the `cursor` adapter | needs owner review |

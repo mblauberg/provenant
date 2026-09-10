@@ -1898,7 +1898,7 @@ def test_resolved_role_effort_reaches_codex_adapter_and_receipt():
             bin_dir / "codex",
             f'''#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{{"models":[{{"slug":"gpt-6-astra","supported_reasoning_levels":[{{"effort":"high"}},{{"effort":"xhigh"}}]}}]}}'
+              printf '%s\n' '{{"models":[{{"slug":"gpt-6-astra","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
               exit 0
             fi
             printf '%s\\n' "$@" > {args_file}
@@ -1930,8 +1930,10 @@ def test_resolved_role_effort_reaches_codex_adapter_and_receipt():
         )
         record = json.loads(result.stdout)
         assert result.returncode == 0, result.stderr
-        assert record["requested_effort"] == "max"
-        assert record["effort"] == "xhigh"
+        # The stub only supports high, so the CLI must carry the effective
+        # effort rather than forwarding the requested xhigh.
+        assert record["requested_effort"] == "xhigh"
+        assert record["effort"] == "high"
         assert record["effort_capability_source"] == "runtime-model-catalog"
         assert record["resolved_model"] == "gpt-6-astra"
         assert record["catalog_model"] == ""
@@ -1940,7 +1942,8 @@ def test_resolved_role_effort_reaches_codex_adapter_and_receipt():
         assert "-m" in args
         assert "gpt-6-astra" in args
         assert "service_tier=default" in args
-        assert "model_reasoning_effort=xhigh" in args
+        assert "model_reasoning_effort=high" in args
+        assert "model_reasoning_effort=xhigh" not in args
 
 
 def test_bare_codex_dispatch_defaults_to_workhorse_not_flagship():
@@ -2007,7 +2010,7 @@ def test_critical_review_role_still_defaults_to_flagship():
             bin_dir / "codex",
             f'''#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"medium"}}]}},{{"slug":"gpt-6-astra","supported_reasoning_levels":[{{"effort":"max"}}]}}]}}'
+              printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"medium"}}]}},{{"slug":"gpt-6-astra","supported_reasoning_levels":[{{"effort":"xhigh"}}]}}]}}'
               exit 0
             fi
             printf '%s\\n' "$@" > {args_file}

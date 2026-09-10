@@ -31,10 +31,10 @@ project uses them. Do not assume a custom agent exists; discover current tools a
 
 ## Routing rules
 
-- Prefer a GPT-6 Astra flagship Codex lead at `ultra` for substantial-to-terminal
-  orchestration when the native runtime exposes it. The API route supports
-  Astra through `max`; record a fallback to `max`,
-  `xhigh` or `high`; do not assume the entitlement exists.
+- Prefer a GPT-6 Astra flagship Codex lead at `xhigh` for substantial-to-terminal
+  orchestration. The native runtime exposes `ultra` and the API route `max`,
+  but neither is the standing default; record any fallback to `high`, and do
+  not assume an entitlement exists.
 - Use Codex native subagents for same-harness fan-out. Do not use `codex exec` as a substitute for
   Codex subagents inside Codex.
 - Use `codex exec -s read-only --ephemeral` as a noninteractive verifier only when the orchestrator is
@@ -67,7 +67,7 @@ Good Codex worker prompt fields:
 role:              explorer | worker | default
 task-class:        mechanical | legwork | critical-review | orchestration
 tier:              scout | workhorse | flagship
-catalog-model:     Astra | Luna | Terra
+catalog-model:     Astra | Luna
 effort:            <effective effort from route receipt>
 route-receipt:     <path or receipt identity>
 scope:             <files / sources / task slice>
@@ -79,7 +79,7 @@ return:            3-6 bullets, surprises, unresolved, file path
 ```
 
 When the native Codex surface exposes model and effort overrides, bind both to
-the resolved route. Retain Astra/Luna/Terra as the catalogue identity in the
+the resolved route. Retain Astra/Luna as the catalogue identity in the
 receipt. If the native surface cannot bind either field, stop or use an
 authorised adapter and record the substitution; do not silently inherit the
 chair route. Explicit chair inheritance is valid only when the dispatch and

@@ -42,15 +42,15 @@
     "openai": {
       "aliases": {
         "flagship": ["gpt-6-astra"],
-        "workhorse": ["gpt-5.6-luna", "gpt-5.6-terra"],
+        "workhorse": ["gpt-5.6-luna"],
         "scout": ["gpt-5.6-luna"]
       },
       "role_overrides": {},
       "role_effort_defaults": {
-        "lead": {"flagship": "ultra"},
-        "orchestrator": {"flagship": "ultra"},
-        "critical-review": {"flagship": "max"},
-        "worker": {"workhorse": "high"}
+        "lead": {"flagship": "xhigh"},
+        "orchestrator": {"flagship": "xhigh"},
+        "critical-review": {"flagship": "xhigh"},
+        "worker": {"workhorse": "high", "scout": "high"}
       },
       "ultra_eligible_roles": ["lead", "orchestrator"],
       "effort_fallback_order": ["max", "xhigh", "high", "medium", "low"]
