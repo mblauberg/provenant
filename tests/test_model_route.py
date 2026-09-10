@@ -2579,7 +2579,7 @@ def test_caller_efforts_do_not_replace_openai_capability_snapshot():
     )
     assert result.returncode == 1
     assert route["status"] == "capability_discovery_failed"
-    assert route["requested_effort"] == "ultra"
+    assert route["requested_effort"] == "xhigh"
     assert route["effort"] == ""
 
 
@@ -2592,7 +2592,7 @@ def test_capability_snapshot_controls_default_fallback(
     snapshot.write_text(json.dumps(capability_snapshot({
             "gpt-6-astra": {
                 "resolved_model": "gpt-6-astra",
-                "supported_efforts": ["high", "xhigh", "max"],
+                "supported_efforts": ["medium", "high"],
             }
         })))
     result = router.main([
@@ -2601,11 +2601,11 @@ def test_capability_snapshot_controls_default_fallback(
     ])
     route = json.loads(capsys.readouterr().out)
     assert result == 0
-    assert route["requested_effort"] == "ultra"
-    assert route["effort"] == "max"
+    assert route["requested_effort"] == "xhigh"
+    assert route["effort"] == "high"
     assert route["effort_capability_source"] == "runtime-model-catalog"
     assert route["effort_substitution"] == (
-        "ultra unavailable (runtime/model capability); used max"
+        "xhigh unavailable (runtime/model capability); used high"
     )
 
 
@@ -2680,8 +2680,8 @@ def test_fresh_openai_snapshot_without_alias_candidate_fails_closed(
     assert result == 1
     assert route["status"] == "no_candidate_available"
     assert route["candidates"] == ["gpt-6-astra"]
-    assert route["requested_effort"] == "ultra"
-    assert route["effort"] == "ultra"
+    assert route["requested_effort"] == "xhigh"
+    assert route["effort"] == "xhigh"
 
 
 def test_explicit_unsupported_effort_fails_against_runtime_snapshot(tmp_path):
