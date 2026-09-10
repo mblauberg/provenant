@@ -234,9 +234,11 @@ provenant route resolve --adapter codex --role worker --task-class legwork \
 Use `--task-class mechanical`, or `--role critical-review --task-class
 critical-review`, as the slice demands. Bind `-m` and `model_reasoning_effort`
 to `resolved_model` and `effort` only when the exit status is 0 and `status`
-is `ok`; any other status means the catalogue could not vouch for the route,
-so fall back to the names below. When a new model lands, the catalogue and
-`docs/model-dossier.md` change and this section follows them.
+is `ok`. Any other status is a routing decision, not a hint: stop, report the
+`status` and `message` to the caller, and do not dispatch until the route
+resolves. The names below are for a workstation without `provenant` on the
+path. When a new model lands, the catalogue and `docs/model-dossier.md` change
+and this section follows them.
 
 - `-m gpt-5.6-luna` is the default for mechanical and legwork slices. Run it
   at `high` by default; raise to `xhigh` or `max` when the brief warrants it.
