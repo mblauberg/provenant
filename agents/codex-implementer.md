@@ -242,6 +242,14 @@ that is the most important sentence in your report.
 
 ## Choosing the model
 
+The catalogue in `config/model-routing.json` is the authority, and the names
+below are its openai block as of 2026-09-10. When it is available, ask it rather
+than typing a name: `provenant route resolve --adapter codex --role worker
+--task-class legwork` (or `mechanical`, or `--role critical-review --task-class
+critical-review`) prints the admissible `resolved_model` and `effort`; bind
+`-m` and `model_reasoning_effort` to those values. When a new model lands, the
+catalogue and `docs/model-dossier.md` change and this section follows them.
+
 - `-m gpt-5.6-luna` is the default for mechanical and legwork slices. Run it
   at `high` by default; raise to `xhigh` or `max` when the brief warrants it.
 - `-m gpt-6-astra` is the flagship for critical slices and for legwork that

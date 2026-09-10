@@ -93,10 +93,11 @@ divergence is a configuration error and must not surface as the provider fault
 occupies both configured tiers.
 Astra leads for Codex and is the only OpenAI flagship candidate, so Sol cannot
 be selected as a silent fallback. The standing policy runs Astra between `low`
-and `xhigh` for critical review and for legwork that needs judgement; the CLI
-exposes `max` and `ultra` but the catalogue does not default to them. Runtime
-capability evidence decides what a CLI can dispatch, and every substitution is
-recorded. Luna is the only workhorse and scout catalogue candidate, run at
+and `xhigh` for critical review and for legwork that needs judgement. The
+native Codex CLI reports `max` and `ultra` for Astra and the Responses API
+stops at `max`; those are separate surfaces, only the runtime capability probe
+decides what the adapter can dispatch, and the catalogue defaults to neither.
+Every substitution is recorded. Luna is the only workhorse and scout catalogue candidate, run at
 `high` by default and raised to `xhigh` or `max` for mechanical and legwork
 slices that warrant it. Sol and Terra are not catalogue routes. Claude and
 Codex are equal primary families.

@@ -1938,11 +1938,11 @@ def test_catalog_and_compatibility_mismatch_fails_closed(
 
 
 def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
-    # Workhorse is deliberately not proportionate on OpenAI. Luna is cheap enough
-    # that the family raises worker+workhorse to high in role_effort_defaults, so
-    # the tier difference against flagship is the model, not the effort. See
-    # docs/model-dossier.md.
-    expected = {"flagship": "high", "workhorse": "high", "scout": "low"}
+    # Workhorse and scout are deliberately not proportionate on OpenAI. Luna is
+    # cheap enough that the family raises both worker aliases to high in
+    # role_effort_defaults, so the tier difference against flagship is the
+    # model, not the effort. See docs/model-dossier.md.
+    expected = {"flagship": "high", "workhorse": "high", "scout": "high"}
     snapshot = write_codex_capability_snapshot(tmp_path)
     for alias, effort in expected.items():
         result, route = resolve(
@@ -1956,10 +1956,11 @@ def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
 @pytest.mark.parametrize(
     ("task_class", "alias", "effort", "resolved_model"),
     (
-        ("mechanical", "scout", "low", "gpt-5.6-luna"),
-        # Luna at high, not the task class default of medium: the OpenAI family
-        # raises worker+workhorse in role_effort_defaults, the same way
+        # Luna at high on both worker aliases, not the task-class floors of
+        # low and medium: the OpenAI family raises worker+scout and
+        # worker+workhorse in role_effort_defaults, the same way
         # critical-review and orchestration are raised below.
+        ("mechanical", "scout", "high", "gpt-5.6-luna"),
         ("legwork", "workhorse", "high", "gpt-5.6-luna"),
         ("critical-review", "flagship", "xhigh", "gpt-6-astra"),
         ("orchestration", "flagship", "xhigh", "gpt-6-astra"),
@@ -2416,7 +2417,7 @@ def test_openai_catalog_declares_effort_policy_only():
         "lead": {"flagship": "xhigh"},
         "orchestrator": {"flagship": "xhigh"},
         "critical-review": {"flagship": "xhigh"},
-        "worker": {"workhorse": "high"},
+        "worker": {"workhorse": "high", "scout": "high"},
     }
     assert family["effort_fallback_order"] == ["max", "xhigh", "high", "medium", "low"]
 
@@ -2595,7 +2596,9 @@ def test_capability_snapshot_controls_default_fallback(
     snapshot.write_text(json.dumps(capability_snapshot({
             "gpt-6-astra": {
                 "resolved_model": "gpt-6-astra",
-                "supported_efforts": ["medium", "high"],
+                # max is present so the test proves the default steps down
+                # to high rather than up past the xhigh ceiling.
+                "supported_efforts": ["medium", "high", "max"],
             }
         })))
     result = router.main([
@@ -2658,7 +2661,7 @@ def test_task_class_effort_fallback_never_escalates_when_only_higher_effort_is_s
 
     assert route["status"] == "no_effort_available"
     assert result.returncode == 1
-    assert route["requested_effort"] == "low"
+    assert route["requested_effort"] == "high"
     assert route["effort"] == ""
     assert route["effort_substitution"] == ""
 

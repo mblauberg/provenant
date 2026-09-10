@@ -114,8 +114,9 @@ not read an absent `Watch out for` as an endorsement.
   fan-out where several bounded opinions are worth more than one flagship call.
 - **Watch out for:** can over-engineer a loose brief. Raised effort narrows the
   gap, but a tight brief closes it.
-  Effort must be raised explicitly at dispatch, because the catalogue's
-  task-class efforts would hand it `medium`.
+  The catalogue's worker defaults hand it `high` on both the `workhorse` and
+  `scout` aliases; raise to `xhigh` or `max` explicitly when the brief
+  warrants it.
 - **Cost:** cheap, and far cheaper than it was; the point of using it.
 - **Reach:** `codex` adapter, `openai` family, `workhorse` and `scout` aliases.
 
@@ -260,8 +261,10 @@ over Sonnet at a higher one. The catalogue lists Opus under
 `anthropic.aliases.workhorse` so this is a real option rather than a
 flagship-only escape hatch.
 
-**Orchestration stays with Anthropic**, at flagship and high effort. Decomposition,
-synthesis and final calls are the chair's job.
+**Orchestration stays with the chair's own family**, at flagship effort:
+Anthropic at high effort when Claude is the chair, and Astra at `xhigh` when a
+Codex lead orchestrates. Decomposition, synthesis and final calls are the
+chair's job.
 
 **Gemini for writing style, naturalisation and polish passes, not for core
 changes.** It is chosen for voice, not for reasoning. Use it to make prose read

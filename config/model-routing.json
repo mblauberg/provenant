@@ -50,7 +50,7 @@
         "lead": {"flagship": "xhigh"},
         "orchestrator": {"flagship": "xhigh"},
         "critical-review": {"flagship": "xhigh"},
-        "worker": {"workhorse": "high"}
+        "worker": {"workhorse": "high", "scout": "high"}
       },
       "ultra_eligible_roles": ["lead", "orchestrator"],
       "effort_fallback_order": ["max", "xhigh", "high", "medium", "low"]
