@@ -11,6 +11,7 @@ Verified locally on macOS, 2026-08-05. Model IDs, flags, auth, and safety modes 
 - [Distinct-family lane](#distinct-family-lane)
 - [Codex worktree implementation lane](#codex-worktree-implementation-lane)
 - [Runtime routing](#runtime-routing)
+- [OpenRouter and OpenCode](#openrouter-and-opencode)
 - [Output normalisation](#output-normalisation)
 - [Data policy](#data-policy)
 
@@ -315,6 +316,56 @@ load-bearing for cross-verification: resolve a different-family read-only route
 through current capability evidence and record its adapter, lineage, effective
 effort, safety guarantee, and CLI version in the run manifest.
 A best_effort route may scout but not certify cross-family verification.
+
+## OpenRouter and OpenCode
+
+These expand optional worker capacity. They are not default `task_class` alias
+routes and do not satisfy distinct-family assurance by themselves.
+
+### OpenRouter (Claude or Codex as the harness)
+
+Requires `OPENROUTER_API_KEY` in the environment (install into `~/.zshenv` so
+non-interactive dispatch sees it). Select a profile with
+`CF_DISPATCH_ENDPOINT` and pass an explicit OpenRouter slug as `--model`. Do
+not pin rotating free/stealth models into catalogue aliases.
+
+```sh
+# Claude Code harness → OpenRouter Anthropic-compatible API
+CF_DISPATCH_ENDPOINT=openrouter-anthropic \
+  cf_dispatch.sh --intent ordinary --tool claude \
+  --model stealth/union-alpha --alias scout --role worker \
+  --prompt '…' --out /tmp/out.txt
+
+# Codex harness → OpenRouter Responses API
+CF_DISPATCH_ENDPOINT=openrouter-openai \
+  cf_dispatch.sh --intent ordinary --tool codex \
+  --model stealth/union-alpha --alias scout --role worker \
+  --prompt '…' --out /tmp/out.txt
+```
+
+Interactive Claude/Codex `/model` menus stay on their subscription catalogues
+unless the operator configures those CLIs for OpenRouter separately. Provenant
+dispatch is the supported expansion path.
+
+### OpenCode (provider + interactive client)
+
+- **As a dispatch provider:** `--tool opencode` with an explicit
+  `opencode/<model>` (list with `opencode models`). Fabric may use adapter
+  `opencode`. No Kiro-style enable env var. `read_only_guarantee` is `none`
+  until a hard read-only mode is proven; never pass `--auto`.
+- **As an interactive client:** register Fabric MCP for OpenCode
+  (`scripts/configure-fabric-mcp.py --platform opencode` or
+  `install-harness --mcp-clients all`). The client keeps label `opencode` and
+  shares the `codex` seat by design. After registration, a new OpenCode session
+  should list `fabric` via `opencode mcp list`.
+- **Subscription / Zen models:** still pass the live `opencode/…` slug
+  explicitly; discover with `opencode models` after login. Paid catalogue
+  changes do not require a Provenant alias-table edit.
+
+Instance installs copy `config/model-routing.json` into
+`~/.agents/config/`. After merging activation, re-run `install-harness` (or
+otherwise refresh the instance catalogue) so dispatch sees OpenCode as
+`implemented` and the OpenRouter endpoint profiles.
 
 ## Output normalisation
 

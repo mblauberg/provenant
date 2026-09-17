@@ -588,18 +588,36 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 1,
             )
         model = args.model
-        family = infer_family(model, catalog)
-        identity_source = "model-pattern"
-        if not family:
-            return emit_route(
-                {
-                    **base,
-                    "status": "model_family_unknown",
-                    "endpoint_provider": endpoint,
-                    "resolved_model": model,
-                },
-                1,
-            )
+        # An endpoint profile is a multi-model gateway more often than a single
+        # lab: the profile's declared family is the route family. Pattern
+        # inference still applies on ordinary (non-endpoint) routes.
+        if endpoint_profile:
+            family = endpoint_profile["model_family"]
+            identity_source = "endpoint-profile"
+        else:
+            family = infer_family(model, catalog)
+            identity_source = "model-pattern"
+            if not family:
+                return emit_route(
+                    {
+                        **base,
+                        "status": "model_family_unknown",
+                        "endpoint_provider": endpoint,
+                        "resolved_model": model,
+                    },
+                    1,
+                )
+            if fixed_family and family != fixed_family:
+                return emit_route(
+                    {
+                        **base,
+                        "status": "adapter_family_mismatch",
+                        "endpoint_provider": endpoint,
+                        "model_family": family,
+                        "resolved_model": model,
+                    },
+                    1,
+                )
         selected_override_model = (
             args.model_override.get("models", [""])[0] if args.model_override else ""
         )
@@ -610,17 +628,6 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         )
         if args.model_override and not model_matches_override:
             return emit_route({**base, "status": "risk_tier_model_mismatch"}, 1)
-        if fixed_family and family != fixed_family:
-            return emit_route(
-                {
-                    **base,
-                    "status": "adapter_family_mismatch",
-                    "endpoint_provider": endpoint,
-                    "model_family": family,
-                    "resolved_model": model,
-                },
-                1,
-            )
     else:
         # An adapter whose pinned family the catalogue leaves undefined, or defines
         # without an alias table, has no alias to resolve against and must be given

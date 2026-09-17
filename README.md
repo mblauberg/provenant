@@ -202,7 +202,7 @@ are separate; current dispatch activation is owned by
 | Agy | Supported | Enabled optional broker; the receipt records the runtime model family |
 | Cursor | Supported | Enabled optional Composer/Grok and hosted third-party broker |
 | Kiro | Supported | Disabled; see [`kiro-acp` policy](config/adapter-compatibility.yaml) |
-| OpenCode | Supported | Disabled; see [`opencode-acp` policy](config/adapter-compatibility.yaml) |
+| OpenCode | Supported | Enabled optional free/Zen worker (`opencode/<model>`); explicit model required |
 
 Provider CLI versions and digests are diagnostic observations, not admission
 locks. Direct dispatch enforces the checked-in activation decision and uses
