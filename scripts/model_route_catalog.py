@@ -36,17 +36,15 @@ _BROKER_PREFIXES = ("opencode/", "openrouter/")
 def model_slug_for_family(model: str) -> str:
     """Return the slug used for upstream family inference.
 
-    Strips repeated broker prefixes and a leading ``~`` (OpenRouter shorthand).
+    Strips repeated broker prefixes and leading ``~`` (OpenRouter shorthand).
     Does not strip ``stealth/``: those stay non-assurance ``generic-open``.
     """
-    slug = model.strip().lower()
-    while True:
-        if slug.startswith("~"):
-            slug = slug[1:]
-            continue
+    slug = model.strip().lower().lstrip("~")
+    # Bound prefix peeling so a pathological slug cannot spin.
+    for _ in range(8):
         for prefix in _BROKER_PREFIXES:
             if slug.startswith(prefix):
-                slug = slug[len(prefix) :]
+                slug = slug[len(prefix) :].lstrip("~")
                 break
         else:
             break
