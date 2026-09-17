@@ -159,6 +159,27 @@ adapters:
       requires_explicit_model: true
     official_source_url: "https://cursor.com/docs/cli/overview"
 
+  copilot:
+    enabled: false
+    disabled_reason: "Copilot CLI execution is dormant: non-interactive mode may require broad tool permissions, and no bounded ordinary invocation is verified. Requires CF_DISPATCH_ENABLE_COPILOT=1 at the dispatcher."
+    delivery_stage: 4
+    implementation:
+      kind: native-cli
+      command: copilot
+      executable: "copilot"
+      provider_identity: github-broker
+    contract:
+      protocol: copilot-cli
+    runtime_range:
+      platforms:
+        - darwin-arm64
+    model_family_constraints:
+      allowed:
+        - github
+      requires_explicit_model: true
+      route_role: optional-broker-worker
+    official_source_url: "https://docs.github.com/en/copilot/how-tos/use-copilot-cli"
+
   kiro-acp:
     enabled: false
     disabled_reason: "Provider execution is dormant until one bounded ordinary Kiro invocation and safety boundary are verified."

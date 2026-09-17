@@ -3341,7 +3341,10 @@ def test_primary_adapters_route_directly_with_compatibility_metadata(tmp_path):
         assert route["adapter_enabled"] is True
 
 
-def test_catalogue_adapter_without_compatibility_contract_routes_directly():
+def test_dormant_compatibility_adapter_fails_closed():
+    # Copilot has a dispatcher arm but no verified safe invocation, so it is
+    # registered in the compatibility contract with enabled: false. The route
+    # must refuse it rather than pass it through as an unknown adapter.
     arguments = (
         "--adapter", "copilot", "--model", "gemini-3.1-pro",
         "--alias", "flagship", "--role", "worker",
@@ -3349,8 +3352,10 @@ def test_catalogue_adapter_without_compatibility_contract_routes_directly():
 
     result, route = resolve(*arguments)
 
-    assert result.returncode == 0
-    assert route["status"] == "ok"
+    assert result.returncode == 1
+    assert route["status"] == "adapter_disabled"
+    assert route["adapter_enabled"] is False
+    assert route["compatibility_adapter"] == "copilot"
 
 
 def write_agy_capability_snapshot(tmp_path, models=None):
