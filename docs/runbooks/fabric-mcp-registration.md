@@ -46,10 +46,11 @@ registrations need no extra variable.
 ## The six clients
 
 Registration exposes coordination and, on current clients, the thin dispatch
-and batch façade. It does not activate a provider: Kiro and OpenCode remain
-registered here while execution is disabled by [adapter
-compatibility](../../config/adapter-compatibility.yaml). Changing an MCP
-registry never overrides that decision.
+and batch façade. It does not activate a provider: Kiro remains
+dormant behind its compatibility gate until separately enabled. OpenCode is an
+ordinary implemented dispatch adapter when the CLI is installed; pass an
+explicit `opencode/<model>` slug. Changing an MCP registry never overrides
+adapter compatibility.
 
 | Client | Global registry |
 | --- | --- |

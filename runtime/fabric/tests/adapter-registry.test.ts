@@ -82,7 +82,7 @@ describe("adapter rejection", () => {
     rmSync(workspace, { recursive: true, force: true });
   });
 
-  for (const adapter of ["opencode", "pi", "not-an-adapter"]) {
+  for (const adapter of ["pi", "not-an-adapter"]) {
     it(`refuses ${adapter} before a run directory exists`, async () => {
       await expect(dispatchConfiguredProvider(
         { adapter, prompt: "hello" },
@@ -104,9 +104,9 @@ describe("adapter rejection", () => {
 
   it("names the adapters it does accept", async () => {
     await expect(dispatchConfiguredProvider(
-      { adapter: "opencode", prompt: "hello" },
+      { adapter: "pi", prompt: "hello" },
       identity,
       AbortSignal.abort(),
-    )).rejects.toThrow(/agy, claude, codex, copilot, cursor, kiro/u);
+    )).rejects.toThrow(/agy, claude, codex, copilot, cursor, kiro, opencode/u);
   });
 });

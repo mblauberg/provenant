@@ -45,7 +45,7 @@ const FIRST_BATCH_ID = "batch-001";
  * directory, prompt staging and route resolution. tests/adapter-registry.test.ts
  * binds this list to the catalogue and to the dispatcher.
  */
-export const DISPATCH_ADAPTERS = ["agy", "claude", "codex", "copilot", "cursor", "kiro"] as const;
+export const DISPATCH_ADAPTERS = ["agy", "claude", "codex", "copilot", "cursor", "kiro", "opencode"] as const;
 const SUPPORTED_ADAPTERS = new Set<string>(DISPATCH_ADAPTERS);
 const DISPATCH_TERMINAL_STATUSES = new Set(["succeeded", "failed", "blocked", "timed_out", "cancelled"]);
 const BATCH_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
