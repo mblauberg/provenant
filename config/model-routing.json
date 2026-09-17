@@ -100,7 +100,7 @@
     },
     "copilot": {"endpoint_provider": "github", "fixed_model_family": null, "effort_transport": "flag", "dispatch": "implemented"},
     "kiro": {"endpoint_provider": "aws", "fixed_model_family": null, "effort_transport": "flag", "dispatch": "implemented"},
-    "opencode": {"endpoint_provider": "opencode", "fixed_model_family": "generic-open", "effort_transport": "flag", "dispatch": "dormant"},
+    "opencode": {"endpoint_provider": "opencode", "fixed_model_family": null, "effort_transport": "flag", "dispatch": "implemented"},
     "pi": {"endpoint_provider": "configured", "fixed_model_family": null, "effort_transport": "none", "dispatch": "unsupported"}
   },
   "endpoints": {
@@ -121,10 +121,23 @@
       "token_env": "DEEPSEEK_API_KEY",
       "model_family": "deepseek",
       "adapters": ["claude"]
+    },
+    "openrouter-anthropic": {
+      "base_url": "https://openrouter.ai/api",
+      "token_env": "OPENROUTER_API_KEY",
+      "model_family": "generic-open",
+      "adapters": ["claude"]
+    },
+    "openrouter-openai": {
+      "base_url": "https://openrouter.ai/api/v1",
+      "token_env": "OPENROUTER_API_KEY",
+      "model_family": "generic-open",
+      "wire_api": "responses",
+      "adapters": ["codex"]
     }
   },
   "model_patterns": [
-    {"pattern": "^opencode/", "family": "generic-open"},
+    {"pattern": "^stealth/", "family": "generic-open"},
     {"pattern": "claude|fable|opus|sonnet|haiku", "family": "anthropic"},
     {"pattern": "gpt|codex|^o1|^o3|^o4", "family": "openai"},
     {"pattern": "gemini", "family": "google"},
@@ -133,7 +146,7 @@
     {"pattern": "deepseek", "family": "deepseek"},
     {"pattern": "minimax", "family": "minimax"},
     {"pattern": "qwen", "family": "alibaba"},
-    {"pattern": "kimi", "family": "moonshot"},
+    {"pattern": "kimi|moonshot", "family": "moonshot"},
     {"pattern": "glm", "family": "zhipu"},
     {"pattern": "mistral|mixtral", "family": "mistral"},
     {"pattern": "llama", "family": "meta"}

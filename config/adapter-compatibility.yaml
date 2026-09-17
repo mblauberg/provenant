@@ -33,6 +33,7 @@ adapters:
         - zhipu
         - moonshot
         - deepseek
+        - generic-open
       requires_explicit_model: true
     official_source_url: "https://github.com/anthropics/claude-agent-sdk-typescript"
 
@@ -59,6 +60,7 @@ adapters:
         - zhipu
         - moonshot
         - deepseek
+        - generic-open
       requires_explicit_model: true
     official_source_url: "https://github.com/openai/codex"
 
@@ -174,10 +176,19 @@ adapters:
         - darwin-arm64
         - darwin-x86_64
     model_family_constraints:
+      # Attribution follows the upstream slug (claude → anthropic, deepseek →
+      # deepseek, …). `auto` and unparseable ids stay open-weight and are not
+      # assurance-eligible.
       allowed:
         - open-weight
+        - anthropic
+        - deepseek
+        - zhipu
+        - alibaba
+        - minimax
       allowed_model_patterns:
         - "auto"
+        - "claude-*"
         - "deepseek-*"
         - "glm-*"
         - "minimax-*"
@@ -187,8 +198,7 @@ adapters:
     official_source_url: "https://kiro.dev/docs/cli/acp/"
 
   opencode-acp:
-    enabled: false
-    disabled_reason: "Provider execution is unavailable because the direct dispatch owner has no verified OpenCode invocation or receipt contract."
+    enabled: true
     delivery_stage: 4
     implementation:
       kind: native-cli
@@ -196,15 +206,29 @@ adapters:
       executable: "opencode"
       provider_identity: owner-controlled-install-root
     contract:
-      protocol: agent-client-protocol
+      protocol: opencode-run-cli
     runtime_range:
       platforms:
         - darwin-arm64
     model_family_constraints:
+      # Brokers may front many vendors; allow the upstream families slug
+      # inference can produce. Unparseable / stealth stay generic-open.
       allowed:
         - generic-open
+        - anthropic
+        - openai
+        - google
+        - deepseek
+        - moonshot
+        - zhipu
+        - alibaba
+        - minimax
+        - mistral
+        - meta
+        - xai
+        - cursor-composer
       allowed_model_patterns:
         - "opencode/*"
       requires_explicit_model: true
       route_role: optional-free-account-worker
-    official_source_url: "https://opencode.ai/docs/acp/"
+    official_source_url: "https://opencode.ai/docs/"

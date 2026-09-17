@@ -37,3 +37,4 @@ historical evidence; the current Fabric owner is
 | [0022](0022-thin-fabric-mcp-execution-facade.md) | Thin Fabric MCP execution façade | Accepted |
 | [0023](0023-codex-custom-providers-inline-config.md) | Codex custom providers arrive inline, not by relaxing `--ignore-user-config` | Accepted |
 | [0024](0024-git-log-and-adrs-own-history.md) | Git history and ADRs own the change record | Accepted |
+| [0025](0025-broker-upstream-family-attribution.md) | Broker upstream family attribution for multi-family pipes | Accepted |

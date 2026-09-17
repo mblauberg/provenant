@@ -26,7 +26,7 @@ Usage: cf_dispatch.sh --tool TOOL --orchestrator-family FAMILY --prompt TEXT [op
        cf_dispatch.sh --doctor
 
 Options:
-  --tool TOOL                  One of claude, codex, cursor, agy, kiro, copilot.
+  --tool TOOL                  One of claude, codex, cursor, agy, kiro, copilot, opencode.
   --task-class CLASS           Route task class through model_route.py.
   --chain SPECS                Space-separated fallback chain.
   --orchestrator-family FAMILY Labels the chair family; assurance requires separation.
@@ -119,8 +119,8 @@ esac
 # DISPATCH_ADAPTERS in runtime/fabric/src/execution.ts and to the "dispatch"
 # field in config/model-routing.json by runtime/fabric/tests/adapter-registry.test.ts,
 # so the three cannot drift.
-DISPATCH_IMPLEMENTED_ADAPTERS="agy claude codex copilot cursor kiro"
-DISPATCH_DORMANT_ADAPTERS="opencode"
+DISPATCH_IMPLEMENTED_ADAPTERS="agy claude codex copilot cursor kiro opencode"
+DISPATCH_DORMANT_ADAPTERS=""
 # An adapter with neither an arm nor a declared dormant route is an input error,
 # refused here rather than after a temporary directory, prompt staging and route
 # resolution have already been paid for.
@@ -260,11 +260,11 @@ show_doctor() {
   printf 'CF_DISPATCH_ENABLE_KIRO=%s\n' "${CF_DISPATCH_ENABLE_KIRO:-0}"
   printf 'CF_DISPATCH_ENABLE_COPILOT=%s\n' "${CF_DISPATCH_ENABLE_COPILOT:-0}"
   printf 'CF_DISPATCH_AGY_ADD_DIR=%s\n' "${CF_DISPATCH_AGY_ADD_DIR:-}"
-  for tool in claude codex cursor-agent agy kiro-cli copilot; do
+  for tool in claude codex cursor-agent agy kiro-cli copilot opencode; do
     if cmd="$(command -v "$tool" 2>/dev/null)"; then
       printf '%s=%s\n' "$tool" "$cmd"
       case "$tool" in
-        claude|codex|agy) "$cmd" --version 2>/dev/null | sed "s/^/${tool}_version=/" | head -n 1;;
+        claude|codex|agy|opencode) "$cmd" --version 2>/dev/null | sed "s/^/${tool}_version=/" | head -n 1;;
       esac
     else
       printf '%s=NOT_FOUND\n' "$tool"
@@ -378,6 +378,14 @@ valid_family() {
     *) return 1;;
   esac
 }
+# Upstream families that may appear on a receipt but must not set cross_family /
+# certification_eligible (broker collapse / open-weight bucket).
+assurance_family() {
+  case "$1" in
+    ""|generic-open|open-weight) return 1;;
+    *) return 0;;
+  esac
+}
 resolve_model() {
   local tool="$1" model="$2"
   if [ -n "$model" ]; then
@@ -388,6 +396,7 @@ resolve_model() {
     cursor) echo "${CF_DISPATCH_CURSOR_MODEL:-}";;
     kiro) echo "${CF_DISPATCH_KIRO_MODEL:-}";;
     copilot) echo "${CF_DISPATCH_COPILOT_MODEL:-}";;
+    opencode) echo "${CF_DISPATCH_OPENCODE_MODEL:-}";;
     *) echo "";;
   esac
 }
@@ -398,6 +407,7 @@ endpoint_provider() {
     cursor) echo "cursor";;
     kiro) echo "aws";;
     copilot) echo "github";;
+    opencode) echo "opencode";;
     *) echo "";;
   esac
 }
@@ -452,7 +462,7 @@ emit_record() {
     guarantee="none"
   fi
   cross="false"
-  [ -n "$ORCH_FAMILY" ] && valid_family "$ORCH_FAMILY" && [ -n "$family" ] && [ "$ORCH_FAMILY" != "$family" ] && cross="true"
+  [ -n "$ORCH_FAMILY" ] && valid_family "$ORCH_FAMILY" && assurance_family "$family" && [ -n "$family" ] && [ "$ORCH_FAMILY" != "$family" ] && cross="true"
   cert="false"
   [ "$INTENT" = "assurance" ] && [ "$status" = "ok" ] && [ -n "$output_digest" ] && [ "$cross" = "true" ] && { [ "$guarantee" = "enforced" ] || [ "$guarantee" = "oauth_safe_mode" ]; } && cert="true"
   printf '{"tool":"%s","adapter":"%s","adapter_gate":"direct-cli","execution_intent":"%s","model":"%s","requested_model":"%s","resolved_model":"%s","fallback_model":"%s","requested_effort":"%s","effort":"%s","effort_source":"%s","effort_capability_source":"%s","effort_substitution":"%s","substitution":"%s","status":"%s","reason":"%s","exit":%s,"output_path":"%s","output_digest":"%s","read_only_guarantee":"%s","provider_sandbox":%s,"access_mode":"%s","worktree":"%s","orchestrator_family":"%s","provider_family":"%s","model_family":"%s","endpoint_provider":"%s","identity_source":"%s","catalog_model":"%s","model_selection":"%s","route_alias":"%s","reviewer_id":"%s","risk_tier":"%s","model_override_tier":"%s","policy_override":"%s","cross_family":%s,"certification_eligible":%s}\n' \
@@ -804,6 +814,10 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
             export ANTHROPIC_BASE_URL="$endpoint_base_url"
             ANTHROPIC_AUTH_TOKEN="$(printenv "$endpoint_token_env" || true)"
             export ANTHROPIC_AUTH_TOKEN
+            # Gateways (OpenRouter and Anthropic-compatible endpoints) authenticate
+            # with ANTHROPIC_AUTH_TOKEN. An inherited ANTHROPIC_API_KEY would send
+            # x-api-key and fall back toward Anthropic directly.
+            export ANTHROPIC_API_KEY=""
           fi
           if ! require_cmd claude "$diag"; then
             status="tool_not_found"
@@ -1142,6 +1156,21 @@ PY
                 --available-tools='' --disallow-temp-dir ${model:+--model "$model"} ${effort:+--effort "$effort"} \
                 </dev/null >"$raw" 2>"$diag"; rc=$?
             fi
+          fi ;;
+        opencode)
+          # OpenCode has no verified hard read-only mode on `run`; do not claim
+          # one, and never pass --auto (that auto-approves permissions).
+          guarantee="none"
+          if ! require_cmd opencode "$diag"; then
+            status="tool_not_found"
+            rc=127
+          elif argv_prompt_too_large opencode "$diag"; then
+            status="prompt_too_large"
+            rc=1
+          else
+            opencode run --format json \
+              ${model:+--model "$model"} ${effort:+--variant "$effort"} \
+              "$PROMPT_ARG" </dev/null >"$raw" 2>"$diag"; rc=$?
           fi ;;
         *) emit_record "$tool" "$model" "$effort" "unknown_tool" 1 "" "none" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source"; rm -f "$raw" "$diag"; return 1;;
         esac

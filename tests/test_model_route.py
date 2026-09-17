@@ -1361,8 +1361,8 @@ def test_capability_resolved_override_occupant_records_explicit_risk_tier(
 
 def test_disabled_adapter_precedes_inferred_family_override_checks():
     result, route = resolve(
-        "--adapter", "opencode", "--alias", "flagship", "--role", "worker",
-        "--model", "opencode/fable",
+        "--adapter", "kiro", "--alias", "flagship", "--role", "worker",
+        "--model", "deepseek-v3.2",
     )
 
     assert result.returncode == 1
@@ -1646,13 +1646,11 @@ def test_unusable_families_table_fails_closed(
     assert route.get("resolved_model") is None
 
 
-def test_disabled_adapter_precedes_missing_alias_configuration(capsys):
-    """OpenCode is rejected by its configured execution gate before alias lookup.
+def test_opencode_without_model_requires_explicit_account_catalogue_slug(capsys):
+    """OpenCode is a broker with no alias table.
 
-    ``generic-open`` is deliberately absent from the families table: OpenCode
-    routes on explicit account-catalogue models. Resolving an alias against it
-    dereferenced a family that was never there and crashed with no JSON at all,
-    on the production catalogue, with no catalogue edit needed to reach it.
+    Routes must carry an explicit account-catalogue model; resolving an alias
+    alone must fail closed with a typed status rather than crashing.
     """
     router = load_router()
 
@@ -1662,8 +1660,8 @@ def test_disabled_adapter_precedes_missing_alias_configuration(capsys):
     ])
 
     route = json.loads(capsys.readouterr().out)
-    assert result == 1
-    assert route["status"] == "adapter_disabled"
+    assert result == 2
+    assert route["status"] == "model_required_for_broker"
     assert route.get("resolved_model") is None
 
 
@@ -2971,21 +2969,148 @@ def test_agy_broker_records_google_to_anthropic_substitution(tmp_path):
     assert route["substitution"] == "gemini-3.8-flash unavailable; used haiku"
 
 
-def test_disabled_opencode_route_fails_closed_with_configured_reason():
+def test_opencode_route_resolves_explicit_free_model():
     result, route = resolve(
-        "--adapter", "opencode", "--model", "opencode/deepseek-v4-flash-free",
+        "--adapter", "opencode", "--model", "opencode/union-alpha",
         "--alias", "scout", "--role", "worker",
-        "--effort", "high",
     )
 
-    assert result.returncode == 1
-    assert route["status"] == "adapter_disabled"
+    assert result.returncode == 0, result.stdout
+    assert route["status"] == "ok"
+    assert route["adapter_enabled"] is True
     assert route["compatibility_adapter"] == "opencode-acp"
-    assert route["adapter_enabled"] is False
-    assert route["reason"] == (
-        "Provider execution is unavailable because the direct dispatch owner "
-        "has no verified OpenCode invocation or receipt contract."
+    assert route["model_family"] == "generic-open"
+    assert route["family_source"] == "broker-default"
+    assert route["resolved_model"] == "opencode/union-alpha"
+    assert route["endpoint_provider"] == "opencode"
+
+
+def test_opencode_nested_deepseek_attributes_upstream_family():
+    result, route = resolve(
+        "--adapter", "opencode", "--model", "opencode/deepseek-v4.1-flash",
+        "--alias", "scout", "--role", "worker",
     )
+
+    assert result.returncode == 0, result.stdout
+    assert route["model_family"] == "deepseek"
+    assert route["family_source"] == "slug-inferred"
+
+
+def test_openrouter_anthropic_endpoint_infers_vendor_from_slug(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "endpoint-token-fixture")
+    result, route = resolve(
+        "--adapter", "claude", "--endpoint", "openrouter-anthropic",
+        "--model", "moonshotai/kimi-k3", "--alias", "scout", "--role", "worker",
+        "--catalog", PRODUCT_CATALOG,
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert route["status"] == "ok"
+    assert route["endpoint_profile"] == "openrouter-anthropic"
+    assert route["model_family"] == "moonshot"
+    assert route["family_source"] == "slug-inferred"
+    assert route["resolved_model"] == "moonshotai/kimi-k3"
+    assert route["effort"] == ""
+
+
+def test_openrouter_stealth_slug_stays_non_assurance(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "endpoint-token-fixture")
+    result, route = resolve(
+        "--adapter", "claude", "--endpoint", "openrouter-anthropic",
+        "--model", "stealth/union-alpha", "--alias", "scout", "--role", "worker",
+        "--catalog", PRODUCT_CATALOG,
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert route["model_family"] == "generic-open"
+    assert route["family_source"] == "slug-inferred"
+    blocked, blocked_route = resolve(
+        "--adapter", "claude", "--endpoint", "openrouter-anthropic",
+        "--model", "stealth/union-alpha", "--alias", "scout", "--role", "worker",
+        "--catalog", PRODUCT_CATALOG,
+        "--require-distinct", "--lead-family", "anthropic",
+    )
+    assert blocked.returncode != 0
+    assert blocked_route["status"] == "family_not_assurance_eligible"
+
+
+def test_openrouter_openai_endpoint_infers_deepseek(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "endpoint-token-fixture")
+    result, route = resolve(
+        "--adapter", "codex", "--endpoint", "openrouter-openai",
+        "--model", "deepseek/deepseek-v4.1-flash", "--alias", "scout", "--role", "worker",
+        "--catalog", PRODUCT_CATALOG,
+    )
+
+    assert result.returncode == 0, result.stdout
+    assert route["endpoint_profile"] == "openrouter-openai"
+    assert route["endpoint_wire_api"] == "responses"
+    assert route["model_family"] == "deepseek"
+    assert route["family_source"] == "slug-inferred"
+
+
+def test_kiro_model_slugs_attribute_upstream_families():
+    """Kiro's catalogue attribution follows the slug, independent of execution."""
+    from scripts import model_route_catalog as catalog_mod
+
+    # Load via the same loader model_route uses
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "model_route_catalog.py"
+    spec = importlib.util.spec_from_file_location("model_route_catalog", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    for model, family in (
+        ("claude-sonnet-4.5", "anthropic"),
+        ("deepseek-3.2", "deepseek"),
+        ("glm-5", "zhipu"),
+        ("qwen3-coder-next", "alibaba"),
+        ("minimax-m2.5", "minimax"),
+        ("auto", None),  # no vendor pattern; not assurance-eligible
+    ):
+        inferred = mod.infer_family(model, CATALOG)
+        assert inferred == family, (model, inferred)
+        if family:
+            assert mod.family_is_assurance_eligible(family, "slug-inferred")
+        else:
+            assert not mod.family_is_assurance_eligible("open-weight", "broker-default")
+
+
+def test_agy_claude_is_same_family_as_anthropic_lead():
+    result, route = resolve(
+        "--adapter", "agy", "--model", "claude-opus-4-6-thinking",
+        "--alias", "scout", "--role", "worker",
+        "--require-distinct", "--lead-family", "anthropic",
+    )
+    assert result.returncode != 0
+    assert route["status"] == "same_family_forbidden"
+    assert route["model_family"] == "anthropic"
+
+
+def test_agy_claude_is_distinct_from_google_lead():
+    result, route = resolve(
+        "--adapter", "agy", "--model", "claude-opus-4-6-thinking",
+        "--alias", "scout", "--role", "worker",
+        "--require-distinct", "--lead-family", "google",
+    )
+    assert result.returncode == 0, result.stdout
+    assert route["model_family"] == "anthropic"
+    assert route["distinct_from_lead"] is True
+
+
+def test_require_distinct_rejects_ineligible_lead_family(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "endpoint-token-fixture")
+    result, route = resolve(
+        "--adapter", "claude", "--endpoint", "openrouter-anthropic",
+        "--model", "deepseek/deepseek-v4.1-flash", "--alias", "scout", "--role", "worker",
+        "--catalog", PRODUCT_CATALOG,
+        "--require-distinct", "--lead-family", "generic-open",
+    )
+    assert result.returncode != 0
+    assert route["status"] == "family_not_assurance_eligible"
+    assert route["model_family"] == "deepseek"
 
 
 def test_optional_adapter_preference_policy_is_ordered_and_native_first_for_fallbacks():
