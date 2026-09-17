@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { parse as parseYaml } from "yaml";
 
 import { DISPATCH_ADAPTERS, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
 import type { Identity } from "../src/identity.js";
@@ -12,6 +13,11 @@ const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../.
 const catalogue = JSON.parse(
   readFileSync(join(repositoryRoot, "config", "model-routing.json"), "utf8"),
 ) as { adapters: Record<string, { dispatch?: string }> };
+const compatibility = parseYaml(
+  readFileSync(join(repositoryRoot, "config", "adapter-compatibility.yaml"), "utf8"),
+) as {
+  dispatch_registry?: Record<string, { dispatch?: string; write_modes?: string[] }>;
+};
 const dispatcher = readFileSync(
   join(repositoryRoot, "skills", "orchestrate", "scripts", "cf_dispatch.sh"),
   "utf8",
@@ -31,14 +37,32 @@ function catalogueAdapters(state: string): string[] {
 }
 
 /**
- * The adapter list lives in three places that a single change can silently pull
- * apart: the Fabric schema, the routing catalogue and the dispatcher. These
- * tests read all three and fail on any disagreement.
+ * The adapter list lives in several places that a single change can silently
+ * pull apart: the Fabric schema, the routing catalogue, the product-owned
+ * dispatch registry in adapter-compatibility.yaml and the dispatcher. These
+ * tests read them all and fail on any disagreement. The dispatch state that
+ * governs execution is owned by `dispatch_registry` (product policy);
+ * `model-routing.json`'s `dispatch` field must mirror it because the routing
+ * catalogue is instance-owned and may lag behind a product change.
  */
 describe("adapter registry", () => {
   it("declares a known dispatch state for every catalogued adapter", () => {
     for (const [name, entry] of Object.entries(catalogue.adapters)) {
       expect(["implemented", "dormant", "unsupported"], `adapter ${name}`).toContain(entry.dispatch);
+    }
+  });
+
+  it("keeps the product dispatch registry and the catalogue aligned", () => {
+    // herdr is a policy-only entry: it observes and steers but is never a
+    // routing adapter, so the instance-owned catalogue does not list it.
+    const policyOnly = new Set(["herdr"]);
+    const registry = Object.entries(compatibility.dispatch_registry ?? {})
+      .filter(([name]) => !policyOnly.has(name));
+    expect(registry.map(([name]) => name).sort())
+      .toStrictEqual(Object.keys(catalogue.adapters).sort());
+    for (const [name, entry] of registry) {
+      expect(entry.dispatch, `dispatch_registry ${name}`)
+        .toBe(catalogue.adapters[name]?.dispatch);
     }
   });
 
