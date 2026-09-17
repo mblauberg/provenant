@@ -15,7 +15,7 @@ import sys
 import tempfile
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -118,7 +118,9 @@ DEFAULT_ARTIFACT_TYPES = dict(
 )
 
 def utc_now() -> str:
-    return datetime.utcnow().isoformat() + "Z"  # noqa: DTZ003 - adjudicated clock format
+    # Z-suffix is the adjudicated receipt clock format; now(UTC) supplies it
+    # without the deprecated naive utcnow().
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def require_identifier(value: str, field: str) -> str:
