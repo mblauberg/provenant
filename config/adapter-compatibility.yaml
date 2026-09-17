@@ -176,10 +176,19 @@ adapters:
         - darwin-arm64
         - darwin-x86_64
     model_family_constraints:
+      # Attribution follows the upstream slug (claude → anthropic, deepseek →
+      # deepseek, …). `auto` and unparseable ids stay open-weight and are not
+      # assurance-eligible.
       allowed:
         - open-weight
+        - anthropic
+        - deepseek
+        - zhipu
+        - alibaba
+        - minimax
       allowed_model_patterns:
         - "auto"
+        - "claude-*"
         - "deepseek-*"
         - "glm-*"
         - "minimax-*"
@@ -202,8 +211,22 @@ adapters:
       platforms:
         - darwin-arm64
     model_family_constraints:
+      # Brokers may front many vendors; allow the upstream families slug
+      # inference can produce. Unparseable / stealth stay generic-open.
       allowed:
         - generic-open
+        - anthropic
+        - openai
+        - google
+        - deepseek
+        - moonshot
+        - zhipu
+        - alibaba
+        - minimax
+        - mistral
+        - meta
+        - xai
+        - cursor-composer
       allowed_model_patterns:
         - "opencode/*"
       requires_explicit_model: true

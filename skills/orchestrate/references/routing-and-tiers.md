@@ -154,13 +154,17 @@ nothing.
 
 OpenRouter is a multi-model gateway: use `openrouter-anthropic` with Claude or
 `openrouter-openai` with Codex (`wire_api: responses`), set `OPENROUTER_API_KEY`
-in the environment, and pass the live slug (for example `stealth/union-alpha`).
-Do not pin rotating free or stealth models into alias tables; pick the slug at
-dispatch time.
+in the environment, and pass the live slug (for example `stealth/union-alpha` or
+`moonshotai/kimi-k3`). Receipts record upstream `model_family` when the slug
+infers one (`family_source: slug-inferred`); stealth/unknown broker ids stay
+`generic-open` and are not distinct-family eligible. Do not pin rotating free or
+stealth models into alias tables; pick the slug at dispatch time.
 
-OpenCode is an ordinary implemented adapter for its own free/Zen catalogue
-(`opencode/<model>`). Discover current slugs with `opencode models` and pass
-`--model` explicitly. It is not a substitute for distinct-family assurance.
+OpenCode is an ordinary implemented broker for its catalogue (`opencode/<model>`).
+Discover current slugs with `opencode models` and pass `--model` explicitly.
+Nested vendor ids attribute as that vendor; unparseable Zen free ids fall back
+to `generic-open` (worker only, not assurance). See
+[ADR 0025](../../../docs/adr/0025-broker-upstream-family-attribution.md).
 
 A profile listing `codex` among its adapters reaches an OpenAI-compatible
 endpoint instead, and must also declare `wire_api` (Codex 0.146 accepts only
@@ -215,7 +219,8 @@ Record the actual provider/model lineage. Kiro execution remains disabled by
 compatibility policy even though its Fabric MCP client registration is
 supported. OpenCode execution is enabled when the `opencode` CLI is installed:
 pass an explicit `opencode/<model>` slug (discover with `opencode models`).
-OpenCode free/Zen routes are ordinary workers, not distinct-family assurance.
+Upstream family on the receipt follows the slug when knowable; otherwise
+`generic-open` (ordinary worker, not distinct-family assurance).
 Gemini, xAI and other distinct families are
 flexible advisory workers/reviewers: useful for blind spots, never load-bearing
 when quota/API output is absent. Pi stays dormant until a pinned distinct

@@ -24,13 +24,76 @@ from typing import Any
 EFFORT_ORDER = {name: index for index, name in enumerate(("low", "medium", "high", "xhigh", "max", "ultra"))}
 ALIAS_ORDER = {name: index for index, name in enumerate(("scout", "workhorse", "flagship"))}
 
+# Families that may differ from the lead but must not satisfy distinct-family /
+# certification claims without a proven upstream vendor.
+ASSURANCE_INELIGIBLE_FAMILIES = frozenset({"generic-open", "open-weight"})
+
+# Broker/gateway prefixes stripped before pattern inference so nested vendor
+# slugs (opencode/deepseek-…, openrouter/moonshotai/kimi-…) attribute correctly.
+_BROKER_PREFIXES = ("opencode/", "openrouter/")
+
+
+def model_slug_for_family(model: str) -> str:
+    """Return the slug used for upstream family inference.
+
+    Strips repeated broker prefixes and leading ``~`` (OpenRouter shorthand).
+    Does not strip ``stealth/``: those stay non-assurance ``generic-open``.
+    """
+    slug = model.strip().lower().lstrip("~")
+    # Bound prefix peeling so a pathological slug cannot spin.
+    for _ in range(8):
+        for prefix in _BROKER_PREFIXES:
+            if slug.startswith(prefix):
+                slug = slug[len(prefix) :].lstrip("~")
+                break
+        else:
+            break
+    return slug
+
 
 def infer_family(model: str, catalog: dict[str, Any]) -> str | None:
-    lowered = model.lower()
-    for item in catalog["model_patterns"]:
-        if re.search(item["pattern"], lowered):
-            return item["family"]
+    """Infer upstream model family from a model id (broker prefixes stripped)."""
+    for candidate in (model_slug_for_family(model), model.strip().lower()):
+        if not candidate:
+            continue
+        for item in catalog["model_patterns"]:
+            if re.search(item["pattern"], candidate):
+                return item["family"]
     return None
+
+
+def family_is_assurance_eligible(family: str | None, family_source: str = "") -> bool:
+    """Whether a resolved family may satisfy distinct-family / certification."""
+    if not family or family in ASSURANCE_INELIGIBLE_FAMILIES:
+        return False
+    if family_source == "unresolved":
+        return False
+    return True
+
+
+def attribute_model_family(
+    model: str,
+    catalog: dict[str, Any],
+    *,
+    endpoint_family: str | None = None,
+) -> tuple[str | None, str]:
+    """Resolve upstream family and a short provenance tag.
+
+    Prefer slug inference. Broker-prefixed ids with no nested vendor match fall
+    back to ``generic-open`` (ordinary worker, not assurance). An endpoint
+    profile family is the last fallback.
+    """
+    inferred = infer_family(model, catalog)
+    if inferred:
+        return inferred, "slug-inferred"
+    lowered = model.strip().lower()
+    if lowered.startswith(_BROKER_PREFIXES):
+        if endpoint_family:
+            return endpoint_family, "endpoint-profile-fallback"
+        return "generic-open", "broker-default"
+    if endpoint_family:
+        return endpoint_family, "endpoint-profile-fallback"
+    return None, "unresolved"
 
 
 def model_has_alias(model: str, alias: str) -> bool:
