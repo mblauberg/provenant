@@ -211,9 +211,12 @@ On an auth/quota/limit/safety error from a tool: log it to the run scratchpad an
 entry. Never silently skip the verification step.
 
 Cursor, Copilot, Kiro, OpenCode, Agy and Pi are adapters, not model families.
-Record the actual provider/model lineage. Kiro and OpenCode execution are
-currently disabled by compatibility policy even though their Fabric MCP client
-registrations remain supported. Gemini, xAI and other distinct families are
+Record the actual provider/model lineage. Kiro execution remains disabled by
+compatibility policy even though its Fabric MCP client registration is
+supported. OpenCode execution is enabled when the `opencode` CLI is installed:
+pass an explicit `opencode/<model>` slug (discover with `opencode models`).
+OpenCode free/Zen routes are ordinary workers, not distinct-family assurance.
+Gemini, xAI and other distinct families are
 flexible advisory workers/reviewers: useful for blind spots, never load-bearing
 when quota/API output is absent. Pi stays dormant until a pinned distinct
 open-model route, current Herdr integration and smoke evaluation exist; it may
