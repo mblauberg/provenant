@@ -33,6 +33,7 @@ adapters:
         - zhipu
         - moonshot
         - deepseek
+        - generic-open
       requires_explicit_model: true
     official_source_url: "https://github.com/anthropics/claude-agent-sdk-typescript"
 
@@ -59,6 +60,7 @@ adapters:
         - zhipu
         - moonshot
         - deepseek
+        - generic-open
       requires_explicit_model: true
     official_source_url: "https://github.com/openai/codex"
 
@@ -187,8 +189,7 @@ adapters:
     official_source_url: "https://kiro.dev/docs/cli/acp/"
 
   opencode-acp:
-    enabled: false
-    disabled_reason: "Provider execution is unavailable because the direct dispatch owner has no verified OpenCode invocation or receipt contract."
+    enabled: true
     delivery_stage: 4
     implementation:
       kind: native-cli
@@ -196,7 +197,7 @@ adapters:
       executable: "opencode"
       provider_identity: owner-controlled-install-root
     contract:
-      protocol: agent-client-protocol
+      protocol: opencode-run-cli
     runtime_range:
       platforms:
         - darwin-arm64
@@ -207,4 +208,4 @@ adapters:
         - "opencode/*"
       requires_explicit_model: true
       route_role: optional-free-account-worker
-    official_source_url: "https://opencode.ai/docs/acp/"
+    official_source_url: "https://opencode.ai/docs/"

@@ -320,6 +320,8 @@ assessment; until then, route these on the hard axis alone.
 | DeepSeek | `deepseek` endpoint, reached through the `claude` adapter | needs owner review |
 | Moonshot Kimi | `moonshot-kimi` endpoint, reached through the `claude` adapter | needs owner review |
 | Zhipu GLM | `zai-glm` endpoint, reached through the `claude` adapter | needs owner review |
+| OpenRouter (any slug) | `openrouter-anthropic` / `openrouter-openai` endpoints; caller picks live slug; not alias-pinned | needs owner review; free/stealth windows rotate |
+| OpenCode free / Zen | `opencode` adapter with explicit `opencode/<model>` (discover via `opencode models`) | needs owner review; not distinct-family assurance |
 
 ## Recording the preference
 

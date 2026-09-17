@@ -1278,11 +1278,6 @@ def test_disabled_execution_routes_keep_configured_reason_and_never_launch_provi
             "Provider execution is dormant until one bounded ordinary Kiro "
             "invocation and safety boundary are verified.",
         ),
-        (
-            "opencode", "opencode/deepseek-v4-flash-free", "opencode", "",
-            "Provider execution is unavailable because the direct dispatch owner "
-            "has no verified OpenCode invocation or receipt contract.",
-        ),
     )
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -2707,7 +2702,10 @@ def test_worktree_writer_route_rejects_a_path_that_is_not_a_worktree_root():
 ENDPOINT_STUB = """\
     #!/usr/bin/env bash
     cat >/dev/null
-    printf 'base=%s token=%s\n' "${ANTHROPIC_BASE_URL:-unset}" "${ANTHROPIC_AUTH_TOKEN:-unset}"
+    printf 'base=%s token=%s api_key=%s\n' \
+      "${ANTHROPIC_BASE_URL:-unset}" \
+      "${ANTHROPIC_AUTH_TOKEN:-unset}" \
+      "${ANTHROPIC_API_KEY-__unset__}"
 """
 
 
@@ -2716,7 +2714,11 @@ def test_named_endpoint_reaches_the_claude_process_environment():
         ENDPOINT_STUB,
         role="other-primary",
         extra_args=["--model", "glm-4.7"],
-        extra_env={"CF_DISPATCH_ENDPOINT": "zai-glm", "ZAI_API_KEY": "endpoint-token-fixture"},
+        extra_env={
+            "CF_DISPATCH_ENDPOINT": "zai-glm",
+            "ZAI_API_KEY": "endpoint-token-fixture",
+            "ANTHROPIC_API_KEY": "must-not-reach-child",
+        },
     )
 
     assert result.returncode == 0, result.output
@@ -2725,7 +2727,11 @@ def test_named_endpoint_reaches_the_claude_process_environment():
     assert record["resolved_model"] == "glm-4.7"
     # These endpoints expose no effort control, so the dispatch carries none.
     assert record["effort"] == ""
-    assert output.strip() == "base=https://api.z.ai/api/anthropic token=endpoint-token-fixture"
+    assert output.strip() == (
+        "base=https://api.z.ai/api/anthropic "
+        "token=endpoint-token-fixture "
+        "api_key="
+    )
 
 
 def test_claude_without_a_named_endpoint_keeps_the_default_anthropic_environment():
@@ -2734,7 +2740,30 @@ def test_claude_without_a_named_endpoint_keeps_the_default_anthropic_environment
     assert result.returncode == 0, result.output
     assert record["status"] == "ok"
     assert record["model_family"] == "anthropic"
-    assert output.strip() == "base=unset token=unset"
+    assert output.strip() == "base=unset token=unset api_key=__unset__"
+
+
+def test_openrouter_anthropic_endpoint_reaches_claude_with_blank_api_key():
+    result, record, output = run_dispatch_with_stub(
+        ENDPOINT_STUB,
+        role="other-primary",
+        extra_args=["--model", "stealth/union-alpha"],
+        extra_env={
+            "CF_DISPATCH_ENDPOINT": "openrouter-anthropic",
+            "OPENROUTER_API_KEY": "endpoint-token-fixture",
+            "ANTHROPIC_API_KEY": "must-not-reach-child",
+        },
+    )
+
+    assert result.returncode == 0, result.output
+    assert record["status"] == "ok"
+    assert record["model_family"] == "generic-open"
+    assert record["resolved_model"] == "stealth/union-alpha"
+    assert output.strip() == (
+        "base=https://openrouter.ai/api "
+        "token=endpoint-token-fixture "
+        "api_key="
+    )
 
 
 CLAUDE_ENDPOINT_ARGV_STUB = """\
@@ -2942,31 +2971,49 @@ def test_unimplemented_adapter_is_refused_before_any_provider_work():
             assert not invoked.exists()
 
 
-def test_declared_dormant_adapter_still_reaches_its_configured_reason():
-    """opencode has no arm but does have a declared route, so it is not a typo.
-
-    The pre-flight rejection must not swallow the configured activation reason
-    the routing policy returns for a dormant adapter.
-    """
+def test_opencode_arm_runs_with_explicit_model_and_records_variant():
+    """OpenCode is an ordinary implemented adapter: explicit model, no --auto."""
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        args_file = tmp / "opencode.args"
+        write_executable(
+            bin_dir / "opencode",
+            f"""#!/usr/bin/env bash
+            printf '%s\\n' "$@" > {args_file}
+            echo '{{"type":"text","text":"OPENCODE OK"}}'
+            """,
+        )
         env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
         out = tmp / "out.txt"
         result = subprocess.run(
             [
-                str(SCRIPT), "--tool", "opencode",
-                "--model", "opencode/deepseek-v4-flash-free",
-                "--orchestrator-family", "anthropic",
-                "--out", str(out),
-                "--prompt", "Review",
+                str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+                "--model", "opencode/union-alpha", "--alias", "scout",
+                "--role", "worker", "--effort", "high",
+                "--prompt", "Reply with pong only.", "--out", str(out),
             ],
-            cwd=td, env=env, text=True,
+            cwd=tmp, env=env, text=True,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
         )
         record = json.loads(result.stdout)
-        assert result.returncode != 0
-        assert record["status"] != "unknown_tool"
-        assert record["reason"]
+        assert result.returncode == 0, result.stderr
+        assert record["status"] == "ok"
+        assert record["resolved_model"] == "opencode/union-alpha"
+        assert record["model_family"] == "generic-open"
+        assert record["read_only_guarantee"] == "none"
+        recorded = args_file.read_text(encoding="utf-8")
+        assert "run" in recorded
+        assert "--format" in recorded
+        assert "json" in recorded
+        assert "--model" in recorded
+        assert "opencode/union-alpha" in recorded
+        assert "--variant" in recorded
+        assert "high" in recorded
+        assert "--auto" not in recorded
+        assert "OPENCODE OK" in out.read_text(encoding="utf-8")
 
 
 def test_oversized_argv_prompt_is_typed_for_cursor():
@@ -3019,9 +3066,9 @@ def test_every_argv_prompt_adapter_arm_bounds_the_prompt():
     source = SCRIPT.read_text(encoding="utf-8")
     arms = re.split(r"^ {8}([a-z]+)\)$", source, flags=re.MULTILINE)
     bodies = dict(zip(arms[1::2], arms[2::2]))
-    assert {"agy", "cursor", "kiro", "copilot"} <= set(bodies), sorted(bodies)
+    assert {"agy", "cursor", "kiro", "copilot", "opencode"} <= set(bodies), sorted(bodies)
     guarded = [tool for tool, body in bodies.items() if '"$PROMPT_ARG"' in body]
-    assert sorted(guarded) == ["agy", "copilot", "cursor", "kiro"], guarded
+    assert sorted(guarded) == ["agy", "copilot", "cursor", "kiro", "opencode"], guarded
     for tool in guarded:
         assert "argv_prompt_too_large" in bodies[tool], tool
 

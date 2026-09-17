@@ -135,8 +135,9 @@ resolver output.
 
 ## Endpoint profiles
 
-`config/model-routing.json` carries an `endpoints` map of Anthropic-compatible
-provider endpoints (Z.ai GLM, Moonshot Kimi and DeepSeek ship as examples). Each
+`config/model-routing.json` carries an `endpoints` map of Anthropic- or
+OpenAI-compatible provider endpoints (Z.ai GLM, Moonshot Kimi, DeepSeek and
+OpenRouter ship as examples). Each
 profile names a base URL, the model family it serves, the adapters allowed to use
 it, and the environment variable that holds the token. Tokens are never stored in
 the catalogue or written into a route record. Name one with
@@ -144,11 +145,22 @@ the catalogue or written into a route record. Name one with
 takes the profile's family in place of the adapter's pinned family, emits
 `endpoint_base_url` and `endpoint_token_env`, and the dispatcher exports
 `ANTHROPIC_BASE_URL` and `ANTHROPIC_AUTH_TOKEN` into the Claude child process
-only. These endpoints expose no reasoning-effort control, so an endpoint route
+only (and blanks `ANTHROPIC_API_KEY` so a gateway cannot fall back to Anthropic
+direct auth). These endpoints expose no reasoning-effort control, so an endpoint route
 carries no effort at all and rejects an explicit `--effort` rather than claiming
 one. A route naming an unknown profile, an adapter the profile does not list, or
 a token variable that is unset fails closed with a typed status and dispatches
 nothing.
+
+OpenRouter is a multi-model gateway: use `openrouter-anthropic` with Claude or
+`openrouter-openai` with Codex (`wire_api: responses`), set `OPENROUTER_API_KEY`
+in the environment, and pass the live slug (for example `stealth/union-alpha`).
+Do not pin rotating free or stealth models into alias tables; pick the slug at
+dispatch time.
+
+OpenCode is an ordinary implemented adapter for its own free/Zen catalogue
+(`opencode/<model>`). Discover current slugs with `opencode models` and pass
+`--model` explicitly. It is not a substitute for distinct-family assurance.
 
 A profile listing `codex` among its adapters reaches an OpenAI-compatible
 endpoint instead, and must also declare `wire_api` (Codex 0.146 accepts only
