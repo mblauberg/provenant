@@ -401,13 +401,18 @@ resolve_model() {
   esac
 }
 endpoint_provider() {
+  # Mirror of the routing catalogue's per-adapter endpoint_provider, drift-bound
+  # by tests/test_adapter_identity_maps.py. `pi` routes only through an endpoint
+  # profile, so its catalogue provider is the placeholder "configured".
   case "$1" in
     claude) echo "anthropic";;
     codex) echo "openai";;
     cursor) echo "cursor";;
+    agy) echo "agy";;
     kiro) echo "aws";;
     copilot) echo "github";;
     opencode) echo "opencode";;
+    pi) echo "configured";;
     *) echo "";;
   esac
 }

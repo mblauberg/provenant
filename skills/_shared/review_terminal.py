@@ -33,12 +33,21 @@ _REVIEW_CROSS_FAMILY_KEYS = frozenset({
     "ran", "tool", "status", "modelFamily", "endpointProvider", "crossFamily",
     "certificationEligible", "readOnlyGuarantee", "outputPath", "routeReceipt", "notRunReason",
 })
+# Adapter identity mirrors, drift-checked against the product dispatch
+# registry by tests/test_adapter_identity_maps.py. Endpoint providers come
+# from the routing catalogue's adapter entries; fixed families from the same
+# entries' fixed_model_family. A missing endpoint entry makes every review
+# leg for that adapter fail closed with an identity mismatch, so coverage is
+# gated on the implemented set, not hand-maintained.
 _ENDPOINT_PROVIDERS = {
     "claude": "anthropic",
     "codex": "openai",
     "cursor": "cursor",
+    "agy": "agy",
     "kiro": "aws",
     "copilot": "github",
+    "opencode": "opencode",
+    "pi": "configured",
 }
 _FIXED_PROVIDER_FAMILIES = {"claude": "anthropic", "codex": "openai"}
 _FIXED_MODEL_FAMILIES = {"claude": "anthropic", "codex": "openai"}
