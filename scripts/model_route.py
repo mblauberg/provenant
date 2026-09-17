@@ -43,6 +43,7 @@ COMPATIBILITY_ADAPTER_IDS = {
     "codex": "codex-app-server",
     "agy": "agy",
     "cursor": "cursor-agent",
+    "copilot": "copilot",
     "kiro": "kiro-acp",
     "opencode": "opencode-acp",
     "pi": "pi-rpc",
