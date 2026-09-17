@@ -38,6 +38,8 @@ const USAGE = `fabric <command>
   watch [--interval N]        tail everything agents here are doing
   status [--json]             read-only summary; absent state is healthy
   doctor [--json]             read-only schema and integrity diagnostics
+  adapters [--json]           configured providers: dispatch state, aliases,
+                              read-only guarantee, endpoint profiles
   dispatch list [--json]      configured-provider runs recorded in this workspace
   dispatch kill <run> [--json]  stop one recorded run and the group it leads
 
@@ -49,7 +51,7 @@ const argv = process.argv.slice(2);
 const command = argv[0] ?? "whoami";
 const commands = new Set([
   "whoami", "send", "inbox", "ack", "note", "tasks", "task", "claim", "done",
-  "activity", "watch", "status", "doctor", "dispatch",
+  "activity", "watch", "status", "doctor", "dispatch", "adapters",
 ]);
 
 if (command === "--help" || command === "-h" || command === "help") {
@@ -129,6 +131,36 @@ if (command === "dispatch") {
   }
   console.error(`fabric: usage: fabric dispatch <list|kill> ...`);
   process.exit(2);
+}
+if (command === "adapters") {
+  const unknown = argv.slice(1).filter((argument) => argument !== "--json");
+  if (unknown.length > 0) {
+    console.error("fabric: usage: fabric adapters [--json]");
+    process.exit(2);
+  }
+  const { catalogueSnapshot } = await import("./catalogue.js");
+  const snapshot = catalogueSnapshot();
+  if (argv.includes("--json")) {
+    console.log(JSON.stringify(snapshot, null, 2));
+  } else if (snapshot.adapters.length === 0) {
+    console.error("fabric: adapter catalogue unavailable (no product checkout found)");
+    process.exit(1);
+  } else {
+    for (const adapter of snapshot.adapters) {
+      const alias = Object.keys(adapter.aliases).sort().join("/") || "-";
+      const modes = ["read_only", ...(adapter.write_modes ?? [])].join(",");
+      const guarantee = adapter.read_only_guarantee ?? "-";
+      const line = `${adapter.name.padEnd(9)} ${adapter.dispatch.padEnd(12)} guarantee=${guarantee.padEnd(12)} modes=${modes.padEnd(21)} aliases=${alias}`;
+      console.log(adapter.disabled_reason !== undefined && adapter.dispatch !== "implemented"
+        ? `${line}  (${adapter.disabled_reason})`
+        : line);
+    }
+    const endpoints = Object.keys(snapshot.endpoints);
+    if (endpoints.length > 0) {
+      console.log(`endpoint profiles: ${endpoints.join(", ")}`);
+    }
+  }
+  process.exit(0);
 }
 if (command === "status" || command === "doctor") {
   const unknown = argv.slice(1).filter((argument) => argument !== "--json");

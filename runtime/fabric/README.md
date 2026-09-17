@@ -151,8 +151,25 @@ fabric_whoami       fabric_send          fabric_inbox
 fabric_acknowledge  fabric_team_create   fabric_task_create
 fabric_task_claim   fabric_task_update   fabric_tasks
 fabric_note         fabric_activity      fabric_dispatch
-fabric_batch
+fabric_batch        fabric_adapters
 ```
+
+### Happy path
+
+One discovery call answers everything `fabric_dispatch` accepts:
+
+```sh
+fabric adapters                      # or the fabric_adapters MCP tool
+```
+
+then dispatch:
+
+```json
+{ "prompt": "review auth.ts", "adapter": "codex" }
+```
+
+Adapter, mode and worktree are the only extras ever needed; alias defaults to
+`workhorse` and mode to `read_only`.
 
 `fabric_dispatch` accepts one inline prompt or prompt file. `fabric_batch`
 accepts 1–64 fixed tasks with concurrency capped at eight. Both carry the same

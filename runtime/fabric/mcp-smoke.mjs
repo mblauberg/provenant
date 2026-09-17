@@ -82,6 +82,7 @@ try {
   assert.deepEqual(listed.tools.map((tool) => tool.name).sort(), [
     "fabric_acknowledge",
     "fabric_activity",
+    "fabric_adapters",
     "fabric_batch",
     "fabric_dispatch",
     "fabric_inbox",
