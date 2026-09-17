@@ -253,3 +253,50 @@ adapters:
       requires_explicit_model: true
       route_role: optional-free-account-worker
     official_source_url: "https://opencode.ai/docs/"
+
+# ---------------------------------------------------------------------------
+# Dispatch registry (P1b of #827): the product-owned single source for which
+# adapters the dispatcher knows and how it may run them. `model-routing.json`
+# is instance-owned (ADR 0019) and must never carry these policy facts.
+#
+# dispatch:  implemented — the dispatcher has an executing arm in
+#            cf_dispatch.sh and Fabric may stage runs for it.
+#            dormant — declared for routing; the dispatcher refuses with a
+#            typed dormant status until an arm and a safety boundary exist.
+#            unsupported — routing-only; no dispatcher arm is planned.
+# write_modes — access modes the dispatcher arm can enforce. read_only is
+#            implicit for every implemented adapter; worktree_write is listed
+#            only where the arm actually enforces the one-writer lease.
+# read_only_guarantee — what the dispatcher arm proves on a read-only route:
+#            enforced | oauth_safe_mode | prompt_only | best_effort | none.
+#            Mirrored for drift-testing from the dispatcher arms; never fed
+#            into them.
+# ---------------------------------------------------------------------------
+dispatch_registry:
+  agy:
+    dispatch: implemented
+    read_only_guarantee: prompt_only
+  claude:
+    dispatch: implemented
+    read_only_guarantee: enforced
+    write_modes: [worktree_write]
+  codex:
+    dispatch: implemented
+    read_only_guarantee: enforced
+    write_modes: [worktree_write]
+  copilot:
+    dispatch: implemented
+    read_only_guarantee: none
+  cursor:
+    dispatch: implemented
+    read_only_guarantee: enforced
+  herdr:
+    dispatch: unsupported
+  kiro:
+    dispatch: implemented
+    read_only_guarantee: none
+  opencode:
+    dispatch: implemented
+    read_only_guarantee: enforced
+  pi:
+    dispatch: unsupported
