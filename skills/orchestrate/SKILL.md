@@ -49,6 +49,10 @@ runtime.
   execution freedom is bounded by credential/auth-store exclusions, unrelated
   path containment, explicit denials, write/resource limits and external-action
   gates.
+- **Discover providers through Fabric, not by reading config.** `fabric
+  adapters` (or the `fabric_adapters` MCP tool) returns every adapter with its
+  dispatch state, aliases, read-only guarantee and endpoint profiles in one
+  read-only call; pass the adapter name straight to `fabric_dispatch`.
 - **Objective checks outrank opinions. You own the final call.**
 - Discover current model/tool options at runtime.
 
