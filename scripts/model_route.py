@@ -92,6 +92,9 @@ if _preferences is None:
 EFFORT_ORDER = _catalog_validation.EFFORT_ORDER
 ALIAS_ORDER = _catalog_validation.ALIAS_ORDER
 infer_family = _catalog_validation.infer_family
+model_slug_for_family = _catalog_validation.model_slug_for_family
+family_is_assurance_eligible = _catalog_validation.family_is_assurance_eligible
+attribute_model_family = _catalog_validation.attribute_model_family
 model_has_alias = _catalog_validation.model_has_alias
 risk_tier_override_reserves_model = _catalog_validation.risk_tier_override_reserves_model
 capability_key_matches_model = _catalog_validation.capability_key_matches_model
@@ -567,6 +570,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     substitution = ""
     fallback_model = ""
     identity_source = ""
+    family_source = ""
 
     if args.model:
         if account_default:
@@ -588,36 +592,40 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 1,
             )
         model = args.model
-        # An endpoint profile is a multi-model gateway more often than a single
-        # lab: the profile's declared family is the route family. Pattern
-        # inference still applies on ordinary (non-endpoint) routes.
-        if endpoint_profile:
-            family = endpoint_profile["model_family"]
-            identity_source = "endpoint-profile"
-        else:
-            family = infer_family(model, catalog)
-            identity_source = "model-pattern"
-            if not family:
-                return emit_route(
-                    {
-                        **base,
-                        "status": "model_family_unknown",
-                        "endpoint_provider": endpoint,
-                        "resolved_model": model,
-                    },
-                    1,
-                )
-            if fixed_family and family != fixed_family:
-                return emit_route(
-                    {
-                        **base,
-                        "status": "adapter_family_mismatch",
-                        "endpoint_provider": endpoint,
-                        "model_family": family,
-                        "resolved_model": model,
-                    },
-                    1,
-                )
+        # Brokers and gateways: attribute upstream family from the slug.
+        # Endpoint profile family is only a fallback when inference fails.
+        endpoint_family = endpoint_profile.get("model_family") if endpoint_profile else None
+        family, family_source = attribute_model_family(
+            model, catalog, endpoint_family=endpoint_family,
+        )
+        identity_source = (
+            "endpoint-profile" if family_source.startswith("endpoint-profile") else "model-pattern"
+        )
+        if not family:
+            return emit_route(
+                {
+                    **base,
+                    "status": "model_family_unknown",
+                    "endpoint_provider": endpoint,
+                    "resolved_model": model,
+                    "family_source": family_source,
+                },
+                1,
+            )
+        # Pinned single-family adapters (claude/codex without a gateway) still
+        # reject cross-family slugs. Brokers and endpoint routes do not.
+        if fixed_family and not endpoint_profile and family != fixed_family:
+            return emit_route(
+                {
+                    **base,
+                    "status": "adapter_family_mismatch",
+                    "endpoint_provider": endpoint,
+                    "model_family": family,
+                    "resolved_model": model,
+                    "family_source": family_source,
+                },
+                1,
+            )
         selected_override_model = (
             args.model_override.get("models", [""])[0] if args.model_override else ""
         )
@@ -694,10 +702,12 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                     1,
                 )
             model, identity_source = available[chosen.lower()]
+            family_source = "runtime-capability"
             if chosen != candidates[0]:
                 substitution = f"{candidates[0]} unavailable; used {chosen}"
         else:
             family = fixed_family
+            family_source = "catalog-family"
             candidates = args.model_override.get("models")
             candidates = candidates or family_config.get("role_overrides", {}).get(args.role, {}).get(args.alias)
             candidates = candidates or family_config["aliases"].get(args.alias)
@@ -757,7 +767,14 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if is_risk_override_model and not args.model_override:
         return emit_route({**base, "status": "risk_tier_override_required"}, 1)
     compatibility_family = ""
-    distinct = bool(args.lead_family and family != args.lead_family)
+    assurance_ok = family_is_assurance_eligible(family, family_source)
+    lead_ok = family_is_assurance_eligible(args.lead_family or "", "catalog-family")
+    distinct = bool(
+        args.lead_family
+        and assurance_ok
+        and lead_ok
+        and family != args.lead_family
+    )
     if compatibility and args.require_distinct and not args.lead_family:
         return emit_route(
             {
@@ -767,9 +784,25 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 "model_family": family,
                 "resolved_model": model,
                 "identity_source": identity_source,
+                "family_source": family_source,
                 **compatibility_metadata,
             },
             2,
+        )
+    if compatibility and args.require_distinct and (not assurance_ok or not lead_ok):
+        return emit_route(
+            {
+                **base,
+                "status": "family_not_assurance_eligible",
+                "endpoint_provider": endpoint,
+                "model_family": family,
+                "resolved_model": model,
+                "identity_source": identity_source,
+                "family_source": family_source,
+                "distinct_from_lead": False,
+                **compatibility_metadata,
+            },
+            1,
         )
     if compatibility and args.require_distinct and not distinct:
         return emit_route(
@@ -780,6 +813,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 "model_family": family,
                 "resolved_model": model,
                 "identity_source": identity_source,
+                "family_source": family_source,
                 "distinct_from_lead": False,
                 **compatibility_metadata,
             },
@@ -881,6 +915,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         "model_family": family,
         "resolved_model": model,
         "identity_source": identity_source,
+        "family_source": family_source,
         "substitution": substitution,
         "fallback_model": fallback_model,
         "distinct_from_lead": distinct,
@@ -911,6 +946,8 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         )
     if args.require_distinct and not args.lead_family:
         return emit_route({**record, "status": "lead_family_required"}, 2)
+    if args.require_distinct and (not assurance_ok or not lead_ok):
+        return emit_route({**record, "status": "family_not_assurance_eligible"}, 1)
     if args.require_distinct and not distinct:
         return emit_route({**record, "status": "same_family_forbidden"}, 1)
     return emit_route(record, 0)

@@ -378,6 +378,14 @@ valid_family() {
     *) return 1;;
   esac
 }
+# Upstream families that may appear on a receipt but must not set cross_family /
+# certification_eligible (broker collapse / open-weight bucket).
+assurance_family() {
+  case "$1" in
+    ""|generic-open|open-weight) return 1;;
+    *) return 0;;
+  esac
+}
 resolve_model() {
   local tool="$1" model="$2"
   if [ -n "$model" ]; then
@@ -454,7 +462,7 @@ emit_record() {
     guarantee="none"
   fi
   cross="false"
-  [ -n "$ORCH_FAMILY" ] && valid_family "$ORCH_FAMILY" && [ -n "$family" ] && [ "$ORCH_FAMILY" != "$family" ] && cross="true"
+  [ -n "$ORCH_FAMILY" ] && valid_family "$ORCH_FAMILY" && assurance_family "$family" && [ -n "$family" ] && [ "$ORCH_FAMILY" != "$family" ] && cross="true"
   cert="false"
   [ "$INTENT" = "assurance" ] && [ "$status" = "ok" ] && [ -n "$output_digest" ] && [ "$cross" = "true" ] && { [ "$guarantee" = "enforced" ] || [ "$guarantee" = "oauth_safe_mode" ]; } && cert="true"
   printf '{"tool":"%s","adapter":"%s","adapter_gate":"direct-cli","execution_intent":"%s","model":"%s","requested_model":"%s","resolved_model":"%s","fallback_model":"%s","requested_effort":"%s","effort":"%s","effort_source":"%s","effort_capability_source":"%s","effort_substitution":"%s","substitution":"%s","status":"%s","reason":"%s","exit":%s,"output_path":"%s","output_digest":"%s","read_only_guarantee":"%s","provider_sandbox":%s,"access_mode":"%s","worktree":"%s","orchestrator_family":"%s","provider_family":"%s","model_family":"%s","endpoint_provider":"%s","identity_source":"%s","catalog_model":"%s","model_selection":"%s","route_alias":"%s","reviewer_id":"%s","risk_tier":"%s","model_override_tier":"%s","policy_override":"%s","cross_family":%s,"certification_eligible":%s}\n' \

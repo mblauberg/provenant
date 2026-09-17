@@ -2744,10 +2744,15 @@ def test_claude_without_a_named_endpoint_keeps_the_default_anthropic_environment
 
 
 def test_openrouter_anthropic_endpoint_reaches_claude_with_blank_api_key():
+    # Ordinary worker: stealth/generic-open is fine for capability, not assurance.
     result, record, output = run_dispatch_with_stub(
         ENDPOINT_STUB,
-        role="other-primary",
-        extra_args=["--model", "stealth/union-alpha"],
+        role="worker",
+        extra_args=[
+            "--intent", "ordinary",
+            "--model", "stealth/union-alpha",
+            "--alias", "scout",
+        ],
         extra_env={
             "CF_DISPATCH_ENDPOINT": "openrouter-anthropic",
             "OPENROUTER_API_KEY": "endpoint-token-fixture",
@@ -2764,6 +2769,29 @@ def test_openrouter_anthropic_endpoint_reaches_claude_with_blank_api_key():
         "token=endpoint-token-fixture "
         "api_key="
     )
+
+
+def test_openrouter_kimi_attributes_moonshot_for_ordinary_dispatch():
+    result, record, output = run_dispatch_with_stub(
+        ENDPOINT_STUB,
+        role="worker",
+        extra_args=[
+            "--intent", "ordinary",
+            "--model", "moonshotai/kimi-k3",
+            "--alias", "scout",
+        ],
+        extra_env={
+            "CF_DISPATCH_ENDPOINT": "openrouter-anthropic",
+            "OPENROUTER_API_KEY": "endpoint-token-fixture",
+        },
+    )
+
+    assert result.returncode == 0, result.output
+    assert record["status"] == "ok"
+    assert record["model_family"] == "moonshot"
+    assert record["resolved_model"] == "moonshotai/kimi-k3"
+    assert "base=https://openrouter.ai/api" in output
+
 
 
 CLAUDE_ENDPOINT_ARGV_STUB = """\
