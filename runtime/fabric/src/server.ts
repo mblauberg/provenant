@@ -4,6 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 
 import { databasePath, identify } from "./identity.js";
+import { catalogueSnapshot } from "./catalogue.js";
 import {
   cancelActiveExecutions,
   DISPATCH_ADAPTERS,
@@ -351,6 +352,24 @@ server.registerTool(
   ({ limit, after_seq }) => reply(after_seq === undefined
     ? readyStore().activity(who.project, limit)
     : readyStore().activityAfter(who.project, after_seq, limit)),
+);
+
+server.registerTool(
+  "fabric_adapters",
+  {
+    description:
+      "List configured providers from the product catalogue: dispatch state, aliases, " +
+      "read-only guarantee, writable modes and endpoint profiles. Read-only and store-free; " +
+      "everything fabric_dispatch accepts is answerable from one call. Use the adapter name " +
+      "and optionally an alias directly in fabric_dispatch.",
+    inputSchema: {},
+  },
+  () => {
+    const snapshot = catalogueSnapshot();
+    return reply(snapshot.adapters.length === 0
+      ? { error: "adapter catalogue unavailable", adapters: [], endpoints: {} }
+      : snapshot);
+  },
 );
 
 const transport = new StdioServerTransport();
