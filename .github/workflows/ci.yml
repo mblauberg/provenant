@@ -103,10 +103,28 @@ jobs:
             split-root:
               - *ci-contract
               - *node-workspace
+              # Install/instance/contract surfaces only. runtime/** and
+              # scripts/** stay because the job runs `npm run check` and the
+              # provisioner under genuinely split ambient roots: a
+              # root-resolution regression that passes fused would otherwise
+              # skip split entirely (fail-open), and install-harness calls
+              # helpers beyond install*/instance* (manage_installation,
+              # configure-*, write-product-root-pointer, lib/**,
+              # provenant.template). tests/ narrows to exactly the contract
+              # files this job runs — every other test rides the harness
+              # fused suite. Broader docs/skills/agents changes skip split;
+              # the harness filter stays near-total by design.
               - 'config/**'
               - 'runtime/**'
               - 'scripts/**'
-              - 'tests/**'
+              - 'tests/test_split_root_contract.py'
+              - 'tests/test_install_harness.py'
+              - 'tests/test_install_agents.py'
+              - 'tests/test_install_provenant_command.py'
+              - 'tests/test_install_skills.py'
+              - 'tests/test_instance_installation.py'
+              - 'tests/test_check_provenant_install.py'
+              - 'docs/worktrees.md'
             workflows:
               - '.github/workflows/**'
               - '.github/actions/**'
@@ -125,6 +143,17 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # Full history is load-bearing here, not incidental: the frozen
+          # eval-predecessor test resolves a pinned historical blob
+          # (`git show <commit>:docs/evals/...` in
+          # tests/test_skill_eval_fixtures.py) and the ui provenance tests
+          # diff working files against a pinned modification baseline
+          # (`git show <baseline>:skills/ui-ux-design/...` in
+          # tests/test_ui_ux_provenance_contract.py). A depth-1 checkout of
+          # this job was verified to fail exactly those four tests while
+          # 1891 others passed, so the fetch-depth stays 0. Only the
+          # split-root job below, whose narrowed contract set is HEAD-local,
+          # checks out shallow.
           fetch-depth: 0
       - name: Set up Node.js workspace
         uses: ./.github/actions/setup-node-workspace
@@ -193,9 +222,13 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Retained-receipt tests resolve `origin/main` and historical blobs,
-          # so this job needs the same full history the harness job takes.
-          fetch-depth: 0
+          # Shallow is enough for the narrowed contract set below: every one
+          # of those files is HEAD-local or fixture-scoped, verified by
+          # running the exact subset green in a depth-1 checkout. The harness
+          # job keeps full history for its pinned-blob tests (see its
+          # checkout comment); the old claim that retained-receipt tests need
+          # origin/main here was stale — no such test exists.
+          fetch-depth: 1
       - name: Set up Node.js workspace
         uses: ./.github/actions/setup-node-workspace
       - name: Set up uv
@@ -235,18 +268,31 @@ jobs:
             echo "AGENT_FABRIC_PRODUCT_ROOT=$AGENT_FABRIC_PRODUCT_ROOT"
             echo "AGENT_FABRIC_INSTANCE_ROOT=$AGENT_FABRIC_INSTANCE_ROOT"
           } >> "$GITHUB_ENV"
-      - name: Run full Python suite under split roots
+      - name: Run install and relocation contract under split roots
         env:
           HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: |
           set -euo pipefail
-          $HARNESS_PYTHON -m pytest tests/ -q
-      # Both split-root failure ledgers are gone with the daemon that owned
-      # every entry in them: each named a provisioning, seat or lease case in
-      # the retired coordination runtime. The workspace suite is now an
-      # ordinary must-be-green step under split roots.
-      - name: Run full workspace suite under split roots
-        run: npm test
+          # The full Python suite already ran fused in the harness job; under
+          # split roots only the install/relocation/reconciliation contract
+          # matters (ADR 0019). Same checks, cheaper placement.
+          # One case is deselected, not dropped: ..._fused_desired_state
+          # asserts workstation state of the live checkout (its ignored
+          # installation.json), not the split contract — it still runs in the
+          # harness fused suite. In the full suite it passes only via an
+          # earlier test's side effect on the checkout; that latent
+          # order-dependence is recorded for hygiene follow-up.
+          $HARNESS_PYTHON -m pytest tests/test_split_root_contract.py \
+            tests/test_instance_installation.py tests/test_install_harness.py \
+            tests/test_install_agents.py tests/test_install_provenant_command.py \
+            tests/test_install_skills.py tests/test_check_provenant_install.py \
+            --deselect tests/test_instance_installation.py::test_the_repository_ships_a_valid_fused_desired_state -q
+      # The workspace suite already ran fused in the fabric job (`npm run
+      # check`); under split roots the same command re-proves the JS side
+      # against genuinely split product/instance roots without a second full
+      # `npm test` placement.
+      - name: Run workspace checks under split roots
+        run: npm run check
 
   zizmor:
     name: Workflow security lint
