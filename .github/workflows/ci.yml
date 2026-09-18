@@ -135,11 +135,18 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Shallow is enough: every gate in this job is HEAD-local
-          # (rev-parse HEAD, fixture repos). Verified against
-          # tests/test_harness_contract.py and the retained-receipt tests;
-          # no gate resolves origin/main or historical blobs.
-          fetch-depth: 1
+          # Full history is load-bearing here, not incidental: the frozen
+          # eval-predecessor test resolves a pinned historical blob
+          # (`git show <commit>:docs/evals/...` in
+          # tests/test_skill_eval_fixtures.py) and the ui provenance tests
+          # diff working files against a pinned modification baseline
+          # (`git show <baseline>:skills/ui-ux-design/...` in
+          # tests/test_ui_ux_provenance_contract.py). A depth-1 checkout of
+          # this job was verified to fail exactly those four tests while
+          # 1891 others passed, so the fetch-depth stays 0. Only the
+          # split-root job below, whose narrowed contract set is HEAD-local,
+          # checks out shallow.
+          fetch-depth: 0
       - name: Set up Node.js workspace
         uses: ./.github/actions/setup-node-workspace
       - name: Set up uv and Python
@@ -207,10 +214,12 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Shallow is enough: the rig runs only the install/relocation
-          # contract tests below (all HEAD-local or fixture-scoped), and the
-          # old full-history comment was stale — no gate in this job resolves
-          # origin/main or historical blobs.
+          # Shallow is enough for the narrowed contract set below: every one
+          # of those files is HEAD-local or fixture-scoped, verified by
+          # running the exact subset green in a depth-1 checkout. The harness
+          # job keeps full history for its pinned-blob tests (see its
+          # checkout comment); the old claim that retained-receipt tests need
+          # origin/main here was stale — no such test exists.
           fetch-depth: 1
       - name: Set up Node.js workspace
         uses: ./.github/actions/setup-node-workspace
