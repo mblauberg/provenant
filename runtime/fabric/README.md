@@ -190,6 +190,14 @@ responses include the task or batch identifier and expected evidence path; a
 terminal response has a null result path when no result was retained. Failed,
 cancelled or timed-out attempts may retain provider output or diagnostics there.
 
+Run retention is dispatch-time-only: starting a dispatch prunes that
+workspace's `.agent-run/mcp-*` runs older than the retention window (default
+168 hours, `AGENT_FABRIC_RUN_RETENTION_HOURS` overrides, `0` keeps nothing);
+workspaces that only ever read never prune. `fabric dispatch list` reports the
+effective `retention_hours` for the workspace. There is no background reaper
+and no `run gc` command by design — retention is a bounded side effect of the
+next dispatch, not a second lifecycle.
+
 The existing run controls inspect, retry or cancel an execution after the MCP
 call returns. Closing the MCP transport asks any owner started by that process
 to terminate. Fabric does not add a session database, transcript copy,

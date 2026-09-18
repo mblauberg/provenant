@@ -12,7 +12,7 @@ import type { Identity } from "../src/identity.js";
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const catalogue = JSON.parse(
   readFileSync(join(repositoryRoot, "config", "model-routing.json"), "utf8"),
-) as { adapters: Record<string, { dispatch?: string }> };
+) as { adapters: Record<string, { endpoint_provider?: string; fixed_model_family?: string | null }> };
 const compatibility = parseYaml(
   readFileSync(join(repositoryRoot, "config", "adapter-compatibility.yaml"), "utf8"),
 ) as {
@@ -29,26 +29,37 @@ function shellList(name: string): string[] {
   return match[1]!.split(/\s+/u).filter((entry) => entry.length > 0).sort();
 }
 
-function catalogueAdapters(state: string): string[] {
-  return Object.entries(catalogue.adapters)
-    .filter(([, entry]) => entry.dispatch === state)
+function registryAdapters(state: string): string[] {
+  // herdr is a policy-only entry: it observes and steers but is never a
+  // routing adapter, so it is excluded from the routable sets (it still
+  // counts as unrunnable below, which is exactly the point).
+  return Object.entries(compatibility.dispatch_registry ?? {})
+    .filter(([name, entry]) => name !== "herdr" && entry.dispatch === state)
     .map(([name]) => name)
     .sort();
 }
 
 /**
- * The adapter list lives in several places that a single change can silently
- * pull apart: the Fabric schema, the routing catalogue, the product-owned
- * dispatch registry in adapter-compatibility.yaml and the dispatcher. These
- * tests read them all and fail on any disagreement. The dispatch state that
- * governs execution is owned by `dispatch_registry` (product policy);
- * `model-routing.json`'s `dispatch` field must mirror it because the routing
- * catalogue is instance-owned and may lag behind a product change.
+ * Dispatch state lives in exactly one place: the product-owned
+ * `dispatch_registry` in adapter-compatibility.yaml. The instance-owned
+ * routing catalogue (`config/model-routing.json`, ADR 0019) carries no
+ * dispatch field and may lag behind product policy, so no test here may read
+ * adapter state from it. These tests read the registry, the Fabric schema and
+ * the dispatcher, and fail on any disagreement. Unsupported adapters are
+ * absent from the catalogue, not stubbed in it: the catalogue lists exactly
+ * the implemented set.
  */
 describe("adapter registry", () => {
-  it("declares a known dispatch state for every catalogued adapter", () => {
+  it("declares a known dispatch state in the registry for every catalogued adapter", () => {
+    for (const name of Object.keys(catalogue.adapters)) {
+      expect(["implemented", "dormant", "unsupported"], `registry ${name}`)
+        .toContain(compatibility.dispatch_registry?.[name]?.dispatch);
+    }
+  });
+
+  it("carries no dispatch mirror in the catalogue", () => {
     for (const [name, entry] of Object.entries(catalogue.adapters)) {
-      expect(["implemented", "dormant", "unsupported"], `adapter ${name}`).toContain(entry.dispatch);
+      expect(entry, `catalogue ${name}`).not.toHaveProperty("dispatch");
     }
   });
 
@@ -60,24 +71,35 @@ describe("adapter registry", () => {
       .filter(([name]) => !policyOnly.has(name));
     expect(registry.map(([name]) => name).sort())
       .toStrictEqual(Object.keys(catalogue.adapters).sort());
-    for (const [name, entry] of registry) {
-      expect(entry.dispatch, `dispatch_registry ${name}`)
-        .toBe(catalogue.adapters[name]?.dispatch);
-    }
   });
 
-  it("agrees on the implemented adapters across the schema, the catalogue and the dispatcher", () => {
+  it("lists exactly the implemented adapters in the catalogue (no stubs)", () => {
+    expect(Object.keys(catalogue.adapters).sort())
+      .toStrictEqual(registryAdapters("implemented"));
+  });
+
+  it("agrees on the implemented adapters across the schema, the registry and the dispatcher", () => {
     const schema = [...DISPATCH_ADAPTERS].sort();
-    expect(schema).toStrictEqual(catalogueAdapters("implemented"));
+    expect(schema).toStrictEqual(registryAdapters("implemented"));
     expect(schema).toStrictEqual(shellList("DISPATCH_IMPLEMENTED_ADAPTERS"));
   });
 
-  it("agrees on the adapters declared for routing but dormant in the dispatcher", () => {
-    expect(shellList("DISPATCH_DORMANT_ADAPTERS")).toStrictEqual(catalogueAdapters("dormant"));
+  it("keeps adapters the registry marks dormant out of the dispatcher", () => {
+    // No dormant adapters exist today; the loop is the guard for the day one
+    // is added: dormant means refused (absent from the implemented list),
+    // never silently runnable. The shell keeps no dormant list by design; the
+    // registry is the only place dormant state is declared.
+    const implemented = new Set(shellList("DISPATCH_IMPLEMENTED_ADAPTERS"));
+    for (const adapter of registryAdapters("dormant")) {
+      expect(DISPATCH_ADAPTERS as readonly string[]).not.toContain(adapter);
+      expect(implemented.has(adapter), `dispatcher runs dormant ${adapter}`).toBe(false);
+    }
   });
 
   it("keeps adapters the dispatcher cannot execute out of the schema", () => {
-    const unrunnable = [...catalogueAdapters("dormant"), ...catalogueAdapters("unsupported")];
+    const unrunnable = Object.entries(compatibility.dispatch_registry ?? {})
+      .filter(([, entry]) => entry.dispatch !== "implemented")
+      .map(([name]) => name);
     expect(unrunnable.length).toBeGreaterThan(0);
     for (const adapter of unrunnable) {
       expect(DISPATCH_ADAPTERS as readonly string[]).not.toContain(adapter);

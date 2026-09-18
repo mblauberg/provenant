@@ -502,6 +502,24 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             ),
         })
     if not adapter:
+        # Product policy outranks the instance catalogue: an adapter absent
+        # from the catalogue but known to product policy (pi maps to pi-rpc,
+        # which is absent from the catalogue, not stubbed there) reports its
+        # policy state instead of unknown_adapter. Anything policy-unknown is
+        # still unknown_adapter.
+        if args.adapter in COMPATIBILITY_ADAPTER_IDS:
+            compatibility, compatibility_status = load_adapter_compatibility(
+                args.adapter, Path(args.adapter_compatibility),
+            )
+            if compatibility_status:
+                return emit({**base, "status": compatibility_status, "endpoint_provider": ""}, 2)
+            assert compatibility is not None
+            if not compatibility["enabled"]:
+                return emit({**base, "status": "adapter_disabled",
+                             "reason": compatibility["disabled_reason"],
+                             "endpoint_provider": "",
+                             "compatibility_adapter": compatibility["compatibility_adapter"],
+                             "adapter_enabled": False}, 1)
         return emit({**base, "status": "unknown_adapter"}, 2)
     # A third-party endpoint exposes no reasoning-effort control on the Anthropic
     # wire format, so an endpoint route carries no effort rather than a claimed one.
