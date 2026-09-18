@@ -2961,9 +2961,11 @@ def test_codex_endpoint_with_an_unusable_wire_api_dispatches_nothing():
 def test_unimplemented_adapter_is_refused_before_any_provider_work():
     """An adapter with no executing arm is an input error, not a late refusal.
 
-    The catalogue declares adapters for routing that this dispatcher cannot run.
-    Discovering that after the temporary directory, prompt staging and route
-    resolution have been paid for costs about ten processes to report a typo.
+    The shell keeps only the implemented list; dispatch state lives in the
+    product registry. `pi` has no catalogue entry and no arm (absent, not
+    stubbed), so like any other unknown name it is refused before the
+    temporary directory, prompt staging and route resolution have been paid
+    for — about ten processes saved to report a typo.
     """
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)

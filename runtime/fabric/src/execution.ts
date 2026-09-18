@@ -39,11 +39,12 @@ const FIRST_BATCH_ID = "batch-001";
 /**
  * Adapters this front door can actually run: each has an executing arm in
  * skills/orchestrate/scripts/cf_dispatch.sh and is marked `"dispatch":
- * "implemented"` in config/model-routing.json. Adapters the catalogue declares
- * for routing but the dispatcher cannot execute are absent on purpose, so they
- * are a typed input error here rather than a refusal paid for with a run
- * directory, prompt staging and route resolution. tests/adapter-registry.test.ts
- * binds this list to the catalogue and to the dispatcher.
+ * "implemented"` in the product-owned `dispatch_registry` in
+ * config/adapter-compatibility.yaml. Adapters the registry marks dormant or
+ * unsupported are absent on purpose, so they are a typed input error here
+ * rather than a refusal paid for with a run directory, prompt staging and
+ * route resolution. tests/adapter-registry.test.ts binds this list to the
+ * registry and to the dispatcher.
  */
 export const DISPATCH_ADAPTERS = ["agy", "claude", "codex", "copilot", "cursor", "kiro", "opencode"] as const;
 const SUPPORTED_ADAPTERS = new Set<string>(DISPATCH_ADAPTERS);

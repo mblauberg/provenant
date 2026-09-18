@@ -103,7 +103,12 @@ export function catalogueSnapshot(root?: string): CatalogueSnapshot {
     }
     return {
       name,
-      dispatch: ((entry as any).dispatch ?? "unsupported") as AdapterEntry["dispatch"],
+      // Dispatch state is product-owned: the registry in
+      // config/adapter-compatibility.yaml is the single writer. The routing
+      // catalogue carries no dispatch field; an adapter missing from the
+      // registry is unsupported by definition.
+      dispatch: ((registryEntry as { dispatch?: AdapterEntry["dispatch"] } | undefined)?.dispatch
+        ?? "unsupported") as AdapterEntry["dispatch"],
       endpoint_provider: ((entry as any).endpoint_provider ?? null) as string | null,
       fixed_model_family: ((entry as any).fixed_model_family ?? null) as string | null,
       effort_transport: ((entry as any).effort_transport ?? "flag") as string,

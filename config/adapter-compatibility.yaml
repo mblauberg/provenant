@@ -298,5 +298,3 @@ dispatch_registry:
   opencode:
     dispatch: implemented
     read_only_guarantee: enforced
-  pi:
-    dispatch: unsupported

@@ -114,19 +114,19 @@ case "$TIMEOUT_SECONDS" in
   0*|*[!0-9]*) echo "invalid timeout-seconds: $TIMEOUT_SECONDS" >&2; exit 2;;
 esac
 
-# Adapters with an executing arm in run_one, and adapters the catalogue declares
-# for routing but this dispatcher cannot execute. Both lists are bound to
-# DISPATCH_ADAPTERS in runtime/fabric/src/execution.ts and to the "dispatch"
-# field in config/model-routing.json by runtime/fabric/tests/adapter-registry.test.ts,
-# so the three cannot drift.
+# The adapters with an executing arm in run_one below. This is the only
+# adapter list the shell keeps: dispatch state (implemented / dormant /
+# unsupported) is owned by `dispatch_registry` in
+# config/adapter-compatibility.yaml, and runtime/fabric/tests/adapter-registry.test.ts
+# binds this list to the registry's implemented set, so the two cannot drift.
+# There are no dormant adapters today; a future dormant adapter must be refused
+# here (absent from this list) until its arm and safety boundary exist.
 DISPATCH_IMPLEMENTED_ADAPTERS="agy claude codex copilot cursor kiro opencode"
-DISPATCH_DORMANT_ADAPTERS=""
-# An adapter with neither an arm nor a declared dormant route is an input error,
-# refused here rather than after a temporary directory, prompt staging and route
-# resolution have already been paid for.
+# An adapter with no arm is an input error, refused here rather than after a
+# temporary directory, prompt staging and route resolution have been paid for.
 known_adapter() {
   local candidate="$1" known
-  for known in $DISPATCH_IMPLEMENTED_ADAPTERS $DISPATCH_DORMANT_ADAPTERS; do
+  for known in $DISPATCH_IMPLEMENTED_ADAPTERS; do
     [ "$candidate" = "$known" ] && return 0
   done
   return 1
@@ -135,7 +135,7 @@ known_adapter() {
 # specs, and an empty TOOL or CHAIN contributes no word at all.
 for candidate in ${TOOL:-} ${CHAIN:-}; do
   known_adapter "${candidate%%:*}" || {
-    echo "unimplemented adapter: ${candidate%%:*} (known: $DISPATCH_IMPLEMENTED_ADAPTERS $DISPATCH_DORMANT_ADAPTERS)" >&2
+    echo "unimplemented adapter: ${candidate%%:*} (known: $DISPATCH_IMPLEMENTED_ADAPTERS)" >&2
     exit 2
   }
 done
@@ -402,8 +402,7 @@ resolve_model() {
 }
 endpoint_provider() {
   # Mirror of the routing catalogue's per-adapter endpoint_provider, drift-bound
-  # by tests/test_adapter_identity_maps.py. `pi` routes only through an endpoint
-  # profile, so its catalogue provider is the placeholder "configured".
+  # by tests/test_adapter_identity_maps.py.
   case "$1" in
     claude) echo "anthropic";;
     codex) echo "openai";;
@@ -412,7 +411,6 @@ endpoint_provider() {
     kiro) echo "aws";;
     copilot) echo "github";;
     opencode) echo "opencode";;
-    pi) echo "configured";;
     *) echo "";;
   esac
 }
