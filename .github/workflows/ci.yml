@@ -103,10 +103,20 @@ jobs:
             split-root:
               - *ci-contract
               - *node-workspace
+              # Install and instance surfaces only: after the rig shrank to the
+              # install/relocation/reconciliation contract (see the split-root
+              # job), broader changes are covered by the harness full suite
+              # fused plus the fabric job, so they must not pay for a split
+              # provision. The harness filter stays near-total by design.
               - 'config/**'
-              - 'runtime/**'
-              - 'scripts/**'
-              - 'tests/**'
+              - 'scripts/install*'
+              - 'scripts/instance*'
+              - 'scripts/check-provenant-install.py'
+              - 'tests/test_split_root_contract.py'
+              - 'tests/test_install_*.py'
+              - 'tests/test_instance_installation.py'
+              - 'tests/test_check_provenant_install.py'
+              - 'docs/worktrees.md'
             workflows:
               - '.github/workflows/**'
               - '.github/actions/**'
@@ -125,7 +135,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          fetch-depth: 0
+          # Shallow is enough: every gate in this job is HEAD-local
+          # (rev-parse HEAD, fixture repos). Verified against
+          # tests/test_harness_contract.py and the retained-receipt tests;
+          # no gate resolves origin/main or historical blobs.
+          fetch-depth: 1
       - name: Set up Node.js workspace
         uses: ./.github/actions/setup-node-workspace
       - name: Set up uv and Python
@@ -193,9 +207,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-          # Retained-receipt tests resolve `origin/main` and historical blobs,
-          # so this job needs the same full history the harness job takes.
-          fetch-depth: 0
+          # Shallow is enough: the rig runs only the install/relocation
+          # contract tests below (all HEAD-local or fixture-scoped), and the
+          # old full-history comment was stale — no gate in this job resolves
+          # origin/main or historical blobs.
+          fetch-depth: 1
       - name: Set up Node.js workspace
         uses: ./.github/actions/setup-node-workspace
       - name: Set up uv
@@ -235,18 +251,24 @@ jobs:
             echo "AGENT_FABRIC_PRODUCT_ROOT=$AGENT_FABRIC_PRODUCT_ROOT"
             echo "AGENT_FABRIC_INSTANCE_ROOT=$AGENT_FABRIC_INSTANCE_ROOT"
           } >> "$GITHUB_ENV"
-      - name: Run full Python suite under split roots
+      - name: Run install and relocation contract under split roots
         env:
           HARNESS_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: |
           set -euo pipefail
-          $HARNESS_PYTHON -m pytest tests/ -q
-      # Both split-root failure ledgers are gone with the daemon that owned
-      # every entry in them: each named a provisioning, seat or lease case in
-      # the retired coordination runtime. The workspace suite is now an
-      # ordinary must-be-green step under split roots.
-      - name: Run full workspace suite under split roots
-        run: npm test
+          # The full Python suite already ran fused in the harness job; under
+          # split roots only the install/relocation/reconciliation contract
+          # matters (ADR 0019). Same checks, cheaper placement.
+          $HARNESS_PYTHON -m pytest tests/test_split_root_contract.py \
+            tests/test_instance_installation.py tests/test_install_harness.py \
+            tests/test_install_agents.py tests/test_install_provenant_command.py \
+            tests/test_install_skills.py tests/test_check_provenant_install.py -q
+      # The workspace suite already ran fused in the fabric job (`npm run
+      # check`); under split roots the same command re-proves the JS side
+      # against genuinely split product/instance roots without a second full
+      # `npm test` placement.
+      - name: Run workspace checks under split roots
+        run: npm run check
 
   zizmor:
     name: Workflow security lint

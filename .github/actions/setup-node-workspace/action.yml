@@ -16,7 +16,13 @@ runs:
     - name: Pin npm
       shell: bash
       run: |
-        npm install --global npm@11.12.1
+        # The pin holds the toolchain contract, but reinstalling on every job
+        # costs 15-30s even when setup-node's bundled npm already matches, so
+        # only pay for the install on mismatch. The assertion keeps the
+        # contract either way.
+        if [ "$(npm --version)" != "11.12.1" ]; then
+          npm install --global npm@11.12.1
+        fi
         test "$(npm --version)" = "11.12.1"
     - name: Install locked workspace dependencies
       shell: bash
