@@ -103,17 +103,25 @@ jobs:
             split-root:
               - *ci-contract
               - *node-workspace
-              # Install and instance surfaces only: after the rig shrank to the
-              # install/relocation/reconciliation contract (see the split-root
-              # job), broader changes are covered by the harness full suite
-              # fused plus the fabric job, so they must not pay for a split
-              # provision. The harness filter stays near-total by design.
+              # Install/instance/contract surfaces only. runtime/** and
+              # scripts/** stay because the job runs `npm run check` and the
+              # provisioner under genuinely split ambient roots: a
+              # root-resolution regression that passes fused would otherwise
+              # skip split entirely (fail-open), and install-harness calls
+              # helpers beyond install*/instance* (manage_installation,
+              # configure-*, write-product-root-pointer, lib/**,
+              # provenant.template). tests/ narrows to exactly the contract
+              # files this job runs — every other test rides the harness
+              # fused suite. Broader docs/skills/agents changes skip split;
+              # the harness filter stays near-total by design.
               - 'config/**'
-              - 'scripts/install*'
-              - 'scripts/instance*'
-              - 'scripts/check-provenant-install.py'
+              - 'runtime/**'
+              - 'scripts/**'
               - 'tests/test_split_root_contract.py'
-              - 'tests/test_install_*.py'
+              - 'tests/test_install_harness.py'
+              - 'tests/test_install_agents.py'
+              - 'tests/test_install_provenant_command.py'
+              - 'tests/test_install_skills.py'
               - 'tests/test_instance_installation.py'
               - 'tests/test_check_provenant_install.py'
               - 'docs/worktrees.md'
