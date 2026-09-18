@@ -276,10 +276,17 @@ jobs:
           # The full Python suite already ran fused in the harness job; under
           # split roots only the install/relocation/reconciliation contract
           # matters (ADR 0019). Same checks, cheaper placement.
+          # One case is deselected, not dropped: ..._fused_desired_state
+          # asserts workstation state of the live checkout (its ignored
+          # installation.json), not the split contract — it still runs in the
+          # harness fused suite. In the full suite it passes only via an
+          # earlier test's side effect on the checkout; that latent
+          # order-dependence is recorded for hygiene follow-up.
           $HARNESS_PYTHON -m pytest tests/test_split_root_contract.py \
             tests/test_instance_installation.py tests/test_install_harness.py \
             tests/test_install_agents.py tests/test_install_provenant_command.py \
-            tests/test_install_skills.py tests/test_check_provenant_install.py -q
+            tests/test_install_skills.py tests/test_check_provenant_install.py \
+            --deselect tests/test_instance_installation.py::test_the_repository_ships_a_valid_fused_desired_state -q
       # The workspace suite already ran fused in the fabric job (`npm run
       # check`); under split roots the same command re-proves the JS side
       # against genuinely split product/instance roots without a second full
