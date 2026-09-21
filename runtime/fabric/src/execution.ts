@@ -634,8 +634,34 @@ function basePaths(started: StartedOwner): Record<string, string> {
   };
 }
 
+function emptyProviderResult(record: Record<string, unknown>, runDir: string): boolean {
+  if (record.record_type !== "dispatch-attempt" || record.status !== "succeeded") return false;
+  const result = objectValue(record.result);
+  const path = retainedRegularFile(runDir, result?.path);
+  return path !== null && lstatSync(path).size === 0;
+}
+
 function compactDispatch(started: StartedOwner, completion: OwnerCompletion): Record<string, unknown> {
   const record = parseOwnerOutput(started.stdoutPath);
+  if (record !== undefined && emptyProviderResult(record, started.runDir)) {
+    const result = objectValue(record.result);
+    const stderr = objectValue(record.stderr);
+    return {
+      schema_version: 1,
+      status: "failed",
+      outcome: "empty_output",
+      task_id: record.task_id,
+      attempt_id: record.attempt_id,
+      route: compactRoute(record.route),
+      owner_exit: completion.exitCode,
+      paths: {
+        ...basePaths(started),
+        attempt: retainedAbsolute(started.runDir, record.attempt_path),
+        result: retainedAbsolute(started.runDir, result?.path),
+        stderr: retainedAbsolute(started.runDir, stderr?.path),
+      },
+    };
+  }
   if (record === undefined || !validOwnerRecord(record, "dispatch", started.runDir)) {
     return {
       schema_version: 1,
