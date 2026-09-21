@@ -155,4 +155,15 @@ describe("adapter rejection", () => {
       AbortSignal.abort(),
     )).rejects.toThrow(/agy, claude, codex, copilot, cursor, kiro, opencode/u);
   });
+
+  it("rejects an alias the live adapter catalogue does not allow before launch", async () => {
+    await expect(dispatchConfiguredProvider(
+      { adapter: "codex", alias: "luna", prompt: "hello" },
+      identity,
+      AbortSignal.abort(),
+      { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot },
+    )).rejects.toThrow(/adapter codex.*allowed aliases: flagship, workhorse, scout/u);
+    expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
+  });
+
 });

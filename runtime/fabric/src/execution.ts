@@ -17,6 +17,7 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
+import { catalogueSnapshot, type CatalogueSnapshot } from "./catalogue.js";
 import { withoutGitRedirects, type Identity } from "./identity.js";
 import {
   processStartedAt,
@@ -266,11 +267,26 @@ async function initialiseRun(identity: Identity, env: NodeJS.ProcessEnv, root: s
   return runDir;
 }
 
-function normaliseRoute(input: RouteInput, identity: Identity): NormalisedRoute {
+function normaliseRoute(
+  input: RouteInput,
+  identity: Identity,
+  catalogue: CatalogueSnapshot,
+): NormalisedRoute {
   const adapter = input.adapter ?? (SUPPORTED_ADAPTERS.has(identity.provider) ? identity.provider : undefined);
   if (adapter === undefined) throw new Error("adapter is required when the Fabric seat is not a provider adapter");
   if (!SUPPORTED_ADAPTERS.has(adapter)) {
     throw new Error(`adapter must be one of ${DISPATCH_ADAPTERS.join(", ")}`);
+  }
+  const catalogueAdapter = catalogue.adapters.find((entry) => entry.name === adapter);
+  if (catalogueAdapter !== undefined) {
+    const allowedAliases = Object.keys(catalogueAdapter.aliases);
+    const alias = input.alias ?? "workhorse";
+    if (!allowedAliases.includes(alias)) {
+      throw new Error(
+        `adapter ${adapter} does not allow alias ${alias}; `
+        + `allowed aliases: ${allowedAliases.join(", ") || "(none)"}`,
+      );
+    }
   }
   const mode = input.mode ?? "read_only";
   if (!ACCESS_MODES.includes(mode)) throw new Error(`mode must be one of ${ACCESS_MODES.join(", ")}`);
@@ -756,10 +772,10 @@ export async function dispatchConfiguredProvider(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<Record<string, unknown>> {
   validatePrompt(input.prompt, input.prompt_file);
-  const route = normaliseRoute(input, identity);
+  const root = productRoot(env);
+  const route = normaliseRoute(input, identity, catalogueSnapshot(root));
   const timeout = timeoutSeconds(input.timeout_seconds);
   const taskId = input.task_id ?? `task-${randomUUID().slice(0, 8)}`;
-  const root = productRoot(env);
   const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
   const python = await pythonOwner(root, identity, env);
@@ -786,13 +802,18 @@ export async function dispatchConfiguredProvider(
   return completion === undefined ? running(started, "dispatch", identity, taskId) : compactDispatch(started, completion);
 }
 
-function normaliseTask(task: BatchTaskInput, index: number, identity: Identity): Record<string, unknown> {
+function normaliseTask(
+  task: BatchTaskInput,
+  index: number,
+  identity: Identity,
+  catalogue: CatalogueSnapshot,
+): Record<string, unknown> {
   validatePrompt(task.prompt, task.prompt_file);
   return {
     id: task.id ?? `task-${index + 1}`,
     ...(task.prompt === undefined ? { prompt_file: task.prompt_file } : { prompt: task.prompt }),
     timeout: timeoutSeconds(task.timeout_seconds),
-    ...normaliseRoute(task, identity),
+    ...normaliseRoute(task, identity, catalogue),
   };
 }
 
@@ -807,8 +828,9 @@ export async function dispatchConfiguredBatch(
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) {
     throw new Error("concurrency must be an integer from 1 to 8");
   }
-  const tasks = input.tasks.map((task, index) => normaliseTask(task, index, identity));
   const root = productRoot(env);
+  const catalogue = catalogueSnapshot(root);
+  const tasks = input.tasks.map((task, index) => normaliseTask(task, index, identity, catalogue));
   const owner = executableOwner(root, "skills/orchestrate/scripts/batch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
   const python = await pythonOwner(root, identity, env);
