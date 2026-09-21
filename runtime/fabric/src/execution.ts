@@ -278,14 +278,26 @@ function normaliseRoute(
     throw new Error(`adapter must be one of ${DISPATCH_ADAPTERS.join(", ")}`);
   }
   const catalogueAdapter = catalogue.adapters.find((entry) => entry.name === adapter);
+  // A fixed-family adapter (claude, codex; agy merges its preferred families)
+  // gets its alias table straight from that family, so an unknown alias is a
+  // caller mistake worth failing on at the front door. An adapter that picks
+  // its family per model (cursor's xai/cursor-composer preferences, or
+  // copilot/kiro/opencode with no family entry at all) has no alias table
+  // here yet: the routing catalogue does not carry that resolution, only the
+  // Python resolver does. Enforcing against an empty table there would reject
+  // every dispatch, including the default alias, which is the regression this
+  // check must not introduce; only validate when the catalogue actually knows
+  // the adapter's aliases.
   if (catalogueAdapter !== undefined) {
     const allowedAliases = Object.keys(catalogueAdapter.aliases);
-    const alias = input.alias ?? "workhorse";
-    if (!allowedAliases.includes(alias)) {
-      throw new Error(
-        `adapter ${adapter} does not allow alias ${alias}; `
-        + `allowed aliases: ${allowedAliases.join(", ") || "(none)"}`,
-      );
+    if (allowedAliases.length > 0) {
+      const alias = input.alias ?? "workhorse";
+      if (!allowedAliases.includes(alias)) {
+        throw new Error(
+          `adapter ${adapter} does not allow alias ${alias}; `
+          + `allowed aliases: ${allowedAliases.join(", ") || "(none)"}`,
+        );
+      }
     }
   }
   const mode = input.mode ?? "read_only";
