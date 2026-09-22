@@ -3124,6 +3124,9 @@ def test_opencode_read_only_route_installs_pattern_permissions():
     assert config["permission"]["edit"] == {"*": "deny"}
     assert config["permission"]["bash"]["*"] == "deny"
     assert config["permission"]["bash"]["git status*"] == "allow"
+    assert config["permission"]["bash"]["*--pre*"] == "deny"
+    assert config["permission"]["bash"]["*--output*"] == "deny"
+    assert config["permission"]["bash"]["*-o *"] == "deny"
     assert config["permission"]["external_directory"] == {"*": "allow"}
 
 

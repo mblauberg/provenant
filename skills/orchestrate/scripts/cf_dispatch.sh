@@ -1213,7 +1213,7 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
             guarantee="none"
             opencode_config='{"permission":{"edit":{"*":"allow"},"bash":{"*":"allow"},"external_directory":{"*":"deny"},"webfetch":"allow"}}'
           else
-            opencode_config='{"permission":{"edit":{"*":"deny"},"bash":{"*":"deny","git status*":"allow","git log*":"allow","git diff*":"allow","git show*":"allow","ls*":"allow","rg *":"allow","grep *":"allow"},"external_directory":{"*":"allow"},"webfetch":"allow"}}'
+            opencode_config='{"permission":{"edit":{"*":"deny"},"bash":{"*":"deny","git status*":"allow","git log*":"allow","git diff*":"allow","git show*":"allow","ls*":"allow","rg *":"allow","grep *":"allow","*--pre*":"deny","*--output*":"deny","*-o *":"deny"},"external_directory":{"*":"allow"},"webfetch":"allow"}}'
           fi
           if ! require_cmd opencode "$diag"; then
             status="tool_not_found"

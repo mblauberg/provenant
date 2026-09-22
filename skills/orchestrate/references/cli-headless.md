@@ -105,6 +105,11 @@ lets the lane run its own tests and commit its own work.
 
 On the default read-only route:
 
+OpenCode's read-only shell patterns deny `rg --pre` and Git output-file flags
+after allowing common inspection commands. The dispatcher supplies these
+permissions through `OPENCODE_CONFIG_CONTENT`; it does not override the user's
+own OpenCode configuration, so the guarantee remains `best_effort`.
+
 - `claude`: first tries API-key-safe `--bare`, `--disable-slash-commands`,
   `--no-session-persistence`, `--permission-mode plan`, and only the safe read
   tools `Read,Grep,Glob`, plus a verifier `--system-prompt` that forbids
