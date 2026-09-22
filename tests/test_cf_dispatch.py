@@ -15,6 +15,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 PRODUCT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts"
 SCRIPT = SCRIPTS / "cf_dispatch.sh"
@@ -569,9 +571,9 @@ def test_claude_bare_oauth_model_fallback_reuses_verifier_contract():
             assert "--tools\nRead,Grep,Glob" in invocation
             assert "--system-prompt" in invocation
             assert "Fabric MCP tools are not exposed" in invocation
-            assert "Return only the file-backed verification result" in invocation
+            assert "Return the result the supplied prompt asks for" in invocation
             assert "caller owns any Fabric correlation" in invocation
-            assert "independent verifier" in invocation
+            assert "non-interactive read-only worker" in invocation
             assert "cross-family verifier" not in invocation
             assert "CLAUDE_CODE_DISABLE_WORKFLOWS=1" in invocation
         assert "--model\nopus" in invocations[0]
@@ -706,7 +708,7 @@ def test_claude_oauth_fallback_after_bare_auth_failure():
     assert output.strip() == "OK"
 
 
-def test_claude_oauth_fallback_uses_verifier_system_prompt():
+def test_claude_oauth_fallback_uses_neutral_read_only_system_prompt():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         bin_dir = tmp / "bin"
@@ -759,11 +761,11 @@ def test_claude_oauth_fallback_uses_verifier_system_prompt():
         args = args_file.read_text(encoding="utf-8")
         assert "--system-prompt" in args
         assert "--disable-slash-commands" in args
-        assert "non-interactive independent verifier" in args
+        assert "non-interactive read-only worker" in args
         assert "cross-family verifier" not in args
         assert "launch subagents" in args
         assert args.count("Fabric MCP tools are not exposed") == 2
-        assert args.count("Return only the file-backed verification result") == 2
+        assert args.count("Return the result the supplied prompt asks for") == 2
         assert args.count("caller owns any Fabric correlation") == 2
         assert "CLAUDE_CODE_DISABLE_WORKFLOWS=1" in args
         assert "Read,Grep,Glob" in args.splitlines()
@@ -2300,11 +2302,17 @@ def test_interrupted_dispatch_cleans_internal_tempfiles():
         assert list(temp_root.iterdir()) == []
 
 
-def test_broker_adapter_requires_resolvable_provider_family():
+def test_cursor_default_auto_model_keeps_unknown_family_ineligible_for_certification():
     with tempfile.TemporaryDirectory() as td:
+        bin_dir = Path(td) / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "cursor-agent", "#!/usr/bin/env bash\necho OK\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
         result = subprocess.run(
             [
                 str(SCRIPT),
+                "--intent", "ordinary",
                 "--tool",
                 "cursor",
                 "--orchestrator-family",
@@ -2313,14 +2321,19 @@ def test_broker_adapter_requires_resolvable_provider_family():
                 "Review",
             ],
             cwd=td,
+            env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
         record = json.loads(result.stdout)
-        assert result.returncode != 0
-        assert record["status"] == "model_required_for_broker"
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert record["status"] == "ok"
+        assert record["resolved_model"] == "auto"
+        assert record["model_selection"] == "adapter-default"
+        assert record["model_family"] == "generic-open"
         assert record["cross_family"] is False
+        assert record["certification_eligible"] is False
 
 
 def test_manual_provider_override_is_not_supported():
@@ -2405,6 +2418,50 @@ def test_chain_all_failed_uses_dispatch_schema():
         assert record["tool"] == "chain"
         assert record["status"] == "all_failed"
         assert record["read_only_guarantee"] == "none"
+
+
+def test_opencode_chain_all_failed_removes_raw_sidecar():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", """#!/usr/bin/env bash
+            echo '{"type":"error","error":"forbidden"}'
+        """)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--chain", "opencode",
+             "--prompt", "Reply OK", "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        assert json.loads(result.stdout)["status"] == "all_failed"
+        assert not (tmp / "out.txt.raw.jsonl").exists()
+
+
+def test_opencode_failed_chain_arm_does_not_leave_raw_for_next_provider():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", """#!/usr/bin/env bash
+            echo '{"type":"error","error":"forbidden"}'
+        """)
+        write_executable(bin_dir / "cursor-agent", "#!/usr/bin/env bash\necho 'fallback OK'\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--chain",
+             "opencode cursor:cursor-grok-4.5-high", "--prompt", "Reply OK",
+             "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert json.loads(result.stdout)["tool"] == "cursor"
+        assert out.read_text().strip() == "fallback OK"
+        assert not (tmp / "out.txt.raw.jsonl").exists()
 
 
 def test_run_dir_init_force_flag_only_creates_final_gate():
@@ -2526,7 +2583,7 @@ if __name__ == "__main__":
     test_missing_option_value_is_clean_error()
     test_missing_prompt_file_is_clean_error()
     test_claude_oauth_fallback_after_bare_auth_failure()
-    test_claude_oauth_fallback_uses_verifier_system_prompt()
+    test_claude_oauth_fallback_uses_neutral_read_only_system_prompt()
     test_agy_direct_route_dispatches_json_sandbox_and_file_prompt()
     test_agy_oversized_prompt_fails_closed_instead_of_truncating()
     test_agy_success_with_empty_response_is_non_passing()
@@ -3056,7 +3113,7 @@ def test_opencode_arm_runs_with_explicit_model_and_records_variant():
             bin_dir / "opencode",
             f"""#!/usr/bin/env bash
             printf '%s\\n' "$@" > {args_file}
-            echo '{{"type":"text","text":"OPENCODE OK"}}'
+            echo '{{"type":"text","part":{{"text":"OPENCODE OK"}}}}'
             """,
         )
         env = fabric_free_env()
@@ -3077,7 +3134,7 @@ def test_opencode_arm_runs_with_explicit_model_and_records_variant():
         assert record["status"] == "ok"
         assert record["resolved_model"] == "opencode/union-alpha"
         assert record["model_family"] == "generic-open"
-        assert record["read_only_guarantee"] == "none"
+        assert record["read_only_guarantee"] == "best_effort"
         recorded = args_file.read_text(encoding="utf-8")
         assert "run" in recorded
         assert "--format" in recorded
@@ -3087,7 +3144,283 @@ def test_opencode_arm_runs_with_explicit_model_and_records_variant():
         assert "--variant" in recorded
         assert "high" in recorded
         assert "--auto" not in recorded
-        assert "OPENCODE OK" in out.read_text(encoding="utf-8")
+        assert out.read_text(encoding="utf-8") == "OPENCODE OK"
+        assert '"type":"text"' in (tmp / "out.txt.raw.jsonl").read_text()
+
+
+OPENCODE_EVENT_STUB = """\
+    #!/usr/bin/env bash
+    printf 'PWD=%s\\n' "$PWD" > {args_file}
+    printf 'CONFIG=%s\\n' "$OPENCODE_CONFIG_CONTENT" >> {args_file}
+    printf '%s\\n' "$@" >> {args_file}
+    printf '%s\\n' '{{"type":"step_start"}}' '{{"type":"text","part":{{"text":"OK"}}}}' '{{"type":"step_finish"}}'
+"""
+
+
+def test_opencode_read_only_route_installs_pattern_permissions():
+    result, recorded, _ = run_worktree_dispatch("opencode", OPENCODE_EVENT_STUB)
+    record = json.loads(result.output)
+    assert result.returncode == 0, result.output
+    assert record["read_only_guarantee"] == "best_effort"
+    assert record["resolved_model"] == "opencode/nemotron-3.5-lightning-free"
+    assert record["model_selection"] == "adapter-default"
+    config = json.loads(recorded.split("CONFIG=", 1)[1].splitlines()[0])
+    assert config["permission"]["edit"] == {"*": "deny"}
+    assert config["permission"]["bash"]["*"] == "deny"
+    assert config["permission"]["bash"]["git status*"] == "allow"
+    assert config["permission"]["bash"]["*--pre*"] == "deny"
+    assert config["permission"]["bash"]["*--output*"] == "deny"
+    assert config["permission"]["bash"]["*-o *"] == "deny"
+    assert config["permission"]["external_directory"] == {"*": "allow"}
+
+
+def test_opencode_environment_model_overrides_adapter_default():
+    result, recorded, _ = run_worktree_dispatch(
+        "opencode", OPENCODE_EVENT_STUB,
+        extra_env={"CF_DISPATCH_OPENCODE_MODEL": "openrouter/deepseek/deepseek-v4"},
+    )
+    record = json.loads(result.output)
+    assert result.returncode == 0, result.output
+    assert record["resolved_model"] == "openrouter/deepseek/deepseek-v4"
+    assert record["model_family"] == "deepseek"
+    assert record["model_selection"] != "adapter-default"
+    assert "openrouter/deepseek/deepseek-v4" in recorded
+
+
+def test_opencode_writer_route_uses_owned_worktree():
+    result, recorded, worktree = run_worktree_dispatch(
+        "opencode", OPENCODE_EVENT_STUB, worktree="make"
+    )
+    record = json.loads(result.output)
+    assert result.returncode == 0, result.output
+    assert record["access_mode"] == "worktree_write"
+    assert record["read_only_guarantee"] == "none"
+    assert f"PWD={worktree}" in recorded
+    assert f"--dir\n{worktree}" in recorded
+    config = json.loads(recorded.split("CONFIG=", 1)[1].splitlines()[0])
+    assert config["permission"]["external_directory"] == {"*": "deny"}
+    assert config["permission"]["edit"] == {"*": "allow"}
+    assert config["permission"]["bash"] == {"*": "allow"}
+
+
+@pytest.mark.parametrize(
+    "events, expected_status, diagnostic",
+    [
+        ('{"type":"error","error":{"name":"APIError","data":{"statusCode":403,"message":"free tier denied"}}}',
+         "auth_or_quota_error", "free tier denied"),
+        ('{"type":"tool_use","part":{"state":{"status":"error","error":"blocked"}}}',
+         "empty_output", "tool_use"),
+    ],
+)
+def test_opencode_event_failures_are_typed_and_keep_raw_jsonl(events, expected_status, diagnostic):
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", f"#!/usr/bin/env bash\nprintf '%s\\n' '{events}'\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == expected_status
+        assert "try another model" in record["reason"]
+        assert diagnostic in out.read_text()
+        assert events in (tmp / "out.txt.raw.jsonl").read_text()
+
+
+@pytest.mark.parametrize("events,expected_status,expected_text", [
+    ('null\n[1,2]\n{"type":"text","part":{"text":"OK"}}', "ok", "OK"),
+    ('{"type":"error","error":"forbidden"}', "auth_or_quota_error", "forbidden"),
+    ('{"type":"error","error":{"data":null,"message":"forbidden"}}', "auth_or_quota_error", "forbidden"),
+    ('{"type":"error","error":{"data":{"statusCode":"403","message":"access denied"}}}',
+     "auth_or_quota_error", "access denied"),
+])
+def test_opencode_parser_accepts_non_object_json_and_error_shapes(events, expected_status, expected_text):
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", "#!/usr/bin/env bash\ncat <<'EOF'\n" + events + "\nEOF\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        record = json.loads(result.stdout)
+        assert record["status"] == expected_status, result.stderr
+        assert expected_text in out.read_text()
+        assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("provider_exit", [2, 124])
+def test_opencode_provider_exit_with_text_is_not_watchdog_error(provider_exit):
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", f"""#!/usr/bin/env bash
+            echo '{{"type":"text","part":{{"text":"provider detail"}}}}'
+            exit {provider_exit}
+        """)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        record = json.loads(result.stdout)
+        assert record["status"] == "error"
+        assert "provider detail" in out.read_text()
+
+
+def test_invalid_opencode_idle_limit_is_refused_before_provider_launch():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        invoked = tmp / "invoked"
+        write_executable(bin_dir / "opencode", f"#!/usr/bin/env bash\ntouch '{invoked}'\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["CF_DISPATCH_IDLE_SECONDS"] = "oops"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(tmp / "out.txt")],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        assert result.returncode == 2
+        assert "CF_DISPATCH_IDLE_SECONDS must be a positive integer" in result.stderr
+        assert not invoked.exists()
+
+
+def test_opencode_idle_watchdog_terminates_silent_provider():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", "#!/usr/bin/env bash\nsleep 10\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["CF_DISPATCH_IDLE_SECONDS"] = "1"
+        out = tmp / "out.txt"
+        result = run_bounded(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(out)],
+            cwd=tmp, env=env, timeout_seconds=5, output_limit_bytes=1_048_576,
+        )
+        record = json.loads(result.output)
+        assert record["status"] == "idle_timeout"
+        assert "try another model" in record["reason"]
+        assert "idle for 1s; try another model" in out.read_text()
+
+
+def test_opencode_stderr_progress_keeps_writer_alive():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", """#!/usr/bin/env bash
+            for i in 1 2 3 4 5 6; do
+              echo "test progress $i" >&2
+              sleep 0.3
+            done
+            echo '{"type":"text","part":{"text":"tests passed"}}'
+        """)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["CF_DISPATCH_IDLE_SECONDS"] = "1"
+        out = tmp / "out.txt"
+        worktree = make_worktree(tmp)
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--access-mode", "worktree_write", "--worktree", str(worktree),
+             "--prompt", "Run tests", "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert json.loads(result.stdout)["status"] == "ok"
+        assert out.read_text() == "tests passed"
+
+
+def test_opencode_dispatch_group_signal_terminates_provider_and_grandchild():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", f"""#!/usr/bin/env bash
+            echo "$$" > "{tmp / 'provider.pid'}"
+            trap 'touch "{tmp / 'provider.stopped'}"; exit 143' TERM
+            (trap 'touch "{tmp / 'grandchild.stopped'}"; exit 143' TERM; touch "{tmp / 'ready'}"; while :; do sleep 0.1; done) &
+            wait
+        """)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        process = subprocess.Popen(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(tmp / "out.txt")],
+            cwd=tmp, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while not (tmp / "ready").exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert (tmp / "ready").exists()
+            os.killpg(process.pid, signal.SIGTERM)
+            process.communicate(timeout=5)
+            assert (tmp / "provider.stopped").exists()
+            assert (tmp / "grandchild.stopped").exists()
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+            provider_pid = tmp / "provider.pid"
+            if provider_pid.exists():
+                try:
+                    os.killpg(int(provider_pid.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+
+def test_opencode_normal_exit_reaps_grandchild():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", f"""#!/usr/bin/env bash
+            echo "$$" > "{tmp / 'provider.pid'}"
+            (trap 'touch "{tmp / 'grandchild.stopped'}"; exit 143' TERM; touch "{tmp / 'ready'}"; while :; do sleep 0.1; done) &
+            while [ ! -f "{tmp / 'ready'}" ]; do sleep 0.05; done
+            echo '{{"type":"text","part":{{"text":"OK"}}}}'
+        """)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        try:
+            result = subprocess.run(
+                [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+                 "--prompt", "Reply OK", "--out", str(tmp / "out.txt")],
+                cwd=tmp, env=env, text=True, capture_output=True, timeout=10,
+            )
+            assert json.loads(result.stdout)["status"] == "ok"
+            assert (tmp / "grandchild.stopped").exists()
+        finally:
+            provider_pid = tmp / "provider.pid"
+            if provider_pid.exists():
+                try:
+                    os.killpg(int(provider_pid.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 def test_oversized_argv_prompt_is_typed_for_cursor():

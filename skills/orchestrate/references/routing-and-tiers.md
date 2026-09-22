@@ -167,7 +167,8 @@ infers one (`family_source: slug-inferred`); stealth/unknown broker ids stay
 stealth models into alias tables; pick the slug at dispatch time.
 
 OpenCode is an ordinary implemented broker for its catalogue (`opencode/<model>`).
-Discover current slugs with `opencode models` and pass `--model` explicitly.
+It defaults to `opencode/nemotron-3.5-lightning-free`; use `opencode models`
+to discover a live slug when overriding with `--model`.
 Nested vendor ids attribute as that vendor; unparseable Zen free ids fall back
 to `generic-open` (worker only, not assurance). See
 [ADR 0025](../../../docs/adr/0025-broker-upstream-family-attribution.md).
@@ -224,7 +225,8 @@ Cursor, Copilot, Kiro, OpenCode, Agy and Pi are adapters, not model families.
 Record the actual provider/model lineage. Kiro execution remains disabled by
 compatibility policy even though its Fabric MCP client registration is
 supported. OpenCode execution is enabled when the `opencode` CLI is installed:
-pass an explicit `opencode/<model>` slug (discover with `opencode models`).
+its free default applies unless `--model` selects a live slug (discover with
+`opencode models`).
 Upstream family on the receipt follows the slug when knowable; otherwise
 `generic-open` (ordinary worker, not distinct-family assurance).
 Gemini, xAI and other distinct families are

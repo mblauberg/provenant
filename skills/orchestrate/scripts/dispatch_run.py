@@ -587,7 +587,7 @@ def existing_attempt_number(task_dir: Path) -> int:
 
 ACCESS_MODES = ("read_only", "worktree_write")
 WORKTREE_WRITER_LOCK = "provenant-dispatch-writer.lock"
-WORKTREE_WRITE_ADAPTERS = ("claude", "codex")
+WORKTREE_WRITE_ADAPTERS = ("claude", "codex", "opencode")
 
 
 class WorktreeLeaseError(ValueError):

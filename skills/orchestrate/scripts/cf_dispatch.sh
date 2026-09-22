@@ -116,6 +116,11 @@ case "$TIMEOUT_SECONDS" in
   "") ;;
   0*|*[!0-9]*) echo "invalid timeout-seconds: $TIMEOUT_SECONDS" >&2; exit 2;;
 esac
+if [ -n "${CF_DISPATCH_IDLE_SECONDS:-}" ] &&
+   { [[ ! "$CF_DISPATCH_IDLE_SECONDS" =~ ^[0-9]+$ ]] || [[ ! "$CF_DISPATCH_IDLE_SECONDS" =~ [1-9] ]]; }; then
+  echo "CF_DISPATCH_IDLE_SECONDS must be a positive integer" >&2
+  exit 2
+fi
 
 # The adapters with an executing arm in run_one below. This is the only
 # adapter list the shell keeps: dispatch state (implemented / dormant /
@@ -160,7 +165,7 @@ case "$ACCESS_MODE" in
       echo "--access-mode worktree_write requires --intent ordinary" >&2; exit 2
     fi
     case "$TOOL" in
-      claude|codex) ;;
+      claude|codex|opencode) ;;
       *) echo "--access-mode worktree_write is unsupported for adapter: ${TOOL:-<chain>}" >&2; exit 2;;
     esac
     if ! command -v git >/dev/null 2>&1; then
@@ -184,7 +189,7 @@ CLAUDE_MODE_FLAGS=(--permission-mode plan --tools "Read,Grep,Glob")
 # name instead, so a profile name containing characters that a TOML dotted path
 # would have to quote cannot reshape the override.
 CODEX_ENDPOINT_PROVIDER_ID="provenant_endpoint"
-CLAUDE_SYSTEM_PROMPT="You are a non-interactive independent verifier. You may use only Read, Grep, and Glob to inspect the requested workspace. Fabric MCP tools are not exposed to this direct verifier invocation. Do not mutate files, use shell commands, call Task/tool/function abstractions, or launch subagents. Return only the file-backed verification result requested by the supplied prompt; the caller owns any Fabric correlation."
+CLAUDE_SYSTEM_PROMPT="You are a non-interactive read-only worker. You may use only Read, Grep, and Glob to inspect the requested workspace. Fabric MCP tools are not exposed to this direct invocation. Do not mutate files, use shell commands, call Task/tool/function abstractions, or launch subagents. Return the result the supplied prompt asks for; the caller owns any Fabric correlation."
 # A writer lane has to be able to run its own tests and commit its own work, so
 # the write tools are named on the permission allow-list rather than left to the
 # permission mode. `--permission-mode acceptEdits` accepts edits; `--allowedTools`
@@ -203,6 +208,127 @@ claude_provider() {
   else
     CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude "$@" <"$PROMPT_TMP" >"$raw" 2>"$diag"
   fi
+}
+
+# Reusable idle guard for a headless provider that writes incremental output.
+# Python creates a new process group so a timed-out CLI cannot leave children.
+run_with_idle_watchdog() {
+  local idle="$1" raw_path="$2" diag_path="$3" cwd="$4" marker="$5"
+  shift 5
+  python3 - "$idle" "$raw_path" "$diag_path" "$cwd" "$marker" "$@" <<'PY'
+import os, signal, subprocess, sys, time
+idle, raw, diag, cwd, marker, *command = sys.argv[1:]
+try:
+    idle = int(idle)
+    if idle < 1:
+        raise ValueError
+except ValueError:
+    with open(diag, "a") as output:
+        output.write("CF_DISPATCH_IDLE_SECONDS must be a positive integer\n")
+    sys.exit(2)
+with open(raw, "wb") as output, open(diag, "ab") as diagnostic:
+    cancelled = False
+    def cancel(_signum, _frame):
+        global cancelled
+        cancelled = True
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, cancel)
+    child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output,
+                             stderr=diagnostic, cwd=cwd or None, start_new_session=True)
+    def stop_group():
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            child.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        time.sleep(0.1)
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait()
+    if cancelled:
+        stop_group()
+        sys.exit(143)
+    last_size = (0, 0)
+    last_growth = time.monotonic()
+    while child.poll() is None:
+        time.sleep(0.25)
+        if cancelled:
+            stop_group()
+            sys.exit(143)
+        size = (os.fstat(output.fileno()).st_size,
+                os.fstat(diagnostic.fileno()).st_size)
+        if size != last_size:
+            last_size, last_growth = size, time.monotonic()
+        elif time.monotonic() - last_growth >= idle:
+            with open(marker, "w", encoding="utf-8") as sentinel:
+                sentinel.write("idle_timeout\n")
+            stop_group()
+            diagnostic.write(f"OpenCode idle for {idle}s; try another model\n".encode())
+            sys.exit(124)
+    stop_group()
+    if cancelled:
+        sys.exit(143)
+    sys.exit(child.returncode)
+PY
+}
+
+parse_opencode_events() {
+  python3 - "$raw" "$clean" "$diag" <<'PY'
+import json, sys
+raw, clean, diag = sys.argv[1:]
+parts, errors, tool_errors = [], [], []
+with open(raw, encoding="utf-8", errors="replace") as stream:
+    for line in stream:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "text":
+            part = event.get("part", {})
+            if isinstance(part, dict) and isinstance(part.get("text"), str):
+                parts.append(part["text"])
+        elif event.get("type") == "error":
+            error = event.get("error", {})
+            if isinstance(error, dict):
+                data = error.get("data")
+                data = data if isinstance(data, dict) else {}
+                message = data.get("message") or error.get("message") or str(error)
+            else:
+                data = {}
+                message = str(error)
+            try:
+                code = int(data.get("statusCode"))
+            except (ValueError, TypeError):
+                code = None
+            errors.append((code, str(message)))
+        elif event.get("type") == "tool_use":
+            part = event.get("part", {})
+            state = part.get("state", {}) if isinstance(part, dict) else {}
+            if isinstance(state, dict) and state.get("status") == "error":
+                tool_errors.append(str(state.get("error") or "tool failed"))
+with open(clean, "w", encoding="utf-8") as output:
+    output.write("".join(parts))
+if errors:
+    with open(diag, "a", encoding="utf-8") as output:
+        for code, message in errors:
+            output.write(f"OpenCode {code or 'error'}: {message}\n")
+    if any(code in (401, 403, 429) or any(word in message.lower() for word in
+           ("quota", "free tier", "rate limit", "unauthorized", "forbidden")) for code, message in errors):
+        sys.exit(4)
+    sys.exit(5)
+if not parts:
+    if tool_errors:
+        with open(diag, "a", encoding="utf-8") as output:
+            output.write(f"OpenCode tool_use error: {tool_errors[0]}; try another model\n")
+    sys.exit(3)
+PY
 }
 
 # When the caller does not name an alias, derive it from the role rather than
@@ -324,6 +450,7 @@ cleanup_dispatch() {
 }
 abort_dispatch() {
   cleanup_dispatch
+  [ -n "$OUT" ] && rm -f -- "$OUT.raw.jsonl"
   [ "$OUT_CREATED" = true ] && rm -f "$OUT"
   exit 143
 }
@@ -1085,9 +1212,14 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
             fi
           fi ;;
         opencode)
-          # OpenCode has no verified hard read-only mode on `run`; do not claim
-          # one, and never pass --auto (that auto-approves permissions).
-          guarantee="none"
+          guarantee="best_effort"
+          local opencode_config opencode_parse_rc
+          if [ "$ACCESS_MODE" = "worktree_write" ]; then
+            guarantee="none"
+            opencode_config='{"permission":{"edit":{"*":"allow"},"bash":{"*":"allow"},"external_directory":{"*":"deny"},"webfetch":"allow"}}'
+          else
+            opencode_config='{"permission":{"edit":{"*":"deny"},"bash":{"*":"deny","git status*":"allow","git log*":"allow","git diff*":"allow","git show*":"allow","ls*":"allow","rg *":"allow","grep *":"allow","*--pre*":"deny","*--output*":"deny","*-o *":"deny"},"external_directory":{"*":"allow"},"webfetch":"allow"}}'
+          fi
           if ! require_cmd opencode "$diag"; then
             status="tool_not_found"
             rc=127
@@ -1095,9 +1227,27 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
             status="prompt_too_large"
             rc=1
           else
-            opencode run --format json \
+            local idle_marker="$ACTIVE_RUN_TMPDIR/opencode.idle"
+            local idle_seconds="${CF_DISPATCH_IDLE_SECONDS:-}"
+            if [ -z "$idle_seconds" ]; then
+              if [ "$ACCESS_MODE" = "worktree_write" ]; then idle_seconds=1800; else idle_seconds=600; fi
+            fi
+            OPENCODE_CONFIG_CONTENT="$opencode_config" run_with_idle_watchdog \
+              "$idle_seconds" "$raw" "$diag" "$WORKTREE" "$idle_marker" \
+              opencode run --format json ${WORKTREE:+--dir "$WORKTREE"} \
               ${model:+--model "$model"} ${effort:+--variant "$effort"} \
-              "$PROMPT_ARG" </dev/null >"$raw" 2>"$diag"; rc=$?
+              "$PROMPT_ARG"; rc=$?
+            if [ -f "$idle_marker" ]; then
+              status="idle_timeout"
+              route_reason="OpenCode idle for ${idle_seconds}s; try another model"
+            else
+              parse_opencode_events; opencode_parse_rc=$?
+              case "$opencode_parse_rc" in
+                3) status="empty_output"; rc=1;;
+                4) status="auth_or_quota_error"; rc=1;;
+                5) status="error"; rc=1;;
+              esac
+            fi
           fi ;;
         *) emit_record "$tool" "$model" "$effort" "unknown_tool" 1 "" "none" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source"; rm -f "$raw" "$diag"; return 1;;
         esac
@@ -1110,7 +1260,7 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
     fi
   fi
 
-  if [ "$tool" != "agy" ]; then
+  if [ "$tool" != "agy" ] && [ "$tool" != "opencode" ]; then
     strip_ansi <"$raw" >"$clean"
   fi
   cat "$clean" "$diag" >"$combined"
@@ -1128,6 +1278,20 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
     status="ok"
   fi
   [ "$status" = "tool_not_found" ] && guarantee="none"
+  if [ "$tool" = "opencode" ] && [ "$status" != "ok" ] && [ -z "$route_reason" ]; then
+    case "$status" in
+      auth_or_quota_error) route_reason="OpenCode account or quota rejected this model; check account or try another model";;
+      empty_output) route_reason="OpenCode returned no assistant text; try another model or inspect raw JSONL";;
+      error) route_reason="OpenCode failed; try another model or inspect raw JSONL";;
+    esac
+  fi
+
+  if [ "$tool" = "opencode" ] && [ -s "$raw" ]; then
+    # Keep the complete event stream beside the compact result/diagnostic.
+    install_output "$raw" "$OUT.raw.jsonl" || {
+      status="output_write_error"; rc=1; guarantee="none"
+    }
+  fi
 
   if [ "$status" = "ok" ]; then
     if install_output "$clean" "$OUT"; then
@@ -1165,7 +1329,9 @@ if [ -n "$CHAIN" ]; then
     ACTIVE_RUN_TMPDIR=""
     echo "$rec" >&2
     if [ $rc -eq 0 ]; then echo "$rec"; exit 0; fi
+    rm -f -- "$OUT.raw.jsonl"
   done
+  rm -f -- "$OUT.raw.jsonl"
   [ "$OUT_CREATED" = true ] && rm -f "$OUT"
   emit_record "chain" "" "" "all_failed" 1 "" "none"
   exit 1

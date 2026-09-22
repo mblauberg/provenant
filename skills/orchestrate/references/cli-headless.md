@@ -78,8 +78,9 @@ For Agy, the dispatcher performs an initial route check, runs `capabilities.py a
 when required, then resolves the final route. Task-class selection chooses from
 the adapter's configured preferred families and fresh
 runtime list inside the resolver; a failed probe cannot be labelled as Agy
-capability evidence. Broker adapters otherwise require a model (`--model` or
-`CF_DISPATCH_CURSOR_MODEL` or `CF_DISPATCH_COPILOT_MODEL`); an unprovable provider fails closed as
+capability evidence. OpenCode and Cursor use their adapter defaults when no
+model is supplied; `--model` and `CF_DISPATCH_<ADAPTER>_MODEL` override them.
+Other brokers without a default require a model; an unprovable provider fails closed as
 `model_required_for_broker` or `model_family_unknown`. Matching provider routes
 fail closed as `same_family_forbidden`. Successful
 cross-family certification requires `status=ok`, `cross_family=true`, and `read_only_guarantee=enforced`
@@ -88,7 +89,7 @@ or `oauth_safe_mode`.
 `scripts/cf_dispatch.sh` defaults to `--access-mode read_only` and is
 conservative on that route by design. `--access-mode worktree_write` with
 `--worktree PATH` is the one writable route: it is ordinary-intent only,
-supported for `claude` and `codex` only, requires a Git worktree root, and drops
+supported for `claude`, `codex` and `opencode`, requires a Git worktree root, and drops
 `read_only_guarantee` to `none`. `dispatch_run.py` holds an exclusive lease on
 that worktree for the provider's lifetime, so a second writer is refused with
 `worktree_busy`, and `batch_run.py` refuses a manifest naming one worktree
@@ -103,6 +104,11 @@ prompt is a denial under `-p`: the mode accepts edits, the allow-list is what
 lets the lane run its own tests and commit its own work.
 
 On the default read-only route:
+
+OpenCode's read-only shell patterns deny `rg --pre` and Git output-file flags
+after allowing common inspection commands. The dispatcher supplies these
+permissions through `OPENCODE_CONFIG_CONTENT`; it does not override the user's
+own OpenCode configuration, so the guarantee remains `best_effort`.
 
 - `claude`: first tries API-key-safe `--bare`, `--disable-slash-commands`,
   `--no-session-persistence`, `--permission-mode plan`, and only the safe read
@@ -349,17 +355,25 @@ dispatch is the supported expansion path.
 
 ### OpenCode (provider + interactive client)
 
-- **As a dispatch provider:** `--tool opencode` with an explicit
-  `opencode/<model>` (list with `opencode models`). Fabric may use adapter
-  `opencode`. No Kiro-style enable env var. `read_only_guarantee` is `none`
-  until a hard read-only mode is proven; never pass `--auto`.
+- **As a dispatch provider:** Fabric adapter `opencode` defaults to the verified
+  free model `opencode/nemotron-3.5-lightning-free`. Override with a live
+  `opencode/*`, `opencode-go/*` or `openrouter/*` model from `opencode models`.
+  The read-only route denies edit tools and most shell commands through
+  `OPENCODE_CONFIG_CONTENT`; its guarantee is `best_effort` because allowed
+  shell patterns can still write. `worktree_write` runs inside the owned
+  worktree with external directory access denied. A silent run exits
+  `idle_timeout` after 600 seconds on read-only runs or 1800 seconds on writer
+  runs by default (`CF_DISPATCH_IDLE_SECONDS` overrides either). Both stdout
+  and stderr activity reset the idle timer.
+  The result contains assistant text; full events are in `<output>.raw.jsonl`.
+  Never pass `--auto` (which auto-approves permissions).
 - **As an interactive client:** register Fabric MCP for OpenCode
   (`scripts/configure-fabric-mcp.py --platform opencode` or
   `install-harness --mcp-clients all`). The client keeps label `opencode` and
   shares the `codex` seat by design. After registration, a new OpenCode session
   should list `fabric` via `opencode mcp list`.
-- **Subscription / Zen models:** still pass the live `opencode/…` slug
-  explicitly; discover with `opencode models` after login. Paid catalogue
+- **Subscription / Zen models:** pass the live slug explicitly; discover with
+  `opencode models` after login. Paid catalogue
   changes do not require a Provenant alias-table edit.
 
 Instance installs copy `config/model-routing.json` into
@@ -378,7 +392,7 @@ dispatcher should produce:
 
 `status` is the resolver/dispatcher vocabulary, not a hand-maintained subset:
 `ok`, `error`, `empty_output`, `output_write_error`, `tool_not_found`,
-`auth_or_quota_error`, `permission_denied`, `timeout`, `unsafe_by_default`, family/orchestrator errors,
+`auth_or_quota_error`, `permission_denied`, `timeout`, `idle_timeout`, `unsafe_by_default`, family/orchestrator errors,
 model/alias/adapter errors, capability discovery/trust/staleness errors,
 effort unsupported/mismatch/unresolved errors, `same_family_forbidden`, and
 `all_failed`. Consumers must tolerate a new fail-closed status as non-passing.

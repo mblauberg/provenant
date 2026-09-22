@@ -115,7 +115,8 @@ def resolve(*args):
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={**os.environ, "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT)},
+        env={**os.environ, "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+             "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT)},
     )
     return result, json.loads(result.stdout) if result.stdout else None
 
@@ -1654,23 +1655,39 @@ def test_unusable_families_table_fails_closed(
     assert route.get("resolved_model") is None
 
 
-def test_opencode_without_model_requires_explicit_account_catalogue_slug(capsys):
-    """OpenCode is a broker with no alias table.
-
-    Routes must carry an explicit account-catalogue model; resolving an alias
-    alone must fail closed with a typed status rather than crashing.
-    """
+def test_opencode_without_model_uses_adapter_default(capsys, monkeypatch):
+    compatibility = yaml.safe_load((ROOT / "config" / "adapter-compatibility.yaml").read_text())
+    assert compatibility["adapters"]["opencode-acp"]["model_family_constraints"]["requires_explicit_model"] is False
     router = load_router()
+    monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
 
     result = router.main([
         "resolve", "--adapter", "opencode", "--alias", "flagship",
-        "--role", "worker",
+        "--role", "worker", "--adapter-compatibility",
+        str(ROOT / "config" / "adapter-compatibility.yaml"),
     ])
 
     route = json.loads(capsys.readouterr().out)
-    assert result == 2
-    assert route["status"] == "model_required_for_broker"
-    assert route.get("resolved_model") is None
+    assert result == 0
+    assert route["status"] == "ok"
+    assert route["resolved_model"] == "opencode/nemotron-3.5-lightning-free"
+    assert route["model_selection"] == "adapter-default"
+    assert route["model_family"] == "generic-open"
+
+
+def test_cursor_without_model_uses_account_auto_default(capsys, monkeypatch):
+    router = load_router()
+    monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
+    result = router.main([
+        "resolve", "--adapter", "cursor", "--alias", "workhorse",
+        "--role", "worker", "--adapter-compatibility",
+        str(ROOT / "config" / "adapter-compatibility.yaml"),
+    ])
+    route = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert route["resolved_model"] == "auto"
+    assert route["model_selection"] == "adapter-default"
+    assert route["model_family"] == "generic-open"
 
 
 @pytest.mark.parametrize(
@@ -2993,9 +3010,14 @@ def test_opencode_route_resolves_explicit_free_model():
     assert route["endpoint_provider"] == "opencode"
 
 
-def test_opencode_nested_deepseek_attributes_upstream_family():
+@pytest.mark.parametrize("model", [
+    "opencode/deepseek-v4.1-flash",
+    "opencode-go/deepseek-v4.1-flash",
+    "openrouter/deepseek/deepseek-v4.1-flash",
+])
+def test_opencode_nested_deepseek_attributes_upstream_family(model):
     result, route = resolve(
-        "--adapter", "opencode", "--model", "opencode/deepseek-v4.1-flash",
+        "--adapter", "opencode", "--model", model,
         "--alias", "scout", "--role", "worker",
     )
 
