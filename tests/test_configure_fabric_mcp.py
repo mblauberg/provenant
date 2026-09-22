@@ -518,14 +518,44 @@ def test_check_reports_only_agent_fabric_entry_status(tmp_path: Path) -> None:
 
 def test_opencode_commented_jsonc_fails_closed_without_rewriting(tmp_path: Path) -> None:
     config = tmp_path / "opencode.jsonc"
-    original = '{\n  // user comment\n  "mcp": {}\n}\n'
+    original = '{\n  // user comment\n  "mcp": {},\n}\n'
     config.write_text(original)
 
     result = run_configure(tmp_path, "--platform", "opencode")
 
     assert result.returncode == 3
-    assert "OpenCode config is invalid JSON" in result.stderr
+    assert "mcp.fabric" in result.stderr
     assert config.read_text() == original
+
+
+def test_opencode_existing_registration_accepts_commented_jsonc(tmp_path: Path) -> None:
+    config = tmp_path / "opencode.jsonc"
+    initial = run_configure(tmp_path, "--platform", "opencode")
+    assert initial.returncode == 0, initial.stderr
+    commented = config.read_text().replace("{\n", '{\n  // keep this note\n', 1)
+    commented = commented.removesuffix("}\n") + ",\n}\n"
+    config.write_text(commented)
+
+    result = run_configure(tmp_path, "--platform", "opencode")
+
+    assert result.returncode == 0, result.stderr
+    assert "existing platform=opencode" in result.stdout
+    assert config.read_text() == commented
+
+
+def test_opencode_removes_only_missing_legacy_agents_harness_entry(tmp_path: Path) -> None:
+    config = tmp_path / "opencode.jsonc"
+    dangling = Path.home() / ".agents/HARNESS.md"
+    assert not dangling.exists()
+    foreign = tmp_path / "notes/HARNESS.md"
+    config.write_text(json.dumps({"instructions": [str(dangling), str(foreign)]}))
+
+    result = run_configure(tmp_path, "--platform", "opencode")
+
+    assert result.returncode == 0, result.stderr
+    entries = json.loads(config.read_text())["instructions"]
+    assert str(dangling) not in entries
+    assert str(foreign) in entries
 
 
 def test_preflight_rejects_malformed_codex_without_mutating_claude(tmp_path: Path) -> None:

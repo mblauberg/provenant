@@ -18,6 +18,7 @@ import tempfile
 import tomllib
 from typing import Any
 
+from lib.jsonc import parse_jsonc
 from lib.product_root_resolver import POINTER_RELATIVE_PATH, load_pointer_path
 
 
@@ -226,11 +227,12 @@ def opencode_update(
     snapshot = _capture(path, label)
     text = _text(snapshot, label)
     try:
-        value: Any = json.loads(text) if snapshot.source_kind != "absent" else {}
+        value, has_comments = parse_jsonc(text) if snapshot.source_kind != "absent" else ({}, False)
     except json.JSONDecodeError as exc:
-        raise RegistrationError(f"{label} config is invalid JSON: {exc}") from exc
+        raise RegistrationError(f"{label} config is invalid JSONC: {exc}") from exc
     if not isinstance(value, dict):
         raise RegistrationError(f"{label} config root must be an object")
+    original = json.loads(json.dumps(value))
     if instruction_paths is not None:
         instance_doctrine, harness, previous_harness = instruction_paths
         entries = value.get("instructions", [])
@@ -239,7 +241,9 @@ def opencode_update(
         retained = []
         for item in entries:
             expanded = Path(item).expanduser()
-            if expanded in {instance_doctrine, harness, previous_harness}:
+            if expanded in {instance_doctrine, harness, previous_harness} or (
+                expanded == Path.home() / ".agents/HARNESS.md" and not expanded.exists()
+            ):
                 continue
             retained.append(item)
         value["instructions"] = [*retained, str(instance_doctrine), str(harness)]
@@ -252,9 +256,16 @@ def opencode_update(
         "enabled": True,
         "environment": desired["env"],
     }
-    if servers.get(SERVER_NAME) == entry and value == (json.loads(text) if text else {}):
+    if servers.get(SERVER_NAME) == entry and value == original:
         return ConfigProposal(client, snapshot, text, "existing")
     servers[SERVER_NAME] = entry
+    if has_comments:
+        instructions = json.dumps(value.get("instructions", []), separators=(",", ":"))
+        fabric = json.dumps(entry, separators=(",", ":"))
+        raise RegistrationError(
+            "OpenCode JSONC comments must be preserved; add by hand "
+            f"instructions={instructions} and mcp.fabric={fabric} in {path}"
+        )
     return ConfigProposal(client, snapshot, json.dumps(value, indent=2, sort_keys=True) + "\n", "ready")
 
 

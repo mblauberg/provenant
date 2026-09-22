@@ -975,6 +975,71 @@ def test_all_mcp_opt_in_still_skips_detected_clients_with_user_instructions(tmp_
     assert (tmp_path / ".claude.json").exists()
 
 
+def test_all_skips_detected_opencode_jsonc_without_blocking_primary_clients(tmp_path):
+    config = tmp_path / ".config/opencode/opencode.jsonc"
+    config.parent.mkdir(parents=True)
+    original = '{\n  // keep this note\n  "mcp": {},\n}\n'
+    config.write_text(original)
+
+    result = run("all", tmp_path, PATH="/usr/bin:/bin")
+
+    assert result.returncode == 0, result.stderr
+    assert "provider opencode skipped=mcp-conflict" in result.stdout
+    assert "warning: detected provider opencode" in result.stderr
+    assert "mcp.fabric" in result.stderr
+    assert config.read_text() == original
+    assert (tmp_path / ".claude.json").exists()
+    assert (tmp_path / ".codex/config.toml").exists()
+
+
+def test_all_skips_broken_detected_cursor_mcp_but_named_cursor_fails(tmp_path):
+    config = tmp_path / ".cursor/mcp.json"
+    config.parent.mkdir()
+    config.write_text("{broken")
+
+    detected = run("all", tmp_path, "--mcp-clients", "all", PATH="/usr/bin:/bin")
+    assert detected.returncode == 0, detected.stderr
+    assert "provider cursor skipped=mcp-conflict" in detected.stdout
+    assert "warning: detected provider cursor" in detected.stderr
+    assert config.read_text() == "{broken"
+    assert (tmp_path / ".claude.json").exists()
+    assert (tmp_path / ".codex/config.toml").exists()
+
+    named = run("cursor", tmp_path, PATH="/usr/bin:/bin")
+    assert named.returncode == 3
+    assert config.read_text() == "{broken"
+
+
+def test_mcp_all_skips_unnamed_primary_client_conflict(tmp_path):
+    claude_config = tmp_path / ".claude.json"
+    claude_config.write_text("{broken")
+
+    result = run("codex", tmp_path, "--mcp-clients", "all")
+
+    assert result.returncode == 0, result.stderr
+    assert "provider claude skipped=mcp-conflict" in result.stdout
+    assert claude_config.read_text() == "{broken"
+    assert (tmp_path / ".codex/config.toml").exists()
+
+
+def test_all_reports_detected_client_link_failure_and_continues(tmp_path):
+    (tmp_path / ".config/opencode").mkdir(parents=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    blocked_ln = bin_dir / "ln"
+    blocked_ln.write_text("#!/bin/sh\nexit 1\n")
+    blocked_ln.chmod(0o755)
+
+    result = run("all", tmp_path, PATH=f"{bin_dir}:{os.environ['PATH']}")
+
+    assert result.returncode == 0, result.stderr
+    assert "provider opencode skipped=install-conflict" in result.stdout
+    assert "harness created=" not in result.stdout
+    assert not (tmp_path / ".config/opencode/opencode.jsonc").exists()
+    assert (tmp_path / ".claude.json").exists()
+    assert (tmp_path / ".codex/config.toml").exists()
+
+
 def test_refresh_routing_is_opt_in_through_install_harness(tmp_path):
     first = run("codex", tmp_path)
     assert first.returncode == 0, first.stderr

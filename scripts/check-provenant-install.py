@@ -7,9 +7,11 @@ import os
 import argparse
 import json
 from pathlib import Path
+import shutil
 import sys
 import tomllib
 
+from lib.jsonc import parse_jsonc
 from lib.product_root_resolver import POINTER_RELATIVE_PATH, load_pointer_file
 from instance_installation import InstallError, routing_drift
 
@@ -34,15 +36,20 @@ def _provider_lines(home: Path) -> tuple[list[str], bool]:
     lines = []
     missing = False
     for provider, (root, config) in locations.items():
-        if not root.is_dir():
+        if not root.is_dir() or (
+            provider == "agy" and not os.environ.get("AGY_CONFIG_DIR") and shutil.which("agy") is None
+        ):
             lines.append(f"provider {provider} present=no")
             continue
         skills = (root / "skills/orchestrate/SKILL.md").is_file()
         try:
-            document = (
-                tomllib.loads(config.read_text())
-                if provider == "codex" else json.loads(config.read_text())
-            )
+            content = config.read_text()
+            if provider == "codex":
+                document = tomllib.loads(content)
+            elif provider == "opencode":
+                document, _ = parse_jsonc(content)
+            else:
+                document = json.loads(content)
             key = "mcp_servers" if provider == "codex" else "mcp" if provider == "opencode" else "mcpServers"
             servers = document.get(key, {}) if isinstance(document, dict) else {}
             mcp = isinstance(servers, dict) and "fabric" in servers
@@ -118,10 +125,10 @@ def main() -> int:
     try:
         differences = routing_drift(ROOT, instance_root)
     except InstallError as exc:
-        print(f"warning: routing catalogue {exc}; repair=install-harness --refresh-routing", file=sys.stderr)
+        print(f"warning: routing catalogue {exc}; repair=install-harness --platform all --refresh-routing", file=sys.stderr)
         differences = ["unreadable"]
     for key in differences:
-        print(f"routing drift={key} repair=install-harness --refresh-routing", file=sys.stderr)
+        print(f"routing drift={key} repair=install-harness --platform all --refresh-routing", file=sys.stderr)
     if args.strict and (differences or provider_missing):
         return 1
     return 0

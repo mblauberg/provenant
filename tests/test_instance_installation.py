@@ -100,6 +100,8 @@ def test_routing_drift_names_product_keys_and_ignores_instance_additions(tmp_pat
     assert "endpoints.new.base_url" in drift
     assert "endpoints.custom" not in " ".join(drift)
     assert "model_patterns" in drift
+    summary = run("validate", product, instance_root, "--summary")
+    assert "repair=install-harness --platform all --refresh-routing" in summary.stdout
 
     old["model_patterns"][0]["family"] = "legacy"
     target.write_text(json.dumps(old))
@@ -185,7 +187,7 @@ def test_refresh_removes_retired_product_keys_and_preserves_unchanged_instance_e
     assert json.loads(run("validate", product, root).stdout)["routing_drift"] == []
 
 
-def test_refresh_lists_conflicts_when_no_base_exists(tmp_path):
+def test_refresh_without_base_reports_product_updates_and_retained_unknown_keys(tmp_path):
     product = build_product(tmp_path)
     source = product / "config/model-routing.json"
     source.write_text('{"schema_version": 2, "adapters": {"a": {"field": "new"}}}')
@@ -193,13 +195,30 @@ def test_refresh_lists_conflicts_when_no_base_exists(tmp_path):
     seed(product, root)
     (root / "config/.model-routing.base.json").unlink()
     target = root / "config/model-routing.json"
-    target.write_text('{"schema_version": 1, "adapters": {"a": {"field": "user"}}}')
+    target.write_text('{"schema_version": 1, "adapters": {"a": {"field": "user"}, "retired": {"field": "old"}}}')
 
-    result = run("refresh-routing", product, root)
+    result = run("refresh-routing", product, root, "--summary")
 
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["routing"]["conflicts"] == ["adapters.a.field", "schema_version"]
+    assert "routing conflict=" not in result.stdout
+    assert "routing updated from product=adapters.a.field" in result.stdout
+    assert "product value won" in result.stdout
+    assert "routing retained (not in product; remove if retired)=adapters.retired" in result.stdout
     assert json.loads(target.read_text())["adapters"]["a"]["field"] == "new"
+    assert "retired" in json.loads(target.read_text())["adapters"]
+    assert json.loads((root / "config/.model-routing.base.json").read_text()) == json.loads(source.read_text())
+
+
+def test_fused_refresh_does_not_create_a_routing_base(tmp_path):
+    product = build_product(tmp_path)
+    seed(product, product)
+    base = product / "config/.model-routing.base.json"
+    assert not base.exists()
+
+    result = run("refresh-routing", product, product, "--summary")
+
+    assert result.returncode == 0, result.stderr
+    assert not base.exists()
 
 
 def test_validate_reports_unreadable_instance_routing_without_blocking_seed(tmp_path):

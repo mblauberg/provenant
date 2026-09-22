@@ -59,7 +59,7 @@ def test_check_names_routing_drift_and_refresh_repair(tmp_path: Path) -> None:
 
     assert result.returncode == 0
     assert "routing drift=adapters.opencode.endpoint_provider" in result.stderr
-    assert "install-harness --refresh-routing" in result.stderr
+    assert "install-harness --platform all --refresh-routing" in result.stderr
     assert run_check(tmp_path, "--strict").returncode == 1
 
 
@@ -107,6 +107,36 @@ def test_check_reports_invalid_provider_config_without_a_traceback(tmp_path: Pat
     assert result.returncode == 0
     assert "provider opencode present=yes skills=missing agents=unsupported mcp=missing" in result.stdout
     assert "Traceback" not in result.stderr
+
+
+def test_check_accepts_commented_opencode_jsonc_registration(tmp_path: Path) -> None:
+    command = tmp_path / "bin/provenant"
+    command.parent.mkdir()
+    shutil.copy2(TEMPLATE, command)
+    command.chmod(0o755)
+    root = tmp_path / "home/.config/opencode"
+    skill = root / "skills/orchestrate/SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# Test\n")
+    (root / "opencode.jsonc").write_text('{\n// keep\n"mcp": {"fabric": {}},\n}\n')
+
+    result = run_check(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert "provider opencode present=yes skills=ok agents=unsupported mcp=ok" in result.stdout
+
+
+def test_check_does_not_detect_agy_from_gemini_directory_alone(tmp_path: Path) -> None:
+    command = tmp_path / "bin/provenant"
+    command.parent.mkdir()
+    shutil.copy2(TEMPLATE, command)
+    command.chmod(0o755)
+    (tmp_path / "home/.gemini").mkdir(parents=True)
+
+    result = run_check(tmp_path, PATH="/opt/homebrew/bin:/usr/bin:/bin")
+
+    assert result.returncode == 0, result.stderr
+    assert "provider agy present=no" in result.stdout
 
 
 def test_check_uses_the_installer_mcp_config_override(tmp_path: Path) -> None:

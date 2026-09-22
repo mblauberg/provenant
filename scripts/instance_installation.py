@@ -367,8 +367,44 @@ def _routing_merge(base: Any, product: Any, installed: Any, path: tuple[str, ...
 
 def _routing_result(product: dict[str, Any], installed: dict[str, Any], base: dict[str, Any] | None) -> tuple[dict[str, Any], list[str]]:
     conflicts: list[str] = []
+    if base is None:
+        # Existing installations predate the snapshot. A differing shipped key
+        # has no evidence of an instance edit; use the product and keep unknown
+        # keys visible so a retired product key can be removed deliberately.
+        return _routing_merge_without_base(product, installed), []
     merged = _routing_merge(base if base is not None else _MISSING, product, installed, (), conflicts)
     return merged, sorted(set(conflicts))
+
+
+def _routing_merge_without_base(product: Any, installed: Any) -> Any:
+    if not isinstance(product, dict) or not isinstance(installed, dict):
+        return product
+    return {
+        key: (
+            _routing_merge_without_base(value, installed[key])
+            if key in installed else value
+        )
+        for key, value in product.items()
+    } | {key: value for key, value in installed.items() if key not in product}
+
+
+def _routing_no_base_changes(product: Any, installed: Any, path: tuple[str, ...] = ()) -> tuple[list[str], list[str]]:
+    updated: list[str] = []
+    retained: list[str] = []
+    if isinstance(product, dict) and isinstance(installed, dict):
+        for key in sorted(set(product) | set(installed)):
+            name = (*path, key)
+            if key not in product:
+                retained.append(".".join(name))
+            elif key not in installed:
+                updated.append(".".join(name))
+            else:
+                changed, unknown = _routing_no_base_changes(product[key], installed[key], name)
+                updated.extend(changed)
+                retained.extend(unknown)
+    elif product != installed:
+        updated.append(".".join(path))
+    return updated, retained
 
 
 def _routing_differences(product: Any, installed: Any, path: tuple[str, ...]) -> list[str]:
@@ -400,8 +436,14 @@ def refresh_routing(product_root: Path, instance_root: Path) -> dict[str, Any]:
     target = instance_root / "config/model-routing.json"
     if target.is_symlink():
         raise InstallError("routing catalogue must be a regular instance file")
+    if product_root.resolve() == instance_root.resolve():
+        return {"state": "existing", "conflicts": [], "schema_changed": False,
+                "updated_from_product": [], "retained": []}
     base = _routing_base(instance_root)
     result, conflicts = _routing_result(product, installed, base)
+    updated_from_product, retained = (
+        _routing_no_base_changes(product, installed) if base is None else ([], [])
+    )
     schema_change = (
         (base.get("schema_version") if base is not None else installed.get("schema_version"))
         != product.get("schema_version")
@@ -409,7 +451,8 @@ def refresh_routing(product_root: Path, instance_root: Path) -> dict[str, Any]:
     base_path = instance_root / "config" / ROUTING_BASE_NAME
     if result == installed:
         _write_json(base_path, product, contain=instance_root)
-        return {"state": "existing", "conflicts": conflicts, "schema_changed": schema_change}
+        return {"state": "existing", "conflicts": conflicts, "schema_changed": schema_change,
+                "updated_from_product": updated_from_product, "retained": retained}
     backup = target.with_name(f"{target.name}.bak-{date.today().isoformat()}")
     suffix = 1
     while backup.exists() or backup.is_symlink():
@@ -418,7 +461,9 @@ def refresh_routing(product_root: Path, instance_root: Path) -> dict[str, Any]:
     _publish(backup, lambda handle: handle.write(target.read_bytes()), mode="wb", contain=instance_root)
     _write_json(target, result, contain=instance_root)
     _write_json(base_path, product, contain=instance_root)
-    return {"state": "updated", "backup": str(backup), "conflicts": conflicts, "schema_changed": schema_change}
+    return {"state": "updated", "backup": str(backup), "conflicts": conflicts,
+            "schema_changed": schema_change, "updated_from_product": updated_from_product,
+            "retained": retained}
 
 
 def seed_desired_state(product_root: Path, instance_root: Path) -> tuple[str, dict[str, Any]]:
@@ -645,6 +690,11 @@ def main(argv: list[str] | None = None) -> int:
             print(f"routing {routing['state']}" + (f" backup={routing['backup']}" if "backup" in routing else ""))
             for key in routing["conflicts"]:
                 print(f"routing conflict={key}" + (f" backup={routing['backup']}" if "backup" in routing else ""))
+            for key in routing["updated_from_product"]:
+                print(f"routing updated from product={key} product value won"
+                      + (f" (backup: {routing['backup']})" if "backup" in routing else ""))
+            for key in routing["retained"]:
+                print(f"routing retained (not in product; remove if retired)={key}")
             if routing["schema_changed"]:
                 print("routing warning=schema_version-changed")
             return 0
@@ -661,7 +711,7 @@ def main(argv: list[str] | None = None) -> int:
         summary += f" custom-skills={len(result.get('custom_skills', []))}"
         print(f"{summary} root={instance_root}")
         for key in result.get("routing_drift", []):
-            print(f"routing drift={key} repair=install-harness --refresh-routing")
+            print(f"routing drift={key} repair=install-harness --platform all --refresh-routing")
     else:
         print(json.dumps(result, indent=2, sort_keys=True))
     return 0

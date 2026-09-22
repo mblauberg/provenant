@@ -76,18 +76,26 @@ fields in the direct-dispatch receipt; a non-Google model selected through Agy
 is not a qualifying Gemini leg.
 
 OpenCode's `instructions[]` includes the instance `AGENTS.md` and the product
-`HARNESS.md`. The installer preserves unrelated entries, rejects a conflicting
-doctrine path, and rebinds a prior product path recorded by the instance's
+`HARNESS.md`. The installer preserves unrelated entries, requires a string
+array, and rebinds a prior product path recorded by the instance's
 product-root pointer when the checkout moves. Standalone MCP configuration
 uses the pointer for the current product path when `--agents-home` is omitted.
 Re-run `install-harness` after
 relocation so the literal OpenCode paths and pointer agree.
+OpenCode JSONC with comments is read safely. If adding Fabric would require a
+rewrite that discards those comments, the installer leaves the file intact and
+prints the exact `instructions` and `mcp.fabric` entries to add manually.
+With `--platform all`, a detected client's configuration conflict produces a
+per-client skip warning; explicitly named clients still fail.
 
 `config/model-routing.json` remains instance-owned. Install and validation name
 product catalogue differences by key; run `install-harness --platform all
 --refresh-routing` to back up the instance file to `model-routing.json.bak-<date>`
 and apply product sections while retaining instance-only adapters, endpoints,
-and extra alias models.
+and extra alias models. On an older install without a merge base, the refresh
+lists retained keys that may be retired product keys, lists each product value
+that won, and writes the product catalogue as the new base. A fused checkout
+does not write a merge base during refresh.
 
     scripts/configure-fabric-mcp.py --platform all
     scripts/configure-fabric-mcp.py --platform codex
