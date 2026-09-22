@@ -892,8 +892,11 @@ def test_opencode_primary_installs_bootstrap_skills_harness_and_mcp(tmp_path):
 def test_all_installs_present_optional_provider_surfaces(tmp_path):
     for relative in (".config/opencode", ".gemini", ".cursor", ".kiro"):
         (tmp_path / relative).mkdir(parents=True)
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin/agy").write_text("#!/bin/sh\n")
+    (tmp_path / "bin/agy").chmod(0o755)
 
-    result = run("all", tmp_path)
+    result = run("all", tmp_path, PATH=f"{tmp_path / 'bin'}:{os.environ['PATH']}")
 
     assert result.returncode == 0, result.stderr
     for relative in (".config/opencode", ".gemini", ".cursor", ".kiro"):
@@ -923,6 +926,55 @@ def test_all_installs_present_optional_provider_surfaces(tmp_path):
     assert "missing" not in checked.stdout
 
 
+def test_all_skips_detected_clients_with_user_instructions_and_keeps_primary_installs(tmp_path):
+    opencode = tmp_path / ".config/opencode/AGENTS.md"
+    gemini = tmp_path / ".gemini/GEMINI.md"
+    opencode.parent.mkdir(parents=True)
+    gemini.parent.mkdir()
+    opencode.write_bytes(UNMANAGED_BYTES)
+    gemini.write_bytes(UNMANAGED_BYTES)
+    (tmp_path / "bin").mkdir()
+    agy = tmp_path / "bin/agy"
+    agy.write_text("#!/bin/sh\n")
+    agy.chmod(0o755)
+
+    result = run("all", tmp_path, PATH=f"{agy.parent}:{os.environ['PATH']}")
+
+    assert result.returncode == 0, result.stderr
+    assert "provider opencode skipped=instructions-preserved" in result.stdout
+    assert "provider agy skipped=instructions-preserved" in result.stdout
+    assert opencode.read_bytes() == gemini.read_bytes() == UNMANAGED_BYTES
+    assert (tmp_path / ".claude/skills/orchestrate/SKILL.md").exists()
+    assert (tmp_path / ".codex/skills/orchestrate/SKILL.md").exists()
+    assert not (opencode.parent / "skills").exists()
+    assert not (gemini.parent / "skills").exists()
+
+
+def test_gemini_directory_alone_does_not_detect_agy(tmp_path):
+    gemini = tmp_path / ".gemini/GEMINI.md"
+    gemini.parent.mkdir()
+    gemini.write_bytes(UNMANAGED_BYTES)
+
+    result = run("all", tmp_path, PATH="/usr/bin:/bin")
+
+    assert result.returncode == 0, result.stderr
+    assert gemini.read_bytes() == UNMANAGED_BYTES
+    assert not (gemini.parent / "skills").exists()
+
+
+def test_all_mcp_opt_in_still_skips_detected_clients_with_user_instructions(tmp_path):
+    opencode = tmp_path / ".config/opencode/AGENTS.md"
+    opencode.parent.mkdir(parents=True)
+    opencode.write_bytes(UNMANAGED_BYTES)
+
+    result = run("all", tmp_path, "--mcp-clients", "all", PATH="/usr/bin:/bin")
+
+    assert result.returncode == 0, result.stderr
+    assert "provider opencode skipped=instructions-preserved" in result.stdout
+    assert not (opencode.parent / "opencode.jsonc").exists()
+    assert (tmp_path / ".claude.json").exists()
+
+
 def test_refresh_routing_is_opt_in_through_install_harness(tmp_path):
     first = run("codex", tmp_path)
     assert first.returncode == 0, first.stderr
@@ -934,12 +986,12 @@ def test_refresh_routing_is_opt_in_through_install_harness(tmp_path):
     second = run("codex", tmp_path)
     assert second.returncode == 0, second.stderr
     assert json.loads(target.read_text())["adapters"]["opencode"]["endpoint_provider"] == "codex"
-    assert "routing drift=adapters.opencode.endpoint_provider" in second.stdout
+    assert "routing drift=" not in second.stdout
 
     refreshed = run("codex", tmp_path, "--refresh-routing")
     assert refreshed.returncode == 0, refreshed.stderr
-    assert json.loads(target.read_text())["adapters"]["opencode"]["endpoint_provider"] == "opencode"
-    assert len(list(target.parent.glob("model-routing.json.bak-*"))) == 1
+    assert json.loads(target.read_text())["adapters"]["opencode"]["endpoint_provider"] == "codex"
+    assert len(list(target.parent.glob("model-routing.json.bak-*"))) == 0
 
 
 def test_rejects_unknown_mcp_client_selection(tmp_path):

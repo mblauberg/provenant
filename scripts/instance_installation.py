@@ -15,10 +15,9 @@ machine-local and ignored.
 
 Seeded files are the third owner in that ADR. The product ships a template; the
 installer copies it into the instance root only when nothing is there, and never
-again. The routing catalogue is the one exception: validation compares the
-product-owned sections, and an explicit refresh backs up and merges them while
-retaining instance additions. Other seeded files have no hash-drift check or
-three-way merge.
+again. The routing catalogue is the one exception: seeding records a product
+snapshot, and an explicit refresh backs up and three-way merges the catalogue.
+Other seeded files have no hash-drift check or three-way merge.
 """
 
 from __future__ import annotations
@@ -73,9 +72,8 @@ SEEDED_FILES = (
     "config/model-preferences.json",
     "config/model-routing.json",
 )
-ROUTING_SECTIONS = (
-    "task_class_routes", "families", "adapters", "endpoints", "model_patterns",
-)
+ROUTING_BASE_NAME = ".model-routing.base.json"
+_MISSING = object()
 
 #: Instance-owned third-party skill sources projected beside the product
 #: catalogue (ADR 0019). The installer links them; this module only reports
@@ -325,30 +323,63 @@ def _routing_documents(product_root: Path, instance_root: Path) -> tuple[dict[st
     return product, installed
 
 
-def _routing_merge(product: Any, installed: Any, path: tuple[str, ...]) -> Any:
-    if isinstance(product, dict):
-        result = dict(installed) if isinstance(installed, dict) else {}
-        for key, value in product.items():
-            result[key] = _routing_merge(value, result.get(key), (*path, key))
+def _routing_base(instance_root: Path) -> dict[str, Any] | None:
+    path = instance_root / "config" / ROUTING_BASE_NAME
+    if not path.exists():
+        return None
+    try:
+        document = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise InstallError(f"routing base is unreadable: {exc}") from exc
+    if not isinstance(document, dict):
+        raise InstallError("routing base must be an object")
+    return document
+
+
+def _routing_merge(base: Any, product: Any, installed: Any, path: tuple[str, ...], conflicts: list[str]) -> Any:
+    if path == ("schema_version",):
+        if installed != product and installed != base:
+            conflicts.append("schema_version")
+        return product
+    if product == base:
+        return installed
+    if installed == base:
+        return product
+    if product == installed:
+        return product
+    if product is _MISSING:
+        # A removed product key remains only when the instance edited it.
+        return installed
+    if isinstance(product, dict) and isinstance(installed, dict) and (isinstance(base, dict) or base is _MISSING):
+        baseline = base if isinstance(base, dict) else {}
+        result = {}
+        for key in sorted(set(baseline) | set(product) | set(installed)):
+            merged = _routing_merge(
+                baseline.get(key, _MISSING), product.get(key, _MISSING),
+                installed.get(key, _MISSING), (*path, key), conflicts,
+            )
+            if merged is not _MISSING:
+                result[key] = merged
         return result
-    if isinstance(product, list) and isinstance(installed, list) and (
-        path[-2:-1] == ("aliases",) or path == ("model_patterns",)
-    ):
-        return product + [item for item in installed if item not in product]
+    conflicts.append(".".join(path))
     return product
+
+
+def _routing_result(product: dict[str, Any], installed: dict[str, Any], base: dict[str, Any] | None) -> tuple[dict[str, Any], list[str]]:
+    conflicts: list[str] = []
+    merged = _routing_merge(base if base is not None else _MISSING, product, installed, (), conflicts)
+    return merged, sorted(set(conflicts))
 
 
 def _routing_differences(product: Any, installed: Any, path: tuple[str, ...]) -> list[str]:
     if isinstance(product, dict) and isinstance(installed, dict):
         return [
             difference
-            for key, value in product.items()
-            for difference in _routing_differences(value, installed.get(key), (*path, key))
+            for key in sorted(set(product) | set(installed))
+            for difference in _routing_differences(
+                product.get(key, _MISSING), installed.get(key, _MISSING), (*path, key)
+            )
         ]
-    if isinstance(product, list) and isinstance(installed, list) and (
-        path[-2:-1] == ("aliases",) or path == ("model_patterns",)
-    ):
-        return [] if installed[:len(product)] == product else [".".join(path)]
     return [] if product == installed else [".".join(path)]
 
 
@@ -357,20 +388,11 @@ def routing_drift(product_root: Path, instance_root: Path) -> list[str]:
     if documents is None:
         return []
     product, installed = documents
-    drift = [
-        key
-        for section in ROUTING_SECTIONS if section in product
-        for key in _routing_differences(product[section], installed.get(section), (section,))
-    ]
-    if isinstance(product.get("catalog_date"), str) and (
-        not isinstance(installed.get("catalog_date"), str)
-        or product["catalog_date"] > installed["catalog_date"]
-    ):
-        drift.insert(0, "catalog_date")
-    return drift
+    merged, _ = _routing_result(product, installed, _routing_base(instance_root))
+    return _routing_differences(merged, installed, ())
 
 
-def refresh_routing(product_root: Path, instance_root: Path) -> dict[str, str]:
+def refresh_routing(product_root: Path, instance_root: Path) -> dict[str, Any]:
     documents = _routing_documents(product_root, instance_root)
     if documents is None:
         raise InstallError("routing catalogue is missing; run install-harness first")
@@ -378,17 +400,16 @@ def refresh_routing(product_root: Path, instance_root: Path) -> dict[str, str]:
     target = instance_root / "config/model-routing.json"
     if target.is_symlink():
         raise InstallError("routing catalogue must be a regular instance file")
-    result = dict(installed)
-    for section in ROUTING_SECTIONS:
-        if section in product:
-            result[section] = _routing_merge(product[section], installed.get(section), (section,))
-    if "catalog_date" in product and (
-        not isinstance(installed.get("catalog_date"), str)
-        or product["catalog_date"] > installed["catalog_date"]
-    ):
-        result["catalog_date"] = product["catalog_date"]
+    base = _routing_base(instance_root)
+    result, conflicts = _routing_result(product, installed, base)
+    schema_change = (
+        (base.get("schema_version") if base is not None else installed.get("schema_version"))
+        != product.get("schema_version")
+    )
+    base_path = instance_root / "config" / ROUTING_BASE_NAME
     if result == installed:
-        return {"state": "existing"}
+        _write_json(base_path, product, contain=instance_root)
+        return {"state": "existing", "conflicts": conflicts, "schema_changed": schema_change}
     backup = target.with_name(f"{target.name}.bak-{date.today().isoformat()}")
     suffix = 1
     while backup.exists() or backup.is_symlink():
@@ -396,7 +417,8 @@ def refresh_routing(product_root: Path, instance_root: Path) -> dict[str, str]:
         suffix += 1
     _publish(backup, lambda handle: handle.write(target.read_bytes()), mode="wb", contain=instance_root)
     _write_json(target, result, contain=instance_root)
-    return {"state": "updated", "backup": str(backup)}
+    _write_json(base_path, product, contain=instance_root)
+    return {"state": "updated", "backup": str(backup), "conflicts": conflicts, "schema_changed": schema_change}
 
 
 def seed_desired_state(product_root: Path, instance_root: Path) -> tuple[str, dict[str, Any]]:
@@ -447,6 +469,8 @@ def seed_instance_files(product_root: Path, instance_root: Path) -> list[dict[st
             contain=instance_root,
         )
         results.append({"path": relative, "state": "created"})
+        if relative == "config/model-routing.json":
+            _write_json(instance_root / "config" / ROUTING_BASE_NAME, json.loads(template), contain=instance_root)
     return results
 
 
@@ -484,6 +508,10 @@ def validate_install(product_root: Path, instance_root: Path) -> dict[str, Any]:
         if not source.is_file():
             raise InstallError(f"product template is missing: {relative}")
         seeded.append({"path": relative, "state": "missing"})
+    try:
+        drift = routing_drift(product_root, instance_root)
+    except InstallError:
+        drift = ["unreadable"]
     return {
         "schema_version": 1,
         "action": "validate",
@@ -492,7 +520,7 @@ def validate_install(product_root: Path, instance_root: Path) -> dict[str, Any]:
         "desired_state_state": "existing" if desired is not None else "missing",
         "product_pointer": pointer,
         "seeded": seeded,
-        "routing_drift": routing_drift(product_root, instance_root),
+        "routing_drift": drift,
         "custom_skills": custom_skill_names(instance_root),
         "changed": [],
     }
@@ -615,6 +643,10 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "refresh-routing":
             routing = result["routing"]
             print(f"routing {routing['state']}" + (f" backup={routing['backup']}" if "backup" in routing else ""))
+            for key in routing["conflicts"]:
+                print(f"routing conflict={key}" + (f" backup={routing['backup']}" if "backup" in routing else ""))
+            if routing["schema_changed"]:
+                print("routing warning=schema_version-changed")
             return 0
         created = sum(item["state"] == "created" for item in result.get("seeded", []))
         existing = sum(item["state"] == "existing" for item in result.get("seeded", []))

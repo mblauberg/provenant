@@ -241,13 +241,6 @@ def opencode_update(
             expanded = Path(item).expanduser()
             if expanded in {instance_doctrine, harness, previous_harness}:
                 continue
-            if expanded == instance_doctrine.parent / "HARNESS.md":
-                # The old manual path was dangling: HARNESS.md is product-owned.
-                continue
-            if expanded.name in {"AGENTS.md", "HARNESS.md"}:
-                raise RegistrationError(
-                    f"OpenCode instructions conflict at {item}; repair: remove the foreign doctrine path"
-                )
             retained.append(item)
         value["instructions"] = [*retained, str(instance_doctrine), str(harness)]
     servers = value.setdefault("mcp", {})
@@ -621,6 +614,9 @@ def main(argv: list[str] | None = None) -> int:
         "--opencode-config", type=Path,
         default=Path.home() / ".config/opencode/opencode.jsonc",
     )
+    parser.add_argument(
+        "--skip-client", action="append", choices=("cursor", "agy", "kiro", "opencode"), default=[],
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--preflight", action="store_true")
@@ -665,7 +661,7 @@ def main(argv: list[str] | None = None) -> int:
             "kiro": args.kiro_config,
         }
         for client, path in optional_configs.items():
-            if args.platform in {"all", client}:
+            if args.platform in {"all", client} and client not in args.skip_client:
                 proposals.append(json_client_update(
                     path,
                     registration(
@@ -678,7 +674,7 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     client,
                 ))
-        if args.platform in {"all", "opencode"}:
+        if args.platform in {"all", "opencode"} and "opencode" not in args.skip_client:
             instruction_root = instance_root or Path.home() / ".agents"
             previous_product = load_pointer_path(instruction_root)
             instruction_product = agents_home

@@ -260,16 +260,30 @@ def test_opencode_owns_instruction_paths_and_preserves_other_entries(tmp_path: P
     assert document["theme"] == "dark"
 
 
-def test_opencode_instruction_conflict_fails_without_a_write(tmp_path: Path) -> None:
+def test_opencode_preserves_foreign_instruction_paths(tmp_path: Path) -> None:
     config = tmp_path / "opencode.jsonc"
-    original = json.dumps({"instructions": ["/foreign/HARNESS.md"]})
+    foreign = ["/foreign/HARNESS.md", "packages/*/AGENTS.md", "AGENTS.md"]
+    original = json.dumps({"instructions": foreign})
     config.write_text(original)
 
     result = run_configure(tmp_path, "--platform", "opencode")
 
-    assert result.returncode == 3
-    assert "OpenCode instructions conflict" in result.stderr
-    assert config.read_text() == original
+    assert result.returncode == 0, result.stderr
+    assert json.loads(config.read_text())["instructions"][:3] == foreign
+
+
+def test_opencode_keeps_user_symlink_to_instance_doctrine(tmp_path: Path) -> None:
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+    link = tmp_path / "user-instructions.md"
+    link.symlink_to(instance_root / "AGENTS.md")
+    config = tmp_path / "opencode.jsonc"
+    config.write_text(json.dumps({"instructions": [str(link)]}))
+
+    result = run_configure(tmp_path, "--platform", "opencode", "--instance-root", str(instance_root))
+
+    assert result.returncode == 0, result.stderr
+    assert str(link) in json.loads(config.read_text())["instructions"]
 
 
 def test_opencode_rebinds_harness_from_previous_product_pointer(tmp_path: Path) -> None:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import os
+import argparse
 import json
 from pathlib import Path
 import sys
@@ -60,6 +61,9 @@ def _provider_lines(home: Path) -> tuple[list[str], bool]:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--strict", action="store_true", help="fail on routing or provider warnings")
+    args = parser.parse_args()
     instance_value = os.environ.get("AGENT_FABRIC_INSTANCE_ROOT") or None
     instance_root = (
         Path(instance_value).expanduser()
@@ -114,11 +118,11 @@ def main() -> int:
     try:
         differences = routing_drift(ROOT, instance_root)
     except InstallError as exc:
-        print(f"FAIL: routing catalogue {exc}; repair=install-harness --refresh-routing", file=sys.stderr)
-        return 1
+        print(f"warning: routing catalogue {exc}; repair=install-harness --refresh-routing", file=sys.stderr)
+        differences = ["unreadable"]
     for key in differences:
         print(f"routing drift={key} repair=install-harness --refresh-routing", file=sys.stderr)
-    if differences or provider_missing:
+    if args.strict and (differences or provider_missing):
         return 1
     return 0
 

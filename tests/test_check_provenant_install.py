@@ -10,7 +10,7 @@ SCRIPT = ROOT / "scripts/check-provenant-install.py"
 TEMPLATE = ROOT / "scripts/provenant.template"
 
 
-def run_check(tmp_path: Path, **extra_env: str) -> subprocess.CompletedProcess[str]:
+def run_check(tmp_path: Path, *arguments: str, **extra_env: str) -> subprocess.CompletedProcess[str]:
     instance_root = tmp_path / "instance"
     pointer = instance_root / ".agent-fabric/product-root.json"
     pointer.parent.mkdir(parents=True, exist_ok=True)
@@ -18,7 +18,7 @@ def run_check(tmp_path: Path, **extra_env: str) -> subprocess.CompletedProcess[s
         f'{{"schema_version": 1, "product_root": "{ROOT}"}}\n'
     )
     return subprocess.run(
-        [str(SCRIPT)],
+        [str(SCRIPT), *arguments],
         env={
             **os.environ,
             "AGENT_FABRIC_INSTANCE_ROOT": str(instance_root),
@@ -57,9 +57,10 @@ def test_check_names_routing_drift_and_refresh_repair(tmp_path: Path) -> None:
 
     result = run_check(tmp_path)
 
-    assert result.returncode == 1
+    assert result.returncode == 0
     assert "routing drift=adapters.opencode.endpoint_provider" in result.stderr
     assert "install-harness --refresh-routing" in result.stderr
+    assert run_check(tmp_path, "--strict").returncode == 1
 
 
 def test_check_reports_each_provider_on_one_line(tmp_path: Path) -> None:
@@ -86,9 +87,10 @@ def test_check_names_repair_for_present_provider_without_install(tmp_path: Path)
 
     result = run_check(tmp_path)
 
-    assert result.returncode == 1
+    assert result.returncode == 0
     assert "provider opencode present=yes skills=missing" in result.stdout
     assert "repair=install-harness --platform all" in result.stdout
+    assert run_check(tmp_path, "--strict").returncode == 1
 
 
 def test_check_reports_invalid_provider_config_without_a_traceback(tmp_path: Path) -> None:
@@ -102,7 +104,7 @@ def test_check_reports_invalid_provider_config_without_a_traceback(tmp_path: Pat
 
     result = run_check(tmp_path)
 
-    assert result.returncode == 1
+    assert result.returncode == 0
     assert "provider opencode present=yes skills=missing agents=unsupported mcp=missing" in result.stdout
     assert "Traceback" not in result.stderr
 

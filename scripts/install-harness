@@ -55,7 +55,9 @@ case "$PLATFORM" in
   all)
     primary_platforms=(claude codex)
     [[ -d "${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}" ]] && primary_platforms+=(opencode)
-    [[ -d "${AGY_CONFIG_DIR:-$HOME/.gemini}" ]] && primary_platforms+=(agy)
+    if [[ -n "${AGY_CONFIG_DIR:-}" ]] || { [[ -d "$HOME/.gemini" ]] && command -v agy >/dev/null 2>&1; }; then
+      primary_platforms+=(agy)
+    fi
     [[ -d "$HOME/.cursor" ]] && primary_platforms+=(cursor)
     [[ -d "$HOME/.kiro" ]] && primary_platforms+=(kiro)
     ;;
@@ -289,7 +291,8 @@ rebind_harness_link() {
 # pointer, seeded instance files, client links or installation receipt. A
 # canonical whole-directory link was already checked above; it has no
 # per-entry catalogue to preflight.
-for primary in "${primary_platforms[@]}"; do
+preflight_primary() {
+  local primary="$1"
   select_primary "$primary"
   preflight_directory_target "$platform_home/skills" "$PRODUCT_ROOT/skills"
   if [[ "$PLATFORM" == "claude" ]]; then
@@ -300,25 +303,45 @@ for primary in "${primary_platforms[@]}"; do
     run_stdlib "$PRODUCT_ROOT/scripts/manage_installation.py" preflight \
       --source "$PRODUCT_ROOT/skills" \
       --custom-source "$instance_root/custom-skills" \
-      --target "$platform_home/skills" >/dev/null
+      --target "$platform_home/skills" >/dev/null || return $?
   fi
   run_stdlib "$PRODUCT_ROOT/scripts/instance_installation.py" validate \
-    --product-root "$PRODUCT_ROOT" --instance-root "$instance_root" >/dev/null
+    --product-root "$PRODUCT_ROOT" --instance-root "$instance_root" >/dev/null || return $?
   if [[ "$PLATFORM" == "claude" ]]; then
     if [[ ! -L "$platform_home/agents" ]]; then
       run_stdlib "$PRODUCT_ROOT/scripts/manage_installation.py" plan \
         --surface agents \
         --source "$PRODUCT_ROOT/agents" \
         --target "$platform_home/agents" \
-        --summary >/dev/null
+        --summary >/dev/null || return $?
     fi
     if [[ ! -L "$platform_home/workflows" ]]; then
-      run_stdlib "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows" --preflight
+      run_stdlib "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows" --preflight || return $?
     fi
   fi
   preflight_instructions
   preflight_harness_link
+}
+
+selected_platforms=()
+skipped_platforms=()
+for primary in "${primary_platforms[@]}"; do
+  if [[ "$REQUESTED_PLATFORM" == "all" && "$primary" != "claude" && "$primary" != "codex" ]]; then
+    if ! diagnostic="$(preflight_primary "$primary" 2>&1)"; then
+      printf '%s\n' "$diagnostic" >&2
+      skip_reason=conflict
+      [[ "$diagnostic" == *"instructions preserved="* ]] && skip_reason=instructions-preserved
+      echo "warning: detected provider $primary skipped=$skip_reason; preserving its files" >&2
+      echo "provider $primary skipped=$skip_reason"
+      skipped_platforms+=("$primary")
+      continue
+    fi
+  else
+    preflight_primary "$primary"
+  fi
+  selected_platforms+=("$primary")
 done
+primary_platforms=("${selected_platforms[@]}")
 
 # Refuse a command collision before any installation mutation. Publication
 # revalidates this state and uses atomic no-replace or exchange primitives.
@@ -344,6 +367,11 @@ mcp_args=(
   --kiro-config "${KIRO_MCP_CONFIG:-$HOME/.kiro/settings/mcp.json}"
   --opencode-config "${OPENCODE_MCP_CONFIG:-${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}/opencode.jsonc}"
 )
+if [[ "$REQUESTED_PLATFORM" == "all" && "$MCP_CLIENTS" == "all" ]]; then
+  for skipped in "${skipped_platforms[@]}"; do
+    mcp_args+=(--skip-client "$skipped")
+  done
+fi
 mcp_instance_root=""
 if [[ -n "${AGENT_FABRIC_INSTANCE_ROOT:-}" && "$instance_root" != "$HOME/.agents" ]]; then
   mcp_instance_root="$instance_root"

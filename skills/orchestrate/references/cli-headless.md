@@ -361,10 +361,10 @@ dispatch is the supported expansion path.
   explicitly; discover with `opencode models` after login. Paid catalogue
   changes do not require a Provenant alias-table edit.
 
-Instance installs seed `config/model-routing.json` into `~/.agents/config/`
-once. Check-install reports product catalogue drift; explicitly run
-`install-harness --platform all --refresh-routing` to back up and refresh
-product-owned sections while retaining instance additions.
+Instance installs seed `config/model-routing.json` and a product snapshot into
+`~/.agents/config/` once. Check-install warns about drift; `--strict` makes it
+fail. Run `install-harness --platform all --refresh-routing` to back up and
+merge product changes with instance edits. Refresh lists overwritten conflicts.
 
 ## Output normalisation
 
