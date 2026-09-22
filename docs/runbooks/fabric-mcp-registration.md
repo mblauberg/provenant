@@ -78,7 +78,9 @@ is not a qualifying Gemini leg.
 OpenCode's `instructions[]` includes the instance `AGENTS.md` and the product
 `HARNESS.md`. The installer preserves unrelated entries, rejects a conflicting
 doctrine path, and rebinds a prior product path recorded by the instance's
-product-root pointer when the checkout moves. Re-run `install-harness` after
+product-root pointer when the checkout moves. Standalone MCP configuration
+uses the pointer for the current product path when `--agents-home` is omitted.
+Re-run `install-harness` after
 relocation so the literal OpenCode paths and pointer agree.
 
 `config/model-routing.json` remains instance-owned. Install and validation name

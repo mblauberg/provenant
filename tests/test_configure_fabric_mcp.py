@@ -291,6 +291,37 @@ def test_opencode_rebinds_harness_from_previous_product_pointer(tmp_path: Path) 
     ]
 
 
+def test_opencode_standalone_configurer_uses_the_instance_product_pointer(tmp_path: Path) -> None:
+    instance_root = tmp_path / "instance"
+    pointer = instance_root / ".agent-fabric/product-root.json"
+    pointer.parent.mkdir(parents=True)
+    product = tmp_path / "selected-product"
+    product.mkdir()
+    (product / "HARNESS.md").write_text("# Harness\n")
+    pointer.write_text(json.dumps({"schema_version": 1, "product_root": str(product)}))
+    config = tmp_path / "opencode.jsonc"
+
+    result = subprocess.run(
+        [
+            str(SCRIPT), "--platform", "opencode",
+            "--instance-root", str(instance_root),
+            "--state-directory", str(tmp_path / "state"),
+            "--shim-path", str(stable_shim(tmp_path)),
+            "--opencode-config", str(config),
+        ],
+        cwd=ROOT,
+        env={**os.environ, "HOME": str(tmp_path / "home")},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(config.read_text())["instructions"] == [
+        str(instance_root / "AGENTS.md"), str(product / "HARNESS.md"),
+    ]
+
+
 def test_stable_registration_launches_after_product_relocation(tmp_path: Path) -> None:
     configurer = load_configurer()
     shim = stable_shim(tmp_path)

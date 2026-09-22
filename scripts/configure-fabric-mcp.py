@@ -18,7 +18,7 @@ import tempfile
 import tomllib
 from typing import Any
 
-from lib.product_root_resolver import load_pointer_path
+from lib.product_root_resolver import POINTER_RELATIVE_PATH, load_pointer_path
 
 
 SERVER_NAME = "fabric"
@@ -624,7 +624,12 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--preflight", action="store_true")
-    args = parser.parse_args(argv)
+    arguments = sys.argv[1:] if argv is None else argv
+    agents_home_explicit = any(
+        item == "--agents-home" or item.startswith("--agents-home=")
+        for item in arguments
+    )
+    args = parser.parse_args(arguments)
     try:
         agents_home = args.agents_home.resolve(strict=True)
         shim_path = args.shim_path.expanduser()
@@ -676,6 +681,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.platform in {"all", "opencode"}:
             instruction_root = instance_root or Path.home() / ".agents"
             previous_product = load_pointer_path(instruction_root)
+            instruction_product = agents_home
+            if not agents_home_explicit and (instruction_root / POINTER_RELATIVE_PATH).exists():
+                if previous_product is None or not (previous_product / "HARNESS.md").is_file():
+                    raise RegistrationError(
+                        "product-root pointer is invalid or stale; repair: run install-harness"
+                    )
+                instruction_product = previous_product
             proposals.append(opencode_update(
                 args.opencode_config,
                 registration(
@@ -687,7 +699,7 @@ def main(argv: list[str] | None = None) -> int:
                     instance_root=instance_root,
                 ),
                 (
-                    instruction_root / "AGENTS.md", agents_home / "HARNESS.md",
+                    instruction_root / "AGENTS.md", instruction_product / "HARNESS.md",
                     previous_product / "HARNESS.md" if previous_product else None,
                 ),
             ))
