@@ -440,12 +440,19 @@ export async function fabricStatus(workspace: string, id?: string, waitSeconds =
       const selectedIndex = id === undefined || !Array.isArray(status?.task_ids) ? -1 : status.task_ids.indexOf(id);
       const selectedTask = id !== undefined && id !== status?.id && id !== owner?.task_id && id !== owner?.batch_id
         ? attempts.find((attempt) => attempt.task_id === id) : undefined;
+      const batchId = owner?.batch_id ?? (status?.kind === "batch" ? status.id : undefined);
+      const summaryPath = typeof batchId === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(batchId)
+        ? join(runDir, "dispatch", "batches", batchId, "summary.json") : undefined;
+      const summary = summaryPath === undefined ? undefined : readJson(summaryPath);
       const route = (selectedTask?.route ?? (selectedIndex >= 0 ? (status?.routes as unknown[] | undefined)?.[selectedIndex] : undefined) ?? status?.route ?? attempts[0]?.route ?? (status?.routes as unknown[] | undefined)?.[0] ?? {}) as Record<string, unknown>;
       const terminal = attempts.length > 0 && attempts.every((attempt) =>
-        ["succeeded", "failed", "blocked", "timed_out", "cancelled"].includes(String(attempt.status)));
+        ["succeeded", "failed", "blocked", "timed_out", "cancelled"].includes(String(attempt.status))) &&
+        (batchId === undefined || (Array.isArray(status?.task_ids) &&
+          status.task_ids.every((taskId) => attempts.some((attempt) => attempt.task_id === taskId))));
       let state = String(status?.status ?? "running");
       if (state === "running" && !alive) {
-        state = terminal ? (attempts.length === 1 ? String(attempts[0]!.status) : "completed") : "interrupted";
+        state = ["completed", "failed", "cancelled"].includes(String(summary?.status)) ? String(summary!.status)
+          : terminal ? (batchId === undefined ? String(attempts[0]!.status) : "completed") : "interrupted";
       }
       if (alive) state = "running";
       if (selectedTask !== undefined) state = String(selectedTask.status);
@@ -455,12 +462,12 @@ export async function fabricStatus(workspace: string, id?: string, waitSeconds =
       const silence = Math.max(0, (Date.now() - newest) / 1000);
       const paths = status?.paths as Record<string, unknown> | undefined;
       const result = (selectedTask ?? attempts[0])?.result as Record<string, unknown> | undefined;
-      const finished = Date.parse(String(selectedTask?.finished_at ?? status?.finished_at ?? attempts.at(-1)?.finished_at ?? ""));
+      const finished = Date.parse(String(selectedTask?.finished_at ?? status?.finished_at ?? summary?.finished_at ?? attempts.at(-1)?.finished_at ?? ""));
       return { id: selectedTask?.task_id ?? (selectedIndex >= 0 ? id : undefined) ?? status?.id ?? owner?.task_id ?? owner?.batch_id ?? basename(runDir), run_dir: runDir,
         adapter: route.adapter ?? null, model: route.resolved_model ?? route.model ?? null,
         status: state, elapsed_seconds: Math.round(Math.max(0, ((state === "running" || !finished ? Date.now() : finished) - started) / 1000)),
         output_age_seconds: Math.round(silence), stalled: state === "running" && alive && silence > Math.max(600, Number(status?.timeout_seconds ?? 3600) * 0.2),
-        result_path: safePath(selectedTask === undefined ? paths?.result ?? paths?.summary ?? result?.path : result?.path) ?? null };
+        result_path: safePath(selectedTask === undefined ? paths?.result ?? paths?.summary ?? (summary === undefined ? result?.path : summaryPath) : result?.path) ?? null };
     });
     if (id === undefined) return { runs: rows };
     const row = rows[0]!;

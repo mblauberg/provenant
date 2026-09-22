@@ -18,6 +18,11 @@ include a one-line fix, and launch no batch tasks. Writes require
 `mode: worktree_write` and a distinct registered worktree. Timeouts default to
 3600 seconds for reads and 10800 for writes. Wait up to 55 seconds, then use
 `fabric_status` with the returned id or run directory; no id lists recent runs.
+
+Provider launch strips the chair's `AGENT_FABRIC_STATE_DIRECTORY`,
+`AGENT_FABRIC_SEAT`, `AGENT_FABRIC_CLIENT_LABEL`, `AGENT_FABRIC_LABEL` and
+`AGENT_FABRIC_PRODUCT_ROOT`. Dispatch and batch owners keep their own context;
+workers discover their workspace and identity independently.
 Status is read-only, including liveness and silence reporting. Ordinary MCP
 execution custody closes when its attempts become terminal; delivery gates
 remain separate.
@@ -254,7 +259,3 @@ automatic retries or silent substitution.
 Frontier families increasingly make *correlated* errors, so "ask another model" is weakening on its
 own. Lean on **objective/locally-checkable verification** and (in non-code domains) source-anchoring +
 action-authority gates, with cross-family review as pressure on top — not as the sole safety net.
-Provider launch strips the chair's `AGENT_FABRIC_STATE_DIRECTORY`,
-`AGENT_FABRIC_SEAT`, `AGENT_FABRIC_CLIENT_LABEL`, `AGENT_FABRIC_LABEL` and
-`AGENT_FABRIC_PRODUCT_ROOT`. Dispatch and batch owners keep their own context;
-workers discover their workspace and identity independently.

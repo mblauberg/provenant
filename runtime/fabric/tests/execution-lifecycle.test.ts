@@ -1,6 +1,6 @@
 import { execFileSync, spawn } from "node:child_process";
 import {
-  chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
+  chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync,
   rmSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
@@ -602,6 +602,23 @@ describe("orphan reaping", () => {
 });
 
 describe("compact status", () => {
+  it("does not report an interrupted partial batch as completed", async () => {
+    const dir = join(workspace, ".agent-run", "mcp-partial");
+    const attemptDir = join(dir, "dispatch", "tasks", "done", "attempt-001");
+    mkdirSync(attemptDir, { recursive: true });
+    writeFileSync(join(dir, "dispatch-status.json"), JSON.stringify({ id: "partial", kind: "batch",
+      status: "running", task_ids: ["done", "missing"], started_at: new Date().toISOString() }));
+    writeFileSync(join(attemptDir, "attempt.json"), JSON.stringify({ task_id: "done", status: "succeeded" }));
+    expect(await fabricStatus(workspace, "partial")).toMatchObject({ status: "interrupted" });
+    expect(await fabricStatus(workspace, "done")).toMatchObject({ id: "done", status: "succeeded" });
+    const summaryDir = join(dir, "dispatch", "batches", "partial");
+    mkdirSync(summaryDir, { recursive: true });
+    writeFileSync(join(summaryDir, "summary.json"), JSON.stringify({ status: "cancelled", batch_id: "partial",
+      tasks: [{ task_id: "done", status: "succeeded" }, { task_id: "missing", status: "cancelled" }] }));
+    expect(await fabricStatus(workspace, "partial")).toMatchObject({ status: "cancelled",
+      result_path: realpathSync(join(summaryDir, "summary.json")) });
+  });
+
   it("retains terminal route and result after the owner exits", async () => {
     const result = await dispatchConfiguredProvider(
       { adapter: "codex", model: "gpt-6-luna", effort: "medium", prompt: "emit empty provider result", task_id: "status-task", wait_seconds: 5 },
