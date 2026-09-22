@@ -277,15 +277,26 @@ with open(raw, encoding="utf-8", errors="replace") as stream:
             event = json.loads(line)
         except ValueError:
             continue
+        if not isinstance(event, dict):
+            continue
         if event.get("type") == "text":
             part = event.get("part", {})
             if isinstance(part, dict) and isinstance(part.get("text"), str):
                 parts.append(part["text"])
         elif event.get("type") == "error":
             error = event.get("error", {})
-            data = error.get("data", {}) if isinstance(error, dict) else {}
-            message = data.get("message") or error.get("message") or str(error)
-            errors.append((data.get("statusCode"), str(message)))
+            if isinstance(error, dict):
+                data = error.get("data")
+                data = data if isinstance(data, dict) else {}
+                message = data.get("message") or error.get("message") or str(error)
+            else:
+                data = {}
+                message = str(error)
+            try:
+                code = int(data.get("statusCode"))
+            except (ValueError, TypeError):
+                code = None
+            errors.append((code, str(message)))
         elif event.get("type") == "tool_use":
             part = event.get("part", {})
             state = part.get("state", {}) if isinstance(part, dict) else {}
@@ -298,7 +309,7 @@ if errors:
         for code, message in errors:
             output.write(f"OpenCode {code or 'error'}: {message}\n")
     if any(code in (401, 403, 429) or any(word in message.lower() for word in
-           ("quota", "free tier", "rate limit", "unauthorized")) for code, message in errors):
+           ("quota", "free tier", "rate limit", "unauthorized", "forbidden")) for code, message in errors):
         sys.exit(4)
     sys.exit(5)
 if not parts:

@@ -3187,6 +3187,33 @@ def test_opencode_event_failures_are_typed_and_keep_raw_jsonl(events, expected_s
         assert events in (tmp / "out.txt.raw.jsonl").read_text()
 
 
+@pytest.mark.parametrize("events,expected_status,expected_text", [
+    ('null\n[1,2]\n{"type":"text","part":{"text":"OK"}}', "ok", "OK"),
+    ('{"type":"error","error":"forbidden"}', "auth_or_quota_error", "forbidden"),
+    ('{"type":"error","error":{"data":null,"message":"forbidden"}}', "auth_or_quota_error", "forbidden"),
+    ('{"type":"error","error":{"data":{"statusCode":"403","message":"access denied"}}}',
+     "auth_or_quota_error", "access denied"),
+])
+def test_opencode_parser_accepts_non_object_json_and_error_shapes(events, expected_status, expected_text):
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", "#!/usr/bin/env bash\ncat <<'EOF'\n" + events + "\nEOF\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        record = json.loads(result.stdout)
+        assert record["status"] == expected_status, result.stderr
+        assert expected_text in out.read_text()
+        assert "Traceback" not in result.stderr
+
+
 def test_opencode_idle_watchdog_terminates_silent_provider():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
