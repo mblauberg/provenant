@@ -144,7 +144,8 @@ bursts.
 
 ## MCP surface
 
-The MCP server announces its identity at ordinary startup and exposes:
+The MCP server announces its identity at startup with a 1 ms lock budget. If
+the store is busy, coordination tools retry lazily. It exposes:
 
 ```text
 fabric_whoami       fabric_send          fabric_inbox
@@ -183,15 +184,21 @@ reads and 10800 for writes; `timeout_seconds` overrides them.
 (up to eight). Every task is checked before anything launches, with one
 capability probe per adapter per call. Bad inputs return `status: "rejected"`,
 an `error` code and a one-line `fix`; batches include per-task errors. Rejection
-creates no run directory, and two writer tasks cannot share a worktree.
+for caller input creates no run directory, and two writer tasks cannot share a
+worktree. Harness or run-setup failures return `preflight_unavailable` with the
+environment, scripts or permissions to check. Cancelling preflight stops its
+child without launching an execution owner.
 
-Both tools retain full output in files and return compact status and paths.
+Both tools retain full output in files and return a unique short `id`, compact
+status and paths, whether running or terminal.
 `wait_seconds` defaults to 55; zero returns after preflight and launch. Continue
-with `fabric_status({id: task_id_or_batch_id_or_run_dir, wait_seconds: 55})`.
-Omit `id` for at most 20 workspace runs from the last 24 hours. Reused task or
-batch identifiers require the returned `run_dir` to disambiguate.
+with `fabric_status({id: "mcp-AbC123", wait_seconds: 55})`, passing the returned
+`id`. Omit `id` for at most 20 workspace runs from the last 24 hours. Task IDs,
+batch IDs and run directories also work; repeated IDs select the newest run
+and return a one-line `note`.
 The CLI equivalents are `fabric status <id> --wait-seconds 55` and
-`fabric status --runs`; bare `fabric status` retains the store summary.
+`fabric status --runs`; flags may appear before or after the ID. Bare
+`fabric status` retains the store summary.
 
 Status reads owner/provider liveness and retained stdout/stderr/result mtimes without
 writing to SQLite or starting background work. It reports elapsed time,
@@ -206,8 +213,10 @@ after the provider exits; status reads timestamps only.
 
 Dispatch and batch owners retain their chair context, but provider processes
 start without the chair's Fabric state directory, seat, client label, agent
-label or product-root override. Worker tests and commands discover their own
-workspace instead of using the chair's state or checkout.
+label, product-root override or `PROVENANT_RUN_*` / `PROVENANT_PREFLIGHT_*`
+custody variables. Missing instance configuration falls back to the product
+catalogue only for router subprocesses. Worker tests and commands discover
+their own workspace instead of using the chair's state or checkout.
 
 MCP execution owners close `RUN_RECEIPT.json` after all attempts finish. This is
 a minimal execution-status update under the existing custody lock: the delivery

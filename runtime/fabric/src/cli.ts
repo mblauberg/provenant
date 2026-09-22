@@ -75,11 +75,21 @@ const flag = (name: string): string | undefined => {
   return value;
 };
 const who = identify();
-if (command === "status" && (argv[1] !== undefined && argv[1] !== "--json")) {
-  const wait = flag("wait-seconds");
-  const id = argv.slice(1).find((value) => value !== "--json" && value !== "--runs");
-  console.log(JSON.stringify(await fabricStatus(who.cwd, id, wait === undefined ? 0 : Number(wait)), null, 2));
-  process.exit(0);
+if (command === "status") {
+  try {
+    const wait = flag("wait-seconds");
+    const rest = argv.slice(1).filter((value) => value !== "--json" && value !== "--runs");
+    if (rest.length > 1 || rest.some((value) => value.startsWith("--"))) {
+      throw new Error("usage: fabric status [id] [--wait-seconds N] [--json]");
+    }
+    if (rest[0] !== undefined || argv.includes("--runs") || wait !== undefined) {
+      console.log(JSON.stringify(await fabricStatus(who.cwd, rest[0], wait === undefined ? 0 : Number(wait)), null, 2));
+      process.exit(0);
+    }
+  } catch (error) {
+    console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(2);
+  }
 }
 /**
  * Dispatch runs are recorded on disk, not in the store, so these read and act

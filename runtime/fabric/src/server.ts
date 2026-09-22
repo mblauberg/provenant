@@ -20,7 +20,7 @@ import { isSQLiteContention, Store, type Message } from "./store.js";
 const MAX_WAIT_SECONDS = MAX_EXECUTION_WAIT_SECONDS;
 
 /**
- * One MCP process per agent; coordination tools open the store on first use.
+ * One MCP process per agent; announce at startup and retry lazily on contention.
  *
  * There is no handshake to fail, so there is no reconnect path, so there is no
  * class of error that reports "the daemon is unavailable" while the daemon is
@@ -255,7 +255,7 @@ server.registerTool(
 server.registerTool(
   "fabric_status",
   {
-    description: "Read a task_id, batch_id or run_dir; omit id for up to 20 workspace runs from the last 24 hours. Wait up to 55 seconds for completion; reports liveness, silence and result path without changing runs.",
+    description: "Pass the id from the dispatch response; task_id, batch_id and run_dir also work (newest match with a note if ambiguous). Omit id for up to 20 workspace runs from the last 24 hours. Wait up to 55 seconds for completion; reports liveness, silence and result path without changing runs.",
     inputSchema: { id: z.string().min(1).optional(), wait_seconds: z.number().int().min(0).max(55).optional() },
   },
   async ({ id, wait_seconds }, { signal }) => reply(await fabricStatus(who.cwd, id, wait_seconds, signal)),
@@ -370,6 +370,12 @@ server.registerTool(
       : snapshot);
   },
 );
+
+// Presence is best effort: a lock must not delay the transport or execution tools.
+try { initialiseStore(1); }
+catch (error) {
+  console.error(`fabric: startup presence deferred: ${error instanceof Error ? error.message : String(error)}`);
+}
 
 const transport = new StdioServerTransport();
 process.stdin.once("end", () => { void transport.close(); });

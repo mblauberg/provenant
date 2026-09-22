@@ -14,7 +14,18 @@ const value = (flag) => {
 if (process.argv.includes("--preflight-json")) {
   let input = "";
   for await (const chunk of process.stdin) input += chunk;
+  if (process.env.FIXTURE_PREFLIGHT_FAILURE === "exit") process.exit(9);
+  if (process.env.FIXTURE_PREFLIGHT_FAILURE === "json") {
+    process.stdout.write("not JSON");
+    process.exit(0);
+  }
   const tasks = JSON.parse(input).tasks;
+  if (process.env.FIXTURE_PREFLIGHT_PID) {
+    writeFileSync(process.env.FIXTURE_PREFLIGHT_PID, String(process.pid));
+    while (!existsSync(process.env.FIXTURE_PREFLIGHT_RELEASE)) {
+      await new Promise((done) => setTimeout(done, 20));
+    }
+  }
   process.stdout.write(JSON.stringify({ status: "validated", routes: tasks }));
   process.exit(0);
 }
@@ -22,7 +33,14 @@ if (process.argv.includes("--preflight-json")) {
 const owner = process.env.PROVENANT_FIXTURE_OWNER ?? basename(process.argv[1]);
 
 if (owner === "run_dir_init.sh") {
+  if (process.env.FIXTURE_SETUP_FAILURE) process.exit(9);
   const runDir = process.argv[2];
+  if (process.env.FIXTURE_SETUP_PID) {
+    writeFileSync(process.env.FIXTURE_SETUP_PID, String(process.pid));
+    while (!existsSync(process.env.FIXTURE_SETUP_RELEASE)) {
+      await new Promise((done) => setTimeout(done, 20));
+    }
+  }
   mkdirSync(join(runDir, "findings"), { recursive: true });
   mkdirSync(join(runDir, "traces"), { recursive: true });
   writeFileSync(join(runDir, "MANIFEST.md"), "# fixture manifest\n");
@@ -30,6 +48,7 @@ if (owner === "run_dir_init.sh") {
     schema_version: 1,
     status: "active",
   }) + "\n");
+  if (process.env.FIXTURE_STATUS_DIRECTORY) mkdirSync(join(runDir, "dispatch-status.json"));
   process.stdout.write(`${runDir}\n`);
   process.exit(0);
 }
@@ -109,7 +128,9 @@ if (owner === "run_controls.py") {
 if (owner === "dispatch_run.py") {
   const taskId = value("--task-id");
   const prompt = readFileSync(value("--prompt-file"), "utf8");
-  if (prompt === "sleep with provider") {
+  if (prompt === "sleep without provider") {
+    sleepUntilSignalled();
+  } else if (prompt === "sleep with provider") {
     mkdirSync(join(runDir, "dispatch", "tasks", taskId, "attempt-001"), { recursive: true });
     startProvider();
     sleepUntilSignalled();

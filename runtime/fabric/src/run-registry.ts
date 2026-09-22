@@ -398,19 +398,26 @@ export async function fabricStatus(workspace: string, id?: string, waitSeconds =
         const status = readJson(join(runDir, "dispatch-status.json"));
         const owner = readOwnerRecord(runDir);
         const started = Date.parse(String(status?.started_at ?? owner?.started_at ?? "")) || metadata.birthtimeMs;
-        return [{ runDir, status, owner, started }];
+        return [{ runDir, status, owner, started, created: metadata.birthtimeMs }];
       } catch { return []; }
-    }).sort((a, b) => b.started - a.started);
+    }).sort((a, b) => b.started - a.started || b.created - a.created);
+    const exact = candidates.find((run) => run.runDir === id || basename(run.runDir) === id);
     const matches = id === undefined
       ? candidates.filter((run) => run.started >= Date.now() - 86_400_000).slice(0, 20)
-      : candidates.filter((run) => [run.runDir, basename(run.runDir), run.status?.id, run.owner?.task_id, run.owner?.batch_id].includes(id)
+      : exact !== undefined ? [exact] : candidates.filter((run) => [run.status?.id, run.status?.task_id, run.status?.batch_id, run.owner?.task_id, run.owner?.batch_id].includes(id)
         || (Array.isArray(run.status?.task_ids) && run.status.task_ids.includes(id))
         || (/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(id) && readJson(join(run.runDir, "dispatch", "tasks", id, "attempt-001", "attempt.json"))?.task_id === id));
-    if (id !== undefined && matches.length !== 1) {
-      return { status: "rejected", error: matches.length === 0 ? "run_not_found" : "run_id_ambiguous",
-        fix: "Pass the run_dir returned by fabric_dispatch or fabric_batch." };
+    if (id !== undefined && matches.length === 0) {
+      return { status: "rejected", error: "run_not_found",
+        fix: "Pass the id from the dispatch response." };
     }
-    const rows = matches.map(({ runDir, status, owner, started }) => {
+    const note = id !== undefined && matches.length > 1 ? `Multiple runs match; showing the newest (${basename(matches[0]!.runDir)}).` : undefined;
+    const rows = (id === undefined ? matches : matches.slice(0, 1)).map(({ runDir, status: initialStatus, owner, started }) => {
+      const provider = owner === undefined ? null : readProviderRecord(runDir, owner.run_token);
+      const alive = (owner !== undefined && observedAlive(owner.owner_pid, owner.owner_started_at)) ||
+        (provider !== null && observedAlive(provider.provider_pid, provider.provider_started_at));
+      // Once the owner is dead its attempt files are final. Read them after the probe.
+      const status = readJson(join(runDir, "dispatch-status.json")) ?? initialStatus;
       const safePath = (value: unknown): string | undefined => {
         if (typeof value !== "string") return undefined;
         const path = resolve(runDir, value);
@@ -445,13 +452,10 @@ export async function fabricStatus(workspace: string, id?: string, waitSeconds =
           }
         }
       } catch { /* A new run may not have its first attempt yet. */ }
-      const provider = owner === undefined ? null : readProviderRecord(runDir, owner.run_token);
-      const alive = (owner !== undefined && observedAlive(owner.owner_pid, owner.owner_started_at)) ||
-        (provider !== null && observedAlive(provider.provider_pid, provider.provider_started_at));
       const selectedIndex = id === undefined || !Array.isArray(status?.task_ids) ? -1 : status.task_ids.indexOf(id);
-      const selectedTask = id !== undefined && id !== status?.id && id !== owner?.task_id && id !== owner?.batch_id
+      const selectedTask = id !== undefined && id !== status?.id && id !== status?.task_id && id !== status?.batch_id && id !== owner?.task_id && id !== owner?.batch_id
         ? attempts.find((attempt) => attempt.task_id === id) : undefined;
-      const batchId = owner?.batch_id ?? (status?.kind === "batch" ? status.id : undefined);
+      const batchId = owner?.batch_id ?? status?.batch_id ?? (status?.kind === "batch" ? status.id : undefined);
       const summaryPath = typeof batchId === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(batchId)
         ? join(runDir, "dispatch", "batches", batchId, "summary.json") : undefined;
       const summary = summaryPath === undefined ? undefined : readJson(summaryPath);
@@ -481,7 +485,7 @@ export async function fabricStatus(workspace: string, id?: string, waitSeconds =
         result_path: safePath(selectedTask === undefined ? paths?.result ?? paths?.summary ?? (summary === undefined ? result?.path : summaryPath) : result?.path) ?? null };
     });
     if (id === undefined) return { runs: rows };
-    const row = rows[0]!;
+    const row = { ...rows[0]!, ...(note === undefined ? {} : { note }) };
     if (row.status !== "running" || Date.now() >= deadline) return row;
     await new Promise((done) => setTimeout(done, Math.min(250, deadline - Date.now())));
   }

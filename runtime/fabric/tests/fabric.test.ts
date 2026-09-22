@@ -427,6 +427,26 @@ describe("CLI boundaries", () => {
 });
 
 describe("MCP startup boundaries", () => {
+  it("announces a connected seat before any coordination tool is called", async () => {
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["--import", createRequire(import.meta.url).resolve("tsx"),
+        fileURLToPath(new URL("../src/server.ts", import.meta.url))],
+      cwd: repositoryRoot,
+      stderr: "pipe",
+      env: { HOME: process.env.HOME ?? temporaryDirectory, PATH: process.env.PATH ?? "/usr/bin:/bin",
+        AGENT_FABRIC_STATE_DIRECTORY: temporaryDirectory, AGENT_FABRIC_SEAT: "codex",
+        AGENT_FABRIC_LABEL: "connected-seat", NODE_NO_WARNINGS: "1" },
+    });
+    const client = new Client({ name: "presence-regression", version: "1" });
+    try {
+      await client.connect(transport);
+      expect(openStore().agents(agent("observer").project)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ agentId: "connected-seat", provider: "codex" }),
+      ]));
+    } finally { await client.close(); }
+  });
+
   it("closes an active wait when stdin reaches EOF", async () => {
     const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
     const tsxLoader = createRequire(import.meta.url).resolve("tsx");
