@@ -3208,6 +3208,39 @@ def test_opencode_idle_watchdog_terminates_silent_provider():
         assert "idle for 1s; try another model" in out.read_text()
 
 
+def test_opencode_dispatch_group_signal_terminates_provider_and_grandchild():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", f"""#!/usr/bin/env bash
+            trap 'touch "{tmp / 'provider.stopped'}"; exit 143' TERM
+            (trap 'touch "{tmp / 'grandchild.stopped'}"; exit 143' TERM; touch "{tmp / 'ready'}"; while :; do sleep 0.1; done) &
+            wait
+        """)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        process = subprocess.Popen(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(tmp / "out.txt")],
+            cwd=tmp, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while not (tmp / "ready").exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert (tmp / "ready").exists()
+            os.killpg(process.pid, signal.SIGTERM)
+            process.communicate(timeout=5)
+            assert (tmp / "provider.stopped").exists()
+            assert (tmp / "grandchild.stopped").exists()
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+
+
 def test_oversized_argv_prompt_is_typed_for_cursor():
     """cursor takes the prompt as one argv value, like agy.
 

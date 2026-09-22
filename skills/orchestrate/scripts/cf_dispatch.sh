@@ -224,26 +224,44 @@ except ValueError:
 with open(raw, "wb") as output, open(diag, "ab") as diagnostic:
     child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output,
                              stderr=diagnostic, cwd=cwd or None, start_new_session=True)
+    cancelled = False
+    def cancel(_signum, _frame):
+        global cancelled
+        cancelled = True
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, cancel)
+    def stop_group():
+        try:
+            os.killpg(child.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        try:
+            child.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            pass
+        time.sleep(0.1)
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait()
     last_size = 0
     last_growth = time.monotonic()
     while child.poll() is None:
         time.sleep(0.25)
+        if cancelled:
+            stop_group()
+            sys.exit(143)
         size = os.fstat(output.fileno()).st_size
         if size != last_size:
             last_size, last_growth = size, time.monotonic()
         elif time.monotonic() - last_growth >= idle:
-            os.killpg(child.pid, signal.SIGTERM)
-            try:
-                child.wait(timeout=1)
-            except subprocess.TimeoutExpired:
-                pass
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            child.wait()
+            stop_group()
             diagnostic.write(f"OpenCode idle for {idle}s; try another model\n".encode())
             sys.exit(124)
+    stop_group()
+    if cancelled:
+        sys.exit(143)
     sys.exit(child.returncode)
 PY
 }
