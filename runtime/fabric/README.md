@@ -182,6 +182,9 @@ the current provider seat, the `workhorse` route, the `worker` role and
 `read_only_guarantee`; Agy is `prompt_only`, even with its optional sandbox.
 OpenCode is `best_effort` on read-only runs and supports an owned worktree
 writer. OpenCode and Cursor select an adapter default model when none is given.
+OpenCode treats progress on either output stream as activity; its idle limit is
+600 seconds for read-only runs and 1800 seconds for writers unless
+`CF_DISPATCH_IDLE_SECONDS` is set. Cancelling a run stops its provider session.
 A worker that must write takes `mode: "worktree_write"` with
 a `worktree` it owns exclusively; two writer tasks may never name one worktree.
 They create the run directory automatically, delegate to `dispatch_run.py` or

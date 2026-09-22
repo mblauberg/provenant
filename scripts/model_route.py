@@ -146,8 +146,8 @@ def load_adapter_compatibility(
         "disabled_reason": disabled_reason.strip() if isinstance(disabled_reason, str) else "",
         "allowed_families": allowed,
         "allowed_model_patterns": patterns,
-        # Fail closed on omission: only an explicit `false` opts an adapter
-        # into account-default dispatch (#190).
+        # Fail closed on omission: only an explicit `false` permits dispatch
+        # without a caller-supplied model, via an account or catalogue default.
         "requires_explicit_model": (constraints.get("requires_explicit_model") is not False)
         if isinstance(constraints, dict)
         else True,
