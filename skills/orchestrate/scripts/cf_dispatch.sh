@@ -227,14 +227,14 @@ except ValueError:
         output.write("CF_DISPATCH_IDLE_SECONDS must be a positive integer\n")
     sys.exit(2)
 with open(raw, "wb") as output, open(diag, "ab") as diagnostic:
-    child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output,
-                             stderr=diagnostic, cwd=cwd or None, start_new_session=True)
     cancelled = False
     def cancel(_signum, _frame):
         global cancelled
         cancelled = True
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, cancel)
+    child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output,
+                             stderr=diagnostic, cwd=cwd or None, start_new_session=True)
     def stop_group():
         try:
             os.killpg(child.pid, signal.SIGTERM)
@@ -250,6 +250,9 @@ with open(raw, "wb") as output, open(diag, "ab") as diagnostic:
         except ProcessLookupError:
             pass
         child.wait()
+    if cancelled:
+        stop_group()
+        sys.exit(143)
     last_size = (0, 0)
     last_growth = time.monotonic()
     while child.poll() is None:
