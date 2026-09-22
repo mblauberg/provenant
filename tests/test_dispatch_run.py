@@ -1919,3 +1919,43 @@ print(json.dumps({'models': [{'slug': 'gpt-6-luna', 'supported_reasoning_levels'
     assert record['status'] == 'validated', record
     assert len(record['routes']) == 3
     assert counter.read_text().splitlines() == ['probe']
+
+
+@pytest.mark.parametrize('owner', ['dispatch', 'batch'])
+def test_provider_does_not_inherit_chair_fabric_environment(tmp_path, owner):
+    run_dir = make_run(tmp_path, 'isolated-provider')
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('Reply OK')
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    write_executable(bin_dir / 'codex', '''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+if sys.argv[1:3] == ['debug', 'models']:
+    print(json.dumps({'models': [{'slug': 'gpt-6-luna', 'supported_reasoning_levels': [{'effort': 'high'}]}]}))
+else:
+    names = ['AGENT_FABRIC_STATE_DIRECTORY', 'AGENT_FABRIC_SEAT', 'AGENT_FABRIC_CLIENT_LABEL',
+             'AGENT_FABRIC_LABEL', 'AGENT_FABRIC_PRODUCT_ROOT']
+    Path(os.environ['PROVIDER_ENV_CAPTURE']).write_text(json.dumps({k: os.environ[k] for k in names if k in os.environ}))
+    sys.stdin.read()
+    print('OK')
+''')
+    capture = tmp_path / 'provider-env.json'
+    env = {**os.environ, 'PATH': f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}",
+           'AGENT_FABRIC_INSTANCE_ROOT': str(ROOT), 'AGENT_FABRIC_PRODUCT_ROOT': str(ROOT),
+           'AGENT_FABRIC_STATE_DIRECTORY': str(tmp_path / 'chair-state'),
+           'AGENT_FABRIC_SEAT': 'claude', 'AGENT_FABRIC_CLIENT_LABEL': 'chair-client',
+           'AGENT_FABRIC_LABEL': 'chair-label', 'PROVIDER_ENV_CAPTURE': str(capture)}
+    if owner == 'dispatch':
+        command = [str(SCRIPT), '--run-dir', str(run_dir), '--adapter', 'codex',
+                   '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker']
+    else:
+        manifest = tmp_path / 'tasks.json'
+        manifest.write_text(json.dumps({'schema_version': 1, 'tasks': [
+            {'id': 'isolated', 'adapter': 'codex', 'prompt_file': str(prompt),
+             'alias': 'workhorse', 'role': 'worker'}]}))
+        command = [str(SCRIPT.with_name('batch_run.py')), '--run-dir', str(run_dir), '--manifest', str(manifest)]
+    result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(capture.read_text()) == {}
+    assert not (tmp_path / 'chair-state').exists()

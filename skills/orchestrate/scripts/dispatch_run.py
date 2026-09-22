@@ -1249,6 +1249,11 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 signal.signal(signal.SIGTERM, cancel_handler)
                 signal.signal(signal.SIGHUP, cancel_handler)
                 provider_environment = routing_environment()
+                # Owners retain chair custody; provider work must discover its own
+                # seat, state directory and checkout rather than inherit the chair's.
+                for name in ("AGENT_FABRIC_STATE_DIRECTORY", "AGENT_FABRIC_SEAT",
+                             "AGENT_FABRIC_CLIENT_LABEL", "AGENT_FABRIC_LABEL", "AGENT_FABRIC_PRODUCT_ROOT"):
+                    provider_environment.pop(name, None)
                 if git_evidence_requested:
                     provider_environment.pop("CF_DISPATCH_AGY_ADD_DIR", None)
                 process = subprocess.Popen(

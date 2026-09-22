@@ -200,6 +200,11 @@ than the greater of 600 seconds or 20% of its timeout. A dead owner without a
 terminal record is `interrupted`. Timeout and cancellation records retain route
 metadata, including the preflight route when the provider emitted no receipt.
 
+Dispatch and batch owners retain their chair context, but provider processes
+start without the chair's Fabric state directory, seat, client label, agent
+label or product-root override. Worker tests and commands discover their own
+workspace instead of using the chair's state or checkout.
+
 MCP execution owners close `RUN_RECEIPT.json` after all attempts finish. This is
 a minimal execution-status update under the existing custody lock: the delivery
 finaliser requires synthesis and review gates that ordinary provider tasks do

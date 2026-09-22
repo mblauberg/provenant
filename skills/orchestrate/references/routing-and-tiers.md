@@ -254,3 +254,7 @@ automatic retries or silent substitution.
 Frontier families increasingly make *correlated* errors, so "ask another model" is weakening on its
 own. Lean on **objective/locally-checkable verification** and (in non-code domains) source-anchoring +
 action-authority gates, with cross-family review as pressure on top — not as the sole safety net.
+Provider launch strips the chair's `AGENT_FABRIC_STATE_DIRECTORY`,
+`AGENT_FABRIC_SEAT`, `AGENT_FABRIC_CLIENT_LABEL`, `AGENT_FABRIC_LABEL` and
+`AGENT_FABRIC_PRODUCT_ROOT`. Dispatch and batch owners keep their own context;
+workers discover their workspace and identity independently.
