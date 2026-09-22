@@ -1656,6 +1656,8 @@ def test_unusable_families_table_fails_closed(
 
 
 def test_opencode_without_model_uses_adapter_default(capsys, monkeypatch):
+    compatibility = yaml.safe_load((ROOT / "config" / "adapter-compatibility.yaml").read_text())
+    assert compatibility["adapters"]["opencode-acp"]["model_family_constraints"]["requires_explicit_model"] is False
     router = load_router()
     monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
 

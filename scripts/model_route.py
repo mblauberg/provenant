@@ -574,9 +574,10 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 },
                 1,
             )
-        if account_default != (not compatibility["requires_explicit_model"]):
-            # The routing catalogue and adapter policy must agree on
-            # account-default dispatch in both directions (#190).
+        has_default_model = isinstance(adapter.get("default_model"), str) and bool(adapter["default_model"])
+        if (account_default or has_default_model) != (not compatibility["requires_explicit_model"]):
+            # Either an account default or a catalogue default supplies the
+            # model when callers omit one; compatibility must agree.
             return emit_route(
                 {
                     **base,

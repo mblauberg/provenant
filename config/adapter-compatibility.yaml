@@ -253,7 +253,7 @@ adapters:
         - "opencode/*"
         - "opencode-go/*"
         - "openrouter/*"
-      requires_explicit_model: true
+      requires_explicit_model: false
       route_role: optional-free-account-worker
     official_source_url: "https://opencode.ai/docs/"
 
