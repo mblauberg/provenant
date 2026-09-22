@@ -575,9 +575,10 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 1,
             )
         has_default_model = isinstance(adapter.get("default_model"), str) and bool(adapter["default_model"])
-        if (account_default or has_default_model) != (not compatibility["requires_explicit_model"]):
-            # Either an account default or a catalogue default supplies the
-            # model when callers omit one; compatibility must agree.
+        permits_implicit_model = not compatibility["requires_explicit_model"]
+        if (account_default or (has_default_model and permits_implicit_model)) != permits_implicit_model:
+            # A catalogue default may satisfy an adapter's implicit-model
+            # policy; retain the existing account-default drift check.
             return emit_route(
                 {
                     **base,

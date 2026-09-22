@@ -2440,6 +2440,30 @@ def test_opencode_chain_all_failed_removes_raw_sidecar():
         assert not (tmp / "out.txt.raw.jsonl").exists()
 
 
+def test_opencode_failed_chain_arm_does_not_leave_raw_for_next_provider():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", """#!/usr/bin/env bash
+            echo '{"type":"error","error":"forbidden"}'
+        """)
+        write_executable(bin_dir / "cursor-agent", "#!/usr/bin/env bash\necho 'fallback OK'\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--chain",
+             "opencode cursor:cursor-grok-4.5-high", "--prompt", "Reply OK",
+             "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert json.loads(result.stdout)["tool"] == "cursor"
+        assert out.read_text().strip() == "fallback OK"
+        assert not (tmp / "out.txt.raw.jsonl").exists()
+
+
 def test_run_dir_init_force_flag_only_creates_final_gate():
     with tempfile.TemporaryDirectory() as td:
         result = subprocess.run(
