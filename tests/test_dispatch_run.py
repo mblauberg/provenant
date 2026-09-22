@@ -1581,6 +1581,9 @@ def run_writer_dispatch(
             printf '%s\\n' '{"type":"text","part":{"text":"OK"}}'
         """)
     env = os.environ.copy()
+    env.pop("AGENTS_HOME", None)
+    env["AGENT_FABRIC_INSTANCE_ROOT"] = str(ROOT)
+    env["AGENT_FABRIC_PRODUCT_ROOT"] = str(ROOT)
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     return subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", task_id, "--adapter", adapter,
