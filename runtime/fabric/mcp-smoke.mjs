@@ -18,6 +18,7 @@ const command = process.env.AGENT_FABRIC_MCP_COMMAND ?? resolve(import.meta.dirn
 const tsxLoader = process.env.AGENT_FABRIC_TSX_LOADER ??
   createRequire(import.meta.url).resolve("tsx");
 const clients = [];
+const fixtureProcesses = new Set();
 
 const spawnAgent = async (seat, clientLabel, options = {}) => {
   const transport = new StdioClientTransport({
@@ -581,9 +582,11 @@ try {
     },
   }));
   assert.equal(signalledRun.status, "running");
+  fixtureProcesses.add(signalledRun.pid);
   const signalledProviderPid = resolve(signalledRun.paths.run_dir, "provider.pid");
   await waitForFile(signalledProviderPid, 10_000);
   const signalledProvider = Number(readFileSync(signalledProviderPid, "utf8").trim());
+  fixtureProcesses.add(signalledProvider);
   const ownerRecordPath = resolve(signalledRun.paths.run_dir, "dispatch-owner.json");
   await waitForFile(ownerRecordPath, 10_000);
   const ownerRecord = JSON.parse(readFileSync(ownerRecordPath, "utf8"));
@@ -892,6 +895,10 @@ try {
   console.log("MCP contract assertions passed for claude, codex and agy client seats");
 } finally {
   await Promise.allSettled(clients.map(async (client) => await client.close()));
+  for (const pid of fixtureProcesses) {
+    try { process.kill(-pid, "SIGKILL"); } catch { /* group already stopped */ }
+    try { process.kill(pid, "SIGKILL"); } catch { /* process already stopped */ }
+  }
   rmSync(state, { recursive: true, force: true });
   rmSync(executionRoot, { recursive: true, force: true });
 }
