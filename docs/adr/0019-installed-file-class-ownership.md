@@ -277,6 +277,13 @@ its receipt outside the instance repository. `.gitignore` names both receipt
 files and the `.agent-fabric/` pointer directory, so nothing in the receipt
 class can be committed by accident.
 
+2026-09-23 amendment: routing remains instance-owned and ordinary installs still
+seed it only once. Validation now reports differences in product catalogue
+sections. An explicit `install-harness --refresh-routing` backs up the instance
+file, overlays product sections, and retains instance-only adapters, endpoints,
+and alias models. This opt-in refresh is a two-input update, not a three-way
+merge or an automatic rewrite of instance intent.
+
 Split-layout startup binds the product root for the global config layer,
 `adapter-compatibility.yaml`, the compatibility schema and the `${AGENTS_HOME}`
 token, and the instance root for the local layer. The fused layout still has

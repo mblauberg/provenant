@@ -15,13 +15,16 @@ machine-local and ignored.
 
 Seeded files are the third owner in that ADR. The product ships a template; the
 installer copies it into the instance root only when nothing is there, and never
-again. There is no hash-drift check and no three-way merge: both repositories
-are Git repositories, so Git is the drift detector.
+again. The routing catalogue is the one exception: validation compares the
+product-owned sections, and an explicit refresh backs up and merges them while
+retaining instance additions. Other seeded files have no hash-drift check or
+three-way merge.
 """
 
 from __future__ import annotations
 
 import argparse
+from datetime import date
 import json
 import os
 from pathlib import Path
@@ -69,6 +72,9 @@ SEEDED_FILES = (
     "AGENTS.md",
     "config/model-preferences.json",
     "config/model-routing.json",
+)
+ROUTING_SECTIONS = (
+    "task_class_routes", "families", "adapters", "endpoints", "model_patterns",
 )
 
 #: Instance-owned third-party skill sources projected beside the product
@@ -304,6 +310,95 @@ def _write_json(path: Path, document: dict[str, Any], contain: Path | None = Non
     _publish(path, write, contain=contain)
 
 
+def _routing_documents(product_root: Path, instance_root: Path) -> tuple[dict[str, Any], dict[str, Any]] | None:
+    source = product_root / "config/model-routing.json"
+    target = instance_root / "config/model-routing.json"
+    if not target.exists():
+        return None
+    try:
+        product = json.loads(source.read_text())
+        installed = json.loads(target.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise InstallError(f"routing catalogue is unreadable: {exc}") from exc
+    if not isinstance(product, dict) or not isinstance(installed, dict):
+        raise InstallError("routing catalogue must be an object")
+    return product, installed
+
+
+def _routing_merge(product: Any, installed: Any, path: tuple[str, ...]) -> Any:
+    if isinstance(product, dict):
+        result = dict(installed) if isinstance(installed, dict) else {}
+        for key, value in product.items():
+            result[key] = _routing_merge(value, result.get(key), (*path, key))
+        return result
+    if isinstance(product, list) and isinstance(installed, list) and (
+        path[-2:-1] == ("aliases",) or path == ("model_patterns",)
+    ):
+        return product + [item for item in installed if item not in product]
+    return product
+
+
+def _routing_differences(product: Any, installed: Any, path: tuple[str, ...]) -> list[str]:
+    if isinstance(product, dict) and isinstance(installed, dict):
+        return [
+            difference
+            for key, value in product.items()
+            for difference in _routing_differences(value, installed.get(key), (*path, key))
+        ]
+    if isinstance(product, list) and isinstance(installed, list) and (
+        path[-2:-1] == ("aliases",) or path == ("model_patterns",)
+    ):
+        return [] if installed[:len(product)] == product else [".".join(path)]
+    return [] if product == installed else [".".join(path)]
+
+
+def routing_drift(product_root: Path, instance_root: Path) -> list[str]:
+    documents = _routing_documents(product_root, instance_root)
+    if documents is None:
+        return []
+    product, installed = documents
+    drift = [
+        key
+        for section in ROUTING_SECTIONS if section in product
+        for key in _routing_differences(product[section], installed.get(section), (section,))
+    ]
+    if isinstance(product.get("catalog_date"), str) and (
+        not isinstance(installed.get("catalog_date"), str)
+        or product["catalog_date"] > installed["catalog_date"]
+    ):
+        drift.insert(0, "catalog_date")
+    return drift
+
+
+def refresh_routing(product_root: Path, instance_root: Path) -> dict[str, str]:
+    documents = _routing_documents(product_root, instance_root)
+    if documents is None:
+        raise InstallError("routing catalogue is missing; run install-harness first")
+    product, installed = documents
+    target = instance_root / "config/model-routing.json"
+    if target.is_symlink():
+        raise InstallError("routing catalogue must be a regular instance file")
+    result = dict(installed)
+    for section in ROUTING_SECTIONS:
+        if section in product:
+            result[section] = _routing_merge(product[section], installed.get(section), (section,))
+    if "catalog_date" in product and (
+        not isinstance(installed.get("catalog_date"), str)
+        or product["catalog_date"] > installed["catalog_date"]
+    ):
+        result["catalog_date"] = product["catalog_date"]
+    if result == installed:
+        return {"state": "existing"}
+    backup = target.with_name(f"{target.name}.bak-{date.today().isoformat()}")
+    suffix = 1
+    while backup.exists() or backup.is_symlink():
+        backup = target.with_name(f"{target.name}.bak-{date.today().isoformat()}-{suffix}")
+        suffix += 1
+    _publish(backup, lambda handle: handle.write(target.read_bytes()), mode="wb", contain=instance_root)
+    _write_json(target, result, contain=instance_root)
+    return {"state": "updated", "backup": str(backup)}
+
+
 def seed_desired_state(product_root: Path, instance_root: Path) -> tuple[str, dict[str, Any]]:
     """Write the desired state when absent; never rewrite what is there.
 
@@ -397,6 +492,7 @@ def validate_install(product_root: Path, instance_root: Path) -> dict[str, Any]:
         "desired_state_state": "existing" if desired is not None else "missing",
         "product_pointer": pointer,
         "seeded": seeded,
+        "routing_drift": routing_drift(product_root, instance_root),
         "custom_skills": custom_skill_names(instance_root),
         "changed": [],
     }
@@ -409,7 +505,7 @@ def execute(
     *,
     write_product_pointer: bool = True,
 ) -> dict[str, Any]:
-    if action not in {"seed", "show", "validate"}:
+    if action not in {"seed", "show", "validate", "refresh-routing"}:
         raise InstallError(f"unsupported action: {action}")
     product_root = Path(product_root).resolve()
     instance_root = Path(instance_root).resolve()
@@ -437,8 +533,15 @@ def execute(
         }
     if action == "validate":
         return validate_install(product_root, instance_root)
+    if action == "refresh-routing":
+        return {
+            "schema_version": 1,
+            "action": action,
+            "routing": refresh_routing(product_root, instance_root),
+            "routing_drift": routing_drift(product_root, instance_root),
+        }
     state, desired = seed_desired_state(product_root, instance_root)
-    return {
+    result = {
         "schema_version": 1,
         "action": action,
         "mode": install_mode(product_root, instance_root),
@@ -452,6 +555,11 @@ def execute(
         "seeded": seed_instance_files(product_root, instance_root),
         "custom_skills": custom_skill_names(instance_root),
     }
+    try:
+        result["routing_drift"] = routing_drift(product_root, instance_root)
+    except InstallError:
+        result["routing_drift"] = ["unreadable"]
+    return result
 
 
 def default_instance_root(environment: dict[str, str] | None = None) -> Path:
@@ -478,7 +586,7 @@ def default_instance_root(environment: dict[str, str] | None = None) -> Path:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("action", choices=("seed", "show", "validate"))
+    parser.add_argument("action", choices=("seed", "show", "validate", "refresh-routing"))
     parser.add_argument("--product-root", type=Path, default=ROOT)
     parser.add_argument("--instance-root", type=Path, default=None)
     parser.add_argument("--summary", action="store_true")
@@ -504,6 +612,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"conflicting: {exc}", file=sys.stderr)
         return 3
     if args.summary:
+        if args.action == "refresh-routing":
+            routing = result["routing"]
+            print(f"routing {routing['state']}" + (f" backup={routing['backup']}" if "backup" in routing else ""))
+            return 0
         created = sum(item["state"] == "created" for item in result.get("seeded", []))
         existing = sum(item["state"] == "existing" for item in result.get("seeded", []))
         missing = sum(item["state"] == "missing" for item in result.get("seeded", []))
@@ -516,6 +628,8 @@ def main(argv: list[str] | None = None) -> int:
             summary += f" missing={missing}"
         summary += f" custom-skills={len(result.get('custom_skills', []))}"
         print(f"{summary} root={instance_root}")
+        for key in result.get("routing_drift", []):
+            print(f"routing drift={key} repair=install-harness --refresh-routing")
     else:
         print(json.dumps(result, indent=2, sort_keys=True))
     return 0

@@ -56,6 +56,78 @@ def seed(product: Path, instance_root: Path) -> dict:
     return json.loads(result.stdout)
 
 
+def test_routing_drift_names_product_keys_and_ignores_instance_additions(tmp_path):
+    product = build_product(tmp_path)
+    source = product / "config/model-routing.json"
+    source.write_text(json.dumps({
+        "catalog_date": "2026-09-23", "task_class_routes": {"review": {"alias": "new"}},
+        "families": {"openai": {"aliases": {"scout": ["new", "old"]}}},
+        "adapters": {"opencode": {"endpoint_provider": "opencode"}},
+        "endpoints": {"new": {"base_url": "https://example.invalid"}},
+        "model_patterns": [{"pattern": "new", "family": "openai"}],
+    }))
+    instance_root = tmp_path / "instance"
+    seed(product, instance_root)
+    target = instance_root / "config/model-routing.json"
+    old = json.loads(target.read_text())
+    old["catalog_date"] = "2026-09-01"
+    old["task_class_routes"]["review"]["alias"] = "old"
+    old["families"]["openai"]["aliases"]["scout"] = ["old", "custom"]
+    old["adapters"]["opencode"]["endpoint_provider"] = "codex"
+    old["endpoints"]["new"]["base_url"] = "https://old.invalid"
+    old["endpoints"]["custom"] = {"base_url": "https://custom.invalid"}
+    old["model_patterns"].append({"pattern": "custom", "family": "custom"})
+    target.write_text(json.dumps(old))
+
+    result = run("validate", product, instance_root)
+    assert result.returncode == 0, result.stderr
+    drift = json.loads(result.stdout)["routing_drift"]
+    assert "catalog_date" in drift
+    assert "task_class_routes.review.alias" in drift
+    assert "families.openai.aliases.scout" in drift
+    assert "adapters.opencode.endpoint_provider" in drift
+    assert "endpoints.new.base_url" in drift
+    assert "endpoints.custom" not in " ".join(drift)
+    assert "model_patterns" not in drift
+
+    old["model_patterns"][0]["family"] = "legacy"
+    target.write_text(json.dumps(old))
+    assert "model_patterns" in json.loads(run("validate", product, instance_root).stdout)["routing_drift"]
+
+
+def test_explicit_routing_refresh_backs_up_and_preserves_instance_additions(tmp_path):
+    product = build_product(tmp_path)
+    source = product / "config/model-routing.json"
+    source.write_text(json.dumps({
+        "catalog_date": "2026-09-23", "families": {"openai": {"aliases": {"scout": ["new"]}}},
+        "adapters": {"opencode": {"endpoint_provider": "opencode"}},
+        "endpoints": {"new": {"base_url": "https://new.invalid"}},
+        "model_patterns": [{"pattern": "new", "family": "openai"}],
+    }))
+    instance_root = tmp_path / "instance"
+    seed(product, instance_root)
+    target = instance_root / "config/model-routing.json"
+    old = json.loads(target.read_text())
+    old["families"]["openai"]["aliases"]["scout"] = ["old", "custom"]
+    old["adapters"]["custom"] = {"endpoint_provider": "custom"}
+    old["endpoints"]["custom"] = {"base_url": "https://custom.invalid"}
+    old["model_patterns"].append({"pattern": "custom", "family": "custom"})
+    target.write_text(json.dumps(old))
+    before = target.read_bytes()
+
+    result = run("refresh-routing", product, instance_root)
+    assert result.returncode == 0, result.stderr
+    updated = json.loads(target.read_text())
+    assert updated["families"]["openai"]["aliases"]["scout"] == ["new", "old", "custom"]
+    assert updated["adapters"]["custom"] == old["adapters"]["custom"]
+    assert updated["endpoints"]["custom"] == old["endpoints"]["custom"]
+    assert updated["model_patterns"][-1] == old["model_patterns"][-1]
+    backups = list(target.parent.glob("model-routing.json.bak-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == before
+    assert json.loads(run("validate", product, instance_root).stdout)["routing_drift"] == []
+
+
 def test_desired_state_is_seeded_with_product_version_and_split_mode(tmp_path):
     product = build_product(tmp_path)
     instance_root = tmp_path / "instance"
@@ -477,6 +549,8 @@ def test_a_missing_product_template_is_a_conflict_not_a_silent_skip(tmp_path):
 
 def test_the_repository_ships_a_valid_fused_desired_state():
     """This checkout is itself a fused instance, so its desired state must load."""
+    if (ROOT / ".git").is_file():
+        pytest.skip("linked worktrees do not carry the fused instance's state")
     document = instance.load_desired_state(ROOT)
 
     assert document is not None
