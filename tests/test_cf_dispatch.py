@@ -3362,6 +3362,27 @@ def test_opencode_dispatch_group_signal_terminates_provider_and_grandchild():
                 process.communicate()
 
 
+def test_opencode_normal_exit_reaps_grandchild():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", f"""#!/usr/bin/env bash
+            (trap 'touch "{tmp / 'grandchild.stopped'}"; exit 143' TERM; touch "{tmp / 'ready'}"; while :; do sleep 0.1; done) &
+            while [ ! -f "{tmp / 'ready'}" ]; do sleep 0.05; done
+            echo '{{"type":"text","part":{{"text":"OK"}}}}'
+        """)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(tmp / "out.txt")],
+            cwd=tmp, env=env, text=True, capture_output=True, timeout=10,
+        )
+        assert json.loads(result.stdout)["status"] == "ok"
+        assert (tmp / "grandchild.stopped").exists()
+
+
 def test_oversized_argv_prompt_is_typed_for_cursor():
     """cursor takes the prompt as one argv value, like agy.
 
