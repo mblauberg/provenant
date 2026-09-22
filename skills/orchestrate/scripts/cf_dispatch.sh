@@ -68,6 +68,9 @@ INSTALLED_OUTPUT_DEVICE=""
 INSTALLED_OUTPUT_INODE=""
 AGY_ADD_DIRS=()
 AGY_SANDBOX_JSON=null
+# Effective outbound network of the provider sandbox, where the arm controls it:
+# true or false for codex, null where the adapter does not expose the switch.
+PROVIDER_NETWORK_JSON=null
 ACCESS_MODE="read_only"
 TIMEOUT_SECONDS=""
 WORKTREE=""
@@ -468,7 +471,7 @@ emit_record() {
   [ -n "$ORCH_FAMILY" ] && valid_family "$ORCH_FAMILY" && assurance_family "$family" && [ -n "$family" ] && [ "$ORCH_FAMILY" != "$family" ] && cross="true"
   cert="false"
   [ "$INTENT" = "assurance" ] && [ "$status" = "ok" ] && [ -n "$output_digest" ] && [ "$cross" = "true" ] && { [ "$guarantee" = "enforced" ] || [ "$guarantee" = "oauth_safe_mode" ]; } && cert="true"
-  printf '{"tool":"%s","adapter":"%s","adapter_gate":"direct-cli","execution_intent":"%s","model":"%s","requested_model":"%s","resolved_model":"%s","fallback_model":"%s","requested_effort":"%s","effort":"%s","effort_source":"%s","effort_capability_source":"%s","effort_substitution":"%s","substitution":"%s","status":"%s","reason":"%s","exit":%s,"output_path":"%s","output_digest":"%s","read_only_guarantee":"%s","provider_sandbox":%s,"access_mode":"%s","worktree":"%s","orchestrator_family":"%s","provider_family":"%s","model_family":"%s","endpoint_provider":"%s","identity_source":"%s","catalog_model":"%s","model_selection":"%s","route_alias":"%s","reviewer_id":"%s","risk_tier":"%s","model_override_tier":"%s","policy_override":"%s","cross_family":%s,"certification_eligible":%s}\n' \
+  printf '{"tool":"%s","adapter":"%s","adapter_gate":"direct-cli","execution_intent":"%s","model":"%s","requested_model":"%s","resolved_model":"%s","fallback_model":"%s","requested_effort":"%s","effort":"%s","effort_source":"%s","effort_capability_source":"%s","effort_substitution":"%s","substitution":"%s","status":"%s","reason":"%s","exit":%s,"output_path":"%s","output_digest":"%s","read_only_guarantee":"%s","provider_sandbox":%s,"provider_network":%s,"access_mode":"%s","worktree":"%s","orchestrator_family":"%s","provider_family":"%s","model_family":"%s","endpoint_provider":"%s","identity_source":"%s","catalog_model":"%s","model_selection":"%s","route_alias":"%s","reviewer_id":"%s","risk_tier":"%s","model_override_tier":"%s","policy_override":"%s","cross_family":%s,"certification_eligible":%s}\n' \
     "$(printf '%s' "$tool" | json_escape)" \
     "$(printf '%s' "$tool" | json_escape)" \
     "$(printf '%s' "$INTENT" | json_escape)" \
@@ -489,6 +492,7 @@ emit_record() {
     "$(printf '%s' "$output_digest" | json_escape)" \
     "$(printf '%s' "$guarantee" | json_escape)" \
     "$AGY_SANDBOX_JSON" \
+    "$PROVIDER_NETWORK_JSON" \
     "$(printf '%s' "$ACCESS_MODE" | json_escape)" \
     "$(printf '%s' "$WORKTREE" | json_escape)" \
     "$(printf '%s' "$ORCH_FAMILY" | json_escape)" \
@@ -729,6 +733,11 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
     status="unsafe_by_default"
     echo "agy refused: --dangerously-skip-permissions is not allowed on the read-only route" >"$diag"
     rc=1
+  elif [ "$tool" = "codex" ] && [ "${CF_DISPATCH_CODEX_NETWORK-1}" != "0" ] && [ "${CF_DISPATCH_CODEX_NETWORK-1}" != "1" ]; then
+    guarantee="none"
+    status="invalid_configuration"
+    echo "CF_DISPATCH_CODEX_NETWORK must be 0 or 1" >"$diag"
+    rc=1
   elif [ "$tool" = "agy" ] && [ "${CF_DISPATCH_AGY_SANDBOX-0}" != "0" ] && [ "${CF_DISPATCH_AGY_SANDBOX-0}" != "1" ]; then
     guarantee="none"
     status="invalid_configuration"
@@ -900,14 +909,42 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
             # so the sandbox needs the common Git directory as a writable root or
             # the worker cannot commit what it just wrote.
             guarantee="none"
+            # `--ignore-user-config` also drops the user's own
+            # `[sandbox_workspace_write] network_access`, so the lane's network is
+            # set here. Lanes need it for gh, git push and package installs;
+            # CF_DISPATCH_CODEX_NETWORK=0 turns it off.
+            local -a codex_network_flags=()
+            PROVIDER_NETWORK_JSON=false
+            if [ "${CF_DISPATCH_CODEX_NETWORK-1}" = "1" ]; then
+              codex_network_flags=(-c sandbox_workspace_write.network_access=true)
+              PROVIDER_NETWORK_JSON=true
+            fi
             codex exec -s workspace-write --cd "$WORKTREE" --ignore-user-config --ignore-rules \
               --ephemeral -c service_tier="default" \
               ${WORKTREE_GIT_COMMON:+-c sandbox_workspace_write.writable_roots="[\"$WORKTREE_GIT_COMMON\"]"} \
+              ${codex_network_flags[@]+"${codex_network_flags[@]}"} \
               ${codex_provider_flags[@]+"${codex_provider_flags[@]}"} \
               ${model:+-m "$model"} ${effort:+-c model_reasoning_effort="$effort"} \
               - <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
           else
-            codex exec -s read-only --ignore-user-config --ignore-rules --ephemeral -c service_tier="default" \
+            # The `-s read-only` preset has no network switch. A permissions
+            # profile extending the built-in `:read-only` keeps every filesystem
+            # write denied while allowing outbound network, so a reviewer can
+            # still read issues and PRs with gh. The two cannot be combined:
+            # `-s` overrides the profile. `--skip-git-repo-check` lets a review
+            # run from a workspace root that is not itself a Git repository.
+            local -a codex_read_only_flags=(-s read-only)
+            PROVIDER_NETWORK_JSON=false
+            if [ "${CF_DISPATCH_CODEX_NETWORK-1}" = "1" ]; then
+              codex_read_only_flags=(
+                -c 'default_permissions="provenant-read-only-network"'
+                -c 'permissions.provenant-read-only-network.extends=":read-only"'
+                -c 'permissions.provenant-read-only-network.network.enabled=true'
+              )
+              PROVIDER_NETWORK_JSON=true
+            fi
+            codex exec "${codex_read_only_flags[@]}" --skip-git-repo-check \
+              --ignore-user-config --ignore-rules --ephemeral -c service_tier="default" \
               ${codex_provider_flags[@]+"${codex_provider_flags[@]}"} ${model:+-m "$model"} \
               ${effort:+-c model_reasoning_effort="$effort"} \
               - <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?

@@ -41,6 +41,7 @@ DISPATCH_SCHEMA = {
     "output_digest",
     "read_only_guarantee",
     "provider_sandbox",
+    "provider_network",
     "orchestrator_family",
     "provider_family",
     "endpoint_provider",
@@ -81,7 +82,7 @@ def test_output_install_replaces_symlink_without_overwriting_target():
             bin_dir / "codex",
             """#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+              printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
               exit 0
             fi
             cat >/dev/null
@@ -123,7 +124,7 @@ def test_directory_symlink_output_is_rejected_without_escaping():
             bin_dir / "codex",
             """#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+              printf '%s\n' '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
               exit 0
             fi
             cat >/dev/null
@@ -167,7 +168,7 @@ def test_symlinked_output_parent_is_rejected_without_escaping():
             bin_dir / "codex",
             """#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+              printf '%s\n' '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
               exit 0
             fi
             cat >/dev/null
@@ -214,7 +215,7 @@ def test_output_parent_swap_cannot_certify_an_identical_outside_file():
             bin_dir / "codex",
             """#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+              printf '%s\n' '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
               exit 0
             fi
             cat >/dev/null
@@ -475,7 +476,7 @@ def test_task_class_route_accepts_lifecycle_risk_without_model_override():
             bin_dir / "codex",
             """#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"low"}]}]}'
+              printf '%s\n' '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"}]}]}'
               exit 0
             fi
             cat >/dev/null
@@ -1330,7 +1331,7 @@ def test_disabled_capability_adapters_are_rejected_before_their_probe_runs():
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
 
-        for tool, model in (("codex", "gpt-5.6-luna"), ("agy", "gemini-3.7-flash")):
+        for tool, model in (("codex", "gpt-6-luna"), ("agy", "gemini-3.7-flash")):
             invoked = tmp / f"{tool}.invoked"
             write_executable(
                 bin_dir / tool,
@@ -1364,7 +1365,7 @@ def test_prompt_file_trailing_newlines_reach_stdin_adapter_byte_for_byte():
             bin_dir / "codex",
             f"""#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
+              printf '%s\n' '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
               exit 0
             fi
             cat > {received}
@@ -1956,7 +1957,7 @@ def test_bare_codex_dispatch_defaults_to_workhorse_not_flagship():
             bin_dir / "codex",
             f'''#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"medium"}},{{"effort":"high"}}]}},{{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{{"effort":"high"}},{{"effort":"max"}}]}}]}}'
+              printf '%s\n' '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"medium"}},{{"effort":"high"}}]}},{{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{{"effort":"high"}},{{"effort":"max"}}]}}]}}'
               exit 0
             fi
             printf '%s\\n' "$@" > {args_file}
@@ -1987,9 +1988,9 @@ def test_bare_codex_dispatch_defaults_to_workhorse_not_flagship():
         record = json.loads(result.stdout)
         assert result.returncode == 0, result.stderr
         assert record["route_alias"] == "workhorse"
-        assert record["resolved_model"] == "gpt-5.6-luna"
+        assert record["resolved_model"] == "gpt-6-luna"
         args = args_file.read_text(encoding="utf-8").splitlines()
-        assert "gpt-5.6-luna" in args
+        assert "gpt-6-luna" in args
         assert "gpt-5.6-sol" not in args
         assert "service_tier=default" in args
 
@@ -2005,7 +2006,7 @@ def test_critical_review_role_still_defaults_to_flagship():
             bin_dir / "codex",
             f'''#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"medium"}}]}},{{"slug":"gpt-6-astra","supported_reasoning_levels":[{{"effort":"xhigh"}}]}}]}}'
+              printf '%s\n' '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"medium"}}]}},{{"slug":"gpt-6-astra","supported_reasoning_levels":[{{"effort":"xhigh"}}]}}]}}'
               exit 0
             fi
             printf '%s\\n' "$@" > {args_file}
@@ -2593,7 +2594,7 @@ CLAUDE_ARGV_STUB = """\
 CODEX_ARGV_STUB = """\
     #!/usr/bin/env bash
     if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-      printf '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
+      printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
       exit 0
     fi
     printf '%s\\n' "$@" >> {args_file}
@@ -2648,15 +2649,58 @@ def test_codex_worktree_writer_route_uses_the_workspace_write_sandbox():
     assert "read-only" not in recorded
     # A linked worktree keeps its Git metadata outside the worktree root.
     assert "sandbox_workspace_write.writable_roots=" in recorded
+    # --ignore-user-config drops the user's own network setting, so the arm
+    # grants the lane network itself: gh, git push and installs need it.
+    assert "sandbox_workspace_write.network_access=true" in recorded
+    assert record["provider_network"] is True
 
 
-def test_codex_read_only_route_keeps_the_read_only_sandbox():
+def test_codex_worktree_writer_network_can_be_disabled():
+    result, recorded, _ = run_worktree_dispatch(
+        "codex", CODEX_ARGV_STUB, worktree="make",
+        extra_env={"CF_DISPATCH_CODEX_NETWORK": "0"},
+    )
+    assert result.returncode == 0, result.output
+    record = json.loads(result.output)
+    assert "network_access" not in recorded
+    assert record["provider_network"] is False
+
+
+def test_codex_read_only_route_denies_writes_but_keeps_network():
     result, recorded, _ = run_worktree_dispatch("codex", CODEX_ARGV_STUB)
     assert result.returncode == 0, result.output
     record = json.loads(result.output)
     assert record["access_mode"] == "read_only"
-    assert "-s\nread-only" in recorded
+    assert record["read_only_guarantee"] == "enforced"
+    assert record["provider_network"] is True
+    # `-s` would override the profile and drop network again.
+    assert "-s\nread-only" not in recorded
     assert "workspace-write" not in recorded
+    assert 'default_permissions="provenant-read-only-network"' in recorded
+    assert 'permissions.provenant-read-only-network.extends=":read-only"' in recorded
+    assert "permissions.provenant-read-only-network.network.enabled=true" in recorded
+    assert "--skip-git-repo-check" in recorded
+
+
+def test_codex_read_only_route_without_network_keeps_the_read_only_preset():
+    result, recorded, _ = run_worktree_dispatch(
+        "codex", CODEX_ARGV_STUB, extra_env={"CF_DISPATCH_CODEX_NETWORK": "0"},
+    )
+    assert result.returncode == 0, result.output
+    record = json.loads(result.output)
+    assert record["provider_network"] is False
+    assert "-s\nread-only" in recorded
+    assert "default_permissions" not in recorded
+    assert "workspace-write" not in recorded
+
+
+def test_codex_network_setting_rejects_other_values():
+    result, _, _ = run_worktree_dispatch(
+        "codex", CODEX_ARGV_STUB, extra_env={"CF_DISPATCH_CODEX_NETWORK": "yes"},
+    )
+    record = json.loads(result.output)
+    assert record["status"] == "invalid_configuration"
+    assert record["provider_network"] is None
 
 
 def test_worktree_writer_route_is_refused_for_assurance_intent():
@@ -2829,7 +2873,7 @@ def test_named_endpoint_reaches_the_claude_writer_route_environment():
 CODEX_ARGV_STUB = """\
 #!/usr/bin/env bash
 if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-  printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
+  printf '%s\n' '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
   exit 0
 fi
 printf '%s\n' "$@" > {args_file}
@@ -2896,7 +2940,7 @@ def codex_endpoint_instance(tmp, name="deepseek-openai", profile=None):
 
 def test_ordinary_codex_dispatch_still_ignores_user_config():
     """No endpoint named, so the user's own codex config stays out of the run."""
-    result, recorded = run_codex_dispatch(extra_args=["--model", "gpt-5.6-luna"])
+    result, recorded = run_codex_dispatch(extra_args=["--model", "gpt-6-luna"])
 
     assert result.returncode == 0, result.stderr
     record = json.loads(result.stdout)

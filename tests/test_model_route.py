@@ -176,6 +176,14 @@ def write_codex_capability_snapshot(tmp_path, *, observed_at=None, models=None):
                 "resolved_model": "gpt-5.6-luna",
                 "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
             },
+            "gpt-6-sol": {
+                "resolved_model": "gpt-6-sol",
+                "supported_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+            },
+            "gpt-6-luna": {
+                "resolved_model": "gpt-6-luna",
+                "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
+            },
         }
     value = capability_snapshot(models)
     if observed_at is not None:
@@ -1874,8 +1882,8 @@ def test_malformed_override_fails_closed_without_a_fixed_model_family(
 def test_account_default_aliases_resolve_to_account_default_dispatch(tmp_path):
     expected = {
         "flagship": "gpt-6-astra",
-        "workhorse": "gpt-5.6-luna",
-        "scout": "gpt-5.6-luna",
+        "workhorse": "gpt-6-sol",
+        "scout": "gpt-6-luna",
     }
     catalog = write_account_default_catalog(tmp_path)
     for alias, model in expected.items():
@@ -1954,12 +1962,12 @@ def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
 @pytest.mark.parametrize(
     ("task_class", "alias", "effort", "resolved_model"),
     (
-        # Luna at high on both worker aliases, not the task-class floors of
+        # Sol and Luna at high on the worker aliases, not the task-class floors of
         # low and medium: the OpenAI family raises worker+scout and
         # worker+workhorse in role_effort_defaults, the same way
         # critical-review and orchestration are raised below.
-        ("mechanical", "scout", "high", "gpt-5.6-luna"),
-        ("legwork", "workhorse", "high", "gpt-5.6-luna"),
+        ("mechanical", "scout", "high", "gpt-6-luna"),
+        ("legwork", "workhorse", "high", "gpt-6-sol"),
         ("critical-review", "flagship", "xhigh", "gpt-6-astra"),
         ("orchestration", "flagship", "xhigh", "gpt-6-astra"),
     ),
@@ -2539,12 +2547,12 @@ def test_codex_failure_records_never_expose_a_dispatchable_model(tmp_path):
     # identifies the capability-gated route that was attempted.
     snapshot = write_codex_capability_snapshot(tmp_path)
     result, route = resolve(
-        "--adapter", "codex", "--alias", "workhorse", "--role", "worker",
+        "--adapter", "codex", "--alias", "scout", "--role", "worker",
         "--effort", "ultra", "--capabilities-file", str(snapshot),
     )
     assert result.returncode == 1
     assert route["status"] == "effort_unsupported"
-    assert route["resolved_model"] == "gpt-5.6-luna"
+    assert route["resolved_model"] == "gpt-6-luna"
     assert route["identity_source"] == "runtime-capability+catalog"
     assert "catalog_model" not in route
     assert "model_selection" not in route
@@ -2645,8 +2653,8 @@ def test_task_class_effort_fallback_never_escalates_when_only_higher_effort_is_s
     snapshot = write_codex_capability_snapshot(
         tmp_path,
         models={
-            "gpt-5.6-luna": {
-                "resolved_model": "gpt-5.6-luna",
+            "gpt-6-luna": {
+                "resolved_model": "gpt-6-luna",
                 "supported_efforts": ["max"],
             },
         },

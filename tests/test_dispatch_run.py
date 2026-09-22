@@ -119,7 +119,7 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
         bin_dir / "codex",
         """#!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
         fi
         cat >/dev/null
@@ -496,7 +496,7 @@ def test_ordinary_dispatch_without_lead_family_is_not_certification(tmp_path: Pa
     bin_dir.mkdir()
     write_executable(bin_dir / "codex", """#!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
         fi
         cat >/dev/null
@@ -610,7 +610,7 @@ def test_route_failure_is_typed_and_provider_is_not_invoked(tmp_path: Path) -> N
         f"""
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
+          printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
           exit 0
         fi
         touch {invoked}
@@ -650,7 +650,7 @@ def test_nonzero_provider_exit_is_recorded_without_substitution(tmp_path: Path) 
         bin_dir / "codex",
         """#!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-sol","supported_reasoning_levels":[{"effort":"high"}]},{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
         fi
         cat >/dev/null
@@ -838,7 +838,7 @@ def test_timeout_records_reaped_exit(tmp_path: Path) -> None:
         bin_dir / "codex",
         """#!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
         fi
         sleep 10
@@ -870,7 +870,7 @@ def test_sigterm_cancels_and_reaps_provider_group(tmp_path: Path) -> None:
         bin_dir / "codex",
         """#!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
         fi
         printf '%s\n' "$$" > "$PROBE_PID_PATH"
@@ -1008,7 +1008,7 @@ def test_external_task_cancel_reaps_only_owned_provider_group(tmp_path: Path) ->
         bin_dir / "codex",
         f"""#!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
+          printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
           exit 0
         fi
         printf '%s' "$$" > "{provider_pid_path}"
@@ -1111,7 +1111,7 @@ def test_attempt_rows_are_accepted_by_existing_finalizer(tmp_path: Path) -> None
     bin_dir.mkdir()
     write_executable(bin_dir / "codex", """#!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
         fi
         cat >/dev/null

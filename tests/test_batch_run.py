@@ -423,7 +423,7 @@ def test_real_dispatch_children_defer_manifest_race_and_preserve_route_identity(
     write_executable(bin_dir / 'codex', """
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
           exit 0
         fi
         cat >/dev/null
@@ -594,7 +594,7 @@ def test_real_dispatch_timeout_retains_typed_non_success_attempt(tmp_path, monke
     write_executable(bin_dir / 'codex', """
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
           exit 0
         fi
         sleep 10
@@ -605,7 +605,7 @@ def test_real_dispatch_timeout_retains_typed_non_success_attempt(tmp_path, monke
     slow_prompt = tmp_path / 'slow.md'
     slow_prompt.write_text('slow\n', encoding='utf-8')
     manifest = task_manifest(tmp_path, [{'id': 'slow', 'prompt_file': str(slow_prompt),
-        'adapter': 'codex', 'model': 'gpt-5.6-luna', 'role': 'worker', 'timeout': 0.1}])
+        'adapter': 'codex', 'model': 'gpt-6-luna', 'role': 'worker', 'timeout': 0.1}])
 
     assert module.batch(args(module, run_dir, manifest, 1)) == 1
     summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
@@ -624,7 +624,7 @@ def test_real_dispatch_cancellation_reaps_provider_process(tmp_path, monkeypatch
     write_executable(bin_dir / 'codex', f"""
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"low"}},{{"effort":"medium"}},{{"effort":"high"}}]}}]}}'
+          printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"low"}},{{"effort":"medium"}},{{"effort":"high"}}]}}]}}'
           exit 0
         fi
         printf '%s' "$$" > "{provider_pid}"
@@ -637,7 +637,7 @@ def test_real_dispatch_cancellation_reaps_provider_process(tmp_path, monkeypatch
     prompt = tmp_path / 'cancel.md'
     prompt.write_text('cancel\n', encoding='utf-8')
     manifest = task_manifest(tmp_path, [{'id': 'cancel', 'prompt_file': str(prompt),
-        'adapter': 'codex', 'model': 'gpt-5.6-luna', 'role': 'worker', 'timeout': 10}])
+        'adapter': 'codex', 'model': 'gpt-6-luna', 'role': 'worker', 'timeout': 10}])
     parsed = args(module, run_dir, manifest, 1)
     result = []
     import threading
@@ -679,7 +679,7 @@ def test_external_batch_marker_cancels_active_child_and_skips_queued_provider(tm
     write_executable(bin_dir / 'codex', f"""
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"low"}}]}}]}}'
+          printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"low"}}]}}]}}'
           exit 0
         fi
         printf '%s\\n' "$1" >> "{launches}"
@@ -694,8 +694,8 @@ def test_external_batch_marker_cancels_active_child_and_skips_queued_provider(tm
     first_prompt.write_text('first\n', encoding='utf-8')
     second_prompt.write_text('second\n', encoding='utf-8')
     manifest = task_manifest(tmp_path, [
-        {'id': 'first', 'prompt_file': str(first_prompt), 'adapter': 'codex', 'model': 'gpt-5.6-luna', 'role': 'worker', 'timeout': 10},
-        {'id': 'second', 'prompt_file': str(second_prompt), 'adapter': 'codex', 'model': 'gpt-5.6-luna', 'role': 'worker', 'timeout': 10},
+        {'id': 'first', 'prompt_file': str(first_prompt), 'adapter': 'codex', 'model': 'gpt-6-luna', 'role': 'worker', 'timeout': 10},
+        {'id': 'second', 'prompt_file': str(second_prompt), 'adapter': 'codex', 'model': 'gpt-6-luna', 'role': 'worker', 'timeout': 10},
     ])
     result = []
     import threading
@@ -758,7 +758,7 @@ def test_retry_creates_new_attempt_without_replacing_attempt_one(tmp_path, monke
     write_executable(bin_dir / 'codex', """
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
           exit 0
         fi
         cat >/dev/null
@@ -834,7 +834,7 @@ def test_real_dispatch_child_propagates_worker_question_envelope(tmp_path, monke
     write_executable(bin_dir / 'codex', """
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"low"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"}]}]}'
           exit 0
         fi
         printf '{"schema_version":1,"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"Which source should I use?"}}\\n'
@@ -842,7 +842,7 @@ def test_real_dispatch_child_propagates_worker_question_envelope(tmp_path, monke
     monkeypatch.setenv('PATH', f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
     module = load_module()
     module.DISPATCH_RUN = BATCH.parent / 'dispatch_run.py'
-    manifest = task_manifest(tmp_path, [task(tmp_path, 'blocked-real', model='gpt-5.6-luna')])
+    manifest = task_manifest(tmp_path, [task(tmp_path, 'blocked-real', model='gpt-6-luna')])
 
     assert module.batch(args(module, run_dir, manifest, 1)) == 1, attempt_diagnostics(run_dir)
     summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
