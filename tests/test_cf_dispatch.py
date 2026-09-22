@@ -2420,6 +2420,26 @@ def test_chain_all_failed_uses_dispatch_schema():
         assert record["read_only_guarantee"] == "none"
 
 
+def test_opencode_chain_all_failed_removes_raw_sidecar():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", """#!/usr/bin/env bash
+            echo '{"type":"error","error":"forbidden"}'
+        """)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--chain", "opencode",
+             "--prompt", "Reply OK", "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        assert json.loads(result.stdout)["status"] == "all_failed"
+        assert not (tmp / "out.txt.raw.jsonl").exists()
+
+
 def test_run_dir_init_force_flag_only_creates_final_gate():
     with tempfile.TemporaryDirectory() as td:
         result = subprocess.run(

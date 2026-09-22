@@ -447,6 +447,7 @@ cleanup_dispatch() {
 }
 abort_dispatch() {
   cleanup_dispatch
+  [ -n "$OUT" ] && rm -f -- "$OUT.raw.jsonl"
   [ "$OUT_CREATED" = true ] && rm -f "$OUT"
   exit 143
 }
@@ -1325,7 +1326,9 @@ if [ -n "$CHAIN" ]; then
     ACTIVE_RUN_TMPDIR=""
     echo "$rec" >&2
     if [ $rc -eq 0 ]; then echo "$rec"; exit 0; fi
+    rm -f -- "$OUT.raw.jsonl"
   done
+  rm -f -- "$OUT.raw.jsonl"
   [ "$OUT_CREATED" = true ] && rm -f "$OUT"
   emit_record "chain" "" "" "all_failed" 1 "" "none"
   exit 1
