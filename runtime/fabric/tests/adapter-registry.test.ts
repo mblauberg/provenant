@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 
 import { DISPATCH_ADAPTERS, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
+import { catalogueSnapshot } from "../src/catalogue.js";
 import type { Identity } from "../src/identity.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -134,7 +135,7 @@ describe("adapter rejection", () => {
         { adapter, prompt: "hello" },
         identity,
         AbortSignal.abort(),
-      )).rejects.toThrow(/adapter must be one of/u);
+      )).resolves.toMatchObject({ status: "rejected", error: "adapter_invalid" });
       expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
     });
 
@@ -143,7 +144,7 @@ describe("adapter rejection", () => {
         { tasks: [{ adapter, prompt: "hello" }] },
         identity,
         AbortSignal.abort(),
-      )).rejects.toThrow(/adapter must be one of/u);
+      )).resolves.toMatchObject({ status: "rejected", error: "adapter_invalid" });
       expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
     });
   }
@@ -153,16 +154,29 @@ describe("adapter rejection", () => {
       { adapter: "pi", prompt: "hello" },
       identity,
       AbortSignal.abort(),
-    )).rejects.toThrow(/agy, claude, codex, copilot, cursor, kiro, opencode/u);
+    )).resolves.toMatchObject({ status: "rejected", fix: expect.stringMatching(/agy, claude, codex, copilot, cursor, kiro, opencode/u) });
   });
 
   it("rejects an alias the live adapter catalogue does not allow before launch", async () => {
     await expect(dispatchConfiguredProvider(
-      { adapter: "codex", alias: "luna", prompt: "hello" },
+      { adapter: "codex", alias: "missing-model", prompt: "hello" },
       identity,
       AbortSignal.abort(),
       { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot },
-    )).rejects.toThrow(/adapter codex.*allowed aliases: flagship, workhorse, scout/u);
+    )).resolves.toMatchObject({ status: "rejected", error: "unknown_alias", fix: expect.stringContaining("gpt-6-luna") });
+    expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
+  });
+
+  it("uses the real router and returns every invalid task before creating a run", async () => {
+    const result = await dispatchConfiguredBatch({ tasks: [
+      { id: "bad-model", adapter: "claude", model: "unknown-model-family", prompt: "hello" },
+      { id: "bad-prompt", adapter: "claude", prompt_file: "absent.md" },
+      { id: "bad-alias", adapter: "codex", alias: "not-in-catalogue", prompt: "hello" },
+    ], wait_seconds: 0 }, identity, new AbortController().signal,
+    { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot, AGENT_FABRIC_INSTANCE_ROOT: repositoryRoot });
+    expect(result.status).toBe("rejected");
+    expect((result.errors as Record<string, unknown>[]).map((error) => error.task_id).sort()).toEqual(["bad-alias", "bad-model", "bad-prompt"]);
+    expect((result.errors as Record<string, unknown>[]).map((error) => error.error)).toContain("model_family_unknown");
     expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
   });
 
@@ -197,4 +211,23 @@ describe("adapter rejection", () => {
     }
   });
 
+});
+
+describe("instance catalogue", () => {
+  it("reads live instance aliases and falls back only when the file is absent", () => {
+    const root = mkdtempSync(join(tmpdir(), "fabric-catalogue-"));
+    try {
+      mkdirSync(join(root, "config"));
+      const path = join(root, "config", "model-routing.json");
+      const routing = JSON.parse(readFileSync(join(repositoryRoot, "config", "model-routing.json"), "utf8"));
+      routing.families.openai.aliases.workhorse = ["custom-luna"];
+      writeFileSync(path, JSON.stringify(routing));
+      const env = { AGENT_FABRIC_INSTANCE_ROOT: root };
+      expect(catalogueSnapshot(repositoryRoot, env).adapters.find((adapter) => adapter.name === "codex")?.models).toContain("custom-luna");
+      writeFileSync(path, "invalid");
+      expect(catalogueSnapshot(repositoryRoot, env).adapters).toEqual([]);
+      rmSync(path);
+      expect(catalogueSnapshot(repositoryRoot, env).adapters.find((adapter) => adapter.name === "codex")?.models).toContain("gpt-6-luna");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
 });
