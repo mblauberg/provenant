@@ -362,7 +362,9 @@ dispatch is the supported expansion path.
   `OPENCODE_CONFIG_CONTENT`; its guarantee is `best_effort` because allowed
   shell patterns can still write. `worktree_write` runs inside the owned
   worktree with external directory access denied. A silent run exits
-  `idle_timeout` after 600 seconds by default (`CF_DISPATCH_IDLE_SECONDS`).
+  `idle_timeout` after 600 seconds on read-only runs or 1800 seconds on writer
+  runs by default (`CF_DISPATCH_IDLE_SECONDS` overrides either). Both stdout
+  and stderr activity reset the idle timer.
   The result contains assistant text; full events are in `<output>.raw.jsonl`.
   Never pass `--auto` (which auto-approves permissions).
 - **As an interactive client:** register Fabric MCP for OpenCode

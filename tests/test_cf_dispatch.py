@@ -3281,6 +3281,34 @@ def test_opencode_idle_watchdog_terminates_silent_provider():
         assert "idle for 1s; try another model" in out.read_text()
 
 
+def test_opencode_stderr_progress_keeps_writer_alive():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", """#!/usr/bin/env bash
+            for i in 1 2 3 4 5 6; do
+              echo "test progress $i" >&2
+              sleep 0.3
+            done
+            echo '{"type":"text","part":{"text":"tests passed"}}'
+        """)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["CF_DISPATCH_IDLE_SECONDS"] = "1"
+        out = tmp / "out.txt"
+        worktree = make_worktree(tmp)
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--access-mode", "worktree_write", "--worktree", str(worktree),
+             "--prompt", "Run tests", "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert json.loads(result.stdout)["status"] == "ok"
+        assert out.read_text() == "tests passed"
+
+
 def test_opencode_dispatch_group_signal_terminates_provider_and_grandchild():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)

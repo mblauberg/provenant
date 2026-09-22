@@ -250,14 +250,15 @@ with open(raw, "wb") as output, open(diag, "ab") as diagnostic:
         except ProcessLookupError:
             pass
         child.wait()
-    last_size = 0
+    last_size = (0, 0)
     last_growth = time.monotonic()
     while child.poll() is None:
         time.sleep(0.25)
         if cancelled:
             stop_group()
             sys.exit(143)
-        size = os.fstat(output.fileno()).st_size
+        size = (os.fstat(output.fileno()).st_size,
+                os.fstat(diagnostic.fileno()).st_size)
         if size != last_size:
             last_size, last_growth = size, time.monotonic()
         elif time.monotonic() - last_growth >= idle:
@@ -1223,14 +1224,18 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
             rc=1
           else
             local idle_marker="$ACTIVE_RUN_TMPDIR/opencode.idle"
+            local idle_seconds="${CF_DISPATCH_IDLE_SECONDS:-}"
+            if [ -z "$idle_seconds" ]; then
+              if [ "$ACCESS_MODE" = "worktree_write" ]; then idle_seconds=1800; else idle_seconds=600; fi
+            fi
             OPENCODE_CONFIG_CONTENT="$opencode_config" run_with_idle_watchdog \
-              "${CF_DISPATCH_IDLE_SECONDS:-600}" "$raw" "$diag" "$WORKTREE" "$idle_marker" \
+              "$idle_seconds" "$raw" "$diag" "$WORKTREE" "$idle_marker" \
               opencode run --format json ${WORKTREE:+--dir "$WORKTREE"} \
               ${model:+--model "$model"} ${effort:+--variant "$effort"} \
               "$PROMPT_ARG"; rc=$?
             if [ -f "$idle_marker" ]; then
               status="idle_timeout"
-              route_reason="OpenCode idle for ${CF_DISPATCH_IDLE_SECONDS:-600}s; try another model"
+              route_reason="OpenCode idle for ${idle_seconds}s; try another model"
             else
               parse_opencode_events; opencode_parse_rc=$?
               case "$opencode_parse_rc" in
