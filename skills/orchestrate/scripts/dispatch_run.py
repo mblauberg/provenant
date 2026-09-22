@@ -1249,12 +1249,15 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
                 signal.signal(signal.SIGTERM, cancel_handler)
                 signal.signal(signal.SIGHUP, cancel_handler)
-                provider_environment = routing_environment()
+                provider_environment = os.environ.copy()
                 # Owners retain chair custody; provider work must discover its own
                 # seat, state directory and checkout rather than inherit the chair's.
                 for name in ("AGENT_FABRIC_STATE_DIRECTORY", "AGENT_FABRIC_SEAT",
                              "AGENT_FABRIC_CLIENT_LABEL", "AGENT_FABRIC_LABEL", "AGENT_FABRIC_PRODUCT_ROOT"):
                     provider_environment.pop(name, None)
+                for name in list(provider_environment):
+                    if name.startswith(("PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")):
+                        provider_environment.pop(name)
                 if os.environ.get("PROVENANT_RUN_TOKEN"):
                     # cf_dispatch buffers stdout/stderr here until completion.
                     # Status can observe mtimes without reading provider output.

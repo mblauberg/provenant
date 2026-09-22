@@ -1935,7 +1935,8 @@ print(json.dumps({'models': [{'slug': 'gpt-6-luna', 'supported_reasoning_levels'
 
 
 @pytest.mark.parametrize('owner', ['dispatch', 'batch'])
-def test_provider_does_not_inherit_chair_fabric_environment(tmp_path, owner):
+@pytest.mark.parametrize('instance', ['configured', 'missing', 'unset'])
+def test_provider_does_not_inherit_chair_fabric_environment(tmp_path, owner, instance):
     run_dir = make_run(tmp_path, 'isolated-provider')
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('Reply OK')
@@ -1949,7 +1950,9 @@ if sys.argv[1:3] == ['debug', 'models']:
 else:
     names = ['AGENT_FABRIC_STATE_DIRECTORY', 'AGENT_FABRIC_SEAT', 'AGENT_FABRIC_CLIENT_LABEL',
              'AGENT_FABRIC_LABEL', 'AGENT_FABRIC_PRODUCT_ROOT']
+    names += [k for k in os.environ if k.startswith(('PROVENANT_RUN_', 'PROVENANT_PREFLIGHT_'))]
     Path(os.environ['PROVIDER_ENV_CAPTURE']).write_text(json.dumps({k: os.environ[k] for k in names if k in os.environ}))
+    Path(os.environ['PROVIDER_INSTANCE_CAPTURE']).write_text(os.environ.get('AGENT_FABRIC_INSTANCE_ROOT', ''))
     Path(os.environ['PROVIDER_TMP_CAPTURE']).write_text(os.environ['TMPDIR'])
     sys.stdin.read()
     print('OK')
@@ -1961,7 +1964,15 @@ else:
            'AGENT_FABRIC_SEAT': 'claude', 'AGENT_FABRIC_CLIENT_LABEL': 'chair-client',
            'AGENT_FABRIC_LABEL': 'chair-label', 'PROVIDER_ENV_CAPTURE': str(capture),
            'PROVIDER_TMP_CAPTURE': str(tmp_path / 'provider-tmp.txt'),
-           'PROVENANT_RUN_TOKEN': 'mcp-fixture-token', 'PROVENANT_RUN_DIR': str(run_dir)}
+           'PROVENANT_RUN_TOKEN': 'mcp-fixture-token', 'PROVENANT_RUN_DIR': str(run_dir),
+           'PROVENANT_PREFLIGHT_ROUTES': '{}', 'PROVENANT_RUN_PARENT_TOKEN': 'parent-token',
+           'PROVIDER_INSTANCE_CAPTURE': str(tmp_path / 'provider-instance.txt')}
+    if instance != 'configured':
+        env['HOME'] = str(tmp_path / 'home')
+        env['AGENT_FABRIC_INSTANCE_ROOT'] = str(tmp_path / 'missing-instance')
+    if instance == 'unset':
+        env.pop('AGENT_FABRIC_INSTANCE_ROOT', None)
+    expected_instance = env.get('AGENT_FABRIC_INSTANCE_ROOT', '')
     if owner == 'dispatch':
         command = [str(SCRIPT), '--run-dir', str(run_dir), '--adapter', 'codex',
                    '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker']
@@ -1974,6 +1985,7 @@ else:
     result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads(capture.read_text()) == {}
+    assert (tmp_path / 'provider-instance.txt').read_text() == expected_instance
     assert not (tmp_path / 'chair-state').exists()
     scratch = Path((tmp_path / 'provider-tmp.txt').read_text())
     assert scratch.name.startswith('fabric-provider-')
