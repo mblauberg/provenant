@@ -199,6 +199,10 @@ seconds since output, and `stalled: true` when a live run has been silent longer
 than the greater of 600 seconds or 20% of its timeout. A dead owner without a
 terminal record is `interrupted`. Timeout and cancellation records retain route
 metadata, including the preflight route when the provider emitted no receipt.
+For MCP runs, owners give the dispatcher a private temporary directory and
+record its location per attempt, so status can also observe buffered provider
+output before a result is retained. Owners remove that temporary directory
+after the provider exits; status reads timestamps only.
 
 Dispatch and batch owners retain their chair context, but provider processes
 start without the chair's Fabric state directory, seat, client label, agent

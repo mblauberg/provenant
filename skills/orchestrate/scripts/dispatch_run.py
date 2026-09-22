@@ -1222,6 +1222,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     exit_code: int | None = None
     process_error = ""
     process = None
+    provider_temporary = None
     cancelled = False
     old_handlers: dict[int, Any] = {}
     try:
@@ -1254,6 +1255,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 for name in ("AGENT_FABRIC_STATE_DIRECTORY", "AGENT_FABRIC_SEAT",
                              "AGENT_FABRIC_CLIENT_LABEL", "AGENT_FABRIC_LABEL", "AGENT_FABRIC_PRODUCT_ROOT"):
                     provider_environment.pop(name, None)
+                if os.environ.get("PROVENANT_RUN_TOKEN"):
+                    # cf_dispatch buffers stdout/stderr here until completion.
+                    # Status can observe mtimes without reading provider output.
+                    provider_temporary = tempfile.TemporaryDirectory(prefix="fabric-provider-", ignore_cleanup_errors=True)
+                    provider_environment["TMPDIR"] = provider_temporary.name
+                    atomic_write_contained(run_dir, (attempt_dir / "provider-output.json").relative_to(run_dir),
+                                           (json.dumps({"directory": provider_temporary.name}) + "\n").encode(), label="provider output location")
                 if git_evidence_requested:
                     provider_environment.pop("CF_DISPATCH_AGY_ADD_DIR", None)
                 process = subprocess.Popen(
@@ -1340,6 +1348,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         process_error = str(exc)
     finally:
         release_worktree_lease(worktree_lease)
+        if provider_temporary is not None:
+            provider_temporary.cleanup()
 
     finished_at = now()
     duration_seconds = round(time.monotonic() - started, 6)
@@ -1533,7 +1543,7 @@ def close_mcp_run(run_dir: Path) -> None:
     try:
         attempts = list((run_dir / "dispatch/tasks").glob("*/attempt-*/attempt.json"))
         records = [json.loads(read_bound_bytes(run_dir, path.relative_to(run_dir), label="attempt.json")) for path in attempts]
-        if not records or any(record.get("status") not in {"succeeded", "failed", "blocked", "timed_out", "cancelled"} for record in records):
+        if any(record.get("status") not in {"succeeded", "failed", "blocked", "timed_out", "cancelled"} for record in records):
             return
         # The batch owner calls this after joining all children, under its custody lock.
         receipt = json.loads(read_bound_bytes(run_dir, "RUN_RECEIPT.json", label="RUN_RECEIPT.json"))
@@ -1545,6 +1555,8 @@ def close_mcp_run(run_dir: Path) -> None:
             if summary.get("status") not in {"completed", "failed", "cancelled"}:
                 return
             statuses.update(task.get("status", "failed") for task in summary.get("tasks", []))
+        if not statuses:
+            return
         receipt.update(status="succeeded" if statuses == {"succeeded"} else "cancelled" if statuses == {"cancelled"} else "failed",
                        closed_at=now(), terminal_reason=None if statuses == {"succeeded"} else "MCP execution attempts are terminal")
         write_owned(run_dir, run_dir / "RUN_RECEIPT.json", json.dumps(receipt, indent=2) + "\n")

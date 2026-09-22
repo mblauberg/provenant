@@ -1890,6 +1890,19 @@ def test_mcp_owner_closes_receipt(tmp_path, monkeypatch):
     assert receipt['closed_at']
 
 
+def test_mcp_batch_cancelled_before_dispatch_closes_receipt(tmp_path, monkeypatch):
+    run_dir = make_run(tmp_path, 'mcp-cancelled-before-dispatch')
+    module = load_dispatch_module()
+    monkeypatch.setenv('PROVENANT_RUN_TOKEN', 'fixture-token')
+    monkeypatch.setenv('PROVENANT_RUN_DIR', str(run_dir))
+    summary = run_dir / 'dispatch/batches/batch-001/summary.json'
+    summary.parent.mkdir(parents=True)
+    summary.write_text(json.dumps({'status': 'cancelled', 'tasks': [
+        {'task_id': 'never-started', 'status': 'cancelled'}]}))
+    module.close_mcp_run(run_dir)
+    assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'cancelled'
+
+
 @pytest.mark.parametrize(('mode', 'timeout'), [('read_only', 3600), ('worktree_write', 10800)])
 def test_front_door_mode_timeout_defaults(tmp_path, mode, timeout):
     module = load_dispatch_module()
@@ -1937,6 +1950,7 @@ else:
     names = ['AGENT_FABRIC_STATE_DIRECTORY', 'AGENT_FABRIC_SEAT', 'AGENT_FABRIC_CLIENT_LABEL',
              'AGENT_FABRIC_LABEL', 'AGENT_FABRIC_PRODUCT_ROOT']
     Path(os.environ['PROVIDER_ENV_CAPTURE']).write_text(json.dumps({k: os.environ[k] for k in names if k in os.environ}))
+    Path(os.environ['PROVIDER_TMP_CAPTURE']).write_text(os.environ['TMPDIR'])
     sys.stdin.read()
     print('OK')
 ''')
@@ -1945,7 +1959,9 @@ else:
            'AGENT_FABRIC_INSTANCE_ROOT': str(ROOT), 'AGENT_FABRIC_PRODUCT_ROOT': str(ROOT),
            'AGENT_FABRIC_STATE_DIRECTORY': str(tmp_path / 'chair-state'),
            'AGENT_FABRIC_SEAT': 'claude', 'AGENT_FABRIC_CLIENT_LABEL': 'chair-client',
-           'AGENT_FABRIC_LABEL': 'chair-label', 'PROVIDER_ENV_CAPTURE': str(capture)}
+           'AGENT_FABRIC_LABEL': 'chair-label', 'PROVIDER_ENV_CAPTURE': str(capture),
+           'PROVIDER_TMP_CAPTURE': str(tmp_path / 'provider-tmp.txt'),
+           'PROVENANT_RUN_TOKEN': 'mcp-fixture-token', 'PROVENANT_RUN_DIR': str(run_dir)}
     if owner == 'dispatch':
         command = [str(SCRIPT), '--run-dir', str(run_dir), '--adapter', 'codex',
                    '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker']
@@ -1959,3 +1975,7 @@ else:
     assert result.returncode == 0, result.stdout + result.stderr
     assert json.loads(capture.read_text()) == {}
     assert not (tmp_path / 'chair-state').exists()
+    scratch = Path((tmp_path / 'provider-tmp.txt').read_text())
+    assert scratch.name.startswith('fabric-provider-')
+    assert not scratch.exists()
+    assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'succeeded'

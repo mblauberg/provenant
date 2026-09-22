@@ -686,6 +686,15 @@ describe("status liveness", () => {
     writeFileSync(statusPath, JSON.stringify({ ...record, timeout_seconds: 10800 }));
     expect(await fabricStatus(workspace, "silent")).toMatchObject({ status: "running", stalled: false });
     writeFileSync(statusPath, JSON.stringify(record));
+    const scratch = join(temporaryDirectory, "fabric-provider-fixture");
+    const rawDir = join(scratch, "cf-dispatch-run.fixture");
+    mkdirSync(rawDir, { recursive: true });
+    const attemptDir = join(dir, "dispatch", "tasks", "silent", "attempt-001");
+    mkdirSync(attemptDir, { recursive: true });
+    writeFileSync(join(attemptDir, "provider-output.json"), JSON.stringify({ directory: scratch }));
+    writeFileSync(join(rawDir, "raw"), "streaming provider output");
+    expect(await fabricStatus(workspace, "silent")).toMatchObject({ status: "running", stalled: false, output_age_seconds: 0 });
+    rmSync(scratch, { recursive: true });
     writeFileSync(`${dir}-owner.stdout.jsonl`, "new provider output");
     expect(await fabricStatus(workspace, "silent")).toMatchObject({ status: "running", stalled: false, output_age_seconds: 0 });
   });

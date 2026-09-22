@@ -431,6 +431,17 @@ export async function fabricStatus(workspace: string, id?: string, waitSeconds =
             const record = readJson(join(attemptDir, "attempt.json"));
             if (record !== undefined) attempts.push(record);
             for (const name of ["result.md", "stderr.log", "adapter-receipt.json"]) outputPaths.push(join(attemptDir, name));
+            const scratch = readJson(join(attemptDir, "provider-output.json"))?.directory;
+            if (typeof scratch === "string" && isAbsolute(scratch) && basename(scratch).startsWith("fabric-provider-")) {
+              try {
+                if (lstatSync(scratch).isSymbolicLink()) continue;
+                for (const directory of readdirSync(scratch).filter((name) => name.startsWith("cf-dispatch-run.")).slice(0, 32)) {
+                  const path = join(scratch, directory);
+                  if (lstatSync(path).isSymbolicLink()) continue;
+                  for (const name of ["raw", "diag", "combined", "clean"]) outputPaths.push(join(path, name));
+                }
+              } catch { /* Owners remove temporary output after retaining the result. */ }
+            }
           }
         }
       } catch { /* A new run may not have its first attempt yet. */ }
