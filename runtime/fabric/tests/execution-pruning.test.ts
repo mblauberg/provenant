@@ -94,6 +94,7 @@ async function startSleepingRun(prompt: string): Promise<Record<string, unknown>
     ownerEnvironment,
   );
   expect(started.status, JSON.stringify(started)).toBe("running");
+  spawnedPids.push(Number(started.pid));
   return started;
 }
 

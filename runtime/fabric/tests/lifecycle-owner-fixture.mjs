@@ -54,9 +54,15 @@ const startProvider = ({ ignoreTerm = false, detached = false } = {}) => {
   ], { detached, stdio: "ignore", env: providerEnvironment });
   provider.unref();
   writeFileSync(join(runDir, "provider.pid"), `${provider.pid}\n`);
-  const providerStartedAt = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(provider.pid)], {
-    encoding: "utf8",
-  }).trim();
+  let providerStartedAt;
+  try {
+    providerStartedAt = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(provider.pid)], {
+      encoding: "utf8",
+    }).trim();
+  } catch (error) {
+    provider.kill("SIGKILL");
+    throw error;
+  }
   writeFileSync(join(runDir, "dispatch-provider.json"), JSON.stringify({
     run_token: process.env.PROVENANT_RUN_TOKEN,
     provider_pid: provider.pid,
