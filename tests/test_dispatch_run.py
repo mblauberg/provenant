@@ -1570,19 +1570,43 @@ def make_worktree(root: Path) -> Path:
 
 
 def run_writer_dispatch(
-    tmp_path: Path, run_dir: Path, prompt: Path, *extra: str, task_id: str = "task-1"
+    tmp_path: Path, run_dir: Path, prompt: Path, *extra: str, task_id: str = "task-1",
+    adapter: str = "claude",
 ) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     write_success_adapter(bin_dir / "cf_dispatch_stub.sh")
+    if adapter == "opencode":
+        write_executable(bin_dir / "opencode", """#!/usr/bin/env bash
+            printf '%s\\n' '{"type":"text","part":{"text":"OK"}}'
+        """)
     env = os.environ.copy()
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     return subprocess.run(
-        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", task_id, "--adapter", "claude",
-         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "workhorse",
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", task_id, "--adapter", adapter,
+         "--prompt-file", str(prompt), "--orchestrator-family", "openai",
+         *([] if adapter == "opencode" else ["--alias", "workhorse"]),
          "--role", "worker", *extra],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
+
+
+def test_opencode_worktree_writer_reaches_adapter_and_attempt(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "opencode-writer")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Make a change\n", encoding="utf-8")
+    worktree = make_worktree(tmp_path)
+    result = run_writer_dispatch(
+        tmp_path, run_dir, prompt, "--access-mode", "worktree_write",
+        "--worktree", str(worktree), "--model", "opencode/nemotron-3.5-lightning-free",
+        adapter="opencode",
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    receipt = json.loads(result.stdout)
+    assert receipt["status"] == "succeeded"
+    attempt = json.loads((run_dir / "dispatch/tasks/task-1/attempt-001/attempt.json").read_text())
+    assert attempt["requested_route"]["adapter"] == "opencode"
+    assert attempt["requested_route"]["access_mode"] == "worktree_write"
 
 
 def test_worktree_writer_route_reaches_the_adapter_and_the_attempt_record(tmp_path: Path) -> None:
