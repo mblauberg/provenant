@@ -3162,7 +3162,7 @@ def test_opencode_read_only_route_installs_pattern_permissions():
     record = json.loads(result.output)
     assert result.returncode == 0, result.output
     assert record["read_only_guarantee"] == "best_effort"
-    assert record["resolved_model"] == "opencode/nemotron-3.5-lightning-free"
+    assert record["resolved_model"] == "opencode-go/deepseek-v4.1-flash"
     assert record["model_selection"] == "adapter-default"
     config = json.loads(recorded.split("CONFIG=", 1)[1].splitlines()[0])
     assert config["permission"]["edit"] == {"*": "deny"}

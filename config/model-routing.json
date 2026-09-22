@@ -99,7 +99,7 @@
     },
     "copilot": {"endpoint_provider": "github", "fixed_model_family": null, "effort_transport": "flag"},
     "kiro": {"endpoint_provider": "aws", "fixed_model_family": null, "effort_transport": "flag"},
-    "opencode": {"endpoint_provider": "opencode", "fixed_model_family": null, "effort_transport": "flag", "default_model": "opencode/nemotron-3.5-lightning-free"}
+    "opencode": {"endpoint_provider": "opencode", "fixed_model_family": null, "effort_transport": "flag", "default_model": "opencode-go/deepseek-v4.1-flash"}
   },
   "endpoints": {
     "zai-glm": {

@@ -355,8 +355,8 @@ dispatch is the supported expansion path.
 
 ### OpenCode (provider + interactive client)
 
-- **As a dispatch provider:** Fabric adapter `opencode` defaults to the verified
-  free model `opencode/nemotron-3.5-lightning-free`. Override with a live
+- **As a dispatch provider:** Fabric adapter `opencode` defaults to
+  `opencode-go/deepseek-v4.1-flash`. Override with a live
   `opencode/*`, `opencode-go/*` or `openrouter/*` model from `opencode models`.
   The read-only route denies edit tools and most shell commands through
   `OPENCODE_CONFIG_CONTENT`; its guarantee is `best_effort` because allowed

@@ -1670,9 +1670,9 @@ def test_opencode_without_model_uses_adapter_default(capsys, monkeypatch):
     route = json.loads(capsys.readouterr().out)
     assert result == 0
     assert route["status"] == "ok"
-    assert route["resolved_model"] == "opencode/nemotron-3.5-lightning-free"
+    assert route["resolved_model"] == "opencode-go/deepseek-v4.1-flash"
     assert route["model_selection"] == "adapter-default"
-    assert route["model_family"] == "generic-open"
+    assert route["model_family"] == "deepseek"
 
 
 def test_cursor_without_model_uses_account_auto_default(capsys, monkeypatch):

@@ -1601,7 +1601,7 @@ def test_opencode_worktree_writer_reaches_adapter_and_attempt(tmp_path: Path) ->
     worktree = make_worktree(tmp_path)
     result = run_writer_dispatch(
         tmp_path, run_dir, prompt, "--access-mode", "worktree_write",
-        "--worktree", str(worktree), "--model", "opencode/nemotron-3.5-lightning-free",
+        "--worktree", str(worktree), "--model", "opencode-go/deepseek-v4.1-flash",
         adapter="opencode",
     )
     assert result.returncode == 0, result.stderr + result.stdout
