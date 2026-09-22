@@ -591,7 +591,11 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     identity_source = ""
     family_source = ""
 
-    if args.model:
+    adapter_default = adapter.get("default_model") if not args.model else None
+    if adapter_default is not None and (not isinstance(adapter_default, str) or not adapter_default.strip()):
+        return emit_route({**base, "status": "adapter_default_model_invalid"}, 2)
+    selected_model = args.model or adapter_default
+    if selected_model:
         if account_default:
             candidates = family_config.get("role_overrides", {}).get(args.role, {}).get(args.alias)
             candidates = candidates or family_config.get("aliases", {}).get(args.alias, [])
@@ -610,13 +614,16 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 },
                 1,
             )
-        model = args.model
+        model = selected_model
         # Brokers and gateways: attribute upstream family from the slug.
         # Endpoint profile family is only a fallback when inference fails.
         endpoint_family = endpoint_profile.get("model_family") if endpoint_profile else None
-        family, family_source = attribute_model_family(
-            model, catalog, endpoint_family=endpoint_family,
-        )
+        if args.adapter == "cursor" and model == "auto":
+            family, family_source = "generic-open", "broker-default"
+        else:
+            family, family_source = attribute_model_family(
+                model, catalog, endpoint_family=endpoint_family,
+            )
         identity_source = (
             "endpoint-profile" if family_source.startswith("endpoint-profile") else "model-pattern"
         )
@@ -939,6 +946,8 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         "fallback_model": fallback_model,
         "distinct_from_lead": distinct,
     }
+    if adapter_default:
+        record["model_selection"] = "adapter-default"
     if account_default:
         record.update(
             {

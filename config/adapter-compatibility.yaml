@@ -151,6 +151,7 @@ adapters:
         - darwin-arm64
     model_family_constraints:
       allowed:
+        - generic-open
         - cursor-composer
         - xai
         - anthropic
@@ -250,6 +251,8 @@ adapters:
         - cursor-composer
       allowed_model_patterns:
         - "opencode/*"
+        - "opencode-go/*"
+        - "openrouter/*"
       requires_explicit_model: true
       route_role: optional-free-account-worker
     official_source_url: "https://opencode.ai/docs/"
