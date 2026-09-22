@@ -24,11 +24,11 @@ def _provider_lines(home: Path) -> tuple[list[str], bool]:
     agy_root = Path(os.environ.get("AGY_CONFIG_DIR") or home / ".gemini")
     locations = {
         "claude": (claude_root, Path(os.environ.get("CLAUDE_MCP_CONFIG") or home / ".claude.json")),
-        "codex": (codex_root, codex_root / "config.toml"),
+        "codex": (codex_root, Path(os.environ.get("CODEX_MCP_CONFIG") or codex_root / "config.toml")),
         "opencode": (opencode_root, Path(os.environ.get("OPENCODE_MCP_CONFIG") or opencode_root / "opencode.jsonc")),
         "agy": (agy_root, Path(os.environ.get("AGY_MCP_CONFIG") or agy_root / "config/mcp_config.json")),
-        "cursor": (home / ".cursor", home / ".cursor/mcp.json"),
-        "kiro": (home / ".kiro", home / ".kiro/settings/mcp.json"),
+        "cursor": (home / ".cursor", Path(os.environ.get("CURSOR_MCP_CONFIG") or home / ".cursor/mcp.json")),
+        "kiro": (home / ".kiro", Path(os.environ.get("KIRO_MCP_CONFIG") or home / ".kiro/settings/mcp.json")),
     }
     lines = []
     missing = False
