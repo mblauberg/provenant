@@ -3182,6 +3182,7 @@ def test_opencode_event_failures_are_typed_and_keep_raw_jsonl(events, expected_s
         record = json.loads(result.stdout)
         assert result.returncode != 0
         assert record["status"] == expected_status
+        assert "try another model" in record["reason"]
         assert diagnostic in out.read_text()
         assert events in (tmp / "out.txt.raw.jsonl").read_text()
 

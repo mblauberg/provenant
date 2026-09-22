@@ -1234,6 +1234,13 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
     status="ok"
   fi
   [ "$status" = "tool_not_found" ] && guarantee="none"
+  if [ "$tool" = "opencode" ] && [ "$status" != "ok" ] && [ -z "$route_reason" ]; then
+    case "$status" in
+      auth_or_quota_error) route_reason="OpenCode account or quota rejected this model; check account or try another model";;
+      empty_output) route_reason="OpenCode returned no assistant text; try another model or inspect raw JSONL";;
+      error) route_reason="OpenCode failed; try another model or inspect raw JSONL";;
+    esac
+  fi
 
   if [ "$tool" = "opencode" ] && [ -s "$raw" ]; then
     # Keep the complete event stream beside the compact result/diagnostic.
