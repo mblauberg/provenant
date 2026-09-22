@@ -76,14 +76,17 @@ passing topology.
 ## Adaptive Loop
 
 1. Preflight authority/isolation/disclosure/receipts.
-2. **Pick the cheapest route that fits.** Native same-session subagents suit
-   work that needs the chair's own tools or context (browser, MCP, tightly
-   coupled edits). Token-heavy, bulk, cross-family or long-running work goes
-   through `fabric_dispatch`/`fabric_batch`: it spends the provider's budget,
-   not the chair's, and keeps custody. Do not wrap a Fabric call in a subagent.
-   Direct provider CLI is the fallback when Fabric cannot express the task;
-   record it as degraded. Ordinary dispatch may use same-family routes; the
-   `cf_dispatch.sh` distinct-family requirement belongs to its assurance path.
+2. **Pick the route by model, then cost.** If the wanted model is the chair's
+   own or in its native subagent pool (a Claude Code chair wanting Opus,
+   Sonnet, Haiku or Fable; a Codex chair wanting Astra, Sol or Luna), use a
+   native subagent: no Fabric hop. Any other provider or model goes through
+   `fabric_dispatch`/`fabric_batch`, which also suits long-running or
+   worktree-writer lanes that need custody. Call Fabric from the chair rather
+   than through a wrapper subagent (`codex-analyst`, `agy-reviewer` and the
+   like exist for hosts without Fabric). Direct provider CLI is the fallback when
+   Fabric cannot express the task; record it as degraded. Ordinary dispatch
+   may use same-family routes; the `cf_dispatch.sh` distinct-family
+   requirement belongs to its assurance path.
 3. Dispatch parallel read/partitioned-write and serial shared-state waves;
    adapt leaders on evidence and keep one chair/stage owner.
 4. Reduce to a claim/conflict map; verify the live tree before repair.
