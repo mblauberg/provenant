@@ -235,7 +235,7 @@ def test_current_routing_fixture_runs_real_dispatch_and_retains_partial_batch(tm
     for task_id, family, status in task_specs:
         prompt = tmp_path / f'{task_id}.md'
         prompt.write_text(
-            f'fixture_family={family}\nfixture_status={status}\nfixture_sleep=0.03\n',
+            f'fixture_family={family}\nfixture_status={status}\nfixture_sleep=0.03\nfixture_barrier=2\n',
             encoding='utf-8',
         )
         prompts[task_id] = prompt

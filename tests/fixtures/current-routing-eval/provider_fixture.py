@@ -43,6 +43,12 @@ status = values.get("fixture_status", "succeeded")
 state = Path(os.environ["CURRENT_ROUTING_FIXTURE_STATE"])
 _counter(state, 1)
 try:
+    if values.get("fixture_barrier") == "2":
+        deadline = time.monotonic() + 10
+        while int((state / "maximum").read_text()) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if int((state / "maximum").read_text()) < 2:
+            raise RuntimeError("batch did not launch two providers concurrently")
     time.sleep(float(values.get("fixture_sleep", "0")))
 finally:
     _counter(state, -1)
