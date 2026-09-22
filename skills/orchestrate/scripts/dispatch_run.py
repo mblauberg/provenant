@@ -3,7 +3,7 @@
 
 This is deliberately a one-attempt owner.  Provider command construction stays
 with ``cf_dispatch.sh``; this module owns only the regular-file boundary,
-process wait and attempt custody. Provider execution is bounded to 900 seconds
+process wait and attempt custody. Provider execution is bounded to 3600 seconds for reads and 10800 for writes
 by default; callers may provide a smaller or larger finite positive timeout.
 """
 
@@ -23,6 +23,7 @@ import stat
 import subprocess
 import sys
 import time
+import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -38,7 +39,7 @@ CF_DISPATCH = Path(__file__).with_name("cf_dispatch.sh")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
 BATCH_ID_RE = re.compile(r"^batch-(?:\d{3}|[1-9]\d{3,})$")
-DEFAULT_TIMEOUT_SECONDS = 900.0
+DEFAULT_TIMEOUT_SECONDS = 3600.0
 MAX_WORKER_QUESTION_PROMPT = 4096
 MAX_WORKER_TERMINAL_ENVELOPE_BYTES = 64 * 1024
 MAX_GIT_EVIDENCE_HEADER_BYTES = 64 * 1024
@@ -625,6 +626,14 @@ def resolve_writer_worktree(worktree: Path) -> Path:
             raise WorktreeLeaseError(f"worktree must be the root of a Git worktree: {resolved}")
     except OSError as exc:
         raise WorktreeLeaseError(f"worktree root could not be resolved: {resolved}") from exc
+    try:
+        listing = subprocess.run(["git", "-C", str(resolved), "worktree", "list", "--porcelain", "-z"],
+                                 env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")}, capture_output=True, timeout=3, check=True)
+        roots = [Path(os.fsdecode(field[9:])).resolve() for field in listing.stdout.split(b"\0") if field.startswith(b"worktree ")]
+        if resolved not in roots:
+            raise WorktreeLeaseError("worktree must be registered with Git")
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise WorktreeLeaseError("cannot verify registered Git worktree") from exc
     return resolved
 
 
@@ -886,6 +895,166 @@ def _record_provider_process(run_dir: Path, process: subprocess.Popen[Any]) -> N
         return
 
 
+class PreflightError(ValueError):
+    def __init__(self, code: str, fix: str):
+        super().__init__(fix)
+        self.code = code
+
+
+def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path) -> bytes:
+    prompt_source = None
+    if prompt_file is not None:
+        prompt_source = prompt_file.expanduser()
+        if not prompt_source.is_absolute():
+            prompt_source = workspace / prompt_source
+    prompt_bytes: bytes | None = None
+    if prompt_source is not None:
+        if not prompt_source.exists():
+            raise PreflightError("prompt_unavailable", f"cannot read prompt file: {prompt_source}")
+        if not (prompt_source == run_dir or run_dir in prompt_source.parents or workspace in prompt_source.parents):
+            raise PreflightError("prompt_path_forbidden", "prompt file must be inside the run directory or current workspace")
+        sensitive_roots = {".ssh", ".aws", ".azure", ".gnupg"}
+        sensitive_files = {
+            ".env", ".env.local", ".env.production", "credentials.json",
+            "application_default_credentials.json", "token.json",
+        }
+        parts = [part.casefold() for part in prompt_source.parts]
+        config_auth_dirs = {"gcloud", "gh", "claude", "codex", "openai"}
+        config_auth = any(
+            part == ".config" and index + 1 < len(parts) and parts[index + 1] in config_auth_dirs
+            for index, part in enumerate(parts)
+        )
+        if sensitive_roots.intersection(parts) or prompt_source.name.casefold() in sensitive_files or config_auth:
+            raise PreflightError("credential_or_auth_store_denied", "prompt path is a credential or authentication store")
+        try:
+            prompt_bytes = _read_prompt_once(workspace, prompt_source)
+        except OwnedLinkError as exc:
+            raise PreflightError("prompt_hard_link_denied", str(exc))
+        except OwnedFileError as exc:
+            raise PreflightError("prompt_unavailable", str(exc))
+    return prompt_bytes
+
+
+def routing_environment() -> dict[str, str]:
+    """Keep discovery and worker routing on the same instance/product fallback."""
+    env = os.environ.copy()
+    instance = Path(env.get("AGENT_FABRIC_INSTANCE_ROOT") or Path.home() / ".agents").expanduser()
+    try:
+        (instance / "config/model-routing.json").lstat()
+    except FileNotFoundError:
+        env["AGENT_FABRIC_INSTANCE_ROOT"] = env.get("AGENT_FABRIC_PRODUCT_ROOT", str(SKILLS_ROOT.parent))
+    except OSError:
+        pass
+    return env
+
+
+def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
+    """Use the dispatcher router before creating custody or launching any task."""
+    workspace = Path.cwd().resolve()
+    product = Path(os.environ.get("AGENT_FABRIC_PRODUCT_ROOT", SKILLS_ROOT.parent))
+    instance = Path(routing_environment().get("AGENT_FABRIC_INSTANCE_ROOT") or Path.home() / ".agents").expanduser()
+    catalog = instance / "config/model-routing.json"
+    errors = []
+    routes = []
+    try:
+        routing_catalog = json.loads(catalog.read_text())
+    except (OSError, ValueError):
+        routing_catalog = {}
+    seen = set()
+    writers = set()
+    probes: dict[str, Path | None] = {}
+    resolved_routes: dict[tuple[str, ...], dict[str, Any]] = {}
+    with tempfile.TemporaryDirectory(prefix="fabric-preflight-") as scratch:
+        for task in tasks:
+            task_id = task.get("id", "task-1")
+            try:
+                if not isinstance(task_id, str) or not TASK_ID_RE.fullmatch(task_id) or task_id in seen:
+                    raise PreflightError("invalid_task_id", "Pass unique task ids containing letters, numbers, '.', '_' or '-'.")
+                seen.add(task_id)
+                if (task.get("prompt") is None) == (task.get("prompt_file") is None):
+                    raise PreflightError("prompt_required", "Pass exactly one of prompt or prompt_file.")
+                if task.get("prompt_file") is not None:
+                    read_prompt_input(Path(task["prompt_file"]), workspace, workspace)
+                adapter = task["adapter"]
+                mode = task.get("access_mode", "read_only")
+                if mode not in ACCESS_MODES:
+                    raise PreflightError("access_mode_invalid", "Pass mode read_only or worktree_write.")
+                if mode == "worktree_write":
+                    if adapter not in WORKTREE_WRITE_ADAPTERS:
+                        raise PreflightError("worktree_write_adapter_unsupported", "Pass mode read_only or adapter " + ", ".join(sorted(WORKTREE_WRITE_ADAPTERS)) + ".")
+                    if not task.get("worktree"):
+                        raise PreflightError("worktree_required", "Pass worktree=<registered Git worktree root> with mode worktree_write.")
+                    worktree = resolve_writer_worktree(Path(task["worktree"]))
+                    if worktree in writers:
+                        raise PreflightError("worktree_conflict", "Pass a different registered worktree for each writer task.")
+                    writers.add(worktree)
+                elif task.get("worktree"):
+                    raise PreflightError("worktree_not_applicable", "Pass mode worktree_write with worktree, or omit worktree.")
+                command = [sys.executable, str(product / "scripts/model_route.py"), "resolve",
+                           "--catalog", str(catalog), "--adapter", adapter, "--role", "worker",
+                           "--alias", task.get("alias") or ("flagship" if task.get("model") else "workhorse")]
+                for key in ("model", "effort"):
+                    if task.get(key):
+                        command.extend(["--" + key, task[key]])
+                if os.environ.get("CF_DISPATCH_ENDPOINT"):
+                    command.extend(["--endpoint", os.environ["CF_DISPATCH_ENDPOINT"]])
+                def resolve_route():
+                    key = tuple(command)
+                    if key in resolved_routes:
+                        return resolved_routes[key]
+                    result = subprocess.run(command, text=True, capture_output=True, timeout=15, env=routing_environment())
+                    try:
+                        route = json.loads(result.stdout)
+                        resolved_routes[key] = route
+                        return route
+                    except ValueError:
+                        raise PreflightError("model_routing_unavailable", "Restore the routing catalogue and the harness Python environment.")
+                route = resolve_route()
+                if (adapter == "codex" and route.get("status") == "capability_discovery_failed") or (
+                    adapter == "agy" and route.get("status") in {"ok", "model_required_for_broker"}
+                ):
+                    if adapter not in probes:
+                        path = Path(scratch) / (adapter + ".json")
+                        probe = subprocess.run([sys.executable, str(CF_DISPATCH.with_name("capabilities.py")),
+                                                adapter, "--out", str(path)], capture_output=True, timeout=20)
+                        probes[adapter] = path if probe.returncode == 0 else None
+                    if probes[adapter] is not None:
+                        command.extend(["--capabilities-file", str(probes[adapter])])
+                        route = resolve_route()
+                if route.get("status") != "ok":
+                    code = route.get("status", "routing_record_invalid")
+                    fixes = {
+                        "model_required_for_broker": "Pass model=<provider/model id> for " + adapter + ".",
+                        "effort_unsupported": "Pass an effort supported by the selected model, or omit effort.",
+                        "capability_discovery_failed": "Pass an installed, authenticated adapter with a readable model catalogue.",
+                    }
+                    adapter_config = routing_catalog.get("adapters", {}).get(adapter, {})
+                    family = adapter_config.get("fixed_model_family")
+                    families = [family] if family else adapter_config.get("model_family_preferences", {}).get("preferred", [])
+                    aliases: dict[str, list[str]] = {}
+                    for name in families:
+                        for alias, models in routing_catalog.get("families", {}).get(name, {}).get("aliases", {}).items():
+                            aliases.setdefault(alias, []).extend(models)
+                    choices = list(dict.fromkeys(model for models in aliases.values() for model in models))
+                    fix = ("Pass alias " + ", ".join(aliases) + " or model " + ", ".join(choices) + "."
+                           if choices else "Pass an explicit provider/model id supported by " + adapter + ".")
+                    if "effort" in code:
+                        fix = "Omit effort, or pass a supported level: low, medium, high, xhigh, max, ultra."
+                    raise PreflightError(code, fixes.get(code, fix))
+                routes.append(route)
+            except (PreflightError, WorktreeLeaseError, OSError, subprocess.TimeoutExpired) as exc:
+                prompt_fixes = {
+                    "prompt_unavailable": "Pass prompt text or prompt_file=<readable regular file inside the workspace>.",
+                    "prompt_path_forbidden": "Pass prompt_file=<readable regular file inside the workspace>.",
+                    "credential_or_auth_store_denied": "Pass prompt text or a workspace prompt file outside credential and authentication stores.",
+                    "prompt_hard_link_denied": "Pass prompt_file=<workspace file with one hard link>.",
+                }
+                errors.append({"task_id": task_id, "error": getattr(exc, "code", "worktree_invalid" if isinstance(exc, WorktreeLeaseError) else "preflight_unavailable"),
+                               "fix": prompt_fixes.get(exc.code, str(exc)) if isinstance(exc, PreflightError) else "Pass a readable prompt and registered Git worktree; check adapter availability."})
+    return ({"status": "rejected", "error": errors[0]["error"], "fix": errors[0]["fix"], "errors": errors}
+            if errors else {"status": "validated", "routes": routes})
+
+
 def _dispatch(args: argparse.Namespace, custody=None) -> int:
     run_dir = args.run_dir.resolve()
     workspace = Path.cwd().resolve()
@@ -935,41 +1104,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     except OSError as exc:
         return fail(run_dir, "manifest_not_appendable", f"MANIFEST.md is not appendable: {exc}")
 
-    prompt_source = None
-    if args.prompt_file is not None:
-        prompt_source = args.prompt_file.expanduser()
-        if not prompt_source.is_absolute():
-            prompt_source = workspace / prompt_source
-    prompt_bytes: bytes | None = None
-    if prompt_source is not None:
-        if not prompt_source.exists():
-            return fail(run_dir, "prompt_unavailable", f"cannot read prompt file: {prompt_source}")
-        if not (prompt_source == run_dir or run_dir in prompt_source.parents or workspace in prompt_source.parents):
-            return fail(run_dir, "prompt_path_forbidden", "prompt file must be inside the run directory or current workspace")
-        sensitive_roots = {".ssh", ".aws", ".azure", ".gnupg"}
-        sensitive_files = {
-            ".env", ".env.local", ".env.production", "credentials.json",
-            "application_default_credentials.json", "token.json",
-        }
-        parts = [part.casefold() for part in prompt_source.parts]
-        config_auth_dirs = {"gcloud", "gh", "claude", "codex", "openai"}
-        config_auth = any(
-            part == ".config" and index + 1 < len(parts) and parts[index + 1] in config_auth_dirs
-            for index, part in enumerate(parts)
-        )
-        if sensitive_roots.intersection(parts) or prompt_source.name.casefold() in sensitive_files or config_auth:
-            return fail(run_dir, "credential_or_auth_store_denied", "prompt path is a credential or authentication store")
-        try:
-            prompt_bytes = _read_prompt_once(workspace, prompt_source)
-        except OwnedLinkError as exc:
-            return fail(run_dir, "prompt_hard_link_denied", str(exc))
-        except OwnedFileError as exc:
-            return fail(run_dir, "prompt_unavailable", str(exc))
-    else:
-        try:
-            prompt_bytes = sys.stdin.buffer.read()
-        except OSError as exc:
-            return fail(run_dir, "prompt_unavailable", f"cannot read prompt stdin: {exc}")
+    try:
+        prompt_bytes = (read_prompt_input(args.prompt_file, workspace, run_dir)
+                        if args.prompt_file is not None else sys.stdin.buffer.read())
+    except PreflightError as exc:
+        return fail(run_dir, exc.code, str(exc))
+    except OSError as exc:
+        return fail(run_dir, "prompt_unavailable", str(exc))
     git_evidence_requested = args.git_evidence is not None
     git_evidence_identity: dict[str, Any] | None = None
     git_evidence_source: Path | None = None
@@ -1107,7 +1248,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
                 signal.signal(signal.SIGTERM, cancel_handler)
                 signal.signal(signal.SIGHUP, cancel_handler)
-                provider_environment = os.environ.copy()
+                provider_environment = routing_environment()
                 if git_evidence_requested:
                     provider_environment.pop("CF_DISPATCH_AGY_ADD_DIR", None)
                 process = subprocess.Popen(
@@ -1287,6 +1428,12 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         status = "failed"
         outcome = adapter_status or ("adapter_exit" if exit_code else "empty_result")
 
+    try:
+        preflight_route = json.loads(os.environ.get("PROVENANT_PREFLIGHT_ROUTES", "{}"))[args.task_id]
+        if not isinstance(preflight_route, dict):
+            preflight_route = {}
+    except (ValueError, KeyError, TypeError):
+        preflight_route = {}
     record: dict[str, Any] = {
         "schema_version": 1,
         "record_type": "dispatch-attempt",
@@ -1297,6 +1444,10 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "intent": args.intent,
         "requested_route": requested_route,
         "route": {
+            "adapter": args.tool, "alias": args.alias or "", "model": args.model or "", "effort": args.effort or "",
+            **{key: value for key, value in preflight_route.items() if key in {
+                "adapter", "alias", "model", "effort", "resolved_model", "provider_family", "model_family", "execution_intent",
+            }},
             **adapter,
             "adapter_receipt": {
                 "path": relative_path(run_dir, adapter_path),
@@ -1370,8 +1521,36 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     return 0 if status == "succeeded" and not manifest_error else 1
 
 
+def close_mcp_run(run_dir: Path) -> None:
+    """Close execution custody only; this is not a delivery/assurance final gate."""
+    if not os.environ.get("PROVENANT_RUN_TOKEN") or os.environ.get("PROVENANT_RUN_DIR") != str(run_dir):
+        return
+    try:
+        attempts = list((run_dir / "dispatch/tasks").glob("*/attempt-*/attempt.json"))
+        records = [json.loads(read_bound_bytes(run_dir, path.relative_to(run_dir), label="attempt.json")) for path in attempts]
+        if not records or any(record.get("status") not in {"succeeded", "failed", "blocked", "timed_out", "cancelled"} for record in records):
+            return
+        # The batch owner calls this after joining all children, under its custody lock.
+        receipt = json.loads(read_bound_bytes(run_dir, "RUN_RECEIPT.json", label="RUN_RECEIPT.json"))
+        if receipt.get("status") != "active":
+            return
+        statuses = {record["status"] for record in records}
+        for summary_path in (run_dir / "dispatch/batches").glob("*/summary.json"):
+            summary = json.loads(read_bound_bytes(run_dir, summary_path.relative_to(run_dir), label="summary.json"))
+            if summary.get("status") not in {"completed", "failed", "cancelled"}:
+                return
+            statuses.update(task.get("status", "failed") for task in summary.get("tasks", []))
+        receipt.update(status="succeeded" if statuses == {"succeeded"} else "cancelled" if statuses == {"cancelled"} else "failed",
+                       closed_at=now(), terminal_reason=None if statuses == {"succeeded"} else "MCP execution attempts are terminal")
+        write_owned(run_dir, run_dir / "RUN_RECEIPT.json", json.dumps(receipt, indent=2) + "\n")
+    except (OSError, ValueError, OwnedFileError):
+        pass
+
+
 def dispatch(args: argparse.Namespace) -> int:
     """Run one attempt while serialising standalone run-ledger mutation."""
+    if args.timeout_seconds is None:
+        args.timeout_seconds = 10800.0 if args.access_mode == "worktree_write" else DEFAULT_TIMEOUT_SECONDS
     run_dir = args.run_dir.resolve()
     workspace = Path.cwd().resolve()
     if (
@@ -1386,7 +1565,9 @@ def dispatch(args: argparse.Namespace) -> int:
     except (OSError, OwnedFileError):
         return fail(run_dir, "run_custody_busy", "another dispatch, batch or finalizer owns the run")
     try:
-        return _dispatch(args, custody)
+        result = _dispatch(args, custody)
+        close_mcp_run(run_dir)
+        return result
     finally:
         fcntl.flock(custody.fileno(), fcntl.LOCK_UN)
         custody.close()
@@ -1426,8 +1607,8 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--effort")
     root.add_argument(
         "--timeout", "--timeout-seconds", dest="timeout_seconds", type=timeout_value,
-        default=DEFAULT_TIMEOUT_SECONDS,
-        help=f"maximum provider runtime in seconds (default: {DEFAULT_TIMEOUT_SECONDS:g})",
+        default=None,
+        help="maximum provider runtime: read_only 3600 seconds, worktree_write 10800",
     )
     root.add_argument("--retry-of", help="existing attempt id under this task, for lineage only")
     root.add_argument(
@@ -1440,4 +1621,7 @@ def parser() -> argparse.ArgumentParser:
 
 
 if __name__ == "__main__":
-    raise SystemExit(dispatch(parser().parse_args()))
+    if sys.argv[1:] == ["--preflight-json"]:
+        print(json.dumps(preflight_tasks(json.load(sys.stdin)["tasks"])))
+    else:
+        raise SystemExit(dispatch(parser().parse_args()))

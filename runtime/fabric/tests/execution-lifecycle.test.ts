@@ -11,9 +11,10 @@ import { setTimeout as delay } from "node:timers/promises";
 
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { cancelActiveExecutions, dispatchConfiguredProvider } from "../src/execution.js";
+import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
 import {
   listRecordedRuns,
+  fabricStatus,
   OWNER_RECORD_NAME,
   processStartedAt,
   reapOrphanedRuns,
@@ -598,4 +599,97 @@ describe("orphan reaping", () => {
     expect(alive(providerPid)).toBe(true);
     expect(listRecordedRuns(workspace).some((run) => run.run_dir === runDir)).toBe(true);
   }, 40_000);
+});
+
+describe("compact status", () => {
+  it("retains terminal route and result after the owner exits", async () => {
+    const result = await dispatchConfiguredProvider(
+      { adapter: "codex", model: "gpt-6-luna", effort: "medium", prompt: "emit empty provider result", task_id: "status-task", wait_seconds: 5 },
+      identity, new AbortController().signal, ownerEnvironment,
+    );
+    const status = await fabricStatus(workspace, "status-task");
+    expect(status).toMatchObject({ id: "status-task", status: "failed", stalled: false });
+    expect(status.result_path).toEqual((result.paths as Record<string, unknown>).result);
+    expect((await fabricStatus(workspace)).runs).toHaveLength(1);
+  });
+});
+
+describe("front door model selection", () => {
+  it("resolves unique model tokens from the adapter catalogue", async () => {
+    mkdirSync(join(product, "config"));
+    copyFileSync(join(repositoryRoot, "config", "model-routing.json"), join(product, "config", "model-routing.json"));
+    for (const name of ["luna", "sol", "astra"]) {
+      const done = await dispatchConfiguredProvider({ adapter: "codex", alias: name, prompt: "ordinary run", wait_seconds: 5 },
+        identity, new AbortController().signal, { ...ownerEnvironment, AGENT_FABRIC_INSTANCE_ROOT: product });
+      expect(done).toMatchObject({ status: "succeeded", route: { resolved_model: `gpt-6-${name}` } });
+    }
+  });
+  it("passes an explicit model and effort without an alias", async () => {
+    const done = await dispatchConfiguredProvider({ adapter: "codex", model: "gpt-6-luna", effort: "medium", prompt: "ordinary run", wait_seconds: 5 },
+      identity, new AbortController().signal, ownerEnvironment);
+    expect(done).toMatchObject({ status: "succeeded", route: { resolved_model: "gpt-6-luna" } });
+  });
+  it("rejects empty retained batch results per task", async () => {
+    const done = await dispatchConfiguredBatch({ tasks: [{ adapter: "codex", prompt: "empty batch" }], wait_seconds: 5 },
+      identity, new AbortController().signal, ownerEnvironment);
+    expect(done).toMatchObject({ status: "completed", counts: { failed: 1 }, tasks: [{ status: "failed", outcome: "empty_output" }] });
+  });
+});
+
+describe("status list bounds", () => {
+  it("lists only twenty recent runs and reads an older run by id without modifying it", async () => {
+    for (let i = 0; i < 25; i++) {
+      const dir = join(workspace, ".agent-run", `mcp-${i}`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "dispatch-status.json"), JSON.stringify({ id: `task-${i}`, status: "failed",
+        started_at: new Date(Date.now() - (i === 24 ? 90_000_000 : i * 1000)).toISOString() }));
+    }
+    const path = join(workspace, ".agent-run", "mcp-24", "dispatch-status.json");
+    const before = readFileSync(path, "utf8");
+    expect((await fabricStatus(workspace)).runs).toHaveLength(20);
+    expect(await fabricStatus(workspace, "task-24", 1)).toMatchObject({ id: "task-24", status: "failed" });
+    expect(readFileSync(path, "utf8")).toBe(before);
+    expect(await fabricStatus(workspace, "../../outside")).toMatchObject({ status: "rejected", error: "run_not_found" });
+  });
+});
+
+describe("status liveness", () => {
+  it("marks silence only beyond the mode timeout threshold", async () => {
+    const dir = join(workspace, ".agent-run", "mcp-silent");
+    mkdirSync(dir, { recursive: true });
+    const started = new Date(Date.now() - 1_000_000).toISOString();
+    writeFileSync(join(dir, OWNER_RECORD_NAME), JSON.stringify({ schema_version: 1, kind: "dispatch",
+      run_dir: dir, workspace, run_token: "test", owner_pid: process.pid, owner_pgid: process.pid,
+      owner_started_at: processStartedAt(process.pid), started_at: started, task_id: "silent" }));
+    const statusPath = join(dir, "dispatch-status.json");
+    const record = { id: "silent", status: "running", started_at: started, timeout_seconds: 3600 };
+    writeFileSync(statusPath, JSON.stringify(record));
+    expect(await fabricStatus(workspace, "silent")).toMatchObject({ status: "running", stalled: true });
+    writeFileSync(statusPath, JSON.stringify({ ...record, timeout_seconds: 10800 }));
+    expect(await fabricStatus(workspace, "silent")).toMatchObject({ status: "running", stalled: false });
+    writeFileSync(statusPath, JSON.stringify(record));
+    writeFileSync(`${dir}-owner.stdout.jsonl`, "new provider output");
+    expect(await fabricStatus(workspace, "silent")).toMatchObject({ status: "running", stalled: false, output_age_seconds: 0 });
+  });
+
+  it("waits for terminal output and reads a completed batch task separately", async () => {
+    const dir = join(workspace, ".agent-run", "mcp-wait");
+    const taskDir = join(dir, "dispatch", "tasks", "child", "attempt-001");
+    mkdirSync(taskDir, { recursive: true });
+    const worker = spawn(process.execPath, ["-e", "setTimeout(() => {}, 400)"], { stdio: "ignore" });
+    const started = new Date().toISOString();
+    writeFileSync(join(dir, OWNER_RECORD_NAME), JSON.stringify({ schema_version: 1, kind: "batch",
+      run_dir: dir, workspace, run_token: "test", owner_pid: worker.pid, owner_pgid: worker.pid,
+      owner_started_at: null, started_at: started, batch_id: "batch-001" }));
+    const statusPath = join(dir, "dispatch-status.json");
+    writeFileSync(statusPath, JSON.stringify({ id: "batch-001", status: "running", started_at: started }));
+    worker.once("exit", () => {
+      writeFileSync(join(taskDir, "result.md"), "answer");
+      writeFileSync(join(taskDir, "attempt.json"), JSON.stringify({ task_id: "child", status: "succeeded",
+        route: { adapter: "claude", resolved_model: "opus" }, result: { path: "dispatch/tasks/child/attempt-001/result.md" } }));
+      writeFileSync(statusPath, JSON.stringify({ id: "batch-001", status: "completed", started_at: started }));
+    });
+    expect(await fabricStatus(workspace, "batch-001", 2)).toMatchObject({ status: "completed" });
+    expect(await fabricStatus(workspace, "child")).toMatchObject({ id: "child", status: "succeeded", model: "opus" });
+  });
 });

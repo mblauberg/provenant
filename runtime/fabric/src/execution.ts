@@ -10,6 +10,7 @@ import {
   openSync,
   readFileSync,
   realpathSync,
+  statSync,
   rmSync,
   unlinkSync,
   writeFileSync,
@@ -34,7 +35,7 @@ import {
 const execFileAsync = promisify(execFile);
 export const MAX_EXECUTION_WAIT_SECONDS = 55;
 const DEFAULT_WAIT_SECONDS = 55;
-const DEFAULT_TIMEOUT_SECONDS = 900;
+const DEFAULT_TIMEOUT_SECONDS = 3600;
 const FIRST_ATTEMPT_ID = "attempt-001";
 const FIRST_BATCH_ID = "batch-001";
 /**
@@ -68,6 +69,8 @@ export type AccessMode = (typeof ACCESS_MODES)[number];
 export interface RouteInput {
   adapter?: string;
   alias?: string;
+  model?: string;
+  effort?: string;
   mode?: AccessMode;
   worktree?: string;
 }
@@ -120,7 +123,9 @@ interface CancelSpec {
 
 interface NormalisedRoute {
   adapter: string;
-  alias: string;
+  alias?: string;
+  model?: string;
+  effort?: string;
   role: string;
   access_mode: AccessMode;
   worktree?: string;
@@ -207,8 +212,8 @@ async function pythonOwner(root: string, identity: Identity, env: NodeJS.Process
       timeout: 10_000,
       maxBuffer: 64 * 1024,
     });
-    const selected = canonical(stdout.trim());
-    const selectedMetadata = lstatSync(selected);
+    const selected = resolve(stdout.trim());
+    const selectedMetadata = statSync(selected);
     accessSync(selected, constants.X_OK);
     if (!isAbsolute(selected) || !selectedMetadata.isFile()) throw new Error("selector returned a non-file");
     return selected;
@@ -273,44 +278,38 @@ function normaliseRoute(
   catalogue: CatalogueSnapshot,
 ): NormalisedRoute {
   const adapter = input.adapter ?? (SUPPORTED_ADAPTERS.has(identity.provider) ? identity.provider : undefined);
-  if (adapter === undefined) throw new Error("adapter is required when the Fabric seat is not a provider adapter");
+  if (adapter === undefined) throw new InputError("adapter_required", `Pass adapter ${DISPATCH_ADAPTERS.join(", ")}.`);
   if (!SUPPORTED_ADAPTERS.has(adapter)) {
-    throw new Error(`adapter must be one of ${DISPATCH_ADAPTERS.join(", ")}`);
+    throw new InputError("adapter_invalid", `Pass adapter ${DISPATCH_ADAPTERS.join(", ")}.`);
   }
   const catalogueAdapter = catalogue.adapters.find((entry) => entry.name === adapter);
-  // A fixed-family adapter (claude, codex; agy merges its preferred families)
-  // gets its alias table straight from that family, so an unknown alias is a
-  // caller mistake worth failing on at the front door. An adapter that picks
-  // its family per model (cursor's xai/cursor-composer preferences, or
-  // copilot/kiro/opencode with no family entry at all) has no alias table
-  // here yet: the routing catalogue does not carry that resolution, only the
-  // Python resolver does. Enforcing against an empty table there would reject
-  // every dispatch, including the default alias, which is the regression this
-  // check must not introduce; only validate when the catalogue actually knows
-  // the adapter's aliases.
-  if (catalogueAdapter !== undefined) {
-    const allowedAliases = Object.keys(catalogueAdapter.aliases);
-    if (allowedAliases.length > 0) {
-      const alias = input.alias ?? "workhorse";
-      if (!allowedAliases.includes(alias)) {
-        throw new Error(
-          `adapter ${adapter} does not allow alias ${alias}; `
-          + `allowed aliases: ${allowedAliases.join(", ") || "(none)"}`,
-        );
-      }
+  let alias = input.alias;
+  let model = input.model;
+  if (alias !== undefined && !["flagship", "workhorse", "scout"].includes(alias)) {
+    const models = catalogueAdapter?.models ?? [];
+    const matches = models.includes(alias) ? [alias] : models.filter((name) =>
+      name.toLowerCase().split(/[^a-z0-9]+/u).includes(alias!.toLowerCase()));
+    if (matches.length !== 1 || model !== undefined) {
+      throw new InputError("unknown_alias", `Pass alias flagship, workhorse or scout, or model ${models.join(", ") || "<provider/model id>"} for ${adapter}.`);
     }
+    model = matches[0];
+    alias = undefined;
+  }
+  if (model !== undefined && alias !== undefined) {
+    throw new InputError("route_selector_conflict", "Pass either alias or model, plus optional effort.");
   }
   const mode = input.mode ?? "read_only";
-  if (!ACCESS_MODES.includes(mode)) throw new Error(`mode must be one of ${ACCESS_MODES.join(", ")}`);
+  if (!ACCESS_MODES.includes(mode)) throw new InputError("mode_invalid", `Pass mode ${ACCESS_MODES.join(" or ")}.`);
   if (mode === "worktree_write" && input.worktree === undefined) {
-    throw new Error("mode worktree_write requires the worktree it owns");
+    throw new InputError("worktree_required", "Pass worktree=<registered Git worktree root> with mode worktree_write.");
   }
   if (mode !== "worktree_write" && input.worktree !== undefined) {
-    throw new Error("worktree requires mode worktree_write");
+    throw new InputError("worktree_not_applicable", "Pass mode worktree_write with worktree, or omit worktree.");
   }
   return {
     adapter,
-    alias: input.alias ?? "workhorse",
+    ...(model === undefined ? { alias: alias ?? "workhorse" } : { model }),
+    ...(input.effort === undefined ? {} : { effort: input.effort }),
     role: "worker",
     access_mode: mode,
     ...(input.worktree === undefined ? {} : { worktree: input.worktree }),
@@ -327,13 +326,16 @@ function routeArguments(route: NormalisedRoute): string[] {
 
 function validatePrompt(prompt: string | undefined, promptFile: string | undefined): void {
   if ((prompt === undefined) === (promptFile === undefined)) {
-    throw new Error("provide exactly one of prompt or prompt_file");
+    throw new InputError("prompt_required", "Pass exactly one of prompt or prompt_file.");
   }
 }
 
 interface OwnerIdentification {
   kind: "dispatch" | "batch";
   identifier: string;
+  routes?: unknown;
+  taskIds?: string[];
+  timeout?: number;
 }
 
 function startOwner(
@@ -353,6 +355,8 @@ function startOwner(
     ...withoutGitRedirects(env),
     PROVENANT_RUN_TOKEN: runToken,
     PROVENANT_RUN_DIR: runDir,
+    PROVENANT_PREFLIGHT_ROUTES: JSON.stringify(Object.fromEntries((identification.taskIds ?? []).map((id, index) =>
+      [id, compactRoute((identification.routes as unknown[] | undefined)?.[index])]))),
   };
   const logPrefix = join(dirname(runDir), basename(runDir));
   const stdoutPath = `${logPrefix}-owner.stdout.jsonl`;
@@ -384,7 +388,14 @@ function startOwner(
         for (const path of cleanupPaths) {
           try { unlinkSync(path); } catch { /* Exact staging input may already be absent. */ }
         }
-        resolveCompletion({ exitCode, signal, ...(spawnError === undefined ? {} : { error: spawnError }) });
+        const completed = { exitCode, signal, ...(spawnError === undefined ? {} : { error: spawnError }) };
+        try {
+          const path = join(runDir, "dispatch-status.json");
+          const previous = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+          const result = identification.kind === "dispatch" ? compactDispatch(started, completed) : compactBatch(started, completed);
+          writeFileSync(path, JSON.stringify({ ...previous, ...result, finished_at: new Date().toISOString() }) + "\n", { mode: 0o600 });
+        } catch { /* The retained owner/attempt files remain the status fallback. */ }
+        resolveCompletion(completed);
       });
     });
   });
@@ -423,6 +434,12 @@ function startOwner(
       writeOwnerRecord(record);
     } catch { /* An unwritable record costs reaping, never the run. */ }
   }
+  writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({
+    id: identification.identifier, kind: identification.kind, started_at: new Date().toISOString(),
+    routes: identification.routes, task_ids: identification.taskIds, timeout_seconds: identification.timeout,
+    status: "running", owner_pid: child.pid, owner_started_at: started.record?.owner_started_at,
+    owner_stdout: stdoutPath, owner_stderr: stderrPath,
+  }) + "\n", { mode: 0o600 });
   activeOwners.add(started);
   return started;
 }
@@ -561,7 +578,7 @@ function retainedRegularFile(runDir: string, value: unknown): string | null {
   if (path === null) return null;
   try {
     const metadata = lstatSync(path);
-    return metadata.isFile() && !metadata.isSymbolicLink() ? path : null;
+    return metadata.isFile() && !metadata.isSymbolicLink() && inside(canonical(runDir), realpathSync(path)) ? path : null;
   } catch {
     return null;
   }
@@ -611,7 +628,7 @@ function validOwnerRecord(
       Number.isInteger(record.concurrency) && Number(record.concurrency) > 0 &&
       tasks.length === record.task_count && tasks.every((value) => {
         const task = objectValue(value);
-        if (task === undefined || !nonEmptyString(task.task_id) || !nonEmptyString(task.status)) return false;
+        if (task === undefined || !nonEmptyString(task.task_id) || !DISPATCH_TERMINAL_STATUSES.has(String(task.status))) return false;
         return task.status !== "succeeded" || (
           nonEmptyString(task.outcome) && retainedRegularFile(runDir, task.attempt_path) !== null &&
           retainedRegularFile(runDir, task.result_path) !== null && completeRoute(task.route)
@@ -631,7 +648,7 @@ function compactRoute(value: unknown): Record<string, string> | null {
   if (route === undefined) return null;
   const compact: Record<string, string> = {};
   for (const field of [
-    "adapter", "provider_family", "model_family", "resolved_model", "endpoint_provider", "execution_intent",
+    "adapter", "alias", "model", "effort", "provider_family", "model_family", "resolved_model", "endpoint_provider", "execution_intent",
   ]) {
     if (typeof route[field] === "string" && route[field].length > 0) compact[field] = route[field];
   }
@@ -728,7 +745,11 @@ function compactBatch(started: StartedOwner, completion: OwnerCompletion): Recor
     };
   }
   const allTasksSucceeded = Array.isArray(record.tasks) && record.tasks.length > 0 &&
-    record.tasks.every((value) => objectValue(value)?.status === "succeeded");
+    record.tasks.every((value) => {
+      const task = objectValue(value);
+      const path = retainedRegularFile(started.runDir, task?.result_path);
+      return task?.status === "succeeded" && path !== null && lstatSync(path).size > 0;
+    });
   if (completionConflict(completion, allTasksSucceeded)) {
     return {
       schema_version: 1,
@@ -743,10 +764,12 @@ function compactBatch(started: StartedOwner, completion: OwnerCompletion): Recor
   const tasks = Array.isArray(record.tasks) ? record.tasks.map((value) => {
     const task = objectValue(value);
     if (task === undefined) return { status: "owner_task_invalid" };
+    const resultPath = retainedRegularFile(started.runDir, task.result_path);
+    const empty = task.status === "succeeded" && resultPath !== null && lstatSync(resultPath).size === 0;
     return {
       task_id: task.task_id,
-      status: task.status,
-      outcome: task.outcome,
+      status: empty ? "failed" : task.status,
+      outcome: empty ? "empty_output" : task.outcome,
       route: compactRoute(task.route),
       paths: {
         attempt: retainedAbsolute(started.runDir, task.attempt_path),
@@ -761,7 +784,7 @@ function compactBatch(started: StartedOwner, completion: OwnerCompletion): Recor
     batch_id: record.batch_id,
     task_count: record.task_count,
     concurrency: record.concurrency,
-    counts: record.counts,
+    counts: tasks.reduce<Record<string, number>>((counts, task) => { const key = String(task.status); counts[key] = (counts[key] ?? 0) + 1; return counts; }, {}),
     tasks,
     owner_exit: completion.exitCode,
     paths: {
@@ -793,8 +816,8 @@ function running(
   };
 }
 
-function timeoutSeconds(value: number | undefined): number {
-  const timeout = value ?? DEFAULT_TIMEOUT_SECONDS;
+function timeoutSeconds(value: number | undefined, mode?: AccessMode): number {
+  const timeout = value ?? (mode === "worktree_write" ? 10800 : DEFAULT_TIMEOUT_SECONDS);
   if (!Number.isFinite(timeout) || timeout <= 0) throw new Error("timeout_seconds must be finite and positive");
   return timeout;
 }
@@ -803,20 +826,27 @@ function stagingPath(runDir: string, name: string): string {
   return join(dirname(runDir), `${basename(runDir)}-${name}`);
 }
 
-export async function dispatchConfiguredProvider(
+async function dispatchConfiguredProviderUnchecked(
   input: DispatchInput,
   identity: Identity,
   signal: AbortSignal,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<Record<string, unknown>> {
   validatePrompt(input.prompt, input.prompt_file);
+  if (!Number.isInteger(input.wait_seconds ?? DEFAULT_WAIT_SECONDS) || (input.wait_seconds ?? 0) < 0 || (input.wait_seconds ?? 0) > 55) {
+    throw new InputError("wait_invalid", "Pass wait_seconds from 0 to 55.");
+  }
+  const callStarted = Date.now();
   const root = productRoot(env);
-  const route = normaliseRoute(input, identity, catalogueSnapshot(root));
-  const timeout = timeoutSeconds(input.timeout_seconds);
+  const route = normaliseRoute(input, identity, catalogueSnapshot(root, env));
+  const timeout = timeoutSeconds(input.timeout_seconds, input.mode);
   const taskId = input.task_id ?? `task-${randomUUID().slice(0, 8)}`;
   const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
   const python = await pythonOwner(root, identity, env);
+  const checked = await preflight(python, owner, [{ id: taskId, ...route,
+    ...(input.prompt === undefined ? { prompt_file: input.prompt_file } : { prompt: input.prompt }) }], identity, env);
+  if (checked.status === "rejected") return { status: "rejected", error: checked.error, fix: checked.fix };
   const runDir = await initialiseRun(identity, env, root);
   const promptPath = input.prompt === undefined ? input.prompt_file! : stagingPath(runDir, "prompt.md");
   if (input.prompt !== undefined) writeFileSync(promptPath, input.prompt, { flag: "wx", mode: 0o600 });
@@ -835,8 +865,8 @@ export async function dispatchConfiguredProvider(
     targetDirectory: join(runDir, "dispatch", "tasks", taskId, FIRST_ATTEMPT_ID),
     cwd: identity.cwd,
     env,
-  }, { kind: "dispatch", identifier: taskId }, input.prompt === undefined ? [] : [promptPath]);
-  const completion = await observeOwner(started, input.wait_seconds, signal);
+  }, { kind: "dispatch", identifier: taskId, routes: checked.routes, taskIds: [taskId], timeout }, input.prompt === undefined ? [] : [promptPath]);
+  const completion = await observeOwner(started, Math.max(0, Math.min(input.wait_seconds ?? DEFAULT_WAIT_SECONDS, Math.floor(55 - (Date.now() - callStarted) / 1000))), signal);
   return completion === undefined ? running(started, "dispatch", identity, taskId) : compactDispatch(started, completion);
 }
 
@@ -850,12 +880,12 @@ function normaliseTask(
   return {
     id: task.id ?? `task-${index + 1}`,
     ...(task.prompt === undefined ? { prompt_file: task.prompt_file } : { prompt: task.prompt }),
-    timeout: timeoutSeconds(task.timeout_seconds),
+    timeout: timeoutSeconds(task.timeout_seconds, task.mode),
     ...normaliseRoute(task, identity, catalogue),
   };
 }
 
-export async function dispatchConfiguredBatch(
+async function dispatchConfiguredBatchUnchecked(
   input: BatchInput,
   identity: Identity,
   signal: AbortSignal,
@@ -866,12 +896,24 @@ export async function dispatchConfiguredBatch(
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) {
     throw new Error("concurrency must be an integer from 1 to 8");
   }
+  if (!Number.isInteger(input.wait_seconds ?? DEFAULT_WAIT_SECONDS) || (input.wait_seconds ?? 0) < 0 || (input.wait_seconds ?? 0) > 55) {
+    throw new InputError("wait_invalid", "Pass wait_seconds from 0 to 55.");
+  }
+  const callStarted = Date.now();
   const root = productRoot(env);
-  const catalogue = catalogueSnapshot(root);
-  const tasks = input.tasks.map((task, index) => normaliseTask(task, index, identity, catalogue));
+  const catalogue = catalogueSnapshot(root, env);
+  const errors: Record<string, unknown>[] = [];
+  const tasks = input.tasks.flatMap((task, index) => {
+    try { return [normaliseTask(task, index, identity, catalogue)]; }
+    catch (error) { errors.push({ task_id: task.id ?? `task-${index + 1}`, ...rejected(error) }); return []; }
+  });
+  if (tasks.length === 0) return { status: "rejected", error: errors[0]!.error, fix: errors[0]!.fix, errors };
   const owner = executableOwner(root, "skills/orchestrate/scripts/batch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
   const python = await pythonOwner(root, identity, env);
+  const checked = await preflight(python, executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py"), tasks, identity, env);
+  if (checked.status === "rejected") errors.push(...checked.errors as Record<string, unknown>[]);
+  if (errors.length > 0) return { status: "rejected", error: errors[0]!.error, fix: errors[0]!.fix, errors };
   const runDir = await initialiseRun(identity, env, root);
   const manifestPath = stagingPath(runDir, "task-manifest.json");
   writeFileSync(manifestPath, JSON.stringify({
@@ -889,7 +931,43 @@ export async function dispatchConfiguredBatch(
     targetDirectory: join(runDir, "dispatch", "batches", FIRST_BATCH_ID),
     cwd: identity.cwd,
     env,
-  }, { kind: "batch", identifier: FIRST_BATCH_ID }, [manifestPath]);
-  const completion = await observeOwner(started, input.wait_seconds, signal);
+  }, { kind: "batch", identifier: FIRST_BATCH_ID, routes: checked.routes, taskIds: tasks.map((task) => String(task.id)), timeout: Math.max(...tasks.map((task) => Number(task.timeout))) }, [manifestPath]);
+  const completion = await observeOwner(started, Math.max(0, Math.min(input.wait_seconds ?? DEFAULT_WAIT_SECONDS, Math.floor(55 - (Date.now() - callStarted) / 1000))), signal);
   return completion === undefined ? running(started, "batch", identity, FIRST_BATCH_ID) : compactBatch(started, completion);
+}
+
+class InputError extends Error {
+  constructor(readonly code: string, readonly fix: string) { super(fix); }
+}
+
+function rejected(error: unknown): Record<string, unknown> {
+  return { status: "rejected", error: error instanceof InputError ? error.code : "invalid_input",
+    fix: error instanceof Error ? error.message : String(error) };
+}
+
+async function preflight(python: string, owner: string, tasks: Record<string, unknown>[], identity: Identity,
+  env: NodeJS.ProcessEnv): Promise<Record<string, unknown>> {
+  const child = execFile(python, [owner, "--preflight-json"], {
+    cwd: identity.cwd, env: withoutGitRedirects(env), timeout: 50_000, maxBuffer: 1024 * 1024,
+  });
+  const output = new Promise<string>((resolveOutput, rejectOutput) => {
+    let stdout = "";
+    child.stdout!.on("data", (chunk: string) => { stdout += chunk; });
+    child.once("error", rejectOutput);
+    child.once("close", (code) => code === 0 ? resolveOutput(stdout) : rejectOutput(new Error("Preflight unavailable; restore the harness Python environment.")));
+  });
+  child.stdin!.end(JSON.stringify({ tasks }));
+  return JSON.parse(await output) as Record<string, unknown>;
+}
+
+export async function dispatchConfiguredProvider(input: DispatchInput, identity: Identity, signal: AbortSignal,
+  env: NodeJS.ProcessEnv = process.env): Promise<Record<string, unknown>> {
+  try { return await dispatchConfiguredProviderUnchecked(input, identity, signal, env); }
+  catch (error) { if (signal.aborted && !(error instanceof InputError)) throw error; return rejected(error); }
+}
+
+export async function dispatchConfiguredBatch(input: BatchInput, identity: Identity, signal: AbortSignal,
+  env: NodeJS.ProcessEnv = process.env): Promise<Record<string, unknown>> {
+  try { return await dispatchConfiguredBatchUnchecked(input, identity, signal, env); }
+  catch (error) { if (signal.aborted && !(error instanceof InputError)) throw error; return rejected(error); }
 }

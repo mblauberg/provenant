@@ -845,6 +845,7 @@ def test_timeout_records_reaped_exit(tmp_path: Path) -> None:
         """,
     )
     env = os.environ.copy()
+    env["PROVENANT_PREFLIGHT_ROUTES"] = json.dumps({"timeout": {"adapter": "codex", "alias": "workhorse", "resolved_model": "gpt-6-luna", "effort": "high"}})
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "timeout", "--adapter", "codex",
@@ -855,6 +856,8 @@ def test_timeout_records_reaped_exit(tmp_path: Path) -> None:
     record = json.loads(result.stdout)
     assert record["status"] == "timed_out"
     assert record["failure_code"] == "timeout"
+    assert record["route"]["resolved_model"] == "gpt-6-luna"
+    assert record["route"]["effort"] == "high"
     assert record["process"]["observed_exit"] is True
     assert record["process"]["exit_code"] is not None
 
@@ -1850,3 +1853,69 @@ def test_result_missing_past_the_provider_deadline_is_a_timeout_not_a_result_fai
         "result_missing_or_empty", "adapter_receipt_invalid", "terminal_envelope_invalid",
     }
     assert record["process"]["observed_exit"] is True
+
+
+def test_front_door_preflight_rejects_all_invalid_tasks_without_run(tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), '--preflight-json'], cwd=tmp_path,
+        input=json.dumps({'tasks': [
+            {'id': 'missing', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': 'absent.md'},
+            {'id': 'broker', 'adapter': 'opencode', 'alias': 'workhorse', 'prompt': 'hello'},
+        ]}), text=True, capture_output=True,
+        env={**os.environ, 'AGENT_FABRIC_INSTANCE_ROOT': str(ROOT)},
+    )
+    record = json.loads(result.stdout)
+    assert record['status'] == 'rejected'
+    assert {error['error'] for error in record['errors']} == {'prompt_unavailable', 'model_required_for_broker'}
+    assert all(error['fix'] for error in record['errors'])
+    assert not (tmp_path / '.agent-run').exists()
+
+
+def test_mcp_owner_closes_receipt(tmp_path, monkeypatch):
+    run_dir = make_run(tmp_path, 'mcp-finished')
+    module = load_dispatch_module()
+    adapter = tmp_path / 'adapter'
+    write_success_adapter(adapter)
+    module.CF_DISPATCH = adapter
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('PROVENANT_RUN_TOKEN', 'fixture-token')
+    monkeypatch.setenv('PROVENANT_RUN_DIR', str(run_dir))
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('hello')
+    args = module.parser().parse_args(['--run-dir', str(run_dir), '--adapter', 'codex',
+        '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker'])
+    assert module.dispatch(args) == 0
+    receipt = json.loads((run_dir / 'RUN_RECEIPT.json').read_text())
+    assert receipt['status'] == 'succeeded'
+    assert receipt['closed_at']
+
+
+@pytest.mark.parametrize(('mode', 'timeout'), [('read_only', 3600), ('worktree_write', 10800)])
+def test_front_door_mode_timeout_defaults(tmp_path, mode, timeout):
+    module = load_dispatch_module()
+    args = module.parser().parse_args(['--run-dir', str(tmp_path), '--adapter', 'codex',
+        '--prompt-stdin', '--alias', 'workhorse', '--role', 'worker', '--access-mode', mode])
+    module.dispatch(args)
+    assert args.timeout_seconds == timeout
+
+
+def test_front_door_preflight_caches_capability_probe_per_adapter(tmp_path, monkeypatch):
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    counter = tmp_path / 'probes'
+    write_executable(bin_dir / 'codex', '''#!/usr/bin/env python3
+import json, os
+from pathlib import Path
+p = Path(os.environ['PROBE_COUNTER'])
+p.write_text(p.read_text() + 'probe\\n' if p.exists() else 'probe\\n')
+print(json.dumps({'models': [{'slug': 'gpt-6-luna', 'supported_reasoning_levels': [{'effort': 'high'}]}]}))
+''')
+    result = subprocess.run([sys.executable, str(SCRIPT), '--preflight-json'], cwd=tmp_path,
+        input=json.dumps({'tasks': [{'id': f't{i}', 'adapter': 'codex', 'model': 'gpt-6-luna',
+            'effort': 'high', 'prompt': 'hello'} for i in range(3)]}), text=True, capture_output=True,
+        env={**os.environ, 'AGENT_FABRIC_INSTANCE_ROOT': str(ROOT), 'PROBE_COUNTER': str(counter),
+             'PATH': str(bin_dir) + os.pathsep + os.environ['PATH']})
+    record = json.loads(result.stdout)
+    assert record['status'] == 'validated', record
+    assert len(record['routes']) == 3
+    assert counter.read_text().splitlines() == ['probe']

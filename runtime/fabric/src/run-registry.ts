@@ -16,9 +16,9 @@
  */
 import { execFileSync } from "node:child_process";
 import {
-  lstatSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync,
+  lstatSync, readFileSync, realpathSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const OWNER_RECORD_NAME = "dispatch-owner.json";
 export const PROVIDER_RECORD_NAME = "dispatch-provider.json";
@@ -370,4 +370,101 @@ export function pruneDispatchRuns(workspace: string, env: NodeJS.ProcessEnv): st
     } catch { /* A run another process is already removing is already pruned. */ }
   }
   return pruned;
+}
+
+function observedAlive(pid: number, startedAt: string | null): boolean {
+  if (startedAt !== null) return processMatches(pid, startedAt);
+  // A read-only observation can report a live PID when ps is unavailable;
+  // signalling still requires the verified identity in processMatches.
+  if (!positiveInteger(pid)) return false;
+  try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+/** Status observes retained files and process identities; it never repairs or reaps runs. */
+export async function fabricStatus(workspace: string, id?: string, waitSeconds = 0,
+  signal?: AbortSignal): Promise<Record<string, unknown>> {
+  if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 55) {
+    return { status: "rejected", error: "wait_invalid", fix: "Pass wait_seconds from 0 to 55." };
+  }
+  try { workspace = realpathSync(workspace); } catch { workspace = resolve(workspace); }
+  const deadline = Date.now() + waitSeconds * 1000;
+  while (true) {
+    signal?.throwIfAborted();
+    const candidates = runDirectoryNames(workspace).flatMap((name) => {
+      const runDir = join(runRoot(workspace), name);
+      try {
+        const metadata = lstatSync(runDir);
+        if (!metadata.isDirectory() || metadata.isSymbolicLink()) return [];
+        const status = readJson(join(runDir, "dispatch-status.json"));
+        const owner = readOwnerRecord(runDir);
+        const started = Date.parse(String(status?.started_at ?? owner?.started_at ?? "")) || metadata.birthtimeMs;
+        return [{ runDir, status, owner, started }];
+      } catch { return []; }
+    }).sort((a, b) => b.started - a.started);
+    const matches = id === undefined
+      ? candidates.filter((run) => run.started >= Date.now() - 86_400_000).slice(0, 20)
+      : candidates.filter((run) => [run.runDir, basename(run.runDir), run.status?.id, run.owner?.task_id, run.owner?.batch_id].includes(id)
+        || (Array.isArray(run.status?.task_ids) && run.status.task_ids.includes(id))
+        || (/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(id) && readJson(join(run.runDir, "dispatch", "tasks", id, "attempt-001", "attempt.json"))?.task_id === id));
+    if (id !== undefined && matches.length !== 1) {
+      return { status: "rejected", error: matches.length === 0 ? "run_not_found" : "run_id_ambiguous",
+        fix: "Pass the run_dir returned by fabric_dispatch or fabric_batch." };
+    }
+    const rows = matches.map(({ runDir, status, owner, started }) => {
+      const safePath = (value: unknown): string | undefined => {
+        if (typeof value !== "string") return undefined;
+        const path = resolve(runDir, value);
+        const rel = relative(runDir, path);
+        return !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`) ? path : undefined;
+      };
+      const attempts: Record<string, unknown>[] = [];
+      const outputPaths: string[] = [];
+      try {
+        const tasksRoot = join(runDir, "dispatch", "tasks");
+        if (lstatSync(tasksRoot).isSymbolicLink()) throw new Error("linked tasks");
+        for (const task of readdirSync(tasksRoot).slice(0, 64)) {
+          const taskDir = join(tasksRoot, task);
+          if (lstatSync(taskDir).isSymbolicLink()) continue;
+          for (const attempt of readdirSync(taskDir).filter((name) => /^attempt-\d+$/u.test(name)).sort().slice(-1)) {
+            const attemptDir = join(taskDir, attempt);
+            if (lstatSync(attemptDir).isSymbolicLink()) continue;
+            const record = readJson(join(attemptDir, "attempt.json"));
+            if (record !== undefined) attempts.push(record);
+            for (const name of ["result.md", "stderr.log", "adapter-receipt.json"]) outputPaths.push(join(attemptDir, name));
+          }
+        }
+      } catch { /* A new run may not have its first attempt yet. */ }
+      const provider = owner === undefined ? null : readProviderRecord(runDir, owner.run_token);
+      const alive = (owner !== undefined && observedAlive(owner.owner_pid, owner.owner_started_at)) ||
+        (provider !== null && observedAlive(provider.provider_pid, provider.provider_started_at));
+      const selectedIndex = id === undefined || !Array.isArray(status?.task_ids) ? -1 : status.task_ids.indexOf(id);
+      const selectedTask = id !== undefined && id !== status?.id && id !== owner?.task_id && id !== owner?.batch_id
+        ? attempts.find((attempt) => attempt.task_id === id) : undefined;
+      const route = (selectedTask?.route ?? (selectedIndex >= 0 ? (status?.routes as unknown[] | undefined)?.[selectedIndex] : undefined) ?? status?.route ?? attempts[0]?.route ?? (status?.routes as unknown[] | undefined)?.[0] ?? {}) as Record<string, unknown>;
+      const terminal = attempts.length > 0 && attempts.every((attempt) =>
+        ["succeeded", "failed", "blocked", "timed_out", "cancelled"].includes(String(attempt.status)));
+      let state = String(status?.status ?? "running");
+      if (state === "running" && !alive) {
+        state = terminal ? (attempts.length === 1 ? String(attempts[0]!.status) : "completed") : "interrupted";
+      }
+      if (alive) state = "running";
+      if (selectedTask !== undefined) state = String(selectedTask.status);
+      // Owner logs are siblings created by the front door, never arbitrary receipt paths.
+      outputPaths.push(`${runDir}-owner.stdout.jsonl`, `${runDir}-owner.stderr.log`);
+      const newest = Math.max(started, newestMtimeMs(outputPaths));
+      const silence = Math.max(0, (Date.now() - newest) / 1000);
+      const paths = status?.paths as Record<string, unknown> | undefined;
+      const result = (selectedTask ?? attempts[0])?.result as Record<string, unknown> | undefined;
+      const finished = Date.parse(String(selectedTask?.finished_at ?? status?.finished_at ?? attempts.at(-1)?.finished_at ?? ""));
+      return { id: selectedTask?.task_id ?? (selectedIndex >= 0 ? id : undefined) ?? status?.id ?? owner?.task_id ?? owner?.batch_id ?? basename(runDir), run_dir: runDir,
+        adapter: route.adapter ?? null, model: route.resolved_model ?? route.model ?? null,
+        status: state, elapsed_seconds: Math.round(Math.max(0, ((state === "running" || !finished ? Date.now() : finished) - started) / 1000)),
+        output_age_seconds: Math.round(silence), stalled: state === "running" && alive && silence > Math.max(600, Number(status?.timeout_seconds ?? 3600) * 0.2),
+        result_path: safePath(selectedTask === undefined ? paths?.result ?? paths?.summary ?? result?.path : result?.path) ?? null };
+    });
+    if (id === undefined) return { runs: rows };
+    const row = rows[0]!;
+    if (row.status !== "running" || Date.now() >= deadline) return row;
+    await new Promise((done) => setTimeout(done, Math.min(250, deadline - Date.now())));
+  }
 }

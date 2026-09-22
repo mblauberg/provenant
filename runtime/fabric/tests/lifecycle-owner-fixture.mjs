@@ -11,6 +11,14 @@ const value = (flag) => {
   return index < 0 ? undefined : process.argv[index + 1];
 };
 
+if (process.argv.includes("--preflight-json")) {
+  let input = "";
+  for await (const chunk of process.stdin) input += chunk;
+  const tasks = JSON.parse(input).tasks;
+  process.stdout.write(JSON.stringify({ status: "validated", routes: tasks }));
+  process.exit(0);
+}
+
 const owner = process.env.PROVENANT_FIXTURE_OWNER ?? basename(process.argv[1]);
 
 if (owner === "run_dir_init.sh") {
@@ -133,7 +141,7 @@ if (owner === "dispatch_run.py") {
       route: {
         adapter: value("--adapter"),
         provider_family: value("--adapter"),
-        resolved_model: value("--alias"),
+        resolved_model: value("--model") ?? value("--alias"),
         execution_intent: "ordinary",
       },
     };
@@ -166,7 +174,7 @@ if (owner === "dispatch_run.py") {
       route: {
         adapter: value("--adapter"),
         provider_family: value("--adapter"),
-        resolved_model: value("--alias"),
+        resolved_model: value("--model") ?? value("--alias"),
         execution_intent: "ordinary",
       },
     };
@@ -180,6 +188,19 @@ if (owner === "dispatch_run.py") {
     mkdirSync(join(runDir, "dispatch", "batches", "batch-001"), { recursive: true });
     startProvider();
     sleepUntilSignalled();
+  } else if (manifest.tasks[0]?.prompt === "empty batch") {
+    const taskId = manifest.tasks[0].id;
+    const dir = join(runDir, "dispatch", "tasks", taskId, "attempt-001");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "result.md"), "");
+    writeFileSync(join(dir, "attempt.json"), "{}");
+    const summary = join(runDir, "summary.json");
+    writeFileSync(summary, "{}");
+    process.stdout.write(JSON.stringify({ schema_version: 1, record_type: "dispatch-batch", status: "completed",
+      batch_id: "batch-001", task_count: 1, concurrency: 1, counts: { succeeded: 1 }, summary_path: "summary.json",
+      tasks: [{ task_id: taskId, status: "succeeded", outcome: "ok", attempt_path: relative(runDir, join(dir, "attempt.json")),
+        result_path: relative(runDir, join(dir, "result.md")), route: { adapter: "codex", provider_family: "openai", resolved_model: "luna", execution_intent: "ordinary" } }] }) + "\n");
+    process.exit(0);
   } else {
     process.stdout.write(JSON.stringify({ schema_version: 1, status: "failed", message: "fixture" }) + "\n");
     process.exit(1);

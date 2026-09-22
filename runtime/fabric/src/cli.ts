@@ -11,7 +11,7 @@
  */
 import { databasePath, identify } from "./identity.js";
 import {
-  findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
+  fabricStatus, findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
 } from "./run-registry.js";
 import { inspectDatabase, Store } from "./store.js";
 
@@ -36,7 +36,7 @@ const USAGE = `fabric <command>
   activity [--after-seq N]    list activity, optionally after a cursor
            [--limit N]
   watch [--interval N]        tail everything agents here are doing
-  status [--json]             read-only summary; absent state is healthy
+  status [id] [--wait-seconds N]  run status by task, batch or run directory; no id: store summary
   doctor [--json]             read-only schema and integrity diagnostics
   adapters [--json]           configured providers: dispatch state, aliases,
                               read-only guarantee, endpoint profiles
@@ -75,6 +75,12 @@ const flag = (name: string): string | undefined => {
   return value;
 };
 const who = identify();
+if (command === "status" && (argv[1] !== undefined && argv[1] !== "--json")) {
+  const wait = flag("wait-seconds");
+  const id = argv.slice(1).find((value) => value !== "--json" && value !== "--runs");
+  console.log(JSON.stringify(await fabricStatus(who.cwd, id, wait === undefined ? 0 : Number(wait)), null, 2));
+  process.exit(0);
+}
 /**
  * Dispatch runs are recorded on disk, not in the store, so these read and act
  * from a cold start: a run started by an MCP host that has since died is still
