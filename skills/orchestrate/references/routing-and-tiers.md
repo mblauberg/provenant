@@ -9,6 +9,19 @@
 > authority on task class, tier, role, effort and degradation. Neither restates
 > the other.
 
+For ordinary provider work, use `fabric_dispatch` or `fabric_batch`: pass a
+prompt, adapter, optional `alias` or `model`, and optional `effort`. A unique
+catalogue model token (for example `luna`) is accepted as an alias; broker
+adapters require an explicit model. `fabric_adapters` reads the instance
+catalogue and lists alias models. Input and route failures are synchronous,
+include a one-line fix, and launch no batch tasks. Writes require
+`mode: worktree_write` and a distinct registered worktree. Timeouts default to
+3600 seconds for reads and 10800 for writes. Wait up to 55 seconds, then use
+`fabric_status` with the returned id or run directory; no id lists recent runs.
+Status is read-only, including liveness and silence reporting. Ordinary MCP
+execution custody closes when its attempts become terminal; delivery gates
+remain separate.
+
 The resolver's default `--adapter-gate fabric` fails closed when the selected
 fabric adapter is disabled or inactive. Runtime Fabric composition separately
 requires current provider identity and interface conformance. A direct CLI

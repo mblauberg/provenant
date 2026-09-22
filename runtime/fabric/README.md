@@ -151,44 +151,60 @@ fabric_whoami       fabric_send          fabric_inbox
 fabric_acknowledge  fabric_team_create   fabric_task_create
 fabric_task_claim   fabric_task_update   fabric_tasks
 fabric_note         fabric_activity      fabric_dispatch
+fabric_status
 fabric_batch        fabric_adapters
 ```
 
 ### Happy path
 
-One discovery call answers everything `fabric_dispatch` accepts:
-
-```sh
-fabric adapters                      # or the fabric_adapters MCP tool
-```
-
-then dispatch:
+Discover configured adapters once with `fabric_adapters` (CLI: `fabric adapters`).
+It lists aliases, concrete models and read-only guarantees from the instance
+`$AGENT_FABRIC_INSTANCE_ROOT/config/model-routing.json` (default `~/.agents`),
+using the product catalogue only when the instance file is absent.
 
 ```json
-{ "prompt": "review auth.ts", "adapter": "codex" }
+{ "prompt": "review auth.ts", "adapter": "codex", "model": "gpt-6-luna" }
 ```
 
-Adapter, mode and worktree are the only extras ever needed; alias defaults to
-`workhorse` and mode to `read_only`.
+`fabric_dispatch` takes `prompt` or a readable `prompt_file` inside the workspace,
+plus an adapter (default: the current provider seat). Optional `model` selects
+an explicit id, including broker ids such as `opencode/<id>`; optional `alias`
+selects `flagship`, `workhorse` (default), or `scout`. A unique catalogue model
+name such as `luna`, `sol`, `astra` or `opus` also works in `alias`. Pass one
+selector and, optionally, `effort`: `low`, `medium`, `high`, `xhigh`, `max` or
+`ultra`. The router still enforces model and effort admissibility.
 
-`fabric_dispatch` accepts one inline prompt or prompt file. `fabric_batch`
-accepts 1–64 fixed tasks with concurrency capped at eight. Both carry the same
-three routing parameters and nothing else: `adapter`, `alias` and `mode`, with
-`worktree` when the mode is `worktree_write`. Assurance selectors are absent
-rather than accepted and ignored, both schemas are strict, so a removed
-parameter is a typed input error, and intent is always ordinary. Both default to
-the current provider seat, the `workhorse` route, the `worker` role and
-`read_only` requested access. The adapter receipt records the actual
-`read_only_guarantee`; Agy is `prompt_only`, even with its optional sandbox.
-A worker that must write takes `mode: "worktree_write"` with
-a `worktree` it owns exclusively; two writer tasks may never name one worktree.
-They create the run directory automatically, delegate to `dispatch_run.py` or
-`batch_run.py`, and return compact status, route and absolute artifact paths;
-full prompts, results and diagnostics remain file-backed. `wait_seconds: 0`
-returns immediately, while values through 55 wait within one MCP call. Immediate
-responses include the task or batch identifier and expected evidence path; a
-terminal response has a null result path when no result was retained. Failed,
-cancelled or timed-out attempts may retain provider output or diagnostics there.
+Mode defaults to `read_only`; inspect the adapter's `read_only_guarantee`
+(Agy is `prompt_only`). Writers pass `mode: "worktree_write"` and the registered
+Git `worktree` they own exclusively. Default timeouts are 3600 seconds for
+reads and 10800 for writes; `timeout_seconds` overrides them.
+
+`fabric_batch` takes 1–64 tasks with the same fields and optional concurrency
+(up to eight). Every task is checked before anything launches, with one
+capability probe per adapter per call. Bad inputs return `status: "rejected"`,
+an `error` code and a one-line `fix`; batches include per-task errors. Rejection
+creates no run directory, and two writer tasks cannot share a worktree.
+
+Both tools retain full output in files and return compact status and paths.
+`wait_seconds` defaults to 55; zero returns after preflight and launch. Continue
+with `fabric_status({id: task_id_or_batch_id_or_run_dir, wait_seconds: 55})`.
+Omit `id` for at most 20 workspace runs from the last 24 hours. Reused task or
+batch identifiers require the returned `run_dir` to disambiguate.
+The CLI equivalents are `fabric status <id> --wait-seconds 55` and
+`fabric status --runs`; bare `fabric status` retains the store summary.
+
+Status reads owner/provider liveness and retained stdout/stderr/result mtimes without
+writing to SQLite or starting background work. It reports elapsed time,
+seconds since output, and `stalled: true` when a live run has been silent longer
+than the greater of 600 seconds or 20% of its timeout. A dead owner without a
+terminal record is `interrupted`. Timeout and cancellation records retain route
+metadata, including the preflight route when the provider emitted no receipt.
+
+MCP execution owners close `RUN_RECEIPT.json` after all attempts finish. This is
+a minimal execution-status update under the existing custody lock: the delivery
+finaliser requires synthesis and review gates that ordinary provider tasks do
+not have. It does not certify delivery acceptance, and manual orchestration runs
+keep their existing finalisation workflow.
 
 Run retention is dispatch-time-only: starting a dispatch prunes that
 workspace's `.agent-run/mcp-*` runs older than the retention window (default
