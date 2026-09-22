@@ -18,6 +18,8 @@ import tempfile
 import tomllib
 from typing import Any
 
+from lib.product_root_resolver import load_pointer_path
+
 
 SERVER_NAME = "fabric"
 CODEX_TABLES = {"mcp_servers.fabric", "mcp_servers.fabric.env"}
@@ -28,11 +30,9 @@ CLIENT_LABELS = {"opencode": "OpenCode"}
 # carried by Fabric records; it is not proof of the provider or model family
 # selected by the external dispatch.
 #
-# Cursor, Kiro and OpenCode share the codex seat because they are brokers that
-# front whichever model the operator picks. Agy has a separate seat for stable
-# addressing, but a dispatch receipt must establish whether its selected model
-# is Google, Anthropic or another supported family.
-CLIENT_SEATS = {"cursor": "codex", "agy": "agy", "kiro": "codex", "opencode": "codex"}
+# identity.ts accepts any seat string. Give each client its own inbox; a seat
+# never establishes which model family a broker selected for dispatch.
+CLIENT_SEATS = {"cursor": "cursor", "agy": "agy", "kiro": "kiro", "opencode": "opencode"}
 
 
 class RegistrationError(ValueError):
@@ -217,7 +217,10 @@ def json_client_update(path: Path, desired: dict[str, Any], client: str) -> Conf
     return ConfigProposal(client, snapshot, json.dumps(value, indent=2, sort_keys=True) + "\n", "ready")
 
 
-def opencode_update(path: Path, desired: dict[str, Any]) -> ConfigProposal:
+def opencode_update(
+    path: Path, desired: dict[str, Any],
+    instruction_paths: tuple[Path, Path, Path | None] | None = None,
+) -> ConfigProposal:
     client = "opencode"
     label = "OpenCode"
     snapshot = _capture(path, label)
@@ -228,6 +231,25 @@ def opencode_update(path: Path, desired: dict[str, Any]) -> ConfigProposal:
         raise RegistrationError(f"{label} config is invalid JSON: {exc}") from exc
     if not isinstance(value, dict):
         raise RegistrationError(f"{label} config root must be an object")
+    if instruction_paths is not None:
+        instance_doctrine, harness, previous_harness = instruction_paths
+        entries = value.get("instructions", [])
+        if not isinstance(entries, list) or any(not isinstance(item, str) for item in entries):
+            raise RegistrationError("OpenCode instructions conflict; repair: use a string array")
+        retained = []
+        for item in entries:
+            expanded = Path(item).expanduser()
+            if expanded in {instance_doctrine, harness, previous_harness}:
+                continue
+            if expanded == instance_doctrine.parent / "HARNESS.md":
+                # The old manual path was dangling: HARNESS.md is product-owned.
+                continue
+            if expanded.name in {"AGENTS.md", "HARNESS.md"}:
+                raise RegistrationError(
+                    f"OpenCode instructions conflict at {item}; repair: remove the foreign doctrine path"
+                )
+            retained.append(item)
+        value["instructions"] = [*retained, str(instance_doctrine), str(harness)]
     servers = value.setdefault("mcp", {})
     if not isinstance(servers, dict):
         raise RegistrationError(f"{label} config mcp must be an object")
@@ -237,7 +259,7 @@ def opencode_update(path: Path, desired: dict[str, Any]) -> ConfigProposal:
         "enabled": True,
         "environment": desired["env"],
     }
-    if servers.get(SERVER_NAME) == entry:
+    if servers.get(SERVER_NAME) == entry and value == (json.loads(text) if text else {}):
         return ConfigProposal(client, snapshot, text, "existing")
     servers[SERVER_NAME] = entry
     return ConfigProposal(client, snapshot, json.dumps(value, indent=2, sort_keys=True) + "\n", "ready")
@@ -652,6 +674,8 @@ def main(argv: list[str] | None = None) -> int:
                     client,
                 ))
         if args.platform in {"all", "opencode"}:
+            instruction_root = instance_root or Path.home() / ".agents"
+            previous_product = load_pointer_path(instruction_root)
             proposals.append(opencode_update(
                 args.opencode_config,
                 registration(
@@ -661,6 +685,10 @@ def main(argv: list[str] | None = None) -> int:
                     "opencode",
                     shim_path=shim_path,
                     instance_root=instance_root,
+                ),
+                (
+                    instruction_root / "AGENTS.md", agents_home / "HARNESS.md",
+                    previous_product / "HARNESS.md" if previous_product else None,
                 ),
             ))
         if args.check:
