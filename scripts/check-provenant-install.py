@@ -4,14 +4,59 @@
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 import sys
+import tomllib
 
 from lib.product_root_resolver import POINTER_RELATIVE_PATH, load_pointer_file
+from instance_installation import InstallError, routing_drift
 
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "scripts/provenant.template"
+
+
+def _provider_lines(home: Path) -> tuple[list[str], bool]:
+    claude_root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude")
+    codex_root = Path(os.environ.get("CODEX_HOME") or home / ".codex")
+    opencode_root = Path(os.environ.get("OPENCODE_CONFIG_DIR") or home / ".config/opencode")
+    agy_root = Path(os.environ.get("AGY_CONFIG_DIR") or home / ".gemini")
+    locations = {
+        "claude": (claude_root, Path(os.environ.get("CLAUDE_MCP_CONFIG") or home / ".claude.json")),
+        "codex": (codex_root, codex_root / "config.toml"),
+        "opencode": (opencode_root, Path(os.environ.get("OPENCODE_MCP_CONFIG") or opencode_root / "opencode.jsonc")),
+        "agy": (agy_root, Path(os.environ.get("AGY_MCP_CONFIG") or agy_root / "config/mcp_config.json")),
+        "cursor": (home / ".cursor", home / ".cursor/mcp.json"),
+        "kiro": (home / ".kiro", home / ".kiro/settings/mcp.json"),
+    }
+    lines = []
+    missing = False
+    for provider, (root, config) in locations.items():
+        if not root.is_dir():
+            lines.append(f"provider {provider} present=no")
+            continue
+        skills = (root / "skills/orchestrate/SKILL.md").is_file()
+        try:
+            document = (
+                tomllib.loads(config.read_text())
+                if provider == "codex" else json.loads(config.read_text())
+            )
+            key = "mcp_servers" if provider == "codex" else "mcp" if provider == "opencode" else "mcpServers"
+            servers = document.get(key, {}) if isinstance(document, dict) else {}
+            mcp = isinstance(servers, dict) and "fabric" in servers
+        except (OSError, ValueError):
+            mcp = False
+        agents = (root / "agents").is_dir() if provider == "claude" else None
+        complete = skills and mcp and agents is not False
+        missing |= not complete
+        lines.append(
+            f"provider {provider} present=yes skills={'ok' if skills else 'missing'} "
+            f"agents={'ok' if agents else 'missing' if agents is False else 'unsupported'} "
+            f"mcp={'ok' if mcp else 'missing'}"
+            + (" repair=install-harness --platform all" if not complete else "")
+        )
+    return lines, missing
 
 
 def main() -> int:
@@ -63,6 +108,18 @@ def main() -> int:
         )
         return 1
     print(f"provenant installed stub=ok path={command}")
+    provider_lines, provider_missing = _provider_lines(Path.home())
+    for line in provider_lines:
+        print(line)
+    try:
+        differences = routing_drift(ROOT, instance_root)
+    except InstallError as exc:
+        print(f"FAIL: routing catalogue {exc}; repair=install-harness --refresh-routing", file=sys.stderr)
+        return 1
+    for key in differences:
+        print(f"routing drift={key} repair=install-harness --refresh-routing", file=sys.stderr)
+    if differences or provider_missing:
+        return 1
     return 0
 
 

@@ -71,6 +71,7 @@ def instance_root_for(home: Path) -> Path:
 
 def run(platform: str, home: Path, *arguments: str, **extra_env):
     env = os.environ.copy()
+    env.pop("AGENT_FABRIC_STATE_DIRECTORY", None)
     env.update({"HOME": str(home)})
     # Keep the instance root deterministic in the scratch HOME. AGENTS_HOME now
     # names only the product root, but an explicit instance value also keeps the
@@ -101,6 +102,7 @@ def copy_product(root: Path, destination: Path) -> Path:
 
 def run_product(product: Path, platform: str, home: Path, **extra_env):
     environment = os.environ.copy()
+    environment.pop("AGENT_FABRIC_STATE_DIRECTORY", None)
     # Resolve the copied product through the pointer written by this install,
     # not through an explicit product root inherited from the outer CI job.
     environment.pop("AGENT_FABRIC_PRODUCT_ROOT", None)
@@ -841,13 +843,11 @@ def test_all_mcp_clients_are_an_explicit_subscription_native_opt_in(tmp_path):
     result = run("codex", tmp_path, "--mcp-clients", "all", CODEX_HOME=str(config))
 
     assert result.returncode == 0, result.stderr
-    # Brokers sit in the codex seat; Agy holds the `agy` seat for stable
-    # addressing, not model-family proof. See CLIENT_SEATS in
-    # scripts/configure-fabric-mcp.py.
+    # Each client has its own Fabric inbox; seat alone is not model-family proof.
     for client, path, seat in (
-        ("cursor", tmp_path / ".cursor/mcp.json", "codex"),
+        ("cursor", tmp_path / ".cursor/mcp.json", "cursor"),
         ("agy", tmp_path / ".gemini/config/mcp_config.json", "agy"),
-        ("kiro", tmp_path / ".kiro/settings/mcp.json", "codex"),
+        ("kiro", tmp_path / ".kiro/settings/mcp.json", "kiro"),
     ):
         registration = json.loads(path.read_text())["mcpServers"]["fabric"]
         assert registration["env"]["AGENT_FABRIC_SEAT"] == seat
@@ -856,7 +856,7 @@ def test_all_mcp_clients_are_an_explicit_subscription_native_opt_in(tmp_path):
     opencode = json.loads((tmp_path / ".config/opencode/opencode.jsonc").read_text())
     registration = opencode["mcp"]["fabric"]
     assert registration["command"] == [str(tmp_path / ".local/bin/provenant")]
-    assert registration["environment"]["AGENT_FABRIC_SEAT"] == "codex"
+    assert registration["environment"]["AGENT_FABRIC_SEAT"] == "opencode"
     assert registration["environment"]["AGENT_FABRIC_CLIENT_LABEL"] == "opencode"
     assert all("API_KEY" not in key for key in registration["environment"])
 
@@ -872,6 +872,74 @@ def test_primary_mcp_clients_remain_the_default(tmp_path):
     assert not (tmp_path / ".gemini/config/mcp_config.json").exists()
     assert not (tmp_path / ".kiro/settings/mcp.json").exists()
     assert not (tmp_path / ".config/opencode/opencode.jsonc").exists()
+
+
+def test_opencode_primary_installs_bootstrap_skills_harness_and_mcp(tmp_path):
+    result = run("opencode", tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    root = tmp_path / ".config/opencode"
+    assert str(ROOT / "HARNESS.md") in (root / "AGENTS.md").read_text()
+    assert (root / "HARNESS.md").resolve() == ROOT / "HARNESS.md"
+    assert {path.name for path in (root / "skills").iterdir()} == expected_installed_entries()
+    config = json.loads((root / "opencode.jsonc").read_text())
+    assert config["instructions"] == [
+        str(instance_root_for(tmp_path) / "AGENTS.md"), str(ROOT / "HARNESS.md"),
+    ]
+    assert config["mcp"]["fabric"]["environment"]["AGENT_FABRIC_SEAT"] == "opencode"
+
+
+def test_all_installs_present_optional_provider_surfaces(tmp_path):
+    for relative in (".config/opencode", ".gemini", ".cursor", ".kiro"):
+        (tmp_path / relative).mkdir(parents=True)
+
+    result = run("all", tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    for relative in (".config/opencode", ".gemini", ".cursor", ".kiro"):
+        assert (tmp_path / relative / "skills" / "orchestrate/SKILL.md").exists()
+    assert (tmp_path / ".gemini/GEMINI.md").is_file()
+    assert (tmp_path / ".gemini/HARNESS.md").resolve() == ROOT / "HARNESS.md"
+    for relative in (
+        ".claude.json", ".codex/config.toml", ".config/opencode/opencode.jsonc",
+        ".gemini/config/mcp_config.json", ".cursor/mcp.json", ".kiro/settings/mcp.json",
+    ):
+        assert (tmp_path / relative).exists(), relative
+    checked = subprocess.run(
+        [str(ROOT / "scripts/check-provenant-install.py")],
+        env={
+            **os.environ,
+            "HOME": str(tmp_path),
+            "AGENT_FABRIC_INSTANCE_ROOT": str(instance_root_for(tmp_path)),
+            "PROVENANT_BIN_DIR": str(tmp_path / ".local/bin"),
+            "CODEX_HOME": str(tmp_path / ".codex"),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert checked.returncode == 0, checked.stderr
+    assert len([line for line in checked.stdout.splitlines() if line.startswith("provider ")]) == 6
+    assert "missing" not in checked.stdout
+
+
+def test_refresh_routing_is_opt_in_through_install_harness(tmp_path):
+    first = run("codex", tmp_path)
+    assert first.returncode == 0, first.stderr
+    target = instance_root_for(tmp_path) / "config/model-routing.json"
+    document = json.loads(target.read_text())
+    document["adapters"]["opencode"]["endpoint_provider"] = "codex"
+    target.write_text(json.dumps(document))
+
+    second = run("codex", tmp_path)
+    assert second.returncode == 0, second.stderr
+    assert json.loads(target.read_text())["adapters"]["opencode"]["endpoint_provider"] == "codex"
+    assert "routing drift=adapters.opencode.endpoint_provider" in second.stdout
+
+    refreshed = run("codex", tmp_path, "--refresh-routing")
+    assert refreshed.returncode == 0, refreshed.stderr
+    assert json.loads(target.read_text())["adapters"]["opencode"]["endpoint_provider"] == "opencode"
+    assert len(list(target.parent.glob("model-routing.json.bak-*"))) == 1
 
 
 def test_rejects_unknown_mcp_client_selection(tmp_path):

@@ -18,6 +18,10 @@ runtime/fabric/bin/fabric-mcp
 
 The package carries `tsx` as a runtime dependency. The launchers resolve it
 from an installed package or the product root.
+`install-harness --platform all` registers Fabric for installed client homes;
+each client has its own seat and inbox. `check-provenant-install.py` reports one
+line per supported client and names routing catalogue drift. Refresh the
+instance-owned catalogue explicitly with `install-harness --refresh-routing`.
 `AGENT_FABRIC_PRODUCT_ROOT` selects an installed product checkout and
 `AGENT_FABRIC_TSX_LOADER` can name an explicit loader. `FABRIC_NODE` can name
 the Node binary. Launchers require Node `>=24.15.0` and `<25`.

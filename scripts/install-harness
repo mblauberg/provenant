@@ -17,9 +17,10 @@ if [[ -f "$PRODUCT_ROOT/.git" && "${PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL:-}" 
 fi
 PLATFORM=""
 MCP_CLIENTS="primary"
+REFRESH_ROUTING=0
 
 usage() {
-  echo "usage: install-harness --platform <claude|codex|all> [--mcp-clients <primary|all>]" >&2
+  echo "usage: install-harness --platform <claude|codex|opencode|agy|all> [--mcp-clients <primary|all>] [--refresh-routing]" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -34,6 +35,10 @@ while [[ $# -gt 0 ]]; do
       MCP_CLIENTS="$2"
       shift 2
       ;;
+    --refresh-routing)
+      REFRESH_ROUTING=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -46,8 +51,14 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$PLATFORM" in
-  claude|codex) primary_platforms=("$PLATFORM") ;;
-  all) primary_platforms=(claude codex) ;;
+  claude|codex|opencode|agy) primary_platforms=("$PLATFORM") ;;
+  all)
+    primary_platforms=(claude codex)
+    [[ -d "${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}" ]] && primary_platforms+=(opencode)
+    [[ -d "${AGY_CONFIG_DIR:-$HOME/.gemini}" ]] && primary_platforms+=(agy)
+    [[ -d "$HOME/.cursor" ]] && primary_platforms+=(cursor)
+    [[ -d "$HOME/.kiro" ]] && primary_platforms+=(kiro)
+    ;;
   *) usage; exit 2 ;;
 esac
 REQUESTED_PLATFORM="$PLATFORM"
@@ -101,6 +112,18 @@ select_primary() {
     codex)
       platform_home="${CODEX_HOME:-$HOME/.codex}"
       instructions="$platform_home/AGENTS.md"
+      ;;
+    opencode)
+      platform_home="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
+      instructions="$platform_home/AGENTS.md"
+      ;;
+    agy)
+      platform_home="${AGY_CONFIG_DIR:-$HOME/.gemini}"
+      instructions="$platform_home/GEMINI.md"
+      ;;
+    cursor|kiro)
+      platform_home="$HOME/.$PLATFORM"
+      instructions=""
       ;;
     *) echo "unsupported primary: $PLATFORM" >&2; exit 2 ;;
   esac
@@ -182,6 +205,7 @@ create_generated_bootstrap() {
 }
 
 preflight_instructions() {
+  [[ -n "$instructions" ]] || return 0
   if [[ ! -e "$instructions" && ! -L "$instructions" ]]; then
     return 0
   fi
@@ -207,6 +231,7 @@ preflight_instructions() {
 }
 
 preflight_harness_link() {
+  [[ -n "$instructions" ]] || return 0
   local harness="$platform_home/HARNESS.md"
   if [[ ! -e "$harness" && ! -L "$harness" ]]; then
     return 0
@@ -236,7 +261,14 @@ raise SystemExit(0 if target == expected else 1)
 }
 
 rebind_harness_link() {
+  [[ -n "$instructions" ]] || return 0
   local harness="$platform_home/HARNESS.md"
+  if [[ "$PLATFORM" == "agy" || "$PLATFORM" == "opencode" ]] \
+    && [[ ! -e "$harness" && ! -L "$harness" ]]; then
+    ln -s "$PRODUCT_ROOT/HARNESS.md" "$harness"
+    echo "harness created=$harness"
+    return 0
+  fi
   if is_receipt_owned_old_harness "$harness" \
     && [[ ! "$harness" -ef "$PRODUCT_ROOT/HARNESS.md" ]]; then
     local temporary_directory temporary
@@ -299,9 +331,7 @@ provenant_preflight="$(
 state_directory="${AGENT_FABRIC_STATE_DIRECTORY:-$HOME/.local/state/agent-harness/fabric}"
 claude_mcp_config="${CLAUDE_MCP_CONFIG:-$HOME/.claude.json}"
 mcp_platform="$REQUESTED_PLATFORM"
-if [[ "$MCP_CLIENTS" == "all" ]]; then
-  mcp_platform="all"
-fi
+if [[ "$MCP_CLIENTS" == "all" ]]; then mcp_platform="all"; fi
 codex_mcp_config="${CODEX_MCP_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
 mcp_args=(
   --agents-home "$PRODUCT_ROOT"
@@ -310,9 +340,9 @@ mcp_args=(
   --claude-config "$claude_mcp_config"
   --codex-config "$codex_mcp_config"
   --cursor-config "${CURSOR_MCP_CONFIG:-$HOME/.cursor/mcp.json}"
-  --agy-config "${AGY_MCP_CONFIG:-$HOME/.gemini/config/mcp_config.json}"
+  --agy-config "${AGY_MCP_CONFIG:-${AGY_CONFIG_DIR:-$HOME/.gemini}/config/mcp_config.json}"
   --kiro-config "${KIRO_MCP_CONFIG:-$HOME/.kiro/settings/mcp.json}"
-  --opencode-config "${OPENCODE_MCP_CONFIG:-$HOME/.config/opencode/opencode.jsonc}"
+  --opencode-config "${OPENCODE_MCP_CONFIG:-${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}/opencode.jsonc}"
 )
 mcp_instance_root=""
 if [[ -n "${AGENT_FABRIC_INSTANCE_ROOT:-}" && "$instance_root" != "$HOME/.agents" ]]; then
@@ -325,7 +355,7 @@ configure_fabric_mcp() {
   local mcp_command=("${mcp_args[@]}")
   if [[ -n "$action" ]]; then mcp_command+=("$action"); fi
   if [[ "$REQUESTED_PLATFORM" == "all" && "$MCP_CLIENTS" == "primary" ]]; then
-    for mcp_primary in claude codex; do
+    for mcp_primary in "${primary_platforms[@]}"; do
       AGENT_FABRIC_INSTANCE_ROOT="$mcp_instance_root" \
         run_stdlib "$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" \
         --platform "$mcp_primary" "${mcp_command[@]}"
@@ -364,6 +394,10 @@ esac
 # resolved once, above, on the contract #529 established.
 run_stdlib "$PRODUCT_ROOT/scripts/instance_installation.py" seed \
   --product-root "$PRODUCT_ROOT" --instance-root "$instance_root" --no-pointer --summary
+if [[ "$REFRESH_ROUTING" == 1 ]]; then
+  run_stdlib "$PRODUCT_ROOT/scripts/instance_installation.py" refresh-routing \
+    --product-root "$PRODUCT_ROOT" --instance-root "$instance_root" --summary
+fi
 
 for primary in "${primary_platforms[@]}"; do
   select_primary "$primary"
@@ -385,7 +419,9 @@ for primary in "${primary_platforms[@]}"; do
   # (ADR 0019), so the client reads doctrine from the instance and the harness
   # constitution from the product. In a fused layout both roots are one directory,
   # so this is the text that was always emitted.
-  if [[ ! -e "$instructions" && ! -L "$instructions" ]]; then
+  if [[ -z "$instructions" ]]; then
+    :
+  elif [[ ! -e "$instructions" && ! -L "$instructions" ]]; then
     create_generated_bootstrap
   elif [[ -L "$instructions" ]] && [[ "$instructions" -ef "$instance_doctrine" ]]; then
     # A link the user made to the instance doctrine already resolves to doctrine;

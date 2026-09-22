@@ -353,19 +353,18 @@ dispatch is the supported expansion path.
   `opencode/<model>` (list with `opencode models`). Fabric may use adapter
   `opencode`. No Kiro-style enable env var. `read_only_guarantee` is `none`
   until a hard read-only mode is proven; never pass `--auto`.
-- **As an interactive client:** register Fabric MCP for OpenCode
-  (`scripts/configure-fabric-mcp.py --platform opencode` or
-  `install-harness --mcp-clients all`). The client keeps label `opencode` and
-  shares the `codex` seat by design. After registration, a new OpenCode session
-  should list `fabric` via `opencode mcp list`.
+- **As an interactive client:** `install-harness --platform opencode` installs
+  skills, explicit instance/product instructions, and Fabric MCP. The client
+  has its own `opencode` seat and label. A new OpenCode session should list
+  `fabric` via `opencode mcp list`.
 - **Subscription / Zen models:** still pass the live `opencode/…` slug
   explicitly; discover with `opencode models` after login. Paid catalogue
   changes do not require a Provenant alias-table edit.
 
-Instance installs copy `config/model-routing.json` into
-`~/.agents/config/`. After merging activation, re-run `install-harness` (or
-otherwise refresh the instance catalogue) so dispatch sees OpenCode as
-`implemented` and the OpenRouter endpoint profiles.
+Instance installs seed `config/model-routing.json` into `~/.agents/config/`
+once. Check-install reports product catalogue drift; explicitly run
+`install-harness --platform all --refresh-routing` to back up and refresh
+product-owned sections while retaining instance additions.
 
 ## Output normalisation
 
