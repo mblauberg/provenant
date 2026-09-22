@@ -180,6 +180,8 @@ parameter is a typed input error, and intent is always ordinary. Both default to
 the current provider seat, the `workhorse` route, the `worker` role and
 `read_only` requested access. The adapter receipt records the actual
 `read_only_guarantee`; Agy is `prompt_only`, even with its optional sandbox.
+OpenCode is `best_effort` on read-only runs and supports an owned worktree
+writer. OpenCode and Cursor select an adapter default model when none is given.
 A worker that must write takes `mode: "worktree_write"` with
 a `worktree` it owns exclusively; two writer tasks may never name one worktree.
 They create the run directory automatically, delegate to `dispatch_run.py` or

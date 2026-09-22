@@ -15,6 +15,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 PRODUCT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts"
 SCRIPT = SCRIPTS / "cf_dispatch.sh"
@@ -569,9 +571,9 @@ def test_claude_bare_oauth_model_fallback_reuses_verifier_contract():
             assert "--tools\nRead,Grep,Glob" in invocation
             assert "--system-prompt" in invocation
             assert "Fabric MCP tools are not exposed" in invocation
-            assert "Return only the file-backed verification result" in invocation
+            assert "Return the result the supplied prompt asks for" in invocation
             assert "caller owns any Fabric correlation" in invocation
-            assert "independent verifier" in invocation
+            assert "non-interactive read-only worker" in invocation
             assert "cross-family verifier" not in invocation
             assert "CLAUDE_CODE_DISABLE_WORKFLOWS=1" in invocation
         assert "--model\nopus" in invocations[0]
@@ -706,7 +708,7 @@ def test_claude_oauth_fallback_after_bare_auth_failure():
     assert output.strip() == "OK"
 
 
-def test_claude_oauth_fallback_uses_verifier_system_prompt():
+def test_claude_oauth_fallback_uses_neutral_read_only_system_prompt():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         bin_dir = tmp / "bin"
@@ -759,11 +761,11 @@ def test_claude_oauth_fallback_uses_verifier_system_prompt():
         args = args_file.read_text(encoding="utf-8")
         assert "--system-prompt" in args
         assert "--disable-slash-commands" in args
-        assert "non-interactive independent verifier" in args
+        assert "non-interactive read-only worker" in args
         assert "cross-family verifier" not in args
         assert "launch subagents" in args
         assert args.count("Fabric MCP tools are not exposed") == 2
-        assert args.count("Return only the file-backed verification result") == 2
+        assert args.count("Return the result the supplied prompt asks for") == 2
         assert args.count("caller owns any Fabric correlation") == 2
         assert "CLAUDE_CODE_DISABLE_WORKFLOWS=1" in args
         assert "Read,Grep,Glob" in args.splitlines()
@@ -2300,11 +2302,17 @@ def test_interrupted_dispatch_cleans_internal_tempfiles():
         assert list(temp_root.iterdir()) == []
 
 
-def test_broker_adapter_requires_resolvable_provider_family():
+def test_cursor_default_auto_model_keeps_unknown_family_ineligible_for_certification():
     with tempfile.TemporaryDirectory() as td:
+        bin_dir = Path(td) / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "cursor-agent", "#!/usr/bin/env bash\necho OK\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
         result = subprocess.run(
             [
                 str(SCRIPT),
+                "--intent", "ordinary",
                 "--tool",
                 "cursor",
                 "--orchestrator-family",
@@ -2313,14 +2321,19 @@ def test_broker_adapter_requires_resolvable_provider_family():
                 "Review",
             ],
             cwd=td,
+            env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
         record = json.loads(result.stdout)
-        assert result.returncode != 0
-        assert record["status"] == "model_required_for_broker"
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert record["status"] == "ok"
+        assert record["resolved_model"] == "auto"
+        assert record["model_selection"] == "adapter-default"
+        assert record["model_family"] == "generic-open"
         assert record["cross_family"] is False
+        assert record["certification_eligible"] is False
 
 
 def test_manual_provider_override_is_not_supported():
@@ -2526,7 +2539,7 @@ if __name__ == "__main__":
     test_missing_option_value_is_clean_error()
     test_missing_prompt_file_is_clean_error()
     test_claude_oauth_fallback_after_bare_auth_failure()
-    test_claude_oauth_fallback_uses_verifier_system_prompt()
+    test_claude_oauth_fallback_uses_neutral_read_only_system_prompt()
     test_agy_direct_route_dispatches_json_sandbox_and_file_prompt()
     test_agy_oversized_prompt_fails_closed_instead_of_truncating()
     test_agy_success_with_empty_response_is_non_passing()
@@ -3056,7 +3069,7 @@ def test_opencode_arm_runs_with_explicit_model_and_records_variant():
             bin_dir / "opencode",
             f"""#!/usr/bin/env bash
             printf '%s\\n' "$@" > {args_file}
-            echo '{{"type":"text","text":"OPENCODE OK"}}'
+            echo '{{"type":"text","part":{{"text":"OPENCODE OK"}}}}'
             """,
         )
         env = fabric_free_env()
@@ -3077,7 +3090,7 @@ def test_opencode_arm_runs_with_explicit_model_and_records_variant():
         assert record["status"] == "ok"
         assert record["resolved_model"] == "opencode/union-alpha"
         assert record["model_family"] == "generic-open"
-        assert record["read_only_guarantee"] == "none"
+        assert record["read_only_guarantee"] == "best_effort"
         recorded = args_file.read_text(encoding="utf-8")
         assert "run" in recorded
         assert "--format" in recorded
@@ -3087,7 +3100,111 @@ def test_opencode_arm_runs_with_explicit_model_and_records_variant():
         assert "--variant" in recorded
         assert "high" in recorded
         assert "--auto" not in recorded
-        assert "OPENCODE OK" in out.read_text(encoding="utf-8")
+        assert out.read_text(encoding="utf-8") == "OPENCODE OK"
+        assert '"type":"text"' in (tmp / "out.txt.raw.jsonl").read_text()
+
+
+OPENCODE_EVENT_STUB = """\
+    #!/usr/bin/env bash
+    printf 'PWD=%s\\n' "$PWD" > {args_file}
+    printf 'CONFIG=%s\\n' "$OPENCODE_CONFIG_CONTENT" >> {args_file}
+    printf '%s\\n' "$@" >> {args_file}
+    printf '%s\\n' '{{"type":"step_start"}}' '{{"type":"text","part":{{"text":"OK"}}}}' '{{"type":"step_finish"}}'
+"""
+
+
+def test_opencode_read_only_route_installs_pattern_permissions():
+    result, recorded, _ = run_worktree_dispatch("opencode", OPENCODE_EVENT_STUB)
+    record = json.loads(result.output)
+    assert result.returncode == 0, result.output
+    assert record["read_only_guarantee"] == "best_effort"
+    assert record["resolved_model"] == "opencode/nemotron-3.5-lightning-free"
+    assert record["model_selection"] == "adapter-default"
+    config = json.loads(recorded.split("CONFIG=", 1)[1].splitlines()[0])
+    assert config["permission"]["edit"] == {"*": "deny"}
+    assert config["permission"]["bash"]["*"] == "deny"
+    assert config["permission"]["bash"]["git status*"] == "allow"
+    assert config["permission"]["external_directory"] == {"*": "allow"}
+
+
+def test_opencode_environment_model_overrides_adapter_default():
+    result, recorded, _ = run_worktree_dispatch(
+        "opencode", OPENCODE_EVENT_STUB,
+        extra_env={"CF_DISPATCH_OPENCODE_MODEL": "openrouter/deepseek/deepseek-v4"},
+    )
+    record = json.loads(result.output)
+    assert result.returncode == 0, result.output
+    assert record["resolved_model"] == "openrouter/deepseek/deepseek-v4"
+    assert record["model_family"] == "deepseek"
+    assert record["model_selection"] != "adapter-default"
+    assert "openrouter/deepseek/deepseek-v4" in recorded
+
+
+def test_opencode_writer_route_uses_owned_worktree():
+    result, recorded, worktree = run_worktree_dispatch(
+        "opencode", OPENCODE_EVENT_STUB, worktree="make"
+    )
+    record = json.loads(result.output)
+    assert result.returncode == 0, result.output
+    assert record["access_mode"] == "worktree_write"
+    assert record["read_only_guarantee"] == "none"
+    assert f"PWD={worktree}" in recorded
+    assert f"--dir\n{worktree}" in recorded
+    config = json.loads(recorded.split("CONFIG=", 1)[1].splitlines()[0])
+    assert config["permission"]["external_directory"] == {"*": "deny"}
+    assert config["permission"]["edit"] == {"*": "allow"}
+    assert config["permission"]["bash"] == {"*": "allow"}
+
+
+@pytest.mark.parametrize(
+    "events, expected_status, diagnostic",
+    [
+        ('{"type":"error","error":{"name":"APIError","data":{"statusCode":403,"message":"free tier denied"}}}',
+         "auth_or_quota_error", "free tier denied"),
+        ('{"type":"tool_use","part":{"state":{"status":"error","error":"blocked"}}}',
+         "empty_output", "tool_use"),
+    ],
+)
+def test_opencode_event_failures_are_typed_and_keep_raw_jsonl(events, expected_status, diagnostic):
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", f"#!/usr/bin/env bash\nprintf '%s\\n' '{events}'\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == expected_status
+        assert diagnostic in out.read_text()
+        assert events in (tmp / "out.txt.raw.jsonl").read_text()
+
+
+def test_opencode_idle_watchdog_terminates_silent_provider():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", "#!/usr/bin/env bash\nsleep 10\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["CF_DISPATCH_IDLE_SECONDS"] = "1"
+        out = tmp / "out.txt"
+        result = run_bounded(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(out)],
+            cwd=tmp, env=env, timeout_seconds=5, output_limit_bytes=1_048_576,
+        )
+        record = json.loads(result.output)
+        assert record["status"] == "idle_timeout"
+        assert "try another model" in record["reason"]
+        assert "idle for 1s; try another model" in out.read_text()
 
 
 def test_oversized_argv_prompt_is_typed_for_cursor():
