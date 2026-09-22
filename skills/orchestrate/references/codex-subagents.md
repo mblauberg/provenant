@@ -67,7 +67,7 @@ Good Codex worker prompt fields:
 role:              explorer | worker | default
 task-class:        mechanical | legwork | critical-review | orchestration
 tier:              scout | workhorse | flagship
-catalog-model:     Astra | Luna
+catalog-model:     Astra | Sol | Luna
 effort:            <effective effort from route receipt>
 route-receipt:     <path or receipt identity>
 scope:             <files / sources / task slice>
@@ -79,7 +79,7 @@ return:            3-6 bullets, surprises, unresolved, file path
 ```
 
 When the native Codex surface exposes model and effort overrides, bind both to
-the resolved route. Retain Astra/Luna as the catalogue identity in the
+the resolved route. Retain Astra, Sol or Luna as the catalogue identity in the
 receipt. If the native surface cannot bind either field, stop or use an
 authorised adapter and record the substitution; do not silently inherit the
 chair route. Explicit chair inheritance is valid only when the dispatch and

@@ -69,9 +69,10 @@ The first configured candidate is the default and later candidates remain
 admissible. `docs/model-dossier.md` records advisory preferences, so prose
 alone does not move a default.
 
-Opus is Claude's default flagship and high-effort critical reviewer, and is also
-the default workhorse at low or medium effort, where it tends to beat Sonnet at
-a higher one. Sonnet stays admissible at workhorse and is the one to reach for
+Opus (the `opus` alias, which resolves to Opus 5.5, `claude-opus-5-5`) is
+Claude's default flagship and the standing choice for critical review, synthesis
+and adjudication at every risk tier. It is also the default workhorse at low or
+medium effort, where it tends to beat Sonnet at a higher one. Sonnet stays admissible at workhorse and is the one to reach for
 when the work is genuinely routine. Each catalogue-configured risk tier has one bounded
 override occupant. Validation prevents it from being an alias or alias
 candidate. Lifecycle `risk_tier` remains delivery metadata and never selects
@@ -90,16 +91,21 @@ route whose effort differs from its probe policy's `minimum_effort` fails as
 `task_class_config_invalid`: the probe evidences exactly one effort, so a
 divergence is a configuration error and must not surface as the provider fault
 `effort_capability_unverified`. Claude Fable 5.1 (`claude-fable-5-1`) currently
-occupies both configured tiers.
-Astra leads for Codex and is the only OpenAI flagship candidate, so Sol cannot
-be selected as a silent fallback. The standing policy runs Astra between `low`
+occupies both configured tiers. The override is opt-in and is not the default
+for crucial or terminal work: prefer Opus 5.5 at `high` or `xhigh`, and select
+Fable only when a deliberately different Anthropic mind is wanted or the owner
+asks for it.
+Astra leads for Codex and is the only OpenAI flagship candidate, so a worker
+model is never a silent flagship fallback. The standing policy runs Astra between `low`
 and `xhigh` for critical review and for legwork that needs judgement. The
 native Codex CLI reports `max` and `ultra` for Astra and the Responses API
 stops at `max`; those are separate surfaces, only the runtime capability probe
 decides what the adapter can dispatch, and the catalogue defaults to neither.
-Every substitution is recorded. Luna is the only workhorse and scout catalogue candidate, run at
-`high` by default and raised to `xhigh` or `max` for mechanical and legwork
-slices that warrant it. Sol and Terra are not catalogue routes. Claude and
+Every substitution is recorded. The workhorse alias lists GPT-6 Sol
+(`gpt-6-sol`) first, with GPT-6 Luna (`gpt-6-luna`) as its admissible
+fallback; scout is Luna. Both run at `high` by default and are raised to
+`xhigh` or `max` when a slice warrants it. GPT-5.6 models and Terra are no
+longer catalogue routes. Claude and
 Codex are equal primary families.
 
 Effort rule: **medium by default**; **high for verification, adversarial, and high-stakes** calls

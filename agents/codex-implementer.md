@@ -1,6 +1,6 @@
 ---
 name: codex-implementer
-description: Token-heavy IMPLEMENTATION executed by the Codex CLI rather than by Claude, writing code, tests, refactors and mechanical sweeps across many files, inside a git worktree it owns exclusively. Use for any substantial coding task where Claude would otherwise burn its budget writing the diff. Returns a digest, the commit list and a path to the full transcript.
+description: Token-heavy IMPLEMENTATION executed by the Codex CLI rather than by Claude, writing code, tests, refactors and mechanical sweeps across many files, inside a git worktree it owns exclusively. Use for any substantial coding task where Claude would otherwise burn its budget writing the diff. Returns a digest, the commit list and a path to the full transcript. When the Fabric MCP is available, call fabric_dispatch directly instead (adapter codex); it needs no wrapper and costs no Claude tokens.
 tools: Bash, Read, Write, Glob, Grep
 model: sonnet
 effort: low
@@ -96,7 +96,7 @@ again through you.
 **2. Run Codex in the foreground and let the call block.**
 
 ```
-codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
+codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-6-sol \
   -c service_tier=default -c model_reasoning_effort=high - \
   < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt \
   > ${TMPDIR:-/tmp}/codex-<slug>-transcript.txt 2>&1
@@ -123,7 +123,7 @@ durable completion marker atomically to `run_dir/done`:
 run_dir=${TMPDIR:-/tmp}/codex-<unique-slug>
 "$(provenant root)/skills/orchestrate/scripts/run_worker_detached.sh" \
   --run-dir "$run_dir" -- \
-  codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
+  codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-6-sol \
     -c service_tier=default -c model_reasoning_effort=high - \
     < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt &
 WRAPPER_PID=$!
@@ -262,15 +262,18 @@ resolves. The names below are for a workstation without `provenant` on the
 path. When a new model lands, the catalogue and `docs/model-dossier.md` change
 and this section follows them.
 
-- `-m gpt-5.6-luna` is the default for mechanical and legwork slices. Run it
-  at `high` by default; raise to `xhigh` or `max` when the brief warrants it.
+- `-m gpt-6-sol` is the default for ordinary legwork and medium-sized
+  implementation (the `workhorse` alias). Run it at `high`.
+- `-m gpt-6-luna` is the cheap default for mechanical, bulk and high-token
+  slices (the `scout` alias). Run it at `high`; raise to `xhigh` or `max` when
+  the brief warrants it.
 - `-m gpt-6-astra` is the flagship for critical slices and for legwork that
   genuinely needs judgement. Run it between `low` and `xhigh`; `max` and
   `ultra` are not part of the standing policy.
-- Sol and Terra are not routes. Do not select them, and do not fall back to
-  them when a name is rejected.
+- GPT-5.6 models and Terra are retired. Do not select them, and do not fall
+  back to them when a name is rejected.
 
-Luna can over-engineer a loose brief, so keep the implementation brief tight.
+A cheap model can over-engineer a loose brief, so keep the implementation brief tight.
 
 These names go stale. `codex debug models` is the headless discovery command and returns JSON
 with a `models` list, each entry carrying a `slug` and `supported_reasoning_levels` with per-model
