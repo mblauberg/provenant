@@ -116,6 +116,11 @@ case "$TIMEOUT_SECONDS" in
   "") ;;
   0*|*[!0-9]*) echo "invalid timeout-seconds: $TIMEOUT_SECONDS" >&2; exit 2;;
 esac
+if [ -n "${CF_DISPATCH_IDLE_SECONDS:-}" ] &&
+   { [[ ! "$CF_DISPATCH_IDLE_SECONDS" =~ ^[0-9]+$ ]] || [[ ! "$CF_DISPATCH_IDLE_SECONDS" =~ [1-9] ]]; }; then
+  echo "CF_DISPATCH_IDLE_SECONDS must be a positive integer" >&2
+  exit 2
+fi
 
 # The adapters with an executing arm in run_one below. This is the only
 # adapter list the shell keeps: dispatch state (implemented / dormant /
@@ -208,11 +213,11 @@ claude_provider() {
 # Reusable idle guard for a headless provider that writes incremental output.
 # Python creates a new process group so a timed-out CLI cannot leave children.
 run_with_idle_watchdog() {
-  local idle="$1" raw_path="$2" diag_path="$3" cwd="$4"
-  shift 4
-  python3 - "$idle" "$raw_path" "$diag_path" "$cwd" "$@" <<'PY'
+  local idle="$1" raw_path="$2" diag_path="$3" cwd="$4" marker="$5"
+  shift 5
+  python3 - "$idle" "$raw_path" "$diag_path" "$cwd" "$marker" "$@" <<'PY'
 import os, signal, subprocess, sys, time
-idle, raw, diag, cwd, *command = sys.argv[1:]
+idle, raw, diag, cwd, marker, *command = sys.argv[1:]
 try:
     idle = int(idle)
     if idle < 1:
@@ -256,6 +261,8 @@ with open(raw, "wb") as output, open(diag, "ab") as diagnostic:
         if size != last_size:
             last_size, last_growth = size, time.monotonic()
         elif time.monotonic() - last_growth >= idle:
+            with open(marker, "w", encoding="utf-8") as sentinel:
+                sentinel.write("idle_timeout\n")
             stop_group()
             diagnostic.write(f"OpenCode idle for {idle}s; try another model\n".encode())
             sys.exit(124)
@@ -1215,16 +1222,15 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
             status="prompt_too_large"
             rc=1
           else
+            local idle_marker="$ACTIVE_RUN_TMPDIR/opencode.idle"
             OPENCODE_CONFIG_CONTENT="$opencode_config" run_with_idle_watchdog \
-              "${CF_DISPATCH_IDLE_SECONDS:-600}" "$raw" "$diag" "$WORKTREE" \
+              "${CF_DISPATCH_IDLE_SECONDS:-600}" "$raw" "$diag" "$WORKTREE" "$idle_marker" \
               opencode run --format json ${WORKTREE:+--dir "$WORKTREE"} \
               ${model:+--model "$model"} ${effort:+--variant "$effort"} \
               "$PROMPT_ARG"; rc=$?
-            if [ "$rc" -eq 124 ]; then
+            if [ -f "$idle_marker" ]; then
               status="idle_timeout"
               route_reason="OpenCode idle for ${CF_DISPATCH_IDLE_SECONDS:-600}s; try another model"
-            elif [ "$rc" -eq 2 ]; then
-              status="invalid_configuration"
             else
               parse_opencode_events; opencode_parse_rc=$?
               case "$opencode_parse_rc" in

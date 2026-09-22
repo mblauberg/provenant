@@ -3214,6 +3214,49 @@ def test_opencode_parser_accepts_non_object_json_and_error_shapes(events, expect
         assert "Traceback" not in result.stderr
 
 
+@pytest.mark.parametrize("provider_exit", [2, 124])
+def test_opencode_provider_exit_with_text_is_not_watchdog_error(provider_exit):
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", f"""#!/usr/bin/env bash
+            echo '{{"type":"text","part":{{"text":"provider detail"}}}}'
+            exit {provider_exit}
+        """)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        record = json.loads(result.stdout)
+        assert record["status"] == "error"
+        assert "provider detail" in out.read_text()
+
+
+def test_invalid_opencode_idle_limit_is_refused_before_provider_launch():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        invoked = tmp / "invoked"
+        write_executable(bin_dir / "opencode", f"#!/usr/bin/env bash\ntouch '{invoked}'\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["CF_DISPATCH_IDLE_SECONDS"] = "oops"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(tmp / "out.txt")],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        assert result.returncode == 2
+        assert "CF_DISPATCH_IDLE_SECONDS must be a positive integer" in result.stderr
+        assert not invoked.exists()
+
+
 def test_opencode_idle_watchdog_terminates_silent_provider():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
