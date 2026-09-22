@@ -112,6 +112,34 @@ if (owner === "dispatch_run.py") {
     mkdirSync(join(runDir, "dispatch", "tasks", taskId, "attempt-001"), { recursive: true });
     startProvider({ ignoreTerm: true, detached: true });
     exitAfterOwnerRecord({ release: true });
+  } else if (prompt === "emit empty provider result") {
+    const attemptDir = join(runDir, "dispatch", "tasks", taskId, "attempt-001");
+    mkdirSync(attemptDir, { recursive: true });
+    const resultPath = join(attemptDir, "result.md");
+    const stderrPath = join(attemptDir, "stderr.log");
+    const attemptPath = join(attemptDir, "attempt.json");
+    writeFileSync(resultPath, "");
+    writeFileSync(stderrPath, "");
+    const record = {
+      schema_version: 1,
+      record_type: "dispatch-attempt",
+      status: "succeeded",
+      outcome: "ok",
+      task_id: taskId,
+      attempt_id: "attempt-001",
+      attempt_path: relative(runDir, attemptPath),
+      result: { path: relative(runDir, resultPath) },
+      stderr: { path: relative(runDir, stderrPath) },
+      route: {
+        adapter: value("--adapter"),
+        provider_family: value("--adapter"),
+        resolved_model: value("--alias"),
+        execution_intent: "ordinary",
+      },
+    };
+    writeFileSync(attemptPath, JSON.stringify(record, null, 2) + "\n");
+    process.stdout.write(JSON.stringify(record) + "\n");
+    process.exit(0);
   } else if (prompt === "sleep before the attempt directory") {
     // Deliberately no attempt directory: this is the cold-start shape, where
     // the cooperative canceller has nothing to act on.

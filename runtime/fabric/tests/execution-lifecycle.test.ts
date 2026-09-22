@@ -205,6 +205,26 @@ describe("owner records", () => {
     expect(existsSync(join(runDir, OWNER_RECORD_NAME))).toBe(false);
   }, 40_000);
 
+  it("rejects an empty provider result with task and route context", async () => {
+    const done = await dispatchConfiguredProvider(
+      { adapter: "codex", prompt: "emit empty provider result", task_id: "empty-result", wait_seconds: 5 },
+      identity,
+      new AbortController().signal,
+      ownerEnvironment,
+    );
+    expect(done).toMatchObject({
+      status: "failed",
+      outcome: "empty_output",
+      task_id: "empty-result",
+      route: {
+        adapter: "codex",
+        provider_family: "codex",
+        resolved_model: "workhorse",
+        execution_intent: "ordinary",
+      },
+    });
+  }, 40_000);
+
   it("keeps custody until a provider outliving its owner has stopped", async () => {
     const done = await dispatchConfiguredProvider(
       { adapter: "codex", prompt: "exit with provider", task_id: "exit-with-provider", wait_seconds: 5 },

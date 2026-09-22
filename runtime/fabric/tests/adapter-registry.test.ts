@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -155,4 +155,46 @@ describe("adapter rejection", () => {
       AbortSignal.abort(),
     )).rejects.toThrow(/agy, claude, codex, copilot, cursor, kiro, opencode/u);
   });
+
+  it("rejects an alias the live adapter catalogue does not allow before launch", async () => {
+    await expect(dispatchConfiguredProvider(
+      { adapter: "codex", alias: "luna", prompt: "hello" },
+      identity,
+      AbortSignal.abort(),
+      { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot },
+    )).rejects.toThrow(/adapter codex.*allowed aliases: flagship, workhorse, scout/u);
+    expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
+  });
+
+  it("does not block the default alias for an adapter the routing catalogue carries no alias table for", async () => {
+    // cursor, copilot, kiro and opencode pick their model per call rather than
+    // through a fixed family, so config/model-routing.json's family-keyed
+    // alias tables do not cover them; catalogueSnapshot resolves an empty
+    // alias set for each. Enforcing against that empty set would reject the
+    // default alias on every dispatch to these adapters, which is not the
+    // caller mistake the front-door check exists to catch.
+    const catalogueOnlyProduct = join(workspace, "catalogue-only-product");
+    mkdirSync(join(catalogueOnlyProduct, "config"), { recursive: true });
+    cpSync(
+      join(repositoryRoot, "config", "model-routing.json"),
+      join(catalogueOnlyProduct, "config", "model-routing.json"),
+    );
+    cpSync(
+      join(repositoryRoot, "config", "adapter-compatibility.yaml"),
+      join(catalogueOnlyProduct, "config", "adapter-compatibility.yaml"),
+    );
+    for (const adapter of ["cursor", "copilot", "kiro", "opencode"]) {
+      // No skills/orchestrate/scripts directory exists under this synthetic
+      // product root, so a dispatch that gets past alias validation fails
+      // fast on the missing execution owner instead of spawning a real
+      // provider: this isolates the alias check from launch mechanics.
+      await expect(dispatchConfiguredProvider(
+        { adapter, prompt: "hello" },
+        identity,
+        AbortSignal.abort(),
+        { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: catalogueOnlyProduct },
+      )).rejects.toThrow(/execution owner is unavailable/u);
+    }
+  });
+
 });
