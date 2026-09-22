@@ -3335,6 +3335,7 @@ def test_opencode_dispatch_group_signal_terminates_provider_and_grandchild():
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
         write_executable(bin_dir / "opencode", f"""#!/usr/bin/env bash
+            echo "$$" > "{tmp / 'provider.pid'}"
             trap 'touch "{tmp / 'provider.stopped'}"; exit 143' TERM
             (trap 'touch "{tmp / 'grandchild.stopped'}"; exit 143' TERM; touch "{tmp / 'ready'}"; while :; do sleep 0.1; done) &
             wait
@@ -3360,6 +3361,12 @@ def test_opencode_dispatch_group_signal_terminates_provider_and_grandchild():
             if process.poll() is None:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.communicate()
+            provider_pid = tmp / "provider.pid"
+            if provider_pid.exists():
+                try:
+                    os.killpg(int(provider_pid.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 def test_opencode_normal_exit_reaps_grandchild():
@@ -3368,19 +3375,28 @@ def test_opencode_normal_exit_reaps_grandchild():
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
         write_executable(bin_dir / "opencode", f"""#!/usr/bin/env bash
+            echo "$$" > "{tmp / 'provider.pid'}"
             (trap 'touch "{tmp / 'grandchild.stopped'}"; exit 143' TERM; touch "{tmp / 'ready'}"; while :; do sleep 0.1; done) &
             while [ ! -f "{tmp / 'ready'}" ]; do sleep 0.05; done
             echo '{{"type":"text","part":{{"text":"OK"}}}}'
         """)
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
-        result = subprocess.run(
-            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
-             "--prompt", "Reply OK", "--out", str(tmp / "out.txt")],
-            cwd=tmp, env=env, text=True, capture_output=True, timeout=10,
-        )
-        assert json.loads(result.stdout)["status"] == "ok"
-        assert (tmp / "grandchild.stopped").exists()
+        try:
+            result = subprocess.run(
+                [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+                 "--prompt", "Reply OK", "--out", str(tmp / "out.txt")],
+                cwd=tmp, env=env, text=True, capture_output=True, timeout=10,
+            )
+            assert json.loads(result.stdout)["status"] == "ok"
+            assert (tmp / "grandchild.stopped").exists()
+        finally:
+            provider_pid = tmp / "provider.pid"
+            if provider_pid.exists():
+                try:
+                    os.killpg(int(provider_pid.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 def test_oversized_argv_prompt_is_typed_for_cursor():
