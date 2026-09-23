@@ -100,7 +100,7 @@ export async function resumeConfiguredProvider(
     const checked = await preflight(python, owner, [{
       id: taskId, adapter: requested.adapter ?? previous.adapter ?? identity.provider,
       model: previous.provenance?.resolved_model ?? requested.model,
-      effort: previous.provenance?.effort_applied,
+      effort: previous.provenance?.effort_applied || undefined,
       access_mode: previous.mode ?? "read_only", worktree: previous.worktree ?? undefined,
       cwd: previous.mode === "worktree_write" ? undefined : executionIdentity.cwd,
       ...Object.fromEntries(Object.entries(previous.applied ?? {}).filter(([key, value]) =>

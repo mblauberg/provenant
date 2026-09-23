@@ -149,6 +149,20 @@ it("keeps a running brief digest on one line with its run id, route and result p
   expect(text).not.toContain("\n");
 });
 
+it("renders no effort suffix when none was applied, whatever was requested", async () => {
+  const { digest } = await import("../src/surface.js");
+  for (const applied of ["", null]) {
+    const provenance = { effort_applied: applied, effort_requested: "high", resolved_model: "haiku", requested: { adapter: "claude" } };
+    const route = { adapter: "claude", resolved_model: "haiku", effort: "high" };
+    expect(digest({ state: "running", run_id: "mcp-haiku", route, provenance })).toBe(
+      'running mcp-haiku claude/haiku · fabric_status{ids:["mcp-haiku"],wait_seconds:55}');
+    expect(digest({ status: "queued", run_id: "mcp-haiku", route, provenance })).toBe(
+      "queued mcp-haiku claude/haiku · result pending");
+  }
+  const applied = { effort_applied: "high", resolved_model: "opus", requested: { adapter: "claude" } };
+  expect(digest({ status: "queued", run_id: "mcp-opus", provenance: applied })).toBe("queued mcp-opus claude/opus@high · result pending");
+});
+
 it("gives v2 fixture processes a bounded self-exit deadline", () => {
   const fixture = resolve(import.meta.dirname, "v2-owner-fixture.mjs");
   const result = spawnSync(process.execPath, [fixture, "--deadline-loop"], {

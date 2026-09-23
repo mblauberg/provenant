@@ -150,12 +150,40 @@ class Meter:
         return dict(self.value)
 
 
+def _codex_rollouts(session, env):
+    if not session or not re.fullmatch(r"[\w-]{1,128}", session):
+        return []
+    root = Path(env.get("CODEX_HOME") or Path.home() / ".codex") / "sessions"
+    return sorted(root.glob("**/*" + session + "*.jsonl"), reverse=True)
+
+
+def codex_rollout_effort(session, env):
+    """The reasoning effort Codex reports for the session's latest turn, or None."""
+    for path in _codex_rollouts(session, env):
+        effort = None
+        try:
+            with path.open() as stream:
+                for line in stream:
+                    if '"turn_context"' not in line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                        payload = event.get("payload") or {}
+                    except (ValueError, AttributeError):
+                        continue
+                    value = payload.get("effort") if event.get("type") == "turn_context" and isinstance(payload, dict) else None
+                    if isinstance(value, str) and re.fullmatch(r"[a-z]{1,16}", value):
+                        effort = value
+        except OSError:
+            continue
+        if effort:
+            return effort
+    return None
+
+
 def with_codex_rollout(value, session, env):
     """Codex's local rollout holds the latest request's usage and the model window."""
-    if not session or not re.fullmatch(r"[\w-]{1,128}", session):
-        return value
-    root = Path(env.get("CODEX_HOME") or Path.home() / ".codex") / "sessions"
-    for path in sorted(root.glob("**/*" + session + "*.jsonl"), reverse=True):
+    for path in _codex_rollouts(session, env):
         info = None
         try:
             with path.open() as stream:
