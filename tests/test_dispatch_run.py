@@ -2683,7 +2683,8 @@ print(json.dumps({"type":"result","result":os.getcwd()}))
     second = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
     assert second['status'] == 'ok'
     assert second['cwd'] == str(nested)
-    assert second['workspace']['root'] == row['workspace']['root']
+    second_legacy = json.loads((run / second['legacy_attempt_path']).read_text())
+    assert second_legacy['workspace']['root'] == str(tmp_path.resolve())
     assert second['requested_route']['preface'] is False
     assert second['requested_route']['intent'] == row['requested_route']['intent']
     assert 'resumed_by_relaunch' in second['provenance']['notes']
