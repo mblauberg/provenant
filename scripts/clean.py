@@ -300,8 +300,10 @@ def _worktree_verdict(root: Path, path: Path, open_heads: set[str],
     if path.resolve() not in registered:
         return "triage:unregistered"
     agent = path / ".agent-run"
-    if agent.is_symlink() or any((agent / name).exists() for name in ("runs", "RUN.json", "RUN_RECEIPT.json")) or (
-            agent.is_dir() and any(child.name.startswith("mcp-") for child in agent.iterdir())):
+    if agent.is_symlink() or (agent.exists() and (
+            not agent.is_dir() or any(child.name != "README.md" and
+                                      not (child.name == "scratch" and child.is_dir() and not child.is_symlink())
+                                      for child in agent.iterdir()))):
         return "keep:worktree-runs"
     legacy = path / ".work" / "wf"
     if legacy.is_symlink() or (legacy.is_dir() and any(legacy.iterdir())):
