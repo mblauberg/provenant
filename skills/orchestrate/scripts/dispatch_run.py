@@ -799,6 +799,7 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
     if (not args.model or args.tool not in {"claude", "codex"}
             or any(str(value).startswith("-") for value in (args.model, args.effort, args.role) if value)
             or any(value for key, value in os.environ.items() if key.startswith("CF_DISPATCH_"))
+            or not Path(os.environ.get("TMPDIR") or "/tmp").is_dir()
             or args.access_mode != "read_only"
             or args.task_class or args.alias or args.resume or getattr(args, "resume_session", None) or args.worktree
             or args.provider_cwd or args.sandbox or args.network is not None or args.add_dirs

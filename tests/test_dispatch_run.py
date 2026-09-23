@@ -2408,6 +2408,18 @@ def test_fabric_fast_plan_delegates_valid_shell_only_options(tmp_path, monkeypat
         assert 'existing-session' in expected['argv']
 
 
+def test_fabric_fast_plan_delegates_missing_tmpdir(tmp_path, monkeypatch):
+    """cf_dispatch.sh rejects a TMPDIR that is not a directory; the fast path must not accept it."""
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, 'import sys\nsys.stdin.read()\n')
+    isolate_fabric_plan_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
+    monkeypatch.setenv('TMPDIR', str(tmp_path / 'missing'))
+    assert mod.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
+
+
 def test_fabric_fast_plan_guard_covers_shell_environment_reads():
     import re
     mod = load_dispatch_module()
