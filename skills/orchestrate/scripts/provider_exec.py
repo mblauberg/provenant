@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 import ctypes
+import functools
 import json
 import math
 import os
@@ -81,7 +82,21 @@ def credential_path(path):
 def _sandbox_exec_path():
     if sys.platform != "darwin" or os.environ.get("PROVENANT_NO_OS_CONFINEMENT") == "1":
         return None
-    return shutil.which("sandbox-exec")
+    path = shutil.which("sandbox-exec")
+    return path if path and _sandbox_exec_usable(path) else None
+
+
+@functools.lru_cache(maxsize=None)
+def _sandbox_exec_usable(path):
+    # macOS refuses a nested sandbox; a sandboxed caller runs unconfined with a warning.
+    try:
+        probe = subprocess.run(
+            [path, "-p", "(version 1)(allow default)", "/usr/bin/true"],
+            capture_output=True, timeout=10, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0
 
 
 def _sbpl_string(path):

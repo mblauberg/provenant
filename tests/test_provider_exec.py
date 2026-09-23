@@ -148,6 +148,20 @@ def test_os_confinement_opt_out_disables_sandbox_exec(monkeypatch):
     assert supervisor._sandbox_exec_path() is None
 
 
+def test_refused_sandbox_exec_falls_back_to_unconfined_with_warning(monkeypatch):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.delenv("PROVENANT_NO_OS_CONFINEMENT", raising=False)
+    monkeypatch.setattr(supervisor.shutil, "which", lambda _name: "/usr/bin/sandbox-exec")
+    refused = subprocess.CompletedProcess([], 71, "", "sandbox-exec: sandbox_apply: Operation not permitted\n")
+    monkeypatch.setattr(supervisor.subprocess, "run", lambda *_a, **_k: refused)
+    supervisor._sandbox_exec_usable.cache_clear()
+    try:
+        assert supervisor._sandbox_exec_path() is None
+    finally:
+        supervisor._sandbox_exec_usable.cache_clear()
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
 def test_sandbox_exec_profile_confines_reads_to_temp_subdirectory(tmp_path):
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
