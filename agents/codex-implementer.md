@@ -230,6 +230,11 @@ clean or are there stray uncommitted files; did any scaffolding file the brief s
 survive. A transcript claiming success while the tree is empty is a real and recurring failure
 mode, so this step is not optional.
 
+Before any command that restores tracked files, preserve the current worktree changes in the
+run-owned output or a commit when the task authority permits it. A restore returns files to the
+last commit, not to uncommitted work, and may affect every changed file rather than only the one
+under test.
+
 Then read `$SCRATCH/codex-<slug>-report.md`, which is bounded and holds the outcome.
 Between that file and the git commands above you have everything you need.
 

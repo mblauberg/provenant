@@ -126,6 +126,10 @@ It defaults to `opencode-go/deepseek-v4.1-flash`; `opencode-go/glm-5.3-flash`,
 `opencode/mimo-v2.6-flash-free` and `opencode/muse-spark-1.3-contributor-free`
 are the other preferred models (Muse may train on prompts: never send it sensitive
 content). Use `opencode models` to discover a live slug when overriding with `--model`.
+OpenCode resolves workspace file reads from the worker's current directory. If
+the prompt names supporting files elsewhere in the workspace, set Fabric's
+read-only `cwd` to a directory that contains them; `prompt_file` supplies the
+task text but does not stage those referenced files.
 Nested vendor ids attribute as that vendor; unparseable Zen free ids fall back
 to `generic-open` (worker only, not assurance). See
 [ADR 0025](../../../docs/adr/0025-broker-upstream-family-attribution.md).

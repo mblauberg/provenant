@@ -328,12 +328,6 @@ not inferred:
   permits `rg` with arbitrary flags. Rules of this shape are far broader than
   they look: `command(sed)` includes `sed -i`, which writes files.
 
-Three field traps. Agy quota is per account, so a 429 on one model blocks the
-others too. On quota, Agy can answer from a different model (GPT-OSS 120B was
-once shipped unnoticed under a Gemini flag), so check the model named in the
-output, not only the one requested. Prompts over about 124 KiB fail closed
-because the prompt travels in argv.
-
 The practical consequence: do not ask Gemini to write its own output file.
 Generate any diff yourself, pass the directory with `--add-dir`, and redirect
 the CLI's stdout to capture the review. That path needs no allow-rules at all.
