@@ -393,7 +393,7 @@ fi
 mcp_ready=()
 for client in "${mcp_platforms[@]}"; do
   skip=0
-  for skipped in "${skipped_platforms[@]-}"; do
+  for skipped in ${skipped_platforms[@]+"${skipped_platforms[@]}"}; do
     [[ "$client" == "$skipped" ]] && skip=1
   done
   [[ "$skip" == 1 ]] && continue
@@ -414,7 +414,7 @@ mcp_platforms=("${mcp_ready[@]}")
 selected_platforms=()
 for primary in "${primary_platforms[@]}"; do
   skip=0
-  for skipped in "${skipped_platforms[@]-}"; do
+  for skipped in ${skipped_platforms[@]+"${skipped_platforms[@]}"}; do
     [[ "$primary" == "$skipped" ]] && skip=1
   done
   [[ "$skip" == 0 ]] && selected_platforms+=("$primary")
@@ -510,7 +510,7 @@ done
 
 for client in "${mcp_platforms[@]}"; do
   skip=0
-  for skipped in "${skipped_platforms[@]-}"; do
+  for skipped in ${skipped_platforms[@]+"${skipped_platforms[@]}"}; do
     [[ "$client" == "$skipped" ]] && skip=1
   done
   [[ "$skip" == 1 ]] && continue

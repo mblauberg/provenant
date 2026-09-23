@@ -69,7 +69,7 @@ def instance_root_for(home: Path) -> Path:
     return home / ".agents"
 
 
-def run(platform: str, home: Path, *arguments: str, **extra_env):
+def run(platform: str, home: Path, *arguments: str, bash=None, **extra_env):
     env = os.environ.copy()
     env.pop("AGENT_FABRIC_STATE_DIRECTORY", None)
     env.update({"HOME": str(home)})
@@ -80,7 +80,7 @@ def run(platform: str, home: Path, *arguments: str, **extra_env):
     env["PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL"] = "1"
     env.update(extra_env)
     return subprocess.run(
-        [str(SCRIPT), "--platform", platform, *arguments],
+        [*([bash] if bash else []), str(SCRIPT), "--platform", platform, *arguments],
         cwd=ROOT,
         env=env,
         text=True,
@@ -924,6 +924,29 @@ def test_all_installs_present_optional_provider_surfaces(tmp_path):
     assert checked.returncode == 0, checked.stderr
     assert len([line for line in checked.stdout.splitlines() if line.startswith("provider ")]) == 6
     assert "missing" not in checked.stdout
+
+
+def test_all_without_skipped_platforms_runs_under_bash_3(tmp_path):
+    bash = Path("/bin/bash")
+    if not bash.exists() or "version 3." not in subprocess.run(
+        [str(bash), "--version"], text=True, capture_output=True, check=False
+    ).stdout:
+        pytest.skip("requires /bin/bash 3.x")
+
+    result = run(
+        "all", tmp_path, bash=str(bash), HARNESS_PYTHON=sys.executable,
+        PATH="/usr/bin:/bin", CLAUDE_CONFIG_DIR="", CODEX_HOME="",
+        OPENCODE_CONFIG_DIR="", AGY_CONFIG_DIR="",
+        PROVENANT_BIN_DIR=str(tmp_path / "bin"),
+        CLAUDE_MCP_CONFIG=str(tmp_path / "claude.json"),
+        CODEX_MCP_CONFIG=str(tmp_path / "codex/config.toml"),
+        AGENT_FABRIC_PRODUCT_ROOT="",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "skipped=" not in result.stdout + result.stderr
+    assert (tmp_path / ".claude/skills/orchestrate/SKILL.md").is_file()
+    assert (tmp_path / ".codex/skills/orchestrate/SKILL.md").is_file()
 
 
 def test_all_skips_detected_clients_with_user_instructions_and_keeps_primary_installs(tmp_path):
