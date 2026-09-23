@@ -11,7 +11,8 @@ SIGNATURES = (("auth_required", r"not logged in|Login expired"),)
 
 
 def argv(p):
-    command = [CLI, "chat", "--no-interactive", "--output-format", OUTPUT_FORMAT]
+    # stream-json needs the v2 engine; the v1 default rejects it.
+    command = [CLI, "chat", "--no-interactive", "--agent-engine", "v2", "--output-format", OUTPUT_FORMAT]
     command += (
         ["--trust-all-tools"]
         if p["mode"] == "worktree_write"

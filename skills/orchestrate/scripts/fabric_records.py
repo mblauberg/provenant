@@ -112,6 +112,10 @@ def render_digest(row):
     text = f"{status} {run_id} {route} {duration}s" + detail
     if prov.get("line"):
         text += "\n  " + prov["line"]
+    warnings = [str(item) for item in row.get("warnings") or [] if item]
+    if warnings:
+        # Warn, don't block: the caller sees what was substituted or skipped.
+        text += "\n  ! " + "; ".join(dict.fromkeys(warnings))[:200]
     return text
 
 

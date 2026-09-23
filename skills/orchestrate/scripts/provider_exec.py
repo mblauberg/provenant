@@ -374,7 +374,9 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
     ):
         errors.append("invalid agy envelope")
     for event in events:
-        kind = event.get("type", "")
+        kind = event.get("type") or ""
+        if not kind and isinstance(event.get("event"), str):
+            kind = event["event"]  # agy names the event kind `event`
         if adapter == "kiro" and event.get("jsonrpc") == "2.0":
             for item in _objects(event):
                 if item.get("sessionUpdate") == "agent_message_chunk":
@@ -482,10 +484,16 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
             and event["part"].get("reason") == "stop"
         ):
             result["terminal"] = True
-        if adapter == "agy" and "status" in event and "response" in event:
-            provider_status = event.get("status")
-            response = event.get("response")
-            error = event.get("error")
+        # agy prints its envelope flat or nested under a `result` event.
+        envelope = (
+            event["result"]
+            if adapter == "agy" and isinstance(event.get("result"), dict)
+            else event
+        )
+        if adapter == "agy" and "status" in envelope and "response" in envelope:
+            provider_status = envelope.get("status")
+            response = envelope.get("response")
+            error = envelope.get("error")
             if not isinstance(provider_status, str) or not isinstance(response, str):
                 errors.append("invalid agy envelope")
                 continue
@@ -697,6 +705,24 @@ def _cpu_stamp(pgid):
         )
     except (OSError, subprocess.SubprocessError):
         return ()
+
+
+def _same_model(adapter, resolved, observed):
+    """Aliases and display names name the same model: opus is claude-opus-5-5,
+    and Cursor reports grok-4.7 as "Grok 4.7 256K High Fast"."""
+    if not resolved or not observed or resolved == observed:
+        return True
+    norm = lambda value: re.sub(r"[\s_]+", "-", str(value).strip().lower())
+    if norm(observed).startswith(norm(resolved)):
+        return True
+    try:
+        try:
+            from .exec_routing import registered_model
+        except ImportError:
+            from exec_routing import registered_model
+        return registered_model(adapter, resolved) == registered_model(adapter, observed)
+    except Exception:  # A malformed catalogue must not fail a finished attempt.
+        return False
 
 
 def _observed_model(plan, parsed, env):
@@ -1105,12 +1131,15 @@ def execute(
     parsed["session_id"] = session
     observed, source = _observed_model(plan, parsed, environment)
     warnings = list(plan["warnings"])
+    if route.get("effort_substitution") and route["effort_substitution"] not in warnings:
+        warnings.append(route["effort_substitution"])
     if text_truncated or (raw.total > MAX_EVENTS_BYTES and terminal_text is None and not text_chunks):
         warnings.append("result truncated at capture limit; inspect provider session for complete output")
         if parsed["status"] in {"ok", "input_required"}:
             parsed.update(status="partial", question=None, signature="output_truncated")
     notes = list(route.get("notes") or [])
-    if observed and observed != plan["model"]:
+    substituted = bool(observed) and not _same_model(plan["adapter"], plan["model"], observed)
+    if substituted:
         notes.append("mismatch: resolved " + plan["model"] + "; observed " + observed)
         warnings.append(notes[-1])
         if plan["adapter"] == "agy" and plan.get("requested_model"):
@@ -1118,7 +1147,7 @@ def execute(
             parsed["signature"] = "pinned_model_substitution"
     identity = "observed" if observed else "resolved" if plan["model"] else "unknown"
     family = route.get("model_family") or route.get("family") or "unknown"
-    if observed and observed != plan["model"]:
+    if substituted:
         # Routing attributed the requested model, not the provider's substitution.
         # Do not certify a different family without model-router evidence for it.
         family = "unknown"

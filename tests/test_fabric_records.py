@@ -131,3 +131,11 @@ def test_malformed_catalogue_keeps_cooldown_identity_and_warns(tmp_path, monkeyp
     records().write_cooldown(row, path=path)
     assert 'codex/raw-model' in json.loads(path.read_text())['cooldowns']
     assert any('catalogue' in warning for warning in row['warnings'])
+
+
+def test_digest_surfaces_warnings_once_without_blocking():
+    row = json.loads((FIX / "attempt.json").read_text())
+    row["warnings"] = ["ultra unknown; ran at medium", "ultra unknown; ran at medium"]
+    text = records().render_digest(row)
+    assert text.startswith("ok ")
+    assert text.endswith("\n  ! ultra unknown; ran at medium")

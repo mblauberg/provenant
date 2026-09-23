@@ -954,3 +954,51 @@ def test_malformed_router_candidate_containers_are_tolerated(raw, models, expect
     mod = importlib.import_module('skills.orchestrate.scripts.exec_routing')
     plan = {'adapter':'claude','model':'opus','route':{'fallback_candidates':raw}}
     assert [item['model'] for item in mod.candidates(plan, True, {'models':models})] == expected
+
+
+def test_agy_nested_result_envelope_is_success_with_observed_model():
+    # Shape captured from a live agy run (2026-09-23): kind under `event`,
+    # model in `init`, status/response nested under `result`.
+    events = [
+        {"event": "init", "conversation_id": "c1", "init": {"model": "gemini-3.8-flash-high"}},
+        {"event": "step_update", "step_update": {"step_index": 1, "state": "DONE",
+         "step_type": "agent_response", "text_delta": "PONG"}},
+        {"event": "result", "result": {"conversation_id": "c1", "status": "SUCCESS",
+         "response": "PONG\n", "num_turns": 1}},
+    ]
+    parsed = supervisor().parse_output("agy", "\n".join(map(json.dumps, events)))
+    assert parsed["status"] == "ok"
+    assert parsed["text"] == "PONG\n"
+    assert parsed["observed_model"] == "gemini-3.8-flash-high"
+
+
+def test_agy_nested_result_failure_keeps_provider_error():
+    events = [
+        {"event": "result", "result": {"status": "FAILED", "response": "",
+         "error": "RESOURCE_EXHAUSTED (code 429): Individual quota reached. Resets in 29m44s."}},
+    ]
+    parsed = supervisor().parse_output("agy", "\n".join(map(json.dumps, events)), exit_code=3)
+    assert parsed["status"] != "ok"
+    assert "quota" in parsed["excerpt"].lower()
+
+
+def test_kiro_stream_json_selects_the_v2_engine():
+    from adapters import kiro
+    command = kiro.argv({"mode": "read_only", "resume_session": None, "model": "auto",
+                         "effort": None, "boundary_prompt": "B", "prompt": "P"})
+    assert command[command.index("--agent-engine") + 1] == "v2"
+    assert command.index("--agent-engine") < command.index("--output-format")
+
+
+@pytest.mark.parametrize(
+    "adapter,resolved,observed,same",
+    [
+        ("claude", "opus", "claude-opus-5-5", True),
+        ("cursor", "grok-4.7", "Grok 4.7 256K High Fast", True),
+        ("cursor", "auto", "Auto", True),
+        ("codex", "gpt-6-luna", "gpt-6-sol", False),
+        ("agy", "gemini-3.8-flash", "claude-opus-4-6", False),
+    ],
+)
+def test_alias_and_display_names_are_not_substitutions(adapter, resolved, observed, same):
+    assert supervisor()._same_model(adapter, resolved, observed) is same
