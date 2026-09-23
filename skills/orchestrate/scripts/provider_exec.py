@@ -919,6 +919,7 @@ class _Descendants:
         self.root = None
         self.tracked = {}
         self.spared = {}
+        self.verified_owners = set()
         self.parents = {}
         self.spared_at_stop = set()
         self.snapshot_unavailable = False
@@ -980,9 +981,15 @@ class _Descendants:
 
     def _refresh_spared(self, rows):
         observed = {**self.tracked, **self.spared}
-        spared = set()
+        spared = {
+            identity for identity in self.verified_owners
+            if (row := rows.get(identity[0])) is not None
+            and row.identity == identity and not row.zombie
+        }
         own_groups = {self.process.pid, os.getpgrp()}
         for identity in observed:
+            if identity in self.verified_owners:
+                continue
             row = rows.get(identity[0])
             parent = self.parents.get(identity)
             if (row is not None and row.identity == identity and not row.zombie
@@ -991,6 +998,7 @@ class _Descendants:
                     and (parent == self.root or parent in observed)
                     and parent not in self.spared):
                 if _is_nested_fabric_owner(row):
+                    self.verified_owners.add(identity)
                     spared.add(identity)
         changed = True
         while changed:

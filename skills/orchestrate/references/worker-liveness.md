@@ -90,8 +90,10 @@ and its observed subtree are spared only when `PROVENANT_RUN_DIR/dispatch-owner.
 matches that process's PID, start time and `PROVENANT_RUN_TOKEN`. The owner must
 lead its own process group and have an observed non-spared parent. The
 provider's original group and the supervisor's group are never spared. Tracked
-children are rechecked before signalling to cover fork followed by exec; a nonzero
-`spared` count is recorded. A missing owner
+children are rechecked before signalling to cover fork followed by exec. Once
+verified, the owner remains spared for the same PID and start time while alive,
+even if its record or environment becomes unreadable. A nonzero `spared` count
+is recorded. A missing owner
 yields bounded missing evidence; it never authorises a process-table search or
 inferred cancellation.
 On macOS, a child that clears the marker and reparents before the first snapshot
