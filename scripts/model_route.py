@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import fcntl
 import hashlib
 from datetime import datetime, timezone
@@ -625,7 +626,25 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     # `auto` is the provider's own chooser; a provider prefix is not a new model.
     provider_auto = requested.casefold() == "auto"
     if registered is None and not provider_auto:
-        notes.append(f"{requested} is not in the {adapter_name} registry; passed through as given")
+        registered_ids = list(dict.fromkeys(
+            model
+            for candidates in adapter.get("aliases", {}).values()
+            if isinstance(candidates, list)
+            for model in candidates
+            if isinstance(model, str)
+        ))
+        registry = ", ".join(registered_ids[:6])
+        if len(registered_ids) > 6:
+            registry += ", …"
+        details = f" (registered: {registry}" if registry else ""
+        closest = difflib.get_close_matches(requested, registered_ids, n=1)
+        if closest:
+            details += ("; " if registry else " (") + f"closest: {closest[0]}"
+        if details:
+            details += ")"
+        notes.append(
+            f"{requested} is not in the {adapter_name} registry{details}; passed through as given"
+        )
     elif (registered is not None and explicit and model.casefold() != requested.casefold() and not match_notes
           and not model.casefold().endswith("/" + requested.casefold())
           and not any(requested.casefold() == (model + suffix).casefold()

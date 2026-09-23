@@ -449,6 +449,11 @@ def test_unregistered_agy_model_passes_explicit_effort_unverified():
     assert result.returncode == 0, route
     assert route["effort"] == route["effort_applied"] == "medium"
     assert route["effort_capability_source"] == "provider-unverified"
+    assert route["notes"][0] == (
+        "gemini-3.7-flash is not in the agy registry "
+        "(registered: gemini-3.8-flash; closest: gemini-3.8-flash); "
+        "passed through as given"
+    )
 
 
 def test_opencode_training_warning_and_paid_fallback_excludes_free():
