@@ -86,7 +86,9 @@ export function mailboxView(row: Message, peek: boolean) {
 export function adapterView(snapshot: CatalogueSnapshot, detail?: string) {
   let cooldowns: Record<string, any> = {};
   try {
-    const value = JSON.parse(readFileSync(join(homedir(), ".local/state/agent-harness/fabric/cooldowns.json"), "utf8"));
+    const path = process.env.FABRIC_COOLDOWNS_PATH ||
+      join(process.env.AGENT_FABRIC_STATE_ROOT || join(homedir(), ".local/state/agent-harness/fabric"), "cooldowns.json");
+    const value = JSON.parse(readFileSync(path, "utf8"));
     cooldowns = value.cooldowns ?? value.entries ?? value;
   } catch {
     /* Optional cache. */

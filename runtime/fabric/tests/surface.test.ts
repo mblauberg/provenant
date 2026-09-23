@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { createRequire } from "node:module";
@@ -17,6 +17,34 @@ it("keeps legacy route and result path in the brief digest", async () => {
   });
   expect(digest(brief)).toContain("codex/gpt-6-sol");
   expect(digest(brief)).toContain("result .agent-run/old/result.md");
+});
+
+it("reads adapter cooldowns from the configured state root and explicit override", async () => {
+  const { adapterView } = await import("../src/surface.js");
+  const root = mkdtempSync(join(tmpdir(), "fabric-cooldowns-"));
+  const oldRoot = process.env.AGENT_FABRIC_STATE_ROOT;
+  const oldPath = process.env.FABRIC_COOLDOWNS_PATH;
+  const snapshot = { adapters: [{ name: "codex", models: ["gpt-6-sol"], aliases: { workhorse: ["gpt-6-sol"] } }], endpoints: {} } as any;
+  try {
+    writeFileSync(join(root, "cooldowns.json"), JSON.stringify({ cooldowns: { one: {
+      adapter: "codex", cooling_until: "2999-01-01T00:00:00Z",
+    } } }));
+    process.env.AGENT_FABRIC_STATE_ROOT = root;
+    delete process.env.FABRIC_COOLDOWNS_PATH;
+    expect(adapterView(snapshot).digest).toContain("cooling until 2999-01-01");
+    const override = join(root, "override.json");
+    writeFileSync(override, JSON.stringify({ cooldowns: { two: {
+      adapter: "codex", cooling_until: "2998-01-01T00:00:00Z",
+    } } }));
+    process.env.FABRIC_COOLDOWNS_PATH = override;
+    expect(adapterView(snapshot).digest).toContain("cooling until 2998-01-01");
+  } finally {
+    if (oldRoot === undefined) delete process.env.AGENT_FABRIC_STATE_ROOT;
+    else process.env.AGENT_FABRIC_STATE_ROOT = oldRoot;
+    if (oldPath === undefined) delete process.env.FABRIC_COOLDOWNS_PATH;
+    else process.env.FABRIC_COOLDOWNS_PATH = oldPath;
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 it("shows the requested route and pending result before the first attempt", async () => {
@@ -301,6 +329,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     });
     const retried = await call("dispatch", { resume: row.run_id, prompt: "retry", wait_seconds: 5 });
     expect(retried.structuredContent).toMatchObject({ state: "terminal", status: "ok", attempt: 4 });
+    expect(JSON.parse(readFileSync(join(row.run_dir, "dispatch-status.json"), "utf8")).fix).toBeUndefined();
     const rejectedResume = await call("dispatch", {resume:row.run_id,prompt:"reject-before-attempt",wait_seconds:5});
     expect(rejectedResume.structuredContent).toMatchObject({state:"terminal",status:"rejected",fix:"dispatch a new run",attempt:5});
     expect((rejectedResume.structuredContent as any).attempts).toBeUndefined();

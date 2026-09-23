@@ -31,6 +31,7 @@ if (args.includes("--preflight-json")) {
   process.exit();
 }
 if (owner === "run_dir_init.sh") {
+  if (args.includes("--owner-logs")) mkdirSync(join(args[0], "_owner"));
   writeFileSync(join(args[0], "RUN_RECEIPT.json"), JSON.stringify({ status: "active" }));
   process.exit();
 }

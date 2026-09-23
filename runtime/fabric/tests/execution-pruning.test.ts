@@ -14,6 +14,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { cancelActiveExecutions, dispatchConfiguredProvider } from "../src/execution.js";
 import {
   DEFAULT_RETENTION_HOURS,
+  fabricStatus,
   OWNER_RECORD_NAME,
   processStartedAt,
   pruneDispatchRuns,
@@ -127,6 +128,40 @@ afterEach(async () => {
 });
 
 describe("run directory pruning", () => {
+  it("does not report interrupted while a finalising owner is alive", async () => {
+    const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-finalising-abcdef");
+    const attemptDir = join(runDir, "tasks", "task-1", "attempt-001");
+    mkdirSync(attemptDir, { recursive: true });
+    const row = JSON.parse(readFileSync(join(testDirectory, "fixtures/attempt.json"), "utf8"));
+    row.run_id = "mcp-abcdef";
+    row.state = "running";
+    row.status = null;
+    writeFileSync(join(attemptDir, "attempt.json"), JSON.stringify(row));
+    writeFileSync(join(runDir, "RUN_RECEIPT.json"), JSON.stringify({ status: "active" }));
+    writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({
+      status: "interrupted", finished_at: new Date().toISOString(), task_id: "task-1",
+    }));
+    writeFileSync(join(runDir, OWNER_RECORD_NAME), JSON.stringify({
+      schema_version: 1, kind: "dispatch", owner_pid: process.pid, owner_pgid: process.pid,
+      owner_started_at: null, host_pid: process.pid, host_started_at: null,
+      run_token: "finalising", workspace, task_id: "task-1", started_at: new Date().toISOString(),
+      owner_stdout: "", owner_stderr: "",
+    }));
+    expect(await fabricStatus(workspace, "mcp-abcdef")).toMatchObject({ state: "running", status: null });
+    rmSync(join(runDir, OWNER_RECORD_NAME));
+    expect(await fabricStatus(workspace, "mcp-abcdef")).toMatchObject({ state: "terminal", status: "interrupted" });
+  });
+  it("retains a resumable input required run past failed retention", () => {
+    const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-question-a1b2c3");
+    mkdirSync(runDir, { recursive: true });
+    const receipt = join(runDir, "RUN_RECEIPT.json");
+    writeFileSync(receipt, JSON.stringify({ status: "input_required", resumable: true }));
+    const past = new Date(Date.now() - 30 * 86400000);
+    utimesSync(receipt, past, past);
+    utimesSync(runDir, past, past);
+    pruneDispatchRuns(workspace, ownerEnvironment);
+    expect(existsSync(runDir)).toBe(true);
+  });
   function ageRun(name: string, hoursOld: number): { runDir: string; stdout: string; stderr: string } {
     const runRoot = join(workspace, ".agent-run");
     mkdirSync(runRoot, { recursive: true });

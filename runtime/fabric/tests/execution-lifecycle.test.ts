@@ -162,6 +162,31 @@ afterEach(async () => {
 });
 
 describe("owner records", () => {
+  it("initialises a run with the real scaffolder and owner logs", async () => {
+    copyFileSync(join(repositoryRoot, "skills/orchestrate/scripts/run_dir_init.sh"),
+      join(product, "skills/orchestrate/scripts/run_dir_init.sh"));
+    const result = await dispatchConfiguredProvider(
+      { adapter: "codex", prompt: "ordinary run", wait_seconds: 5 },
+      identity, new AbortController().signal, ownerEnvironment,
+    );
+    expect(result.status, JSON.stringify(result)).toBe("succeeded");
+    const runDir = String((result.paths as Record<string, string>).run_dir);
+    expect(existsSync(join(runDir, "RUN_RECEIPT.json"))).toBe(true);
+    expect(existsSync(join(runDir, "_owner", "stdout.jsonl"))).toBe(true);
+  });
+  it("uses a lowercase workspace slug in new run names", async () => {
+    copyFileSync(join(repositoryRoot, "skills/orchestrate/scripts/run_dir_init.sh"),
+      join(product, "skills/orchestrate/scripts/run_dir_init.sh"));
+    const upper = join(temporaryDirectory, "MyWorkspace");
+    mkdirSync(upper);
+    const result = await dispatchConfiguredProvider(
+      { adapter: "codex", prompt: "ordinary run", wait_seconds: 5 },
+      { ...identity, project: upper, cwd: upper }, new AbortController().signal, ownerEnvironment,
+    );
+    expect(result.status, JSON.stringify(result)).toBe("succeeded");
+    expect(String((result.paths as Record<string, string>).run_dir).split("/").at(-1))
+      .toMatch(/^\d{8}-\d{4}-dispatch-myworkspace-[A-Za-z0-9]{6}$/u);
+  });
   it("launches no owner if the initial status file cannot be written", async () => {
     const result = await dispatchConfiguredProvider({ adapter: "codex", prompt: "sleep without provider", wait_seconds: 0 },
       identity, new AbortController().signal, { ...ownerEnvironment, FIXTURE_STATUS_DIRECTORY: "1" });

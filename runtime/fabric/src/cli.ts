@@ -136,14 +136,13 @@ if (command === "dispatch") {
       process.exit(1);
     }
     const outcome = await terminateRecordedRun(run);
-    if (json) console.log(JSON.stringify(outcome, null, 2));
-    else {
-      const state = outcome.reason === "still running"
-        ? outcome.reason
-        : outcome.signalled ? "signalled" : "not running";
-      console.log(`${run.run_id} ${state}${outcome.escalated ? " (escalated to SIGKILL)" : ""}` +
-        `${outcome.reason !== undefined && outcome.reason !== state ? ` (${outcome.reason})` : ""}`);
-    }
+    const state = outcome.reason === "still running"
+      ? outcome.reason
+      : outcome.signalled ? "signalled" : "not running";
+    const output = json ? JSON.stringify(outcome, null, 2)
+      : `${run.run_id} ${state}${outcome.escalated ? " (escalated to SIGKILL)" : ""}` +
+        `${outcome.reason !== undefined && outcome.reason !== state ? ` (${outcome.reason})` : ""}`;
+    await new Promise<void>((resolveWrite) => process.stdout.write(`${output}\n`, "utf8", () => resolveWrite()));
     process.exit(outcome.signalled && outcome.reason !== "still running" ? 0 : 1);
   }
   console.error(`fabric: usage: fabric dispatch <list|kill> ...`);

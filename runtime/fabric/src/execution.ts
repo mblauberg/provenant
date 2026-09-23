@@ -192,9 +192,9 @@ function createRunDirectory(identity: Identity, kind: "dispatch" | "batch"): str
   const slug =
     basename(identity.cwd)
       .replace(/[^a-zA-Z0-9-]/gu, "-")
+      .toLowerCase()
       .slice(0, 32) || "workspace";
   const dir = mkdtempSync(join(runs, `${stamp}-${kind}-${slug}-`));
-  mkdirSync(join(dir, "_owner"), { mode: 0o700 });
   return dir;
 }
 
@@ -231,7 +231,7 @@ async function initialiseRun(
   signal.throwIfAborted();
   const runDir = createRunDirectory(identity, kind);
   try {
-    await execFileAsync(owner, [runDir], {
+    await execFileAsync(owner, [runDir, "--owner-logs"], {
       cwd: identity.cwd,
       env: withoutGitRedirects(env),
       signal,
@@ -335,7 +335,7 @@ function startOwner(
       spawnError = error.message;
     });
     child.once("close", (exitCode, signal) => {
-      void terminateStartedRun(started).finally(async () => {
+      void terminateStartedRun(started, started.cancellation === undefined ? "interrupted" : "cancelled").finally(async () => {
         activeOwners.delete(started);
         for (const path of cleanupPaths) {
           try {
@@ -350,9 +350,10 @@ function startOwner(
           const previous = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
           const result =
             identification.kind === "dispatch" ? compactDispatch(started, completed) : compactBatch(started, completed);
+          const { fix: _staleFix, ...cleanPrevious } = previous;
           writeFileSync(
             path,
-            JSON.stringify({ ...previous, ...Object.fromEntries(Object.entries(result).filter(([, value]) => value !== undefined)), finished_at: new Date().toISOString() }) + "\n",
+            JSON.stringify({ ...cleanPrevious, ...Object.fromEntries(Object.entries(result).filter(([, value]) => value !== undefined)), finished_at: new Date().toISOString() }) + "\n",
             { mode: 0o600 },
           );
         } catch {
@@ -448,10 +449,10 @@ function recordedRun(started: StartedOwner): RecordedRun | undefined {
 }
 
 /** Use the durable record even after its owner exits, while a provider may remain. */
-async function terminateStartedRun(started: StartedOwner): Promise<void> {
+async function terminateStartedRun(started: StartedOwner, terminalStatus: "interrupted" | "cancelled" = "interrupted"): Promise<void> {
   const run = recordedRun(started);
   if (run !== undefined) {
-    await terminateRecordedRun(run);
+    await terminateRecordedRun(run, undefined, terminalStatus);
     return;
   }
   if (started.child.exitCode === null && started.child.signalCode === null) {
@@ -472,7 +473,7 @@ async function requestOwnerCancellation(started: StartedOwner): Promise<void> {
       await new Promise((resolveWait) => setTimeout(resolveWait, 25));
     }
     if (started.child.exitCode !== null || started.child.signalCode !== null) {
-      await terminateStartedRun(started);
+      await terminateStartedRun(started, "cancelled");
       return;
     }
     if (cancellationTargetReady(started.cancelSpec.targetDirectory)) {
@@ -489,7 +490,7 @@ async function requestOwnerCancellation(started: StartedOwner): Promise<void> {
     }
     // The owner leads a process group and may hold a provider in a session of
     // its own. Its durable record remains actionable after the owner exits.
-    await terminateStartedRun(started);
+    await terminateStartedRun(started, "cancelled");
   })();
   await started.cancellation;
 }
@@ -835,7 +836,7 @@ export async function cancelConfiguredRun(
         error: "owner_unavailable",
         fix: "Inspect the retained owner record before cancellation.",
       };
-    const outcome = await terminateRecordedRun(recorded);
+    const outcome = await terminateRecordedRun(recorded, undefined, "cancelled");
     if (outcome.reason === "still running")
       return {
         status: "rejected",

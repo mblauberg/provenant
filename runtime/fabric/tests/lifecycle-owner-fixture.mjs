@@ -42,6 +42,7 @@ if (owner === "run_dir_init.sh") {
     }
   }
   mkdirSync(join(runDir, "findings"), { recursive: true });
+  if (process.argv.includes("--owner-logs")) mkdirSync(join(runDir, "_owner"));
   mkdirSync(join(runDir, "traces"), { recursive: true });
   writeFileSync(join(runDir, "MANIFEST.md"), "# fixture manifest\n");
   writeFileSync(join(runDir, "RUN_RECEIPT.json"), JSON.stringify({

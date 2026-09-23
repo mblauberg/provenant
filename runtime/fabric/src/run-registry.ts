@@ -281,13 +281,17 @@ async function waitForRunStop(run: RecordedRun, timeoutMs: number): Promise<bool
 }
 
 /** Preserve closure even when SIGKILL prevented an attempt receipt. */
-function closeStoppedRun(runDir: string): void {
+function closeStoppedRun(runDir: string, terminalStatus: "interrupted" | "cancelled" = "interrupted"): void {
   const path = join(runDir, "dispatch-status.json");
   const status = readJson(path) ?? {};
-  if (!status.finished_at || status.status === "running") {
+  const receipt = readJson(join(runDir, "RUN_RECEIPT.json"));
+  if ((!status.finished_at || status.status === "running") &&
+      (receipt?.status === undefined || receipt.status === "active")) {
     const temporary = `${path}.${process.pid}.tmp`;
-    writeFileSync(temporary, JSON.stringify({ ...status, status: "interrupted",
-      finished_at: new Date().toISOString(), fix: "Dispatch a new run; the owner exited." }) + "\n", { mode: 0o600 });
+    const { fix: _staleFix, ...prior } = status;
+    writeFileSync(temporary, JSON.stringify({ ...prior, status: terminalStatus,
+      finished_at: new Date().toISOString(), ...(terminalStatus === "interrupted"
+        ? { fix: "Dispatch a new run; the owner exited." } : {}) }) + "\n", { mode: 0o600 });
     renameSync(temporary, path);
   }
   removeOwnerRecord(runDir);
@@ -300,9 +304,10 @@ function closeStoppedRun(runDir: string): void {
 export async function terminateRecordedRun(
   run: RecordedRun,
   escalationMs = ESCALATION_MS,
+  terminalStatus: "interrupted" | "cancelled" = "interrupted",
 ): Promise<TerminationOutcome> {
   if (!runStillAlive(run)) {
-    closeStoppedRun(run.run_dir);
+    closeStoppedRun(run.run_dir, terminalStatus);
     return { run_dir: run.run_dir, signalled: false, escalated: false, reason: "not running" };
   }
   const signalled = signalRecordedRun(run, "SIGTERM");
@@ -315,7 +320,7 @@ export async function terminateRecordedRun(
   if (runStillAlive(run)) {
     return { run_dir: run.run_dir, signalled, escalated, reason: "still running" };
   }
-  closeStoppedRun(run.run_dir);
+  closeStoppedRun(run.run_dir, terminalStatus);
   return { run_dir: run.run_dir, signalled, escalated };
 }
 
@@ -425,6 +430,7 @@ export function pruneDispatchRuns(workspace: string, env: NodeJS.ProcessEnv): st
       if (existsSync(join(runDir, "KEEP")) || existsSync(join(runDir, "RUN.json"))) continue;
       const receipt = readJson(join(runDir, "RUN_RECEIPT.json"));
       if (receipt?.status === "active") continue;
+      if (receipt?.status === "input_required" || receipt?.resumable === true) continue;
       const successful = ["ok", "succeeded", "cancelled"].includes(String(receipt?.status));
       const failed = [
         "failed",
@@ -439,7 +445,6 @@ export function pruneDispatchRuns(workspace: string, env: NodeJS.ProcessEnv): st
         "interrupted",
         "rejected",
         "tool_missing",
-        "input_required",
       ].includes(String(receipt?.status));
       if (name.startsWith("runs/") && !successful && !failed) continue;
       const runCutoff =
@@ -761,7 +766,9 @@ function v1Rows(runDir: string): Record<string, any>[] {
     !observedAlive(owner.owner_pid, owner.owner_started_at) &&
     !(provider && observedAlive(provider.provider_pid, provider.provider_started_at));
   const closed = metadata?.finished_at !== undefined && metadata?.status !== "running";
-  const interrupted = receipt?.status === "interrupted" || dead || closed;
+  const ownerAlive = owner !== undefined && observedAlive(owner.owner_pid, owner.owner_started_at);
+  const interrupted = !ownerAlive && (receipt?.status === "interrupted" || dead || closed);
+  const closureStatus = receipt?.status === "cancelled" || metadata?.status === "cancelled" ? "cancelled" : "interrupted";
   const summary =
     typeof metadata?.batch_id === "string" && /^[A-Za-z0-9._-]+$/u.test(metadata.batch_id)
       ? readJson(join(runDir, "dispatch/batches", metadata.batch_id, "summary.json"))
@@ -777,12 +784,12 @@ function v1Rows(runDir: string): Record<string, any>[] {
         ? {
             ...row,
             state: "terminal",
-            status: "interrupted",
-            digest: `interrupted ${row.run_id} · fix: dispatch a new run`,
+            status: closureStatus,
+            digest: `${closureStatus} ${row.run_id}${closureStatus === "interrupted" ? " · fix: dispatch a new run" : ""}`,
           }
         : row;
     if (pending) {
-      const status = closed && metadata?.status === "rejected" ? "rejected" : interrupted ? "interrupted" : null;
+      const status = closed && metadata?.status === "rejected" ? "rejected" : interrupted ? closureStatus : null;
       const fix = metadata?.fix ?? metadata?.message ?? "Dispatch a new run; the owner exited.";
       return {
         schema: "fabric.status.v1",
