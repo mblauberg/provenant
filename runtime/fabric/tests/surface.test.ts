@@ -59,6 +59,28 @@ it("shows the requested route and pending result before the first attempt", asyn
   expect(digest(brief)).toContain("result pending");
 });
 
+it("budgets the whole injected handoff text, not only the result tail", async () => {
+  const { handoffBrief, HANDOFF_BYTES } = await import("../src/resume.js");
+  const runDir = mkdtempSync(join(tmpdir(), "fabric-handoff-"));
+  try {
+    const row = (result: string) => {
+      writeFileSync(join(runDir, "result.md"), result);
+      return { run_id: "mcp-prior", task_id: "two", run_dir: runDir, paths: { result: "result.md" },
+        provenance: { line: `Route: codex/${"m".repeat(600)}@high (openai; observed)` } };
+    };
+    for (const result of ["x".repeat(25000), "é".repeat(12000)]) {
+      const text = handoffBrief(row(result));
+      expect(Buffer.byteLength(text)).toBeLessThanOrEqual(HANDOFF_BYTES);
+      expect(text.startsWith("Fresh session handed off from Fabric run mcp-prior task two (codex/")).toBe(true);
+      expect(text.endsWith(result.slice(-100) + "\n>>>\n\n")).toBe(true);
+      expect(text).not.toContain("\uFFFD");
+    }
+    expect(handoffBrief({ ...row(""), paths: {} })).toMatch(/It left no result\.\n\n$/u);
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});
+
 it.each([false, true])("exposes exactly twelve default tools within budget (legacy=%s)", async (legacy) => {
   const state = mkdtempSync(join(tmpdir(), "fabric-surface-"));
   const client = new Client({ name: "surface", version: "1" });
@@ -259,7 +281,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     const brief = readFileSync(join(handed.run_dir, "_owner", `${handed.task_id}-prompt-1.md`), "utf8");
     expect(brief.startsWith(`Fresh session handed off from Fabric run ${batchRow.run_id} task two (codex/fixture@high`)).toBe(true);
     expect(brief.endsWith("x".repeat(100) + "\n>>>\n\ncarry on")).toBe(true);
-    expect(brief.length).toBeLessThan(8400);
+    expect(Buffer.byteLength(brief.slice(0, -"carry on".length))).toBeLessThanOrEqual(8000);
     expect((await call("dispatch", { handoff: batchRow.run_id, prompt: "x", wait_seconds: 0 })).structuredContent)
       .toMatchObject({ status: "rejected", error: "handoff_task_required" });
     mkdirSync(join(linked, "nested-batch"));
