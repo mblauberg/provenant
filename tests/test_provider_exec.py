@@ -227,6 +227,43 @@ def test_worker_preface_explains_process_cleanup(tmp_path):
     assert "processes left running are then stopped." in plan["prompt"]
 
 
+def test_provider_launch_sets_pwd_to_resolved_cwd(tmp_path):
+    child = tmp_path / "child"
+    child.mkdir()
+    code = "import json, os; print(json.dumps({'type':'result','result':os.environ['PWD']}))"
+    plan = fixture_plan(tmp_path, code)
+    plan["cwd"] = str(child)
+    record = supervisor().execute(
+        plan,
+        tmp_path / "result.md",
+        env={**os.environ, "PWD": str(tmp_path)},
+    )
+    assert record["status"] == "ok"
+    assert record["output_path"]
+    assert (tmp_path / "result.md").read_text() == str(child)
+
+
+def test_opencode_read_only_declares_fully_denied_bash_tool(tmp_path):
+    code = "import json, os; print(json.dumps({'type':'result','result':os.environ['OPENCODE_CONFIG_CONTENT']}))"
+    record = supervisor().execute(
+        fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md"
+    )
+    permission = json.loads((tmp_path / "result.md").read_text())["permission"]
+    assert permission["bash"]["*"] == "deny"
+    assert permission["bash"]["provenant-no-shell"] == "allow"
+
+
+def test_opencode_free_tier_refusal_is_model_unavailable(tmp_path):
+    code = "import sys; print(\"403 FreeTierError: OpenCode's free tier can only be used from within OpenCode\", file=sys.stderr); sys.exit(1)"
+    record = supervisor().execute(
+        fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md"
+    )
+    assert record["status"] == "model_unavailable"
+    assert record["fix"] == (
+        "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"
+    )
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="Codex seatbelt is macOS-only")
 def test_codex_seatbelt_provider_finds_ps_shim_on_path(tmp_path):
     observed = tmp_path / "ps-path.txt"
@@ -1642,9 +1679,16 @@ def test_codex_observed_model_comes_from_rollout_turn_context(tmp_path):
 
 
 def test_opencode_observed_model_comes_from_export(tmp_path):
+    child = tmp_path / "child"
+    child.mkdir()
+    pwd_file = tmp_path / "export-pwd"
     cli = tmp_path / "opencode"
     cli.write_text(
-        '#!/bin/sh\nif [ "$1" = export ]; then echo \'{"messages":[{"info":{"providerID":"opencode-go","modelID":"deepseek-v4.1-flash"}}]}\'; fi\n'
+        "#!/usr/bin/env python3\n"
+        "import json, os, pathlib, sys\n"
+        "if sys.argv[1] == 'export':\n"
+        f"    pathlib.Path({str(pwd_file)!r}).write_text(os.environ['PWD'])\n"
+        "    print(json.dumps({'messages':[{'info':{'providerID':'opencode-go','modelID':'deepseek-v4.1-flash'}}]}))\n"
     )
     cli.chmod(0o755)
     plan = fixture_plan(
@@ -1652,13 +1696,15 @@ def test_opencode_observed_model_comes_from_export(tmp_path):
         "import json; print(json.dumps({'type':'text','sessionID':'oc-1','part':{'text':'OK'}}))",
         "opencode",
     )
+    plan["cwd"] = str(child)
     record = supervisor().execute(
         plan,
         tmp_path / "result.md",
-        env={**os.environ, "PATH": str(tmp_path) + ":" + os.environ["PATH"]},
+        env={**os.environ, "PATH": str(tmp_path) + ":" + os.environ["PATH"], "PWD": str(tmp_path)},
     )
     assert record["provenance"]["observed_model"] == "opencode-go/deepseek-v4.1-flash"
     assert record["provenance"]["observed_source"] == "opencode:export.modelID"
+    assert pwd_file.read_text() == str(child)
 
 
 def test_capture_is_bounded_but_result_is_complete(tmp_path, monkeypatch):
@@ -1744,6 +1790,20 @@ def test_plan_only_honors_read_only_cwd_inside_workspace(tmp_path):
     )
     assert result.returncode == 0, result.stderr + result.stdout
     assert json.loads(result.stdout)["cwd"] == str(child)
+
+
+def test_opencode_argv_always_pins_plan_cwd(tmp_path):
+    adapter = importlib.import_module("skills.orchestrate.scripts.adapters.opencode")
+    plan = {
+        "worktree": "",
+        "cwd": str(tmp_path),
+        "resume_session": "",
+        "model": "opencode/mimo-v2.6-flash-free",
+        "effort": "",
+        "prompt": "hello",
+    }
+    argv = adapter.argv(plan)
+    assert argv[argv.index("--dir") + 1] == str(tmp_path)
 
 
 def test_unsupported_controls_are_not_claimed_as_applied(tmp_path):

@@ -1350,6 +1350,7 @@ def execute(
         PROVENANT_ROUTE=plan["route_label"],
         PROVENANT_RUN_ID=plan.get("run_id", ""),
         PROVENANT_CHAIR=plan.get("chair", ""),
+        PWD=plan["cwd"],
     )
     attempt_marker = uuid.uuid4().hex
     environment["PROVENANT_ATTEMPT_MARKER"] = attempt_marker
@@ -1368,14 +1369,18 @@ def execute(
             ANTHROPIC_API_KEY="",
         )
     if plan["adapter"] == "opencode":
+        bash_permission = {"*": "allow"} if plan["mode"] == "worktree_write" else {
+            "*": "deny",
+            "provenant-no-shell": "allow",
+        }
         permission = {
             "edit": {"*": "allow" if plan["mode"] == "worktree_write" else "deny"},
-            "bash": {"*": "allow" if plan["mode"] == "worktree_write" else "deny"},
+            "bash": bash_permission,
             "question": "deny",
             "external_directory": {"*": "deny"},
             "webfetch": "deny" if plan.get("network_requested") is False else "allow",
         }
-        # No shell-pattern allowlist: "git diff; write" must remain denied on reads.
+        # The sentinel matches no real command and exists only so Zen declares bash.
         environment["OPENCODE_CONFIG_CONTENT"] = json.dumps({"permission": permission})
     warning_text = "\n".join(plan["warnings"])
     if warning_text:
@@ -1827,7 +1832,15 @@ def execute(
     )
     guarantee = plan["applied"]["guarantee"]
     fix = (
-        _model_unavailable_fix(plan)
+        "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"
+        if status == "model_unavailable"
+        and plan["adapter"] == "opencode"
+        and re.search(
+            r"FreeTierError|free tier can only be used from within OpenCode",
+            parsed["excerpt"],
+            re.I,
+        )
+        else _model_unavailable_fix(plan)
         if status == "model_unavailable"
         else {
             "auth_required": "authenticate the provider CLI",

@@ -7,13 +7,15 @@ IDLE_WRITE = 1800
 EFFORT_FLAG = "--variant"
 SESSION_KEYS = ("sessionID", "session_id")
 MODEL_SOURCE = "opencode:export.modelID"
-SIGNATURES = (("usage_limited", r"Individual quota reached|exhausted your capacity"),)
+SIGNATURES = (
+    ("model_unavailable", r"FreeTierError|free tier can only be used from within OpenCode"),
+    ("usage_limited", r"Individual quota reached|exhausted your capacity"),
+)
 
 
 def argv(p):
     command = [CLI, "run", "--format", "json", "--auto"]
-    if p["worktree"]:
-        command += ["--dir", p["worktree"]]
+    command += ["--dir", p["cwd"]]
     if p["resume_session"]:
         command += ["-s", p["resume_session"]]
     if p["model"]:
