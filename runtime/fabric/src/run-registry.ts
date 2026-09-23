@@ -105,8 +105,10 @@ function readProcessStartedAt(pid: number, canonical: boolean): string | null {
   }
 }
 
-export function processStartedAt(pid: number): string | null {
-  return readProcessStartedAt(pid, true);
+export function processStartedAt(pid: number): string | null { return readProcessStartedAt(pid, true); }
+
+function startMatches(pid: number, startedAt: string, canonical: string | null): boolean {
+  return canonical === startedAt || (canonical !== null && readProcessStartedAt(pid, false) === startedAt);
 }
 
 /** Refuse to signal a PID whose recorded start time cannot be verified. */
@@ -119,7 +121,7 @@ export function processMatches(pid: number, startedAt: string | null): boolean {
     return false;
   }
   const canonical = processStartedAt(pid);
-  return canonical === startedAt || (canonical !== null && readProcessStartedAt(pid, false) === startedAt);
+  return startMatches(pid, startedAt, canonical);
 }
 
 function readJson(path: string): Record<string, unknown> | undefined {
@@ -484,7 +486,7 @@ function observedAlive(pid: number, startedAt: string | null): boolean {
   if (startedAt === null) return true;
   const observed = processStartedAt(pid);
   // An unavailable process identity is not evidence of death. Signalling stays strict.
-  return observed === null || observed === startedAt;
+  return observed === null || startMatches(pid, startedAt, observed);
 }
 
 /** Status observes retained files and process identities; it never repairs or reaps runs. */

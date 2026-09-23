@@ -19,6 +19,7 @@ import {
   processMatches,
   processStartedAt,
   reapOrphanedRuns,
+  terminateRecordedRun,
 } from "../src/run-registry.js";
 import type { Identity } from "../src/identity.js";
 
@@ -190,6 +191,39 @@ describe("owner records", () => {
       expect(processStartedAt(process.pid)).toBe(canonical);
       expect(processMatches(process.pid, legacy)).toBe(true);
     } finally {
+      if (priorAll === undefined) delete process.env.LC_ALL;
+      else process.env.LC_ALL = priorAll;
+      if (priorLang === undefined) delete process.env.LANG;
+      else process.env.LANG = priorLang;
+    }
+  });
+  it.skipIf(!localeCase)("keeps a live legacy-locale owner running during termination", async () => {
+    const { locale, legacy } = localeCase!;
+    const priorAll = process.env.LC_ALL;
+    const priorLang = process.env.LANG;
+    const runDir = join(workspace, ".agent-run", "legacy-owner");
+    mkdirSync(runDir, { recursive: true });
+    let ownerAlive = true;
+    const signals: NodeJS.Signals[] = [];
+    const probe = vi.spyOn(process, "kill").mockImplementation((_pid, signal) => {
+      if (signal === 0 && !ownerAlive) throw new Error("ESRCH");
+      if (signal === "SIGTERM") { signals.push(signal); ownerAlive = false; }
+      return true;
+    });
+    try {
+      process.env.LC_ALL = locale;
+      process.env.LANG = locale;
+      const run: Parameters<typeof terminateRecordedRun>[0] = {
+        schema_version: 1, kind: "dispatch", run_dir: runDir, workspace,
+        run_id: "legacy-owner", run_token: "legacy", owner_pid: process.pid, owner_pgid: process.pid + 100,
+        owner_started_at: legacy, host_pid: process.pid, host_started_at: null,
+        started_at: new Date().toISOString(), owner_stdout: "", owner_stderr: "",
+        running: true, orphaned: false, provider: null,
+      };
+      expect((await terminateRecordedRun(run, 0)).signalled).toBe(true);
+      expect(signals).toEqual(["SIGTERM"]);
+    } finally {
+      probe.mockRestore();
       if (priorAll === undefined) delete process.env.LC_ALL;
       else process.env.LC_ALL = priorAll;
       if (priorLang === undefined) delete process.env.LANG;

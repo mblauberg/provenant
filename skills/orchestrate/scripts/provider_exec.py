@@ -774,7 +774,7 @@ def _process_snapshot():
     try:
         return _process_snapshot_unchecked()
     except Exception:
-        return {}
+        return None
 
 
 def _process_snapshot_unchecked():
@@ -883,11 +883,12 @@ def _recorded_start_time(row):
     return time.strftime("%a %b %e %H:%M:%S %Y", time.localtime(epoch))
 
 
-def _inherited_ps_start_time(pid):
+def _ps_start_time(pid, *, canonical):
     try:
         result = subprocess.run(
             ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
             capture_output=True, text=True, timeout=2, check=False,
+            env={**os.environ, **({"LC_ALL": "C", "LANG": "C"} if canonical else {})},
         )
         return result.stdout.strip() if result.returncode == 0 else None
     except (OSError, subprocess.SubprocessError):
@@ -924,7 +925,8 @@ def _is_nested_fabric_owner(row):
             and isinstance(started_at, str) and bool(started_at)
             and (
                 started_at == _recorded_start_time(row)
-                or started_at == _inherited_ps_start_time(row.pid)
+                or started_at == _ps_start_time(row.pid, canonical=True)
+                or started_at == _ps_start_time(row.pid, canonical=False)
             )
         )
     except Exception:
@@ -949,6 +951,7 @@ class _Descendants:
         self.spared = {}
         self.verified_owners = set()
         self.parents = {}
+        self.orphan_candidates = set()
         self.spared_at_stop = set()
         self.snapshot_unavailable = False
 
@@ -969,6 +972,9 @@ class _Descendants:
             targeted = rows is not None
         if rows is None:
             rows = _process_snapshot()
+        if rows is None:
+            self.snapshot_unavailable = True
+            return {}
         if ((targeted and self.process.poll() is None and self.process.pid not in rows)
                 or (not targeted and os.getpid() not in rows)):
             self.snapshot_unavailable = True
@@ -1004,6 +1010,7 @@ class _Descendants:
                     continue
                 if _has_attempt_marker(row.pid, self.marker):
                     self.tracked[row.identity] = row
+                    self.orphan_candidates.add(row.identity)
         self._refresh_spared(rows)
         return rows
 
@@ -1022,8 +1029,8 @@ class _Descendants:
             parent = self.parents.get(identity)
             if (row is not None and row.identity == identity and not row.zombie
                     and row.pgid not in own_groups
-                    and parent is not None
-                    and (parent == self.root or parent in observed)
+                    and (identity in self.orphan_candidates
+                         or (parent is not None and (parent == self.root or parent in observed)))
                     and parent not in self.spared):
                 if _is_nested_fabric_owner(row):
                     self.verified_owners.add(identity)
@@ -1056,9 +1063,12 @@ class _Descendants:
         try:
             rows = _process_snapshot()
         except Exception:
-            rows = {}
+            rows = None
+        if rows is None:
             self.snapshot_unavailable = True
-        self._refresh_spared(rows)  # A fork observed before exec may now be a recorded owner.
+            rows = {}
+        else:
+            self._refresh_spared(rows)  # A fork observed before exec may now be a recorded owner.
         live = self.live(rows)
         live = {
             identity: row for identity, row in live.items()

@@ -401,6 +401,28 @@ def test_snapshot_exception_still_kills_provider_and_records_attempt(tmp_path, m
                 pass
 
 
+def test_internal_census_failure_warns_and_kills_provider(tmp_path, monkeypatch):
+    module = supervisor()
+    pid_path = tmp_path / "provider.pid"
+    code = f"import os,pathlib,time; pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    monkeypatch.setattr(module, "_process_snapshot_unchecked",
+                        lambda: (_ for _ in ()).throw(RuntimeError("census failed")))
+    try:
+        record = module.execute(
+            fixture_plan(tmp_path, code, timeout_seconds=8), tmp_path / "result.md",
+            cancelled=lambda: pid_path.exists(),
+        )
+        assert record["status"] == "cancelled"
+        assert any("census unavailable" in warning for warning in record["warnings"])
+        assert not _live_process(int(pid_path.read_text()))
+    finally:
+        if pid_path.exists():
+            try:
+                os.killpg(int(pid_path.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 def test_linux_snapshot_replaces_non_utf8_process_names(tmp_path, monkeypatch):
     module = supervisor()
     process_dir = tmp_path / "123"
@@ -744,6 +766,50 @@ def test_verified_owner_stays_spared_through_transient_validation_loss(tmp_path,
     assert ("pid", owner_pid) not in signals
 
 
+def test_unavailable_census_preserves_verified_owner_and_root_kill(tmp_path, monkeypatch):
+    module = supervisor()
+    root_pid = os.getpid() + 100000
+    owner = module._ProcessRow(root_pid + 1, root_pid, root_pid + 1,
+                               str(int(time.time())), "nested owner")
+    root = module._ProcessRow(root_pid, os.getpid(), root_pid,
+                              str(int(time.time())), "provider")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(),
+                                             str(int(time.time())), "test"),
+            root_pid: root, owner.pid: owner}
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, owner, "inner-token")
+    signals = []
+    available = [True]
+    process = type("Process", (), {"pid": root_pid,
+                                   "poll": lambda self: None if available[0] else 0,
+                                   "wait": lambda self, timeout: None})()
+
+    def census():
+        if available[0]:
+            return rows
+        raise RuntimeError("census failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: None)
+        patch.setattr(module, "_process_snapshot_unchecked", census)
+        patch.setattr(module, "_process_environment", lambda pid: [
+            b"PROVENANT_RUN_TOKEN=inner-token",
+            ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+        ] if pid == owner.pid else ())
+        patch.setattr(module.os, "killpg", lambda pgid, _signal: signals.append(pgid))
+        patch.setattr(module.os, "kill", lambda *_args: None)
+        tracker = module._Descendants(process, "fixture")
+        tracker.sample()
+        assert owner.identity in tracker.spared
+        available[0] = False
+        assert module._process_snapshot() is None
+        tracker.stop(root_grace=0.02, descendant_grace=0.01)
+    assert tracker.snapshot_unavailable
+    assert owner.identity in tracker.spared_at_stop
+    assert owner.pgid not in signals
+    assert root_pid in signals
+
+
 def test_verified_owner_identity_does_not_spare_reused_pid(tmp_path, monkeypatch):
     module = supervisor()
     root = module._ProcessRow(501, os.getpid(), 501, str(int(time.time())), "provider")
@@ -881,6 +947,36 @@ def test_owner_without_observed_parent_is_not_spared(tmp_path, monkeypatch):
     assert row.identity not in tracker.spared
 
 
+def test_reparented_marker_owner_with_valid_record_is_spared(tmp_path, monkeypatch):
+    module = supervisor()
+    root_pid = os.getpid() + 100000
+    owner = module._ProcessRow(root_pid + 1, 1, root_pid + 1,
+                               str(int(time.time())), "nested owner")
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, owner, "inner-token")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(),
+                                             str(int(time.time())), "test"), owner.pid: owner}
+    process = type("Process", (), {"pid": root_pid, "poll": lambda self: 0})()
+    signals = []
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: rows)
+        patch.setattr(module, "_has_attempt_marker", lambda pid, _marker: pid == owner.pid)
+        patch.setattr(module, "_process_environment", lambda pid: [
+            b"PROVENANT_RUN_TOKEN=inner-token",
+            ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+        ] if pid == owner.pid else ())
+        patch.setattr(module.os, "killpg", lambda pgid, _signal: signals.append(pgid))
+        patch.setattr(module.os, "kill", lambda *_args: None)
+        tracker = module._Descendants(process, "fixture")
+        tracker.spawned_at = 0
+        tracker.spawned_ticks = 0
+        tracker.sample(include_reparented=True)
+        assert owner.identity in tracker.spared
+        tracker.signal(signal.SIGTERM)
+    assert owner.pgid not in signals
+    assert root_pid in signals
+
+
 @pytest.mark.parametrize("field,value", [
     ("owner_pid", 999999), ("owner_started_at", "old process"),
     ("owner_started_at", None), ("run_token", "wrong token"),
@@ -902,9 +998,6 @@ def test_nested_owner_record_must_match_live_identity(tmp_path, monkeypatch, fie
 
 
 def test_nested_owner_accepts_legacy_inherited_locale_start(tmp_path, monkeypatch):
-    available = subprocess.run(["locale", "-a"], capture_output=True, text=True).stdout
-    if "en_AU.UTF-8" not in available:
-        pytest.skip("en_AU.UTF-8 unavailable")
     module = supervisor()
     row = module._ProcessRow(502, 501, 502, str(int(time.time())), "owner")
     run_dir = tmp_path / "nested-run"
@@ -925,11 +1018,34 @@ def test_nested_owner_accepts_legacy_inherited_locale_start(tmp_path, monkeypatc
 
     def locale_ps(argv, **kwargs):
         calls.append((argv, kwargs))
-        return subprocess.CompletedProcess(argv, 0, stdout=legacy)
+        output = record["owner_started_at"] if kwargs.get("env", {}).get("LC_ALL") != "C" else module._recorded_start_time(row)
+        return subprocess.CompletedProcess(argv, 0, stdout=output)
 
     monkeypatch.setattr(module.subprocess, "run", locale_ps)
     assert module._is_nested_fabric_owner(row)
-    assert calls and calls[0][1].get("env", {}).get("LC_ALL") != "C"
+    assert [call[1].get("env", {}).get("LC_ALL") for call in calls] == ["C", "en_AU.UTF-8"]
+
+
+def test_nested_owner_accepts_canonical_ps_when_computed_start_differs(tmp_path, monkeypatch):
+    module = supervisor()
+    row = module._ProcessRow(502, 501, 502, str(int(time.time())), "owner")
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, row, "inner-token")
+    canonical = json.loads((run_dir / "dispatch-owner.json").read_text())["owner_started_at"]
+    monkeypatch.setattr(module, "_recorded_start_time", lambda _row: "rounded differently")
+    monkeypatch.setattr(module, "_process_environment", lambda _pid: [
+        b"PROVENANT_RUN_TOKEN=inner-token",
+        ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+    ])
+    calls = []
+
+    def canonical_ps(argv, **kwargs):
+        calls.append(kwargs.get("env", {}).get("LC_ALL"))
+        return subprocess.CompletedProcess(argv, 0, stdout=canonical if calls[-1] == "C" else "other locale")
+
+    monkeypatch.setattr(module.subprocess, "run", canonical_ps)
+    assert module._is_nested_fabric_owner(row)
+    assert calls == ["C"]
 
 
 @pytest.mark.parametrize("stop", ["normal", "cancelled"])
