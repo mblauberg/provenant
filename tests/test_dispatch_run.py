@@ -248,6 +248,16 @@ def test_explicit_model_and_alias_are_both_recorded_in_receipt(tmp_path):
     assert row["provenance"]["requested"]["alias"] == "workhorse"
 
 
+def test_workspace_identity_keeps_root_and_records_provider_cwd(tmp_path):
+    mod = load_dispatch_module()
+    root = tmp_path / "workspace"
+    cwd = root / "sub"
+    cwd.mkdir(parents=True)
+    identity = mod.workspace_identity(root, cwd)
+    assert identity["cwd"] == str(cwd)
+    assert identity["root"] == str(root)
+
+
 def test_agy_git_evidence_is_copied_into_attempt_and_bound_to_prompt(tmp_path: Path, monkeypatch) -> None:
     run_dir = make_run(tmp_path, "agy-evidence")
     source = run_dir / "evidence" / "git-evidence.md"

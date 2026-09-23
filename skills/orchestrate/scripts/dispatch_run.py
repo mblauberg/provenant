@@ -220,9 +220,9 @@ def active_receipt_error(receipt: Any) -> str | None:
     return None
 
 
-def workspace_identity(workspace: Path) -> dict[str, Any]:
+def workspace_identity(workspace: Path, provider_cwd: Path | None = None) -> dict[str, Any]:
     identity: dict[str, Any] = {
-        "cwd": str(workspace),
+        "cwd": str((provider_cwd or workspace).resolve()),
         "root": str(workspace),
         "base_revision": None,
         "working_tree": "unavailable",
@@ -1578,7 +1578,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "access_mode": args.access_mode,
         "worktree": str(args.worktree) if args.worktree else "",
     }
-    workspace_observation = workspace_identity(workspace)
+    provider_cwd = Path(args.provider_cwd).expanduser().resolve() if args.provider_cwd else workspace
     worktree_lease = None
     if args.access_mode == "worktree_write" and args.worktree is not None:
         try:
@@ -1613,6 +1613,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             args._phase_timings["route_plan"] = round((time.monotonic() - plan_started) * 1000, 3)
             plan = fast_plan if fast_plan is not None else planner_result(planning)
             if plan.get("schema") == "fabric.exec-plan.v1":
+                provider_cwd = Path(plan.get("cwd") or workspace).resolve()
                 plan.update(timeout_seconds=args.timeout_seconds,run_id=run_identity(run_dir,run_receipt),chair=os.environ.get("PROVENANT_CHAIR") or os.environ.get("AGENT_FABRIC_SEAT", ""),fallback_from=getattr(args,"fallback_from",None))
                 if hasattr(args,"resume_relaunch"):
                     plan["prompt"] += "\n\nPrevious turn and question:\n"+args.resume_relaunch
@@ -1970,7 +1971,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "started_at": started_at,
         "finished_at": finished_at,
         "duration_seconds": duration_seconds,
-        "workspace": workspace_observation,
+        "workspace": workspace_identity(workspace, provider_cwd),
         "prompt": {"path": relative_path(run_dir, prompt_path), "digest": digest(prompt_path)},
         "result": (
             {"path": relative_path(run_dir, result_path), "digest": result_digest}
