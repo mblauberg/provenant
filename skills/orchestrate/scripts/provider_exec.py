@@ -770,6 +770,32 @@ def _linux_tree_snapshot(root_pid, known_pids, proc_root=Path("/proc")):
     return rows
 
 
+def _darwin_process_row(libproc, pid):
+    info = _DarwinBsdInfo()
+    if libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(info):
+        return None
+    return _ProcessRow(
+        pid, info.ppid, info.pgid,
+        f"{info.start_sec}.{info.start_usec:06d}",
+        info.name.split(b"\0", 1)[0].decode(errors="replace")
+        or info.comm.split(b"\0", 1)[0].decode(errors="replace"),
+        info.status == 5,
+    )
+
+
+def _probe_process_row(pid):
+    """One pid's row, or None when it cannot be read."""
+    try:
+        if sys.platform == "darwin":
+            libproc = _darwin_libproc()
+            return _darwin_process_row(libproc, pid) if libproc is not None else None
+        if sys.platform.startswith("linux"):
+            return _linux_process_row(pid)
+    except Exception:
+        return None
+    return None
+
+
 def _process_snapshot():
     try:
         return _process_snapshot_unchecked()
@@ -789,18 +815,8 @@ def _process_snapshot_unchecked():
         count = libproc.proc_listallpids(pids, ctypes.sizeof(pids))
         rows = {}
         for pid in pids[:max(0, count)]:
-            if pid <= 0:
-                continue
-            info = _DarwinBsdInfo()
-            if libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(info):
-                continue
-            rows[pid] = _ProcessRow(
-                pid, info.ppid, info.pgid,
-                f"{info.start_sec}.{info.start_usec:06d}",
-                info.name.split(b"\0", 1)[0].decode(errors="replace")
-                or info.comm.split(b"\0", 1)[0].decode(errors="replace"),
-                info.status == 5,
-            )
+            if pid > 0 and (row := _darwin_process_row(libproc, pid)) is not None:
+                rows[pid] = row
         return rows
     if not sys.platform.startswith("linux"):
         return {}
@@ -1026,14 +1042,16 @@ class _Descendants:
 
     def _refresh_spared(self, rows):
         observed = {**self.tracked, **self.spared}
-        # A row missing from one census is not evidence of death; a verified
-        # owner stays spared while its pid exists and no other process holds it.
-        spared = {
-            identity for identity in self.verified_owners
-            if ((row := rows.get(identity[0])) is not None
-                and row.identity == identity and not row.zombie)
-            or (row is None and _pid_exists(identity[0]))
-        }
+        # A row missing from one census is not evidence of death: probe that pid
+        # alone, and when even that cannot be read, keep a verified owner spared
+        # while its pid exists.
+        def held(identity):
+            row = rows.get(identity[0]) or _probe_process_row(identity[0])
+            if row is not None:
+                return row.identity == identity and not row.zombie
+            return _pid_exists(identity[0])
+
+        spared = {identity for identity in self.verified_owners if held(identity)}
         own_groups = {self.process.pid, os.getpgrp()}
         for identity in observed:
             if identity in self.verified_owners:
