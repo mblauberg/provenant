@@ -886,6 +886,7 @@ def _is_nested_fabric_owner(row):
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 65536:
             return False
         record = json.loads(path.read_text())
+        started_at = record.get("owner_started_at")
         return (
             record.get("schema_version") == 1
             and record.get("kind") in {"dispatch", "batch"}
@@ -894,9 +895,10 @@ def _is_nested_fabric_owner(row):
             and record.get("owner_pid") == row.pid
             and row.pgid == row.pid
             and record.get("owner_pgid") == row.pid
+            and isinstance(started_at, str) and bool(started_at)
             and (
-                record.get("owner_started_at") == _recorded_start_time(row)
-                or record.get("owner_started_at") == _inherited_ps_start_time(row.pid)
+                started_at == _recorded_start_time(row)
+                or started_at == _inherited_ps_start_time(row.pid)
             )
         )
     except Exception:

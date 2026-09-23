@@ -852,7 +852,7 @@ def test_owner_without_observed_parent_is_not_spared(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("field,value", [
     ("owner_pid", 999999), ("owner_started_at", "old process"),
-    ("run_token", "wrong token"),
+    ("owner_started_at", None), ("run_token", "wrong token"),
 ])
 def test_nested_owner_record_must_match_live_identity(tmp_path, monkeypatch, field, value):
     module = supervisor()
