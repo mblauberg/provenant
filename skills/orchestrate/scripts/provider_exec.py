@@ -895,6 +895,16 @@ def _ps_start_time(pid, *, canonical):
         return None
 
 
+def _pid_exists(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def _is_nested_fabric_owner(row):
     try:
         values = {}
@@ -1016,10 +1026,13 @@ class _Descendants:
 
     def _refresh_spared(self, rows):
         observed = {**self.tracked, **self.spared}
+        # A row missing from one census is not evidence of death; a verified
+        # owner stays spared while its pid exists and no other process holds it.
         spared = {
             identity for identity in self.verified_owners
-            if (row := rows.get(identity[0])) is not None
-            and row.identity == identity and not row.zombie
+            if ((row := rows.get(identity[0])) is not None
+                and row.identity == identity and not row.zombie)
+            or (row is None and _pid_exists(identity[0]))
         }
         own_groups = {self.process.pid, os.getpgrp()}
         for identity in observed:
@@ -1076,8 +1089,8 @@ class _Descendants:
         }
         spared_groups = {
             row.pgid for row in self.live_spared(rows).values()
-            if row.pgid not in {self.process.pid, os.getpgrp()}
-        }
+        } | {identity[0] for identity in self.spared if identity in self.verified_owners}
+        spared_groups -= {self.process.pid, os.getpgrp()}
         if not root_group:
             live.pop(self.root, None)
         groups = {

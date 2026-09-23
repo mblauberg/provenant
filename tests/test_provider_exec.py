@@ -766,6 +766,42 @@ def test_verified_owner_stays_spared_through_transient_validation_loss(tmp_path,
     assert ("pid", owner_pid) not in signals
 
 
+def test_partial_census_keeps_a_live_verified_owner_group_spared(tmp_path, monkeypatch):
+    # A census that loses one row (a failed per-pid probe) must not turn the
+    # owner's children into targets and killpg the owner's group with them.
+    module = supervisor()
+    root_pid = os.getpid() + 100000
+    owner_pid, child_pid = root_pid + 1, root_pid + 2
+    root = module._ProcessRow(root_pid, os.getpid(), root_pid, str(int(time.time())), "provider")
+    owner = module._ProcessRow(owner_pid, root_pid, owner_pid, str(int(time.time())), "owner")
+    child = module._ProcessRow(child_pid, owner_pid, owner_pid, str(int(time.time())), "nested provider")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(), str(int(time.time())), "test"),
+            root_pid: root, owner_pid: owner, child_pid: child}
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, owner, "inner-token")
+    signals = []
+    process = type("Process", (), {"pid": root_pid, "poll": lambda self: None,
+                                   "wait": lambda self, timeout: None})()
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: rows)
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: None)
+        patch.setattr(module, "_process_environment", lambda pid: [
+            b"PROVENANT_RUN_TOKEN=inner-token",
+            ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+        ] if pid == owner_pid else ())
+        patch.setattr(module, "_pid_exists", lambda pid: pid in {owner_pid, child_pid, root_pid})
+        patch.setattr(module.os, "killpg", lambda pgid, _signal: signals.append(("group", pgid)))
+        patch.setattr(module.os, "kill", lambda pid, _signal: signals.append(("pid", pid)))
+        tracker = module._Descendants(process, "fixture")
+        tracker.sample()
+        assert {owner.identity, child.identity} <= set(tracker.spared)
+        del rows[owner_pid]
+        tracker.stop(root_grace=0.05, descendant_grace=0.01)
+    assert ("group", owner_pid) not in signals
+    assert ("pid", child_pid) not in signals
+    assert ("group", root_pid) in signals
+
+
 def test_unavailable_census_preserves_verified_owner_and_root_kill(tmp_path, monkeypatch):
     module = supervisor()
     root_pid = os.getpid() + 100000
