@@ -72,9 +72,16 @@ the original question and attempt unchanged.
 For cross-terminal cancellation, write one empty `cancel.request` in the exact
 attempt or batch directory through `provenant run cancel`. The external command
 never signals a PID or writes terminal evidence. The live dispatch owner polls
-the marker during its bounded wait, stops and reaps its own provider group, and
-writes the normal cancelled attempt. A missing owner yields bounded missing
+the marker during its bounded wait, stops its provider and tracked descendants
+across process groups and sessions, and writes the normal cancelled attempt.
+The owner snapshots ancestry during the wait and at termination, matching PID
+and start time before signalling even after a child is reparented. A unique
+provider-inherited marker covers a child reparented between snapshots. The same
+cleanup runs on timeout, stall and normal exit; leftover children appear in the
+attempt's `reaped` list and digest warning. A missing owner yields bounded missing
 evidence; it never authorises a process-table search or inferred cancellation.
+On macOS, a child that clears the marker and reparents before the first snapshot
+cannot be attributed safely by this polling owner.
 
 ## Waiting from inside a sub-agent
 
