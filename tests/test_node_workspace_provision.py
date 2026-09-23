@@ -53,6 +53,18 @@ def run_provision(worktree, tmp_path, npm_body, **extra_environment):
     npm = bin_dir / "npm"
     npm.write_text("#!/usr/bin/env python3\n" + npm_body)
     npm.chmod(0o755)
+    # Linux CI's filesystem has no reflink; emulate the copy-on-write clone so the
+    # tests exercise provisioning rather than the host filesystem.
+    cp = bin_dir / "cp"
+    cp.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, shutil, sys\n"
+        "source, target = sys.argv[-2:]\n"
+        "if os.path.lexists(target):\n"
+        "    sys.exit('cp: target exists')\n"
+        "shutil.copytree(source, target, symlinks=True)\n"
+    )
+    cp.chmod(0o755)
     environment = os.environ.copy()
     environment["PATH"] = str(bin_dir) + os.pathsep + environment["PATH"]
     environment.update(extra_environment)
