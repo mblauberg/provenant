@@ -262,6 +262,25 @@ def load_catalog(path: Path | None = None) -> dict[str, Any]:
     return catalogue_snapshot(path)["catalogue"]
 
 
+def registered_model_ids(adapter: dict[str, Any]) -> list[str]:
+    """Return adapter model ids first, then alias-only ids, in catalogue order."""
+    ids: list[str] = []
+    models = adapter.get("models", []) if isinstance(adapter, dict) else []
+    entries = models.values() if isinstance(models, dict) else models if isinstance(models, list) else []
+    for entry in entries:
+        model = entry.get("id") if isinstance(entry, dict) else entry
+        if isinstance(model, str) and model not in ids:
+            ids.append(model)
+    aliases = adapter.get("aliases", {}) if isinstance(adapter, dict) else {}
+    if isinstance(aliases, dict):
+        for candidates in aliases.values():
+            if isinstance(candidates, list):
+                for model in candidates:
+                    if isinstance(model, str) and model not in ids:
+                        ids.append(model)
+    return ids
+
+
 def _registered_match(adapter: str, requested: str, catalog: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
     entries = catalog["adapters"][adapter].get("models", [])
     token = requested.casefold()
@@ -627,13 +646,7 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     # `auto` is the provider's own chooser; a provider prefix is not a new model.
     provider_auto = requested.casefold() == "auto"
     if registered is None and not provider_auto:
-        registered_ids = list(dict.fromkeys(
-            model
-            for candidates in adapter.get("aliases", {}).values()
-            if isinstance(candidates, list)
-            for model in candidates
-            if isinstance(model, str)
-        ))
+        registered_ids = registered_model_ids(adapter)
         registry = ", ".join(registered_ids[:6])
         if len(registered_ids) > 6:
             registry += ", …"

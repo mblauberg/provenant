@@ -297,14 +297,7 @@ def _model_unavailable_fix(plan):
             import exec_routing
         catalogue = exec_routing.snapshot()
         adapter = catalogue.get("adapters", {}).get(plan.get("adapter"), {})
-        aliases = adapter.get("aliases", {})
-        registered = list(dict.fromkeys(
-            model
-            for candidates in aliases.values()
-            if isinstance(candidates, list)
-            for model in candidates
-            if isinstance(model, str)
-        ))
+        registered = exec_routing._model_route_module().registered_model_ids(adapter)
     except (AttributeError, TypeError):
         registered = []
     if registered:

@@ -101,7 +101,10 @@ def test_unregistered_model_failure_fix_names_adapter_models(tmp_path):
     plan["route"]["identity_source"] = "passed-through"
     record = supervisor().execute(plan, tmp_path / "result.md")
     assert record["status"] == "model_unavailable"
-    assert record["fix"] == "choose a registered model: gemini-3.8-flash"
+    assert record["fix"] == (
+        "choose a registered model: gemini-3.8-flash, "
+        "claude-opus-4-6-thinking, claude-sonnet-4-6"
+    )
 
 
 def test_structured_result_and_question_take_precedence_over_prose():
