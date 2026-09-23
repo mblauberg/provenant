@@ -171,3 +171,8 @@ def test_shim_shows_an_unreadable_live_process_rather_than_dropping_it():
                             capture_output=True, text=True, check=True)
     assert [line.split()[0] for line in result.stdout.splitlines()] == ["1", str(os.getpid())]
     assert "cannot be read" in result.stderr
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS ps prints unbounded minutes")
+def test_cpu_time_uses_the_macos_ps_format():
+    assert process_info._duration(69 * 60 + 45.86) == "69:45.86"

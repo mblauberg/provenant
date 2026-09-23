@@ -252,3 +252,16 @@ def test_cursor_model_suffix_effort_is_recorded_as_sent(tmp_path):
     assert plan["effort"] == "high"
     assert plan["route_label"] == "cursor/grok-4.7-high@high"
     assert not any("does not expose effort control" in warning for warning in plan["warnings"])
+
+
+@pytest.mark.parametrize(("extra", "model", "effort"), [
+    (("--alias", "flagship", "--effort", "high"), "grok-4.7-high", "high"),
+    (("--alias", "flagship", "--effort", "medium"), "grok-4.7-medium", "medium"),
+    (("--alias", "flagship", "--effort", "ultra"), "grok-4.7-xhigh", "xhigh"),
+    (("--alias", "flagship"), "grok-4.7-high", "high"),
+])
+def test_a_suffix_model_carries_the_effort_it_records_with_an_alias(extra, model, effort):
+    """An alias with a model used to hit the adapter-wide model-id rule and refuse the route."""
+    route = resolve("--adapter", "cursor", "--model", "grok-4.7", "--role", "worker", *extra)
+    assert route["resolved_model"] == model
+    assert route["effort_applied"] == effort

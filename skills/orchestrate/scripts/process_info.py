@@ -200,6 +200,8 @@ def _duration(seconds, *, elapsed=False):
     if not elapsed:
         hundredths = min(99, int((seconds - whole) * 100 + 0.5))
         total_hours = days * 24 + hours
+        if sys.platform == "darwin":  # macOS ps: minutes are unbounded, 69:45.86
+            return f"{total_hours * 60 + minutes}:{secs:02d}.{hundredths:02d}"
         if total_hours:
             return f"{total_hours}:{minutes:02d}:{secs:02d}.{hundredths:02d}"
         return f"{minutes}:{secs:02d}.{hundredths:02d}"

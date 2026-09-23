@@ -1019,6 +1019,18 @@ def resolve_effort(
         fallback_source = capability_source if supported is not None else "policy"
         return fallback, f"ultra unavailable (route is not ultra-eligible); used {fallback}", "", fallback_source
 
+    # A registered model whose id carries the effort (cursor grok-4.7-high) is not
+    # an adapter-wide model-id route: its catalogue lists the efforts it takes.
+    if registered and registered.get("effort_transport") == "model-suffix" and requested_effort:
+        offered = [value.lower() for value in registered.get("efforts", []) if value.lower() in EFFORT_ORDER]
+        if requested_effort in offered:
+            return requested_effort, "", "", "registry-model-suffix"
+        if offered:
+            rank = EFFORT_ORDER.get(requested_effort, EFFORT_ORDER["medium"])
+            used = max((value for value in offered if EFFORT_ORDER[value] <= rank),
+                       key=lambda value: EFFORT_ORDER[value], default=min(offered, key=lambda value: EFFORT_ORDER[value]))
+            return used, f"{requested_effort} unsupported by {model}; ran at {used}", "", "registry-model-suffix"
+
     if args.effort_transport == "model-id":
         normalized_model = re.sub(r"(?:^|[-_])extra[-_]high(?=$|[-_])", "-xhigh", model.lower())
         matches = re.findall(r"(?:^|[-_])(low|medium|high|xhigh|max|ultra)(?=$|[-_])", normalized_model)
@@ -1588,6 +1600,10 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             effort_status = ""
     if not effort_status and getattr(args, "raw_effort", None):
         effort_substitution = f"{args.raw_effort} unknown; ran at {effort or 'default'}"
+    # The effort reaches a suffix model only through its id, so the id must carry it.
+    suffix = ((registered_model or {}).get("suffix", {}) if (registered_model or {}).get("effort_transport") == "model-suffix" else {}).get(effort or "", "")
+    if not effort_status and suffix and not model.endswith(suffix):
+        model += suffix
     # A Claude snapshot cannot evidence the effective effort, but its existence
     # does evidence that the CLI accepted the requested value: the canary fails
     # closed on the unknown-effort warning. Paired with runtime-verified model
