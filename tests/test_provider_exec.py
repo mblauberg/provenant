@@ -924,7 +924,7 @@ def test_codex_observed_model_comes_from_rollout_turn_context(tmp_path):
     assert record["provenance"]["observed_model"] == "gpt-6-luna"
     assert record["provenance"]["observed_source"] == "codex:rollout.turn_context.model"
     assert record["provenance"]["identity"] == "observed"
-    assert "mismatch" in record["warnings"][0]
+    assert any("mismatch" in warning for warning in record["warnings"])
 
 
 def test_opencode_observed_model_comes_from_export(tmp_path):

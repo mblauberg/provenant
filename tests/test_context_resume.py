@@ -75,22 +75,34 @@ def resume(run, row, prompt, *extra):
 def test_attempt_records_observed_context_and_enforced_ceiling(tmp_path, monkeypatch):
     run, _prompt, command, log = replay_owner(tmp_path, monkeypatch, "claude", FIX / "claude.jsonl",
                                               FIX / "claude.jsonl", "session-0003", "haiku")
-    first = subprocess.run([*command, "--context-ceiling", "250000"], cwd=tmp_path, capture_output=True, text=True)
+    first = subprocess.run([*command, "--context-ceiling", "150000"], cwd=tmp_path, capture_output=True, text=True)
     assert first.returncode == 0, first.stdout + first.stderr
     row = attempt(run, 1)
     assert row["context"] == {"context_tokens": 8039, "input_tokens": 8035, "output_tokens": 4,
                               "cached_input_tokens": 4587, "context_window_tokens": 1000000,
                               "context_percent": None, "source": "observed"}
     assert row["applied"]["context_ceiling"] == "enforced"
-    assert row["applied"]["context_ceiling_tokens"] == 250000
-    assert follows(argv_calls(log)[0], "--autocompact", "250000")
-    assert row["digest"].splitlines()[1].endswith(" · ctx 8k/1M")
+    assert row["applied"]["context_ceiling_tokens"] == 150000
+    assert follows(argv_calls(log)[0], "--autocompact", "150000")
+    assert row["digest"].splitlines()[1] == "  Route: claude/claude-sonnet-5@high (unknown; observed) · ctx 8k/1M"
+
+
+def test_plan_mode_haiku_ceiling_stays_below_the_requested_window(tmp_path, monkeypatch):
+    """claude-sonnet-5 (1M) answered, but the requested haiku window (200k) bounds the flag."""
+    run, _prompt, command, log = replay_owner(tmp_path, monkeypatch, "claude", FIX / "claude.jsonl",
+                                              FIX / "claude.jsonl", "session-0003", "haiku")
+    done = subprocess.run([*command, "--context-ceiling", "250000"], cwd=tmp_path, capture_output=True, text=True)
+    assert done.returncode == 0, done.stdout + done.stderr
+    row = attempt(run, 1)
+    assert (row["applied"]["context_ceiling"], row["applied"]["context_ceiling_tokens"]) == ("provider_default", 200000)
+    assert row["context"]["context_window_tokens"] == 1000000
+    assert "--autocompact" not in argv_calls(log)[0]
 
 
 def test_resume_of_a_large_session_warns_with_handoff_and_keeps_the_ceiling(tmp_path, monkeypatch):
     run, prompt, command, log = replay_owner(tmp_path, monkeypatch, "claude", FIX / "claude.jsonl",
                                              FIX / "claude.jsonl", "session-0003", "haiku")
-    assert subprocess.run([*command, "--context-ceiling", "250000"], cwd=tmp_path, capture_output=True).returncode == 0
+    assert subprocess.run([*command, "--context-ceiling", "150000"], cwd=tmp_path, capture_output=True).returncode == 0
     path = run / "tasks/dispatch-001/attempt-001/attempt.json"
     row = json.loads(path.read_text())
     row["context"]["context_tokens"] = 620000
@@ -103,7 +115,7 @@ def test_resume_of_a_large_session_warns_with_handoff_and_keeps_the_ceiling(tmp_
     assert "\n  ! " + advice in second["digest"]
     argv = argv_calls(log)[1]
     assert follows(argv, "--resume", "session-0003")
-    assert follows(argv, "--autocompact", "250000")
+    assert follows(argv, "--autocompact", "150000")
 
 
 def test_resume_warning_uses_the_provider_compaction_point_below_the_requested_ceiling(tmp_path, monkeypatch):
@@ -139,6 +151,24 @@ def test_resume_targets_one_task_of_a_multi_task_run(tmp_path, monkeypatch):
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     assert attempt(run, 2, "two")["status"] == "ok"
     assert not (run / "tasks/one/attempt-002").exists()
+
+
+def test_resume_never_redirects_a_task_without_an_attempt(tmp_path, monkeypatch):
+    """A batch with one finished task and one never started: resuming the second must not resume the first."""
+    run, prompt, command, log = replay_owner(tmp_path, monkeypatch, "claude", FIX / "claude.jsonl",
+                                             FIX / "claude.jsonl", "session-0003", "haiku")
+    done = subprocess.run([*command, "--task-id", "one"], cwd=tmp_path, capture_output=True, text=True)
+    assert done.returncode == 0, done.stdout + done.stderr
+    row = attempt(run, 1, "one")
+    missing = resume(run, row, prompt, "--task-id", "two")
+    assert missing.returncode != 0
+    assert json.loads(missing.stdout) == {"schema_version": 1, "status": "rejected", "error": "resume_task_unknown",
+                                          "message": "task two has no attempt in this run"}
+    assert not (run / "tasks/one/attempt-002").exists() and not (run / "tasks/two").exists()
+    assert len(argv_calls(log)) == 1
+    resumed = resume(run, row, prompt, "--task-id", "one")
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    assert attempt(run, 2, "one")["status"] == "ok"
 
 
 @pytest.mark.parametrize("adapter,model,session,window", [

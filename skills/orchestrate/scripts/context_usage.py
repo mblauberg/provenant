@@ -36,7 +36,7 @@ class Meter:
         self.adapter = adapter
         self.value = dict.fromkeys(FIELDS)
         self.totals = {"input_tokens": None, "output_tokens": None, "cached_input_tokens": None}
-        self.last_model = None
+        self.models = {"init": None, "answered": [], "final": None, "usage": []}
 
     def _add(self, input_tokens, output_tokens, cached):
         for key, value in (("input_tokens", input_tokens), ("output_tokens", output_tokens),
@@ -53,10 +53,17 @@ class Meter:
             pass  # A malformed usage field never fails an attempt.
 
     def _claude(self, event):
-        kind = event.get("type")
+        kind, models = event.get("type"), self.models
+        if kind == "system" and event.get("subtype") == "init" and isinstance(event.get("model"), str):
+            models["init"] = event["model"]
         if kind == "assistant" and isinstance(event.get("message"), dict):
             message = event["message"]
-            self.last_model = message.get("model") or self.last_model
+            model = message.get("model")
+            if isinstance(model, str) and model:
+                if model not in models["answered"]:
+                    models["answered"].append(model)
+                if event.get("parent_tool_use_id") is None:
+                    models["final"] = model
             self._claude_request(message.get("usage"))
         if kind == "result":
             usage = event.get("usage") or {}
@@ -69,11 +76,20 @@ class Meter:
             iterations = [item for item in usage.get("iterations") or [] if isinstance(item, dict)]
             if iterations:
                 self._claude_request(iterations[-1])
-            models = event.get("modelUsage") or {}
-            chosen = models.get(self.last_model) if isinstance(models, dict) else None
-            windows = [_int(item.get("contextWindow")) for item in models.values() if isinstance(item, dict)]
-            window = _int((chosen or {}).get("contextWindow")) or max((w for w in windows if w), default=None)
-            self.value["context_window_tokens"] = window
+            usage_models = event.get("modelUsage") if isinstance(event.get("modelUsage"), dict) else {}
+            models["usage"] = list(usage_models)
+            answering = self.answering_model()[0]
+            chosen = usage_models.get(answering) if answering else None
+            self.value["context_window_tokens"] = _int(chosen.get("contextWindow")) if isinstance(chosen, dict) else None
+
+    def answering_model(self):
+        """(model, source): the model that answered, then a lone modelUsage key; init only as a last resort."""
+        models = self.models
+        if models["answered"]:
+            return models["final"] or models["answered"][-1], "claude:assistant.message.model"
+        if len(models["usage"]) == 1:
+            return models["usage"][0], "claude:result.modelUsage"
+        return models["init"], "claude:init.model" if models["init"] else None
 
     def _claude_request(self, usage):
         if isinstance(usage, dict):
@@ -190,24 +206,24 @@ def clamp_ceiling(value):
     return tokens, None
 
 
-CODEX_WINDOW, CODEX_EFFECTIVE_PERCENT = 272000, 95
-# contextWindow from live --safe-mode turns on 2026-09-23; the haiku alias resolved to claude-sonnet-5.
+# contextWindow of the answering model in live turns, 2026-09-23 (Claude Code 2.1.280). A read-only haiku
+# route may be answered by a 1M model in plan mode; its own 200k window still bounds the ceiling.
 CLAUDE_WINDOWS = {"opus": 1000000, "opus-5.5": 1000000, "claude-opus-5-5": 1000000, "sonnet": 1000000,
-                  "claude-sonnet-5": 1000000, "haiku": 1000000, "fable": 1000000, "claude-fable-5-1": 1000000,
-                  "claude-haiku-4-5": 200000}
+                  "claude-sonnet-5": 1000000, "fable": 1000000, "claude-fable-5-1": 1000000,
+                  "haiku": 200000, "claude-haiku-4-5": 200000, "claude-haiku-4-5-20251001": 200000}
 
 
 def _codex_point(model, env):
-    """Codex compacts near effective_context_window_percent of the model window in its models cache."""
-    window, percent = CODEX_WINDOW, CODEX_EFFECTIVE_PERCENT
+    """Codex compacts at effective_context_window_percent of the model window in its models cache."""
     try:
         cache = json.loads((Path(env.get("CODEX_HOME") or Path.home() / ".codex") / "models_cache.json").read_text())
         entry = next((item for item in cache.get("models") or []
                       if isinstance(item, dict) and model and item.get("slug") == model), {})
-        window = _int(entry.get("context_window")) or window
-        percent = _int(entry.get("effective_context_window_percent")) or percent
     except (OSError, ValueError, AttributeError):
-        pass
+        entry = {}
+    window, percent = _int(entry.get("context_window")), _int(entry.get("effective_context_window_percent"))
+    if not window or not percent:
+        return None, None
     return window * percent // 100, "codex models_cache effective window"
 
 
@@ -225,7 +241,7 @@ def _claude_point(model, env):
     user = _int(settings.get("autoCompactWindow")) if isinstance(settings, dict) else None
     if user and settings.get("autoCompactEnabled") is not False and (window is None or user < window):
         return user, "claude user settings autoCompactWindow"
-    return window, "claude model window"
+    return window, "claude model window" if window else None
 
 
 def effective_ceiling(applied):
@@ -244,7 +260,13 @@ def apply_ceiling(plan, value, argv=None, env=None):
     plan["context_ceiling"] = None
     if adapter in CEILING_CONTROL:
         point, source = (_codex_point if adapter == "codex" else _claude_point)(plan.get("model"), env or os.environ)
-        if point is not None and tokens < point:
+        if point is None:
+            # Without a known point, lower-only cannot be proven: pass nothing, claim no number.
+            applied.update(context_ceiling="provider_default", context_ceiling_tokens=None)
+            unknown = f"context_ceiling not applied: {adapter} compaction point for {plan.get('model')} unknown"
+            if unknown not in plan["warnings"]:
+                plan["warnings"].append(unknown)
+        elif tokens < point:
             plan["context_ceiling"] = tokens
             applied.update(context_ceiling="enforced", context_ceiling_tokens=tokens)
         else:

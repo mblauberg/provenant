@@ -16,7 +16,8 @@ import {
 import type { Identity } from "./identity.js";
 import { fabricStatus, processMatches, readOwnerRecord, statusRows } from "./run-registry.js";
 
-const HANDOFF_TAIL_BYTES = 8000;
+/** The whole injected handoff text, prefix and result tail together. */
+export const HANDOFF_BYTES = 8000;
 
 /** One task row: a run id with task_id for a batch, or a task's own id. */
 async function targetTask(cwd: string, id: string, taskId: string | undefined, verb: string) {
@@ -183,9 +184,9 @@ export async function resumeConfiguredProvider(
   }
 }
 
-function resultTail(row: Record<string, any>): string {
+function resultTail(row: Record<string, any>, budget: number): string {
   const raw = row.paths?.result ?? row.result_path;
-  if (typeof raw !== "string") return "";
+  if (typeof raw !== "string" || budget <= 0) return "";
   let fd: number | undefined;
   try {
     const root = realpathSync(String(row.run_dir)),
@@ -194,7 +195,7 @@ function resultTail(row: Record<string, any>): string {
     if (isAbsolute(inside) || inside === ".." || inside.startsWith(`..${sep}`)) return "";
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const size = fstatSync(fd).size,
-      bytes = Buffer.alloc(Math.min(size, HANDOFF_TAIL_BYTES));
+      bytes = Buffer.alloc(Math.min(size, budget));
     readSync(fd, bytes, 0, bytes.length, size - bytes.length);
     let start = 0;
     while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start++;
@@ -204,6 +205,17 @@ function resultTail(row: Record<string, any>): string {
   } finally {
     if (fd !== undefined) closeSync(fd);
   }
+}
+
+export function handoffBrief(previous: Record<string, any>): string {
+  const route = String(previous.provenance?.line ?? "Route: unknown").replace(/^Route: /u, "").slice(0, 300);
+  const head =
+    `Fresh session handed off from Fabric run ${previous.run_id} task ${previous.task_id} (${route}). ` +
+    "Its session was not resumed. ";
+  const open = "Tail of its result:\n<<<\n",
+    close = "\n>>>\n\n";
+  const tail = resultTail(previous, HANDOFF_BYTES - Buffer.byteLength(head + open + close));
+  return head + (tail ? open + tail + close : "It left no result.\n\n");
 }
 
 /** A fresh session primed with the prior result tail: the cheap alternative to a large resume. */
@@ -229,11 +241,7 @@ export async function handoffDispatch(
         throw new InputError("prompt_unavailable", "Pass an existing prompt_file.");
       }
     }
-    const route = String(previous.provenance?.line ?? "Route: unknown").replace(/^Route: /u, "");
-    const tail = resultTail(previous);
-    const brief =
-      `Fresh session handed off from Fabric run ${previous.run_id} task ${previous.task_id} (${route}). ` +
-      `Its session was not resumed. ${tail ? "Tail of its result:\n<<<\n" + tail + "\n>>>" : "It left no result."}\n\n`;
+    const brief = handoffBrief(previous);
     const requested = previous.provenance?.requested ?? {};
     const inherit = rest.adapter === undefined && rest.alias === undefined && rest.model === undefined;
     const writer = rest.mode === undefined && rest.worktree === undefined && rest.cwd === undefined &&
