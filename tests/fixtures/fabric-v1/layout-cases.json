@@ -1,0 +1,20 @@
+[
+  {
+    "name": "primary",
+    "cwd": "/repo",
+    "git_common_dir": "/repo/.git",
+    "run_root": "/repo/.agent-run"
+  },
+  {
+    "name": "linked-worktree",
+    "cwd": "/repo/.worktrees/lane",
+    "git_common_dir": "/repo/.git",
+    "run_root": "/repo/.agent-run"
+  },
+  {
+    "name": "non-git",
+    "cwd": "/workspace",
+    "git_common_dir": null,
+    "run_root": "/workspace/.agent-run"
+  }
+]
