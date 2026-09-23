@@ -1521,8 +1521,8 @@ def execute(
                 exited = process.poll() is not None
                 if exited and not selector.get_map():
                     break
-                if exited:
-                    reaped = descendants.stop(normal=True)  # descendants may hold output pipes
+                if exited and not stopped:
+                    reaped.extend(descendants.stop(normal=True))  # descendants may hold output pipes
                     stopped = True
                 if cancel_signal or (cancelled and cancelled()):
                     forced = "cancelled"
@@ -1579,10 +1579,10 @@ def execute(
         if process:
             if descendants and not stopped:
                 exited_at_stop = process.poll() is not None
-                reaped = descendants.stop(
+                reaped.extend(descendants.stop(
                     normal=exited_at_stop,
                     terminal_grace=terminal_grace_break and not exited_at_stop,
-                )
+                ))
             # Drain final bytes after the group exits, without an unbounded communicate.
             for key in list(selector.get_map().values()):
                 while True:

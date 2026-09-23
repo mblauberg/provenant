@@ -742,6 +742,41 @@ def test_verified_owner_identity_does_not_spare_reused_pid(tmp_path, monkeypatch
     assert replacement.identity not in tracker.spared
 
 
+def test_provider_exit_with_open_pipe_stops_once_and_keeps_reaped(tmp_path, monkeypatch):
+    module = supervisor()
+    child_pid = tmp_path / "pipe-holder.pid"
+    code = f"""import pathlib,subprocess,sys
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(.7)'],
+    start_new_session=True, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))
+print('DONE', flush=True)
+"""
+    calls = []
+    first_reaped = [{"pid": 424242, "command": "fixture-child"}]
+
+    def fake_stop(self, *args, **kwargs):
+        calls.append(kwargs)
+        return first_reaped if len(calls) == 1 else []
+
+    monkeypatch.setattr(module._Descendants, "stop", fake_stop)
+    try:
+        record = module.execute(fixture_plan(tmp_path, code), tmp_path / "result.md")
+        assert len(calls) == 1
+        assert record["reaped"] == first_reaped
+    finally:
+        if child_pid.exists():
+            pid = int(child_pid.read_text())
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            if sys.platform.startswith("linux"):
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    pass
+
+
 def test_token_without_owner_record_is_not_nested_owner(tmp_path, monkeypatch):
     module = supervisor()
     row = module._ProcessRow(502, 501, 502, str(int(time.time())), "sleep")
