@@ -20,7 +20,8 @@ def argv(p):
     )
     if p["resume_session"]:
         command += ["--resume-id", p["resume_session"]]
-    if p["model"]:
+    # auto is kiro's own default; kiro-cli rejects it as an explicit model.
+    if p["model"] and p["model"] != "auto":
         command += ["--model", p["model"]]
     if p["effort"]:
         command += [EFFORT_FLAG, p["effort"]]

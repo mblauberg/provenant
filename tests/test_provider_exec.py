@@ -1002,3 +1002,20 @@ def test_kiro_stream_json_selects_the_v2_engine():
 )
 def test_alias_and_display_names_are_not_substitutions(adapter, resolved, observed, same):
     assert supervisor()._same_model(adapter, resolved, observed) is same
+
+
+def test_kiro_v2_engine_stream_is_parsed_and_auto_is_not_passed():
+    # Shape captured from a live kiro-cli --agent-engine v2 run (2026-09-23).
+    events = [
+        {"type": "runStarted", "data": {"payloadSchema": "acp", "engine": "v2"}},
+        {"type": "sessionUpdate", "data": {"sessionId": "k2", "update": {
+            "sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "PONG"}}}},
+        {"type": "runFinished", "data": {"sessionId": "k2", "status": "success",
+         "stopReason": "end_turn", "finalText": "PONG"}},
+    ]
+    parsed = supervisor().parse_output("kiro", "\n".join(map(json.dumps, events)))
+    assert (parsed["status"], parsed["text"], parsed["session_id"]) == ("ok", "PONG", "k2")
+    from adapters import kiro
+    command = kiro.argv({"mode": "read_only", "resume_session": None, "model": "auto",
+                         "effort": None, "boundary_prompt": "B", "prompt": "P"})
+    assert "--model" not in command

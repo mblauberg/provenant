@@ -532,6 +532,10 @@ resolve_routing() {
   else
     route_args+=(--alias "$alias")
   fi
+  # A defaulted alias beside a named model is ours, not the caller's; an env
+  # hint (not a flag) keeps an older installed router working.
+  local alias_implied=0
+  [ "${ALIAS_EXPLICIT:-0}" -eq 0 ] && alias_implied=1
   [ "$INTENT" = "assurance" ] && route_args+=(--require-distinct)
   [ -n "$FALLBACK" ] && route_args+=(--fallback "$FALLBACK")
   [ -n "$model" ] && route_args+=(--model "$model")
@@ -546,9 +550,9 @@ resolve_routing() {
   if command -v provenant >/dev/null 2>&1; then
     cmd=(provenant route resolve "${route_args[@]}")
     if [ -n "$product_root" ]; then
-      AGENT_FABRIC_PRODUCT_ROOT="$product_root" AGENT_FABRIC_INSTANCE_ROOT="$instance_root" "${cmd[@]}" 2>>"$diag_file"
+      FABRIC_ALIAS_IMPLIED="$alias_implied" AGENT_FABRIC_PRODUCT_ROOT="$product_root" AGENT_FABRIC_INSTANCE_ROOT="$instance_root" "${cmd[@]}" 2>>"$diag_file"
     else
-      "${cmd[@]}" 2>>"$diag_file"
+      FABRIC_ALIAS_IMPLIED="$alias_implied" "${cmd[@]}" 2>>"$diag_file"
     fi
     return $?
   fi
@@ -556,7 +560,7 @@ resolve_routing() {
   # Fall back to scripts/model_route.py under the one resolved product root.
   if [ -n "$product_root" ] && [ -f "$product_root/scripts/model_route.py" ]; then
     cmd=(python3 "$product_root/scripts/model_route.py" "resolve" "${route_args[@]}")
-    AGENT_FABRIC_PRODUCT_ROOT="$product_root" AGENT_FABRIC_INSTANCE_ROOT="$instance_root" "${cmd[@]}" 2>>"$diag_file"
+    FABRIC_ALIAS_IMPLIED="$alias_implied" AGENT_FABRIC_PRODUCT_ROOT="$product_root" AGENT_FABRIC_INSTANCE_ROOT="$instance_root" "${cmd[@]}" 2>>"$diag_file"
     return $?
   fi
 

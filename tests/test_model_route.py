@@ -4215,3 +4215,20 @@ def test_malformed_endpoint_profile_is_never_routed_against(monkeypatch, tmp_pat
     assert result.returncode == 2
     assert route["status"] == "endpoint_config_invalid"
     assert route.get("resolved_model") is None
+
+
+def test_implied_alias_beside_a_named_model_adds_no_note(tmp_path):
+    env = {**os.environ, "FABRIC_ALIAS_IMPLIED": "1", "AGENT_FABRIC_STATE_ROOT": str(tmp_path)}
+    implied = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/model_route.py"), "resolve", "--adapter", "codex",
+         "--role", "worker", "--alias", "flagship", "--model", "gpt-6-luna"],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    assert "alias and model both supplied" not in implied.stdout
+    env.pop("FABRIC_ALIAS_IMPLIED")
+    explicit = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/model_route.py"), "resolve", "--adapter", "codex",
+         "--role", "worker", "--alias", "flagship", "--model", "gpt-6-luna"],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    assert "alias and model both supplied" in explicit.stdout

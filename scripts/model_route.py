@@ -602,7 +602,7 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     notes: list[str] = []
     warnings: list[str] = []
     explicit = bool(args.model) or bool(args.alias and args.alias not in ALIAS_ORDER)
-    if args.model and args.alias and args.alias != args.model:
+    if args.model and args.alias and args.alias != args.model and getattr(args, "alias_supplied", True):
         notes.append("alias and model both supplied; model won")
     if not requested:
         candidates = adapter.get("aliases", {}).get(args.alias or "workhorse", [])
@@ -1691,7 +1691,8 @@ def main(argv: list[str] | None = None) -> int:
         return code
     catalog = load_catalog(Path(args.catalog) if args.catalog else None)
     if args.command == "resolve":
-        args.alias_supplied = bool(args.alias)
+        # cf_dispatch defaults an alias beside a named model; that is not the caller's.
+        args.alias_supplied = bool(args.alias) and os.environ.get("FABRIC_ALIAS_IMPLIED") != "1"
         if args.endpoint and args.model and not args.alias:
             args.alias = "workhorse"
         ordinary_name = args.alias and args.alias not in ALIAS_ORDER

@@ -395,6 +395,19 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
                 result["terminal"] = True
             if event.get("error"):
                 errors.append(json.dumps(event["error"]))
+        # kiro-cli --agent-engine v2 wraps the same ACP updates in typed events.
+        if adapter == "kiro" and kind in {"sessionUpdate", "runFinished"}:
+            data = event.get("data") if isinstance(event.get("data"), dict) else {}
+            update = data.get("update") if isinstance(data.get("update"), dict) else {}
+            content = update.get("content") if isinstance(update.get("content"), dict) else {}
+            if update.get("sessionUpdate") == "agent_message_chunk" and isinstance(content.get("text"), str):
+                parts.append(content["text"])
+            if kind == "runFinished":
+                result["terminal"] = True
+                if isinstance(data.get("finalText"), str):
+                    terminal_text = data["finalText"]
+                if str(data.get("status", "success")).lower() != "success":
+                    errors.append(json.dumps(data, ensure_ascii=False)[:400])
         for item in _objects(event):
             for key in config.SESSION_KEYS:
                 if isinstance(item.get(key), str):
