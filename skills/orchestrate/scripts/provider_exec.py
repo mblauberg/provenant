@@ -151,7 +151,8 @@ def build_plan(
         raise ValueError("prompt contains NUL")
     if preface:
         prompt = (
-            f"You are {route_label} via Fabric. Attribute work to exactly this route; never guess a model name.\n\n"
+            f"You are {route_label} via Fabric. Attribute work to exactly this route; never guess a model name. "
+            "This is a headless run that ends when you reply: run commands in the foreground and finish before answering.\n\n"
             + prompt
         )
     guarantee = (
@@ -900,6 +901,13 @@ def execute(
                     semantic[key] = parsed_line[key]
             if parsed_line["terminal"] and terminal_at is None:
                 terminal_at = time.monotonic()
+            elif not parsed_line["terminal"] and (
+                event.get("type") in {"assistant", "user"}
+                or (event.get("type") == "system" and event.get("subtype") == "init")
+            ):
+                # A resumed Claude session settles leftover background tasks with
+                # an empty result before its real turn; later activity reopens it.
+                terminal_at = None
             if parsed_line["status"] not in {"ok", "input_required"} and parsed_line["signature"] != "empty_output":
                 failure = {key: parsed_line[key] for key in ("status", "signature", "excerpt", "reset_at", "retry_after")}
                 if event.get("type") == "api_retry":
