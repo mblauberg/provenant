@@ -1381,6 +1381,7 @@ def execute(
             ("GIT_", "PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")
         ) or key in {
             "PROVENANT_FABRIC_PHASES",
+            "PROVENANT_NO_OS_CONFINEMENT",
             "AGENT_FABRIC_STATE_DIRECTORY",
             "AGENT_FABRIC_SEAT",
             "AGENT_FABRIC_CLIENT_LABEL",
