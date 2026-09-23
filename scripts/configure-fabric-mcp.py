@@ -246,7 +246,8 @@ def opencode_update(
         for item in entries:
             expanded = Path(item).expanduser()
             if expanded in {instance_doctrine, harness, previous_harness} or (
-                expanded == Path.home() / ".agents/HARNESS.md" and not expanded.exists()
+                expanded in {Path.home() / ".agents/HARNESS.md", instance_doctrine.parent / "HARNESS.md"}
+                and not expanded.exists()
             ):
                 continue
             retained.append(item)

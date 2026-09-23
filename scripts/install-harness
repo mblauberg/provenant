@@ -341,7 +341,7 @@ for primary in "${primary_platforms[@]}"; do
   fi
   selected_platforms+=("$primary")
 done
-primary_platforms=("${selected_platforms[@]}")
+primary_platforms=(${selected_platforms[@]+"${selected_platforms[@]}"})
 
 # Refuse a command collision before any installation mutation. Publication
 # revalidates this state and uses atomic no-replace or exchange primitives.
@@ -388,7 +388,7 @@ required_client() {
 if [[ "$MCP_CLIENTS" == "all" ]]; then
   mcp_platforms=(claude codex cursor agy kiro opencode)
 else
-  mcp_platforms=("${primary_platforms[@]}")
+  mcp_platforms=(${primary_platforms[@]+"${primary_platforms[@]}"})
 fi
 mcp_ready=()
 for client in "${mcp_platforms[@]}"; do
@@ -410,7 +410,7 @@ for client in "${mcp_platforms[@]}"; do
   fi
   mcp_ready+=("$client")
 done
-mcp_platforms=("${mcp_ready[@]}")
+mcp_platforms=(${mcp_ready[@]+"${mcp_ready[@]}"})
 selected_platforms=()
 for primary in "${primary_platforms[@]}"; do
   skip=0
@@ -419,7 +419,7 @@ for primary in "${primary_platforms[@]}"; do
   done
   [[ "$skip" == 0 ]] && selected_platforms+=("$primary")
 done
-primary_platforms=("${selected_platforms[@]}")
+primary_platforms=(${selected_platforms[@]+"${selected_platforms[@]}"})
 
 if [[ "$REQUESTED_PLATFORM" == "codex" || "$REQUESTED_PLATFORM" == "all" ]]; then
   select_primary codex
