@@ -109,3 +109,25 @@ def test_cooldown_identity_strips_provider_effort_suffix(tmp_path, model):
     path = tmp_path / 'cooldowns.json'
     records().write_cooldown(row, path=path)
     assert set(json.loads(path.read_text())['cooldowns']) == {'cursor/grok-4.7'}
+
+
+def test_cooldown_path_uses_state_root_between_override_and_default(tmp_path, monkeypatch):
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path))
+    monkeypatch.delenv('FABRIC_COOLDOWNS_PATH', raising=False)
+    assert records().cooldown_path() == tmp_path / 'cooldowns.json'
+    override = tmp_path / 'explicit.json'
+    monkeypatch.setenv('FABRIC_COOLDOWNS_PATH', str(override))
+    assert records().cooldown_path() == override
+
+
+def test_malformed_catalogue_keeps_cooldown_identity_and_warns(tmp_path, monkeypatch):
+    from skills.orchestrate.scripts import exec_routing
+    monkeypatch.setattr(exec_routing, 'snapshot', lambda: {'adapters': {'codex': {'models': [{}]}}})
+    row = json.loads((FIX / 'attempt.json').read_text())
+    row['status'] = 'rate_limited'
+    row['provenance']['requested']['adapter'] = 'codex'
+    row['provenance']['resolved_model'] = 'raw-model'
+    path = tmp_path / 'cooldowns.json'
+    records().write_cooldown(row, path=path)
+    assert 'codex/raw-model' in json.loads(path.read_text())['cooldowns']
+    assert any('catalogue' in warning for warning in row['warnings'])

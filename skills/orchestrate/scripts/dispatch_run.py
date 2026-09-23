@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 import tempfile
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -1148,6 +1149,25 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     return row
 
 
+def resume_relaunch_context(run_dir, previous):
+    tail=""
+    result=previous["paths"].get("result")
+    if result:
+        retained=retained_path(run_dir,result)
+        try:
+            (run_dir / retained).lstat()
+        except FileNotFoundError:
+            pass  # An interrupted provider may never have produced a result.
+        else:
+            fd, _, _ = open_contained_regular(run_dir, retained, os.O_RDONLY, label="resume result")
+            try:
+                os.lseek(fd,max(0,os.fstat(fd).st_size-4096),os.SEEK_SET)
+                tail=os.read(fd,4096).decode(errors="replace")
+            finally:
+                os.close(fd)
+    return (previous.get("question") or "")+"\n"+tail
+
+
 def prepare_resume(args):
     paths=sorted((args.run_dir.resolve()/"tasks").glob("*/attempt-*/attempt.json"))
     rows=[json.loads(path.read_text()) for path in paths]
@@ -1170,20 +1190,37 @@ def prepare_resume(args):
     for field in ("intent", "orchestrator_family", "role", "risk_tier", "model_override_tier", "reviewer_id", "preface"):
         if field in route:
             setattr(args, field, route[field])
-    if not args.resume_session or args.tool=="copilot":
-        args.resume_session=None
-        tail=""
-        result=previous["paths"].get("result")
-        if result:
-            retained = retained_path(args.run_dir, result)
+    args.resume_previous=previous
+    observed_session=False
+    if args.tool=="claude" and previous["status"] in {"timed_out","cancelled","stalled","interrupted"}:
+        events=previous["paths"].get("events")
+        if events:
+            retained=retained_path(args.run_dir,events)
             try:
                 (args.run_dir / retained).lstat()
             except FileNotFoundError:
-                pass  # An interrupted provider may never have produced a result.
+                data=b""
             else:
-                data = read_bound_bytes(args.run_dir, retained, label="resume result")
-                tail = data[-4096:].decode(errors="replace")
-        args.resume_relaunch=(previous.get("question") or "")+"\n"+tail
+                data=read_bound_bytes(args.run_dir,retained,label="resume events")
+            for line in data.splitlines():
+                if b'"session_id"' not in line:
+                    continue
+                try:
+                    event=json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(event,dict) and event.get("session_id")==args.resume_session:
+                    observed_session=True
+                    break
+    if not args.resume_session or args.tool=="copilot" or (
+        args.tool=="claude" and previous["status"] in {"timed_out","cancelled","stalled","interrupted"}
+        and not observed_session
+    ):
+        if (args.tool=="claude" and previous["mode"]=="worktree_write"
+            and previous["status"] in {"timed_out","cancelled","stalled","interrupted"}):
+            raise ValueError("Claude session unavailable after incomplete writer turn; review worktree changes, then dispatch a new run")
+        args.resume_session=None
+        args.resume_relaunch=resume_relaunch_context(args.run_dir,previous)
     receipt=json.loads(read_bound_bytes(args.run_dir,"RUN_RECEIPT.json",label="RUN_RECEIPT.json"))
     receipt.update(status="active",closed_at=None)
     write_owned(args.run_dir,args.run_dir/"RUN_RECEIPT.json",json.dumps(receipt,indent=2)+"\n")
@@ -1375,7 +1412,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             except ValueError: plan = {"status":"rejected","fix":"route planner returned invalid JSON"}
             if plan.get("schema") == "fabric.exec-plan.v1":
                 plan.update(timeout_seconds=args.timeout_seconds,run_id=run_identity(run_dir,run_receipt),chair=os.environ.get("PROVENANT_CHAIR") or os.environ.get("AGENT_FABRIC_SEAT", ""),fallback_from=getattr(args,"fallback_from",None))
-                if getattr(args,"resume_relaunch",None):
+                if hasattr(args,"resume_relaunch"):
                     plan["prompt"] += "\n\nPrevious turn and question:\n"+args.resume_relaunch
                     plan["argv"] = provider_exec.profile(args.tool).argv(plan)
                 cooling=exec_routing.cooling(args.tool,plan["model"])
@@ -1417,7 +1454,29 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     return owner_cancel[0] or cancellation_marker_present(run_dir,attempt_dir) or (batch_dir is not None and cancellation_marker_present(run_dir,batch_dir))
                 adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
                     on_start=provider_started,on_progress=progress,cancelled=cancellation)
-                if getattr(args,"resume_relaunch",None): adapter_record["provenance"]["notes"].append("resumed_by_relaunch")
+                if (args.resume and args.tool=="claude" and plan.get("resume_session")
+                    and adapter_record.get("status")=="failed"
+                    and re.search(r"no conversation found",adapter_record.get("evidence",{}).get("excerpt") or "",re.I)):
+                    previous=args.resume_previous
+                    if (previous["mode"]=="worktree_write" and previous["status"] in {"timed_out","cancelled","stalled","interrupted"}):
+                        adapter_record["status"]="rejected"
+                        adapter_record["fix"]="Review worktree changes, then dispatch a new run."
+                        adapter_record["evidence"]["signature"]="resume_session_missing"
+                    else:
+                        for diagnostic in (attempt_dir/"events.jsonl",stderr_path):
+                            if diagnostic.exists(): diagnostic.rename(diagnostic.with_name(diagnostic.name+".resume-failed"))
+                        plan["resume_session"]=None
+                        plan["session_id"]=str(uuid.uuid4())
+                        args.resume_relaunch=resume_relaunch_context(run_dir,previous)
+                        plan["prompt"] += "\n\nPrevious turn and question:\n"+args.resume_relaunch
+                        plan["argv"]=provider_exec.profile(args.tool).argv(plan)
+                        active["session_id"]=plan["session_id"]
+                        publish_contract(run_dir,active)
+                        adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
+                            on_start=provider_started,on_progress=progress,cancelled=cancellation)
+                if hasattr(args,"resume_relaunch"):
+                    adapter_record["provenance"]["notes"].append("resumed_by_relaunch")
+                    adapter_record["warnings"].append("resume: relaunched")
                 args._last_plan=plan
             else:
                 adapter_record=plan
@@ -1770,12 +1829,12 @@ def close_mcp_run(run_dir: Path) -> None:
         receipt = json.loads(read_bound_bytes(run_dir, "RUN_RECEIPT.json", label="RUN_RECEIPT.json"))
         if receipt.get("status") != "active":
             return
-        statuses = {record["status"] for record in records}
+        statuses_by_task = {record["task_id"]: record["status"] for record in records}
         for summary_path in (run_dir / "dispatch/batches").glob("*/summary.json"):
             summary = json.loads(read_bound_bytes(run_dir, summary_path.relative_to(run_dir), label="summary.json"))
             if summary.get("status") not in {"completed", "failed", "cancelled"}:
                 return
-            statuses.update(task.get("status", "failed") for task in summary.get("tasks", []))
+            statuses_by_task.update({task["task_id"]: task.get("status", "failed") for task in summary.get("tasks", [])})
         canonical = [json.loads(read_bound_bytes(run_dir, path.relative_to(run_dir), label="attempt.json"))
                      for path in (run_dir / "tasks").glob("*/attempt-*/attempt.json")]
         if canonical:
@@ -1787,9 +1846,11 @@ def close_mcp_run(run_dir: Path) -> None:
             receipt["attempts"]=sorted(canonical,key=lambda row:(row["task_id"],row["attempt"]))
             receipt["run_id"]=canonical[0]["run_id"]
             receipt["resumable"]=any(row.get("status")=="input_required" for row in latest.values())
-            statuses={"succeeded" if row["status"]=="ok" else row["status"] for row in latest.values()}
+            statuses_by_task.update({task_id: "succeeded" if row["status"]=="ok" else row["status"]
+                                     for task_id, row in latest.items()})
         elif any(record.get("status") not in {"succeeded", "failed", "blocked", "timed_out", "cancelled"} for record in records):
             return
+        statuses = set(statuses_by_task.values())
         if not statuses:
             return
         receipt.update(status="succeeded" if statuses == {"succeeded"} else "cancelled" if statuses == {"cancelled"} else "failed",

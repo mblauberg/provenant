@@ -2052,6 +2052,24 @@ def test_close_mcp_run_reads_canonical_single_task_attempts(tmp_path):
     assert receipt['attempts'] == [row]
 
 
+def test_close_mcp_run_includes_batch_tasks_without_canonical_attempts(tmp_path):
+    mod = load_dispatch_module()
+    run = Path(subprocess.check_output([str(INIT), '--kind', 'batch'], cwd=tmp_path, text=True).strip())
+    row = json.loads((ROOT / 'tests/fixtures/fabric-v1/attempt.json').read_text())
+    path = run / 'tasks/finished/attempt-001/attempt.json'
+    path.parent.mkdir(parents=True)
+    row['task_id'] = 'finished'
+    path.write_text(json.dumps(row))
+    summary = run / 'dispatch/batches/batch-001/summary.json'
+    summary.parent.mkdir(parents=True)
+    summary.write_text(json.dumps({'status': 'completed', 'tasks': [
+        {'task_id': 'finished', 'status': 'succeeded'},
+        {'task_id': 'busy', 'status': 'worktree_busy'},
+    ]}))
+    mod.close_mcp_run(run)
+    assert json.loads((run / 'RUN_RECEIPT.json').read_text())['status'] == 'failed'
+
+
 @pytest.mark.parametrize('stop', ['marker', 'SIGTERM', 'timeout'])
 def test_real_dispatcher_stops_group_releases_writer_lease_and_closes_receipt(tmp_path, monkeypatch, stop):
     code = '''import json, os, subprocess, sys, time
@@ -2105,8 +2123,16 @@ def test_real_dispatcher_restores_signal_handlers(tmp_path, monkeypatch):
     assert {sig: signal.getsignal(sig) for sig in handlers} == handlers
 
 
-def test_interrupted_attempt_resumes_from_nested_cwd_with_absolute_caller_prompt(tmp_path, monkeypatch):
-    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, 'import sys,json,os\nsys.stdin.read()\nprint(json.dumps({"type":"result","result":os.getcwd()}))\n')
+@pytest.mark.parametrize('previous_status', ['interrupted', 'timed_out', 'cancelled', 'stalled'])
+def test_interrupted_attempt_resumes_from_nested_cwd_with_absolute_caller_prompt(tmp_path, monkeypatch, previous_status):
+    code = '''import sys,json,os
+prompt = sys.stdin.read()
+if '--resume' in sys.argv:
+ print('No conversation found with session ID', file=sys.stderr)
+ sys.exit(1)
+print(json.dumps({"type":"result","result":os.getcwd()}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
     nested = tmp_path / 'src'
     nested.mkdir()
     first = subprocess.run([*command, '--cwd', str(nested), '--no-preface'], cwd=tmp_path, capture_output=True, text=True)
@@ -2115,12 +2141,13 @@ def test_interrupted_attempt_resumes_from_nested_cwd_with_absolute_caller_prompt
     row = json.loads(path.read_text())
     # Model the B-owner recovery contract: terminal interrupted canonical row,
     # before the owner could publish its legacy terminal evidence.
-    row.update(status='interrupted', state='terminal', session_id=None)
+    row.update(status=previous_status, state='terminal')
     path.write_text(json.dumps(row))
-    legacy_path = run / row['legacy_attempt_path']
-    legacy_path.unlink()
-    legacy_path.with_name('attempt.sha256').unlink()
-    (run / row['paths']['result']).unlink()
+    if previous_status == 'interrupted':
+        legacy_path = run / row['legacy_attempt_path']
+        legacy_path.unlink()
+        legacy_path.with_name('attempt.sha256').unlink()
+        (run / row['paths']['result']).unlink()
     receipt = json.loads((run / 'RUN_RECEIPT.json').read_text())
     receipt['status'] = 'interrupted'
     (run / 'RUN_RECEIPT.json').write_text(json.dumps(receipt))
@@ -2133,3 +2160,48 @@ def test_interrupted_attempt_resumes_from_nested_cwd_with_absolute_caller_prompt
     assert second['cwd'] == str(nested)
     assert second['requested_route']['preface'] is False
     assert second['requested_route']['intent'] == row['requested_route']['intent']
+    assert 'resumed_by_relaunch' in second['provenance']['notes']
+    assert 'resume: relaunched' in second['warnings']
+
+
+def test_claude_resume_relaunches_when_saved_session_is_missing(tmp_path, monkeypatch):
+    code = '''import json,sys
+prompt = sys.stdin.read()
+if '--resume' in sys.argv:
+ print('No conversation found with session ID', file=sys.stderr)
+ sys.exit(1)
+print(json.dumps({'type':'system','subtype':'init','session_id':'saved-session','model':'opus'}))
+print(json.dumps({'type':'result','result':'DONE'}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    first = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
+    assert first.returncode == 0, first.stdout + first.stderr
+    previous = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
+    assert previous['session_id'] == 'saved-session'
+    resumed = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', previous['run_id'],
+                              '--prompt-file', str(prompt)], cwd=tmp_path, capture_output=True, text=True)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    row = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
+    assert row['status'] == 'ok'
+    assert 'resumed_by_relaunch' in row['provenance']['notes']
+    assert 'resume: relaunched' in row['warnings']
+
+
+def test_incomplete_writer_without_claude_session_returns_typed_fix(tmp_path):
+    mod = load_dispatch_module()
+    run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())
+    row = json.loads((ROOT / 'tests/fixtures/fabric-v1/attempt.json').read_text())
+    row.update(run_id=run.name, status='timed_out', mode='worktree_write', cwd=str(tmp_path),
+               worktree=str(tmp_path), session_id='generated-but-unobserved')
+    row['provenance']['requested']['adapter'] = 'claude'
+    path = run / 'tasks/task-1/attempt-001/attempt.json'
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(row))
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('continue')
+    result = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', row['run_id'],
+                             '--prompt-file', str(prompt)], cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode != 0
+    response = json.loads(result.stdout)
+    assert response['status'] == 'rejected'
+    assert 'review worktree' in response['message'].lower()

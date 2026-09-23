@@ -79,21 +79,29 @@ def validate_policy(policy):
     return policy
 
 
-def registered_model(adapter, model, catalogue=None):
+def registered_model(adapter, model, catalogue=None, warnings=None):
     """Cooldown identity: adapter plus registered id, never an effort selector."""
     model = model.partition("@")[0]
     if model == "*":
         return model
     catalogue = snapshot() if catalogue is None else catalogue
-    if adapter not in catalogue.get("adapters", {}):
+    try:
+        if adapter not in catalogue.get("adapters", {}):
+            return model
+        # The router owns alias, retired-name and provider-suffix resolution.
+        product = Path(os.environ.get("AGENT_FABRIC_PRODUCT_ROOT") or Path(__file__).resolve().parents[3])
+        spec = importlib.util.spec_from_file_location("fabric_model_route", product / "scripts/model_route.py")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        entry, _ = module._registered_match(adapter, model, catalogue)
+        return entry["id"] if entry else model
+    except (KeyError, AttributeError, TypeError, ValueError) as exc:
+        warning = f"catalogue malformed for {adapter}/{model}; using raw model ({type(exc).__name__})"
+        if warnings is not None:
+            warnings.append(warning)
+        else:
+            print(warning, file=sys.stderr)
         return model
-    # The router owns alias, retired-name and provider-suffix resolution.
-    product = Path(os.environ.get("AGENT_FABRIC_PRODUCT_ROOT") or Path(__file__).resolve().parents[3])
-    spec = importlib.util.spec_from_file_location("fabric_model_route", product / "scripts/model_route.py")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    entry, _ = module._registered_match(adapter, model, catalogue)
-    return entry["id"] if entry else model
 
 
 

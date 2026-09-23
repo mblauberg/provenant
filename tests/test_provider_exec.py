@@ -269,8 +269,7 @@ def test_preface_env_and_credential_path_controls(tmp_path):
     assert plan["prompt"].startswith("You are codex/fixture@high via Fabric.")
     secrets = tmp_path / ".ssh"
     secrets.mkdir()
-    with pytest.raises(ValueError, match="credential"):
-        fixture_plan(tmp_path, "", add_dirs=[secrets])
+    assert str(secrets) not in fixture_plan(tmp_path, "", add_dirs=[secrets])['applied']['add_dirs']
     with pytest.raises(ValueError, match="read-only"):
         fixture_plan(tmp_path, "", sandbox="workspace-write")
 
@@ -740,14 +739,32 @@ def test_add_dirs_deny_ancestors_of_credential_stores(tmp_path, monkeypatch, dir
     monkeypatch.setenv('HOME', str(tmp_path))
     target = tmp_path / directory
     target.mkdir(parents=True)
-    with pytest.raises(ValueError, match='credential'):
-        supervisor().build_plan('codex', {}, 'hello', cwd=tmp_path, add_dirs=[target])
+    plan = supervisor().build_plan('codex', {}, 'hello', cwd=tmp_path, add_dirs=[target])
+    assert str(target) not in plan['applied']['add_dirs']
+    assert any('credential' in warning for warning in plan['warnings'])
 
 
 def test_opencode_does_not_claim_unsupported_add_dirs(tmp_path):
     plan = supervisor().build_plan('opencode', {}, 'hello', cwd=tmp_path, add_dirs=[tmp_path])
     assert plan['applied']['add_dirs'] == []
     assert 'additional directories unsupported by opencode' in plan['warnings']
+
+
+@pytest.mark.parametrize('directory', [
+    '.gemini', '.cursor', '.kiro', '.docker', '.kube', '.config/opencode',
+    '.config/gh', '.config/gcloud', '.aws', '.ssh', '.gnupg', '.netrc',
+    '.npmrc', '.local/share/opencode/auth.json',
+])
+def test_add_dirs_warns_and_drops_credential_stores(tmp_path, monkeypatch, directory):
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    target = tmp_path / directory
+    target.mkdir(parents=True)
+    safe = tmp_path / 'source'
+    safe.mkdir()
+    plan = supervisor().build_plan('codex', {}, 'hello', cwd=tmp_path, add_dirs=[target, safe])
+    assert str(target) not in plan['applied']['add_dirs']
+    assert str(safe) in plan['applied']['add_dirs']
+    assert any('credential' in warning for warning in plan['warnings'])
 
 
 def test_failure_classification_uses_diagnostics_not_answer_prose():

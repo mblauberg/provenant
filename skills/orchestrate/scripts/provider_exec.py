@@ -33,15 +33,17 @@ def credential_path(path):
     home = Path.home().resolve()
     stores = [home / name for name in (
         '.ssh', '.aws', '.azure', '.gnupg', '.codex', '.claude',
+        '.gemini', '.cursor', '.kiro', '.docker', '.kube', '.netrc', '.npmrc',
         '.config/gh', '.config/gcloud', '.config/claude', '.config/codex',
-        '.config/openai', '.local/share/opencode', 'Library/Keychains',
+        '.config/openai', '.config/opencode', '.local/share/opencode', 'Library/Keychains',
         'Library/Application Support',
     )]
     if any(candidate.is_relative_to(store) or store.is_relative_to(candidate) for store in stores):
         return True
     parts = [part.lower() for part in candidate.parts]
     return (
-        bool(set(parts) & {".ssh", ".aws", ".azure", ".gnupg", ".codex", ".claude"})
+        bool(set(parts) & {".ssh", ".aws", ".azure", ".gnupg", ".codex", ".claude",
+                           ".gemini", ".cursor", ".kiro", ".docker", ".kube", ".netrc", ".npmrc"})
         or any(
             part
             in {
@@ -59,7 +61,7 @@ def credential_path(path):
         or any(
             part == ".config"
             and index + 1 < len(parts)
-            and parts[index + 1] in {"gcloud", "gh", "claude", "codex", "openai"}
+            and parts[index + 1] in {"gcloud", "gh", "claude", "codex", "openai", "opencode"}
             for index, part in enumerate(parts)
         )
         or any(
@@ -111,11 +113,14 @@ def build_plan(
     directories = list(
         dict.fromkeys(str(Path(p).expanduser().resolve()) for p in add_dirs)
     )
-    if any(
-        credential_path(p) or Path.home().resolve().is_relative_to(Path(p))
-        for p in directories
-    ):
-        raise ValueError("credential or authentication store denied")
+    warnings = list(route.get("notes") or [])
+    safe_directories = []
+    for directory in directories:
+        if credential_path(directory) or Path.home().resolve().is_relative_to(Path(directory)):
+            warnings.append("credential or authentication add-dir dropped: " + directory)
+        else:
+            safe_directories.append(directory)
+    directories = safe_directories
     if any(not Path(p).is_dir() for p in directories):
         raise ValueError("add-dir must be a readable directory")
     if mode == "worktree_write" and Path(cwd, ".git").is_file():
@@ -138,7 +143,6 @@ def build_plan(
     effort = route.get("effort_applied", route.get("effort")) or ""
     if effort == "default":
         effort = ""
-    warnings = list(route.get("notes") or [])
     if effort and config.EFFORT_FLAG is None:
         warnings.append(f"{adapter} does not expose effort control; requested {effort}")
         effort = ""

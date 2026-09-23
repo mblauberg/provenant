@@ -116,10 +116,11 @@ def render_digest(row):
 
 
 def cooldown_path():
-    return Path(
-        os.environ.get("FABRIC_COOLDOWNS_PATH")
-        or Path.home() / ".local/state/agent-harness/fabric/cooldowns.json"
-    )
+    if os.environ.get("FABRIC_COOLDOWNS_PATH"):
+        return Path(os.environ["FABRIC_COOLDOWNS_PATH"])
+    if os.environ.get("AGENT_FABRIC_STATE_ROOT"):
+        return Path(os.environ["AGENT_FABRIC_STATE_ROOT"]) / "cooldowns.json"
+    return Path.home() / ".local/state/agent-harness/fabric/cooldowns.json"
 
 
 def store_parent(path):
@@ -195,7 +196,7 @@ def write_cooldown(row, *, path=None, at=None):
     at = at or datetime.now(UTC)
     prov = row["provenance"]
     adapter = prov["requested"]["adapter"]
-    model = registered_model(adapter, prov["resolved_model"] or "*")
+    model = registered_model(adapter, prov["resolved_model"] or "*", warnings=row.setdefault("warnings", []))
     excerpt = row.get("evidence", {}).get("excerpt", "")
     if row["status"] == "usage_limited" and re.search(
         r"(?:usage|session|weekly|account|plan) limit|individual quota reached|insufficient_quota", excerpt, re.I
