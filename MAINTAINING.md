@@ -217,6 +217,10 @@ scripts/public-release-check
 git diff --check
 ```
 
+`provenant gate` runs exactly that list as one composite, with per-step
+pass/fail output and a non-zero exit when any step fails (`scripts/gate`
+owns the steps; a contract test binds them to this block).
+
 Audit every ref reachable in the local clone with:
 
 ```sh

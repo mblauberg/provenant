@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# Composite verification gate (#830). GATE_STEPS mirrors the fenced list in
+# MAINTAINING.md; tests/test_ci_repository_assurance_policy.py binds the two.
+set -u
+
+[[ $# -eq 0 ]] || { echo "usage: gate" >&2; exit 2; }
+
+# The steps verify this checkout, so Git discovery must not inherit caller
+# redirects that would point a step at another repository.
+unset GIT_DIR GIT_WORK_TREE GIT_COMMON_DIR GIT_INDEX_FILE
+unset GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+unset GIT_CEILING_DIRECTORIES GIT_DISCOVERY_ACROSS_FILESYSTEM
+
+requested_product_root="${AGENT_FABRIC_PRODUCT_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+cd -P -- "$requested_product_root" 2>/dev/null || {
+  echo "gate: product root is unavailable: $requested_product_root" >&2
+  exit 3
+}
+PRODUCT_ROOT="$PWD"
+
+GATE_STEPS=(
+  "check-harness|scripts/check-harness"
+  "workspace-checks|npm run check"
+  "fabric-package-install|npm run test:package-install --workspace @local/fabric"
+  "fabric-mcp-smoke|node runtime/fabric/mcp-smoke.mjs"
+  "fabric-dependency-audit|npm audit --workspace=@local/fabric --omit=dev --audit-level=high"
+  "static-security|scripts/static-security-check.py"
+  "public-release|scripts/public-release-check"
+  "diff-hygiene|git diff --check"
+)
+
+log_root="${GATE_LOG_DIR:-$PRODUCT_ROOT/.agent-run/gate-logs}"
+run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+run_logs="$log_root/$run_id"
+mkdir -p -- "$run_logs" || { echo "gate: cannot create log directory: $run_logs" >&2; exit 3; }
+failed=0
+for entry in "${GATE_STEPS[@]}"; do
+  name="${entry%%|*}"
+  command="${entry#*|}"
+  log_file="$run_logs/$name.log"
+  started=$SECONDS
+  if eval "$command" >"$log_file" 2>&1; then
+    printf 'ok %s %ss\n' "$name" "$((SECONDS - started))"
+  else
+    failed=$((failed + 1))
+    printf 'FAIL %s %ss\n' "$name" "$((SECONDS - started))"
+    printf 'log: %s\n' "$log_file"
+    tail -n 20 -- "$log_file"
+  fi
+done
+
+if [[ "$failed" -ne 0 ]]; then
+  exit 1
+fi
