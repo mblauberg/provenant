@@ -88,11 +88,7 @@ export interface TerminationOutcome {
   reason?: string;
 }
 
-/**
- * A pid alone is not an identity: the kernel recycles it. `ps -o lstart=` gives
- * a stable start timestamp for the same pid, so a record can be matched against
- * the process it was written for. Both macOS and procps support this field.
- */
+/** `ps` start time distinguishes a live process from a recycled PID. */
 function readProcessStartedAt(pid: number, canonical: boolean): string | null {
   if (!Number.isInteger(pid) || pid <= 1) return null;
   try {
@@ -113,11 +109,7 @@ export function processStartedAt(pid: number): string | null {
   return readProcessStartedAt(pid, true);
 }
 
-/**
- * Is this pid still the process the record was written for? Fails closed: an
- * unverifiable pid is never signalled, because signalling a recycled pid is
- * worse than leaving one stray process for the next dispatch to find.
- */
+/** Refuse to signal a PID whose recorded start time cannot be verified. */
 export function processMatches(pid: number, startedAt: string | null): boolean {
   if (!Number.isInteger(pid) || pid <= 1) return false;
   if (startedAt === null) return false;
