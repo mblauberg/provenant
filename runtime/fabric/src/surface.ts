@@ -57,7 +57,10 @@ function digestBase(row: Record<string, any>): string {
 }
 export function digest(row: Record<string, any>): string {
   const base = digestBase(row);
-  const warnings = Array.isArray(row.warnings) ? row.warnings.join("\n") : "";
+  // Python's digest may already carry its warnings; add only the rest.
+  const warnings = Array.isArray(row.warnings)
+    ? row.warnings.map(String).filter((item) => !base.includes(item.replace(/^!\s*/u, ""))).join("\n")
+    : "";
   return warnings ? `${base}${base ? "\n" : ""}${warnings}` : base;
 }
 /** Keep the default structured reply as small as its text digest. */

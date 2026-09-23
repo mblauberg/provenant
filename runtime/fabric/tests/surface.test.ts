@@ -71,6 +71,15 @@ it("adds numeric clamp warnings to the returned digest", async () => {
     .toBe("ok mcp-warning\n! wait_seconds 56 clamped to 55");
 });
 
+it("does not repeat warnings the execution digest already carries", async () => {
+  const { digest } = await import("../src/surface.js");
+  const row = {
+    status: "ok", run_id: "mcp-dup", digest: "ok mcp-dup claude/opus 3s\n  ! resuming a ~620k-token session",
+    warnings: ["resuming a ~620k-token session", "! wait_seconds 56 clamped to 55"],
+  };
+  expect(digest(row)).toBe("ok mcp-dup claude/opus 3s\n  ! resuming a ~620k-token session\n! wait_seconds 56 clamped to 55");
+});
+
 it("leaves per-task context to the digest in brief rows", async () => {
   const { runView } = await import("../src/surface.js");
   const context = { context_tokens: 212000, input_tokens: null, output_tokens: null, cached_input_tokens: null,
