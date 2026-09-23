@@ -1096,6 +1096,7 @@ class _Descendants:
             for identity, row in self.live(rows).items() if identity != self.root
         })
         self.signal(signal.SIGKILL)
+        self.spared_at_stop.update(self.spared)
         try:
             self.process.wait(timeout=2)
         except subprocess.TimeoutExpired:
@@ -1117,7 +1118,8 @@ class _Descendants:
                 if not remaining or time.monotonic() >= deadline:
                     break
                 time.sleep(0.02)
-        return list(leftovers.values())
+        return [item for identity, item in leftovers.items()
+                if identity not in self.spared_at_stop]
 
 
 def _enable_subreaper():

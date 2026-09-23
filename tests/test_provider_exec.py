@@ -619,6 +619,46 @@ def test_tracked_pre_exec_child_is_rechecked_before_signal(tmp_path, monkeypatch
     assert ("pid", owner.pid) not in signals
 
 
+def test_owner_promoted_at_signal_is_not_reported_as_reaped(tmp_path, monkeypatch):
+    module = supervisor()
+    root = module._ProcessRow(501, os.getpid(), 501, str(int(time.time())), "root")
+    owner = module._ProcessRow(502, 501, 502, str(int(time.time())), "owner")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(),
+                                             str(int(time.time())), "test"),
+            501: root, 502: owner}
+    run_dir = tmp_path / "nested-run"
+    environment = []
+    signals = []
+    process = type("Process", (), {"pid": 501, "poll": lambda self: None,
+                                   "wait": lambda self, timeout: None})()
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: rows)
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: None)
+        patch.setattr(module, "_process_environment", lambda pid: environment if pid == 502 else ())
+        patch.setattr(module.os, "killpg", lambda pgid, signum: signals.append(("group", pgid)))
+        patch.setattr(module.os, "kill", lambda pid, signum: signals.append(("pid", pid)))
+        tracker = module._Descendants(process, "fixture")
+        tracker.sample()
+        original_sample = tracker.sample
+        published = []
+
+        def publish_after_snapshot(*args, **kwargs):
+            snapshot = original_sample(*args, **kwargs)
+            if not published:
+                _write_fake_owner_record(module, run_dir, owner, "inner-token")
+                environment[:] = [b"PROVENANT_RUN_TOKEN=inner-token",
+                                  ("PROVENANT_RUN_DIR=" + str(run_dir)).encode()]
+                published.append(True)
+            return snapshot
+
+        patch.setattr(tracker, "sample", publish_after_snapshot)
+        reaped = tracker.stop(root_grace=0.1, descendant_grace=0.02)
+    assert reaped == []
+    assert owner.identity in tracker.spared_at_stop
+    assert ("group", owner.pgid) not in signals
+    assert ("pid", owner.pid) not in signals
+
+
 def test_token_without_owner_record_is_not_nested_owner(tmp_path, monkeypatch):
     module = supervisor()
     row = module._ProcessRow(502, 501, 502, str(int(time.time())), "sleep")
