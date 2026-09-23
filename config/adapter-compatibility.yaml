@@ -151,6 +151,7 @@ adapters:
         - darwin-arm64
     model_family_constraints:
       allowed:
+        - generic-open
         - cursor-composer
         - xai
         - anthropic
@@ -181,8 +182,7 @@ adapters:
     official_source_url: "https://docs.github.com/en/copilot/how-tos/use-copilot-cli"
 
   kiro-acp:
-    enabled: false
-    disabled_reason: "Provider execution is dormant until one bounded ordinary Kiro invocation and safety boundary are verified."
+    enabled: true
     delivery_stage: 4
     implementation:
       kind: native-cli
@@ -250,7 +250,10 @@ adapters:
         - cursor-composer
       allowed_model_patterns:
         - "opencode/*"
-      requires_explicit_model: true
+        - "opencode-go/*"
+        - "openrouter/*"
+        - "*/*"
+      requires_explicit_model: false
       route_role: optional-free-account-worker
     official_source_url: "https://opencode.ai/docs/"
 
@@ -294,7 +297,9 @@ dispatch_registry:
     dispatch: unsupported
   kiro:
     dispatch: implemented
-    read_only_guarantee: none
+    read_only_guarantee: prompt_only
+    write_modes: [worktree_write]
   opencode:
     dispatch: implemented
-    read_only_guarantee: enforced
+    read_only_guarantee: best_effort
+    write_modes: [worktree_write]

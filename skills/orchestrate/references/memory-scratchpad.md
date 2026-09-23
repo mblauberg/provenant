@@ -69,6 +69,8 @@ project `MEMORY.md`), record only durable, non-obvious decisions there — not t
 ## Terminalisation and retention
 
 Every bounded run ends `succeeded`, `failed` or `cancelled` in `RUN_RECEIPT.json`.
+Run `provenant clean` for repository retention; it protects live, pinned and
+referenced capsules and lists unknown paths for triage.
 Use `scripts/run_dir_finalize.py`; successful runs require closed gates, valid
 manifest paths and no unlisted payload. Failed/cancelled runs retain a reason
 and useful partial evidence. `--prune-ephemeral` is dry-run; `--apply` removes

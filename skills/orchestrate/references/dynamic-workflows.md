@@ -37,7 +37,7 @@ small, inspectable, and bound to the portable contract. These saved-workflow con
   [memory-scratchpad.md](memory-scratchpad.md); return only a digest and path.
 - Use a serial applier for shared writes. Leave high-risk patches for a separate
   approve-then-apply stage with validation evidence.
-- Apply [verification.md](verification.md) and [cli-headless.md](cli-headless.md)
+- Apply [verification.md](verification.md) and [direct-cli-fallback.md](direct-cli-fallback.md)
   for clean-context, safe cross-family pressure. Record certified, advisory,
   and not-run outcomes distinctly.
 
@@ -60,5 +60,5 @@ small, inspectable, and bound to the portable contract. These saved-workflow con
   [memory-scratchpad.md](memory-scratchpad.md)
 - Claude/Codex routing policy: [routing-and-tiers.md](routing-and-tiers.md)
 - Cross-family verification: [verification.md](verification.md) and
-  [cli-headless.md](cli-headless.md)
+  [direct-cli-fallback.md](direct-cli-fallback.md)
 - Codex-native realisation: [codex-subagents.md](codex-subagents.md)

@@ -54,6 +54,16 @@ def test_direct_delivery_run_with_run_receipt_does_not_require_orchestration_sca
     assert "incomplete-run-index" not in codes(context_audit.audit(tmp_path))
 
 
+def test_new_layout_reads_runs_and_skips_sessions_and_scratch(tmp_path):
+    run = tmp_path / ".agent-run" / "runs" / "20260923-1000-dispatch-task-a1b2c3"
+    run.mkdir(parents=True)
+    (run / "RUN_RECEIPT.json").write_text('{"status":"ok"}')
+    (tmp_path / ".agent-run" / "runs" / "index.jsonl").write_text("{}\n")
+    (tmp_path / ".agent-run" / "sessions" / "20260923-chair").mkdir(parents=True)
+    (tmp_path / ".agent-run" / "scratch" / "temp").mkdir(parents=True)
+    assert "incomplete-run-index" not in codes(context_audit.audit(tmp_path))
+
+
 def test_audit_reports_incomplete_claude_workflow_run(tmp_path):
     run = tmp_path / ".work" / "wf" / "implement" / "one"
     run.mkdir(parents=True)

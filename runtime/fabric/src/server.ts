@@ -4,10 +4,13 @@ import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 
 import { databasePath, identify } from "./identity.js";
+import { statusRows, fabricOutput } from "./run-registry.js";
+import { reply, serverBuild, mailboxView, adapterView, runView } from "./surface.js";
 import { catalogueSnapshot } from "./catalogue.js";
 import {
   cancelActiveExecutions,
-  DISPATCH_ADAPTERS,
+  resumeConfiguredProvider,
+  cancelConfiguredRun,
   dispatchConfiguredBatch,
   dispatchConfiguredProvider,
   MAX_EXECUTION_WAIT_SECONDS,
@@ -19,7 +22,7 @@ import { isSQLiteContention, Store, type Message } from "./store.js";
 const MAX_WAIT_SECONDS = MAX_EXECUTION_WAIT_SECONDS;
 
 /**
- * One MCP process per agent, holding the store open directly.
+ * One MCP process per agent; announce at startup and retry lazily on contention.
  *
  * There is no handshake to fail, so there is no reconnect path, so there is no
  * class of error that reports "the daemon is unavailable" while the daemon is
@@ -40,13 +43,6 @@ const initialiseStore = (busyTimeoutMs = 5000): Store => {
   }
 };
 
-try {
-  initialiseStore();
-} catch {
-  // Keep the transport available. The first tool call retries initialisation,
-  // allowing transient SQLite locks to recover without a background process.
-}
-
 const readyStore = (busyTimeoutMs = 5000): Store => {
   if (store !== undefined) return store;
   try {
@@ -61,12 +57,9 @@ const server = new McpServer(
   { name: "fabric", version: "2.0.0" },
   {
     instructions:
-      "Fabric is a project-scoped mailbox, cooperative task ledger, and activity log. " +
-      "Use fabric_inbox to claim requests, persist any response before calling " +
-      "fabric_acknowledge, and correlate replies with reply_to. Create targeted " +
-      "tasks with an owner; owner is cooperative routing metadata, not an access-control boundary. " +
-      "Use fabric_dispatch or fabric_batch for ordinary configured-provider work; full output stays " +
-      "in the returned run paths.",
+      "Dispatch prompt or tasks (same prompt/route fields per task, optional id); status waits up to 55s. Copy the returned Route line for provenance. " +
+      "Full output stays in files; output reads bounded slices. Inbox peeks; claim ids, then acknowledge after processing. " +
+      "Writers require an owned worktree. Resume answers input_required. detail:full expands metadata.",
   },
 );
 /**
@@ -100,15 +93,13 @@ for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
     });
   });
 }
-process.on("exit", () => { terminateActiveExecutionGroups(); });
-
-/** Errors reach the caller intact. Nothing is swallowed and relabelled. */
-function reply(payload: unknown): { content: Array<{ type: "text"; text: string }> } {
-  return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }] };
-}
+process.on("exit", () => {
+  terminateActiveExecutionGroups();
+});
 
 const waitForInbox = async (
   options: {
+    ids?: string[];
     limit?: number;
     peek?: boolean;
     claimTtlMs?: number;
@@ -126,9 +117,7 @@ const waitForInbox = async (
     if (waitMs > 0 && remainingBeforeClaim <= 0) return [];
     let messages: Message[];
     try {
-      const busyTimeoutMs = waitMs === 0
-        ? undefined
-        : 1;
+      const busyTimeoutMs = waitMs === 0 ? undefined : 1;
       messages = readyStore(busyTimeoutMs).inbox(who, {
         ...options,
         busyTimeoutMs,
@@ -144,234 +133,267 @@ const waitForInbox = async (
   }
 };
 
-server.registerTool(
-  "fabric_whoami",
-  {
-    description: "Who am I, which project am I in, and who else is here.",
-    inputSchema: {},
-  },
-  () => reply({ ...who, database: databasePath(), agents: readyStore().agents(who.project) }),
-);
-
-server.registerTool(
-  "fabric_send",
-  {
-    description:
-      "Send a message to another agent, a team, or 'all' for everyone else in this project.",
-    inputSchema: {
-      to: z.string().describe("agent id, team id, or 'all'"),
-      body: z.string(),
-      kind: z.string().optional().describe("note, request, response, or anything you like"),
-      reply_to: z.string().optional().describe("message id this replies to"),
-      task_id: z.string().min(1).optional().describe("existing Fabric task to link"),
-      output_path: z.string().min(1).optional().describe("opaque output or run path metadata"),
-    },
-  },
-  ({ to, body, kind, reply_to, task_id, output_path }) =>
-    reply(readyStore().send(who, to, body, {
-      kind,
-      replyTo: reply_to,
-      taskId: task_id,
-      outputPath: output_path,
-    })),
-);
-
-server.registerTool(
-  "fabric_inbox",
-  {
-    description:
-      "Claim my unacknowledged messages. Peek observes without claiming; expired claims redeliver. " +
-      "Set wait_seconds for one bounded wait inside this MCP call; task_id limits the same atomic " +
-      "claim/peek to one Fabric task; never poll SQLite or start a watcher.",
-    inputSchema: {
-      limit: z.number().int().positive().optional(),
-      peek: z.boolean().optional(),
-      claim_seconds: z.number().int().min(1).max(3600).optional(),
-      task_id: z.string().min(1).optional(),
-      wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional(),
-    },
-  },
-  async ({ limit, peek, claim_seconds, task_id, wait_seconds }, { signal }) =>
-    reply(await waitForInbox({
-      limit,
-      peek,
-      claimTtlMs: claim_seconds === undefined ? undefined : claim_seconds * 1000,
-      taskId: task_id,
-    }, (wait_seconds ?? 0) * 1000, signal)),
-);
-
-// The whole routing surface: who runs it, which route, and how much access it
-// gets. Assurance selectors are absent rather than accepted and ignored, and the
-// schemas are strict, so a removed parameter is a typed input error.
-const routeInputSchema = {
-  // An enum, not a free string: an adapter the dispatcher cannot execute is a
-  // typed schema error here, before any run directory exists.
-  adapter: z.enum(DISPATCH_ADAPTERS).optional()
-    .describe("provider adapter; defaults to the current Fabric seat"),
-  alias: z.string().min(1).optional().describe("route alias; defaults to workhorse"),
-  mode: z.enum(["read_only", "worktree_write"]).optional()
-    .describe("read_only (default), or worktree_write with the worktree the worker owns"),
-  worktree: z.string().min(1).optional()
-    .describe("Git worktree root the worker owns exclusively; requires mode worktree_write"),
+const detail = z.enum(["brief", "full"]).optional();
+const str = z.string().optional();
+const wait = z.number().int().min(0).max(55).optional();
+const route = {
+  adapter: str,
+  alias: str,
+  model: str,
+  effort: str,
+  mode: z.enum(["read_only", "worktree_write"]).optional(),
+  worktree: str,
+  cwd: str,
+  network: z.boolean().optional(),
+  sandbox: z.enum(["read-only", "workspace-write", "full"]).optional(),
+  add_dirs: z.array(z.string()).optional(),
+  fallback: z
+    .union([z.boolean(), z.literal("any"), z.array(z.union([z.string(), z.record(z.string(), z.unknown())]))])
+    .optional(),
 };
-
-const batchTaskSchema = z.strictObject({
-  id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u).optional(),
-  prompt: z.string().optional(),
-  prompt_file: z.string().min(1).optional(),
-  timeout_seconds: z.number().positive().finite().optional(),
-  ...routeInputSchema,
-});
-
-server.registerTool(
+const task = { prompt: str, prompt_file: str, timeout_seconds: z.number().positive().optional(), ...route };
+const batch = {
+  tasks: z
+    .array(z.record(z.string(), z.unknown()).pipe(z.strictObject({ id: str, ...task })))
+    .min(1)
+    .max(64),
+  concurrency: z.number().int().min(1).max(8).optional(),
+  wait_seconds: wait,
+};
+// Catch domain errors at the boundary; SDK validation errors retain its protocol error envelope.
+function register(
+  name: string,
+  description: string,
+  schema: z.ZodRawShape,
+  handler: (input: any, extra: any) => unknown | Promise<unknown>,
+) {
+  server.registerTool(name, { description, inputSchema: z.strictObject(schema) }, async (input, extra) => {
+    try {
+      return reply(await handler(input, extra));
+    } catch (error) {
+      return {
+        ...reply({
+          status: "rejected",
+          error: "request_failed",
+          fix: String(error instanceof Error ? error.message : error).replace(/\s+/gu, " "),
+        }),
+        isError: true,
+      };
+    }
+  });
+}
+register("fabric_whoami", "Identify this seat and server.", { detail }, ({ detail }) => ({
+  ...who,
+  ...serverBuild(),
+  database: (readyStore(), databasePath()),
+  ...(detail === "full" ? { agents: readyStore().agents(who.project) } : {}),
+}));
+register(
+  "fabric_send",
+  "Send to a seat, team, chair or all.",
+  { to: z.string(), body: z.string(), kind: str, reply_to: str, task_id: str, output_path: str },
+  ({ to, body, kind, reply_to, task_id, output_path }) =>
+    readyStore().send(who, to, body, { kind, replyTo: reply_to, taskId: task_id, outputPath: output_path }),
+);
+register(
+  "fabric_inbox",
+  "Peek headers or claim bodies.",
+  {
+    peek: z.boolean().optional(),
+    task_id: str,
+    claim_seconds: z.number().int().min(1).max(3600).optional(),
+    ids: z.array(z.string()).max(100).optional(),
+    claim: z.boolean().optional(),
+    limit: z.number().int().min(1).max(100).optional(),
+    wait_seconds: wait,
+  },
+  async ({ ids, claim, peek: explicitPeek, task_id, claim_seconds, limit, wait_seconds }, { signal }) => {
+    const peek = explicitPeek ?? (ids === undefined && claim !== true);
+    const rows = await waitForInbox(
+      {
+        ids,
+        limit: limit ?? ids?.length ?? 10,
+        peek,
+        taskId: task_id,
+        claimTtlMs: claim_seconds === undefined ? undefined : claim_seconds * 1000,
+      },
+      (wait_seconds ?? 0) * 1000,
+      signal,
+    );
+    return { messages: rows.map((row) => mailboxView(row, peek)) };
+  },
+);
+function acknowledgeRuns(result: { runs?: Record<string, any>[] }) {
+  for (const row of result.runs ?? []) if (row.state === "terminal") {
+    try { readyStore(1).acknowledgeTerminal(who, row, 1); }
+    catch { /* Mailbox contention must not hide durable run evidence. */ }
+  }
+}
+register(
   "fabric_dispatch",
+  "Run one prompt, tasks, or resume a run.",
   {
-    description:
-      "Start one ordinary configured-provider task: the prompt, the adapter and alias that route " +
-      "it, and the access mode it runs under. Run custody is automatic and full prompt, result and " +
-      "diagnostics stay in named files. read_only is requested access; inspect the adapter receipt for " +
-      "read_only_guarantee (Agy: prompt_only). A worker that must write takes mode " +
-      "worktree_write with a worktree it owns exclusively. The response is compact; set wait_seconds " +
-      "to 0 for immediate start or up to 55 for a terminal result and actual route when it finishes.",
-    inputSchema: z.strictObject({
-      prompt: z.string().optional(),
-      prompt_file: z.string().min(1).optional(),
-      task_id: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u).optional(),
-      timeout_seconds: z.number().positive().finite().optional(),
-      wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional(),
-      ...routeInputSchema,
-    }),
+    ...task,
+    task_id: str,
+    tasks: batch.tasks.optional(),
+    concurrency: batch.concurrency,
+    resume: str,
+    wait_seconds: wait,
+    detail,
   },
-  async (input, { signal }) => reply(await dispatchConfiguredProvider(input, who, signal)),
+  async (input, { signal }) => {
+    if (input.tasks && (input.prompt || input.prompt_file || input.resume))
+      return { status: "rejected", error: "dispatch_conflict", fix: "Pass one prompt, tasks, or resume." };
+    const result = input.resume
+      ? await resumeConfiguredProvider(input, who, signal)
+      : input.tasks
+        ? await dispatchConfiguredBatch({ ...input, wait_seconds: input.wait_seconds ?? 0 }, who, signal)
+        : await dispatchConfiguredProvider(input, who, signal);
+    if (!result.id) return result;
+    const observed = await statusRows(who.cwd, [String(result.id)], 0, "all", signal, input.detail);
+    acknowledgeRuns(observed);
+    if (observed.runs?.length === 1) {
+      const row = observed.runs[0]!;
+      return runView({ ...result, ...row, paths: { ...(result.paths as object), ...row.paths } }, input.detail);
+    }
+    return runView(observed.runs ? observed : result, input.detail);
+  },
 );
-
-server.registerTool(
-  "fabric_batch",
+register(
+  "fabric_status",
+  "Read or wait for runs.",
   {
-    description:
-      "Start a fixed ordinary batch of 1-64 configured-provider tasks with concurrency capped at 8. " +
-      "Tasks share the dispatch surface: prompt, adapter, alias and access mode. The batch owner keeps " +
-      "partial results and rejects two writer tasks naming one worktree. Full output stays in named " +
-      "files; set wait_seconds to 0 for immediate start or up to 55 to await completion.",
-    inputSchema: z.strictObject({
-      tasks: z.array(batchTaskSchema).min(1).max(64),
-      concurrency: z.number().int().min(1).max(8).optional(),
-      wait_seconds: z.number().int().min(0).max(MAX_WAIT_SECONDS).optional(),
-    }),
+    ids: z.array(z.string()).optional(),
+    id: str,
+    wait_seconds: wait,
+    until: z.enum(["any", "all"]).optional(),
+    detail,
   },
-  async (input, { signal }) => reply(await dispatchConfiguredBatch(input, who, signal)),
+  async ({ ids, id, wait_seconds, until, detail }, { signal }) => {
+    const result = await statusRows(who.cwd, ids ?? (id ? [id] : undefined), wait_seconds, until, signal, detail);
+    acknowledgeRuns(result);
+    return runView(result, detail);
+  },
 );
-
-server.registerTool(
+register("fabric_cancel", "Stop a run and its provider group.", { id: z.string(), reason: str }, async ({ id, reason }) => {
+  const result = await cancelConfiguredRun(id, who, reason);
+  acknowledgeRuns(result);
+  return runView(result);
+});
+register(
+  "fabric_output",
+  "Read output; continue at next_offset.",
+  {
+    id: z.string(),
+    part: z.enum(["result", "stderr", "events", "receipt"]).optional(),
+    offset: z.number().int().nonnegative().optional(),
+    tail: z.boolean().optional(),
+    max_bytes: z.number().int().min(1).max(20000).optional(),
+  },
+  (input) => fabricOutput(who.cwd, input),
+);
+register(
   "fabric_acknowledge",
-  {
-    description: "Acknowledge one delivery using the claim token returned by fabric_inbox.",
-    inputSchema: { message_id: z.string(), claim_id: z.string() },
-  },
-  ({ message_id, claim_id }) => reply(readyStore().acknowledge(who, message_id, claim_id)),
+  "Acknowledge a claimed delivery.",
+  { message_id: z.string(), claim_id: z.string() },
+  ({ message_id, claim_id }) => readyStore().acknowledge(who, message_id, claim_id),
 );
-
-server.registerTool(
-  "fabric_team_create",
+register(
+  "fabric_task",
+  "Create, claim, update or list tasks.",
   {
-    description: "Create a team or atomically replace all members of an existing team.",
-    inputSchema: { team_id: z.string(), members: z.array(z.string()).min(1) },
+    action: z.enum(["create", "claim", "update", "list"]),
+    task_id: str,
+    objective: str,
+    owner: str,
+    depends_on: z.array(z.string()).optional(),
+    state: str,
+    note: str,
   },
-  ({ team_id, members }) => reply(readyStore().createTeam(who, team_id, members)),
-);
-
-server.registerTool(
-  "fabric_task_create",
-  {
-    description:
-      "Record a task others can see, own and depend on. Set owner for targeted routing; " +
-      "an owner-bound task is already assigned and is not available to unowned-task claiming. " +
-      "Task ownership is cooperative routing metadata, not an access-control boundary.",
-    inputSchema: {
-      objective: z.string(),
-      task_id: z.string().min(1).optional(),
-      owner: z.string().optional(),
-      depends_on: z.array(z.string()).optional(),
-    },
-  },
-  ({ objective, task_id, owner, depends_on }) =>
-    reply(readyStore().createTask(who, objective, { taskId: task_id, owner, dependsOn: depends_on })),
-);
-
-server.registerTool(
-  "fabric_task_update",
-  {
-    description: "Change a task's cooperative state, for example to blocked or done.",
-    inputSchema: { task_id: z.string(), state: z.string(), note: z.string().optional() },
-  },
-  ({ task_id, state, note }) => reply(readyStore().updateTask(who, task_id, state, note)),
-);
-
-server.registerTool(
-  "fabric_task_claim",
-  {
-    description:
-      "Atomically claim an open, unowned task. Owner-bound tasks are already assigned and " +
-      "are not available to other claimers; retrying as the winning owner is idempotent.",
-    inputSchema: { task_id: z.string() },
-  },
-  ({ task_id }) => reply(readyStore().claimTask(who, task_id)),
-);
-
-server.registerTool(
-  "fabric_tasks",
-  {
-    description: "List tasks in this project, optionally filtered by state.",
-    inputSchema: { state: z.string().optional() },
-  },
-  ({ state }) => reply(readyStore().tasks(who.project, state)),
-);
-
-server.registerTool(
-  "fabric_note",
-  {
-    description: "Append a line to the project's activity log, for oversight.",
-    inputSchema: { detail: z.string() },
-  },
-  ({ detail }) => {
-    readyStore().note(who, detail);
-    return reply({ noted: detail });
+  ({ action, task_id, objective, owner, depends_on, state, note }) => {
+    if (action === "list") return { tasks: readyStore().tasks(who.project, state) };
+    if (action === "create" && objective)
+      return readyStore().createTask(who, objective, { taskId: task_id, owner, dependsOn: depends_on });
+    if (action === "claim" && task_id) return readyStore().claimTask(who, task_id);
+    if (action === "update" && task_id && state) return readyStore().updateTask(who, task_id, state, note);
+    throw new Error("Supply objective for create; task_id for claim; task_id and state for update.");
   },
 );
-
-server.registerTool(
+register("fabric_note", "Append an activity note.", { detail: z.string() }, ({ detail }) => {
+  readyStore().note(who, detail);
+  return { noted: detail };
+});
+register(
   "fabric_activity",
-  {
-    description:
-      "Project activity. With after_seq, returns forward cursor order; otherwise newest first.",
-    inputSchema: {
-      limit: z.number().int().positive().optional(),
-      after_seq: z.number().int().nonnegative().optional(),
-    },
-  },
-  ({ limit, after_seq }) => reply(after_seq === undefined
-    ? readyStore().activity(who.project, limit)
-    : readyStore().activityAfter(who.project, after_seq, limit)),
+  "Read recent activity or entries after a cursor.",
+  { limit: z.number().int().min(1).max(100).optional(), after_seq: z.number().int().nonnegative().optional() },
+  ({ limit, after_seq }) => ({
+    activity:
+      after_seq === undefined
+        ? readyStore().activity(who.project, limit ?? 20)
+        : readyStore().activityAfter(who.project, after_seq, limit ?? 20),
+  }),
 );
-
-server.registerTool(
-  "fabric_adapters",
-  {
-    description:
-      "List configured providers from the product catalogue: dispatch state, aliases, " +
-      "read-only guarantee, writable modes and endpoint profiles. Read-only and store-free; " +
-      "everything fabric_dispatch accepts is answerable from one call. Use the adapter name " +
-      "and optionally an alias directly in fabric_dispatch.",
-    inputSchema: {},
-  },
-  () => {
-    const snapshot = catalogueSnapshot();
-    return reply(snapshot.adapters.length === 0
-      ? { error: "adapter catalogue unavailable", adapters: [], endpoints: {} }
-      : snapshot);
-  },
+register("fabric_adapters", "List routes and guarantees; full includes profiles.", { detail }, ({ detail }) =>
+  adapterView(catalogueSnapshot(), detail),
 );
-
+if (process.env.FABRIC_LEGACY_TOOLS === "1") {
+  register("fabric_batch", "Run a task batch.", batch, (input, { signal }) =>
+    dispatchConfiguredBatch(input, who, signal),
+  );
+  register(
+    "fabric_team_create",
+    "Create a team.",
+    { team_id: z.string(), members: z.array(z.string()) },
+    ({ team_id, members }) => readyStore().createTeam(who, team_id, members),
+  );
+  register(
+    "fabric_task_create",
+    "Create a task.",
+    { objective: z.string(), task_id: str, owner: str, depends_on: z.array(z.string()).optional() },
+    ({ objective, task_id, owner, depends_on }) =>
+      readyStore().createTask(who, objective, { taskId: task_id, owner, dependsOn: depends_on }),
+  );
+  register("fabric_task_claim", "Claim a task.", { task_id: z.string() }, ({ task_id }) =>
+    readyStore().claimTask(who, task_id),
+  );
+  register(
+    "fabric_task_update",
+    "Update a task.",
+    { task_id: z.string(), state: z.string(), note: str },
+    ({ task_id, state, note }) => readyStore().updateTask(who, task_id, state, note),
+  );
+  register("fabric_tasks", "List tasks.", { state: str }, ({ state }) => readyStore().tasks(who.project, state));
+}
+try {
+  initialiseStore(1);
+} catch (error) {
+  console.error(`fabric: presence deferred: ${String(error)}`);
+}
 const transport = new StdioServerTransport();
-process.stdin.once("end", () => { void transport.close(); });
+// SDK schema failures happen before tool callbacks; keep their presentation consistent.
+const send = transport.send.bind(transport);
+transport.send = async (message) => {
+  if ("result" in message && message.result.isError === true) {
+    const result = message.result;
+    const blocks = Array.isArray(result.content) ? result.content : [];
+    const text = blocks
+      .map((block) => (typeof block.text === "string" ? block.text : ""))
+      .join(" ")
+      .replace(/\s+/gu, " ");
+    const line = text.includes("fix:") ? text : `rejected invalid_input · fix: ${text}`;
+    message = {
+      ...message,
+      result: {
+        ...result,
+        content: [{ type: "text", text: line }],
+        structuredContent: result.structuredContent ?? { status: "rejected", error: "invalid_input", fix: text },
+      },
+    };
+  }
+  return send(message);
+};
+process.stdin.once("end", () => {
+  void transport.close();
+});
 await server.connect(transport);

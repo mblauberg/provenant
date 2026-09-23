@@ -1,39 +1,76 @@
 {
   "schema_version": 1,
-  "catalog_date": "2026-09-08",
+  "catalog_date": "2026-09-23",
   "task_class_routes": {
-    "mechanical": {"alias": "scout", "effort": "low", "role": "worker"},
-    "legwork": {"alias": "workhorse", "effort": "medium", "role": "worker"},
-    "critical-review": {"alias": "flagship", "effort": "high", "role": "critical-review"},
-    "orchestration": {"alias": "flagship", "effort": "high", "role": "orchestrator"}
+    "mechanical": {
+      "alias": "scout",
+      "effort": "low",
+      "role": "worker"
+    },
+    "legwork": {
+      "alias": "workhorse",
+      "effort": "medium",
+      "role": "worker"
+    },
+    "critical-review": {
+      "alias": "flagship",
+      "effort": "high",
+      "role": "critical-review"
+    },
+    "orchestration": {
+      "alias": "flagship",
+      "effort": "high",
+      "role": "orchestrator"
+    }
   },
   "families": {
     "anthropic": {
       "aliases": {
-        "flagship": ["opus"],
-        "workhorse": ["opus", "sonnet"],
-        "scout": ["haiku"]
+        "flagship": [
+          "opus"
+        ],
+        "workhorse": [
+          "opus",
+          "sonnet"
+        ],
+        "scout": [
+          "haiku"
+        ]
       },
       "role_overrides": {
         "critical-review": {
-          "flagship": ["opus"]
+          "flagship": [
+            "opus"
+          ]
         },
         "reviewer": {
-          "flagship": ["opus"]
+          "flagship": [
+            "opus"
+          ]
         }
       },
       "risk_tier_overrides": {
         "crucial": {
-          "roles": ["synthesis", "adjudication"],
+          "roles": [
+            "synthesis",
+            "adjudication"
+          ],
           "alias": "flagship",
-          "models": ["claude-fable-5-1"],
+          "models": [
+            "claude-fable-5-1"
+          ],
           "default_effort": "medium",
           "maximum_effort": "medium"
         },
         "terminal": {
-          "roles": ["synthesis", "adjudication"],
+          "roles": [
+            "synthesis",
+            "adjudication"
+          ],
           "alias": "flagship",
-          "models": ["claude-fable-5-1"],
+          "models": [
+            "claude-fable-5-1"
+          ],
           "default_effort": "medium",
           "maximum_effort": "medium"
         }
@@ -41,50 +78,259 @@
     },
     "openai": {
       "aliases": {
-        "flagship": ["gpt-6-astra"],
-        "workhorse": ["gpt-5.6-luna"],
-        "scout": ["gpt-5.6-luna"]
+        "flagship": [
+          "gpt-6-astra"
+        ],
+        "workhorse": [
+          "gpt-6-sol",
+          "gpt-6-luna"
+        ],
+        "scout": [
+          "gpt-6-luna"
+        ]
       },
       "role_overrides": {},
       "role_effort_defaults": {
-        "lead": {"flagship": "xhigh"},
-        "orchestrator": {"flagship": "xhigh"},
-        "critical-review": {"flagship": "xhigh"},
-        "worker": {"workhorse": "high", "scout": "high"}
+        "lead": {
+          "flagship": "xhigh"
+        },
+        "orchestrator": {
+          "flagship": "xhigh"
+        },
+        "critical-review": {
+          "flagship": "xhigh"
+        },
+        "worker": {
+          "workhorse": "high",
+          "scout": "high"
+        }
       },
-      "ultra_eligible_roles": ["lead", "orchestrator"],
-      "effort_fallback_order": ["max", "xhigh", "high", "medium", "low"]
+      "ultra_eligible_roles": [
+        "lead",
+        "orchestrator"
+      ],
+      "effort_fallback_order": [
+        "max",
+        "xhigh",
+        "high",
+        "medium",
+        "low"
+      ]
     },
     "google": {
       "aliases": {
-        "flagship": ["gemini-3.8-flash"],
-        "workhorse": ["gemini-3.8-flash"],
-        "scout": ["gemini-3.8-flash"]
+        "flagship": [
+          "gemini-3.8-flash"
+        ],
+        "workhorse": [
+          "gemini-3.8-flash"
+        ],
+        "scout": [
+          "gemini-3.8-flash"
+        ]
       },
       "role_overrides": {},
-      "effort_fallback_order": ["high", "medium", "low"],
+      "effort_fallback_order": [
+        "high",
+        "medium",
+        "low"
+      ],
       "per_model_efforts": {
-        "gemini-3.8-flash": ["low", "medium", "high"],
-        "gemini-3.7-flash": ["low", "medium", "high"],
-        "gemini-3.6-flash": ["low", "medium", "high"],
-        "gemini-3.1-pro": ["low", "high"]
+        "gemini-3.8-flash": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "gemini-3.7-flash": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "gemini-3.6-flash": [
+          "low",
+          "medium",
+          "high"
+        ],
+        "gemini-3.1-pro": [
+          "low",
+          "high"
+        ]
       }
     }
   },
   "adapters": {
-    "claude": {"endpoint_provider": "anthropic", "fixed_model_family": "anthropic", "effort_transport": "flag"},
-    "codex": {"endpoint_provider": "openai", "fixed_model_family": "openai", "effort_transport": "flag"},
+    "claude": {
+      "endpoint_provider": "anthropic",
+      "fixed_model_family": "anthropic",
+      "effort_transport": "flag",
+      "models": [
+        {
+          "id": "claude-opus-5-5",
+          "names": [
+            "opus",
+            "opus-5.5",
+            "claude-opus-5-5"
+          ],
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default": true
+        },
+        {
+          "id": "sonnet",
+          "names": [
+            "sonnet"
+          ],
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
+        {
+          "id": "haiku",
+          "names": [
+            "haiku"
+          ],
+          "effort_transport": "none"
+        },
+        {
+          "id": "claude-fable-5-1",
+          "names": [
+            "fable"
+          ],
+          "efforts": [
+            "low",
+            "medium"
+          ],
+          "default_effort": "medium"
+        }
+      ]
+    },
+    "codex": {
+      "endpoint_provider": "openai",
+      "fixed_model_family": "openai",
+      "effort_transport": "flag",
+      "models": [
+        {
+          "id": "gpt-6-astra",
+          "names": [
+            "astra"
+          ],
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ]
+        },
+        {
+          "id": "gpt-6-sol",
+          "names": [
+            "sol"
+          ],
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max",
+            "ultra"
+          ],
+          "default": true
+        },
+        {
+          "id": "gpt-6-luna",
+          "names": [
+            "luna"
+          ],
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        }
+      ]
+    },
     "cursor": {
       "endpoint_provider": "cursor",
       "fixed_model_family": null,
+      "default_model": "auto",
       "effort_transport": "model-id",
       "model_family_preferences": {
-        "preferred": ["xai", "cursor-composer"],
+        "preferred": [
+          "xai",
+          "cursor-composer"
+        ],
         "fallback": {
           "anthropic": "claude",
           "openai": "codex",
           "google": "agy"
         }
+      },
+      "models": [
+        {
+          "id": "auto",
+          "names": [
+            "auto"
+          ],
+          "effort_transport": "none",
+          "default": true
+        },
+        {
+          "id": "composer-2.5",
+          "names": [
+            "composer"
+          ],
+          "effort_transport": "none"
+        },
+        {
+          "id": "grok-4.7",
+          "names": [
+            "grok"
+          ],
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "effort_transport": "model-suffix",
+          "suffix": {
+            "low": "-low",
+            "medium": "-medium",
+            "high": "-high",
+            "xhigh": "-xhigh"
+          }
+        },
+        {
+          "id": "cursor-grok-4.6",
+          "names": [
+            "grok-4.6"
+          ],
+          "effort_transport": "none"
+        }
+      ],
+      "aliases": {
+        "flagship": [
+          "auto"
+        ],
+        "workhorse": [
+          "auto"
+        ],
+        "scout": [
+          "auto"
+        ]
       }
     },
     "agy": {
@@ -92,60 +338,258 @@
       "fixed_model_family": null,
       "effort_transport": "flag",
       "model_family_preferences": {
-        "preferred": ["google", "anthropic"],
+        "preferred": [
+          "google",
+          "anthropic"
+        ],
         "fallback": {}
+      },
+      "models": [
+        {
+          "id": "gemini-3.8-flash",
+          "names": [
+            "gemini",
+            "flash",
+            "gemini-flash"
+          ],
+          "efforts": [
+            "low",
+            "medium",
+            "high"
+          ],
+          "effort_transport": "model-suffix",
+          "suffix": {
+            "low": "-low",
+            "medium": "-medium",
+            "high": "-high"
+          },
+          "default_effort": "high",
+          "default": true
+        },
+        {
+          "id": "claude-opus-4-6-thinking",
+          "names": [
+            "opus",
+            "opus-4.6"
+          ],
+          "effort_transport": "none"
+        },
+        {
+          "id": "claude-sonnet-4-6",
+          "names": [
+            "sonnet",
+            "sonnet-4.6"
+          ],
+          "effort_transport": "none"
+        }
+      ],
+      "aliases": {
+        "flagship": [
+          "gemini-3.8-flash"
+        ],
+        "workhorse": [
+          "gemini-3.8-flash"
+        ],
+        "scout": [
+          "gemini-3.8-flash"
+        ]
       }
     },
-    "copilot": {"endpoint_provider": "github", "fixed_model_family": null, "effort_transport": "flag"},
-    "kiro": {"endpoint_provider": "aws", "fixed_model_family": null, "effort_transport": "flag"},
-    "opencode": {"endpoint_provider": "opencode", "fixed_model_family": null, "effort_transport": "flag"}
+    "copilot": {
+      "endpoint_provider": "github",
+      "fixed_model_family": null,
+      "effort_transport": "flag"
+    },
+    "kiro": {
+      "endpoint_provider": "aws",
+      "fixed_model_family": null,
+      "effort_transport": "flag"
+    },
+    "opencode": {
+      "endpoint_provider": "opencode",
+      "fixed_model_family": null,
+      "effort_transport": "flag",
+      "default_model": "opencode-go/deepseek-v4.1-flash",
+      "models": [
+        {
+          "id": "opencode-go/deepseek-v4.1-flash",
+          "names": [
+            "deepseek",
+            "deepseek-v4.1-flash"
+          ],
+          "plan_cap_usd": 60,
+          "trains_on_prompts": false,
+          "default": true
+        },
+        {
+          "id": "opencode-go/glm-5.3-flash",
+          "names": [
+            "glm",
+            "glm-5.3-flash"
+          ],
+          "plan_cap_usd": 30,
+          "trains_on_prompts": false
+        },
+        {
+          "id": "opencode-go/kimi-k2.7-code",
+          "names": [
+            "kimi"
+          ],
+          "plan_cap_usd": 15,
+          "trains_on_prompts": false
+        },
+        {
+          "id": "opencode-go/minimax-m3",
+          "names": [
+            "minimax"
+          ],
+          "plan_cap_usd": 15,
+          "trains_on_prompts": false
+        },
+        {
+          "id": "opencode-go/mimo-v2.6-flash",
+          "names": [
+            "mimo"
+          ],
+          "plan_cap_usd": 30,
+          "trains_on_prompts": false
+        },
+        {
+          "id": "opencode/mimo-v2.6-flash-free",
+          "names": [
+            "mimo-free"
+          ],
+          "plan_cap_usd": 0,
+          "trains_on_prompts": false
+        },
+        {
+          "id": "opencode/nemotron-3-ultra-free",
+          "names": [
+            "nemotron-free"
+          ],
+          "plan_cap_usd": 0,
+          "trains_on_prompts": false
+        },
+        {
+          "id": "opencode/muse-spark-1.3-contributor-free",
+          "names": [
+            "muse"
+          ],
+          "plan_cap_usd": 0,
+          "trains_on_prompts": true,
+          "warning": "Contributor free tier: prompts may be used for training. Do not send sensitive, private or client data."
+        }
+      ],
+      "aliases": {
+        "flagship": [
+          "opencode-go/glm-5.3-flash",
+          "opencode-go/kimi-k2.7-code",
+          "opencode-go/minimax-m3"
+        ],
+        "workhorse": [
+          "opencode-go/deepseek-v4.1-flash"
+        ],
+        "scout": [
+          "opencode-go/mimo-v2.6-flash"
+        ]
+      }
+    }
   },
   "endpoints": {
     "zai-glm": {
       "base_url": "https://api.z.ai/api/anthropic",
       "token_env": "ZAI_API_KEY",
       "model_family": "zhipu",
-      "adapters": ["claude"]
+      "adapters": [
+        "claude"
+      ]
     },
     "moonshot-kimi": {
       "base_url": "https://api.moonshot.ai/anthropic",
       "token_env": "MOONSHOT_API_KEY",
       "model_family": "moonshot",
-      "adapters": ["claude"]
+      "adapters": [
+        "claude"
+      ]
     },
     "deepseek": {
       "base_url": "https://api.deepseek.com/anthropic",
       "token_env": "DEEPSEEK_API_KEY",
       "model_family": "deepseek",
-      "adapters": ["claude"]
+      "adapters": [
+        "claude"
+      ]
     },
     "openrouter-anthropic": {
       "base_url": "https://openrouter.ai/api",
       "token_env": "OPENROUTER_API_KEY",
       "model_family": "generic-open",
-      "adapters": ["claude"]
+      "adapters": [
+        "claude"
+      ]
     },
     "openrouter-openai": {
       "base_url": "https://openrouter.ai/api/v1",
       "token_env": "OPENROUTER_API_KEY",
       "model_family": "generic-open",
       "wire_api": "responses",
-      "adapters": ["codex"]
+      "adapters": [
+        "codex"
+      ]
     }
   },
   "model_patterns": [
-    {"pattern": "^stealth/", "family": "generic-open"},
-    {"pattern": "claude|fable|opus|sonnet|haiku", "family": "anthropic"},
-    {"pattern": "gpt|codex|^o1|^o3|^o4", "family": "openai"},
-    {"pattern": "gemini", "family": "google"},
-    {"pattern": "grok", "family": "xai"},
-    {"pattern": "composer", "family": "cursor-composer"},
-    {"pattern": "deepseek", "family": "deepseek"},
-    {"pattern": "minimax", "family": "minimax"},
-    {"pattern": "qwen", "family": "alibaba"},
-    {"pattern": "kimi|moonshot", "family": "moonshot"},
-    {"pattern": "glm", "family": "zhipu"},
-    {"pattern": "mistral|mixtral", "family": "mistral"},
-    {"pattern": "llama", "family": "meta"}
+    {
+      "pattern": "^stealth/",
+      "family": "generic-open"
+    },
+    {
+      "pattern": "claude|fable|opus|sonnet|haiku",
+      "family": "anthropic"
+    },
+    {
+      "pattern": "gpt|codex|^o1|^o3|^o4",
+      "family": "openai"
+    },
+    {
+      "pattern": "gemini",
+      "family": "google"
+    },
+    {
+      "pattern": "grok",
+      "family": "xai"
+    },
+    {
+      "pattern": "composer",
+      "family": "cursor-composer"
+    },
+    {
+      "pattern": "deepseek",
+      "family": "deepseek"
+    },
+    {
+      "pattern": "minimax",
+      "family": "minimax"
+    },
+    {
+      "pattern": "qwen",
+      "family": "alibaba"
+    },
+    {
+      "pattern": "kimi|moonshot",
+      "family": "moonshot"
+    },
+    {
+      "pattern": "glm",
+      "family": "zhipu"
+    },
+    {
+      "pattern": "mistral|mixtral",
+      "family": "mistral"
+    },
+    {
+      "pattern": "llama",
+      "family": "meta"
+    }
   ]
 }

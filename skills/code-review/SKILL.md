@@ -55,8 +55,8 @@ before writing findings.
 - `implement` owns authorised fixes and bounded re-review; `tdd` or `refactor`
   may supply the method. Do not mutate source during review.
 - Artifact-only authority permits named outputs under the assigned run
-  directory; it does not permit arbitrary repo-root scratch. Use the system
-  temporary directory when no run directory exists. Never redirect a command
+  directory; it does not permit arbitrary repo-root scratch. Use
+  `.agent-run/scratch/` when no run directory exists. Never redirect a command
   over a wildcard/list that can include its own growing output; keep
   captures bounded.
 - Language, framework, UI, security, and project skills add specialised lenses;

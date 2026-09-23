@@ -1,4 +1,5 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parse as parseYaml } from "yaml";
 
 import { DISPATCH_ADAPTERS, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
+import { catalogueSnapshot } from "../src/catalogue.js";
 import type { Identity } from "../src/identity.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -106,12 +108,13 @@ describe("adapter registry", () => {
     }
   });
 
-  it("gives every implemented adapter an executing arm in the dispatcher", () => {
-    for (const adapter of DISPATCH_ADAPTERS) {
-      expect(dispatcher, `cf_dispatch.sh has no ${adapter} arm`).toMatch(
-        new RegExp(`^\\s+${adapter}\\)$`, "mu"),
-      );
-    }
+  it("gives every implemented adapter an executable Python profile", () => {
+    const profiles = JSON.parse(execFileSync("python3", ["-c", [
+      "import json, adapters",
+      "print(json.dumps({name: bool(adapters.profile(name).CLI) and callable(adapters.profile(name).argv) for name in adapters.NAMES}))",
+    ].join("\n")], { cwd: join(repositoryRoot, "skills/orchestrate/scripts"), encoding: "utf8" }));
+    expect(Object.keys(profiles).sort()).toEqual([...DISPATCH_ADAPTERS].sort());
+    expect(Object.values(profiles).every(Boolean)).toBe(true);
   });
 });
 
@@ -134,7 +137,7 @@ describe("adapter rejection", () => {
         { adapter, prompt: "hello" },
         identity,
         AbortSignal.abort(),
-      )).rejects.toThrow(/adapter must be one of/u);
+      )).resolves.toMatchObject({ status: "rejected", error: "adapter_invalid" });
       expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
     });
 
@@ -143,7 +146,7 @@ describe("adapter rejection", () => {
         { tasks: [{ adapter, prompt: "hello" }] },
         identity,
         AbortSignal.abort(),
-      )).rejects.toThrow(/adapter must be one of/u);
+      )).resolves.toMatchObject({ status: "rejected", error: "adapter_invalid" });
       expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
     });
   }
@@ -153,6 +156,81 @@ describe("adapter rejection", () => {
       { adapter: "pi", prompt: "hello" },
       identity,
       AbortSignal.abort(),
-    )).rejects.toThrow(/agy, claude, codex, copilot, cursor, kiro, opencode/u);
+    )).resolves.toMatchObject({ status: "rejected", fix: expect.stringMatching(/agy, claude, codex, copilot, cursor, kiro, opencode/u) });
+  });
+
+  it("passes unknown model aliases to the owner, respecting cancellation", async () => {
+    await expect(dispatchConfiguredProvider(
+      { adapter: "codex", alias: "missing-model", prompt: "hello" },
+      identity,
+      AbortSignal.abort(),
+      { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot },
+    )).rejects.toThrow(/aborted/u);
+    expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
+  });
+
+  it("uses the real router and returns every invalid task before creating a run", async () => {
+    const result = await dispatchConfiguredBatch({ tasks: [
+      { id: "bad-model", adapter: "claude", model: "unknown-model-family", prompt: "hello" },
+      { id: "bad-prompt", adapter: "claude", prompt_file: "absent.md" },
+      { id: "bad-alias", adapter: "codex", alias: "not-in-catalogue", prompt: "hello" },
+    ], wait_seconds: 0 }, identity, new AbortController().signal,
+    { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot, AGENT_FABRIC_INSTANCE_ROOT: repositoryRoot });
+    expect(result.status).toBe("rejected");
+    expect((result.errors as Record<string, unknown>[]).map((error) => error.task_id)).toEqual(["bad-prompt"]);
+    expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
+  });
+
+  it("does not block the default alias for an adapter the routing catalogue carries no alias table for", async () => {
+    // cursor, copilot, kiro and opencode pick their model per call rather than
+    // through a fixed family, so config/model-routing.json's family-keyed
+    // alias tables do not cover them; catalogueSnapshot resolves an empty
+    // alias set for each. Enforcing against that empty set would reject the
+    // default alias on every dispatch to these adapters, which is not the
+    // caller mistake the front-door check exists to catch.
+    const catalogueOnlyProduct = join(workspace, "catalogue-only-product");
+    mkdirSync(join(catalogueOnlyProduct, "config"), { recursive: true });
+    cpSync(
+      join(repositoryRoot, "config", "model-routing.json"),
+      join(catalogueOnlyProduct, "config", "model-routing.json"),
+    );
+    cpSync(
+      join(repositoryRoot, "config", "adapter-compatibility.yaml"),
+      join(catalogueOnlyProduct, "config", "adapter-compatibility.yaml"),
+    );
+    for (const adapter of ["cursor", "copilot", "kiro", "opencode"]) {
+      // No skills/orchestrate/scripts directory exists under this synthetic
+      // product root, so a dispatch that gets past alias validation fails
+      // fast on the missing execution owner instead of spawning a real
+      // provider: this isolates the alias check from launch mechanics.
+      await expect(dispatchConfiguredProvider(
+        { adapter, prompt: "hello" },
+        identity,
+        AbortSignal.abort(),
+        { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: catalogueOnlyProduct },
+      )).rejects.toThrow(/execution owner is unavailable/u);
+    }
+  });
+
+});
+
+describe("instance catalogue", () => {
+  it("deep merges live instance aliases and preserves the product on malformed overlay", () => {
+    const root = mkdtempSync(join(tmpdir(), "fabric-catalogue-"));
+    try {
+      mkdirSync(join(root, "config"));
+      const path = join(root, "config", "model-routing.json");
+      const routing = JSON.parse(readFileSync(join(repositoryRoot, "config", "model-routing.json"), "utf8"));
+      routing.families.openai.aliases.workhorse = ["custom-luna"];
+      writeFileSync(path, JSON.stringify(routing));
+      const env = { AGENT_FABRIC_INSTANCE_ROOT: root };
+      expect(catalogueSnapshot(repositoryRoot, env).adapters.find((adapter) => adapter.name === "codex")?.models).toContain("custom-luna");
+      expect(catalogueSnapshot(repositoryRoot, env).adapters.find((adapter) => adapter.name === "opencode")?.models).toContain("opencode-go/glm-5.3-flash");
+      writeFileSync(path, "invalid");
+      expect(catalogueSnapshot(repositoryRoot, env).adapters.find((adapter) => adapter.name === "codex")?.models).toContain("gpt-6-luna");
+      expect(catalogueSnapshot(repositoryRoot, env).drift).not.toEqual([]);
+      rmSync(path);
+      expect(catalogueSnapshot(repositoryRoot, env).adapters.find((adapter) => adapter.name === "codex")?.models).toContain("gpt-6-luna");
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

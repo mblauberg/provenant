@@ -39,6 +39,7 @@ actionable here as a test-suite change.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import tomllib
@@ -705,3 +706,72 @@ def test_live_fabric_guide_describes_the_daemonless_launch_graph() -> None:
         "workspace trust",
     ):
         assert retired not in source
+
+
+def test_gate_steps_match_the_maintaining_verification_block_exactly() -> None:
+    gate = (ROOT / "scripts" / "gate").read_text(encoding="utf-8")
+    gate_block = re.search(r"GATE_STEPS=\(\n(.*?)\n\)", gate, re.DOTALL)
+    assert gate_block is not None
+    gate_steps = re.findall(r'^\s*"([a-z0-9-]+)\|([^"\n]+)"\s*$', gate_block[1], re.M)
+
+    maintaining = (ROOT / "MAINTAINING.md").read_text(encoding="utf-8")
+    verify_section = maintaining.split("## Verify and release", 1)[1].split("\n## ", 1)[0]
+    command_block = re.search(r"```sh\n(.*?)\n```", verify_section, re.DOTALL)
+    assert command_block is not None
+    expected_commands = [line for line in command_block[1].splitlines() if line]
+    assert [command for _, command in gate_steps] == expected_commands
+
+
+def test_gate_reports_each_step_and_tails_failed_step_log(tmp_path: Path) -> None:
+    root = tmp_path / "product"
+    scripts = root / "scripts"
+    scripts.mkdir(parents=True)
+    gate = scripts / "gate"
+    gate.write_bytes((ROOT / "scripts" / "gate").read_bytes())
+    gate.chmod(0o755)
+
+    path_bin = tmp_path / "bin"
+    path_bin.mkdir()
+    for name in ("npm", "node", "git"):
+        executable = path_bin / name
+        executable.write_text(
+            "#!/bin/sh\n"
+            "i=1\n"
+            "while [ $i -le 25 ]; do echo \"$0 line-$i\"; i=$((i + 1)); done\n"
+            + ("exit 7\n" if name == "node" else "exit 0\n"),
+            encoding="utf-8",
+        )
+        executable.chmod(0o755)
+    for name in ("check-harness", "static-security-check.py", "public-release-check"):
+        executable = scripts / name
+        executable.write_text("#!/bin/sh\necho \"$0 ok\"\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o755)
+
+    result = subprocess.run(
+        [str(gate)],
+        cwd=tmp_path,
+        env={
+            **os.environ,
+            "AGENT_FABRIC_PRODUCT_ROOT": str(root),
+            "PATH": f"{path_bin}:{os.environ['PATH']}",
+            "GATE_LOG_DIR": str(tmp_path / "logs"),
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1
+    lines = result.stdout.splitlines()
+    summaries = [line for line in lines if re.match(r"(?:ok|FAIL) [a-z0-9-]+ \d+s$", line)]
+    assert len(summaries) == 8
+    assert sum(line.startswith("ok ") for line in summaries) == 7
+    assert sum(line.startswith("FAIL ") for line in summaries) == 1
+    assert summaries[3].startswith("FAIL fabric-mcp-smoke ")
+    assert "line-25" in result.stdout and "line-6" in result.stdout
+    assert "line-5" not in result.stdout
+    failed_log_line = next(line for line in lines if line.startswith("log: "))
+    failed_log = Path(failed_log_line.removeprefix("log: "))
+    assert failed_log.parent.parent == tmp_path / "logs"
+    assert failed_log.name == "fabric-mcp-smoke.log"
+    assert failed_log.is_file()

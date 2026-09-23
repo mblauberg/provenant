@@ -17,6 +17,13 @@ SCRIPT = ROOT / "scripts" / "configure-fabric-mcp.py"
 PROVENANT_TEMPLATE = ROOT / "scripts" / "provenant.template"
 
 
+@pytest.fixture(autouse=True)
+def scratch_home(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+
+
 def stable_shim(tmp_path: Path) -> Path:
     shim = tmp_path / "bin/provenant"
     shim.parent.mkdir(exist_ok=True)
@@ -179,10 +186,7 @@ AGENT_FABRIC_CAPABILITY = "never-print-capability"
         "command": str(shim),
         "env": {**expected_common, "AGENT_FABRIC_SEAT": "codex", "AGENT_FABRIC_CLIENT_LABEL": "codex"},
     }
-    # Brokers share the codex seat; Agy holds its own for stable addressing.
-    # The seat is not model-family proof. See CLIENT_SEATS in
-    # scripts/configure-fabric-mcp.py.
-    expected_seats = {"cursor": "codex", "agy": "agy", "kiro": "codex"}
+    expected_seats = {"cursor": "cursor", "agy": "agy", "kiro": "kiro"}
     for client, path in json_configs.items():
         value = json.loads(path.read_text())
         assert value["mcpServers"]["fabric"] == {
@@ -202,12 +206,14 @@ AGENT_FABRIC_CAPABILITY = "never-print-capability"
         "enabled": True,
         "environment": {
             **expected_common,
-            "AGENT_FABRIC_SEAT": "codex",
+            "AGENT_FABRIC_SEAT": "opencode",
             "AGENT_FABRIC_CLIENT_LABEL": "opencode",
         },
     }
     assert opencode["mcp"]["other"] == {"type": "remote", "url": "https://example.invalid"}
     assert opencode["unrelatedSecret"] == "never-print-opencode"
+
+
     assert claude["mcpServers"]["other"] == {"command": "other"}
     assert claude["unrelatedSecret"] == "never-print-claude"
     assert codex["custom"] == {"secret": "never-print-codex"}
@@ -236,6 +242,98 @@ AGENT_FABRIC_CAPABILITY = "never-print-capability"
     assert codex_config.read_bytes() == original_codex
     assert {client: path.read_bytes() for client, path in json_configs.items()} == original_json
     assert opencode_config.read_bytes() == original_opencode
+
+
+def test_opencode_owns_instruction_paths_and_preserves_other_entries(tmp_path: Path) -> None:
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+    config = tmp_path / "opencode.jsonc"
+    config.write_text(json.dumps({"instructions": ["/user/notes.md"], "theme": "dark"}))
+
+    result = run_configure(tmp_path, "--platform", "opencode", "--instance-root", str(instance_root))
+
+    assert result.returncode == 0, result.stderr
+    document = json.loads(config.read_text())
+    assert document["instructions"] == [
+        "/user/notes.md", str(instance_root / "AGENTS.md"), str(ROOT / "HARNESS.md"),
+    ]
+    assert document["theme"] == "dark"
+
+
+def test_opencode_preserves_foreign_instruction_paths(tmp_path: Path) -> None:
+    config = tmp_path / "opencode.jsonc"
+    foreign = ["/foreign/HARNESS.md", "packages/*/AGENTS.md", "AGENTS.md"]
+    original = json.dumps({"instructions": foreign})
+    config.write_text(original)
+
+    result = run_configure(tmp_path, "--platform", "opencode")
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(config.read_text())["instructions"][:3] == foreign
+
+
+def test_opencode_keeps_user_symlink_to_instance_doctrine(tmp_path: Path) -> None:
+    instance_root = tmp_path / "instance"
+    instance_root.mkdir()
+    link = tmp_path / "user-instructions.md"
+    link.symlink_to(instance_root / "AGENTS.md")
+    config = tmp_path / "opencode.jsonc"
+    config.write_text(json.dumps({"instructions": [str(link)]}))
+
+    result = run_configure(tmp_path, "--platform", "opencode", "--instance-root", str(instance_root))
+
+    assert result.returncode == 0, result.stderr
+    assert str(link) in json.loads(config.read_text())["instructions"]
+
+
+def test_opencode_rebinds_harness_from_previous_product_pointer(tmp_path: Path) -> None:
+    instance_root = tmp_path / "instance"
+    pointer = instance_root / ".agent-fabric/product-root.json"
+    pointer.parent.mkdir(parents=True)
+    old_product = tmp_path / "old-product"
+    pointer.write_text(json.dumps({"schema_version": 1, "product_root": str(old_product)}))
+    config = tmp_path / "opencode.jsonc"
+    config.write_text(json.dumps({"instructions": [
+        str(instance_root / "AGENTS.md"), str(old_product / "HARNESS.md"),
+    ]}))
+
+    result = run_configure(tmp_path, "--platform", "opencode", "--instance-root", str(instance_root))
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(config.read_text())["instructions"] == [
+        str(instance_root / "AGENTS.md"), str(ROOT / "HARNESS.md"),
+    ]
+
+
+def test_opencode_standalone_configurer_uses_the_instance_product_pointer(tmp_path: Path) -> None:
+    instance_root = tmp_path / "instance"
+    pointer = instance_root / ".agent-fabric/product-root.json"
+    pointer.parent.mkdir(parents=True)
+    product = tmp_path / "selected-product"
+    product.mkdir()
+    (product / "HARNESS.md").write_text("# Harness\n")
+    pointer.write_text(json.dumps({"schema_version": 1, "product_root": str(product)}))
+    config = tmp_path / "opencode.jsonc"
+
+    result = subprocess.run(
+        [
+            str(SCRIPT), "--platform", "opencode",
+            "--instance-root", str(instance_root),
+            "--state-directory", str(tmp_path / "state"),
+            "--shim-path", str(stable_shim(tmp_path)),
+            "--opencode-config", str(config),
+        ],
+        cwd=ROOT,
+        env={**os.environ, "HOME": str(tmp_path / "home")},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(config.read_text())["instructions"] == [
+        str(instance_root / "AGENTS.md"), str(product / "HARNESS.md"),
+    ]
 
 
 def test_stable_registration_launches_after_product_relocation(tmp_path: Path) -> None:
@@ -420,14 +518,45 @@ def test_check_reports_only_agent_fabric_entry_status(tmp_path: Path) -> None:
 
 def test_opencode_commented_jsonc_fails_closed_without_rewriting(tmp_path: Path) -> None:
     config = tmp_path / "opencode.jsonc"
-    original = '{\n  // user comment\n  "mcp": {}\n}\n'
+    original = '{\n  // user comment\n  "mcp": {},\n}\n'
     config.write_text(original)
 
     result = run_configure(tmp_path, "--platform", "opencode")
 
     assert result.returncode == 3
-    assert "OpenCode config is invalid JSON" in result.stderr
+    assert "warning: OpenCode JSONC comments must be preserved" in result.stderr
+    assert "mcp.fabric" in result.stderr
     assert config.read_text() == original
+
+
+def test_opencode_existing_registration_accepts_commented_jsonc(tmp_path: Path) -> None:
+    config = tmp_path / "opencode.jsonc"
+    initial = run_configure(tmp_path, "--platform", "opencode")
+    assert initial.returncode == 0, initial.stderr
+    commented = config.read_text().replace("{\n", '{\n  // keep this note\n', 1)
+    commented = commented.removesuffix("}\n") + ",\n}\n"
+    config.write_text(commented)
+
+    result = run_configure(tmp_path, "--platform", "opencode")
+
+    assert result.returncode == 0, result.stderr
+    assert "existing platform=opencode" in result.stdout
+    assert config.read_text() == commented
+
+
+def test_opencode_removes_only_missing_legacy_agents_harness_entry(tmp_path: Path) -> None:
+    config = tmp_path / "opencode.jsonc"
+    dangling = Path.home() / ".agents/HARNESS.md"
+    assert not dangling.exists()
+    foreign = tmp_path / "notes/HARNESS.md"
+    config.write_text(json.dumps({"instructions": [str(dangling), str(foreign)]}))
+
+    result = run_configure(tmp_path, "--platform", "opencode")
+
+    assert result.returncode == 0, result.stderr
+    entries = json.loads(config.read_text())["instructions"]
+    assert str(dangling) not in entries
+    assert str(foreign) in entries
 
 
 def test_preflight_rejects_malformed_codex_without_mutating_claude(tmp_path: Path) -> None:
@@ -507,12 +636,11 @@ def test_platform_all_revalidates_codex_after_writing_claude(tmp_path: Path, mon
             codex_config.write_text(external)
 
     monkeypatch.setattr(configurer, "write_proposal", interleaved_write)
+    paths = all_client_paths(tmp_path)
+    paths["claude"] = claude_config
+    paths["codex"] = codex_config
     result = configurer.main([
-        "--agents-home", str(ROOT),
-        "--state-directory", str(tmp_path / "state"),
-        "--shim-path", str(stable_shim(tmp_path)),
-        "--claude-config", str(claude_config),
-        "--codex-config", str(codex_config),
+        *all_client_arguments(tmp_path, paths),
     ])
 
     captured = capsys.readouterr()
@@ -652,8 +780,8 @@ def test_read_only_modes_revalidate_existing_snapshots_before_success(
     external = '{"external":"after-claude-snapshot"}\n'
     opencode_update = configurer.opencode_update
 
-    def interleaved_compose(path, desired):
-        proposal = opencode_update(path, desired)
+    def interleaved_compose(path, desired, instruction_paths=None):
+        proposal = opencode_update(path, desired, instruction_paths)
         paths["claude"].write_text(external)
         return proposal
 
@@ -1199,7 +1327,6 @@ def test_registration_runbook_documents_a_project_free_registration_and_its_reco
     assert "Claude Code and Codex" in runbook
     assert "six clients" in runbook
     assert "`--mcp-clients all`" in runbook
-    assert "two\nprimary clients" in runbook
     assert "not model-family proof" in runbook
     assert "exact provider/model" in runbook
     verification = runbook.split("## Verify", 1)[1].split("\n## ", 1)[0]

@@ -1,59 +1,14 @@
-# Routing & tiers
+# Routing and tiers
 
-> `config/model-routing.json` is the dated machine catalogue; `scripts/model-route`
-> is the policy resolver. This file owns human-readable family/role and
-> degradation policy. `HARNESS.md` keeps only the invariant core.
-> `docs/model-dossier.md` owns what each model is *like* (strengths,
-> weaknesses and cost profile) and the standing model preferences. That dossier
-> is advisory and cannot change what is admissible; this file stays the
-> authority on task class, tier, role, effort and degradation. Neither restates
-> the other.
+The dated source is `config/model-routing.json`; `scripts/model-route snapshot --json` merges the product and per-key user overlay. Read the effective catalogue and health through `fabric_adapters`. `docs/model-dossier.md` explains model strengths and cost, without changing admissibility.
 
-The resolver's default `--adapter-gate fabric` fails closed when the selected
-fabric adapter is disabled or inactive. Runtime Fabric composition separately
-requires current provider identity and interface conformance. A direct CLI
-executor that owns its own safety and activation gates must opt in explicitly
-with `--adapter-gate direct-cli`; this never bypasses explicit denials, adapter
-capability, path/write/resource limits or external-action gates. It does not
-impose family separation on ordinary execution.
+For ordinary provider work, use `fabric_dispatch`: one top-level task or `tasks[]` (1–64, concurrency at most 8). Pass `prompt` or `prompt_file`, optional `adapter`, `model` or `alias`, `effort`, `mode`, `worktree`, and per-run controls. A model shorthand such as `luna`, `sol`, `astra` or `opus` resolves to its owner. A non-tier `alias` is treated as a model with a note. An explicit model wins over a conflicting alias with a note. Unknown models pass through when the provider can run them. Unsupported effort moves to the nearest supported value and the receipt records requested and applied values.
 
-Configured workspace execution is family-agnostic: any configured adapter and
-provider family may perform ordinary authorised work when its capability and
-scope permit it. Family separation is recorded and enforced only when an
-assurance claim requires it. Route receipts retain actual provider/model
-lineage so an assurance claim can be checked rather than inferred.
+Writes require an owned registered worktree. Only impossible execution or a hard boundary fails preflight: missing prompt, missing CLI, unowned writer worktree, credential-store exposure or write sandbox on a read-only run. Read-only guarantees vary by adapter and appear in the receipt; `best_effort` and `prompt_only` must not be claimed as enforced.
 
-Route every dispatch by **task class, role, evidence surface, safety requirement,
-and capability tier**. Never route by a memorised model name. Discover current
-model IDs and effort modes at runtime (`cli-headless.md`) and retain the route
-receipt.
+Take the returned run id and call `fabric_status` with `ids: [id]` and `wait_seconds: 55`. `fabric_output` gives bounded live tails. `fabric_cancel` stops the process group. A worker question yields `input_required`; reply with `fabric_dispatch` using `resume: id` and a new prompt. Terminal digests include the ready-to-paste provenance line. Direct CLI is a degraded path under [direct-cli-fallback.md](direct-cli-fallback.md).
 
-| Task class | Bound role | Default tier | Default effort | Typical work |
-|---|---|---|---|---|
-| `mechanical` | worker | scout | low | search, extraction, formatting, deterministic checks |
-| `legwork` | worker | workhorse | medium | ordinary implementation, analysis, drafting, source mapping |
-| `critical-review` | critical-review | flagship | high | hard review, adversarial verification, design judgement |
-| `orchestration` | orchestrator | flagship | high | decomposition, adjudication, synthesis |
-
-`scripts/model-route resolve --task-class ...` is authoritative for these
-defaults. An explicit role override may raise effort; an unavailable effort may
-substitute only when the receipt records requested and effective values. Alias
-routing remains a compatibility surface. Chair inheritance is exceptional: it
-must be explicit and recorded, never inferred from an omitted binding.
-Task-class dispatch rejects mismatched roles and requires a fresh, adapter-bound
-runtime snapshot. Codex snapshots verify model availability and supported effort.
-For Agy, the resolver intersects the fresh `agy models` snapshot with the
-configured preferred-family alias candidates; the shell owns no second model
-catalogue. An unprobed explicit Agy route remains `provider-unverified`, while
-an unprobed task-class route fails closed.
-Account-default transport omits the literal model, so receipts retain policy
-identity. Claude's no-tools, no-session subscription canary verifies the effective
-model and fails closed on the CLI's unknown-effort warning, but cannot observe
-effort. Task-class dispatch admits only the probed effort, marked
-`provider-unverified`; any other effort is rejected. The canary also rejects
-caller-authored source labels without scrubbed provenance.
-Canaries cost a little; reuse them only within the router's five-minute freshness
-window.
+Task class selects `flagship`, `workhorse` or `scout` when no explicit model is chosen. The configured catalogue determines candidates; the receipt is authoritative for the applied route. A cooling explicit model still runs with a warning; alias routes skip cooling candidates. Automatic fallback stays within permitted paid non-training routes unless the caller opts into `fallback: "any"` or an explicit list.
 
 ## Tiers (relative, family-agnostic)
 
@@ -69,9 +24,10 @@ The first configured candidate is the default and later candidates remain
 admissible. `docs/model-dossier.md` records advisory preferences, so prose
 alone does not move a default.
 
-Opus is Claude's default flagship and high-effort critical reviewer, and is also
-the default workhorse at low or medium effort, where it tends to beat Sonnet at
-a higher one. Sonnet stays admissible at workhorse and is the one to reach for
+Opus (the `opus` alias, which resolves to Opus 5.5, `claude-opus-5-5`) is
+Claude's default flagship and the standing choice for critical review, synthesis
+and adjudication at every risk tier. It is also the default workhorse at low or
+medium effort, where it tends to beat Sonnet at a higher one. Sonnet stays admissible at workhorse and is the one to reach for
 when the work is genuinely routine. Each catalogue-configured risk tier has one bounded
 override occupant. Validation prevents it from being an alias or alias
 candidate. Lifecycle `risk_tier` remains delivery metadata and never selects
@@ -90,16 +46,21 @@ route whose effort differs from its probe policy's `minimum_effort` fails as
 `task_class_config_invalid`: the probe evidences exactly one effort, so a
 divergence is a configuration error and must not surface as the provider fault
 `effort_capability_unverified`. Claude Fable 5.1 (`claude-fable-5-1`) currently
-occupies both configured tiers.
-Astra leads for Codex and is the only OpenAI flagship candidate, so Sol cannot
-be selected as a silent fallback. The standing policy runs Astra between `low`
+occupies both configured tiers. The override is opt-in and is not the default
+for crucial or terminal work: prefer Opus 5.5 at `high` or `xhigh`, and select
+Fable only when a deliberately different Anthropic mind is wanted or the owner
+asks for it.
+Astra leads for Codex and is the only OpenAI flagship candidate, so a worker
+model is never a silent flagship fallback. The standing policy runs Astra between `low`
 and `xhigh` for critical review and for legwork that needs judgement. The
 native Codex CLI reports `max` and `ultra` for Astra and the Responses API
 stops at `max`; those are separate surfaces, only the runtime capability probe
 decides what the adapter can dispatch, and the catalogue defaults to neither.
-Every substitution is recorded. Luna is the only workhorse and scout catalogue candidate, run at
-`high` by default and raised to `xhigh` or `max` for mechanical and legwork
-slices that warrant it. Sol and Terra are not catalogue routes. Claude and
+Every substitution is recorded. The workhorse alias lists GPT-6 Sol
+(`gpt-6-sol`) first, with GPT-6 Luna (`gpt-6-luna`) as its admissible
+fallback; scout is Luna. Both run at `high` by default and are raised to
+`xhigh` or `max` when a slice warrants it. GPT-5.6 models and Terra are no
+longer catalogue routes. Claude and
 Codex are equal primary families.
 
 Effort rule: **medium by default**; **high for verification, adversarial, and high-stakes** calls
@@ -161,7 +122,10 @@ infers one (`family_source: slug-inferred`); stealth/unknown broker ids stay
 stealth models into alias tables; pick the slug at dispatch time.
 
 OpenCode is an ordinary implemented broker for its catalogue (`opencode/<model>`).
-Discover current slugs with `opencode models` and pass `--model` explicitly.
+It defaults to `opencode-go/deepseek-v4.1-flash`; `opencode-go/glm-5.3-flash`,
+`opencode/mimo-v2.6-flash-free` and `opencode/muse-spark-1.3-contributor-free`
+are the other preferred models (Muse may train on prompts: never send it sensitive
+content). Use `opencode models` to discover a live slug when overriding with `--model`.
 Nested vendor ids attribute as that vendor; unparseable Zen free ids fall back
 to `generic-open` (worker only, not assurance). See
 [ADR 0025](../../../docs/adr/0025-broker-upstream-family-attribution.md).
@@ -218,7 +182,8 @@ Cursor, Copilot, Kiro, OpenCode, Agy and Pi are adapters, not model families.
 Record the actual provider/model lineage. Kiro execution remains disabled by
 compatibility policy even though its Fabric MCP client registration is
 supported. OpenCode execution is enabled when the `opencode` CLI is installed:
-pass an explicit `opencode/<model>` slug (discover with `opencode models`).
+its free default applies unless `--model` selects a live slug (discover with
+`opencode models`).
 Upstream family on the receipt follows the slug when knowable; otherwise
 `generic-open` (ordinary worker, not distinct-family assurance).
 Gemini, xAI and other distinct families are

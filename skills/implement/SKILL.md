@@ -40,7 +40,9 @@ reconciliation run.
 3. Run deterministic checks; map each criterion to evidence. When required, run
    `evaluate` and attach its passing receipt.
 4. Invoke read-only `code-review` under the current `HARNESS.md` risk ladder.
-   Record adapter, actual family, omissions and substitutions.
+   Record each `adapter/model@effort` route from its attempt receipt and derive
+   family. Record omissions and substitutions. Native subagents use the Agent
+   tool model parameter and mark the route resolved.
 5. Repair blockers, then repeat verification and review under the `deliver`
    receipt contract's scaled budget. Return evidence to user or `scope` on
    drift.
@@ -50,7 +52,7 @@ reconciliation run.
    artifacts in `RUN.json`.
 7. When a receipt exists, validate with
    `"$(provenant root)/skills/deliver/scripts/validate_delivery.py" \
-   .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes`.
+   .agent-run/runs/<YYYYMMDD-HHMM>-delivery-<slug>-<rand6>/RUN.json --workspace-root "$PWD" --verify-hashes`.
    Hand off only after this machine gate.
 8. User final acceptance is mandatory; promotion needs separate `release`
    authority. Terminalise any run directory as

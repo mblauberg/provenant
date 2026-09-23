@@ -13,7 +13,7 @@ Every authorised linked worktree is a direct child of the owning repository's
 primary checkout:
 
 ```text
-<primary-repository-root>/.worktrees/<task-agent>
+<primary-repository-root>/.worktrees/<branch-with-slashes-as-dashes>
 ```
 
 All agent platforms use that same directory. Never place linked worktrees in a
@@ -33,9 +33,9 @@ envelope:
 
 ```sh
 scripts/worktree create NAME --human-authorised --detach REV
-scripts/worktree create NAME --human-authorised --new-branch BRANCH \
+scripts/worktree create --human-authorised --new-branch BRANCH \
   --branch-authorised --start-point REV
-scripts/worktree create NAME --human-authorised --existing-branch BRANCH
+scripts/worktree create --human-authorised --existing-branch BRANCH
 scripts/worktree list
 scripts/worktree check
 scripts/worktree validate-context
@@ -54,8 +54,18 @@ and branch/detached state. It does not emit the supplied repo path as
 `repo_root`; record that path and the authority provenance separately when the
 run contract requires them. A removal receipt emits only `status`, `name` and
 `primary_root`.
+For branch worktrees, the default name is the branch with `/` replaced by `-`.
+The helper warns when an explicit name differs, and `provenant clean` sends
+such a worktree to triage rather than guessing its branch.
 
 ## Ownership and cleanup
+
+Run `provenant clean` from the project for a dry-run classification and plan
+digest. It protects dirty, unmerged, open-PR and active worktrees; `--apply
+--plan <digest> --human-authorised` delegates eligible removal to `scripts/worktree remove`
+after merge proof. The flag records the caller's attestation of human authority;
+it does not verify who approved removal. Run artifacts and retention are described in
+[Fabric v2](specs/fabric-v2.md).
 
 - One stage owner writes a worktree at a time. Sibling agents use separate
   worktrees or artefact-only scopes.

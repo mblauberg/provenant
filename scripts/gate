@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# Composite verification gate (#830): the MAINTAINING.md "Verify and release"
-# list as one command with per-step pass/fail output, so agents stop
-# re-copying the block. GATE_STEPS must stay identical to that fenced list;
-# tests/test_ci_repository_assurance_policy.py binds the two.
+# Composite verification gate (#830). GATE_STEPS mirrors the fenced list in
+# MAINTAINING.md; tests/test_ci_repository_assurance_policy.py binds the two.
 set -u
 
 [[ $# -eq 0 ]] || { echo "usage: gate" >&2; exit 2; }
@@ -31,33 +29,26 @@ GATE_STEPS=(
   "diff-hygiene|git diff --check"
 )
 
-echo "gate: product_root=$PRODUCT_ROOT"
+log_root="${GATE_LOG_DIR:-$PRODUCT_ROOT/.agent-run/gate-logs}"
+run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
+run_logs="$log_root/$run_id"
+mkdir -p -- "$run_logs" || { echo "gate: cannot create log directory: $run_logs" >&2; exit 3; }
 failed=0
-index=0
-total=${#GATE_STEPS[@]}
-declare -a results=()
 for entry in "${GATE_STEPS[@]}"; do
   name="${entry%%|*}"
   command="${entry#*|}"
-  index=$((index + 1))
-  echo "gate: [$index/$total] $name: $command"
+  log_file="$run_logs/$name.log"
   started=$SECONDS
-  if eval "$command"; then
-    status=pass
+  if eval "$command" >"$log_file" 2>&1; then
+    printf 'ok %s %ss\n' "$name" "$((SECONDS - started))"
   else
-    status=FAIL
     failed=$((failed + 1))
+    printf 'FAIL %s %ss\n' "$name" "$((SECONDS - started))"
+    printf 'log: %s\n' "$log_file"
+    tail -n 20 -- "$log_file"
   fi
-  results+=("$name=$status ($((SECONDS - started))s)")
-  echo "gate: [$index/$total] $name $status ($((SECONDS - started))s)"
 done
 
-echo "gate: summary"
-for line in "${results[@]}"; do
-  echo "gate: $line"
-done
 if [[ "$failed" -ne 0 ]]; then
-  echo "gate: $failed of $total steps failed" >&2
   exit 1
 fi
-echo "gate: all $total steps passed"

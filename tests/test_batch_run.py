@@ -235,7 +235,7 @@ def test_current_routing_fixture_runs_real_dispatch_and_retains_partial_batch(tm
     for task_id, family, status in task_specs:
         prompt = tmp_path / f'{task_id}.md'
         prompt.write_text(
-            f'fixture_family={family}\nfixture_status={status}\nfixture_sleep=0.03\n',
+            f'fixture_family={family}\nfixture_status={status}\nfixture_sleep=0.03\nfixture_barrier=2\n',
             encoding='utf-8',
         )
         prompts[task_id] = prompt
@@ -423,7 +423,7 @@ def test_real_dispatch_children_defer_manifest_race_and_preserve_route_identity(
     write_executable(bin_dir / 'codex', """
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
           exit 0
         fi
         cat >/dev/null
@@ -594,7 +594,7 @@ def test_real_dispatch_timeout_retains_typed_non_success_attempt(tmp_path, monke
     write_executable(bin_dir / 'codex', """
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
           exit 0
         fi
         sleep 10
@@ -605,7 +605,7 @@ def test_real_dispatch_timeout_retains_typed_non_success_attempt(tmp_path, monke
     slow_prompt = tmp_path / 'slow.md'
     slow_prompt.write_text('slow\n', encoding='utf-8')
     manifest = task_manifest(tmp_path, [{'id': 'slow', 'prompt_file': str(slow_prompt),
-        'adapter': 'codex', 'model': 'gpt-5.6-luna', 'role': 'worker', 'timeout': 0.1}])
+        'adapter': 'codex', 'model': 'gpt-6-luna', 'role': 'worker', 'timeout': 0.1}])
 
     assert module.batch(args(module, run_dir, manifest, 1)) == 1
     summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
@@ -624,7 +624,7 @@ def test_real_dispatch_cancellation_reaps_provider_process(tmp_path, monkeypatch
     write_executable(bin_dir / 'codex', f"""
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"low"}},{{"effort":"medium"}},{{"effort":"high"}}]}}]}}'
+          printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"low"}},{{"effort":"medium"}},{{"effort":"high"}}]}}]}}'
           exit 0
         fi
         printf '%s' "$$" > "{provider_pid}"
@@ -637,7 +637,7 @@ def test_real_dispatch_cancellation_reaps_provider_process(tmp_path, monkeypatch
     prompt = tmp_path / 'cancel.md'
     prompt.write_text('cancel\n', encoding='utf-8')
     manifest = task_manifest(tmp_path, [{'id': 'cancel', 'prompt_file': str(prompt),
-        'adapter': 'codex', 'model': 'gpt-5.6-luna', 'role': 'worker', 'timeout': 10}])
+        'adapter': 'codex', 'model': 'gpt-6-luna', 'role': 'worker', 'timeout': 10}])
     parsed = args(module, run_dir, manifest, 1)
     result = []
     import threading
@@ -679,7 +679,7 @@ def test_external_batch_marker_cancels_active_child_and_skips_queued_provider(tm
     write_executable(bin_dir / 'codex', f"""
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"low"}}]}}]}}'
+          printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"low"}}]}}]}}'
           exit 0
         fi
         printf '%s\\n' "$1" >> "{launches}"
@@ -694,8 +694,8 @@ def test_external_batch_marker_cancels_active_child_and_skips_queued_provider(tm
     first_prompt.write_text('first\n', encoding='utf-8')
     second_prompt.write_text('second\n', encoding='utf-8')
     manifest = task_manifest(tmp_path, [
-        {'id': 'first', 'prompt_file': str(first_prompt), 'adapter': 'codex', 'model': 'gpt-5.6-luna', 'role': 'worker', 'timeout': 10},
-        {'id': 'second', 'prompt_file': str(second_prompt), 'adapter': 'codex', 'model': 'gpt-5.6-luna', 'role': 'worker', 'timeout': 10},
+        {'id': 'first', 'prompt_file': str(first_prompt), 'adapter': 'codex', 'model': 'gpt-6-luna', 'role': 'worker', 'timeout': 10},
+        {'id': 'second', 'prompt_file': str(second_prompt), 'adapter': 'codex', 'model': 'gpt-6-luna', 'role': 'worker', 'timeout': 10},
     ])
     result = []
     import threading
@@ -758,7 +758,7 @@ def test_retry_creates_new_attempt_without_replacing_attempt_one(tmp_path, monke
     write_executable(bin_dir / 'codex', """
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
           exit 0
         fi
         cat >/dev/null
@@ -834,7 +834,7 @@ def test_real_dispatch_child_propagates_worker_question_envelope(tmp_path, monke
     write_executable(bin_dir / 'codex', """
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"low"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"}]}]}'
           exit 0
         fi
         printf '{"schema_version":1,"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"Which source should I use?"}}\\n'
@@ -842,7 +842,7 @@ def test_real_dispatch_child_propagates_worker_question_envelope(tmp_path, monke
     monkeypatch.setenv('PATH', f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
     module = load_module()
     module.DISPATCH_RUN = BATCH.parent / 'dispatch_run.py'
-    manifest = task_manifest(tmp_path, [task(tmp_path, 'blocked-real', model='gpt-5.6-luna')])
+    manifest = task_manifest(tmp_path, [task(tmp_path, 'blocked-real', model='gpt-6-luna')])
 
     assert module.batch(args(module, run_dir, manifest, 1)) == 1, attempt_diagnostics(run_dir)
     summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
@@ -1158,3 +1158,43 @@ def test_batch_rejects_a_worktree_without_the_writer_access_mode(tmp_path, monke
     value = task(tmp_path, 'reader', worktree=str(worktree))
     with pytest.raises(module.BatchInputError, match='requires worktree_write'):
         module.load_manifest(task_manifest(tmp_path, [value]), concurrency=1)
+
+
+def test_real_batch_passes_each_task_cwd_and_absolute_prompt(tmp_path, monkeypatch):
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    write_executable(bindir / 'claude', '''#!/usr/bin/env python3
+import json, os, sys
+sys.stdin.read()
+print(json.dumps({'type':'result','result':os.getcwd()}))
+''')
+    monkeypatch.setenv('PATH', str(bindir) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    monkeypatch.setenv('FABRIC_COOLDOWNS_PATH', str(tmp_path / 'cooldowns.json'))
+    run = Path(subprocess.check_output([str(INIT), '--kind', 'batch'], cwd=tmp_path, text=True).strip())
+    prompt = tmp_path / 'caller.md'
+    prompt.write_text('hello')
+    tasks = []
+    for name in ('one', 'two'):
+        cwd = tmp_path / name
+        cwd.mkdir()
+        tasks.append({'id':name,'adapter':'claude','model':'opus','prompt_file':str(prompt),'cwd':str(cwd),'fallback':False})
+    manifest = tmp_path / 'manifest.json'
+    manifest.write_text(json.dumps({'schema_version':1,'tasks':tasks}))
+    result = subprocess.run([str(BATCH), '--run-dir', str(run), '--manifest', str(manifest)], cwd=tmp_path, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr
+    for task in tasks:
+        row = json.loads((run / 'tasks' / task['id'] / 'attempt-001/attempt.json').read_text())
+        assert row['cwd'] == task['cwd']
+        assert (run / row['paths']['result']).read_text() == task['cwd']
+
+
+@pytest.mark.parametrize('fallback', ['yes', {'model':'oops'}, ['']])
+def test_batch_rejects_invalid_fallback_before_launch(tmp_path, monkeypatch, fallback):
+    monkeypatch.chdir(tmp_path)
+    manifest = tmp_path / 'tasks.json'
+    manifest.write_text(json.dumps({'schema_version':1,'tasks':[{'id':'one','adapter':'claude','model':'opus','prompt':'hello','fallback':fallback}]}))
+    mod = load_module()
+    with pytest.raises(mod.BatchInputError, match='fallback'):
+        mod.load_manifest(manifest)

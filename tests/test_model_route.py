@@ -105,7 +105,7 @@ def test_python_floor_rejects_missing_interpreter(harness_script, runner):
 
 
 def resolve(*args):
-    arguments = [str(SCRIPT), "resolve", *args]
+    arguments = [sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve", *args]
     # The router reads its catalogue from the instance root, which defaults to
     # ~/.agents. Left unpinned these cases route against whatever catalogue the
     # developer happens to have installed, so they pass or fail on the machine
@@ -115,9 +115,627 @@ def resolve(*args):
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={**os.environ, "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT)},
+        env={**os.environ, "PATH": "", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+             "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT)},
     )
     return result, json.loads(result.stdout) if result.stdout else None
+
+
+def test_snapshot_deep_merges_models_and_drops_malformed_overlay(tmp_path):
+    product = tmp_path / "product"
+    instance = tmp_path / "instance"
+    (product / "config").mkdir(parents=True)
+    (instance / "config").mkdir(parents=True)
+    shutil.copy(ROOT / "config" / "model-routing.json", product / "config" / "model-routing.json")
+    (instance / "config" / "model-routing.json").write_text(json.dumps({
+        "adapters": {"codex": {"models": [
+            {"id": "gpt-6-luna", "names": ["moon"]},
+            {"id": 4, "names": ["bad"]},
+            {"id": "bad-new", "names": 5},
+        ]}, "broken": {"models": "not-a-list"},
+        "also-broken": {"endpoint_provider": "new", "fixed_model_family": None,
+                        "effort_transport": "flag", "models": [{"names": ["oops"]}]}},
+        "families": {"bad-family": {"aliases": "not-a-map"}},
+        "endpoints": {"bad": {"token_env": 3}},
+    }))
+    result = subprocess.run(
+        [str(SCRIPT), "snapshot", "--json"], capture_output=True, text=True,
+        env={**os.environ, "AGENT_FABRIC_PRODUCT_ROOT": str(product),
+             "AGENT_FABRIC_INSTANCE_ROOT": str(instance),
+             "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state"),
+             "HARNESS_PYTHON": sys.executable},
+    )
+    assert result.returncode == 0, result.stderr
+    snapshot = json.loads(result.stdout)
+    assert snapshot["schema"] == "fabric.catalogue.v1"
+    assert snapshot["sha256"]
+    assert len(snapshot["sources"]) == 2
+    luna = next(model for model in snapshot["adapters"]["codex"]["models"] if model["id"] == "gpt-6-luna")
+    assert "moon" in luna["names"]
+    assert "luna" in luna["names"]
+    assert "bad-new" not in [model["id"] for model in snapshot["adapters"]["codex"]["models"]]
+    assert "broken" not in snapshot["adapters"]
+    assert "also-broken" not in snapshot["adapters"]
+    assert "bad-family" not in snapshot["families"]
+    assert "bad" not in snapshot["endpoints"]
+    assert snapshot["adapters"]["codex"]["default_model"] if "default_model" in snapshot["adapters"]["codex"] else True
+    assert any("codex.models" in note for note in snapshot["drift"])
+
+
+def test_snapshot_drops_invalid_new_adapter_effort_and_allows_nullable_override(tmp_path, monkeypatch):
+    router = load_router()
+    instance = tmp_path / "instance"
+    (instance / "config").mkdir(parents=True)
+    (instance / "config/model-routing.json").write_text(json.dumps({"adapters": {
+        "kiro": {"fixed_model_family": "anthropic"},
+        "pi": {"endpoint_provider": "pi", "fixed_model_family": None,
+               "effort_transport": "flag", "models": [{"id": "foo", "efforts": ["bogus"]}]},
+    }}))
+    monkeypatch.setattr(router, "CATALOG_PATH", instance / "config/model-routing.json")
+    snapshot = router.catalogue_snapshot()
+    assert snapshot["adapters"]["kiro"]["fixed_model_family"] == "anthropic"
+    assert "pi" not in snapshot["adapters"]
+    assert any("pi" in note for note in snapshot["drift"])
+
+
+def test_explicit_endpoint_and_newer_model_preserve_identity(monkeypatch):
+    monkeypatch.setenv("OPENROUTER_API_KEY", "fixture")
+    result, endpoint = resolve("--adapter", "claude", "--model", "custom-model",
+                               "--alias", "workhorse", "--endpoint", "openrouter-anthropic", "--role", "worker")
+    assert result.returncode == 0, result.stderr
+    assert endpoint["endpoint_profile"] == "openrouter-anthropic"
+    no_alias_result, no_alias = resolve("--adapter", "claude", "--model", "custom-model",
+                                        "--endpoint", "openrouter-anthropic", "--role", "worker")
+    assert no_alias_result.returncode == 0, no_alias_result.stderr
+    assert no_alias["endpoint_profile"] == "openrouter-anthropic"
+    assert not any("alias and model both supplied" in note for note in no_alias["notes"])
+    result, newer = resolve("--adapter", "codex", "--model", "gpt-7-luna", "--role", "worker")
+    assert result.returncode == 0, result.stderr
+    assert newer["resolved_model"] == "gpt-7-luna"
+
+
+def test_canonical_cooldown_skips_suffix_and_warns_on_shorthand(tmp_path):
+    until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    (tmp_path / "cooldowns.json").write_text(json.dumps({"cooldowns": {
+        "agy/gemini-3.8-flash-high": {"cooling_until": until},
+        "claude/claude-opus-5-5": {"cooling_until": until},
+    }}))
+    env = {**os.environ, "HARNESS_PYTHON": sys.executable,
+           "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+           "AGENT_FABRIC_STATE_ROOT": str(tmp_path)}
+    def route(*args):
+        run = subprocess.run([str(SCRIPT), "resolve", *args, "--role", "worker"],
+                             capture_output=True, text=True, env=env)
+        assert run.returncode == 0, run.stderr
+        return json.loads(run.stdout)
+    agy = route("--adapter", "agy", "--alias", "workhorse")
+    assert not any(candidate["adapter"] == "agy" and candidate["model"].startswith("gemini-3.8-flash")
+                   for candidate in agy["fallback_candidates"])
+    agy_explicit = route("--adapter", "agy", "--model", "gemini-3.8-flash")
+    assert any("cooling" in warning for warning in agy_explicit["warnings"])
+    opus = route("--adapter", "claude", "--alias", "opus")
+    assert opus["resolved_model"] == "claude-opus-5-5"
+    assert opus["requested_model"] == "opus"
+    assert opus["model_selection"] == "explicit"
+    assert opus["fallback_candidates"] == []
+    assert any("cooling" in warning for warning in opus["warnings"])
+
+
+def test_cooling_alias_without_alternative_has_note(tmp_path):
+    until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    (tmp_path / "cooldowns.json").write_text(json.dumps({"cooldowns": {
+        "agy/gemini-3.8-flash": {"cooling_until": until},
+    }}))
+    run = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve",
+         "--adapter", "agy", "--alias", "workhorse", "--role", "worker"],
+        capture_output=True, text=True,
+        env={**os.environ, "PATH": str(tmp_path), "AGENT_FABRIC_STATE_ROOT": str(tmp_path),
+             "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT)},
+    )
+    assert run.returncode == 0, run.stderr
+    route = json.loads(run.stdout)
+    assert any("cooling" in note and "no available alternative" in note for note in route["notes"])
+
+
+def test_account_wide_cooldown_warns_on_explicit_model(tmp_path):
+    until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    (tmp_path / "cooldowns.json").write_text(json.dumps({"cooldowns": {
+        "codex/*": {"cooling_until": until},
+    }}))
+    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "codex", "--model", "gpt-6-sol",
+                          "--role", "worker"], capture_output=True, text=True,
+                         env={**os.environ, "HARNESS_PYTHON": sys.executable,
+                              "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+                              "AGENT_FABRIC_STATE_ROOT": str(tmp_path)})
+    assert run.returncode == 0, run.stderr
+    assert any("cooling" in warning for warning in json.loads(run.stdout)["warnings"])
+
+
+def test_fallback_false_and_default_explicit_routes_have_no_candidates():
+    for args in (("--alias", "workhorse", "--fallback", "false"),
+                 ("--model", "gpt-6-sol", "--fallback", "false"),
+                 ("--model", "gpt-6-sol")):
+        result, route = resolve("--adapter", "codex", *args, "--role", "worker")
+        assert result.returncode == 0, result.stderr
+        assert route["fallback_candidates"] == []
+
+
+def test_fixed_adapter_cross_family_is_warned_and_default_cooling_does_not_crash(tmp_path):
+    result, wrong = resolve("--adapter", "codex", "--model", "claude-opus-5-5", "--role", "worker")
+    assert result.returncode == 0, result.stderr
+    assert any("claude" in warning and "fix:" in warning for warning in wrong["warnings"])
+    until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    (tmp_path / "cooldowns.json").write_text(json.dumps({"cooldowns": {
+        "opencode/opencode-go/deepseek-v4.1-flash": {"cooling_until": until},
+    }}))
+    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "opencode", "--alias", "flagship",
+                          "--task-class", "critical-review", "--role", "worker"],
+                         capture_output=True, text=True,
+                         env={**os.environ, "HARNESS_PYTHON": sys.executable,
+                              "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+                              "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
+                              "AGENT_FABRIC_STATE_ROOT": str(tmp_path)})
+    assert run.returncode != 1 or "NameError" not in run.stderr
+
+
+def test_kiro_is_enabled_for_both_routes():
+    compatibility = yaml.safe_load((ROOT / "config/adapter-compatibility.yaml").read_text())
+    assert compatibility["dispatch_registry"]["kiro"]["write_modes"] == ["worktree_write"]
+    assert compatibility["dispatch_registry"]["kiro"]["read_only_guarantee"] == "prompt_only"
+    result, route = resolve("--adapter", "kiro", "--model", "deepseek-3.2",
+                            "--alias", "scout", "--role", "worker")
+    assert result.returncode == 0, route
+    assert route["adapter_enabled"] is True
+
+
+def test_kiro_route_carries_cached_negative_probe_evidence(tmp_path):
+    cli = tmp_path / "kiro-cli"
+    cli.write_text("#!/bin/sh\necho 1.2.3\n")
+    cli.chmod(0o755)
+    checked = datetime.now(timezone.utc).isoformat()
+    negative = {"cli_version": "1.2.3", "checked_at": checked,
+                "attempted_write": True, "permission_denied": True, "file_created": False}
+    (tmp_path / "capabilities.json").write_text(json.dumps({"kiro": {
+        "version": "1.2.3", "executable": str(cli),
+        "observed_at": checked, "read_only_probe": negative,
+    }}))
+    run = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"),
+                          "resolve", "--adapter", "kiro", "--alias", "scout",
+                          "--model", "deepseek-3.2", "--role", "worker"], capture_output=True, text=True,
+                         env={**os.environ, "PATH": str(tmp_path),
+                              "AGENT_FABRIC_STATE_ROOT": str(tmp_path),
+                              "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT)})
+    assert run.returncode == 0, run.stderr
+    route = json.loads(run.stdout)
+    assert route["cli_version"] == "1.2.3"
+    assert route["read_only_probe"] == negative
+
+
+def test_kiro_route_discards_probe_after_cli_version_changes(tmp_path):
+    cli = tmp_path / "kiro-cli"
+    cli.write_text("#!/bin/sh\necho 1.2.4\n")
+    cli.chmod(0o755)
+    checked = datetime.now(timezone.utc).isoformat()
+    (tmp_path / "capabilities.json").write_text(json.dumps({"kiro": {
+        "version": "1.2.3", "executable": str(cli), "observed_at": checked,
+        "read_only_probe": {"cli_version": "1.2.3", "checked_at": checked,
+                            "attempted_write": True, "permission_denied": True,
+                            "file_created": False},
+    }}))
+    run = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve",
+         "--adapter", "kiro", "--alias", "scout", "--model", "deepseek-3.2", "--role", "worker"],
+        capture_output=True, text=True,
+        env={**os.environ, "PATH": str(tmp_path), "AGENT_FABRIC_STATE_ROOT": str(tmp_path),
+             "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT)},
+    )
+    assert run.returncode == 0, run.stderr
+    route = json.loads(run.stdout)
+    assert route.get("cli_version") != "1.2.3"
+    assert "read_only_probe" not in route
+
+
+def test_kiro_capability_probe_records_observed_write_denial(tmp_path):
+    cli = tmp_path / "kiro-cli"
+    cli.write_text("""#!/usr/bin/env python3
+import json, sys
+args = sys.argv[1:]
+if args == ['--version']:
+    print('1.2.3')
+elif '--list-models' in args:
+    print(json.dumps({'models': ['auto']}))
+elif args == ['--help']:
+    print('--trust-tools')
+else:
+    target = args[-1].split('FILE=', 1)[1].split()[0]
+    print(json.dumps({'jsonrpc': '2.0', 'params': {'update': {
+        'sessionUpdate': 'tool_call', 'toolCallId': 'write-1',
+        'title': 'fs_write', 'rawInput': {'path': target}}}}))
+    print(json.dumps({'jsonrpc': '2.0', 'params': {'update': {
+        'sessionUpdate': 'tool_call_update', 'toolCallId': 'write-1',
+        'status': 'failed', 'content': [{'type': 'text', 'text': 'permission denied'}]}}}))
+""")
+    cli.chmod(0o755)
+    run = subprocess.run([str(SCRIPT), "probe", "--adapter", "kiro", "--executable", str(cli), "--json"],
+                         capture_output=True, text=True,
+                         env={**os.environ, "HARNESS_PYTHON": sys.executable,
+                              "AGENT_FABRIC_STATE_ROOT": str(tmp_path)})
+    assert run.returncode == 0, run.stderr
+    evidence = json.loads(run.stdout)["read_only_probe"]
+    assert evidence["attempted_write"] is True
+    assert evidence["permission_denied"] is True
+    assert evidence["file_created"] is False
+
+
+def test_probe_bare_executable_records_binary_found_on_path(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path))
+    cli = tmp_path / "kiro-cli"
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.3; exit; fi\n"
+                   "if [ \"$1\" = --help ]; then exit; fi\necho auto\n")
+    cli.chmod(0o755)
+    record, code = router.probe_capabilities("kiro", "kiro-cli")
+    assert code == 0
+    assert record["executable"] == str(cli)
+
+
+def test_explicit_kiro_probe_allows_model_response_budget(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    budgets = []
+
+    def fake_run(argv, **kwargs):
+        if "--no-interactive" in argv:
+            budgets.append(kwargs["timeout"])
+        output = "1.2.3" if argv[-1] == "--version" else "auto"
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    monkeypatch.setattr(router.subprocess, "run", fake_run)
+    record, code = router.probe_capabilities("kiro", "/fake/kiro-cli")
+    assert code == 0
+    assert "read_only_probe" in record
+    assert budgets == [60.0]
+
+
+def test_compatibility_drift_rejection_names_a_fix(tmp_path):
+    router = load_router()
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["adapters"]["codex"].pop("default_model", None)
+    path = tmp_path / "model-routing.json"
+    path.write_text(json.dumps(catalog))
+    compatibility = write_codex_compatibility(tmp_path, requires_explicit_model=False)
+    result = subprocess.run([str(SCRIPT), "resolve", "--adapter", "codex", "--alias",
+                             "workhorse", "--role", "worker", "--catalog", str(path),
+                             "--adapter-compatibility", str(compatibility)],
+                            capture_output=True, text=True,
+                            env={**os.environ, "HARNESS_PYTHON": sys.executable,
+                                 "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
+                                 "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT)})
+    route = json.loads(result.stdout)
+    assert route["status"] == "account_default_conflicts_with_compatibility"
+    assert "fix:" in route["message"]
+
+
+@pytest.mark.parametrize("arguments,model,effort", [
+    (["--adapter", "codex", "--alias", "luna"], "gpt-6-luna", "default"),
+    (["--adapter", "agy", "--alias", "flash", "--effort", "xhigh"], "gemini-3.8-flash-high", "high"),
+    (["--adapter", "cursor", "--alias", "grok"], "grok-4.7", "default"),
+    (["--adapter", "opencode", "--alias", "glm"], "opencode-go/glm-5.3-flash", "default"),
+    (["--model", "gpt-5.6-luna"], "gpt-6-luna", "default"),
+])
+def test_ordinary_registry_routes_names_and_nearest_effort(arguments, model, effort):
+    result, route = resolve(*arguments, "--role", "worker")
+    assert result.returncode == 0, route
+    assert route["status"] == "ok"
+    assert route["resolved_model"] == model
+    assert route["effort_applied"] == effort
+
+
+def test_ordinary_unknown_model_passes_through_and_conflict_prefers_model():
+    result, route = resolve("--adapter", "opencode", "--alias", "scout", "--model",
+                            "example/new-model", "--role", "worker")
+    assert result.returncode == 0, route
+    assert route["resolved_model"] == "example/new-model"
+    assert route["model_family"] == "generic-open"
+    assert route["provider"] == "example"
+    assert route["notes"]
+
+
+def test_unregistered_agy_model_passes_explicit_effort_unverified():
+    result, route = resolve("--adapter", "agy", "--model", "gemini-3.7-flash",
+                            "--effort", "medium", "--role", "worker")
+    assert result.returncode == 0, route
+    assert route["effort"] == route["effort_applied"] == "medium"
+    assert route["effort_capability_source"] == "provider-unverified"
+
+
+def test_opencode_training_warning_and_paid_fallback_excludes_free():
+    result, route = resolve("--adapter", "opencode", "--model",
+                            "opencode/muse-spark-1.3-contributor-free", "--role", "worker")
+    assert result.returncode == 0, route
+    assert route["warnings"]
+    result, route = resolve("--adapter", "opencode", "--alias", "flagship", "--role", "worker")
+    assert result.returncode == 0, route
+    assert all(not candidate["trains_on_prompts"] and candidate["plan_cap_usd"] > 0
+               for candidate in route["fallback_candidates"])
+    result, unregistered = resolve("--adapter", "opencode", "--model",
+                                   "opencode/muse-spark-2-contributor-free", "--role", "worker")
+    assert result.returncode == 0, unregistered
+    assert unregistered["trains_on_prompts"] is True
+    assert unregistered["warnings"]
+
+
+def test_cooling_alias_skips_candidate_but_explicit_model_warns(tmp_path):
+    until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    (tmp_path / "cooldowns.json").write_text(json.dumps({"schema": "fabric.cooldowns.v1", "cooldowns": {
+        "opencode/opencode-go/glm-5.3-flash": {"cooling_until": until},
+    }}))
+    env = {**os.environ, "HARNESS_PYTHON": sys.executable,
+           "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT), "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
+           "AGENT_FABRIC_STATE_ROOT": str(tmp_path)}
+    def routed(*arguments):
+        process = subprocess.run([str(SCRIPT), "resolve", *arguments, "--role", "worker"],
+                                 capture_output=True, text=True, env=env)
+        return process, json.loads(process.stdout)
+    result, alias = routed("--adapter", "opencode", "--alias", "flagship")
+    assert result.returncode == 0
+    assert alias["resolved_model"] == "opencode-go/kimi-k2.7-code"
+    assert any("cooling" in note for note in alias["notes"])
+    result, shorthand = routed("--adapter", "opencode", "--alias", "glm")
+    assert result.returncode == 0
+    assert shorthand["resolved_model"] == "opencode-go/glm-5.3-flash"
+    assert any("cooling" in warning for warning in shorthand["warnings"])
+    result, explicit = routed("--adapter", "opencode", "--model", "glm")
+    assert result.returncode == 0
+    assert explicit["resolved_model"] == "opencode-go/glm-5.3-flash"
+    assert any("cooling" in warning for warning in explicit["warnings"])
+
+
+def test_malformed_cooldown_time_cannot_break_routing(tmp_path):
+    (tmp_path / "cooldowns.json").write_text(json.dumps({"cooldowns": {
+        "opencode/opencode-go/glm-5.3-flash": {"cooling_until": "2026-09-23T10:00:00"},
+    }}))
+    result = subprocess.run([str(SCRIPT), "resolve", "--adapter", "opencode", "--alias",
+                             "flagship", "--role", "worker"], capture_output=True, text=True,
+                            env={**os.environ, "HARNESS_PYTHON": sys.executable,
+                                 "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
+                                 "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+                                 "AGENT_FABRIC_STATE_ROOT": str(tmp_path)})
+    assert result.returncode == 0, result.stderr
+
+
+def test_codex_tier_returns_paid_fallbacks_and_skips_cooling_candidate(tmp_path):
+    until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    (tmp_path / "cooldowns.json").write_text(json.dumps({"cooldowns": {
+        "codex/gpt-6-sol": {"cooling_until": until},
+    }}))
+    capability = write_codex_capability_snapshot(tmp_path)
+    result = subprocess.run([str(SCRIPT), "resolve", "--adapter", "codex", "--alias",
+                             "workhorse", "--role", "worker", "--capabilities-file", str(capability)],
+                            capture_output=True, text=True,
+                            env={**os.environ, "HARNESS_PYTHON": sys.executable,
+                                 "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
+                                 "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+                                 "AGENT_FABRIC_STATE_ROOT": str(tmp_path)})
+    route = json.loads(result.stdout)
+    assert result.returncode == 0, route
+    assert route["resolved_model"] == "gpt-6-luna"
+    assert any("cooling" in note for note in route["notes"])
+    assert any(candidate["adapter"] == "opencode" for candidate in route["fallback_candidates"])
+
+
+def test_ordinary_tier_maps_unsupported_effort_to_nearest_probed_level(tmp_path):
+    capability = write_codex_capability_snapshot(tmp_path, models={
+        "gpt-6-luna": {"resolved_model": "gpt-6-luna", "supported_efforts": ["low", "high"]},
+    })
+    result, route = resolve("--adapter", "codex", "--alias", "scout", "--role", "worker",
+                            "--effort", "xhigh", "--capabilities-file", str(capability))
+    assert result.returncode == 0, route
+    assert route["effort"] == route["effort_applied"] == "high"
+    assert route["effort_note"]
+
+
+def test_unknown_effort_on_tier_routes_as_nearest_supported(tmp_path):
+    capability = write_codex_capability_snapshot(tmp_path, models={
+        "gpt-6-luna": {"resolved_model": "gpt-6-luna", "supported_efforts": ["low", "high"]},
+    })
+    result, route = resolve("--adapter", "codex", "--alias", "scout", "--role", "worker",
+                            "--effort", "balanced", "--capabilities-file", str(capability))
+    assert result.returncode == 0, route
+    assert route["requested_effort"] == "balanced"
+    assert route["effort_applied"] == "low"
+    assert route["effort_note"]
+
+
+def test_tier_alias_and_explicit_model_keeps_model_with_note(tmp_path):
+    capability = write_codex_capability_snapshot(tmp_path)
+    result, route = resolve("--adapter", "codex", "--alias", "scout", "--model",
+                            "gpt-6-sol", "--role", "worker", "--capabilities-file", str(capability))
+    assert result.returncode == 0, route
+    assert route["resolved_model"] == "gpt-6-sol"
+    assert any("model won" in note for note in route["notes"])
+
+
+def test_fallback_any_may_include_free_and_training_models():
+    result, route = resolve("--adapter", "opencode", "--alias", "flagship",
+                            "--fallback", "any", "--role", "worker")
+    assert result.returncode == 0, route
+    assert any(candidate["plan_cap_usd"] == 0 for candidate in route["fallback_candidates"])
+    assert any(candidate["trains_on_prompts"] for candidate in route["fallback_candidates"])
+
+
+def test_capability_probe_caches_model_list_by_cli_version(tmp_path):
+    cli = tmp_path / "opencode"
+    calls = tmp_path / "calls"
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.3; exit; fi\n"
+                   "if [ \"$1\" = --help ]; then echo --variant; exit; fi\n"
+                   f"echo call >> '{calls}'\necho opencode-go/deepseek-v4.1-flash\n")
+    cli.chmod(0o755)
+    env = {**os.environ, "HARNESS_PYTHON": sys.executable,
+           "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_STATE_ROOT": str(tmp_path)}
+    def probe():
+        result = subprocess.run([str(SCRIPT), "probe", "--adapter", "opencode",
+                                 "--executable", str(cli), "--json"],
+                                capture_output=True, text=True, env=env)
+        return result, json.loads(result.stdout)
+    first, observed = probe()
+    second, cached = probe()
+    assert first.returncode == second.returncode == 0
+    assert observed["models"] == ["opencode-go/deepseek-v4.1-flash"]
+    assert observed["version"] == "1.2.3"
+    assert cached["cache_hit"] is True
+    assert calls.read_text().splitlines() == ["call"]
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.4; exit; fi\n"
+                   "if [ \"$1\" = --help ]; then echo --variant; exit; fi\n"
+                   f"echo call >> '{calls}'\necho opencode-go/glm-5.3-flash\n")
+    cli.chmod(0o755)
+    third, refreshed = probe()
+    assert third.returncode == 0
+    assert refreshed["cache_hit"] is False
+    assert refreshed["version"] == "1.2.4"
+    assert calls.read_text().splitlines() == ["call", "call"]
+
+
+def test_failed_capability_probe_retries_after_one_hour(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    cli = tmp_path / "opencode"
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.3; exit; fi\n"
+                   "if [ \"$1\" = --help ]; then exit; fi\n"
+                   "echo opencode-go/glm-5.3-flash\n")
+    cli.chmod(0o755)
+    (tmp_path / "capabilities.json").write_text(json.dumps({"opencode": {
+        "status": "probe_unavailable", "version": "1.2.3", "executable": str(cli),
+        "observed_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+        "models": [],
+    }}))
+    record, code = router.probe_capabilities("opencode", str(cli))
+    assert code == 0
+    assert record["cache_hit"] is False
+    assert record["models"] == ["opencode-go/glm-5.3-flash"]
+
+
+def test_snapshot_exposes_fresh_stale_alias_warning(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", ROOT / "config" / "model-routing.json")
+    monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    (tmp_path / "capabilities.json").write_text(json.dumps({"codex": {
+        "version": "1.2.3", "observed_at": datetime.now(timezone.utc).isoformat(),
+        "models": ["gpt-7-luna"], "probed_flags": [],
+    }}))
+    snapshot = router.catalogue_snapshot()
+    assert any("gpt-7-luna" in note and "fix:" in note
+               for note in snapshot["stale_alias_warnings"])
+
+
+def test_snapshot_reads_cached_probe_without_running_clis(tmp_path):
+    cli = tmp_path / "codex"
+    calls = tmp_path / "calls"
+    cli.write_text(f"#!/bin/sh\necho called >> '{calls}'\necho gpt-7-luna\n")
+    cli.chmod(0o755)
+    kiro = tmp_path / "kiro-cli"
+    kiro.write_text(f"#!/bin/sh\necho \"$@\" >> '{calls}'\necho auto\n")
+    kiro.chmod(0o755)
+    (tmp_path / "capabilities.json").write_text(json.dumps({"codex": {
+        "version": "1.2.2", "observed_at": "2020-01-01T00:00:00Z",
+        "models": ["gpt-6-luna"]}}))
+    before = (tmp_path / "capabilities.json").read_bytes()
+    run = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "snapshot", "--json"],
+                         capture_output=True, text=True,
+                         env={**os.environ, "PATH": str(tmp_path), "AGENT_FABRIC_STATE_ROOT": str(tmp_path),
+                              "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT)})
+    assert run.returncode == 0, run.stderr
+    snapshot = json.loads(run.stdout)
+    assert snapshot["stale_alias_warnings"] == []
+    assert (tmp_path / "capabilities.json").read_bytes() == before
+    assert not calls.exists()
+
+
+def test_concurrent_capability_probes_keep_both_adapters(tmp_path):
+    executables = {}
+    for adapter, model in (("codex", "gpt-7-luna"), ("opencode", "opencode-go/glm-5.3-flash")):
+        executable = tmp_path / adapter
+        executable.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n"
+                              "if [ \"$1\" = --help ]; then exit; fi\nsleep 0.1\n"
+                              f"echo {model}\n")
+        executable.chmod(0o755)
+        executables[adapter] = executable
+    env = {**os.environ, "HARNESS_PYTHON": sys.executable,
+           "AGENT_FABRIC_STATE_ROOT": str(tmp_path)}
+    def probe(adapter):
+        return subprocess.run([str(SCRIPT), "probe", "--adapter", adapter,
+                               "--executable", str(executables[adapter]), "--json"],
+                              capture_output=True, text=True, env=env)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(probe, executables))
+    assert all(result.returncode == 0 for result in results), [result.stderr for result in results]
+    cache = json.loads((tmp_path / "capabilities.json").read_text())
+    assert cache["codex"]["models"] == ["gpt-7-luna"]
+    assert cache["opencode"]["models"] == ["opencode-go/glm-5.3-flash"]
+    assert not list(tmp_path.glob("capabilities-*.tmp"))
+
+
+def test_cursor_plain_text_model_probe_records_model_ids(tmp_path):
+    cli = tmp_path / "cursor-agent"
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n"
+                   "if [ \"$1\" = --help ]; then exit; fi\n"
+                   "echo 'Available models:'\necho '  auto'\necho '  grok-4.7'\n"
+                   "echo '  composer-2.5  Composer'\n")
+    cli.chmod(0o755)
+    result = subprocess.run([str(SCRIPT), "probe", "--adapter", "cursor",
+                             "--executable", str(cli), "--json"], capture_output=True, text=True,
+                            env={**os.environ, "HARNESS_PYTHON": sys.executable,
+                                 "AGENT_FABRIC_STATE_ROOT": str(tmp_path)})
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["models"] == ["auto", "grok-4.7", "composer-2.5"]
+
+
+def test_codex_json_model_map_probe_records_ids(tmp_path):
+    cli = tmp_path / "codex"
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n"
+                   "if [ \"$1\" = --help ]; then exit; fi\n"
+                   "echo '{\"models\":{\"gpt-6-luna\":{},\"gpt-6-sol\":{}}}'\n")
+    cli.chmod(0o755)
+    result = subprocess.run([str(SCRIPT), "probe", "--adapter", "codex",
+                             "--executable", str(cli), "--json"], capture_output=True, text=True,
+                            env={**os.environ, "HARNESS_PYTHON": sys.executable,
+                                 "AGENT_FABRIC_STATE_ROOT": str(tmp_path)})
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["models"] == ["gpt-6-luna", "gpt-6-sol"]
+
+
+def test_ambiguous_name_chooses_newest_when_no_default(tmp_path):
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["adapters"]["agy"]["models"].extend([
+        {"id": "claude-sonnet-4-6", "names": ["verse"]},
+        {"id": "claude-sonnet-5-1", "names": ["verse"]},
+    ])
+    path = tmp_path / "model-routing.json"
+    path.write_text(json.dumps(catalog))
+    result = subprocess.run([str(SCRIPT), "resolve", "--adapter", "agy", "--alias",
+                             "verse", "--role", "worker", "--catalog", str(path)],
+                            capture_output=True, text=True,
+                            env={**os.environ, "HARNESS_PYTHON": sys.executable,
+                                 "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT)})
+    route = json.loads(result.stdout)
+    assert result.returncode == 0, route
+    assert route["resolved_model"] == "claude-sonnet-5-1"
+    assert any("ambiguous" in note for note in route["notes"])
+
+
+def test_suffix_model_id_keeps_or_overrides_its_effort():
+    result, route = resolve("--adapter", "cursor", "--model", "grok-4.7-high", "--role", "worker")
+    assert result.returncode == 0, route
+    assert route["resolved_model"] == "grok-4.7-high"
+    assert route["effort_applied"] == "high"
+    result, route = resolve("--adapter", "cursor", "--model", "grok-4.7-high",
+                            "--effort", "low", "--role", "worker")
+    assert result.returncode == 0, route
+    assert route["resolved_model"] == "grok-4.7-low"
+    assert route["effort_applied"] == "low"
 
 
 @pytest.mark.parametrize(
@@ -174,6 +792,14 @@ def write_codex_capability_snapshot(tmp_path, *, observed_at=None, models=None):
             },
             "gpt-5.6-luna": {
                 "resolved_model": "gpt-5.6-luna",
+                "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
+            },
+            "gpt-6-sol": {
+                "resolved_model": "gpt-6-sol",
+                "supported_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
+            },
+            "gpt-6-luna": {
+                "resolved_model": "gpt-6-luna",
                 "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
             },
         }
@@ -915,6 +1541,7 @@ def test_risk_tier_override_catalogue_retargets_single_model(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", override["alias"],
@@ -969,6 +1596,7 @@ def test_retargeted_override_occupant_requires_explicit_risk_tier(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
@@ -991,6 +1619,7 @@ def test_retargeting_override_occupant_ungates_previous_occupant(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
@@ -1015,6 +1644,7 @@ def test_retargeting_one_tier_keeps_occupant_gated_by_another_tier(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
@@ -1043,6 +1673,7 @@ def test_foreign_family_risk_override_does_not_gate_explicit_model(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
@@ -1067,6 +1698,7 @@ def test_risk_tier_override_occupant_cannot_be_reached_by_alias(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
@@ -1090,6 +1722,7 @@ def test_risk_tier_override_occupant_cannot_match_versioned_alias_candidate(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
@@ -1112,6 +1745,7 @@ def test_versioned_fable_override_rejects_a_different_versioned_alias_candidate(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship", "--role", "worker",
@@ -1142,6 +1776,7 @@ def test_risk_tier_override_occupant_cannot_partially_match_explicit_model(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
@@ -1164,6 +1799,7 @@ def test_risk_tier_override_occupant_cannot_be_reached_by_role_alias_override(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
@@ -1187,6 +1823,7 @@ def test_foreign_family_override_collision_does_not_reject_adapter_route(
     catalog_path.write_text(json.dumps(catalog))
     snapshot = write_codex_capability_snapshot(tmp_path)
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "workhorse",
@@ -1210,6 +1847,7 @@ def test_missing_route_input_precedes_risk_tier_configuration_validation(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--role", "worker",
@@ -1296,6 +1934,7 @@ def test_capability_resolved_override_occupant_requires_explicit_risk_tier(
     router = load_router()
     catalog_path = Path(ROOT / "config" / "model-routing.json")
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
     snapshot = capability_snapshot({
         "opus": {
             "resolved_model": f"claude-opus-4-6-{RISK_OVERRIDE_MODEL}",
@@ -1328,6 +1967,7 @@ def test_capability_resolved_override_occupant_records_explicit_risk_tier(
     router = load_router()
     catalog_path = Path(ROOT / "config" / "model-routing.json")
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
     resolved_model = RISK_OVERRIDE_MODEL
     snapshot = capability_snapshot({
         RISK_OVERRIDE_MODEL: {
@@ -1359,14 +1999,15 @@ def test_capability_resolved_override_occupant_records_explicit_risk_tier(
     assert receipt["route_source"] == "model-override"
 
 
-def test_disabled_adapter_precedes_inferred_family_override_checks():
+def test_enabled_kiro_accepts_inferred_family_model():
     result, route = resolve(
         "--adapter", "kiro", "--alias", "flagship", "--role", "worker",
         "--model", "deepseek-v3.2",
     )
 
-    assert result.returncode == 1
-    assert route["status"] == "adapter_disabled"
+    assert result.returncode == 0
+    assert route["status"] == "ok"
+    assert route["adapter_enabled"] is True
 
 
 @pytest.mark.parametrize(
@@ -1503,6 +2144,7 @@ def test_risk_tier_override_configuration_is_closed_and_bounded(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", CRUCIAL_RISK_OVERRIDE["alias"],
@@ -1523,6 +2165,7 @@ def test_non_dict_risk_tier_override_is_rejected_as_malformed(tmp_path, monkeypa
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
@@ -1542,6 +2185,7 @@ def test_absent_risk_tier_is_still_reported_unavailable(tmp_path, monkeypatch, c
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
@@ -1575,6 +2219,7 @@ def test_malformed_override_models_never_unreserve_the_occupant(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship",
@@ -1598,6 +2243,7 @@ def test_malformed_override_in_one_family_does_not_reject_another_family(
     catalog_path.write_text(json.dumps(catalog))
     snapshot = write_codex_capability_snapshot(tmp_path)
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "workhorse",
@@ -1634,6 +2280,7 @@ def test_unusable_families_table_fails_closed(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", adapter, "--model", "fable",
@@ -1646,23 +2293,41 @@ def test_unusable_families_table_fails_closed(
     assert route.get("resolved_model") is None
 
 
-def test_opencode_without_model_requires_explicit_account_catalogue_slug(capsys):
-    """OpenCode is a broker with no alias table.
-
-    Routes must carry an explicit account-catalogue model; resolving an alias
-    alone must fail closed with a typed status rather than crashing.
-    """
+def test_opencode_without_model_uses_adapter_default(capsys, monkeypatch):
+    compatibility = yaml.safe_load((ROOT / "config" / "adapter-compatibility.yaml").read_text())
+    assert compatibility["adapters"]["opencode-acp"]["model_family_constraints"]["requires_explicit_model"] is False
     router = load_router()
+    monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", ROOT / "config" / "model-routing.json")
 
     result = router.main([
         "resolve", "--adapter", "opencode", "--alias", "flagship",
-        "--role", "worker",
+        "--role", "worker", "--adapter-compatibility",
+        str(ROOT / "config" / "adapter-compatibility.yaml"),
     ])
 
     route = json.loads(capsys.readouterr().out)
-    assert result == 2
-    assert route["status"] == "model_required_for_broker"
-    assert route.get("resolved_model") is None
+    assert result == 0
+    assert route["status"] == "ok"
+    assert route["resolved_model"] == "opencode-go/glm-5.3-flash"
+    assert route["model_selection"] == "alias"
+    assert route["model_family"] == "zhipu"
+
+
+def test_cursor_without_model_uses_account_auto_default(capsys, monkeypatch):
+    router = load_router()
+    monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", ROOT / "config" / "model-routing.json")
+    result = router.main([
+        "resolve", "--adapter", "cursor", "--alias", "workhorse",
+        "--role", "worker", "--adapter-compatibility",
+        str(ROOT / "config" / "adapter-compatibility.yaml"),
+    ])
+    route = json.loads(capsys.readouterr().out)
+    assert result == 0
+    assert route["resolved_model"] == "auto"
+    assert route["model_selection"] == "adapter-default"
+    assert route["model_family"] == "generic-open"
 
 
 @pytest.mark.parametrize(
@@ -1695,6 +2360,7 @@ def test_unroutable_pinned_family_rejects_with_a_receipt(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "flagship",
@@ -1725,6 +2391,7 @@ def test_empty_routed_family_validates_every_family_the_scan_consults(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     # Every family the catalogue defines, named from the catalogue rather than
     # repeated here: the invariant is that the scan widens to all of them, which
@@ -1764,6 +2431,7 @@ def test_unusable_alias_table_rejects_on_an_explicit_model_route(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "account-default-fixture", "--alias", "flagship",
@@ -1801,6 +2469,7 @@ def test_override_field_of_the_wrong_type_fails_closed(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship", "--role", "a",
@@ -1830,6 +2499,7 @@ def test_fixed_family_adapter_fails_closed_on_an_alias_route(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--alias", "flagship", "--role", "worker",
@@ -1859,6 +2529,7 @@ def test_malformed_override_fails_closed_without_a_fixed_model_family(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", adapter, "--model", "fable",
@@ -1874,8 +2545,8 @@ def test_malformed_override_fails_closed_without_a_fixed_model_family(
 def test_account_default_aliases_resolve_to_account_default_dispatch(tmp_path):
     expected = {
         "flagship": "gpt-6-astra",
-        "workhorse": "gpt-5.6-luna",
-        "scout": "gpt-5.6-luna",
+        "workhorse": "gpt-6-sol",
+        "scout": "gpt-6-luna",
     }
     catalog = write_account_default_catalog(tmp_path)
     for alias, model in expected.items():
@@ -1924,6 +2595,7 @@ def test_catalog_and_compatibility_mismatch_fails_closed(
         tmp_path, requires_explicit_model=requires_explicit_model
     )
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "scout", "--role", "worker",
@@ -1954,12 +2626,12 @@ def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
 @pytest.mark.parametrize(
     ("task_class", "alias", "effort", "resolved_model"),
     (
-        # Luna at high on both worker aliases, not the task-class floors of
+        # Sol and Luna at high on the worker aliases, not the task-class floors of
         # low and medium: the OpenAI family raises worker+scout and
         # worker+workhorse in role_effort_defaults, the same way
         # critical-review and orchestration are raised below.
-        ("mechanical", "scout", "high", "gpt-5.6-luna"),
-        ("legwork", "workhorse", "high", "gpt-5.6-luna"),
+        ("mechanical", "scout", "high", "gpt-6-luna"),
+        ("legwork", "workhorse", "high", "gpt-6-sol"),
         ("critical-review", "flagship", "xhigh", "gpt-6-astra"),
         ("orchestration", "flagship", "xhigh", "gpt-6-astra"),
     ),
@@ -2265,6 +2937,7 @@ def test_invalid_task_class_effort_vocabulary_fails_closed(tmp_path, monkeypatch
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--task-class", "critical-review",
@@ -2284,6 +2957,7 @@ def test_task_class_role_policy_cannot_be_reconfigured_to_worker(tmp_path, monke
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--task-class", "critical-review",
@@ -2308,6 +2982,7 @@ def test_critical_review_policy_rejects_valid_vocabulary_downgrade(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--task-class", "critical-review",
@@ -2328,6 +3003,7 @@ def test_task_class_effort_must_equal_the_capability_probe_effort(
     catalog_path = tmp_path / "model-routing.json"
     catalog_path.write_text(json.dumps(catalog))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "claude", "--task-class", "critical-review",
@@ -2352,6 +3028,7 @@ def test_role_default_cannot_lower_task_class_effort(tmp_path, monkeypatch, caps
         "gpt-6-astra": {"resolved_model": "gpt-6-astra", "supported_efforts": ["high"]},
     })))
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "codex", "--task-class", "orchestration",
@@ -2364,11 +3041,12 @@ def test_role_default_cannot_lower_task_class_effort(tmp_path, monkeypatch, caps
     assert route["effort_source"] == "task-class"
 
 
-def test_explicit_ultra_without_runtime_snapshot_fails_closed(
+def test_explicit_ultra_without_runtime_snapshot_uses_registry(
     monkeypatch, capsys
 ):
     router = load_router()
     monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", ROOT / "config" / "model-routing.json")
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
@@ -2376,10 +3054,10 @@ def test_explicit_ultra_without_runtime_snapshot_fails_closed(
     ])
 
     route = json.loads(capsys.readouterr().out)
-    assert result == 1
-    assert route["status"] == "capability_discovery_failed"
+    assert result == 0
+    assert route["status"] == "ok"
+    assert route["effort"] == "ultra"
     assert route["requested_effort"] == "ultra"
-    assert route["effort"] == ""
 
 
 def test_explicit_ultra_with_stale_openai_capability_snapshot_fails_closed(
@@ -2387,6 +3065,7 @@ def test_explicit_ultra_with_stale_openai_capability_snapshot_fails_closed(
 ):
     router = load_router()
     monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", ROOT / "config" / "model-routing.json")
     observed_at = (
         datetime.now(timezone.utc) - timedelta(minutes=6)
     ).isoformat().replace("+00:00", "Z")
@@ -2435,6 +3114,7 @@ def test_fresh_openai_snapshot_accepts_explicit_ultra_effort(
 ):
     router = load_router()
     monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", ROOT / "config" / "model-routing.json")
     snapshot = write_codex_capability_snapshot(tmp_path)
 
     result = router.main([
@@ -2471,6 +3151,7 @@ def test_noneligible_ultra_fallback_reports_runtime_capability_source(
         },
     )
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "worker",
@@ -2494,6 +3175,7 @@ def test_ultra_eligible_roles_must_be_a_list_of_role_names(
     catalog_path.write_text(json.dumps(catalog))
     snapshot = write_codex_capability_snapshot(tmp_path)
     monkeypatch.setattr(router, "CATALOG_PATH", catalog_path)
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", catalog_path)
 
     result = router.main([
         "resolve", "--adapter", "codex", "--alias", "flagship", "--role", "lead",
@@ -2517,7 +3199,7 @@ def test_explicit_effort_overrides_codex_xhigh_default(tmp_path):
     assert route["effort"] == "high"
 
 
-def test_explicit_ultra_fails_for_noneligible_routes(tmp_path):
+def test_explicit_ultra_maps_to_supported_effort_on_ordinary_routes(tmp_path):
     snapshot = write_codex_capability_snapshot(tmp_path)
     cases = [
         (
@@ -2528,10 +3210,10 @@ def test_explicit_ultra_fails_for_noneligible_routes(tmp_path):
     ]
     for route_args in cases:
         result, route = resolve(*route_args, "--effort", "ultra")
-        assert result.returncode == 1
-        assert route["status"] == "effort_unsupported"
+        assert result.returncode == 0
+        assert route["status"] == "ok"
         assert route["requested_effort"] == "ultra"
-        assert route["effort"] == ""
+        assert route["effort"] in {"ultra", "max"}
 
 
 def test_codex_failure_records_never_expose_a_dispatchable_model(tmp_path):
@@ -2539,12 +3221,13 @@ def test_codex_failure_records_never_expose_a_dispatchable_model(tmp_path):
     # identifies the capability-gated route that was attempted.
     snapshot = write_codex_capability_snapshot(tmp_path)
     result, route = resolve(
-        "--adapter", "codex", "--alias", "workhorse", "--role", "worker",
+        "--adapter", "codex", "--alias", "scout", "--role", "worker",
         "--effort", "ultra", "--capabilities-file", str(snapshot),
     )
-    assert result.returncode == 1
-    assert route["status"] == "effort_unsupported"
-    assert route["resolved_model"] == "gpt-5.6-luna"
+    assert result.returncode == 0
+    assert route["status"] == "ok"
+    assert route["effort"] == "max"
+    assert route["resolved_model"] == "gpt-6-luna"
     assert route["identity_source"] == "runtime-capability+catalog"
     assert "catalog_model" not in route
     assert "model_selection" not in route
@@ -2579,10 +3262,10 @@ def test_caller_efforts_do_not_replace_openai_capability_snapshot():
         "--available-effort",
         "high",
     )
-    assert result.returncode == 1
-    assert route["status"] == "capability_discovery_failed"
+    assert result.returncode == 0
+    assert route["status"] == "ok"
     assert route["requested_effort"] == "xhigh"
-    assert route["effort"] == ""
+    assert route["effort"] == "xhigh"
 
 
 def test_capability_snapshot_controls_default_fallback(
@@ -2590,6 +3273,7 @@ def test_capability_snapshot_controls_default_fallback(
 ):
     router = load_router()
     monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", ROOT / "config" / "model-routing.json")
     snapshot = tmp_path / "caps.json"
     snapshot.write_text(json.dumps(capability_snapshot({
             "gpt-6-astra": {
@@ -2645,8 +3329,8 @@ def test_task_class_effort_fallback_never_escalates_when_only_higher_effort_is_s
     snapshot = write_codex_capability_snapshot(
         tmp_path,
         models={
-            "gpt-5.6-luna": {
-                "resolved_model": "gpt-5.6-luna",
+            "gpt-6-luna": {
+                "resolved_model": "gpt-6-luna",
                 "supported_efforts": ["max"],
             },
         },
@@ -2669,6 +3353,7 @@ def test_fresh_openai_snapshot_without_alias_candidate_fails_closed(
 ):
     router = load_router()
     monkeypatch.setattr(router, "CATALOG_PATH", ROOT / "config" / "model-routing.json")
+    monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", ROOT / "config" / "model-routing.json")
     snapshot = tmp_path / "caps.json"
     snapshot.write_text(json.dumps(capability_snapshot({
             "gpt-5.6-terra": {
@@ -2688,7 +3373,7 @@ def test_fresh_openai_snapshot_without_alias_candidate_fails_closed(
     assert route["effort"] == "xhigh"
 
 
-def test_explicit_unsupported_effort_fails_against_runtime_snapshot(tmp_path):
+def test_explicit_unsupported_effort_maps_against_runtime_snapshot(tmp_path):
     snapshot = tmp_path / "caps.json"
     snapshot.write_text(json.dumps(capability_snapshot({
             "gpt-6-astra": {
@@ -2700,9 +3385,9 @@ def test_explicit_unsupported_effort_fails_against_runtime_snapshot(tmp_path):
         "--adapter", "codex", "--alias", "flagship", "--role", "lead",
         "--effort", "ultra", "--capabilities-file", str(snapshot),
     )
-    assert result.returncode == 1
-    assert route["status"] == "effort_unsupported"
-    assert route["effort"] == ""
+    assert result.returncode == 0
+    assert route["status"] == "ok"
+    assert route["effort"] == "max"
 
 
 def test_malformed_capability_snapshot_fails_closed(tmp_path):
@@ -2902,7 +3587,7 @@ def test_cursor_composer_route_uses_cursor_model_family():
     assert route["distinct_from_lead"] is True
 
 
-def test_agy_accepts_only_explicit_gemini_routing():
+def test_agy_passes_unregistered_models_to_the_broker():
     allowed, allowed_route = resolve(
         "--adapter", "agy", "--model", "gemini-3.1-pro", "--alias", "flagship", "--role", "worker",
     )
@@ -2914,8 +3599,10 @@ def test_agy_accepts_only_explicit_gemini_routing():
     assert allowed_route["status"] == "ok"
     assert allowed_route["model_family"] == "google"
     assert allowed_route["adapter_enabled"] is True
-    assert forbidden.returncode == 1
-    assert forbidden_route["status"] == "adapter_family_forbidden"
+    assert forbidden.returncode == 0
+    assert forbidden_route["status"] == "ok"
+    assert forbidden_route["resolved_model"] == "grok-4"
+    assert forbidden_route["notes"]
 
 
 @pytest.mark.parametrize("selector,alias,effort", [
@@ -2985,9 +3672,14 @@ def test_opencode_route_resolves_explicit_free_model():
     assert route["endpoint_provider"] == "opencode"
 
 
-def test_opencode_nested_deepseek_attributes_upstream_family():
+@pytest.mark.parametrize("model", [
+    "opencode/deepseek-v4.1-flash",
+    "opencode-go/deepseek-v4.1-flash",
+    "openrouter/deepseek/deepseek-v4.1-flash",
+])
+def test_opencode_nested_deepseek_attributes_upstream_family(model):
     result, route = resolve(
-        "--adapter", "opencode", "--model", "opencode/deepseek-v4.1-flash",
+        "--adapter", "opencode", "--model", model,
         "--alias", "scout", "--role", "worker",
     )
 
@@ -3153,6 +3845,10 @@ def test_split_root_defaults_use_instance_routing_and_product_compatibility(tmp_
         ROOT / "config/adapter-compatibility.yaml",
         product_root / "config/adapter-compatibility.yaml",
     )
+    shutil.copy2(
+        ROOT / "config/model-routing.json",
+        product_root / "config/model-routing.json",
+    )
     (instance_root / "config").mkdir(parents=True)
     catalogue = json.loads((ROOT / "config/model-routing.json").read_text())
     catalogue["catalog_date"] = "2099-01-01"
@@ -3209,41 +3905,32 @@ def test_cursor_accepts_preferred_and_supported_fallback_families_without_model_
     assert wrong_family_route["status"] == "adapter_family_forbidden"
 
 
-def test_disabled_kiro_route_fails_before_model_compatibility_checks():
+def test_enabled_kiro_route_passes_model_compatibility_checks():
     result, route = resolve(
         "--adapter", "kiro", "--model", "deepseek-3.2",
         "--alias", "scout", "--role", "worker",
     )
 
-    assert result.returncode == 1
-    assert route["status"] == "adapter_disabled"
-    assert route["adapter_enabled"] is False
-    assert route["reason"] == (
-        "Provider execution is dormant until one bounded ordinary Kiro "
-        "invocation and safety boundary are verified."
-    )
+    assert result.returncode == 0
+    assert route["status"] == "ok"
+    assert route["adapter_enabled"] is True
 
 
 @pytest.mark.parametrize(
-    "selector_args",
+    ("selector_args", "status"),
     (
-        ("--alias", "not-a-route"),
-        ("--alias", "scout", "--task-class", "mechanical"),
-        ("--task-class", "not-a-task"),
+        (("--alias", "not-a-route"), "ok"),
+        (("--alias", "scout", "--task-class", "mechanical"), "route_input_conflict"),
+        (("--task-class", "not-a-task"), "unknown_task_class"),
     ),
 )
-def test_disabled_adapter_gate_dominates_invalid_route_selectors(selector_args):
+def test_enabled_kiro_handles_route_selectors(selector_args, status):
     result, route = resolve(
         "--adapter", "kiro", *selector_args, "--role", "worker",
     )
 
-    assert result.returncode == 1
-    assert route["status"] == "adapter_disabled"
-    assert route["adapter_enabled"] is False
-    assert route["reason"] == (
-        "Provider execution is dormant until one bounded ordinary Kiro "
-        "invocation and safety boundary are verified."
-    )
+    assert route["status"] == status
+    assert result.returncode == (0 if status == "ok" else 2)
 
 
 def test_disabled_pi_precedes_provider_family_checks():
@@ -3356,6 +4043,7 @@ def test_dormant_compatibility_adapter_fails_closed():
     assert route["status"] == "adapter_disabled"
     assert route["adapter_enabled"] is False
     assert route["compatibility_adapter"] == "copilot"
+    assert "fix:" in route["message"]
 
 
 def write_agy_capability_snapshot(tmp_path, models=None):

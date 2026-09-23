@@ -1,0 +1,65 @@
+{
+  "adapter": "kiro",
+  "stdout": "{\"type\": \"error\", \"message\": \"permission denied\"}\n",
+  "stderr": "",
+  "exit": 1,
+  "expected": {
+    "status": "permission_blocked"
+  },
+  "cases": [
+    {
+      "adapter": "kiro",
+      "stdout": "",
+      "stderr": "You've hit your usage limit",
+      "exit": 1,
+      "expected": {
+        "status": "usage_limited"
+      }
+    },
+    {
+      "adapter": "kiro",
+      "stdout": "",
+      "stderr": "Individual quota reached",
+      "exit": 1,
+      "expected": {
+        "status": "usage_limited"
+      }
+    },
+    {
+      "adapter": "kiro",
+      "stdout": "",
+      "stderr": "rate limit exceeded; HTTP 429",
+      "exit": 1,
+      "expected": {
+        "status": "rate_limited"
+      }
+    },
+    {
+      "adapter": "kiro",
+      "stdout": "",
+      "stderr": "Login expired; not logged in",
+      "exit": 1,
+      "expected": {
+        "status": "auth_required"
+      }
+    },
+    {
+      "adapter": "kiro",
+      "stdout": "",
+      "stderr": "model not found",
+      "exit": 1,
+      "expected": {
+        "status": "model_unavailable"
+      }
+    },
+    {
+      "adapter": "kiro",
+      "stdout": "",
+      "stderr": "permission denied",
+      "exit": 1,
+      "expected": {
+        "status": "permission_blocked"
+      }
+    }
+  ]
+}

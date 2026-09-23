@@ -56,6 +56,184 @@ def seed(product: Path, instance_root: Path) -> dict:
     return json.loads(result.stdout)
 
 
+def test_routing_drift_names_product_keys_and_ignores_instance_additions(tmp_path):
+    product = build_product(tmp_path)
+    source = product / "config/model-routing.json"
+    source.write_text(json.dumps({
+        "catalog_date": "2026-09-23", "task_class_routes": {"review": {"alias": "new"}},
+        "families": {"openai": {"aliases": {"scout": ["new", "old"]}}},
+        "adapters": {"opencode": {"endpoint_provider": "opencode"}},
+        "endpoints": {"new": {"base_url": "https://example.invalid"}},
+        "model_patterns": [{"pattern": "new", "family": "openai"}],
+    }))
+    instance_root = tmp_path / "instance"
+    seed(product, instance_root)
+    target = instance_root / "config/model-routing.json"
+    old = json.loads(target.read_text())
+    old["catalog_date"] = "2026-09-01"
+    old["task_class_routes"]["review"]["alias"] = "old"
+    old["families"]["openai"]["aliases"]["scout"] = ["old", "custom"]
+    old["adapters"]["opencode"]["endpoint_provider"] = "codex"
+    old["endpoints"]["new"]["base_url"] = "https://old.invalid"
+    old["endpoints"]["custom"] = {"base_url": "https://custom.invalid"}
+    old["model_patterns"].append({"pattern": "custom", "family": "custom"})
+    target.write_text(json.dumps(old))
+
+    result = run("validate", product, instance_root)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["routing_drift"] == []
+
+    changed = json.loads(source.read_text())
+    changed["catalog_date"] = "2026-09-24"
+    changed["task_class_routes"]["review"]["alias"] = "latest"
+    changed["families"]["openai"]["aliases"]["scout"] = ["latest"]
+    changed["adapters"]["opencode"]["endpoint_provider"] = "latest"
+    changed["endpoints"]["new"]["base_url"] = "https://latest.invalid"
+    changed["model_patterns"] = [{"pattern": "latest", "family": "openai"}]
+    source.write_text(json.dumps(changed))
+    result = run("validate", product, instance_root)
+    drift = json.loads(result.stdout)["routing_drift"]
+    assert "catalog_date" in drift
+    assert "task_class_routes.review.alias" in drift
+    assert "families.openai.aliases.scout" in drift
+    assert "adapters.opencode.endpoint_provider" in drift
+    assert "endpoints.new.base_url" in drift
+    assert "endpoints.custom" not in " ".join(drift)
+    assert "model_patterns" in drift
+    summary = run("validate", product, instance_root, "--summary")
+    assert "repair=install-harness --platform all --refresh-routing" in summary.stdout
+
+    old["model_patterns"][0]["family"] = "legacy"
+    target.write_text(json.dumps(old))
+    assert "model_patterns" in json.loads(run("validate", product, instance_root).stdout)["routing_drift"]
+
+
+def test_explicit_routing_refresh_backs_up_and_preserves_instance_additions(tmp_path):
+    product = build_product(tmp_path)
+    source = product / "config/model-routing.json"
+    source.write_text(json.dumps({
+        "catalog_date": "2026-09-23", "families": {"openai": {"aliases": {"scout": ["new"]}}},
+        "adapters": {"opencode": {"endpoint_provider": "opencode"}},
+        "endpoints": {"new": {"base_url": "https://new.invalid"}},
+        "model_patterns": [{"pattern": "new", "family": "openai"}],
+    }))
+    instance_root = tmp_path / "instance"
+    seed(product, instance_root)
+    target = instance_root / "config/model-routing.json"
+    old = json.loads(target.read_text())
+    old["families"]["openai"]["aliases"]["scout"] = ["old", "custom"]
+    old["adapters"]["custom"] = {"endpoint_provider": "custom"}
+    old["endpoints"]["custom"] = {"base_url": "https://custom.invalid"}
+    old["model_patterns"].append({"pattern": "custom", "family": "custom"})
+    target.write_text(json.dumps(old))
+    before = target.read_bytes()
+
+    product_catalogue = json.loads(source.read_text())
+    product_catalogue["families"]["openai"]["aliases"]["scout"] = ["new", "next"]
+    source.write_text(json.dumps(product_catalogue))
+
+    result = run("refresh-routing", product, instance_root)
+    assert result.returncode == 0, result.stderr
+    updated = json.loads(target.read_text())
+    assert updated["families"]["openai"]["aliases"]["scout"] == ["new", "next"]
+    assert updated["adapters"]["custom"] == old["adapters"]["custom"]
+    assert updated["endpoints"]["custom"] == old["endpoints"]["custom"]
+    assert updated["model_patterns"][-1] == old["model_patterns"][-1]
+    assert "families.openai.aliases.scout" in json.loads(result.stdout)["routing"]["conflicts"]
+    backups = list(target.parent.glob("model-routing.json.bak-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == before
+    assert json.loads(run("validate", product, instance_root).stdout)["routing_drift"] == []
+
+
+def test_refresh_removes_retired_product_keys_and_preserves_unchanged_instance_edits(tmp_path):
+    product = build_product(tmp_path)
+    source = product / "config/model-routing.json"
+    source.write_text(json.dumps({
+        "schema_version": 1,
+        "families": {"openai": {"aliases": {"scout": ["old", "kept"]}}},
+        "adapters": {"retired": {"model_patterns": ["old"]}, "kept": {"field": "product"}},
+        "model_patterns": [{"pattern": "old"}, {"pattern": "kept"}],
+    }))
+    root = tmp_path / "instance"
+    seed(product, root)
+    target = root / "config/model-routing.json"
+    installed = json.loads(target.read_text())
+    installed["adapters"]["kept"]["field"] = "user"
+    installed["families"]["openai"]["aliases"]["scout"] = ["kept", "old"]
+    target.write_text(json.dumps(installed))
+    new_product = json.loads(source.read_text())
+    del new_product["adapters"]["retired"]
+    new_product["model_patterns"] = [{"pattern": "kept"}]
+    new_product["schema_version"] = 2
+    source.write_text(json.dumps(new_product))
+    drift = json.loads(run("validate", product, root).stdout)["routing_drift"]
+    assert "adapters.retired" in drift
+    assert "model_patterns" in drift
+    assert "schema_version" in drift
+
+    result = run("refresh-routing", product, root, "--summary")
+
+    assert result.returncode == 0, result.stderr
+    merged = json.loads(target.read_text())
+    assert "retired" not in merged["adapters"]
+    assert merged["model_patterns"] == [{"pattern": "kept"}]
+    assert merged["adapters"]["kept"]["field"] == "user"
+    assert merged["families"]["openai"]["aliases"]["scout"] == ["kept", "old"]
+    assert merged["schema_version"] == 2
+    assert "schema_version" in result.stdout
+    assert "backup=" in result.stdout
+    assert json.loads((root / "config/.model-routing.base.json").read_text()) == new_product
+    assert json.loads(run("validate", product, root).stdout)["routing_drift"] == []
+
+
+def test_refresh_without_base_reports_product_updates_and_retained_unknown_keys(tmp_path):
+    product = build_product(tmp_path)
+    source = product / "config/model-routing.json"
+    source.write_text('{"schema_version": 2, "adapters": {"a": {"field": "new"}}}')
+    root = tmp_path / "instance"
+    seed(product, root)
+    (root / "config/.model-routing.base.json").unlink()
+    target = root / "config/model-routing.json"
+    target.write_text('{"schema_version": 1, "adapters": {"a": {"field": "user"}, "retired": {"field": "old"}}}')
+
+    result = run("refresh-routing", product, root, "--summary")
+
+    assert result.returncode == 0, result.stderr
+    assert "routing conflict=" not in result.stdout
+    assert "routing updated from product=adapters.a.field" in result.stdout
+    assert "product value won" in result.stdout
+    assert "routing retained (not in product; remove if retired)=adapters.retired" in result.stdout
+    assert json.loads(target.read_text())["adapters"]["a"]["field"] == "new"
+    assert "retired" in json.loads(target.read_text())["adapters"]
+    assert json.loads((root / "config/.model-routing.base.json").read_text()) == json.loads(source.read_text())
+
+
+def test_fused_refresh_does_not_create_a_routing_base(tmp_path):
+    product = build_product(tmp_path)
+    seed(product, product)
+    base = product / "config/.model-routing.base.json"
+    assert not base.exists()
+
+    result = run("refresh-routing", product, product, "--summary")
+
+    assert result.returncode == 0, result.stderr
+    assert not base.exists()
+
+
+def test_validate_reports_unreadable_instance_routing_without_blocking_seed(tmp_path):
+    product = build_product(tmp_path)
+    root = tmp_path / "instance"
+    seed(product, root)
+    target = root / "config/model-routing.json"
+    target.write_text("{broken")
+
+    result = run("validate", product, root)
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["routing_drift"] == ["unreadable"]
+
+
 def test_desired_state_is_seeded_with_product_version_and_split_mode(tmp_path):
     product = build_product(tmp_path)
     instance_root = tmp_path / "instance"
@@ -196,6 +374,7 @@ def test_seeding_never_writes_a_receipt_into_the_instance_root(tmp_path):
         "AGENTS.md",
         "config/model-preferences.json",
         "config/model-routing.json",
+        "config/.model-routing.base.json",
     }
 
 
@@ -477,6 +656,8 @@ def test_a_missing_product_template_is_a_conflict_not_a_silent_skip(tmp_path):
 
 def test_the_repository_ships_a_valid_fused_desired_state():
     """This checkout is itself a fused instance, so its desired state must load."""
+    if (ROOT / ".git").is_file():
+        pytest.skip("linked worktrees do not carry the fused instance's state")
     document = instance.load_desired_state(ROOT)
 
     assert document is not None

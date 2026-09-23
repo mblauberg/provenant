@@ -88,37 +88,70 @@ not read an absent `Watch out for` as an endorsement.
 
 ## Models
 
-### Opus (Anthropic flagship)
+### Opus 5.5 (Anthropic flagship)
 
 - **Good at:** open-ended exploration; UI and UX work; open implementation and
   skeletons where the shape is not yet decided; chairing, because its human
-  communication is strong.
-- **Watch out for:** nothing recorded.
+  communication is strong. The default for critical review, synthesis and
+  adjudication at every risk tier, ahead of Fable 5.1.
+- **Watch out for:** the owner on Opus 5's long-form prose: "opus's writing is
+  quite horrible". Hand human-facing prose to a voice pass (see
+  [Human-facing final polish](#human-facing-final-polish)) rather than shipping
+  Opus drafts as written.
 - **Cost:** flagship-tier; not separately characterised.
-- **Reach:** `claude` and `agy` adapters, `anthropic` family.
+- **Reach:** the `opus` alias, which resolves to `claude-opus-5-5` (verified
+  2026-09-23 from `modelUsage`). `claude` adapter, `anthropic` family; the `agy`
+  adapter carries older Opus builds only.
+
+### Claude Fable 5.1 (Anthropic override)
+
+- **Good at:** a deliberately different Anthropic mind for synthesis or
+  adjudication when Opus has already had its say.
+- **Watch out for:** the owner prefers Opus 5.5 for critical work most of the
+  time, and in September said "no fable at the moment". Reach for Fable only
+  when asked, or when a second Anthropic perspective is the point. Effort is
+  capped at `medium` by the catalogue override.
+- **Cost:** not recorded.
+- **Reach:** `claude-fable-5-1` through the crucial and terminal
+  `--model-override-tier`, synthesis and adjudication roles only.
 
 ### GPT-6 Astra (OpenAI flagship)
 
 - **Good at:** the hard, high-stakes slice: correctness, edge cases and precise
   work on a tight scope.
 - **Watch out for:** no standing behavioural note yet. Keep the brief tight and
-  record new evidence rather than carrying Sol's profile forward by assumption.
+  record new evidence rather than carrying GPT-5.6 Sol's profile forward by
+  assumption.
 - **Cost:** flagship-tier.
 - **Reach:** `codex` adapter (preferred), `openai` family. The native Codex app
   exposes `low` through `ultra`; the Responses API supports through `max`.
   Treat those as separate surfaces and probe the CLI before dispatch.
 
-### GPT-5.6 Luna (OpenAI workhorse and scout)
+### GPT-6 Sol (OpenAI workhorse)
 
-- **Good at:** cheap, high-token legwork at `high` or `xhigh` effort, and
-  fan-out where several bounded opinions are worth more than one flagship call.
-- **Watch out for:** can over-engineer a loose brief. Raised effort narrows the
-  gap, but a tight brief closes it.
-  The catalogue's worker defaults hand it `high` on both the `workhorse` and
-  `scout` aliases; raise to `xhigh` or `max` explicitly when the brief
-  warrants it.
-- **Cost:** cheap, and far cheaper than it was; the point of using it.
-- **Reach:** `codex` adapter, `openai` family, `workhorse` and `scout` aliases.
+- **Good at:** medium tasks: ordinary implementation, research legwork, review
+  and drafting that need more judgement than bulk extraction but do not justify
+  Astra. Very cheap for its strength.
+- **Watch out for:** new on 2026-09-23; no field record yet. Record what you see.
+- **Cost:** cheap.
+- **Reach:** `codex` adapter, `openai` family, first `workhorse` candidate, at
+  `high` by default; `low` through `ultra` in the Codex CLI (0.155.1+).
+
+### GPT-6 Luna (OpenAI scout)
+
+- **Good at:** cheap, high-token legwork and mechanical slices, and fan-out
+  where several bounded opinions are worth more than one flagship call.
+- **Watch out for:** the owner on its predecessor, GPT-5.6 Luna: "codex astra is
+  better at design and motion than luna - luna isn't great", and it could
+  over-engineer a loose brief. Keep briefs tight and keep design work off it
+  until GPT-6 Luna has its own record.
+- **Cost:** very cheap; the point of using it. The owner's standing wish is
+  "use just luna or some of the opencode models for smaller
+  implementation/fixes instead of loading up astra".
+- **Reach:** `codex` adapter, `openai` family, `scout` alias and the fallback
+  `workhorse` candidate, at `high` by default; `low` through `max`. Needs Codex
+  CLI 0.155.1 or later: older clients reject it as "not supported when using
+  Codex with a ChatGPT account".
 
 ### Sonnet 5 (Anthropic workhorse)
 
@@ -222,40 +255,36 @@ actual task before relying on it.
 
 ## Current preferences
 
-**Token-heavy legwork goes to OpenAI, and the workhorse there is
-`gpt-5.6-luna` at raised effort.** Reading a lot to produce a report, exhaustive
-inventories, mechanical sweeps: these are cheaper there and Claude's budget is
-better spent on judgement. Luna's price was cut by roughly 80% in July 2026,
-which makes Luna at `high` or `xhigh` the best value in the family for
-high-token work; go to `max` when a leg genuinely deserves it. `gpt-5.6-terra`
-was dropped from the catalogue on 2026-09-10; the owner does not need it.
+**Token-heavy and medium work goes to OpenAI: GPT-6 Sol for medium tasks,
+GPT-6 Luna for bulk.** Both arrived on 2026-09-23 and are very cheap for their
+strength. Reading a lot to produce a report, exhaustive inventories and
+mechanical sweeps go to Luna (`scout`); ordinary implementation, legwork that
+needs some judgement, and review go to Sol (`workhorse`). Claude's budget is
+better spent on judgement. The GPT-5.6 generation and Terra are retired from the
+catalogue.
 
-That is the old standing wish made real by the price cut. The mechanical caveat
-that used to block it was that effort is fixed per task class, so ordering Luna
-first in the catalogue array on its own would have bought Luna at *medium*, a
-downgrade rather than the trade intended, and the array was left alone for that
-reason. Both halves now move together: `openai.aliases.workhorse` lists Luna
-first, and `openai.role_effort_defaults.worker.workhorse` raises the effort to
-`high`, which outranks the `legwork` task class default of `medium`. The raise
-is scoped to the OpenAI family on purpose, so Anthropic and Google workhorse
-routes stay at `medium` rather than inheriting a cost rise nobody asked for.
-Reach for `xhigh` or `max` explicitly when a leg deserves it, and record the
-model and effort pair in the receipt. A cheap model with the effort dial up
-beats a dearer model at medium.
+`openai.role_effort_defaults.worker` raises both worker aliases to `high`, which
+outranks the task-class floors of `low` and `medium`. The raise is scoped to the
+OpenAI family on purpose, so Anthropic and Google worker routes stay at their
+floors rather than inheriting a cost rise nobody asked for. Reach for `xhigh` or
+`max` explicitly when a leg deserves it, and record the model and effort pair in
+the receipt. A cheap model with the effort dial up beats a dearer model at
+medium.
 
 **`gpt-6-astra` is the OpenAI flagship, reserved for critical and high-stakes
 slices and for legwork that needs judgement.** Run it between `low` and
 `xhigh`; `max` and `ultra` exist on the surfaces but are not the standing
-policy. It is the sole OpenAI flagship candidate: Sol is not an automatic
-fallback and is not a catalogue route. Give Astra the work that is genuinely
-hard or where a miss is expensive; everything below that belongs to Luna at
-raised effort.
+policy. It is the sole OpenAI flagship candidate: no worker model is an
+automatic flagship fallback. Give Astra the work that is genuinely hard, where a
+miss is expensive, or that needs design and motion judgement; everything below
+that belongs to Sol or Luna at raised effort.
 
-**Anthropic minds are for judgement, not volume.** Keep Opus and Claude Fable
-5.1 (`claude-fable-5-1`) for
-chairing, adjudication, synthesis and critical review, and reach for them less
+**Anthropic minds are for judgement, not volume.** Keep Opus 5.5 for chairing,
+adjudication, synthesis and critical review, and prefer it over Claude Fable 5.1
+(`claude-fable-5-1`) for that work most of the time. Reach for Anthropic less
 often on lower-stakes tasks: Haiku and Sonnet are not priced well enough to be
-the cheap alternative, so menial and high-token slices route to Luna instead.
+the cheap alternative, so menial and high-token slices route to Luna, and medium
+ones to Sol, instead.
 Where workhorse work must stay Anthropic, prefer Opus at low or medium effort
 over Sonnet at a higher one. The catalogue lists Opus under
 `anthropic.aliases.workhorse` so this is a real option rather than a
@@ -270,8 +299,7 @@ chair's job.
 changes.** It is chosen for voice, not for reasoning. Use it to make prose read
 naturally; do not hand it the logic. `gemini-3.8-flash` is the default across
 every Gemini alias: it is cheap, genuinely a different family for cross-family
-review legs, and reachable at `-high`, `-medium` and `-low`. Reserve
-`gemini-3.1-pro-high` for registers carrying legal or regulatory risk.
+review legs, and reachable at `-high`, `-medium` and `-low`. Use `gemini-3.8-flash-high` for registers carrying legal or regulatory risk as well.
 
 **Critical review has no fixed family.** The cross-family obligation is relative
 to whoever chairs the run, so the right second family depends on the first. Do
@@ -300,6 +328,12 @@ not inferred:
   permits `rg` with arbitrary flags. Rules of this shape are far broader than
   they look: `command(sed)` includes `sed -i`, which writes files.
 
+Three field traps. Agy quota is per account, so a 429 on one model blocks the
+others too. On quota, Agy can answer from a different model (GPT-OSS 120B was
+once shipped unnoticed under a Gemini flag), so check the model named in the
+output, not only the one requested. Prompts over about 124 KiB fail closed
+because the prompt travels in argv.
+
 The practical consequence: do not ask Gemini to write its own output file.
 Generate any diff yourself, pass the directory with `--add-dir`, and redirect
 the CLI's stdout to capture the review. That path needs no allow-rules at all.
@@ -314,7 +348,6 @@ assessment; until then, route these on the hard axis alone.
 | Model | Configured position | Status |
 |---|---|---|
 | Haiku | `anthropic` scout alias | needs owner review |
-| Claude Fable 5.1 | `anthropic` crucial and terminal override for synthesis and adjudication, effort capped at medium | needs owner review |
 | Grok | reachable through the `cursor` adapter, `xai` family | needs owner review |
 | Cursor Composer | reachable through the `cursor` adapter | needs owner review |
 | DeepSeek | `deepseek` endpoint, reached through the `claude` adapter | needs owner review |

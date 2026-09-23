@@ -14,7 +14,7 @@ scaffolds the file set and substitutes the knobs below).*
 ## Where mission state lives
 
 The skill directory ships templates and scripts only — it is never written
-to at runtime. Every run's state lives under **`.agent-run/<mission-id>/`**,
+to at runtime. Every run's state lives under **`.agent-run/runs/<mission-run-dir>/`**,
 the same session-owned run location `deliver`, `implement` and `orchestrate`
 use for their receipts (`RUN.json`) and run directories. `bootstrap-autopilot.sh
 <mission-id>` creates and fills it. This keeps a mission's durable memory
@@ -43,7 +43,7 @@ now belongs to the skills that already own it, not a forked copy here:
 
 - **Decisions/ADRs** — when a work unit reaches a decision worth a durable
   record, delegate it to the owning run's `implement`/`deliver` lifecycle;
-  its receipt lands at `.agent-run/<mission-id>/RUN.json` per their
+  its receipt lands at `.agent-run/runs/<mission-run-dir>/RUN.json` per their
   `run-contract.md`/`contract.md`. Do not fork a second ADR tree here.
 - **Model/effort routing** — owned by `orchestrate`; every wave dispatched
   from this mission goes through it rather than a lab-local matrix.
