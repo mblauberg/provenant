@@ -293,10 +293,14 @@ function closeStoppedRun(runDir: string, terminalStatus: "interrupted" | "cancel
       (receipt?.status === undefined || receipt.status === "active")) {
     const temporary = `${path}.${process.pid}.tmp`;
     const { fix: _staleFix, ...prior } = status;
-    writeFileSync(temporary, JSON.stringify({ ...prior, status: terminalStatus,
-      finished_at: new Date().toISOString(), ...(terminalStatus === "interrupted"
-        ? { fix: "Dispatch a new run; the owner exited." } : {}) }) + "\n", { mode: 0o600 });
-    renameSync(temporary, path);
+    try {
+      writeFileSync(temporary, JSON.stringify({ ...prior, status: terminalStatus,
+        finished_at: new Date().toISOString(), ...(terminalStatus === "interrupted"
+          ? { fix: "Dispatch a new run; the owner exited." } : {}) }) + "\n", { mode: 0o600 });
+      renameSync(temporary, path);
+    } catch {
+      /* The run directory was removed (cleaned or pruned); nothing is left to close. */
+    }
   }
   removeOwnerRecord(runDir);
 }

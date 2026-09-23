@@ -335,7 +335,10 @@ function startOwner(
       spawnError = error.message;
     });
     child.once("close", (exitCode, signal) => {
-      void terminateStartedRun(started, started.cancellation === undefined ? "interrupted" : "cancelled").finally(async () => {
+      void terminateStartedRun(started, started.cancellation === undefined ? "interrupted" : "cancelled")
+        // Closure is best effort; a rejection here must never crash the MCP server.
+        .catch(() => undefined)
+        .finally(async () => {
         activeOwners.delete(started);
         for (const path of cleanupPaths) {
           try {

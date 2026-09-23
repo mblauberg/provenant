@@ -370,6 +370,11 @@ try {
 } catch (error) {
   console.error(`fabric: presence deferred: ${String(error)}`);
 }
+// One stray rejection must not drop every agent's Fabric connection: log it
+// to stderr (the MCP client's log) and keep serving.
+process.on("unhandledRejection", (reason) => {
+  console.error("fabric: unhandled rejection:", reason instanceof Error ? reason.stack ?? reason.message : reason);
+});
 const transport = new StdioServerTransport();
 // SDK schema failures happen before tool callbacks; keep their presentation consistent.
 const send = transport.send.bind(transport);
