@@ -125,6 +125,8 @@ def test_shim_accepts_the_forms_agents_type(argv, header):
 
 def test_shim_ends_quietly_when_its_reader_closes():
     shim = SCRIPTS / "bin/ps"
-    result = subprocess.run(f"{shlex.quote(str(shim))} ax | head -1", shell=True,
-                            capture_output=True, text=True, check=True)
-    assert result.stderr == ""
+    reader = subprocess.Popen([str(shim), "ax"], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    reader.stdout.readline()
+    reader.stdout.close()  # as head -1 does
+    _, stderr = reader.communicate(timeout=30)
+    assert stderr == b""
