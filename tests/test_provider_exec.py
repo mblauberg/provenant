@@ -95,7 +95,13 @@ def test_provider_golden(fixture):
             assert result[key] == value
 
 
-def test_unregistered_model_failure_fix_names_adapter_models(tmp_path):
+def test_unregistered_model_failure_fix_names_adapter_models(tmp_path, monkeypatch):
+    exec_routing = importlib.import_module("skills.orchestrate.scripts.exec_routing")
+    monkeypatch.setattr(
+        exec_routing,
+        "snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("snapshot subprocess called")),
+    )
     plan = fixture_plan(tmp_path, 'import sys; print("model not found", file=sys.stderr); sys.exit(1)', "agy")
     plan["requested_model"] = "gemini-3.8-pro"
     plan["route"]["identity_source"] = "passed-through"
@@ -105,6 +111,16 @@ def test_unregistered_model_failure_fix_names_adapter_models(tmp_path):
         "choose a registered model: gemini-3.8-flash, "
         "claude-opus-4-6-thinking, claude-sonnet-4-6"
     )
+
+
+def test_model_families_load_catalog_without_snapshot(monkeypatch):
+    exec_routing = importlib.import_module("skills.orchestrate.scripts.exec_routing")
+    monkeypatch.setattr(
+        exec_routing,
+        "snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("snapshot subprocess called")),
+    )
+    assert exec_routing.model_families("claude-sonnet-5") == ("anthropic",)
 
 
 def test_structured_result_and_question_take_precedence_over_prose():
@@ -720,6 +736,32 @@ for event in events:
     assert "observed family anthropic inferred from catalogue" in record["provenance"]["notes"]
     assert not record["cross_family"]
     assert not record["certification_eligible"]
+
+
+def test_catalogue_lookup_oserror_does_not_fail_finalisation(tmp_path, monkeypatch):
+    exec_routing = importlib.import_module("skills.orchestrate.scripts.exec_routing")
+
+    def unavailable():
+        raise OSError("catalogue unavailable")
+
+    monkeypatch.setattr(
+        exec_routing,
+        "_model_route_module",
+        lambda: SimpleNamespace(load_catalog=unavailable),
+    )
+    code = """import json
+for event in [
+    {"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"},
+    {"type":"assistant","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"DONE"}]}},
+    {"type":"result","result":"DONE","is_error":False,"session_id":"s-1"},
+]:
+    print(json.dumps(event), flush=True)
+"""
+    plan = fixture_plan(tmp_path, code, "claude")
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["provenance"]["family"] == "unknown"
+    assert "observed model family unverified after substitution" in record["provenance"]["notes"]
 
 
 def test_ambiguous_catalogued_observed_substitution_keeps_family_unknown(tmp_path):

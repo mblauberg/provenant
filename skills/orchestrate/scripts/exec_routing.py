@@ -111,11 +111,12 @@ def _model_route_module():
 
 def model_families(model, catalogue=None):
     """Return catalogue-pattern families for a model id, preserving ambiguity."""
-    catalogue = snapshot() if catalogue is None else catalogue
-    raw_catalogue = catalogue.get("catalogue", {})
     try:
         route = _model_route_module()
-        if not isinstance(raw_catalogue, dict) or "model_patterns" not in raw_catalogue:
+        raw_catalogue = catalogue if isinstance(catalogue, dict) else {}
+        if isinstance(raw_catalogue.get("catalogue"), dict):
+            raw_catalogue = raw_catalogue["catalogue"]
+        if "model_patterns" not in raw_catalogue:
             raw_catalogue = route.load_catalog()
         return route.matching_model_families(model, raw_catalogue)
     except (AttributeError, KeyError, TypeError, ValueError):

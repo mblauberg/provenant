@@ -295,10 +295,11 @@ def _model_unavailable_fix(plan):
             from . import exec_routing
         except ImportError:
             import exec_routing
-        catalogue = exec_routing.snapshot()
+        route = exec_routing._model_route_module()
+        catalogue = route.load_catalog()
         adapter = catalogue.get("adapters", {}).get(plan.get("adapter"), {})
-        registered = exec_routing._model_route_module().registered_model_ids(adapter)
-    except (AttributeError, TypeError):
+        registered = route.registered_model_ids(adapter)
+    except Exception:
         registered = []
     if registered:
         choices = ", ".join(registered[:6])
@@ -1665,7 +1666,7 @@ def execute(
             except ImportError:
                 import exec_routing
             observed_families = exec_routing.model_families(observed)
-        except (AttributeError, ImportError, TypeError, ValueError):
+        except Exception:
             observed_families = ()
         if len(observed_families) == 1:
             family = observed_families[0]
