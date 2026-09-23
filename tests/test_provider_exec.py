@@ -687,6 +687,51 @@ def test_owner_validation_error_cannot_prevent_root_group_kill(monkeypatch):
     assert 501 in groups
 
 
+def test_forged_same_group_owner_cannot_suppress_provider_kill(tmp_path, monkeypatch):
+    module = supervisor()
+    root_pid = os.getpid() + 100000
+    child_pid = root_pid + 1
+    root = module._ProcessRow(root_pid, os.getpid(), root_pid, str(int(time.time())), "provider")
+    child = module._ProcessRow(child_pid, root_pid, root_pid, str(int(time.time())), "forged")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(),
+                                             str(int(time.time())), "test"),
+            root_pid: root, child_pid: child}
+    run_dir = tmp_path / "forged-run"
+    _write_fake_owner_record(module, run_dir, child, "forged-token")
+    signals = []
+    process = type("Process", (), {"pid": root_pid, "poll": lambda self: None})()
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: rows)
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: None)
+        patch.setattr(module, "_process_environment", lambda pid: [
+            b"PROVENANT_RUN_TOKEN=forged-token",
+            ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+        ] if pid == child_pid else ())
+        patch.setattr(module.os, "killpg", lambda pgid, _signal: signals.append(pgid))
+        patch.setattr(module.os, "kill", lambda *_args: None)
+        tracker = module._Descendants(process, "fixture")
+        tracker.sample()
+        tracker.signal(signal.SIGTERM)
+    assert root_pid in signals
+    assert child.identity not in tracker.spared
+
+
+def test_owner_without_observed_parent_is_not_spared(tmp_path, monkeypatch):
+    module = supervisor()
+    row = module._ProcessRow(502, 999, 502, str(int(time.time())), "claimed-owner")
+    run_dir = tmp_path / "forged-run"
+    _write_fake_owner_record(module, run_dir, row, "forged-token")
+    monkeypatch.setattr(module, "_process_environment", lambda _pid: [
+        b"PROVENANT_RUN_TOKEN=forged-token",
+        ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+    ])
+    process = type("Process", (), {"pid": 501, "poll": lambda self: None})()
+    tracker = module._Descendants(process, "fixture")
+    tracker.tracked[row.identity] = row
+    tracker._refresh_spared({row.pid: row})
+    assert row.identity not in tracker.spared
+
+
 @pytest.mark.parametrize("field,value", [
     ("owner_pid", 999999), ("owner_started_at", "old process"),
     ("run_token", "wrong token"),

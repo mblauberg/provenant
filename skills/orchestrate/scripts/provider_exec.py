@@ -892,7 +892,8 @@ def _is_nested_fabric_owner(row):
             and Path(record.get("run_dir", "")).resolve() == run_dir.resolve()
             and record.get("run_token") == os.fsdecode(token)
             and record.get("owner_pid") == row.pid
-            and record.get("owner_pgid") == row.pgid
+            and row.pgid == row.pid
+            and record.get("owner_pgid") == row.pid
             and (
                 record.get("owner_started_at") == _recorded_start_time(row)
                 or record.get("owner_started_at") == _inherited_ps_start_time(row.pid)
@@ -980,9 +981,15 @@ class _Descendants:
     def _refresh_spared(self, rows):
         observed = {**self.tracked, **self.spared}
         spared = set()
+        own_groups = {self.process.pid, os.getpgrp()}
         for identity in observed:
             row = rows.get(identity[0])
-            if row is not None and row.identity == identity and not row.zombie:
+            parent = self.parents.get(identity)
+            if (row is not None and row.identity == identity and not row.zombie
+                    and row.pgid not in own_groups
+                    and parent is not None
+                    and (parent == self.root or parent in observed)
+                    and parent not in self.spared):
                 if _is_nested_fabric_owner(row):
                     spared.add(identity)
         changed = True
@@ -1021,7 +1028,10 @@ class _Descendants:
             identity: row for identity, row in live.items()
             if identity not in skip and (only is None or identity in only)
         }
-        spared_groups = {row.pgid for row in self.live_spared(rows).values()}
+        spared_groups = {
+            row.pgid for row in self.live_spared(rows).values()
+            if row.pgid not in {self.process.pid, os.getpgrp()}
+        }
         if not root_group:
             live.pop(self.root, None)
         groups = {
@@ -1030,7 +1040,7 @@ class _Descendants:
             and row.pgid not in spared_groups
             and (root_group or row.pgid != self.process.pid)
         }
-        if root_group and self.process.pid not in spared_groups:
+        if root_group:
             groups.add(self.process.pid)  # The original group may outlive its leader.
         signalled_groups = set()
         for pgid in groups:

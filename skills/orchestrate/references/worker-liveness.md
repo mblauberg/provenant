@@ -87,8 +87,10 @@ while the root provider group gets up to 2 seconds to flush session state.
 Census failure warns but cannot prevent the root group kill or terminal record.
 A nested Fabric owner
 and its observed subtree are spared only when `PROVENANT_RUN_DIR/dispatch-owner.json`
-matches that process's PID, start time and `PROVENANT_RUN_TOKEN`. Tracked children
-are rechecked before signalling to cover fork followed by exec; a nonzero
+matches that process's PID, start time and `PROVENANT_RUN_TOKEN`. The owner must
+lead its own process group and have an observed non-spared parent. The
+provider's original group and the supervisor's group are never spared. Tracked
+children are rechecked before signalling to cover fork followed by exec; a nonzero
 `spared` count is recorded. A missing owner
 yields bounded missing evidence; it never authorises a process-table search or
 inferred cancellation.
