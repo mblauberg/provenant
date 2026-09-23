@@ -35,7 +35,9 @@ SCRIPT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_ROOT.parents[1]))
 sys.path.insert(0, str(SCRIPT_ROOT))
 from _shared.bounded_process import stop_process_group
+from layout import contains_run
 from dispatch_run import (
+    close_mcp_run,
     ACCESS_MODES,
     ATTEMPT_ID_RE,
     AttemptEvidenceError,
@@ -62,7 +64,7 @@ TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MAX_TASKS = 64
 MAX_CONCURRENCY = 8
 DEFAULT_CONCURRENCY = 4
-DEFAULT_TIMEOUT_SECONDS = 900.0
+DEFAULT_TIMEOUT_SECONDS = 3600.0
 # A cancellation signal is a request to the dispatch owner first.  The owner
 # must be allowed to stop/reap its provider and publish the attempt receipt
 # before the batch falls back to killing that owner.
@@ -169,7 +171,7 @@ def _local_regular(path: Path, label: str) -> Path:
 def _validate_run_dir(run_dir: Path) -> Path:
     run_dir = run_dir.resolve()
     workspace = Path.cwd().resolve()
-    if not run_dir.is_dir() or (run_dir != workspace and workspace not in run_dir.parents):
+    if not run_dir.is_dir() or not contains_run(run_dir,workspace):
         raise BatchInputError("run directory must be an existing child of the workspace")
     receipt_path = run_dir / "RUN_RECEIPT.json"
     manifest_path = run_dir / "MANIFEST.md"
@@ -266,7 +268,7 @@ def _load_manifest(
         role = task.get("role", "worker")
         if not isinstance(role, str) or not role:
             raise BatchInputError(f"task {task_id} role must be a non-empty string")
-        access_mode = task.get("access_mode", "read_only")
+        access_mode = task.get("access_mode", task.get("mode", "read_only"))
         if access_mode not in ACCESS_MODES:
             raise BatchInputError(f"task {task_id} access_mode must be one of {', '.join(ACCESS_MODES)}")
         worktree = task.get("worktree")
@@ -293,7 +295,11 @@ def _load_manifest(
                 f"task {task_id} writer isolation declarations are unsupported; "
                 "use access_mode worktree_write with a worktree"
             )
-        timeout = _finite_timeout(task.get("timeout"))
+        timeout = _finite_timeout(task.get("timeout",task.get("timeout_seconds")), 10800.0 if access_mode == "worktree_write" else DEFAULT_TIMEOUT_SECONDS)
+        try:
+            __import__("exec_routing").validate_policy(task.get("fallback"))
+        except ValueError as exc:
+            raise BatchInputError(f"task {task_id}: {exc}") from exc
         normalized = dict(task)
         normalized.update({
             "id": task_id, "adapter": adapter, "role": role, "timeout": timeout,
@@ -387,6 +393,12 @@ def _command(task: dict[str, Any], run_dir: Path) -> list[str]:
             command.extend((flag, str(task[name])))
     if task.get("git_evidence"):
         command.extend(("--git-evidence", str(task["git_evidence"])))
+    for key in ("sandbox","network","fallback","cwd"):
+        if key in task:
+            value=task[key]
+            command.extend(("--"+key,json.dumps(value) if not isinstance(value,str) else value))
+    for directory in task.get("add_dirs",[]): command.extend(("--add-dir",directory))
+    if task.get("preface") is False: command.append("--no-preface")
     return command
 
 
@@ -531,7 +543,7 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
             "dispatch_exit": process_exit, "attempt_path": attempt_path,
             "attempt_digest": record.get("attempt_digest"), "result_path": result_path,
             "requested_route": requested, "route": {
-                field: route[field] for field in ("adapter", "provider_family", "resolved_model", "execution_intent")
+                field: route[field] for field in ("adapter", "alias", "model", "effort", "provider_family", "model_family", "resolved_model", "execution_intent")
                 if isinstance(route.get(field), str)
             }, "question": attempt.get("question", record.get("question")),
         }
@@ -714,7 +726,9 @@ def batch(args: argparse.Namespace) -> int:
             print(json.dumps({"schema_version": 1, "status": "custody_preflight_failed",
                               "message": str(exc)}, sort_keys=True))
             return 2
-        return _execute_batch(args, tasks, run_dir, source_bytes, batch_lock)
+        result = _execute_batch(args, tasks, run_dir, source_bytes, batch_lock)
+        close_mcp_run(run_dir)
+        return result
     finally:
         if old_handlers:
             for sig, handler in old_handlers.items():

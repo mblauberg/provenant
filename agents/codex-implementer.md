@@ -1,6 +1,6 @@
 ---
 name: codex-implementer
-description: Token-heavy IMPLEMENTATION executed by the Codex CLI rather than by Claude, writing code, tests, refactors and mechanical sweeps across many files, inside a git worktree it owns exclusively. Use for any substantial coding task where Claude would otherwise burn its budget writing the diff. Returns a digest, the commit list and a path to the full transcript.
+description: Token-heavy IMPLEMENTATION executed by the Codex CLI rather than by Claude, writing code, tests, refactors and mechanical sweeps across many files, inside a git worktree it owns exclusively. Use for any substantial coding task where Claude would otherwise burn its budget writing the diff. Returns a digest, the commit list and a path to the full transcript. When the Fabric MCP is available, call fabric_dispatch directly instead (adapter codex); it needs no wrapper and costs no Claude tokens.
 tools: Bash, Read, Write, Glob, Grep
 model: sonnet
 effort: low
@@ -51,23 +51,32 @@ task shape does not establish one.
 | Write and commit in that worktree | `-s workspace-write -C <worktree> --add-dir <primary-repo>/.git` | Use only when the dispatcher is authorised to commit. Grants git metadata only, not the primary working tree. |
 | Never | `-s danger-full-access`, `--dangerously-bypass-approvals-and-sandbox`, `-C <primary-repo>` while another agent works there, or `--add-dir <primary-repo>` or any ancestor of it | The last one is the easy mistake: granting the repo root rather than its `.git` hands over the primary working tree and every sibling worktree at once. |
 
-`-s workspace-write` always writes to `[workdir, /tmp, $TMPDIR]`. `writable_roots` only adds
+`-s workspace-write` also permits writes to system temporary directories. `writable_roots` only adds
 paths; it does not narrow that set. The linked-worktree metadata rule below explains the
 `--add-dir <primary-repo>/.git` case; do not restate or broaden it.
 
-One consequence to keep in mind when testing any of this: a worktree placed under `$TMPDIR` is
-already writable, so it commits happily and proves nothing about the normal case. Put the
-worktree outside `/tmp` and `$TMPDIR` or your sandbox test is measuring the wrong thing.
+When testing containment, place the worktree outside system temporary directories. Those directories are already writable, so a successful commit there proves nothing about the normal case.
 
 ## Procedure
 
 **1. Write the brief to a file.** Never pass it as a shell argument.
 
+Resolve the primary checkout once from the caller's Git working directory:
+
+```sh
+ROOT=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
+SCRATCH="$ROOT/.agent-run/scratch"
+mkdir -p "$SCRATCH"
+```
+
+Use absolute paths under `$SCRATCH` for the brief, report and transcript even
+when Codex runs with `-C` in another worktree.
+
 Codex has no context beyond this file. A good brief states: the worktree path and branch; the
 background it needs (including anything already verified, so it does not redo it); the work,
 broken into ordered parts; what it must NOT touch; how to verify; the commit convention; and
 an explicit instruction not to push and not to open a PR. Write it to
-`${TMPDIR:-/tmp}/codex-<slug>-brief.txt`.
+`$SCRATCH/codex-<slug>-brief.txt`.
 
 **`<slug>` must be unique to this dispatch, not derived from the task.** A slug taken from the
 branch or the subject collides whenever two dispatches run at once, and the collision is silent:
@@ -81,13 +90,14 @@ the claims it is given and to report anything that turns out to be wrong rather 
 following it into a mistake. A brief that says "if I am wrong about this, saying so is more
 valuable than complying" reliably produces better work.
 
-**Tell Codex to write its own report to its own file**, separate from the transcript, and to
+**Tell Codex to make its final message the report**, separate from the transcript, and to
 bound its length. End the brief with something close to:
 
-> Write your final report to `${TMPDIR:-/tmp}/codex-<slug>-report.md`, at most 100 lines: what
-> you changed, what you could not do and why, and the exact final line of each verification
-> command. Put it there, not in your final message.
+> Make your final message the report, at most 100 lines: what you changed,
+> what you could not do and why, and the exact final line of each verification
+> command. The caller passes `-o <REPORT_PATH>`; do not write that file yourself.
 
+The CLI writes the final message to the report path via `-o`, outside the sandbox.
 The transcript holds Codex's whole reasoning trace and every command it ran, often tens of
 thousands of tokens. The report holds only the outcome. Reading the report instead of the
 transcript is what stops the caller paying twice for the same thinking, once through Codex and
@@ -96,10 +106,11 @@ again through you.
 **2. Run Codex in the foreground and let the call block.**
 
 ```
-codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
+codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> \
+  -o "$SCRATCH/codex-<slug>-report.md" -m gpt-6-sol \
   -c service_tier=default -c model_reasoning_effort=high - \
-  < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt \
-  > ${TMPDIR:-/tmp}/codex-<slug>-transcript.txt 2>&1
+  < "$SCRATCH/codex-<slug>-brief.txt" \
+  > "$SCRATCH/codex-<slug>-transcript.txt" 2>&1
 STATUS=$?
 ```
 
@@ -120,12 +131,13 @@ directory; it records that child in `worker.pid`, its own wrapper in
 durable completion marker atomically to `run_dir/done`:
 
 ```
-run_dir=${TMPDIR:-/tmp}/codex-<unique-slug>
+run_dir="$SCRATCH/codex-<unique-slug>"
 "$(provenant root)/skills/orchestrate/scripts/run_worker_detached.sh" \
   --run-dir "$run_dir" -- \
-  codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-5.6-luna \
+  codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> \
+    -o "$SCRATCH/codex-<slug>-report.md" -m gpt-6-sol \
     -c service_tier=default -c model_reasoning_effort=high - \
-    < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt &
+    < "$SCRATCH/codex-<slug>-brief.txt" &
 WRAPPER_PID=$!
 wait "$WRAPPER_PID"
 STATUS=$?
@@ -196,8 +208,7 @@ report failure having written plenty. Never describe changes you have not confir
 **Tell Codex NOT to commit by default.** A linked worktree keeps its git metadata in the primary
 repo's `.git/worktrees/<name>/`, outside the sandbox root. Whether `git commit` succeeds is
 deterministic: it depends on whether the primary `.git` is inside the default writable roots
-`[workdir, /tmp, $TMPDIR]`. A primary repo under `$TMPDIR` is writable; one under `$HOME` is
-not. Granting only `.git/worktrees/<name>` is insufficient because the linked worktree's objects
+the workdir and system temporary directories. A primary repo in a temporary directory is writable; one under the home directory is not. Granting only `.git/worktrees/<name>` is insufficient because the linked worktree's objects
 remain in the primary `.git/objects`. If a lane must commit its own work, add exactly
 `--add-dir <PRIMARY_REPO>/.git` to the invocation. That grants git metadata only, not the primary
 working tree or any sibling worktree working tree, but the lane could still rewrite refs for
@@ -219,13 +230,12 @@ clean or are there stray uncommitted files; did any scaffolding file the brief s
 survive. A transcript claiming success while the tree is empty is a real and recurring failure
 mode, so this step is not optional.
 
-Codex commonly leaves its deliverable uncommitted in the worktree. Commit it, even with a
-placeholder message, before running anything that reverts files as part of proving itself, such
-as a mutation pass. That kind of restore returns a file to the last commit, not to whatever was
-sitting uncommitted in the working tree, and applies it to every changed file, not only the one
-under test: reviewing or mutating uncommitted work is how it gets silently destroyed.
+Before any command that restores tracked files, preserve the current worktree changes in the
+run-owned output or a commit when the task authority permits it. A restore returns files to the
+last commit, not to uncommitted work, and may affect every changed file rather than only the one
+under test.
 
-Then read `${TMPDIR:-/tmp}/codex-<slug>-report.md`, which is bounded and holds the outcome.
+Then read `$SCRATCH/codex-<slug>-report.md`, which is bounded and holds the outcome.
 Between that file and the git commands above you have everything you need.
 
 **Do not read the transcript.** Not directly, not a few hundred lines, not "just to check". It
@@ -250,13 +260,13 @@ that is the most important sentence in your report.
 
 The catalogue in `config/model-routing.json` is the authority, and the names
 below are its openai block as of 2026-09-10. When `provenant` is on the path,
-ask it rather than typing a name. The resolver fails closed without a fresh
+ask it rather than typing a name. Direct CLI fallback needs a fresh
 capability snapshot, so take one first:
 
 ```
-provenant capabilities codex --out ${TMPDIR:-/tmp}/codex-caps.json
+provenant capabilities codex --out "$SCRATCH/codex-caps.json"
 provenant route resolve --adapter codex --role worker --task-class legwork \
-  --capabilities-file ${TMPDIR:-/tmp}/codex-caps.json
+  --capabilities-file "$SCRATCH/codex-caps.json"
 ```
 
 Use `--task-class mechanical`, or `--role critical-review --task-class
@@ -268,15 +278,18 @@ resolves. The names below are for a workstation without `provenant` on the
 path. When a new model lands, the catalogue and `docs/model-dossier.md` change
 and this section follows them.
 
-- `-m gpt-5.6-luna` is the default for mechanical and legwork slices. Run it
-  at `high` by default; raise to `xhigh` or `max` when the brief warrants it.
+- `-m gpt-6-sol` is the default for ordinary legwork and medium-sized
+  implementation (the `workhorse` alias). Run it at `high`.
+- `-m gpt-6-luna` is the cheap default for mechanical, bulk and high-token
+  slices (the `scout` alias). Run it at `high`; raise to `xhigh` or `max` when
+  the brief warrants it.
 - `-m gpt-6-astra` is the flagship for critical slices and for legwork that
   genuinely needs judgement. Run it between `low` and `xhigh`; `max` and
   `ultra` are not part of the standing policy.
-- Sol and Terra are not routes. Do not select them, and do not fall back to
-  them when a name is rejected.
+- GPT-5.6 models and Terra are retired. Do not select them, and do not fall
+  back to them when a name is rejected.
 
-Luna can over-engineer a loose brief, so keep the implementation brief tight.
+A cheap model can over-engineer a loose brief, so keep the implementation brief tight.
 
 These names go stale. `codex debug models` is the headless discovery command and returns JSON
 with a `models` list, each entry carrying a `slug` and `supported_reasoning_levels` with per-model

@@ -35,8 +35,9 @@ PROVENANT_BIN_DIR=/abs/bin \
 AGENT_FABRIC_INSTANCE_ROOT=/abs/instance /abs/bin/provenant root
 ```
 
-Use `--platform claude` or `--platform codex` only when deliberately
-installing one primary.
+Use `--platform claude`, `codex`, `opencode`, or `agy` when installing one
+client. `all` includes Cursor and Kiro skills and MCP when their home
+directories are present.
 
 The installer checks source files, existing managed links, client configuration,
 the stable `provenant` shim and instance seed inputs before changing anything.
@@ -57,9 +58,10 @@ With the default instance and bin paths, verify the result from the new checkout
 "${PROVENANT_BIN_DIR:-$HOME/.local/bin}/provenant" root
 ```
 
-The `all` invocation preflights both primaries before changing either one and
-publishes the shared product pointer once. It is idempotent. If only one
-primary is installed, use its individual platform instead.
+The `all` invocation preflights every selected client before changing any and
+publishes the shared product pointer once. It is idempotent. OpenCode's
+`instructions[]` and the Agy/OpenCode HARNESS links are rebound during this
+install. If only one client is installed, use its individual platform instead.
 
 ### Existing fused checkout
 

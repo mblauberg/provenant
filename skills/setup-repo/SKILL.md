@@ -66,6 +66,9 @@ Only when the tracker is GitHub issues and the remote host is confirmed:
 4. **PR template:** copy
    [`templates/pull_request_template.md`](templates/pull_request_template.md)
    into `.github/` and adapt evidence rows; retain decision and review sections.
+   Merge [`templates/gitignore-agent-runs.txt`](templates/gitignore-agent-runs.txt)
+   into the target `.gitignore` once, preserving its other rules. Local writers
+   also add these rules to `.git/info/exclude` on first use.
 5. **Work-item runbook:** copy [the doctrine](references/doctrine.md) to the
    target's declared work-item runbook path (default
    `docs/runbooks/github-workflow.md`), adding its mechanics; the project

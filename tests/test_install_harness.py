@@ -69,8 +69,9 @@ def instance_root_for(home: Path) -> Path:
     return home / ".agents"
 
 
-def run(platform: str, home: Path, *arguments: str, **extra_env):
+def run(platform: str, home: Path, *arguments: str, bash=None, **extra_env):
     env = os.environ.copy()
+    env.pop("AGENT_FABRIC_STATE_DIRECTORY", None)
     env.update({"HOME": str(home)})
     # Keep the instance root deterministic in the scratch HOME. AGENTS_HOME now
     # names only the product root, but an explicit instance value also keeps the
@@ -79,7 +80,7 @@ def run(platform: str, home: Path, *arguments: str, **extra_env):
     env["PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL"] = "1"
     env.update(extra_env)
     return subprocess.run(
-        [str(SCRIPT), "--platform", platform, *arguments],
+        [*([bash] if bash else []), str(SCRIPT), "--platform", platform, *arguments],
         cwd=ROOT,
         env=env,
         text=True,
@@ -101,6 +102,7 @@ def copy_product(root: Path, destination: Path) -> Path:
 
 def run_product(product: Path, platform: str, home: Path, **extra_env):
     environment = os.environ.copy()
+    environment.pop("AGENT_FABRIC_STATE_DIRECTORY", None)
     # Resolve the copied product through the pointer written by this install,
     # not through an explicit product root inherited from the outer CI job.
     environment.pop("AGENT_FABRIC_PRODUCT_ROOT", None)
@@ -841,13 +843,11 @@ def test_all_mcp_clients_are_an_explicit_subscription_native_opt_in(tmp_path):
     result = run("codex", tmp_path, "--mcp-clients", "all", CODEX_HOME=str(config))
 
     assert result.returncode == 0, result.stderr
-    # Brokers sit in the codex seat; Agy holds the `agy` seat for stable
-    # addressing, not model-family proof. See CLIENT_SEATS in
-    # scripts/configure-fabric-mcp.py.
+    # Each client has its own Fabric inbox; seat alone is not model-family proof.
     for client, path, seat in (
-        ("cursor", tmp_path / ".cursor/mcp.json", "codex"),
+        ("cursor", tmp_path / ".cursor/mcp.json", "cursor"),
         ("agy", tmp_path / ".gemini/config/mcp_config.json", "agy"),
-        ("kiro", tmp_path / ".kiro/settings/mcp.json", "codex"),
+        ("kiro", tmp_path / ".kiro/settings/mcp.json", "kiro"),
     ):
         registration = json.loads(path.read_text())["mcpServers"]["fabric"]
         assert registration["env"]["AGENT_FABRIC_SEAT"] == seat
@@ -856,7 +856,7 @@ def test_all_mcp_clients_are_an_explicit_subscription_native_opt_in(tmp_path):
     opencode = json.loads((tmp_path / ".config/opencode/opencode.jsonc").read_text())
     registration = opencode["mcp"]["fabric"]
     assert registration["command"] == [str(tmp_path / ".local/bin/provenant")]
-    assert registration["environment"]["AGENT_FABRIC_SEAT"] == "codex"
+    assert registration["environment"]["AGENT_FABRIC_SEAT"] == "opencode"
     assert registration["environment"]["AGENT_FABRIC_CLIENT_LABEL"] == "opencode"
     assert all("API_KEY" not in key for key in registration["environment"])
 
@@ -872,6 +872,214 @@ def test_primary_mcp_clients_remain_the_default(tmp_path):
     assert not (tmp_path / ".gemini/config/mcp_config.json").exists()
     assert not (tmp_path / ".kiro/settings/mcp.json").exists()
     assert not (tmp_path / ".config/opencode/opencode.jsonc").exists()
+
+
+def test_opencode_primary_installs_bootstrap_skills_harness_and_mcp(tmp_path):
+    result = run("opencode", tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    root = tmp_path / ".config/opencode"
+    assert str(ROOT / "HARNESS.md") in (root / "AGENTS.md").read_text()
+    assert (root / "HARNESS.md").resolve() == ROOT / "HARNESS.md"
+    assert {path.name for path in (root / "skills").iterdir()} == expected_installed_entries()
+    config = json.loads((root / "opencode.jsonc").read_text())
+    assert config["instructions"] == [
+        str(instance_root_for(tmp_path) / "AGENTS.md"), str(ROOT / "HARNESS.md"),
+    ]
+    assert config["mcp"]["fabric"]["environment"]["AGENT_FABRIC_SEAT"] == "opencode"
+
+
+def test_all_installs_present_optional_provider_surfaces(tmp_path):
+    for relative in (".config/opencode", ".gemini", ".cursor", ".kiro"):
+        (tmp_path / relative).mkdir(parents=True)
+    (tmp_path / "bin").mkdir()
+    (tmp_path / "bin/agy").write_text("#!/bin/sh\n")
+    (tmp_path / "bin/agy").chmod(0o755)
+
+    result = run("all", tmp_path, PATH=f"{tmp_path / 'bin'}:{os.environ['PATH']}")
+
+    assert result.returncode == 0, result.stderr
+    for relative in (".config/opencode", ".gemini", ".cursor", ".kiro"):
+        assert (tmp_path / relative / "skills" / "orchestrate/SKILL.md").exists()
+    assert (tmp_path / ".gemini/GEMINI.md").is_file()
+    assert (tmp_path / ".gemini/HARNESS.md").resolve() == ROOT / "HARNESS.md"
+    for relative in (
+        ".claude.json", ".codex/config.toml", ".config/opencode/opencode.jsonc",
+        ".gemini/config/mcp_config.json", ".cursor/mcp.json", ".kiro/settings/mcp.json",
+    ):
+        assert (tmp_path / relative).exists(), relative
+    checked = subprocess.run(
+        [str(ROOT / "scripts/check-provenant-install.py")],
+        env={
+            **os.environ,
+            "HOME": str(tmp_path),
+            "AGENT_FABRIC_INSTANCE_ROOT": str(instance_root_for(tmp_path)),
+            "PROVENANT_BIN_DIR": str(tmp_path / ".local/bin"),
+            "CODEX_HOME": str(tmp_path / ".codex"),
+        },
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert checked.returncode == 0, checked.stderr
+    assert len([line for line in checked.stdout.splitlines() if line.startswith("provider ")]) == 6
+    assert "missing" not in checked.stdout
+
+
+def test_all_without_skipped_platforms_runs_under_bash_3(tmp_path):
+    bash = Path("/bin/bash")
+    if not bash.exists() or "version 3." not in subprocess.run(
+        [str(bash), "--version"], text=True, capture_output=True, check=False
+    ).stdout:
+        pytest.skip("requires /bin/bash 3.x")
+
+    result = run(
+        "all", tmp_path, bash=str(bash), HARNESS_PYTHON=sys.executable,
+        PATH="/usr/bin:/bin", CLAUDE_CONFIG_DIR="", CODEX_HOME="",
+        OPENCODE_CONFIG_DIR="", AGY_CONFIG_DIR="",
+        PROVENANT_BIN_DIR=str(tmp_path / "bin"),
+        CLAUDE_MCP_CONFIG=str(tmp_path / "claude.json"),
+        CODEX_MCP_CONFIG=str(tmp_path / "codex/config.toml"),
+        AGENT_FABRIC_PRODUCT_ROOT="",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "skipped=" not in result.stdout + result.stderr
+    assert (tmp_path / ".claude/skills/orchestrate/SKILL.md").is_file()
+    assert (tmp_path / ".codex/skills/orchestrate/SKILL.md").is_file()
+
+
+def test_all_skips_detected_clients_with_user_instructions_and_keeps_primary_installs(tmp_path):
+    opencode = tmp_path / ".config/opencode/AGENTS.md"
+    gemini = tmp_path / ".gemini/GEMINI.md"
+    opencode.parent.mkdir(parents=True)
+    gemini.parent.mkdir()
+    opencode.write_bytes(UNMANAGED_BYTES)
+    gemini.write_bytes(UNMANAGED_BYTES)
+    (tmp_path / "bin").mkdir()
+    agy = tmp_path / "bin/agy"
+    agy.write_text("#!/bin/sh\n")
+    agy.chmod(0o755)
+
+    result = run("all", tmp_path, PATH=f"{agy.parent}:{os.environ['PATH']}")
+
+    assert result.returncode == 0, result.stderr
+    assert "provider opencode skipped=instructions-preserved" in result.stdout
+    assert "provider agy skipped=instructions-preserved" in result.stdout
+    assert opencode.read_bytes() == gemini.read_bytes() == UNMANAGED_BYTES
+    assert (tmp_path / ".claude/skills/orchestrate/SKILL.md").exists()
+    assert (tmp_path / ".codex/skills/orchestrate/SKILL.md").exists()
+    assert not (opencode.parent / "skills").exists()
+    assert not (gemini.parent / "skills").exists()
+
+
+def test_gemini_directory_alone_does_not_detect_agy(tmp_path):
+    gemini = tmp_path / ".gemini/GEMINI.md"
+    gemini.parent.mkdir()
+    gemini.write_bytes(UNMANAGED_BYTES)
+
+    result = run("all", tmp_path, PATH="/usr/bin:/bin")
+
+    assert result.returncode == 0, result.stderr
+    assert gemini.read_bytes() == UNMANAGED_BYTES
+    assert not (gemini.parent / "skills").exists()
+
+
+def test_all_mcp_opt_in_still_skips_detected_clients_with_user_instructions(tmp_path):
+    opencode = tmp_path / ".config/opencode/AGENTS.md"
+    opencode.parent.mkdir(parents=True)
+    opencode.write_bytes(UNMANAGED_BYTES)
+
+    result = run("all", tmp_path, "--mcp-clients", "all", PATH="/usr/bin:/bin")
+
+    assert result.returncode == 0, result.stderr
+    assert "provider opencode skipped=instructions-preserved" in result.stdout
+    assert not (opencode.parent / "opencode.jsonc").exists()
+    assert (tmp_path / ".claude.json").exists()
+
+
+def test_all_skips_detected_opencode_jsonc_without_blocking_primary_clients(tmp_path):
+    config = tmp_path / ".config/opencode/opencode.jsonc"
+    config.parent.mkdir(parents=True)
+    original = '{\n  // keep this note\n  "mcp": {},\n}\n'
+    config.write_text(original)
+
+    result = run("all", tmp_path, PATH="/usr/bin:/bin")
+
+    assert result.returncode == 0, result.stderr
+    assert "provider opencode skipped=mcp-conflict" in result.stdout
+    assert "warning: detected provider opencode" in result.stderr
+    assert "mcp.fabric" in result.stderr
+    assert config.read_text() == original
+    assert (tmp_path / ".claude.json").exists()
+    assert (tmp_path / ".codex/config.toml").exists()
+
+
+def test_all_skips_broken_detected_cursor_mcp_but_named_cursor_fails(tmp_path):
+    config = tmp_path / ".cursor/mcp.json"
+    config.parent.mkdir()
+    config.write_text("{broken")
+
+    detected = run("all", tmp_path, "--mcp-clients", "all", PATH="/usr/bin:/bin")
+    assert detected.returncode == 0, detected.stderr
+    assert "provider cursor skipped=mcp-conflict" in detected.stdout
+    assert "warning: detected provider cursor" in detected.stderr
+    assert config.read_text() == "{broken"
+    assert (tmp_path / ".claude.json").exists()
+    assert (tmp_path / ".codex/config.toml").exists()
+
+    named = run("cursor", tmp_path, PATH="/usr/bin:/bin")
+    assert named.returncode == 3
+    assert config.read_text() == "{broken"
+
+
+def test_mcp_all_skips_unnamed_primary_client_conflict(tmp_path):
+    claude_config = tmp_path / ".claude.json"
+    claude_config.write_text("{broken")
+
+    result = run("codex", tmp_path, "--mcp-clients", "all")
+
+    assert result.returncode == 0, result.stderr
+    assert "provider claude skipped=mcp-conflict" in result.stdout
+    assert claude_config.read_text() == "{broken"
+    assert (tmp_path / ".codex/config.toml").exists()
+
+
+def test_all_reports_detected_client_link_failure_and_continues(tmp_path):
+    (tmp_path / ".config/opencode").mkdir(parents=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    blocked_ln = bin_dir / "ln"
+    blocked_ln.write_text("#!/bin/sh\nexit 1\n")
+    blocked_ln.chmod(0o755)
+
+    result = run("all", tmp_path, PATH=f"{bin_dir}:{os.environ['PATH']}")
+
+    assert result.returncode == 0, result.stderr
+    assert "provider opencode skipped=install-conflict" in result.stdout
+    assert "harness created=" not in result.stdout
+    assert not (tmp_path / ".config/opencode/opencode.jsonc").exists()
+    assert (tmp_path / ".claude.json").exists()
+    assert (tmp_path / ".codex/config.toml").exists()
+
+
+def test_refresh_routing_is_opt_in_through_install_harness(tmp_path):
+    first = run("codex", tmp_path)
+    assert first.returncode == 0, first.stderr
+    target = instance_root_for(tmp_path) / "config/model-routing.json"
+    document = json.loads(target.read_text())
+    document["adapters"]["opencode"]["endpoint_provider"] = "codex"
+    target.write_text(json.dumps(document))
+
+    second = run("codex", tmp_path)
+    assert second.returncode == 0, second.stderr
+    assert json.loads(target.read_text())["adapters"]["opencode"]["endpoint_provider"] == "codex"
+    assert "routing drift=" not in second.stdout
+
+    refreshed = run("codex", tmp_path, "--refresh-routing")
+    assert refreshed.returncode == 0, refreshed.stderr
+    assert json.loads(target.read_text())["adapters"]["opencode"]["endpoint_provider"] == "codex"
+    assert len(list(target.parent.glob("model-routing.json.bak-*"))) == 0
 
 
 def test_rejects_unknown_mcp_client_selection(tmp_path):

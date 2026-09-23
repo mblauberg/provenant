@@ -158,28 +158,11 @@ bloats that agent's context window, and makes a cross-check self-referential whe
 the same author as the claim it corroborates. In that case the cross-check is a field compared against
 itself rather than an independent join.
 
-## Fabric
-
-Fabric's dispatch and batch tools return `running` before they validate the
-dispatch, so a returned PID is not evidence a worker actually launched.
-Confirm it independently: write the prompt to a file inside the workspace
-Fabric is scoped to, never to a scratch directory outside it, because a prompt
-file outside the workspace is silently unreachable and the dispatch never
-runs. Give each worker its own run directory; a second writer dispatched onto
-one a worker already owns corrupts both. A codex worker needs a git working
-directory, including a read-only one, which otherwise fails immediately as
-untrusted; anchor a read-only review to a worktree with an explicit no-edit
-instruction, since a read-only codex worker has no route to write its own
-report and must return findings through its normal channel instead. Headless
-`agy` has no web access and auto-denies any fetch a prompt asks for, so route
-work that needs external verification elsewhere and confine `agy` legs to
-claims checkable from the repository alone.
-
 ## Non-goals
 
 This contract does not prescribe a topology (single chair, paired-primary, or
 a run-until-STOP lab loop — see `paired-primary.md` and `autopilot`),
 a specific model/tier (`routing-and-tiers.md`), or a specific cross-family
-dispatcher (`cli-headless.md`). It fixes only the stage/gate/recovery shape
+dispatcher (`direct-cli-fallback.md`). It fixes only the stage/gate/recovery shape
 every adapter must realise, so an external consumer can depend on the shape
 without depending on one substrate's syntax.

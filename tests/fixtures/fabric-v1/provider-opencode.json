@@ -1,0 +1,65 @@
+{
+  "adapter": "opencode",
+  "stdout": "{\"type\": \"error\", \"error\": {\"data\": {\"statusCode\": 429, \"message\": \"Too many requests\"}}}\n",
+  "stderr": "",
+  "exit": 1,
+  "expected": {
+    "status": "rate_limited"
+  },
+  "cases": [
+    {
+      "adapter": "opencode",
+      "stdout": "",
+      "stderr": "You've hit your usage limit",
+      "exit": 1,
+      "expected": {
+        "status": "usage_limited"
+      }
+    },
+    {
+      "adapter": "opencode",
+      "stdout": "",
+      "stderr": "Individual quota reached",
+      "exit": 1,
+      "expected": {
+        "status": "usage_limited"
+      }
+    },
+    {
+      "adapter": "opencode",
+      "stdout": "",
+      "stderr": "rate limit exceeded; HTTP 429",
+      "exit": 1,
+      "expected": {
+        "status": "rate_limited"
+      }
+    },
+    {
+      "adapter": "opencode",
+      "stdout": "",
+      "stderr": "Login expired; not logged in",
+      "exit": 1,
+      "expected": {
+        "status": "auth_required"
+      }
+    },
+    {
+      "adapter": "opencode",
+      "stdout": "",
+      "stderr": "model not found",
+      "exit": 1,
+      "expected": {
+        "status": "model_unavailable"
+      }
+    },
+    {
+      "adapter": "opencode",
+      "stdout": "",
+      "stderr": "permission denied",
+      "exit": 1,
+      "expected": {
+        "status": "permission_blocked"
+      }
+    }
+  ]
+}

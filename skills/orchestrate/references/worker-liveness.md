@@ -102,14 +102,6 @@ codex exec -s <sandbox> -C <ABSOLUTE_DIR> -m <model> - < brief.txt > out.txt 2>&
 Give it the largest timeout the tool accepts. This is the whole procedure when
 the run fits inside one timeout window.
 
-Always redirect stdin explicitly, from the brief file or from `/dev/null`,
-never leave it open. `codex exec` appends piped stdin to the prompt when both
-are present, and an unclosed pipe under a backgrounded launch blocks on EOF
-forever with the prompt never acted on. The signature is a process that sits
-reporting it is reading additional input from stdin, which can also appear
-harmlessly as the first line of a healthy run, so confirm the run's own
-startup banner follows it before trusting either reading.
-
 **Second choice, only when detachment is unavoidable: use the shared detached
 helper.** Give each dispatch a unique run directory. The helper captures the
 actual provider child PID in `worker.pid`, records its own wrapper PID in
@@ -118,7 +110,7 @@ actual provider child PID in `worker.pid`, records its own wrapper PID in
 to `run_dir/done`. The caller captures the wrapper PID separately:
 
 ```bash
-run_dir=${TMPDIR:-/tmp}/provenant-worker-<unique-slug>
+run_dir=.agent-run/scratch/provenant-worker-<unique-slug>
 "$(provenant root)/skills/orchestrate/scripts/run_worker_detached.sh" \
   --run-dir "$run_dir" -- <worker command> &
 WRAPPER_PID=$!
@@ -164,17 +156,6 @@ completion marker remains available. Do not insert liveness probes or status
 checks between reissues: each is a turn the worker could have finished in, and
 the temptation to then stop and await a notification is exactly the failure
 above.
-
-### Fabric-dispatched workers
-
-A worker dispatched through Fabric writes its attempt record and report only
-at exit, so a run directory holding nothing but the prompt is not evidence the
-worker is dead; the worker process is a child of the Fabric dispatch wrapper,
-not a bare provider process bearing the run id. Before treating such a worker
-as dead or relaunching onto its worktree, tail the dispatch owner's stdout for
-a terminal status line and confirm the wrapper PID from the dispatch response
-is still running. An owner stdout with no terminal line means the run is still
-live, whatever the attempt directory looks like.
 
 ## A dispatcher must actually dispatch
 

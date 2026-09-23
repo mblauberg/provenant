@@ -59,7 +59,7 @@ review.
 ## Procedure
 
 **1. Assemble the material.** Gemini sees only what you give it. Build a self-contained prompt
-file at `${TMPDIR:-/tmp}/agy-<slug>-prompt.txt` containing:
+file at `.agent-run/scratch/agy-<slug>-prompt.txt` containing:
 
 - what was changed and why, in a few lines;
 - the actual diff, or the file contents under review, get it with
@@ -82,15 +82,15 @@ work; `--add-dir` is the mechanism.
 
 For Git reviews, materialise the selected diff first with
 `python3 scripts/git_evidence.py --repository <CHECKOUT> --output
-.agent-run/<RUN>/git-evidence.md --diff-from <REVISION>`. Pass that file to
+.agent-run/runs/<RUN>/git-evidence.md --diff-from <REVISION>`. Pass that file to
 `dispatch_run.py --git-evidence`; it copies the packet into the attempt,
 exposes only that directory through `--add-dir`, and records its checkout
 identity. The injected instruction tells Gemini to read the packet and not
 invoke shell, Git or other tools. A provider denial remains a failed review.
 
-Use a Gemini model only. On 2026-09-04, agy listed
+Use `fabric_dispatch` with `adapter: "agy"` when Fabric is available; use the direct procedure below only as a degraded path. Create `.agent-run/scratch/` before writing prompts. Use a Gemini model only. On 2026-09-04, agy accepted
 `gemini-3.8-flash-{high,medium,low}`, `gemini-3.7-flash-{high,medium,low}`,
-`gemini-3.6-flash-{high,medium,low}` and `gemini-3.1-pro-{high,low}`, plus
+`gemini-3.6-flash-{high,medium,low}` and `gemini-3.1-pro-{high,low}` as IDs, not preferred candidates, plus
 non-Gemini models. Never select a Claude,
 GPT or other non-Gemini identifier for this cross-family review. In the
 dispatcher example below, `gemini-3.8-flash` is the harness routing alias and
@@ -130,8 +130,8 @@ a clipped brief be reviewed as though whole. Large material belongs behind
   --model gemini-3.8-flash --effort medium \
   --orchestrator-family anthropic \
   --add-dir <ABSOLUTE_REPO> \
-  --out ${TMPDIR:-/tmp}/agy-<slug>-out.txt \
-  --prompt-file ${TMPDIR:-/tmp}/agy-<slug>-prompt.txt
+  --out .agent-run/scratch/agy-<slug>-out.txt \
+  --prompt-file .agent-run/scratch/agy-<slug>-prompt.txt
 ```
 
 Issue that as a single Bash call with `timeout: 600000` and **without**

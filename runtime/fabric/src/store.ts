@@ -229,7 +229,15 @@ export class Store {
       const delivery = this.#db.prepare(
         `INSERT INTO deliveries(message_id, project, recipient_id, read_at) VALUES (?, ?, ?, NULL)`,
       );
-      for (const recipient of recipients) delivery.run(messageId, who.project, recipient);
+      for (const recipient of recipients) {
+        delivery.run(messageId, who.project, recipient);
+        if(options.kind === "run_terminal" && options.outputPath) {
+          const [runId,taskId,attempt]=options.outputPath.split(":");
+          const observed=this.#db.prepare("SELECT attempt FROM run_observations WHERE project=? AND recipient_id=? AND run_id=? AND task_id=?")
+            .get(who.project,recipient,runId ?? "",taskId ?? "") as {attempt:number}|undefined;
+          if(observed && observed.attempt >= Number(attempt)) this.#db.prepare("UPDATE deliveries SET read_at=? WHERE message_id=? AND recipient_id=?").run(now,messageId,recipient);
+        }
+      }
       this.#log(who, "send", `to ${to}: ${body.slice(0, 120)}`);
       return { messageId, recipients };
     }).immediate();
@@ -239,6 +247,7 @@ export class Store {
   inbox(
     who: Identity,
     options: {
+      ids?: string[];
       limit?: number;
       peek?: boolean;
       claimTtlMs?: number;
@@ -258,7 +267,7 @@ export class Store {
 
     if (options.peek ?? false) {
       const observedAt = Date.now();
-      return this.#deliveryRows(who, limit, observedAt, true, options.taskId).map((row) =>
+      return this.#deliveryRows(who, limit, observedAt, true, options.taskId, options.ids).map((row) =>
         this.#message(row, null, row.claim_expires_at === null || row.claim_expires_at <= observedAt
           ? null
           : row.claim_expires_at));
@@ -274,7 +283,7 @@ export class Store {
         // BEGIN IMMEDIATE has acquired the writer lock before this callback runs.
         // Starting the lease here prevents lock wait time consuming the claim TTL.
         const now = Date.now();
-        const rows = this.#deliveryRows(who, limit, now, false, options.taskId);
+        const rows = this.#deliveryRows(who, limit, now, false, options.taskId, options.ids);
         const claim = this.#db.prepare(
           `INSERT INTO delivery_claims(
              message_id, project, recipient_id, claim_id, claimed_at, expires_at
@@ -304,6 +313,22 @@ export class Store {
     } finally {
       if (busyTimeoutMs !== 5000) this.#db.pragma("busy_timeout = 5000");
     }
+  }
+
+  /** Status observation consumes only this seat's matching terminal notices. */
+  acknowledgeTerminal(who:Identity,row:Record<string,any>,busyTimeoutMs=5000):void {
+    const prefix=`${row.run_id}:${row.task_id}:`, attempt=Number(row.attempt ?? row.attempt_count);
+    if(!Number.isInteger(busyTimeoutMs) || busyTimeoutMs<1 || busyTimeoutMs>5000) throw new Error("invalid notice busy timeout");
+    this.#db.pragma(`busy_timeout = ${busyTimeoutMs}`);
+    try { this.#db.transaction(()=> {
+      this.#db.prepare(`INSERT INTO run_observations(project,recipient_id,run_id,task_id,attempt) VALUES (?,?,?,?,?)
+        ON CONFLICT(project,recipient_id,run_id,task_id) DO UPDATE SET attempt=max(attempt,excluded.attempt)`)
+        .run(who.project,who.agentId,String(row.run_id),String(row.task_id),attempt);
+      this.#db.prepare(`UPDATE deliveries SET read_at = ? WHERE project = ? AND recipient_id = ? AND read_at IS NULL
+        AND message_id IN (SELECT message_id FROM messages WHERE project = ? AND kind = 'run_terminal'
+        AND ((substr(output_path,1,?) = ? AND CAST(substr(output_path,?) AS INTEGER) <= ?) OR output_path = ?))`)
+        .run(Date.now(),who.project,who.agentId,who.project,prefix.length,prefix,prefix.length+1,attempt,row.run_dir);
+    }).immediate(); } finally {this.restoreDefaultBusyTimeout();}
   }
 
   /** Acknowledge one claimed delivery. Retries with the same token are idempotent. */
@@ -523,6 +548,7 @@ export class Store {
     now: number,
     includeClaimed: boolean,
     taskId?: string,
+    ids?: string[],
   ): DeliveryRow[] {
     return this.#db
       .prepare(
@@ -534,17 +560,22 @@ export class Store {
          LEFT JOIN delivery_claims c
            ON c.message_id = d.message_id AND c.recipient_id = d.recipient_id
          WHERE d.project = ? AND d.recipient_id = ? AND d.read_at IS NULL
+           AND m.created_at >= ?
            AND (? = 1 OR c.expires_at IS NULL OR c.expires_at <= ?)
            AND (? IS NULL OR m.task_id = ?)
+           AND (? IS NULL OR m.message_id IN (SELECT value FROM json_each(?)))
          ORDER BY m.created_at, m.message_id LIMIT ?`,
       )
       .all(
         who.project,
         who.agentId,
+        now - 14 * 86400000,
         includeClaimed ? 1 : 0,
         now,
         taskId ?? null,
         taskId ?? null,
+        ids === undefined ? null : JSON.stringify(ids),
+        ids === undefined ? null : JSON.stringify(ids),
         limit,
       ) as DeliveryRow[];
   }
@@ -567,6 +598,9 @@ export class Store {
   }
 
   #ensureMessageLinkColumns(): void {
+    this.#db.exec(`CREATE TABLE IF NOT EXISTS run_observations (
+      project TEXT NOT NULL, recipient_id TEXT NOT NULL, run_id TEXT NOT NULL, task_id TEXT NOT NULL,
+      attempt INTEGER NOT NULL, PRIMARY KEY(project,recipient_id,run_id,task_id))`);
     const columns = new Set(
       (this.#db.pragma("table_info(messages)") as Array<{ name: string }>).map((column) => column.name),
     );
@@ -600,6 +634,15 @@ export class Store {
   }
 
   #resolveRecipients(who: Identity, to: string): string[] {
+    const known=this.agents(who.project).map(agent=>agent.agentId);
+    const chair=process.env.PROVENANT_CHAIR;
+    const parent=process.env.PROVENANT_PARENT;
+    const chairSeat=chair && known.includes(chair) ? chair : known.includes("chair") ? "chair" : undefined;
+    if (["chair", "/root", "root", "parent"].includes(to)) {
+      const seat = to === "chair" ? chairSeat : parent && known.includes(parent) ? parent : chairSeat;
+      if (!seat) throw new Error(`unbound recipient "${to}"; fix: pass to:<seat> from fabric_whoami{detail:"full"}`);
+      to = seat;
+    }
     if (to === "all") {
       return this.agents(who.project)
         .map((agent) => agent.agentId)

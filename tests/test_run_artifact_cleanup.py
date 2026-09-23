@@ -19,6 +19,14 @@ def load_module():
     return module
 
 
+def test_workspace_inference_handles_new_and_legacy_run_roots(tmp_path):
+    module = load_module()
+    canonical = tmp_path / ".agent-run" / "runs" / "20260923-1000-delivery-task-a1b2c3"
+    legacy = tmp_path / ".agent-run" / "DEL-OLD"
+    assert module.infer_workspace_root(canonical) == tmp_path
+    assert module.infer_workspace_root(legacy) == tmp_path
+
+
 def make_run(tmp_path):
     run = tmp_path / "run"
     run.mkdir()

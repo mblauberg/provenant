@@ -37,6 +37,7 @@ import delivery_receipt_process as process_runner
 import delivery_run_shape as shape
 
 import _shared.workspace_paths as paths
+import _shared.excludes as excludes
 # The run-state invariants are enforced by `implement` as well as by this
 # skill, so they live in the shared library and are re-exported here: every
 # caller of `delivery_receipt.ReceiptError`, `RISKS`, `derive_risk` and the
@@ -175,11 +176,17 @@ def check_evidence_sources(
 def resolve_run_dir(value: str | Path, *, run_id: str | None = None) -> tuple[Path, Path]:
     candidate = Path(value)
     resolved = candidate.resolve()
-    if resolved.parent.name != ".agent-run" or not resolved.name:
-        raise ReceiptError("run-dir must be a canonical .agent-run/<id> directory")
-    if run_id is not None and resolved.name != run_id:
-        raise ReceiptError("run-dir name must match run-id")
-    workspace = resolved.parent.parent.resolve()
+    if resolved.parent.name == ".agent-run" and resolved.name:
+        # One-release fallback for hash-bound legacy receipts.
+        if run_id is not None and resolved.name != run_id:
+            raise ReceiptError("legacy run-dir name must match run-id")
+        workspace = resolved.parent.parent.resolve()
+    elif resolved.parent.name == "runs" and resolved.parent.parent.name == ".agent-run":
+        if not re.fullmatch(r"\d{8}-\d{4}-delivery-[a-z0-9-]{1,32}-[a-z0-9]{6}", resolved.name):
+            raise ReceiptError("run-dir must use <YYYYMMDD-HHMM>-delivery-<slug>-<rand6>")
+        workspace = resolved.parents[2].resolve()
+    else:
+        raise ReceiptError("run-dir must be under .agent-run/runs/ (legacy .agent-run/<id> accepted)")
     return resolved, workspace
 
 
@@ -328,6 +335,16 @@ def default_relationships(run_id: str) -> dict[str, str]:
 def command_init(args: argparse.Namespace) -> dict[str, Any]:
     run_id = require_identifier(args.run_id, "run-id")
     run_dir, workspace = resolve_run_dir(args.run_dir, run_id=run_id)
+    if run_dir.parent.name == "runs":
+        worktrees = subprocess.run(
+            ["git", "-C", str(workspace), "worktree", "list", "--porcelain"],
+            text=True, capture_output=True, check=False,
+        )
+        if worktrees.returncode == 0:
+            primary = next((line.removeprefix("worktree ") for line in worktrees.stdout.splitlines()
+                            if line.startswith("worktree ")), "")
+            if primary and workspace != Path(primary).resolve():
+                raise ReceiptError("canonical delivery runs belong in the primary checkout's .agent-run/runs")
     intent_path, intent_relative = safe_workspace_path(workspace, args.intent, "intent")
     if not intent_path.is_file() or not intent_path.read_bytes():
         raise ReceiptError("intent must reference an existing non-empty file")
@@ -433,8 +450,15 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
     if workspace != Path.cwd().resolve():
         raise ReceiptError("init run-dir must be beneath the current workspace root")
     if not run_dir.parent.exists():
-        run_dir.parent.mkdir()
+        run_dir.parent.mkdir(parents=True)
         fsync_directory(workspace)
+    common = subprocess.run(["git", "-C", str(workspace), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+                            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=False)
+    if common.returncode == 0:
+        try:
+            excludes.write_exclude_rules(Path(common.stdout.strip()).resolve(), "/.agent-run/", "/.work/", "/.worktrees/")
+        except (OSError, ValueError) as exc:
+            raise ReceiptError(f"cannot write repository-local exclude rules: {exc}") from exc
     run_dir.mkdir(exist_ok=False)
     fsync_directory(run_dir.parent)
     with run_lock(run_dir):

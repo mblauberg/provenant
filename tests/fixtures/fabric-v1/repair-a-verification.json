@@ -1,0 +1,205 @@
+{
+  "schema": "fabric.repair-verification.v1",
+  "lane": "A",
+  "implementation_commit": "80b6acf7930b776ebac7e63a0379a7bff9d75372",
+  "findings": {
+    "opus-1": {
+      "status": "fixed",
+      "change": "Claude --bare for API key/endpoint, --safe-mode for OAuth, always --strict-mcp-config; flags verified against local help."
+    },
+    "opus-2": {
+      "status": "fixed",
+      "change": "Only Agy success is invalidated by stderr permission diagnostics."
+    },
+    "opus-3": {
+      "status": "fixed",
+      "change": "QUESTION fence must end the response; quoted middle examples remain ordinary output."
+    },
+    "opus-4/luna-credential": {
+      "status": "fixed",
+      "change": "Reject known credential stores and their ancestor directories, including home .config, Library, .local/share and .local."
+    },
+    "opus-5": {
+      "status": "fixed",
+      "change": "OpenCode additional directories are explicitly unsupported; applied.add_dirs is empty with warning."
+    },
+    "opus-6": {
+      "status": "fixed",
+      "change": "Validate fallback in preflight, batch loading and standalone sequence before launch; parse adapter/model@effort; tolerate malformed router candidates."
+    },
+    "opus-7": {
+      "status": "fixed",
+      "change": "Bounded head/tail deque capture, no unbounded full_output spool; incremental semantic metadata, text and failures. Truncated results are partial and cannot certify."
+    },
+    "opus-8": {
+      "status": "fixed",
+      "change": "Real cf_dispatch plus PATH fake provider tests cover marker/SIGTERM/timeout, descendant death, writer lease release, closed receipt and restored handlers."
+    },
+    "opus-9": {
+      "status": "fixed",
+      "change": "Orphan reaping checks every active canonical attempt even if shared dispatch-provider.json exists."
+    },
+    "opus-10": {
+      "status": "fixed",
+      "change": "Overload/529 is rate_limited; answer prose never supplies failure signatures; Kiro tool echo cannot set observed model."
+    },
+    "opus-11": {
+      "status": "fixed",
+      "change": "Account-wide limit evidence writes adapter/*; synthetic cooldown attempts preserve original record. Registry helper normalizes shorthands, retired names and effort suffixes."
+    },
+    "opus-12": {
+      "status": "fixed",
+      "change": "TERM grace is two seconds; provider flush regression passes."
+    },
+    "opus-13": {
+      "status": "partial",
+      "change": "Watchdog avoids per-file resolve and scans beyond ten thousand files. Full-tree polling remains a performance tradeoff.",
+      "remaining": "Full-tree polling can still be expensive on very large worktrees; the false-stall cutoff and repeated path resolution are removed."
+    },
+    "opus-14": {
+      "status": "deferred",
+      "reason": "Keep Cursor open-pipe profile required by design and existing regression. Live Cursor stdin behavior not established by this repair."
+    },
+    "opus-15": {
+      "status": "partial",
+      "change": "Digests have caller-openable result paths and fallback reset time; resume restores intent, family and preface. Local help confirms Kiro effort and Codex resume flags.",
+      "remaining": "Batch resume selection remains single-task only. Legacy run receipt maps input_required to failed with resumable=true while canonical status remains input_required. Live Claude resume attempt returned no conversation found after timed-out review; chair must rerun outside sandbox."
+    },
+    "luna-single-task-receipt": {
+      "status": "fixed",
+      "change": "Read canonical attempts before deciding there is nothing to close; latest terminal rows determine receipt status."
+    }
+  },
+  "handoffs": {
+    "B": [
+      "Per-task --cwd already passed; now tested through real batch owner and fake provider.",
+      "dispatch_run accepts absolute caller prompt plus --cwd. For a nested non-Git owner, the explicit run-dir determines containment; ambient ancestor .agent-run never relocates new runs.",
+      "Interrupted canonical attempts resume even when legacy terminal evidence and result were never created.",
+      "Shared layout fixture run_root is checkout/workspace root; agent_run_dir is root/.agent-run. Update TS fixture consumer to compare its .agent-run-returning API against agent_run_dir.",
+      "Typecheck execution-input.ts:95 model.names must be narrowed before includes.",
+      "Adapter registry test must recognize shared provider_exec dispatch rather than requiring one shell arm per adapter."
+    ],
+    "C": [
+      "Plan consumes fallback_candidates and effort_applied; preflight and cf_dispatch forward true/false/any to router.",
+      "Cooldown keys are adapter/registered-id or adapter/*; registered_model calls model_route._registered_match from the snapshot to preserve router normalization.",
+      "test_snapshot_deep_merges_models_and_drops_malformed_overlay invokes model-route under a synthetic product lacking .venv/bin/python; fix fixture interpreter setup."
+    ],
+    "D_or_B": [
+      "test_live_fabric_guide_describes_the_daemonless_launch_graph asserts removed README prose; update owned guide/test."
+    ]
+  },
+  "review": {
+    "native": {
+      "route": "codex/gpt-6-astra@high (openai; resolved)",
+      "independent": true,
+      "final": "clean after final fixes; 14 targeted regressions passed in independent review"
+    },
+    "other_primary": {
+      "route": "claude/claude-opus-5-5@high (anthropic; observed)",
+      "independent": true,
+      "status": "Findings repaired and independently rechecked by native reviewer; full artifacts retained under .agent-run/repair-a-review.",
+      "degraded": "FABRIC-ROUNDTRIP-UNAVAILABLE: Fabric CLI cannot write its database in sandbox; supervised cf_dispatch used.",
+      "retained_failures": [
+        "First source-reading review timed_out at 180 seconds",
+        "Resume failed: no conversation found with retained session id"
+      ],
+      "repairs": [
+        "Explicit run workspace containment replaces ambient ancestor discovery.",
+        "Malformed router lists, entries and metadata cannot strand terminal attempts; user policy still rejects invalid input.",
+        "Persistent structured failures and transient retry failures are separate; a terminal success clears only transient retries."
+      ]
+    }
+  },
+  "verification": {
+    "python": {
+      "command": "uv run --no-sync python -m pytest -q tests/",
+      "passed": 2142,
+      "failed": 3,
+      "skipped": 1,
+      "duration_seconds": 410.98,
+      "note": "Full run plus post-review focused owner/provider verification; extra regressions added during the full run are covered by the final focused suites.",
+      "failures": [
+        {
+          "test": "tests/test_ci_repository_assurance_policy.py::test_live_fabric_guide_describes_the_daemonless_launch_graph",
+          "classification": "cross-lane stale README assertion"
+        },
+        {
+          "test": "tests/test_harness_contract.py::test_readme_mermaid_parses_with_available_local_renderer",
+          "classification": "sandbox-only; standalone mmdc probe reproduces Chromium bootstrap_check_in permission denied"
+        },
+        {
+          "test": "tests/test_model_route.py::test_snapshot_deep_merges_models_and_drops_malformed_overlay",
+          "classification": "lane C fixture synthetic product has no harness Python interpreter"
+        }
+      ]
+    },
+    "owners_final": {
+      "passed": 271,
+      "failed": 0,
+      "files": [
+        "test_provider_exec.py",
+        "test_fabric_records.py",
+        "test_exec_layout.py",
+        "test_dispatch_run.py",
+        "test_batch_run.py"
+      ]
+    },
+    "provider_dispatcher_before_last_review_fixes": {
+      "passed": 228,
+      "failed": 0
+    },
+    "typecheck": {
+      "status": "failed",
+      "error": "execution-input.ts(95,75): TS2339 includes does not exist on type {}"
+    },
+    "fabric_tests": {
+      "command": "npm --prefix runtime/fabric test",
+      "passed": 124,
+      "failed": 13,
+      "test_files_passed": 2,
+      "test_files_failed": 4,
+      "duration_seconds": 54.36,
+      "cross_lane_failures": [
+        "tests/adapter-registry.test.ts > adapter registry > gives every implemented adapter an executing arm in the dispatcher",
+        "tests/project-identity.test.ts > passes the shared layout contract cases and a symlinked cwd"
+      ],
+      "sandbox_affected_require_unsandboxed_rerun": [
+        "tests/execution-lifecycle.test.ts > owner records > survives a cold start, so a fresh process can list the run",
+        "tests/execution-lifecycle.test.ts > owner records > holds owner cleanup through host shutdown until a resistant provider stops",
+        "tests/execution-lifecycle.test.ts > cancellation > prints an unconfirmed stop reason from dispatch kill",
+        "tests/execution-lifecycle.test.ts > cancellation > fails dispatch kill after signalling only the owner of a live provider",
+        "tests/execution-lifecycle.test.ts > cancellation > cancels a cold-start run before the attempt directory exists",
+        "tests/execution-lifecycle.test.ts > orphan reaping > leaves no running provider process after its MCP host is killed",
+        "tests/execution-lifecycle.test.ts > orphan reaping > keeps the owner record until an orphan that ignores SIGTERM is killed",
+        "tests/execution-lifecycle.test.ts > orphan reaping > does not mask a still-running orphan with the host-gone reason",
+        "tests/execution-lifecycle.test.ts > orphan reaping > never reaps a run whose host is still alive",
+        "tests/execution-pruning.test.ts > run directory pruning > never prunes a run still in flight",
+        "tests/execution-pruning.test.ts > run directory pruning > keeps an aged run while its recorded provider session is live"
+      ],
+      "caveat": "ps denial is confirmed; missing-provider and timeout assertions must be rerun outside the sandbox before claiming all eleven failures are exclusively environmental."
+    },
+    "project_identity_isolated": {
+      "passed": 4,
+      "failed": 1,
+      "failure": "shared layout assertion"
+    },
+    "environment": [
+      "Default uv cache is sandbox-read-only; commands use UV_CACHE_DIR=/tmp/provenant-uv-cache.",
+      "/bin/ps is denied with operation not permitted; liveness tests require chair rerun outside sandbox."
+    ],
+    "cf_dispatch_final": {
+      "passed": 111,
+      "failed": 0,
+      "duration_seconds": 72.36
+    },
+    "final_lane_total": {
+      "passed": 382,
+      "failed": 0
+    }
+  },
+  "contract_deviations": [
+    "Additional optional row field run_dir makes digest result paths directly openable.",
+    "Oversized result content is explicitly partial; raw diagnostics remain bounded at 20 MiB.",
+    "OpenCode add_dirs warns unsupported and records none applied."
+  ]
+}

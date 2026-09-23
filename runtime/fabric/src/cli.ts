@@ -9,9 +9,10 @@
  *   fabric tasks [state]
  *   fabric watch [--interval 2]
  */
+import { digest } from "./surface.js";
 import { databasePath, identify } from "./identity.js";
 import {
-  findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
+  statusRows, fabricStatus, findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
 } from "./run-registry.js";
 import { inspectDatabase, Store } from "./store.js";
 
@@ -35,8 +36,8 @@ const USAGE = `fabric <command>
   done <task-id>              close a task
   activity [--after-seq N]    list activity, optionally after a cursor
            [--limit N]
-  watch [--interval N]        tail everything agents here are doing
-  status [--json]             read-only summary; absent state is healthy
+  watch [ids…] [--interval N] print run state changes; exit when all terminal
+  status [id] [--wait-seconds N]  run status by task, batch or run directory; no id: store summary
   doctor [--json]             read-only schema and integrity diagnostics
   adapters [--json]           configured providers: dispatch state, aliases,
                               read-only guarantee, endpoint profiles
@@ -75,6 +76,22 @@ const flag = (name: string): string | undefined => {
   return value;
 };
 const who = identify();
+if (command === "status") {
+  try {
+    const wait = flag("wait-seconds");
+    const rest = argv.slice(1).filter((value) => value !== "--json" && value !== "--runs");
+    if (rest.length > 1 || rest.some((value) => value.startsWith("--"))) {
+      throw new Error("usage: fabric status [id] [--wait-seconds N] [--json]");
+    }
+    if (rest[0] !== undefined || argv.includes("--runs") || wait !== undefined) {
+      console.log(JSON.stringify(await fabricStatus(who.cwd, rest[0], wait === undefined ? 0 : Number(wait)), null, 2));
+      process.exit(0);
+    }
+  } catch (error) {
+    console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(2);
+  }
+}
 /**
  * Dispatch runs are recorded on disk, not in the store, so these read and act
  * from a cold start: a run started by an MCP host that has since died is still
@@ -309,19 +326,30 @@ try {
 
   case "watch": {
     const interval = positiveNumber(flag("interval"), 2, "watch interval");
-    if (argv.length !== 1) throw new Error("usage: fabric watch [--interval N]");
-    const initial = store.activity(who.project, 200).reverse();
-    printActivity(initial);
-    let cursor = initial.at(-1)?.seq ?? 0;
-    for (;;) {
-      await sleep(interval * 1000);
-      let rows;
-      do {
-        rows = store.activityAfter(who.project, cursor, 200);
-        printActivity(rows);
-        cursor = rows.at(-1)?.seq ?? cursor;
-      } while (rows.length === 200);
+    if(argv.includes("--activity")) {
+      const initial=store.activity(who.project,200).reverse();printActivity(initial);
+      let cursor=initial.at(-1)?.seq ?? 0;
+      for(;;) {
+        await sleep(interval*1000);
+        let rows;
+        do {rows=store.activityAfter(who.project,cursor,200);printActivity(rows);cursor=rows.at(-1)?.seq ?? cursor;} while(rows.length === 200);
+      }
     }
+    const ids=argv.slice(1);
+    if(ids.some(id=>id.startsWith("--"))) throw new Error("usage: fabric watch [ids…] [--interval N]");
+    const seen=new Map<string,string>();
+    for(;;) {
+      const result=await statusRows(who.cwd,ids.length ? ids : undefined);
+      if(!result.runs) throw new Error(digest(result));
+      for(const row of result.runs) {
+        const key=`${row.run_id}:${row.task_id}`;
+        const state=`${row.attempt ?? 1}:${row.state}:${row.status}`;
+        if(seen.get(key) !== state) { console.log(digest(row).split("\n")[0]);seen.set(key,state); }
+      }
+      if(result.runs.every(row=>row.state === "terminal")) break;
+      await sleep(interval*1000);
+    }
+    break;
   }
 
   default:

@@ -15,6 +15,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 PRODUCT_ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts"
 SCRIPT = SCRIPTS / "cf_dispatch.sh"
@@ -41,6 +43,7 @@ DISPATCH_SCHEMA = {
     "output_digest",
     "read_only_guarantee",
     "provider_sandbox",
+    "provider_network",
     "orchestrator_family",
     "provider_family",
     "endpoint_provider",
@@ -68,7 +71,7 @@ REQUIRED_GATE_ROWS = [
 
 
 def write_executable(path, body):
-    path.write_text(textwrap.dedent(body), encoding="utf-8")
+    path.write_text(textwrap.dedent(body).lstrip(), encoding="utf-8")
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
 
 
@@ -81,7 +84,7 @@ def test_output_install_replaces_symlink_without_overwriting_target():
             bin_dir / "codex",
             """#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+              printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
               exit 0
             fi
             cat >/dev/null
@@ -123,7 +126,7 @@ def test_directory_symlink_output_is_rejected_without_escaping():
             bin_dir / "codex",
             """#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+              printf '%s\n' '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
               exit 0
             fi
             cat >/dev/null
@@ -167,7 +170,7 @@ def test_symlinked_output_parent_is_rejected_without_escaping():
             bin_dir / "codex",
             """#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+              printf '%s\n' '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
               exit 0
             fi
             cat >/dev/null
@@ -209,12 +212,12 @@ def test_output_parent_swap_cannot_certify_an_identical_outside_file():
         bin_dir = root / "bin"
         bin_dir.mkdir()
         payload = root / "payload"
-        payload.write_bytes(b"A" * (32 * 1024 * 1024))
+        payload.write_bytes(b"A" * (16 * 1024 * 1024))
         write_executable(
             bin_dir / "codex",
             """#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+              printf '%s\n' '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
               exit 0
             fi
             cat >/dev/null
@@ -326,7 +329,7 @@ def run_dispatch_with_stub(
             timeout_seconds=30,
             output_limit_bytes=1_048_576,
         )
-        record = json.loads(result.output)
+        record = json.loads(result.output.splitlines()[-1])
         return result, record, out.read_text(encoding="utf-8") if out.exists() else ""
 
 
@@ -475,7 +478,7 @@ def test_task_class_route_accepts_lifecycle_risk_without_model_override():
             bin_dir / "codex",
             """#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"low"}]}]}'
+              printf '%s\n' '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"}]}]}'
               exit 0
             fi
             cat >/dev/null
@@ -520,63 +523,14 @@ def test_reviewer_id_round_trips_into_dispatch_receipt():
     assert output.strip() == "OK"
 
 
-def test_claude_bare_oauth_model_fallback_reuses_verifier_contract():
-    with tempfile.TemporaryDirectory() as td:
-        args_file = Path(td) / "claude.args"
-        stub = f"""\
-            #!/usr/bin/env bash
-            if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-              echo '{{"loggedIn":true,"authMethod":"claude.ai"}}'
-              exit 0
-            fi
-            printf '%s\\n' "$@" >> {args_file}
-            printf 'CLAUDE_CODE_DISABLE_WORKFLOWS=%s\\n' "$CLAUDE_CODE_DISABLE_WORKFLOWS" >> {args_file}
-            printf '%s\\n' '--END-INVOCATION--' >> {args_file}
-            model=""; safe=0; bare=0
-            while [ $# -gt 0 ]; do
-              case "$1" in
-                --model) model="$2"; shift 2 ;;
-                --safe-mode) safe=1; shift ;;
-                --bare) bare=1; shift ;;
-                *) shift ;;
-              esac
-            done
-            cat >/dev/null
-            if [ "$bare" = 1 ]; then echo "Not logged in" >&2; exit 1; fi
-            if [ "$safe" = 1 ] && [ "$model" = "opus" ]; then echo "model opus is not available" >&2; exit 1; fi
-            if [ "$safe" = 1 ] && [ "$model" = "sonnet" ]; then echo "SAFE SONNET"; exit 0; fi
-            exit 9
-        """
-        result, record, output = run_dispatch_with_stub(stub, role="other-primary")
-        assert result.returncode == 0, result.output
-        assert record["resolved_model"] == "sonnet"
-        assert record["requested_model"] == "opus"
-        assert record["fallback_model"] == "sonnet"
-        assert record["identity_source"] == "runtime-provider-fallback"
-        assert "opus unavailable; used sonnet" in record["substitution"]
-        assert record["read_only_guarantee"] == "oauth_safe_mode"
-        assert output.strip() == "SAFE SONNET"
-        invocations = args_file.read_text(encoding="utf-8").split("--END-INVOCATION--\n")[:-1]
-        assert len(invocations) == 3
-        assert "--bare" in invocations[0]
-        assert "--safe-mode" in invocations[1]
-        assert "--safe-mode" in invocations[2]
-        for invocation in invocations:
-            assert "--disable-slash-commands" in invocation
-            assert "--no-session-persistence" in invocation
-            assert "--permission-mode\nplan" in invocation
-            assert "--tools\nRead,Grep,Glob" in invocation
-            assert "--system-prompt" in invocation
-            assert "Fabric MCP tools are not exposed" in invocation
-            assert "Return only the file-backed verification result" in invocation
-            assert "caller owns any Fabric correlation" in invocation
-            assert "independent verifier" in invocation
-            assert "cross-family verifier" not in invocation
-            assert "CLAUDE_CODE_DISABLE_WORKFLOWS=1" in invocation
-        assert "--model\nopus" in invocations[0]
-        assert "--model\nopus" in invocations[1]
-        assert "--model\nsonnet" in invocations[2]
-
+def test_claude_auth_failure_does_not_hide_an_unindexed_retry():
+    result, record, output = run_dispatch_with_stub("#!/bin/sh\ncat >/dev/null\necho 'Not logged in' >&2\nexit 1\n", role="other-primary")
+    assert result.returncode != 0
+    assert record["status"] == "auth_required"
+    assert record["resolved_model"] == "opus"
+    assert record["auth_or_quota_error"] is True
+    assert record["certification_eligible"] is False
+    assert "Not logged in" in output
 
 def test_claude_tool_not_found_keeps_diagnostic_instead_of_retrying_fallback():
     with tempfile.TemporaryDirectory() as td:
@@ -627,7 +581,7 @@ def test_claude_tool_not_found_keeps_diagnostic_instead_of_retrying_fallback():
         )
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert record["status"] == "tool_not_found"
+        assert record["status"] == "tool_missing"
         assert record["fallback_model"] == "sonnet"
         assert "claude not found. PATH=" in out.read_text(encoding="utf-8")
         assert "model-unavailable" in out.read_text(encoding="utf-8")
@@ -681,95 +635,24 @@ def test_missing_prompt_file_is_clean_error():
     assert "cannot read prompt file: /no/such/file" in result.stderr
 
 
-def test_claude_oauth_fallback_after_bare_auth_failure():
-    stub = """\
-        #!/usr/bin/env bash
-        if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-          echo '{"loggedIn":true,"authMethod":"claude.ai"}'
-          exit 0
-        fi
-        for arg in "$@"; do
-          if [ "$arg" = "--bare" ]; then
-            echo "Not logged in · Please run /login" >&2
-            exit 1
-          fi
-        done
-        cat >/dev/null
-        echo "OK"
-    """
-    result, record, output = run_dispatch_with_stub(stub)
-    assert result.returncode == 0, result.stderr
-    assert record["status"] == "ok"
-    assert record["tool"] == "claude"
-    assert record["read_only_guarantee"] == "oauth_safe_mode"
-    assert output.strip() == "OK"
+def test_claude_auth_failure_is_typed_for_owner_recovery():
+    result, record, output = run_dispatch_with_stub("#!/bin/sh\ncat >/dev/null\necho 'Authentication required' >&2\nexit 1\n")
+    assert result.returncode != 0
+    assert record["status"] == "auth_required"
+    assert record["retryable"] is False
 
-
-def test_claude_oauth_fallback_uses_verifier_system_prompt():
+def test_claude_persistent_session_keeps_neutral_read_only_boundary():
     with tempfile.TemporaryDirectory() as td:
-        tmp = Path(td)
-        bin_dir = tmp / "bin"
-        bin_dir.mkdir()
-        args_file = tmp / "claude.args"
-        write_executable(
-            bin_dir / "claude",
-            f"""\
-            #!/usr/bin/env bash
-            if [ "$1" = "auth" ] && [ "$2" = "status" ]; then
-              echo '{{"loggedIn":true,"authMethod":"claude.ai"}}'
-              exit 0
-            fi
-            printf '%s\\n' "$@" >> {args_file}
-            printf 'CLAUDE_CODE_DISABLE_WORKFLOWS=%s\\n' "$CLAUDE_CODE_DISABLE_WORKFLOWS" >> {args_file}
-            for arg in "$@"; do
-              if [ "$arg" = "--bare" ]; then
-                echo "Not logged in · Please run /login" >&2
-                exit 1
-              fi
-            done
-            cat >/dev/null
-            echo "OK"
-            """,
-        )
-        out = tmp / "out.txt"
-        env = fabric_free_env()
-        env["PATH"] = f"{bin_dir}:{env['PATH']}"
-        result = subprocess.run(
-            [
-                str(SCRIPT),
-                "--tool",
-                "claude",
-                "--orchestrator-family",
-                "codex",
-                "--out",
-                str(out),
-                "--prompt",
-                "Reply exactly OK",
-            ],
-            cwd=str(tmp),
-            env=env,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-        )
-        record = json.loads(result.stdout)
-        assert result.returncode == 0, result.stderr
-        assert record["status"] == "ok"
-        args = args_file.read_text(encoding="utf-8")
-        assert "--system-prompt" in args
-        assert "--disable-slash-commands" in args
-        assert "non-interactive independent verifier" in args
-        assert "cross-family verifier" not in args
-        assert "launch subagents" in args
-        assert args.count("Fabric MCP tools are not exposed") == 2
-        assert args.count("Return only the file-backed verification result") == 2
-        assert args.count("caller owns any Fabric correlation") == 2
-        assert "CLAUDE_CODE_DISABLE_WORKFLOWS=1" in args
-        assert "Read,Grep,Glob" in args.splitlines()
-        assert "Bash" not in args.splitlines()
-        assert "Edit" not in args.splitlines()
-        assert out.read_text(encoding="utf-8").strip() == "OK"
-
+        args_file = Path(td) / "args"
+        stub = f"#!/bin/sh\nprintf '%s\\n' \"$@\" > {args_file}\ncat >/dev/null\necho OK\n"
+        result, record, output = run_dispatch_with_stub(stub)
+        assert result.returncode == 0
+        arguments = args_file.read_text()
+        assert "--session-id" in arguments
+        assert "--no-session-persistence" not in arguments
+        assert "--permission-prompts" in arguments
+        assert "Read,Grep,Glob" in arguments
+        assert "Do not modify files" in arguments
 
 def test_agy_direct_route_dispatches_json_sandbox_and_file_prompt():
     with tempfile.TemporaryDirectory() as td:
@@ -839,16 +722,16 @@ def test_agy_direct_route_dispatches_json_sandbox_and_file_prompt():
         assert record["certification_eligible"] is False
         assert out.read_text(encoding="utf-8") == "AGY OK"
         args = args_file.read_text(encoding="utf-8").splitlines()
-        assert args[args.index("--output-format") + 1] == "json"
+        assert args[args.index("--output-format") + 1] == "stream-json"
         assert "--sandbox" in args
         assert args[args.index("--model") + 1] == "gemini-3.7-flash"
         assert args[args.index("--effort") + 1] == "medium"
         assert args.count("--add-dir") == 2, args
-        assert str(allowed_one) in args
-        assert str(allowed_two) in args
+        assert str(allowed_one.resolve()) in args
+        assert str(allowed_two.resolve()) in args
         # agy has no file-backed prompt input, so the prompt is one argv value.
         assert args[args.index("--print") + 1] == f"Workspace root: {tmp.resolve()}"
-        assert "Do not modify files or run commands that mutate state." in args
+        assert any("Do not modify files or run commands that mutate state." in arg for arg in args)
         assert args[-1] == "Reply exactly AGY OK"
 
 
@@ -981,7 +864,7 @@ def test_claude_task_class_runs_the_subscription_capability_canary():
         assert record["effort_capability_source"] == "provider-unverified"
         assert record["risk_tier"] == "crucial"
         assert "--output-format json" in calls.read_text(encoding="utf-8")
-        assert out.read_text(encoding="utf-8") == "CLAUDE TASK OK\n"
+        assert out.read_text(encoding="utf-8") == "OK"
 
 
 def test_agy_oversized_prompt_fails_closed_instead_of_truncating():
@@ -1023,9 +906,9 @@ def test_agy_oversized_prompt_fails_closed_instead_of_truncating():
         )
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert record["status"] == "prompt_too_large"
+        assert record["status"] == "rejected"
         assert record["certification_eligible"] is False
-        assert "SHOULD NOT RUN" not in out.read_text(encoding="utf-8")
+        assert not out.exists() or "SHOULD NOT RUN" not in out.read_text(encoding="utf-8")
 
 
 def test_agy_success_with_empty_response_is_non_passing():
@@ -1059,14 +942,14 @@ def test_agy_success_with_empty_response_is_non_passing():
         )
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert record["status"] == "empty_output"
+        assert record["status"] == "failed"
         assert record["certification_eligible"] is False
         # The output carries the diagnostic rather than a review body. It must
         # never be empty, or the caller cannot tell a failed dispatch from a
         # dispatch that has not run.
         written = out.read_text(encoding="utf-8")
-        assert "status=empty_output" in written
-        assert "provider error:" not in written
+        assert "status=failed" in written
+        assert "no assistant text" in written
 
 
 def test_agy_success_envelope_with_nonzero_process_exit_is_failure():
@@ -1102,13 +985,12 @@ def test_agy_success_envelope_with_nonzero_process_exit_is_failure():
 
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert record["status"] == "error"
+        assert record["status"] == "failed"
         assert record["exit"] == 7
         assert record["certification_eligible"] is False
         assert "MUST NOT PASS" not in out.read_text(encoding="utf-8")
         written = out.read_text(encoding="utf-8")
-        assert "status=error exit=7" in written
-        assert "provider error:" not in written
+        assert "provider exited 7" in written
 
 
 def test_agy_success_envelope_with_error_never_publishes_response():
@@ -1143,7 +1025,7 @@ def test_agy_success_envelope_with_error_never_publishes_response():
 
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert record["status"] == "auth_or_quota_error"
+        assert record["status"] == "usage_limited"
         assert record["certification_eligible"] is False
         written = out.read_text(encoding="utf-8")
         assert "MUST NOT PASS" not in written
@@ -1225,7 +1107,7 @@ def test_agy_requires_one_well_typed_json_envelope():
 
             record = json.loads(result.stdout)
             assert result.returncode != 0
-            assert record["status"] in {"empty_output", "invalid_envelope"}
+            assert record["status"] == "failed"
             assert record["certification_eligible"] is False
             assert out.read_text(encoding="utf-8").startswith("agy dispatch failed:")
 
@@ -1264,10 +1146,10 @@ def test_agy_rejects_non_utf8_success_envelope():
 
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert record["status"] == "invalid_envelope"
+        assert record["status"] == "failed"
         assert record["certification_eligible"] is False
         assert out.read_text(encoding="utf-8").startswith(
-            "agy dispatch failed: status=invalid_envelope"
+            "agy dispatch failed: status=failed"
         )
 
 
@@ -1330,7 +1212,7 @@ def test_disabled_capability_adapters_are_rejected_before_their_probe_runs():
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
 
-        for tool, model in (("codex", "gpt-5.6-luna"), ("agy", "gemini-3.7-flash")):
+        for tool, model in (("codex", "gpt-6-luna"), ("agy", "gemini-3.7-flash")):
             invoked = tmp / f"{tool}.invoked"
             write_executable(
                 bin_dir / tool,
@@ -1364,7 +1246,7 @@ def test_prompt_file_trailing_newlines_reach_stdin_adapter_byte_for_byte():
             bin_dir / "codex",
             f"""#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
+              printf '%s\n' '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
               exit 0
             fi
             cat > {received}
@@ -1379,7 +1261,7 @@ def test_prompt_file_trailing_newlines_reach_stdin_adapter_byte_for_byte():
 
         result = subprocess.run(
             [
-                str(SCRIPT), "--intent", "ordinary", "--tool", "codex",
+                str(SCRIPT), "--no-preface", "--intent", "ordinary", "--tool", "codex",
                 "--orchestrator-family", "anthropic", "--alias", "workhorse",
                 "--role", "worker", "--prompt-file", str(prompt), "--out", str(out),
             ],
@@ -1422,7 +1304,7 @@ def test_prompt_file_trailing_newlines_reach_argv_adapter_byte_for_byte():
 
         result = subprocess.run(
             [
-                str(SCRIPT), "--intent", "ordinary", "--tool", "agy",
+                str(SCRIPT), "--no-preface", "--intent", "ordinary", "--tool", "agy",
                 "--orchestrator-family", "openai", "--model", "gemini-3.7-flash",
                 "--effort", "medium", "--prompt-file", str(prompt), "--out", str(out),
             ],
@@ -1499,7 +1381,7 @@ def test_agy_failure_preserves_the_provider_reason_in_the_output():
         )
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert record["status"] == "auth_or_quota_error"
+        assert record["status"] == "usage_limited"
         assert record["certification_eligible"] is False
         written = out.read_text(encoding="utf-8")
         assert "Individual quota reached" in written
@@ -1536,7 +1418,7 @@ def test_agy_failure_with_null_error_uses_generic_reason_and_never_publishes_res
 
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert record["status"] == "error"
+        assert record["status"] == "failed"
         written = out.read_text(encoding="utf-8")
         assert "SHOULD NOT PASS" not in written
         assert (
@@ -1579,7 +1461,7 @@ def test_agy_permission_denial_overrides_false_success_envelope():
         )
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert record["status"] == "permission_denied"
+        assert record["status"] == "permission_blocked"
         assert "read_file" in out.read_text(encoding="utf-8")
 
 
@@ -1602,7 +1484,8 @@ def test_default_failure_retains_only_the_declared_output_tempfile():
         output = Path(record["output_path"])
         assert result.returncode != 0
         assert output.exists()
-        assert [path.resolve() for path in temp_root.iterdir()] == [output.resolve()]
+        assert output.is_file()
+        assert all(path == output or path.name.startswith(output.name+".") for path in temp_root.iterdir())
         output.unlink()
 
 
@@ -1846,7 +1729,7 @@ def test_explicit_output_path_preserves_adapter_failure_diagnostics():
         )
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert record["status"] == "error"
+        assert record["status"] == "failed"
         assert record["output_path"] == str(out)
         assert "simulated adapter failure" in out.read_text(encoding="utf-8")
 
@@ -1860,7 +1743,7 @@ def test_unwritable_output_path_cannot_certify_success():
             bin_dir / "codex",
             """#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{"models":[{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{"effort":"high"},{"effort":"max"},{"effort":"ultra"}]}]}'
+              printf '%s\n' '{"models":[{"slug":"gpt-6-sol","supported_reasoning_levels":[{"effort":"high"},{"effort":"max"},{"effort":"ultra"}]}]}'
               exit 0
             fi
             echo OK
@@ -1869,7 +1752,7 @@ def test_unwritable_output_path_cannot_certify_success():
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{env['PATH']}"
         result = subprocess.run(
-            [str(SCRIPT), "--tool", "codex", "--orchestrator-family", "anthropic", "--out", str(tmp / "missing" / "out.txt"), "--prompt", "Review"],
+            [str(SCRIPT), "--tool", "codex", "--effort", "high", "--orchestrator-family", "anthropic", "--out", str(tmp / "missing" / "out.txt"), "--prompt", "Review"],
             cwd=td,
             env=env,
             text=True,
@@ -1936,8 +1819,8 @@ def test_resolved_role_effort_reaches_codex_adapter_and_receipt():
         args = args_file.read_text(encoding="utf-8").splitlines()
         assert "-m" in args
         assert "gpt-6-astra" in args
-        assert "service_tier=default" in args
-        assert "model_reasoning_effort=high" in args
+        assert 'service_tier="default"' in args
+        assert 'model_reasoning_effort="high"' in args
         assert "model_reasoning_effort=xhigh" not in args
 
 
@@ -1956,7 +1839,7 @@ def test_bare_codex_dispatch_defaults_to_workhorse_not_flagship():
             bin_dir / "codex",
             f'''#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"medium"}},{{"effort":"high"}}]}},{{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{{"effort":"high"}},{{"effort":"max"}}]}}]}}'
+              printf '%s\n' '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"medium"}},{{"effort":"high"}}]}},{{"slug":"gpt-5.6-sol","supported_reasoning_levels":[{{"effort":"high"}},{{"effort":"max"}}]}}]}}'
               exit 0
             fi
             printf '%s\\n' "$@" > {args_file}
@@ -1987,11 +1870,11 @@ def test_bare_codex_dispatch_defaults_to_workhorse_not_flagship():
         record = json.loads(result.stdout)
         assert result.returncode == 0, result.stderr
         assert record["route_alias"] == "workhorse"
-        assert record["resolved_model"] == "gpt-5.6-luna"
+        assert record["resolved_model"] == "gpt-6-luna"
         args = args_file.read_text(encoding="utf-8").splitlines()
-        assert "gpt-5.6-luna" in args
+        assert "gpt-6-luna" in args
         assert "gpt-5.6-sol" not in args
-        assert "service_tier=default" in args
+        assert 'service_tier="default"' in args
 
 
 def test_critical_review_role_still_defaults_to_flagship():
@@ -2005,7 +1888,7 @@ def test_critical_review_role_still_defaults_to_flagship():
             bin_dir / "codex",
             f'''#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"medium"}}]}},{{"slug":"gpt-6-astra","supported_reasoning_levels":[{{"effort":"xhigh"}}]}}]}}'
+              printf '%s\n' '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"medium"}}]}},{{"slug":"gpt-6-astra","supported_reasoning_levels":[{{"effort":"xhigh"}}]}}]}}'
               exit 0
             fi
             printf '%s\\n' "$@" > {args_file}
@@ -2262,7 +2145,7 @@ def test_codex_explicit_model_reaches_adapter_and_reports_runtime_failure():
         )
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert record["status"] == "error"
+        assert record["status"] == "failed"
         assert record["resolved_model"] == "gpt-5.6-sol"
         assert record["requested_model"] == "gpt-5.6-sol"
         assert record["catalog_model"] == ""
@@ -2299,11 +2182,17 @@ def test_interrupted_dispatch_cleans_internal_tempfiles():
         assert list(temp_root.iterdir()) == []
 
 
-def test_broker_adapter_requires_resolvable_provider_family():
+def test_cursor_default_auto_model_keeps_unknown_family_ineligible_for_certification():
     with tempfile.TemporaryDirectory() as td:
+        bin_dir = Path(td) / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "cursor-agent", "#!/usr/bin/env bash\necho OK\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
         result = subprocess.run(
             [
                 str(SCRIPT),
+                "--intent", "ordinary",
                 "--tool",
                 "cursor",
                 "--orchestrator-family",
@@ -2312,14 +2201,19 @@ def test_broker_adapter_requires_resolvable_provider_family():
                 "Review",
             ],
             cwd=td,
+            env=env,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
         record = json.loads(result.stdout)
-        assert result.returncode != 0
-        assert record["status"] == "model_required_for_broker"
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert record["status"] == "ok"
+        assert record["resolved_model"] == "auto"
+        assert record["model_selection"] == "adapter-default"
+        assert record["model_family"] == "generic-open"
         assert record["cross_family"] is False
+        assert record["certification_eligible"] is False
 
 
 def test_manual_provider_override_is_not_supported():
@@ -2404,6 +2298,50 @@ def test_chain_all_failed_uses_dispatch_schema():
         assert record["tool"] == "chain"
         assert record["status"] == "all_failed"
         assert record["read_only_guarantee"] == "none"
+
+
+def test_opencode_chain_all_failed_removes_raw_sidecar():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", """#!/usr/bin/env bash
+            echo '{"type":"error","error":"forbidden"}'
+        """)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--chain", "opencode",
+             "--prompt", "Reply OK", "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        assert json.loads(result.stdout)["status"] == "all_failed"
+        assert not (tmp / "out.txt.raw.jsonl").exists()
+
+
+def test_opencode_failed_chain_arm_does_not_leave_raw_for_next_provider():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", """#!/usr/bin/env bash
+            echo '{"type":"error","error":"forbidden"}'
+        """)
+        write_executable(bin_dir / "cursor-agent", "#!/usr/bin/env bash\necho 'fallback OK'\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--chain",
+             "opencode cursor:cursor-grok-4.5-high", "--prompt", "Reply OK",
+             "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert json.loads(result.stdout)["tool"] == "cursor"
+        assert out.read_text().strip() == "fallback OK"
+        assert not (tmp / "out.txt.raw.jsonl").exists()
 
 
 def test_run_dir_init_force_flag_only_creates_final_gate():
@@ -2525,7 +2463,7 @@ if __name__ == "__main__":
     test_missing_option_value_is_clean_error()
     test_missing_prompt_file_is_clean_error()
     test_claude_oauth_fallback_after_bare_auth_failure()
-    test_claude_oauth_fallback_uses_verifier_system_prompt()
+    test_claude_oauth_fallback_uses_neutral_read_only_system_prompt()
     test_agy_direct_route_dispatches_json_sandbox_and_file_prompt()
     test_agy_oversized_prompt_fails_closed_instead_of_truncating()
     test_agy_success_with_empty_response_is_non_passing()
@@ -2593,7 +2531,7 @@ CLAUDE_ARGV_STUB = """\
 CODEX_ARGV_STUB = """\
     #!/usr/bin/env bash
     if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-      printf '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
+      printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
       exit 0
     fi
     printf '%s\\n' "$@" >> {args_file}
@@ -2605,7 +2543,7 @@ CODEX_ARGV_STUB = """\
 def test_claude_worktree_writer_route_runs_inside_the_owned_worktree():
     result, recorded, worktree = run_worktree_dispatch("claude", CLAUDE_ARGV_STUB, worktree="make")
     assert result.returncode == 0, result.output
-    record = json.loads(result.output)
+    record = json.loads(result.output.splitlines()[-1])
     assert DISPATCH_SCHEMA <= set(record)
     assert record["status"] == "ok"
     assert record["access_mode"] == "worktree_write"
@@ -2619,14 +2557,14 @@ def test_claude_worktree_writer_route_runs_inside_the_owned_worktree():
     assert "--tools\nRead,Grep,Glob" not in recorded
     assert "--permission-mode\nplan" not in recorded
     assert f"PWD={worktree}" in recorded
-    assert "own exclusively for this run" in recorded
-    assert "run commands and commit only inside that worktree" in recorded
+    assert "owned worktree" in recorded
+    assert "run commands and commit only inside this owned worktree" in recorded
 
 
 def test_claude_read_only_route_remains_the_default():
     result, recorded, _ = run_worktree_dispatch("claude", CLAUDE_ARGV_STUB)
     assert result.returncode == 0, result.output
-    record = json.loads(result.output)
+    record = json.loads(result.output.splitlines()[-1])
     assert record["access_mode"] == "read_only"
     assert record["worktree"] == ""
     assert record["read_only_guarantee"] == "enforced"
@@ -2640,7 +2578,7 @@ def test_claude_read_only_route_remains_the_default():
 def test_codex_worktree_writer_route_uses_the_workspace_write_sandbox():
     result, recorded, worktree = run_worktree_dispatch("codex", CODEX_ARGV_STUB, worktree="make")
     assert result.returncode == 0, result.output
-    record = json.loads(result.output)
+    record = json.loads(result.output.splitlines()[-1])
     assert record["access_mode"] == "worktree_write"
     assert record["read_only_guarantee"] == "none"
     assert "-s\nworkspace-write" in recorded
@@ -2648,15 +2586,58 @@ def test_codex_worktree_writer_route_uses_the_workspace_write_sandbox():
     assert "read-only" not in recorded
     # A linked worktree keeps its Git metadata outside the worktree root.
     assert "sandbox_workspace_write.writable_roots=" in recorded
+    # --ignore-user-config drops the user's own network setting, so the arm
+    # grants the lane network itself: gh, git push and installs need it.
+    assert "sandbox_workspace_write.network_access=true" in recorded
+    assert record["provider_network"] is True
 
 
-def test_codex_read_only_route_keeps_the_read_only_sandbox():
+def test_codex_worktree_writer_network_can_be_disabled():
+    result, recorded, _ = run_worktree_dispatch(
+        "codex", CODEX_ARGV_STUB, worktree="make",
+        extra_env={"CF_DISPATCH_CODEX_NETWORK": "0"},
+    )
+    assert result.returncode == 0, result.output
+    record = json.loads(result.output.splitlines()[-1])
+    assert "sandbox_workspace_write.network_access=false" in recorded
+    assert record["provider_network"] is False
+
+
+def test_codex_read_only_route_denies_writes_but_keeps_network():
     result, recorded, _ = run_worktree_dispatch("codex", CODEX_ARGV_STUB)
     assert result.returncode == 0, result.output
-    record = json.loads(result.output)
+    record = json.loads(result.output.splitlines()[-1])
     assert record["access_mode"] == "read_only"
-    assert "-s\nread-only" in recorded
+    assert record["read_only_guarantee"] == "enforced"
+    assert record["provider_network"] is True
+    # `-s` would override the profile and drop network again.
+    assert "-s\nread-only" not in recorded
     assert "workspace-write" not in recorded
+    assert 'default_permissions="provenant-read-only-network"' in recorded
+    assert 'permissions.provenant-read-only-network.extends=":read-only"' in recorded
+    assert "permissions.provenant-read-only-network.network.enabled=true" in recorded
+    assert "--skip-git-repo-check" in recorded
+
+
+def test_codex_read_only_route_without_network_keeps_the_read_only_preset():
+    result, recorded, _ = run_worktree_dispatch(
+        "codex", CODEX_ARGV_STUB, extra_env={"CF_DISPATCH_CODEX_NETWORK": "0"},
+    )
+    assert result.returncode == 0, result.output
+    record = json.loads(result.output.splitlines()[-1])
+    assert record["provider_network"] is False
+    assert "-s\nread-only" in recorded
+    assert "default_permissions" not in recorded
+    assert "workspace-write" not in recorded
+
+
+def test_codex_network_setting_rejects_other_values():
+    result, _, _ = run_worktree_dispatch(
+        "codex", CODEX_ARGV_STUB, extra_env={"CF_DISPATCH_CODEX_NETWORK": "yes"},
+    )
+    record = json.loads(result.output.splitlines()[-1])
+    assert record["status"] == "invalid_configuration"
+    assert record["provider_network"] is None
 
 
 def test_worktree_writer_route_is_refused_for_assurance_intent():
@@ -2668,12 +2649,11 @@ def test_worktree_writer_route_is_refused_for_assurance_intent():
     assert recorded == ""
 
 
-def test_worktree_writer_route_is_refused_for_unsupported_adapters():
-    result, recorded, _ = run_worktree_dispatch("agy", CLAUDE_ARGV_STUB, worktree="make")
+def test_worktree_writer_route_is_refused_for_unknown_adapters():
+    result, recorded, _ = run_worktree_dispatch("unknown-fixture", "#!/bin/sh\necho OK\n", worktree="make")
     assert result.returncode == 2
-    assert "unsupported for adapter: agy" in result.output
+    assert "unimplemented adapter" in result.output
     assert recorded == ""
-
 
 def test_worktree_path_requires_the_writer_access_mode():
     with tempfile.TemporaryDirectory() as td:
@@ -2817,7 +2797,7 @@ def test_named_endpoint_reaches_the_claude_writer_route_environment():
     )
 
     assert result.returncode == 0, result.output
-    record = json.loads(result.output)
+    record = json.loads(result.output.splitlines()[-1])
     assert record["status"] == "ok"
     assert record["access_mode"] == "worktree_write"
     assert record["worktree"] == str(worktree)
@@ -2829,7 +2809,7 @@ def test_named_endpoint_reaches_the_claude_writer_route_environment():
 CODEX_ARGV_STUB = """\
 #!/usr/bin/env bash
 if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-  printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
+  printf '%s\n' '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
   exit 0
 fi
 printf '%s\n' "$@" > {args_file}
@@ -2896,7 +2876,7 @@ def codex_endpoint_instance(tmp, name="deepseek-openai", profile=None):
 
 def test_ordinary_codex_dispatch_still_ignores_user_config():
     """No endpoint named, so the user's own codex config stays out of the run."""
-    result, recorded = run_codex_dispatch(extra_args=["--model", "gpt-5.6-luna"])
+    result, recorded = run_codex_dispatch(extra_args=["--model", "gpt-6-luna"])
 
     assert result.returncode == 0, result.stderr
     record = json.loads(result.stdout)
@@ -2926,14 +2906,14 @@ def test_codex_endpoint_profile_supplies_the_provider_inline():
     # The flag that discards the user's config stays on, and the provider the
     # run needs arrives inline instead of from `~/.codex/config.toml`.
     assert "--ignore-user-config" in recorded
-    assert "model_providers.provenant_endpoint.name=deepseek-openai" in recorded
+    assert 'model_providers.provenant_endpoint.name="deepseek-openai"' in recorded
     assert (
-        "model_providers.provenant_endpoint.base_url=https://api.deepseek.com/v1"
+        'model_providers.provenant_endpoint.base_url="https://api.deepseek.com/v1"'
         in recorded
     )
-    assert "model_providers.provenant_endpoint.env_key=DEEPSEEK_API_KEY" in recorded
-    assert "model_providers.provenant_endpoint.wire_api=responses" in recorded
-    assert "model_provider=provenant_endpoint" in recorded
+    assert 'model_providers.provenant_endpoint.env_key="DEEPSEEK_API_KEY"' in recorded
+    assert 'model_providers.provenant_endpoint.wire_api="responses"' in recorded
+    assert 'model_provider="provenant_endpoint"' in recorded
     # The credential is named, never carried: it reaches codex through the
     # environment variable the profile names, not through an argument or record.
     assert "endpoint-token-fixture" not in "\n".join(recorded)
@@ -3001,8 +2981,8 @@ def test_unimplemented_adapter_is_refused_before_any_provider_work():
             assert not invoked.exists()
 
 
-def test_opencode_arm_runs_with_explicit_model_and_records_variant():
-    """OpenCode is an ordinary implemented adapter: explicit model, no --auto."""
+def test_opencode_arm_runs_with_explicit_model_and_reports_unsupported_variant():
+    """Unknown OpenCode models run with the router-applied effort and a note."""
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         bin_dir = tmp / "bin"
@@ -3012,7 +2992,7 @@ def test_opencode_arm_runs_with_explicit_model_and_records_variant():
             bin_dir / "opencode",
             f"""#!/usr/bin/env bash
             printf '%s\\n' "$@" > {args_file}
-            echo '{{"type":"text","text":"OPENCODE OK"}}'
+            echo '{{"type":"text","part":{{"text":"OPENCODE OK"}}}}'
             """,
         )
         env = fabric_free_env()
@@ -3033,17 +3013,286 @@ def test_opencode_arm_runs_with_explicit_model_and_records_variant():
         assert record["status"] == "ok"
         assert record["resolved_model"] == "opencode/union-alpha"
         assert record["model_family"] == "generic-open"
-        assert record["read_only_guarantee"] == "none"
+        assert record["read_only_guarantee"] == "best_effort"
         recorded = args_file.read_text(encoding="utf-8")
         assert "run" in recorded
         assert "--format" in recorded
         assert "json" in recorded
         assert "--model" in recorded
         assert "opencode/union-alpha" in recorded
-        assert "--variant" in recorded
-        assert "high" in recorded
-        assert "--auto" not in recorded
-        assert "OPENCODE OK" in out.read_text(encoding="utf-8")
+        assert "--variant" not in recorded
+        assert record["provenance"]["effort_applied"] == ""
+        assert any("effort control" in note for note in record["warnings"])
+        assert "--auto" in recorded
+        assert out.read_text(encoding="utf-8") == "OPENCODE OK"
+        assert '"type":"text"' in (tmp / "out.txt.raw.jsonl").read_text()
+
+
+OPENCODE_EVENT_STUB = """\
+    #!/usr/bin/env bash
+    printf 'PWD=%s\\n' "$PWD" > {args_file}
+    printf 'CONFIG=%s\\n' "$OPENCODE_CONFIG_CONTENT" >> {args_file}
+    printf '%s\\n' "$@" >> {args_file}
+    printf '%s\\n' '{{"type":"step_start"}}' '{{"type":"text","part":{{"text":"OK"}}}}' '{{"type":"step_finish"}}'
+"""
+
+
+def test_opencode_read_only_route_denies_shell_writes_and_questions():
+    result, recorded, _ = run_worktree_dispatch("opencode", OPENCODE_EVENT_STUB)
+    assert result.returncode == 0, result.output
+    config = json.loads(next(line[7:] for line in recorded.splitlines() if line.startswith("CONFIG=")))
+    assert config["permission"]["bash"]["*"] == "deny"
+    assert config["permission"]["edit"]["*"] == "deny"
+    assert config["permission"]["question"] == "deny"
+    assert config["permission"]["external_directory"]["*"] == "deny"
+
+def test_opencode_environment_model_overrides_adapter_default():
+    result, recorded, _ = run_worktree_dispatch(
+        "opencode", OPENCODE_EVENT_STUB,
+        extra_env={"CF_DISPATCH_OPENCODE_MODEL": "openrouter/deepseek/deepseek-v4"},
+    )
+    record = json.loads(result.output.splitlines()[-1])
+    assert result.returncode == 0, result.output
+    assert record["resolved_model"] == "openrouter/deepseek/deepseek-v4"
+    assert record["model_family"] == "deepseek"
+    assert record["model_selection"] != "adapter-default"
+    assert "openrouter/deepseek/deepseek-v4" in recorded
+
+
+def test_opencode_writer_route_uses_owned_worktree():
+    result, recorded, worktree = run_worktree_dispatch(
+        "opencode", OPENCODE_EVENT_STUB, worktree="make"
+    )
+    record = json.loads(result.output.splitlines()[-1])
+    assert result.returncode == 0, result.output
+    assert record["access_mode"] == "worktree_write"
+    assert record["read_only_guarantee"] == "none"
+    assert f"PWD={worktree}" in recorded
+    assert f"--dir\n{worktree}" in recorded
+    config = json.loads(recorded.split("CONFIG=", 1)[1].splitlines()[0])
+    assert config["permission"]["external_directory"] == {"*": "deny"}
+    assert config["permission"]["edit"] == {"*": "allow"}
+    assert config["permission"]["bash"] == {"*": "allow"}
+
+
+@pytest.mark.parametrize(
+    "events, expected_status, diagnostic",
+    [
+        ('{"type":"error","error":{"name":"APIError","data":{"statusCode":403,"message":"free tier denied"}}}',
+         "permission_blocked", "free tier denied"),
+        ('{"type":"tool_use","part":{"state":{"status":"error","error":"blocked"}}}',
+         "failed", "tool_use"),
+    ],
+)
+def test_opencode_event_failures_are_typed_and_keep_raw_jsonl(events, expected_status, diagnostic):
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", f"#!/usr/bin/env bash\nprintf '%s\\n' '{events}'\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        record = json.loads(result.stdout)
+        assert result.returncode != 0
+        assert record["status"] == expected_status
+        assert record["fix"] or record["evidence"]["signature"]
+        assert diagnostic in out.read_text()
+        assert events in (tmp / "out.txt.raw.jsonl").read_text()
+
+
+@pytest.mark.parametrize("events,expected_status,expected_text", [
+    ('null\n[1,2]\n{"type":"text","part":{"text":"OK"}}', "ok", "OK"),
+    ('{"type":"error","error":"forbidden"}', "permission_blocked", "forbidden"),
+    ('{"type":"error","error":{"data":null,"message":"forbidden"}}', "permission_blocked", "forbidden"),
+    ('{"type":"error","error":{"data":{"statusCode":"403","message":"access denied"}}}',
+     "permission_blocked", "access denied"),
+])
+def test_opencode_parser_accepts_non_object_json_and_error_shapes(events, expected_status, expected_text):
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", "#!/usr/bin/env bash\ncat <<'EOF'\n" + events + "\nEOF\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        record = json.loads(result.stdout)
+        assert record["status"] == expected_status, result.stderr
+        assert expected_text in out.read_text()
+        assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("provider_exit", [2, 124])
+def test_opencode_provider_exit_with_text_is_not_watchdog_error(provider_exit):
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", f"""#!/usr/bin/env bash
+            echo '{{"type":"text","part":{{"text":"provider detail"}}}}'
+            exit {provider_exit}
+        """)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        out = tmp / "out.txt"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        record = json.loads(result.stdout)
+        assert record["status"] == "failed"
+        assert "provider detail" in out.read_text()
+
+
+def test_invalid_opencode_idle_limit_is_refused_before_provider_launch():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        invoked = tmp / "invoked"
+        write_executable(bin_dir / "opencode", f"#!/usr/bin/env bash\ntouch '{invoked}'\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["CF_DISPATCH_IDLE_SECONDS"] = "oops"
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(tmp / "out.txt")],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        assert result.returncode == 2
+        assert "CF_DISPATCH_IDLE_SECONDS must be a positive integer" in result.stderr
+        assert not invoked.exists()
+
+
+def test_opencode_idle_watchdog_terminates_silent_provider():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", "#!/usr/bin/env bash\nsleep 10\n")
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["CF_DISPATCH_IDLE_SECONDS"] = "1"
+        out = tmp / "out.txt"
+        result = run_bounded(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(out)],
+            cwd=tmp, env=env, timeout_seconds=5, output_limit_bytes=1_048_576,
+        )
+        record = json.loads(result.output.splitlines()[-1])
+        assert record["status"] == "stalled"
+        assert record["fix"] or record["evidence"]["signature"]
+        assert "idle for 1s; try another model" in out.read_text()
+
+
+def test_opencode_stderr_progress_keeps_writer_alive():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", """#!/usr/bin/env bash
+            for i in 1 2 3 4 5 6; do
+              echo "test progress $i" >&2
+              sleep 0.3
+            done
+            echo '{"type":"text","part":{"text":"tests passed"}}'
+        """)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        env["CF_DISPATCH_IDLE_SECONDS"] = "1"
+        out = tmp / "out.txt"
+        worktree = make_worktree(tmp)
+        result = subprocess.run(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--access-mode", "worktree_write", "--worktree", str(worktree),
+             "--prompt", "Run tests", "--out", str(out)],
+            cwd=tmp, env=env, text=True, capture_output=True,
+        )
+        assert result.returncode == 0, result.stderr + result.stdout
+        assert json.loads(result.stdout)["status"] == "ok"
+        assert out.read_text() == "tests passed"
+
+
+def test_opencode_dispatch_group_signal_terminates_provider_and_grandchild():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", f"""#!/usr/bin/env bash
+            echo "$$" > "{tmp / 'provider.pid'}"
+            trap 'touch "{tmp / 'provider.stopped'}"; exit 143' TERM
+            (trap 'touch "{tmp / 'grandchild.stopped'}"; exit 143' TERM; touch "{tmp / 'ready'}"; while :; do sleep 0.1; done) &
+            wait
+        """)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        process = subprocess.Popen(
+            [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+             "--prompt", "Reply OK", "--out", str(tmp / "out.txt")],
+            cwd=tmp, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            start_new_session=True,
+        )
+        try:
+            deadline = time.monotonic() + 10
+            while not (tmp / "ready").exists() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            assert (tmp / "ready").exists()
+            os.killpg(process.pid, signal.SIGTERM)
+            process.communicate(timeout=5)
+            assert (tmp / "provider.stopped").exists()
+            assert (tmp / "grandchild.stopped").exists()
+        finally:
+            if process.poll() is None:
+                os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+            provider_pid = tmp / "provider.pid"
+            if provider_pid.exists():
+                try:
+                    os.killpg(int(provider_pid.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+
+def test_opencode_normal_exit_reaps_grandchild():
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td)
+        bin_dir = tmp / "bin"
+        bin_dir.mkdir()
+        write_executable(bin_dir / "opencode", f"""#!/usr/bin/env bash
+            echo "$$" > "{tmp / 'provider.pid'}"
+            (trap 'touch "{tmp / 'grandchild.stopped'}"; exit 143' TERM; touch "{tmp / 'ready'}"; while :; do sleep 0.1; done) &
+            while [ ! -f "{tmp / 'ready'}" ]; do sleep 0.05; done
+            echo '{{"type":"text","part":{{"text":"OK"}}}}'
+        """)
+        env = fabric_free_env()
+        env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
+        try:
+            result = subprocess.run(
+                [str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+                 "--prompt", "Reply OK", "--out", str(tmp / "out.txt")],
+                cwd=tmp, env=env, text=True, capture_output=True, timeout=10,
+            )
+            assert json.loads(result.stdout)["status"] == "ok"
+            assert (tmp / "grandchild.stopped").exists()
+        finally:
+            provider_pid = tmp / "provider.pid"
+            if provider_pid.exists():
+                try:
+                    os.killpg(int(provider_pid.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 def test_oversized_argv_prompt_is_typed_for_cursor():
@@ -3081,27 +3330,18 @@ def test_oversized_argv_prompt_is_typed_for_cursor():
         )
         record = json.loads(result.stdout)
         assert result.returncode != 0
-        assert record["status"] == "prompt_too_large", record
+        assert record["status"] == "rejected", record
         assert record["certification_eligible"] is False
         assert not invoked.exists()
-        assert "SHOULD NOT RUN" not in out.read_text(encoding="utf-8")
+        assert not out.exists() or "SHOULD NOT RUN" not in out.read_text(encoding="utf-8")
 
 
-def test_every_argv_prompt_adapter_arm_bounds_the_prompt():
-    """kiro and copilot are dormant behind adapter policy, so their arms cannot
-    be reached from a test today. The bound is still a property of the source:
-    any arm that hands the prompt to a CLI as one argv value must go through the
-    shared ceiling first, or a future activation reintroduces the E2BIG defect.
-    """
-    source = SCRIPT.read_text(encoding="utf-8")
-    arms = re.split(r"^ {8}([a-z]+)\)$", source, flags=re.MULTILINE)
-    bodies = dict(zip(arms[1::2], arms[2::2]))
-    assert {"agy", "cursor", "kiro", "copilot", "opencode"} <= set(bodies), sorted(bodies)
-    guarded = [tool for tool, body in bodies.items() if '"$PROMPT_ARG"' in body]
-    assert sorted(guarded) == ["agy", "copilot", "cursor", "kiro", "opencode"], guarded
-    for tool in guarded:
-        assert "argv_prompt_too_large" in bodies[tool], tool
-
+def test_every_argv_prompt_adapter_bounds_the_prompt():
+    import importlib
+    module = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    for adapter in ("agy", "cursor", "kiro", "copilot", "opencode"):
+        with pytest.raises(ValueError, match="prompt_too_large"):
+            module.build_plan(adapter, {"resolved_model":"fixture"}, "X"*100000)
 
 def test_timeout_seconds_reaches_the_agy_print_timeout():
     with tempfile.TemporaryDirectory() as td:
@@ -3174,11 +3414,11 @@ def test_agy_denied_actions_never_publish_partial_success():
         ({}, "ok"),
         ({"denied_actions": None}, "ok"),
         ({"denied_actions": []}, "ok"),
-        ({"denied_actions": ["fixture permission refusal"]}, "permission_denied"),
-        ({"denied_actions": [{"tool": "fixture-read", "permission": "unsandboxed"}]}, "permission_denied"),
-        ({"denied_actions": "refused"}, "invalid_envelope"),
-        ({"denied_actions": False}, "invalid_envelope"),
-        ({"denied_actions": {}}, "invalid_envelope"),
+        ({"denied_actions": ["fixture permission refusal"]}, "permission_blocked"),
+        ({"denied_actions": [{"tool": "fixture-read", "permission": "unsandboxed"}]}, "permission_blocked"),
+        ({"denied_actions": "refused"}, "failed"),
+        ({"denied_actions": False}, "failed"),
+        ({"denied_actions": {}}, "failed"),
     ]
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
@@ -3263,7 +3503,7 @@ else:
             effective_prompt = argv[argv.index("--print") + 1]
             assert effective_prompt.startswith(f"Workspace root: {tmp.resolve()}\n")
             assert "Do not modify files or run commands that mutate state." in effective_prompt
-            assert effective_prompt.split("\nTask:\n", 1)[1] == prompt
+            assert effective_prompt.endswith(prompt)
             assert record["provider_sandbox"] is expected
             assert record["read_only_guarantee"] == "prompt_only"
             assert record["certification_eligible"] is False

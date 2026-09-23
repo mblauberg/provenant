@@ -139,11 +139,12 @@ bound to the exact head SHA and the independent-review block included, and
 pass it explicitly:
 
 ```sh
-cp .github/pull_request_template.md /tmp/pr-body.md
+mkdir -p .agent-run/scratch
+cp .github/pull_request_template.md .agent-run/scratch/pr-body.md
 # fill in every section, then:
 gh pr create --base main \
   --title "docs(runbooks): document agent GitHub mechanics" \
-  --body-file /tmp/pr-body.md
+  --body-file .agent-run/scratch/pr-body.md
 ```
 
 Set the issue to `In review` while exact-head checks and independent review
@@ -293,19 +294,19 @@ reports green; that gate is the whole review pressure for these PRs.
 
 Afterwards:
 
-1. For a software delivery, sync the primary checkout and copy the retained run
-   directory into the same workspace-relative `.agent-run/<id>/` location.
+1. For a software delivery, sync the primary checkout; the run already lives under its
+   workspace-relative `.agent-run/runs/<run-dir>/` location.
    After the merge commit's main-branch `ci-status` succeeds, bind the exact
    merge, PR and review evidence before human acceptance is recorded:
 
    ```sh
    skills/implement/scripts/bind_merged_delivery.py \
-     .agent-run/<id>/RUN.json --workspace-root "$PWD" \
+     .agent-run/runs/<run-dir>/RUN.json --workspace-root "$PWD" \
      --repository owner/repository --pr-number <number> \
      --review-artifact <targeted-review.json> \
      --review-artifact <other-primary-review.json>
    skills/deliver/scripts/validate_delivery.py \
-     .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes
+     .agent-run/runs/<run-dir>/RUN.json --workspace-root "$PWD" --verify-hashes
    ```
 
    The binder reads the merged PR and exact merge-commit `ci-status` from the

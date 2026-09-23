@@ -185,6 +185,7 @@ const RAW_RUN_ID = (args && args.runId) || ''
 // (the bootstrap agent then re-runs run_dir_init with --force only for a stale same-id dir).
 const SAFE_RUN_ID = (RAW_RUN_ID.match(/[A-Za-z0-9._-]+/g) || []).join('-')
 const RUN_ID = SAFE_RUN_ID || 'cross-verify-run'
+// Legacy workflow capsule; bootstrap excludes /.work/ locally. Clean lists it for triage.
 const RUN_DIR = `.work/wf/cross-verify/${RUN_ID}`
 const SKILL_SCRIPTS = '"$(provenant root)/skills/orchestrate/scripts"'
 
@@ -195,6 +196,7 @@ function bootstrapPrompt() {
     `1. Run: ${SKILL_SCRIPTS}/run_dir_init.sh "${RUN_DIR}"   (the path is quoted; keep it quoted in your shell)`,
     '   It prints the resolved run-dir path on stdout. If it refuses (non-empty), re-run with --force only if the dir is clearly a stale copy of THIS runId; otherwise report the refusal in notes.',
     '   If the script is unavailable, fall back to: mkdir -p the dir plus findings/ crossfamily/ traces/ and an empty MANIFEST.md.',
+    '   In a Git repository, ensure /.work/ is present once in <git-common-dir>/info/exclude; do not edit tracked .gitignore.',
     '',
     TARGET_IS_CLAIM
       ? [
@@ -284,7 +286,7 @@ function crossFamilyPrompt(boot, claim, idx) {
     `Claim ${claim.id}: ${claim.claim}`,
     `Where to check: ${claim.whereToCheck}`,
     '',
-    'STEP 0 — DATA POLICY GATE (do this BEFORE writing any prompt file or dispatching). External-family CLIs disclose the prompt + any attached files to that provider. Per the cli-headless data-policy doctrine in the orchestrate skill, confirm the host project data policy permits sending THIS claim text and its cited evidence to an external provider:',
+    'STEP 0 — DATA POLICY GATE (do this BEFORE writing any prompt file or dispatching). External-family CLIs disclose the prompt + any attached files to that provider. Per the direct-cli-fallback disclosure guidance in the orchestrate skill, confirm the host project data policy permits sending THIS claim text and its cited evidence to an external provider:',
     '  - Apply the current project data policy. Redact secrets, credentials, personal data and any content not authorised for the selected provider.',
     '  - If disclosure is NOT permitted for this content: do NOT dispatch. Set verdict="unable", crossFamily=false, verifier="CROSS-FAMILY-NOT-RUN", readOnlyGuarantee="none", notRunReason="data-policy-block", and append a "CROSS-FAMILY-NOT-RUN: data-policy-block" line to <run-dir>/MANIFEST.md. Return that verdict and stop.',
     '  Record the policy acknowledgement (permitted/blocked + what, if anything, you redacted) in your norm file so it is auditable.',

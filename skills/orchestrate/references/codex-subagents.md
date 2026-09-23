@@ -37,8 +37,7 @@ project uses them. Do not assume a custom agent exists; discover current tools a
   not assume an entitlement exists.
 - Use Codex native subagents for same-harness fan-out. Do not use `codex exec` as a substitute for
   Codex subagents inside Codex.
-- Use `codex exec -s read-only --ephemeral` as a noninteractive verifier only when the orchestrator is
-  another family.
+- Use `fabric_dispatch` for an external Codex verifier when Fabric is available; direct `codex exec` is the degraded path.
 - Under `-s read-only`, a synthesis written via `apply_patch` is rejected. Analysis and report
   workers use `-o <path>` to persist the final message directly outside the sandbox. Because
   `-o` saves the final message and nothing else, a brief that demotes that message to a
@@ -67,7 +66,7 @@ Good Codex worker prompt fields:
 role:              explorer | worker | default
 task-class:        mechanical | legwork | critical-review | orchestration
 tier:              scout | workhorse | flagship
-catalog-model:     Astra | Luna
+catalog-model:     Astra | Sol | Luna
 effort:            <effective effort from route receipt>
 route-receipt:     <path or receipt identity>
 scope:             <files / sources / task slice>
@@ -79,7 +78,7 @@ return:            3-6 bullets, surprises, unresolved, file path
 ```
 
 When the native Codex surface exposes model and effort overrides, bind both to
-the resolved route. Retain Astra/Luna as the catalogue identity in the
+the resolved route. Retain Astra, Sol or Luna as the catalogue identity in the
 receipt. If the native surface cannot bind either field, stop or use an
 authorised adapter and record the substitution; do not silently inherit the
 chair route. Explicit chair inheritance is valid only when the dispatch and
@@ -111,7 +110,7 @@ When that surface is unavailable, record the pending decision in the run
 checkpoint and end the turn. Resume only after the user's answer arrives.
 Subagent status and workflow progress never stand in for user approval.
 
-GPT-5.6 Programmatic Tool Calling is a separate Responses API substrate for
+Responses API Programmatic Tool Calling is a separate Responses API substrate for
 bounded, tool-heavy stages with predictable data flow. It can run generated
 JavaScript in OpenAI's hosted runtime, but it is not Claude workflow JavaScript
 and should not absorb semantic review, approval-sensitive writes or user gates.

@@ -71,7 +71,7 @@ Manage your context window as a scarce resource. Keep durable pointers and
 retain the load-bearing synthesis/adjudication role.
 
 - **Offload state to the filesystem.** Your memory is `GOAL.md`, `STATE.md`
-  and `QUEUE.md` under `.agent-run/<mission-id>/` (see `state-contract.md`) —
+  and `QUEUE.md` under `.agent-run/runs/<mission-run-dir>/` (see `state-contract.md`) —
   not your context. After every meaningful step, write to disk and keep only
   a one-line pointer in your head. Offload any tool result over ~20k tokens
   to a file; keep a path plus a short preview.
@@ -115,7 +115,7 @@ RESUMABLE MISSION LOOP until GOAL STATUS == STOP (a dry frontier PAUSES it):
 
   4. RECORD      preserve returned artifacts/receipts; delegate any durable
                  decision to implement/deliver (its receipt lands under the
-                 same .agent-run/<mission-id>/); mark the QUEUE.md row
+                 same .agent-run/runs/<mission-run-dir>/); mark the QUEUE.md row
                  DONE/BLOCKED/DEFERRED; clear the lease.
 
   5. PROPAGATE   add any newly-surfaced work to QUEUE.md, with its deps.

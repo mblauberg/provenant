@@ -155,7 +155,7 @@ to satisfy ceremony.
 
 ## Neutral run receipt
 
-The canonical receipt remains `.agent-run/<run-id>/RUN.json`, using the single
+The canonical receipt remains `.agent-run/runs/<run-dir>/RUN.json`, using the single
 public `delivery-run` schema v1.
 The single location avoids parallel lifecycle truth beside orchestration and
 agent-fabric receipts. JSON is used for

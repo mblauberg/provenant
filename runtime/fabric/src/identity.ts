@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 const GIT_REPOSITORY_REDIRECTS = [
   "GIT_DIR",
@@ -153,4 +153,11 @@ export function databasePath(env: NodeJS.ProcessEnv = process.env): string {
   const stateDirectory = env.AGENT_FABRIC_STATE_DIRECTORY ??
     resolve(homedir(), ".local/state/agent-harness/fabric");
   return resolve(stateDirectory, "fabric.sqlite3");
+}
+
+/** Shared with orchestrate/layout.py: one durable run root per repository. */
+export function runRoot(cwd = process.cwd(), env: NodeJS.ProcessEnv = process.env): string {
+  const current = canonicalPath(cwd);
+  try { return join(dirname(canonicalPath(gitPath(current, "--git-common-dir", env))), ".agent-run"); }
+  catch { return join(current, ".agent-run"); }
 }

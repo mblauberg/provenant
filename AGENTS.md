@@ -18,8 +18,7 @@ orchestration, routing, delegation or memory decisions.
   keeping their own cwd. `AGENT_FABRIC_LABEL` gives several agents of one provider separate
   inboxes.
 - **CLI:** use `provenant help` for discovery; route answer-bearing external
-  work through the `orchestrate` skill and Fabric. opencode reads only inside
-  its own working directory; copy any input it needs there first.
+  work through the `orchestrate` skill and Fabric.
 - **Style:** terse for inter-agent, mechanical and status traffic;
   domain-appropriate user prose. Load the `caveman` skill only when requested.
 - **Shell:** the interactive shell is commonly zsh, whose quoting and

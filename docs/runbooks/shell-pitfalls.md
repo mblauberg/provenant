@@ -32,6 +32,11 @@ clean when the command in fact never ran, or ran on the wrong input.
   work proceeds as though it passed. Run a long job in the background on its
   own; run the gate whose result you intend to act on in the foreground, where
   it lands in front of you before you rely on it.
+- **Long waits can outlive the command window.** If a foreground shell call
+  approaches its roughly ten-minute cap, the process may continue without its
+  result reaching the caller. Run longer work under `nohup`, write its exit
+  code to a file, and use a separate waiter that reports completion before
+  acting on the result.
 
 None of these are bugs in the tools involved; they are the documented
 behaviour of the shell doing exactly what it was asked. Treat a search or

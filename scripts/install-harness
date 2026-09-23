@@ -17,9 +17,10 @@ if [[ -f "$PRODUCT_ROOT/.git" && "${PROVENANT_ALLOW_LINKED_WORKTREE_INSTALL:-}" 
 fi
 PLATFORM=""
 MCP_CLIENTS="primary"
+REFRESH_ROUTING=0
 
 usage() {
-  echo "usage: install-harness --platform <claude|codex|all> [--mcp-clients <primary|all>]" >&2
+  echo "usage: install-harness --platform <claude|codex|opencode|agy|cursor|kiro|all> [--mcp-clients <primary|all>] [--refresh-routing]" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -34,6 +35,10 @@ while [[ $# -gt 0 ]]; do
       MCP_CLIENTS="$2"
       shift 2
       ;;
+    --refresh-routing)
+      REFRESH_ROUTING=1
+      shift
+      ;;
     -h|--help)
       usage
       exit 0
@@ -46,8 +51,16 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$PLATFORM" in
-  claude|codex) primary_platforms=("$PLATFORM") ;;
-  all) primary_platforms=(claude codex) ;;
+  claude|codex|opencode|agy|cursor|kiro) primary_platforms=("$PLATFORM") ;;
+  all)
+    primary_platforms=(claude codex)
+    [[ -d "${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}" ]] && primary_platforms+=(opencode)
+    if [[ -n "${AGY_CONFIG_DIR:-}" ]] || { [[ -d "$HOME/.gemini" ]] && command -v agy >/dev/null 2>&1; }; then
+      primary_platforms+=(agy)
+    fi
+    [[ -d "$HOME/.cursor" ]] && primary_platforms+=(cursor)
+    [[ -d "$HOME/.kiro" ]] && primary_platforms+=(kiro)
+    ;;
   *) usage; exit 2 ;;
 esac
 REQUESTED_PLATFORM="$PLATFORM"
@@ -101,6 +114,18 @@ select_primary() {
     codex)
       platform_home="${CODEX_HOME:-$HOME/.codex}"
       instructions="$platform_home/AGENTS.md"
+      ;;
+    opencode)
+      platform_home="${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}"
+      instructions="$platform_home/AGENTS.md"
+      ;;
+    agy)
+      platform_home="${AGY_CONFIG_DIR:-$HOME/.gemini}"
+      instructions="$platform_home/GEMINI.md"
+      ;;
+    cursor|kiro)
+      platform_home="$HOME/.$PLATFORM"
+      instructions=""
       ;;
     *) echo "unsupported primary: $PLATFORM" >&2; exit 2 ;;
   esac
@@ -157,18 +182,18 @@ is_current_generated_bootstrap() {
 
 rewrite_generated_bootstrap() {
   local temporary
-  temporary="$(mktemp "${instructions}.provenant.XXXXXXXX")"
+  temporary="$(mktemp "${instructions}.provenant.XXXXXXXX")" || return 3
   if ! printf '# Provenant\n\n%s\n' "$bootstrap" > "$temporary"; then
     rm -f "$temporary"
     exit 3
   fi
-  mv -f "$temporary" "$instructions"
+  mv -f "$temporary" "$instructions" || { rm -f "$temporary"; return 3; }
   echo "instructions updated=$instructions"
 }
 
 create_generated_bootstrap() {
   local temporary
-  temporary="$(mktemp "${instructions}.provenant.XXXXXXXX")"
+  temporary="$(mktemp "${instructions}.provenant.XXXXXXXX")" || return 3
   if ! {
     echo "# Provenant"
     echo
@@ -177,11 +202,12 @@ create_generated_bootstrap() {
     rm -f "$temporary"
     exit 3
   fi
-  mv -f "$temporary" "$instructions"
+  mv -f "$temporary" "$instructions" || { rm -f "$temporary"; return 3; }
   echo "instructions created=$instructions"
 }
 
 preflight_instructions() {
+  [[ -n "$instructions" ]] || return 0
   if [[ ! -e "$instructions" && ! -L "$instructions" ]]; then
     return 0
   fi
@@ -207,6 +233,7 @@ preflight_instructions() {
 }
 
 preflight_harness_link() {
+  [[ -n "$instructions" ]] || return 0
   local harness="$platform_home/HARNESS.md"
   if [[ ! -e "$harness" && ! -L "$harness" ]]; then
     return 0
@@ -236,11 +263,18 @@ raise SystemExit(0 if target == expected else 1)
 }
 
 rebind_harness_link() {
+  [[ -n "$instructions" ]] || return 0
   local harness="$platform_home/HARNESS.md"
+  if [[ "$PLATFORM" == "agy" || "$PLATFORM" == "opencode" ]] \
+    && [[ ! -e "$harness" && ! -L "$harness" ]]; then
+    ln -s "$PRODUCT_ROOT/HARNESS.md" "$harness" || return 3
+    echo "harness created=$harness"
+    return 0
+  fi
   if is_receipt_owned_old_harness "$harness" \
     && [[ ! "$harness" -ef "$PRODUCT_ROOT/HARNESS.md" ]]; then
     local temporary_directory temporary
-    temporary_directory="$(mktemp -d "${harness}.provenant-new.XXXXXXXX")"
+    temporary_directory="$(mktemp -d "${harness}.provenant-new.XXXXXXXX")" || return 3
     temporary="$temporary_directory/HARNESS.md"
     if ! ln -s "$PRODUCT_ROOT/HARNESS.md" "$temporary" \
       || ! mv -f "$temporary" "$harness"; then
@@ -248,7 +282,7 @@ rebind_harness_link() {
       rmdir "$temporary_directory"
       exit 3
     fi
-    rmdir "$temporary_directory"
+    rmdir "$temporary_directory" || return 3
     echo "harness updated=$harness"
   fi
 }
@@ -257,7 +291,8 @@ rebind_harness_link() {
 # pointer, seeded instance files, client links or installation receipt. A
 # canonical whole-directory link was already checked above; it has no
 # per-entry catalogue to preflight.
-for primary in "${primary_platforms[@]}"; do
+preflight_primary() {
+  local primary="$1"
   select_primary "$primary"
   preflight_directory_target "$platform_home/skills" "$PRODUCT_ROOT/skills"
   if [[ "$PLATFORM" == "claude" ]]; then
@@ -268,25 +303,45 @@ for primary in "${primary_platforms[@]}"; do
     run_stdlib "$PRODUCT_ROOT/scripts/manage_installation.py" preflight \
       --source "$PRODUCT_ROOT/skills" \
       --custom-source "$instance_root/custom-skills" \
-      --target "$platform_home/skills" >/dev/null
+      --target "$platform_home/skills" >/dev/null || return $?
   fi
   run_stdlib "$PRODUCT_ROOT/scripts/instance_installation.py" validate \
-    --product-root "$PRODUCT_ROOT" --instance-root "$instance_root" >/dev/null
+    --product-root "$PRODUCT_ROOT" --instance-root "$instance_root" >/dev/null || return $?
   if [[ "$PLATFORM" == "claude" ]]; then
     if [[ ! -L "$platform_home/agents" ]]; then
       run_stdlib "$PRODUCT_ROOT/scripts/manage_installation.py" plan \
         --surface agents \
         --source "$PRODUCT_ROOT/agents" \
         --target "$platform_home/agents" \
-        --summary >/dev/null
+        --summary >/dev/null || return $?
     fi
     if [[ ! -L "$platform_home/workflows" ]]; then
-      run_stdlib "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows" --preflight
+      run_stdlib "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows" --preflight || return $?
     fi
   fi
   preflight_instructions
   preflight_harness_link
+}
+
+selected_platforms=()
+skipped_platforms=()
+for primary in "${primary_platforms[@]}"; do
+  if [[ "$REQUESTED_PLATFORM" == "all" && "$primary" != "claude" && "$primary" != "codex" ]]; then
+    if ! diagnostic="$(preflight_primary "$primary" 2>&1)"; then
+      printf '%s\n' "$diagnostic" >&2
+      skip_reason=conflict
+      [[ "$diagnostic" == *"instructions preserved="* ]] && skip_reason=instructions-preserved
+      echo "warning: detected provider $primary skipped=$skip_reason; preserving its files" >&2
+      echo "provider $primary skipped=$skip_reason"
+      skipped_platforms+=("$primary")
+      continue
+    fi
+  else
+    preflight_primary "$primary"
+  fi
+  selected_platforms+=("$primary")
 done
+primary_platforms=(${selected_platforms[@]+"${selected_platforms[@]}"})
 
 # Refuse a command collision before any installation mutation. Publication
 # revalidates this state and uses atomic no-replace or exchange primitives.
@@ -298,10 +353,6 @@ provenant_preflight="$(
 
 state_directory="${AGENT_FABRIC_STATE_DIRECTORY:-$HOME/.local/state/agent-harness/fabric}"
 claude_mcp_config="${CLAUDE_MCP_CONFIG:-$HOME/.claude.json}"
-mcp_platform="$REQUESTED_PLATFORM"
-if [[ "$MCP_CLIENTS" == "all" ]]; then
-  mcp_platform="all"
-fi
 codex_mcp_config="${CODEX_MCP_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
 mcp_args=(
   --agents-home "$PRODUCT_ROOT"
@@ -310,9 +361,9 @@ mcp_args=(
   --claude-config "$claude_mcp_config"
   --codex-config "$codex_mcp_config"
   --cursor-config "${CURSOR_MCP_CONFIG:-$HOME/.cursor/mcp.json}"
-  --agy-config "${AGY_MCP_CONFIG:-$HOME/.gemini/config/mcp_config.json}"
+  --agy-config "${AGY_MCP_CONFIG:-${AGY_CONFIG_DIR:-$HOME/.gemini}/config/mcp_config.json}"
   --kiro-config "${KIRO_MCP_CONFIG:-$HOME/.kiro/settings/mcp.json}"
-  --opencode-config "${OPENCODE_MCP_CONFIG:-$HOME/.config/opencode/opencode.jsonc}"
+  --opencode-config "${OPENCODE_MCP_CONFIG:-${OPENCODE_CONFIG_DIR:-$HOME/.config/opencode}/opencode.jsonc}"
 )
 mcp_instance_root=""
 if [[ -n "${AGENT_FABRIC_INSTANCE_ROOT:-}" && "$instance_root" != "$HOME/.agents" ]]; then
@@ -321,23 +372,54 @@ if [[ -n "${AGENT_FABRIC_INSTANCE_ROOT:-}" && "$instance_root" != "$HOME/.agents
 fi
 
 configure_fabric_mcp() {
-  local action="${1:-}"
+  local client="$1" action="${2:-}"
   local mcp_command=("${mcp_args[@]}")
   if [[ -n "$action" ]]; then mcp_command+=("$action"); fi
-  if [[ "$REQUESTED_PLATFORM" == "all" && "$MCP_CLIENTS" == "primary" ]]; then
-    for mcp_primary in claude codex; do
-      AGENT_FABRIC_INSTANCE_ROOT="$mcp_instance_root" \
-        run_stdlib "$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" \
-        --platform "$mcp_primary" "${mcp_command[@]}"
-    done
-  else
-    AGENT_FABRIC_INSTANCE_ROOT="$mcp_instance_root" \
-      run_stdlib "$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" \
-      --platform "$mcp_platform" "${mcp_command[@]}"
-  fi
+  AGENT_FABRIC_INSTANCE_ROOT="$mcp_instance_root" \
+    run_stdlib "$PRODUCT_ROOT/scripts/configure-fabric-mcp.py" \
+    --platform "$client" "${mcp_command[@]}"
 }
 
-configure_fabric_mcp --preflight
+required_client() {
+  [[ "$1" == "$REQUESTED_PLATFORM" ]] \
+    || { [[ "$REQUESTED_PLATFORM" == all ]] && [[ "$1" == claude || "$1" == codex ]]; }
+}
+
+if [[ "$MCP_CLIENTS" == "all" ]]; then
+  mcp_platforms=(claude codex cursor agy kiro opencode)
+else
+  mcp_platforms=(${primary_platforms[@]+"${primary_platforms[@]}"})
+fi
+mcp_ready=()
+for client in "${mcp_platforms[@]}"; do
+  skip=0
+  for skipped in ${skipped_platforms[@]+"${skipped_platforms[@]}"}; do
+    [[ "$client" == "$skipped" ]] && skip=1
+  done
+  [[ "$skip" == 1 ]] && continue
+  if ! required_client "$client"; then
+    if ! diagnostic="$(configure_fabric_mcp "$client" --preflight 2>&1)"; then
+      printf '%s\n' "$diagnostic" >&2
+      echo "warning: detected provider $client skipped=mcp-conflict; preserving its files" >&2
+      echo "provider $client skipped=mcp-conflict"
+      skipped_platforms+=("$client")
+      continue
+    fi
+  else
+    configure_fabric_mcp "$client" --preflight
+  fi
+  mcp_ready+=("$client")
+done
+mcp_platforms=(${mcp_ready[@]+"${mcp_ready[@]}"})
+selected_platforms=()
+for primary in "${primary_platforms[@]}"; do
+  skip=0
+  for skipped in ${skipped_platforms[@]+"${skipped_platforms[@]}"}; do
+    [[ "$primary" == "$skipped" ]] && skip=1
+  done
+  [[ "$skip" == 0 ]] && selected_platforms+=("$primary")
+done
+primary_platforms=(${selected_platforms[@]+"${selected_platforms[@]}"})
 
 if [[ "$REQUESTED_PLATFORM" == "codex" || "$REQUESTED_PLATFORM" == "all" ]]; then
   select_primary codex
@@ -364,28 +446,34 @@ esac
 # resolved once, above, on the contract #529 established.
 run_stdlib "$PRODUCT_ROOT/scripts/instance_installation.py" seed \
   --product-root "$PRODUCT_ROOT" --instance-root "$instance_root" --no-pointer --summary
+if [[ "$REFRESH_ROUTING" == 1 ]]; then
+  run_stdlib "$PRODUCT_ROOT/scripts/instance_installation.py" refresh-routing \
+    --product-root "$PRODUCT_ROOT" --instance-root "$instance_root" --summary
+fi
 
-for primary in "${primary_platforms[@]}"; do
-  select_primary "$primary"
-  mkdir -p "$platform_home"
+install_primary() {
+  select_primary "$1"
+  mkdir -p "$platform_home" || return $?
   "$PRODUCT_ROOT/scripts/install-skills" \
     --target "$platform_home/skills" \
-    --custom-source "$instance_root/custom-skills"
+    --custom-source "$instance_root/custom-skills" || return $?
   if [[ "$PLATFORM" == "claude" ]]; then
-    run_stdlib "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows"
-    "$PRODUCT_ROOT/scripts/install-agents" --target "$platform_home/agents"
+    run_stdlib "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows" || return $?
+    "$PRODUCT_ROOT/scripts/install-agents" --target "$platform_home/agents" || return $?
   fi
   if [[ "$PLATFORM" == "codex" ]]; then
     run_stdlib "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" \
-      --config "$platform_home/config.toml"
+      --config "$platform_home/config.toml" || return $?
   fi
-  rebind_harness_link
+  rebind_harness_link || return $?
 
   # AGENTS.md is instance-owned once seeded and HARNESS.md stays product-shipped
   # (ADR 0019), so the client reads doctrine from the instance and the harness
   # constitution from the product. In a fused layout both roots are one directory,
   # so this is the text that was always emitted.
-  if [[ ! -e "$instructions" && ! -L "$instructions" ]]; then
+  if [[ -z "$instructions" ]]; then
+    :
+  elif [[ ! -e "$instructions" && ! -L "$instructions" ]]; then
     create_generated_bootstrap
   elif [[ -L "$instructions" ]] && [[ "$instructions" -ef "$instance_doctrine" ]]; then
     # A link the user made to the instance doctrine already resolves to doctrine;
@@ -405,9 +493,39 @@ for primary in "${primary_platforms[@]}"; do
     echo "$bootstrap" >&2
     exit 3
   fi
+}
+
+for primary in "${primary_platforms[@]}"; do
+  if [[ "$REQUESTED_PLATFORM" == all && "$primary" != claude && "$primary" != codex ]]; then
+    if ! (install_primary "$primary"); then
+      echo "warning: detected provider $primary skipped=install-conflict; inspect its files" >&2
+      echo "provider $primary skipped=install-conflict"
+      skipped_platforms+=("$primary")
+      continue
+    fi
+  else
+    install_primary "$primary"
+  fi
 done
 
-configure_fabric_mcp
+for client in "${mcp_platforms[@]}"; do
+  skip=0
+  for skipped in ${skipped_platforms[@]+"${skipped_platforms[@]}"}; do
+    [[ "$client" == "$skipped" ]] && skip=1
+  done
+  [[ "$skip" == 1 ]] && continue
+  if ! required_client "$client"; then
+    if ! diagnostic="$(configure_fabric_mcp "$client" 2>&1)"; then
+      printf '%s\n' "$diagnostic" >&2
+      echo "warning: detected provider $client skipped=mcp-conflict; preserving its files" >&2
+      echo "provider $client skipped=mcp-conflict"
+      continue
+    fi
+    printf '%s\n' "$diagnostic"
+  else
+    configure_fabric_mcp "$client"
+  fi
+done
 
 # The pointer is the final publication. Every deterministic conflict has been
 # checked above, so a failed install preserves the previous product selection.

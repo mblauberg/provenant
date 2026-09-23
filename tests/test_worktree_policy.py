@@ -193,6 +193,24 @@ def test_new_branch_requires_separate_branch_authority(tmp_path, capsys):
     assert receipt["detached"] is False
 
 
+def test_branch_name_defaults_to_safe_worktree_name_and_warns_on_override(tmp_path, capsys):
+    repo = tmp_path / "project"
+    init_repo(repo)
+    assert worktree_policy.main([
+        "create", "--repo", str(repo), "--new-branch", "lane/docs-clean",
+        "--human-authorised", "--branch-authorised",
+    ]) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["name"] == "lane-docs-clean"
+    assert (repo / ".worktrees" / "lane-docs-clean").is_dir()
+
+    assert worktree_policy.main([
+        "create", "custom", "--repo", str(repo), "--new-branch", "lane/other",
+        "--human-authorised", "--branch-authorised",
+    ]) == 0
+    assert "differs from branch-derived" in capsys.readouterr().err
+
+
 def test_ignore_rule_is_repository_local_and_idempotent(tmp_path, capsys):
     repo = tmp_path / "project"
     head = init_repo(repo)

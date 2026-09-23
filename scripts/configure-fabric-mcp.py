@@ -18,6 +18,9 @@ import tempfile
 import tomllib
 from typing import Any
 
+from lib.jsonc import parse_jsonc
+from lib.product_root_resolver import POINTER_RELATIVE_PATH, load_pointer_path
+
 
 SERVER_NAME = "fabric"
 CODEX_TABLES = {"mcp_servers.fabric", "mcp_servers.fabric.env"}
@@ -28,14 +31,16 @@ CLIENT_LABELS = {"opencode": "OpenCode"}
 # carried by Fabric records; it is not proof of the provider or model family
 # selected by the external dispatch.
 #
-# Cursor, Kiro and OpenCode share the codex seat because they are brokers that
-# front whichever model the operator picks. Agy has a separate seat for stable
-# addressing, but a dispatch receipt must establish whether its selected model
-# is Google, Anthropic or another supported family.
-CLIENT_SEATS = {"cursor": "codex", "agy": "agy", "kiro": "codex", "opencode": "codex"}
+# identity.ts accepts any seat string. Give each client its own inbox; a seat
+# never establishes which model family a broker selected for dispatch.
+CLIENT_SEATS = {"cursor": "cursor", "agy": "agy", "kiro": "kiro", "opencode": "opencode"}
 
 
 class RegistrationError(ValueError):
+    pass
+
+
+class RegistrationManualEditError(RegistrationError):
     pass
 
 
@@ -217,17 +222,36 @@ def json_client_update(path: Path, desired: dict[str, Any], client: str) -> Conf
     return ConfigProposal(client, snapshot, json.dumps(value, indent=2, sort_keys=True) + "\n", "ready")
 
 
-def opencode_update(path: Path, desired: dict[str, Any]) -> ConfigProposal:
+def opencode_update(
+    path: Path, desired: dict[str, Any],
+    instruction_paths: tuple[Path, Path, Path | None] | None = None,
+) -> ConfigProposal:
     client = "opencode"
     label = "OpenCode"
     snapshot = _capture(path, label)
     text = _text(snapshot, label)
     try:
-        value: Any = json.loads(text) if snapshot.source_kind != "absent" else {}
+        value, has_comments = parse_jsonc(text) if snapshot.source_kind != "absent" else ({}, False)
     except json.JSONDecodeError as exc:
-        raise RegistrationError(f"{label} config is invalid JSON: {exc}") from exc
+        raise RegistrationError(f"{label} config is invalid JSONC: {exc}") from exc
     if not isinstance(value, dict):
         raise RegistrationError(f"{label} config root must be an object")
+    original = json.loads(json.dumps(value))
+    if instruction_paths is not None:
+        instance_doctrine, harness, previous_harness = instruction_paths
+        entries = value.get("instructions", [])
+        if not isinstance(entries, list) or any(not isinstance(item, str) for item in entries):
+            raise RegistrationError("OpenCode instructions conflict; repair: use a string array")
+        retained = []
+        for item in entries:
+            expanded = Path(item).expanduser()
+            if expanded in {instance_doctrine, harness, previous_harness} or (
+                expanded in {Path.home() / ".agents/HARNESS.md", instance_doctrine.parent / "HARNESS.md"}
+                and not expanded.exists()
+            ):
+                continue
+            retained.append(item)
+        value["instructions"] = [*retained, str(instance_doctrine), str(harness)]
     servers = value.setdefault("mcp", {})
     if not isinstance(servers, dict):
         raise RegistrationError(f"{label} config mcp must be an object")
@@ -237,9 +261,16 @@ def opencode_update(path: Path, desired: dict[str, Any]) -> ConfigProposal:
         "enabled": True,
         "environment": desired["env"],
     }
-    if servers.get(SERVER_NAME) == entry:
+    if servers.get(SERVER_NAME) == entry and value == original:
         return ConfigProposal(client, snapshot, text, "existing")
     servers[SERVER_NAME] = entry
+    if has_comments:
+        instructions = json.dumps(value.get("instructions", []), separators=(",", ":"))
+        fabric = json.dumps(entry, separators=(",", ":"))
+        raise RegistrationManualEditError(
+            "OpenCode JSONC comments must be preserved; add by hand "
+            f"instructions={instructions} and mcp.fabric={fabric} in {path}"
+        )
     return ConfigProposal(client, snapshot, json.dumps(value, indent=2, sort_keys=True) + "\n", "ready")
 
 
@@ -599,10 +630,18 @@ def main(argv: list[str] | None = None) -> int:
         "--opencode-config", type=Path,
         default=Path.home() / ".config/opencode/opencode.jsonc",
     )
+    parser.add_argument(
+        "--skip-client", action="append", choices=("cursor", "agy", "kiro", "opencode"), default=[],
+    )
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--check", action="store_true")
     mode.add_argument("--preflight", action="store_true")
-    args = parser.parse_args(argv)
+    arguments = sys.argv[1:] if argv is None else argv
+    agents_home_explicit = any(
+        item == "--agents-home" or item.startswith("--agents-home=")
+        for item in arguments
+    )
+    args = parser.parse_args(arguments)
     try:
         agents_home = args.agents_home.resolve(strict=True)
         shim_path = args.shim_path.expanduser()
@@ -638,7 +677,7 @@ def main(argv: list[str] | None = None) -> int:
             "kiro": args.kiro_config,
         }
         for client, path in optional_configs.items():
-            if args.platform in {"all", client}:
+            if args.platform in {"all", client} and client not in args.skip_client:
                 proposals.append(json_client_update(
                     path,
                     registration(
@@ -651,7 +690,16 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     client,
                 ))
-        if args.platform in {"all", "opencode"}:
+        if args.platform in {"all", "opencode"} and "opencode" not in args.skip_client:
+            instruction_root = instance_root or Path.home() / ".agents"
+            previous_product = load_pointer_path(instruction_root)
+            instruction_product = agents_home
+            if not agents_home_explicit and (instruction_root / POINTER_RELATIVE_PATH).exists():
+                if previous_product is None or not (previous_product / "HARNESS.md").is_file():
+                    raise RegistrationError(
+                        "product-root pointer is invalid or stale; repair: run install-harness"
+                    )
+                instruction_product = previous_product
             proposals.append(opencode_update(
                 args.opencode_config,
                 registration(
@@ -661,6 +709,10 @@ def main(argv: list[str] | None = None) -> int:
                     "opencode",
                     shim_path=shim_path,
                     instance_root=instance_root,
+                ),
+                (
+                    instruction_root / "AGENTS.md", instruction_product / "HARNESS.md",
+                    previous_product / "HARNESS.md" if previous_product else None,
                 ),
             ))
         if args.check:
@@ -762,6 +814,9 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     return 4
             return 0
+    except RegistrationManualEditError as exc:
+        print(f"warning: {exc}", file=sys.stderr)
+        return 3
     except (OSError, RegistrationError) as exc:
         print(f"conflicting: {exc}", file=sys.stderr)
         return 3
