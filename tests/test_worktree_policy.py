@@ -49,6 +49,107 @@ def test_authorised_detached_worktree_uses_shared_project_directory(tmp_path, ca
     ).strip() == str(expected)
 
 
+def test_create_cow_clones_root_and_workspace_node_modules(tmp_path, capsys, monkeypatch):
+    repo = tmp_path / "project"
+    head = init_repo(repo)
+    (repo / ".gitignore").write_text("node_modules/\n")
+    subprocess.run(["git", "-C", str(repo), "add", ".gitignore"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "ignore modules"], check=True)
+    (repo / "package-lock.json").write_text("lock\n")
+    subprocess.run(["git", "-C", str(repo), "add", "package-lock.json"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "add lock"], check=True)
+    head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    (repo / "node_modules" / "fake").mkdir(parents=True)
+    (repo / "node_modules" / "fake" / "package.json").write_text("root\n")
+    (repo / "runtime" / "fabric" / "node_modules" / "nested").mkdir(parents=True)
+    (repo / "runtime" / "fabric" / "node_modules" / "nested" / "pkg").write_text("ws\n")
+    monkeypatch.setattr(worktree_policy, "node_modules_preflight_passes", lambda _root: True)
+    monkeypatch.setattr(worktree_policy, "cow_clone", lambda source, target: shutil.copytree(source, target))
+
+    assert worktree_policy.main([
+        "create", "cloned", "--repo", str(repo), "--detach", head, "--human-authorised",
+    ]) == 0
+
+    receipt = json.loads(capsys.readouterr().out)
+    worktree = repo / ".worktrees" / "cloned"
+    assert receipt["node_modules"] == "cloned"
+    assert worktree_policy.worktree_residue(worktree) == []
+    assert (worktree / "node_modules" / "fake" / "package.json").read_text() == "root\n"
+    assert (worktree / "runtime" / "fabric" / "node_modules" / "nested" / "pkg").read_text() == "ws\n"
+    assert worktree_policy.main(["remove", "cloned", "--repo", str(repo), "--human-authorised"]) == 0
+    assert json.loads(capsys.readouterr().out)["status"] == "removed"
+    assert not worktree.exists()
+
+
+def test_node_preflight_uses_the_callers_node_path_and_clears_git_redirects(tmp_path, monkeypatch):
+    root = tmp_path / "checkout"
+    (root / "scripts").mkdir(parents=True)
+    (root / "scripts" / "node-workspace-preflight.mjs").write_text("")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "node-called"
+    node = bin_dir / "node"
+    node.write_text(
+        f"#!{sys.executable}\n"
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('called')\n"
+    )
+    node.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "wrong-git-dir"))
+
+    assert worktree_policy.node_modules_preflight_passes(root) is True
+    assert marker.read_text() == "called"
+
+
+@pytest.mark.parametrize(
+    "case", ["different-lock", "no-primary-modules", "disabled", "clone-unavailable"],
+)
+def test_create_reports_node_modules_skip_reasons(tmp_path, capsys, monkeypatch, case):
+    repo = tmp_path / "project"
+    head = init_repo(repo)
+    (repo / "package-lock.json").write_text("primary lock\n")
+    subprocess.run(["git", "-C", str(repo), "add", "package-lock.json"], check=True)
+    subprocess.run(["git", "-C", str(repo), "commit", "-qm", "add lock"], check=True)
+    head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    monkeypatch.setattr(worktree_policy, "node_modules_preflight_passes", lambda _root: True)
+    if case == "clone-unavailable":
+        def unavailable(source, target):
+            shutil.copytree(source, target)
+            raise OSError("reflink unsupported")
+        monkeypatch.setattr(worktree_policy, "cow_clone", unavailable)
+    else:
+        monkeypatch.setattr(worktree_policy, "cow_clone", lambda source, target: shutil.copytree(source, target))
+    if case != "no-primary-modules":
+        (repo / "node_modules").mkdir()
+
+    worktree = repo / ".worktrees" / case
+    if case == "different-lock":
+        # The linked checkout comes from the same commit, so mutate the worktree lock after add.
+        real_create = worktree_policy.git
+        def git_after_add(root, *args, **kwargs):
+            result = real_create(root, *args, **kwargs)
+            if args[:2] == ("worktree", "add"):
+                (worktree / "package-lock.json").write_text("other lock\n")
+            return result
+        monkeypatch.setattr(worktree_policy, "git", git_after_add)
+    command = ["create", case, "--repo", str(repo), "--detach", head, "--human-authorised"]
+    if case == "disabled":
+        command.append("--no-node-modules")
+
+    assert worktree_policy.main(command) == 0
+
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["node_modules"] == ("disabled" if case == "disabled" else "skipped")
+    assert not (worktree / "node_modules").exists()
+    if case == "different-lock":
+        assert "package-lock.json" in receipt["node_modules_reason"]
+    elif case == "no-primary-modules":
+        assert "primary" in receipt["node_modules_reason"]
+    elif case == "clone-unavailable":
+        assert "reflink unsupported" in receipt["node_modules_reason"]
+
+
 def test_creation_from_linked_checkout_still_anchors_primary_root(tmp_path, capsys):
     repo = tmp_path / "project"
     head = init_repo(repo)
