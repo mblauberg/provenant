@@ -7,9 +7,9 @@ import { databasePath, identify } from "./identity.js";
 import { statusRows, fabricOutput } from "./run-registry.js";
 import { reply, serverBuild, mailboxView, adapterView, runView } from "./surface.js";
 import { catalogueSnapshot } from "./catalogue.js";
+import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
 import {
   cancelActiveExecutions,
-  resumeConfiguredProvider,
   cancelConfiguredRun,
   dispatchConfiguredBatch,
   dispatchConfiguredProvider,
@@ -231,26 +231,31 @@ function acknowledgeRuns(result: { runs?: Record<string, any>[] }) {
 }
 register(
   "fabric_dispatch",
-  "Run one prompt, tasks, or resume a run.",
+  "Run one prompt or tasks; resume or hand off a run.",
   {
     ...task,
     task_id: str,
     tasks: batch.tasks.optional(),
     concurrency: batch.concurrency,
     resume: str,
+    handoff: str,
+    context_ceiling: z.number().optional(),
     wait_seconds: wait,
     detail,
   },
   async (input, { signal }) => {
-    if (input.tasks && (input.prompt || input.prompt_file || input.resume))
-      return { status: "rejected", error: "dispatch_conflict", fix: "Pass one prompt, tasks, or resume." };
+    if ([input.tasks, input.resume, input.handoff].filter(Boolean).length > 1 || (input.tasks && (input.prompt || input.prompt_file)))
+      return { status: "rejected", error: "dispatch_conflict", fix: "Pass one prompt, tasks, resume or handoff." };
     const result = input.resume
       ? await resumeConfiguredProvider(input, who, signal)
-      : input.tasks
+      : input.handoff
+        ? await handoffDispatch(input, who, signal)
+        : input.tasks
         ? await dispatchConfiguredBatch({ ...input, wait_seconds: input.wait_seconds ?? 0 }, who, signal)
         : await dispatchConfiguredProvider(input, who, signal);
     if (!result.id) return result;
     const observed = await statusRows(who.cwd, [String(result.id)], 0, "all", signal, input.detail);
+    if (input.resume && result.task_id) observed.runs = observed.runs?.filter((row) => row.task_id === result.task_id);
     acknowledgeRuns(observed);
     if (observed.runs?.length === 1) {
       const row = observed.runs[0]!;
