@@ -390,6 +390,11 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     const cancelled = await call("cancel", { id: active.id });
     expect((cancelled.structuredContent as any).runs[0].status).toBe("cancelled");
     expect((cancelled.structuredContent as any).runs[0].attempts).toBeUndefined();
+    // A cancel that has to SIGKILL an owner before it writes a result stays a cancel.
+    const stubborn = (await call("dispatch", { prompt: "stubborn", wait_seconds: 0 })).structuredContent as any;
+    await call("cancel", { id: stubborn.id });
+    const closed = await call("status", { ids: [stubborn.id], wait_seconds: 10 });
+    expect((closed.structuredContent as any).status ?? (closed.structuredContent as any).runs?.[0]?.status).toBe("cancelled");
     expect(((await call("inbox")).structuredContent as any).messages).toEqual([]);
     expect(readFileSync(join(primary, ".git/info/exclude"), "utf8")).toContain("/.agent-run/");
   } finally {

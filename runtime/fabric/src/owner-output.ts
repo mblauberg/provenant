@@ -253,10 +253,18 @@ export function compactDispatch(started: OwnerFiles, completion: OwnerCompletion
   };
 }
 
+/** Canonical batch rows carry per-task statuses; the batch closes on them. */
+function batchStatus(runs: unknown): string {
+  const statuses = Array.isArray(runs) ? runs.map((run) => objectValue(run)?.status) : [];
+  if (statuses.length === 0) return "failed";
+  if (statuses.every((status) => status === "ok")) return "ok";
+  return statuses.some((status) => status === "ok") ? "partial" : "failed";
+}
+
 export function compactBatch(started: OwnerFiles, completion: OwnerCompletion): Record<string, unknown> {
   const record = parseOwnerOutput(started.stdoutPath);
   if (record?.schema === "fabric.status.v1" || record?.schema === "fabric.batch.v1")
-    return { ...record, id: shortRunId(started.runDir), paths: basePaths(started) };
+    return { ...record, id: shortRunId(started.runDir), status: record.status ?? batchStatus(record.runs), paths: basePaths(started) };
   if (record === undefined || !validOwnerRecord(record, "batch", started.runDir)) {
     return {
       schema_version: 1,

@@ -556,6 +556,8 @@ describe("orphan reaping", () => {
     mkdirSync(attempt, { recursive: true });
     const row = JSON.parse(readFileSync(join(testDirectory, "fixtures/attempt.json"), "utf8"));
     row.run_id = started.id; row.state = "running"; row.status = null;
+    // The attempt belongs to the dispatched task, as a real owner would write it.
+    row.task_id = String(started.task_id ?? row.task_id);
     writeFileSync(join(attempt, "attempt.json"), JSON.stringify(row));
     const reaping = reapOrphanedRuns(workspace);
     await waitForFile(join(runDir, "term-ignored.marker"));

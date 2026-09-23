@@ -123,6 +123,12 @@ const write = () => writeFileSync(join(path, "attempt.json"), JSON.stringify(row
 write();
 writeFileSync(join(path, "stderr.log"), "fixture stderr");
 writeFileSync(join(path, "events.jsonl"), "{}\n");
+if (prompt === "stubborn") {
+  // Ignores SIGTERM and never honours the cancel file: only SIGKILL ends it,
+  // before any terminal row is written.
+  process.on("SIGTERM", () => {});
+  while (true) await new Promise((r) => setTimeout(r, 50));
+}
 if (prompt === "slow") {
   while (true) {
     try {

@@ -232,7 +232,11 @@ export function listRecordedRuns(workspace: string): RecordedRun[] {
 
 export function findRecordedRun(workspace: string, reference: string): RecordedRun | undefined {
   const runs = listRecordedRuns(workspace);
-  return runs.find((run) => run.run_id === reference) ?? runs.find((run) => run.run_dir === reference);
+  // A run dir may be named through a symlinked path (macOS /var → /private/var).
+  const real = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
+  const wanted = real(reference);
+  return runs.find((run) => run.run_id === reference) ??
+    runs.find((run) => run.run_dir === reference || real(run.run_dir) === wanted);
 }
 
 /**

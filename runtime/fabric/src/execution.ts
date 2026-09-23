@@ -348,8 +348,14 @@ function startOwner(
         try {
           const path = join(runDir, "dispatch-status.json");
           const previous = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-          const result =
+          const compact =
             identification.kind === "dispatch" ? compactDispatch(started, completed) : compactBatch(started, completed);
+          // A cancel that killed the owner before it wrote a result stays a
+          // cancel; the empty owner output must not overwrite that closure.
+          const cancelled =
+            (started.cancellation !== undefined || previous.status === "cancelled") &&
+            compact.status === "owner_output_invalid";
+          const result = cancelled ? { ...compact, status: "cancelled", outcome: "cancelled" } : compact;
           const { fix: _staleFix, ...cleanPrevious } = previous;
           writeFileSync(
             path,
