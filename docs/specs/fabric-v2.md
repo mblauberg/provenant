@@ -10,18 +10,42 @@ The default MCP surface has twelve tools: `fabric_dispatch`, `fabric_status`, `f
 
 | Tool | Registered request |
 |---|---|
-| `fabric_dispatch` | One top-level `prompt` or `prompt_file`, `tasks[]` (1–64, `concurrency` 1–8), or `resume` with a new prompt. Optional route and control fields include `adapter`, `alias`, `model`, `effort`, `mode`, `worktree`, `cwd`, `network`, `sandbox`, `add_dirs`, `fallback`, `task_id`, `timeout_seconds`, `wait_seconds` (0–55), and `detail`. |
+| `fabric_dispatch` | One top-level `prompt` or `prompt_file`, `tasks[]` (1–64, `concurrency` 1–8), `resume` with a new prompt, or `handoff` with a new prompt. Optional route and control fields include `adapter`, `alias`, `model`, `effort`, `mode`, `worktree`, `cwd`, `network`, `sandbox`, `add_dirs`, `fallback`, `context_ceiling`, `task_id`, `timeout_seconds`, `wait_seconds` (0–55), and `detail`. With `resume` or `handoff`, `task_id` selects one task of a batch. |
 | `fabric_status` | `ids[]` of run, task or batch IDs, `wait_seconds` (0–55), `until: any|all`, and `detail`; `id` is also accepted for one run. One row per run. |
 | `fabric_cancel` | Required `id`, optional `reason`; stops the owner and provider group. |
 | `fabric_output` | Required `id`, optional `part: result|stderr|events|receipt`, `offset`, and `max_bytes` (1–20,000); returns a bounded chunk and `next_offset`. |
 
-A worker question yields `input_required`; `fabric_dispatch` with `resume` appends an attempt to the same run. For a batch, use `fabric_dispatch` with `tasks[]`; wait on returned IDs with `fabric_status`.
+A worker question yields `input_required`; `fabric_dispatch` with `resume` appends an attempt to the same run. `resume` takes a run ID, a run ID plus `task_id` for one task of a batch, or the task's own ID. A resume may change only `context_ceiling`; any other route or control change needs a new dispatch. For a batch, use `fabric_dispatch` with `tasks[]`; wait on returned IDs with `fabric_status`.
 
 A run has `queued`, `running` and attempt-terminal states. Terminal statuses are `ok`, `partial`, `failed`, `usage_limited`, `rate_limited`, `auth_required`, `model_unavailable`, `permission_blocked`, `stalled`, `timed_out`, `cancelled`, `interrupted`, `rejected`, `tool_missing`, and `input_required`. Structured provider events take precedence over text signatures. Fallback creates another attempt under the same run id. Alias routes default to fallback through allowed paid non-training routes; an explicit model defaults to no fallback. Free or prompt-training routes require explicit opt-in.
 
+## Session context
+
+Many routes have 1M-token windows, so resuming a large session can cost far more than starting fresh. Fabric measures each attempt's context, caps it where the provider allows, and warns rather than blocks.
+
+Each attempt records `context: {context_tokens, input_tokens, output_tokens, cached_input_tokens, context_window_tokens, context_percent, source}`. `context_tokens` is the session's current size after the turn. `input_tokens` counts all prompt tokens, cached ones included; `cached_input_tokens` is the cached share. `source` is `observed` when the provider reported its latest request, `estimated` when only turn totals exist (these overstate context when a turn made several requests), and `null` when nothing was reported. Fields the provider did not report stay `null`; Fabric never invents them. The field paths come from one live turn per adapter, retained as `tests/fixtures/fabric-context/`:
+
+| Adapter | Context source | Window | Ceiling control |
+|---|---|---|---|
+| claude | last request usage (`result.usage.iterations`), `observed` | `modelUsage.*.contextWindow` | `--autocompact <n>` below its compaction point |
+| codex | rollout `token_count.last_token_usage`, `observed`; the stream's `turn.completed` totals alone are `estimated` | rollout `model_context_window` | `-c model_auto_compact_token_limit=<n>` below its compaction point |
+| cursor | `result.usage` turn totals, `estimated` | not reported | none, `unsupported` |
+| opencode | last `step_finish` `tokens.total`, `observed` | not reported | none, `unsupported` |
+| agy | last `step_update` usage, `observed` | not reported | none, `unsupported` |
+| kiro | `metadata.contextUsagePercentage` only, so `context_percent` | not reported | none, `unsupported` |
+| copilot | nothing reported, all `null` | — | none, `unsupported` |
+
+`context_ceiling` is an optional token count. Its default comes from `context.ceiling_tokens` in `config/model-routing.json` (300,000). A value outside 100,000–1,000,000 is clamped with a warning, never rejected. The ceiling only lowers a provider's compaction point; it never raises it. Codex compacts at `effective_context_window_percent` of the model's `context_window` in `$CODEX_HOME/models_cache.json` (fallback 272,000 × 95%, about 258k). Fabric never passes `model_context_window`. Claude compacts at the model window (1M for `opus`, `sonnet`, `fable` and the `haiku` alias, which resolves to `claude-sonnet-5`; 200k for `claude-haiku-4-5`). If the user's `autoCompactWindow` in `~/.claude/settings.json` is lower, Claude compacts there instead: dispatched `--safe-mode` runs load user settings. The flag is passed only when the ceiling is below that point.
+
+The attempt records `applied.context_ceiling` as `enforced`, `provider_default` (the provider's own point is at or below the ceiling, with `applied.context_ceiling_source`) or `unsupported`. It also records `applied.context_ceiling_tokens`, the point in force (`null` when unknown), and `applied.context_ceiling_requested`. A resume inherits the prior requested ceiling unless the call passes a new one.
+
+A resume reads the prior attempt's context. It adds a digest warning when that context exceeds the effective ceiling (the point in force, else the requested ceiling), or when the size is unknown and the adapter has no ceiling control, for example `! resuming a ~620k-token session; fresh: fabric_dispatch{prompt, handoff:"<run id>"}`. The resume still runs. `handoff: <run id>` (with `task_id` for a batch task) is the cheaper alternative. It starts a fresh run whose prompt is prefixed with the prior task's route line and at most 8,000 bytes of its result tail. If the call names no adapter, alias or model, the handoff reuses the prior adapter, model and effort, and a prior writer's mode and worktree. The prior task must be terminal.
+
+A terminal digest appends a compact marker to its Route line: `ctx 212k/1M` when observed, `ctx ~19k` when estimated, `ctx 8%` from a percentage, and nothing when unknown. The stored provenance line stays unmarked for trailers and the index.
+
 ## Receipt and provenance
 
-An owner writes `fabric.attempt.v1` at `tasks/<id>/attempt-NNN/attempt.json` and aggregates it into `RUN_RECEIPT.json`. A status row is `fabric.status.v1`: the latest attempt plus attempt history, batch id where relevant, and live worktree ledger fields. The attempt records state, status, mode, cwd, worktree, timing, process group, session id, retry fields, evidence, question, applied sandbox/network/additional directories/guarantee, warnings, provenance, paths and digest. Unknown fields may be ignored; removals bump the version.
+An owner writes `fabric.attempt.v1` at `tasks/<id>/attempt-NNN/attempt.json` and aggregates it into `RUN_RECEIPT.json`. A status row is `fabric.status.v1`: the latest attempt plus attempt history, batch id where relevant, and live worktree ledger fields. The attempt records state, status, mode, cwd, worktree, timing, process group, session id, retry fields, evidence, question, applied sandbox/network/additional directories/guarantee/context ceiling, context, warnings, provenance, paths and digest. Unknown fields may be ignored; removals bump the version.
 
 Provenance records requested route, resolved and observed model, observation source, identity (`observed`, `resolved`, `unknown`), provider, transport, family, requested and applied effort, CLI version, fallback origin, notes and the generated line. A terminal digest and status row carry `Route: adapter/model@effort (provider; identity)`; the retained index stores that line after run pruning. The proposed `provenant route <run-id>` index lookup is not yet wired: the current command invokes the model catalogue router. Until it is, copy the line from the digest or status row and use `Agent-Route: adapter/model@effort` for the commit trailer. Never infer a model from a worker self-report. Native Claude subagents use the Agent tool model parameter and record `claude/<model>@<effort> (anthropic; resolved)`.
 
