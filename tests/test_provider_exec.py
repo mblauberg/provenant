@@ -2288,3 +2288,23 @@ def test_attempt_restores_the_callers_subreaper_setting(tmp_path):
     value = ctypes.c_int(-1)
     ctypes.CDLL(None, use_errno=True).prctl(37, ctypes.byref(value), 0, 0, 0)
     assert value.value == 0
+
+
+def test_subreaper_is_released_when_attempt_cleanup_raises(tmp_path, monkeypatch):
+    module = supervisor()
+    held = []
+    monkeypatch.setattr(module, "_enable_subreaper", lambda: held.append("on") or True)
+    monkeypatch.setattr(module, "_release_subreaper", lambda: held.append("off"))
+
+    import selectors
+
+    class FailingClose(selectors.DefaultSelector):
+        def close(self):
+            super().close()
+            raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(selectors, "DefaultSelector", FailingClose)
+    plan = fixture_plan(tmp_path, "import json; print(json.dumps({'type':'result','result':'DONE','is_error':False}))")
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        module.execute(plan, tmp_path / "result.md")
+    assert held == ["on", "off"]

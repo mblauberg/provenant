@@ -89,7 +89,7 @@ A nested Fabric owner
 and its observed subtree are spared only when `PROVENANT_RUN_DIR/dispatch-owner.json`
 matches that process's PID, start time and `PROVENANT_RUN_TOKEN`. The owner must
 lead its own process group and have an observed non-spared parent, or retain the
-attempt marker after reparenting before the first census. A descendant with its
+attempt marker after reparenting. A descendant with its
 own session and a valid owner record is spared as an independent containment
 boundary. If that owner ignores
 SIGTERM after its host dies, the next dispatch's orphan reap handles it. The
@@ -101,7 +101,10 @@ is recorded. A missing owner
 yields bounded missing evidence; it never authorises a process-table search or
 inferred cancellation.
 On macOS, a child that clears the marker and reparents before the first snapshot
-cannot be attributed safely by this polling owner.
+cannot be attributed safely by this polling owner. On Linux the owner is a child
+subreaper only while an attempt runs, and restores its own setting afterwards.
+An adopted orphan it cannot attribute to the attempt stays a zombie until the
+owner exits: reaping it blindly could collect another thread's child.
 
 ## Waiting from inside a sub-agent
 

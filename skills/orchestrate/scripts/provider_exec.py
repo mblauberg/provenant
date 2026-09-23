@@ -1743,37 +1743,39 @@ def execute(
         forced = "failed"
         diagnostics.write(str(exc).encode())
     finally:
-        if workspace is not None:
-            workspace.close()
-        if process:
-            if descendants and not stopped:
-                exited_at_stop = process.poll() is not None
-                reaped.extend(descendants.stop(
-                    normal=exited_at_stop,
-                    terminal_grace=terminal_grace_break and not exited_at_stop,
-                ))
-            # Drain final bytes after the group exits, without an unbounded communicate.
-            for key in list(selector.get_map().values()):
-                while True:
-                    try:
-                        data = os.read(key.fileobj.fileno(), 65536)
-                    except (BlockingIOError, OSError):
-                        break
-                    if not data:
-                        break
-                    (raw if key.data == "stdout" else diagnostics).write(data)
-                    if key.data == "stdout":
-                        consume(data)
-            for stream in (process.stdin, process.stdout, process.stderr):
-                if stream:
-                    stream.close()
-        selector.close()
-        if input_file:
-            input_file.close()
-        for sig, handler in old_handlers.items():
-            signal.signal(sig, handler)
-        if subreaper:
-            _release_subreaper()
+        try:
+            if workspace is not None:
+                workspace.close()
+            if process:
+                if descendants and not stopped:
+                    exited_at_stop = process.poll() is not None
+                    reaped.extend(descendants.stop(
+                        normal=exited_at_stop,
+                        terminal_grace=terminal_grace_break and not exited_at_stop,
+                    ))
+                # Drain final bytes after the group exits, without an unbounded communicate.
+                for key in list(selector.get_map().values()):
+                    while True:
+                        try:
+                            data = os.read(key.fileobj.fileno(), 65536)
+                        except (BlockingIOError, OSError):
+                            break
+                        if not data:
+                            break
+                        (raw if key.data == "stdout" else diagnostics).write(data)
+                        if key.data == "stdout":
+                            consume(data)
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    if stream:
+                        stream.close()
+            selector.close()
+            if input_file:
+                input_file.close()
+            for sig, handler in old_handlers.items():
+                signal.signal(sig, handler)
+        finally:
+            if subreaper:
+                _release_subreaper()
     exit_code = process.returncode if process else None
     if pending:
         consume(b"\n")
