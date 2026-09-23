@@ -1,10 +1,56 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { createRequire } from "node:module";
-import { expect, it } from "vitest";
+import { execFileSync, spawnSync } from "node:child_process";
+import { afterEach, expect, it } from "vitest";
+
+const fixturePidLogs = new Set<string>();
+const fixtureRoots = new Set<string>();
+afterEach(async () => {
+  const active = new Set<number>();
+  for (const log of fixturePidLogs) {
+    try {
+      for (const line of readFileSync(log, "utf8").split("\n").filter(Boolean)) {
+        const event = JSON.parse(line) as { pid: number; event: "start" | "exit" };
+        if (event.event === "start") active.add(event.pid);
+        else active.delete(event.pid);
+      }
+    } catch {}
+  }
+  for (const pid of active) {
+    try { process.kill(pid, "SIGKILL"); } catch {}
+  }
+  const survivors: number[] = [];
+  for (let attempt = 0; attempt < 50; attempt++) {
+    survivors.splice(0, survivors.length);
+    for (const pid of active) {
+      try { process.kill(pid, 0); survivors.push(pid); } catch {}
+    }
+    if (!survivors.length) break;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  expect(survivors, "fixture owner processes still alive after cleanup").toEqual([]);
+  for (const root of fixtureRoots) rmSync(root, { recursive: true, force: true });
+  fixturePidLogs.clear();
+  fixtureRoots.clear();
+});
+
+function installV2FixtureOwners(product: string): void {
+  const owners = join(product, "skills/orchestrate/scripts");
+  mkdirSync(owners, { recursive: true });
+  mkdirSync(join(product, "scripts/lib"), { recursive: true });
+  copyFileSync(resolve(import.meta.dirname, "../../../scripts/lib/harness-python.sh"), join(product, "scripts/lib/harness-python.sh"));
+  for (const name of ["run_dir_init.sh", "dispatch_run.py", "batch_run.py", "run_controls.py"]) {
+    const path = join(owners, name), fixture = join(import.meta.dirname, "v2-owner-fixture.mjs");
+    writeFileSync(path, name.endsWith(".sh")
+      ? `#!/bin/sh\nPROVENANT_FIXTURE_OWNER=${name} exec '${process.execPath}' '${fixture}' "$@"\n`
+      : `#!/usr/bin/env python3\nimport os,sys\nos.environ['PROVENANT_FIXTURE_OWNER']=${JSON.stringify(name)}\nos.execv(${JSON.stringify(process.execPath)},[${JSON.stringify(process.execPath)},${JSON.stringify(fixture)},*sys.argv[1:]])\n`);
+    chmodSync(path, 0o755);
+  }
+}
 
 it("keeps legacy route and result path in the brief digest", async () => {
   const { digest, runView } = await import("../src/surface.js");
@@ -65,6 +111,82 @@ it("shows the requested route and pending result before the first attempt", asyn
   expect(digest(brief)).toContain("result pending");
 });
 
+it("keeps a running brief digest on one line with its run id, route and result path", async () => {
+  const { digest } = await import("../src/surface.js");
+  const text = digest({
+    state: "running", run_id: "mcp-live", digest: "running mcp-live codex/gpt-6-luna@medium",
+    paths: { result: ".agent-run/runs/live/result.md" },
+    provenance: { line: "Route: codex/gpt-6-luna@medium (openai; observed)" },
+  });
+  expect(text).toBe("running mcp-live codex/gpt-6-luna@medium (openai; observed) · result .agent-run/runs/live/result.md");
+  expect(text).not.toContain("\n");
+});
+
+it("gives v2 fixture processes a bounded self-exit deadline", () => {
+  const fixture = resolve(import.meta.dirname, "v2-owner-fixture.mjs");
+  const result = spawnSync(process.execPath, [fixture, "--deadline-loop"], {
+    env: { ...process.env, PROVENANT_FIXTURE_DEADLINE_MS: "50" },
+    timeout: 2000,
+    encoding: "utf8",
+  });
+  expect(result.status).toBe(124);
+});
+
+it("keeps brief dispatch replies small and clamps wait on its own fixture server", async () => {
+  const root = mkdtempSync(join(tmpdir(), "fabric-brief-dispatch-"));
+  const ownerPidLog = join(root, "fixture-pids.jsonl");
+  fixturePidLogs.add(ownerPidLog);
+  fixtureRoots.add(root);
+  const workspace = join(root, "workspace"), product = join(root, "product"), state = join(root, "state");
+  mkdirSync(workspace);
+  installV2FixtureOwners(product);
+  const client = new Client({ name: "brief-dispatch", version: "1" });
+  try {
+    await client.connect(new StdioClientTransport({
+      command: resolve(import.meta.dirname, "../bin/fabric-mcp"),
+      cwd: workspace,
+      env: {
+        ...(process.env as Record<string, string>),
+        FABRIC_NODE: process.execPath,
+        AGENT_FABRIC_TSX_LOADER: createRequire(import.meta.url).resolve("tsx"),
+        AGENT_FABRIC_STATE_DIRECTORY: state,
+        AGENT_FABRIC_LABEL: "brief-seat",
+        AGENT_FABRIC_PRODUCT_ROOT: product,
+        PROVENANT_FIXTURE_PID_LOG: ownerPidLog,
+        HARNESS_PYTHON: execFileSync("python3", ["-c", "import sys;print(sys.executable)"], { encoding: "utf8" }).trim(),
+      },
+      stderr: "pipe",
+    }));
+    const fullRunning = await client.callTool({
+      name: "fabric_dispatch", arguments: { adapter: "codex", model: "fixture-model", prompt: "slow", wait_seconds: 1, detail: "full" },
+    });
+    const fullRow = fullRunning.structuredContent as any;
+    const briefRunning = await client.callTool({ name: "fabric_dispatch", arguments: { adapter: "codex", model: "fixture-model", prompt: "slow", wait_seconds: 1 } });
+    expect(briefRunning.structuredContent).toBeUndefined();
+    const briefText = (briefRunning.content as any[])[0].text as string;
+    const briefId = briefText.match(/\bmcp-[A-Za-z0-9_-]+/u)?.[0];
+    expect(briefId, briefText).toBeDefined();
+    expect(briefText).toContain("codex/fixture@high");
+    expect(briefText).toContain("result ");
+    expect(briefText).not.toContain("\n");
+    console.log(`FABRIC_REPLY_SIZE running_dispatch: ${Buffer.byteLength(JSON.stringify(fullRunning))} -> ${Buffer.byteLength(JSON.stringify(briefRunning))} bytes`);
+    await client.callTool({ name: "fabric_cancel", arguments: { id: fullRow.run_id } });
+    await client.callTool({ name: "fabric_cancel", arguments: { id: briefId } });
+
+    const clamped = await client.callTool({ name: "fabric_dispatch", arguments: { adapter: "codex", prompt: "quick", wait_seconds: 56 } });
+    expect(clamped.structuredContent).toBeUndefined();
+    const clampedText = (clamped.content as any[])[0].text as string;
+    expect(clampedText).toContain("! wait_seconds 56 clamped to 55");
+    const clampedId = clampedText.match(/\bmcp-[A-Za-z0-9_-]+/u)?.[0];
+    expect(clampedId).toBeDefined();
+    const status = await client.callTool({ name: "fabric_status", arguments: { id: clampedId, wait_seconds: 60 } });
+    expect(status.structuredContent).toBeUndefined();
+    expect((status.content as any[])[0].text).toContain("! wait_seconds 60 clamped to 55");
+  } finally {
+    await client.close();
+  }
+}, 70000);
+
 it.each([false, true])("exposes exactly twelve default tools within budget (legacy=%s)", async (legacy) => {
   const state = mkdtempSync(join(tmpdir(), "fabric-surface-"));
   const client = new Client({ name: "surface", version: "1" });
@@ -116,6 +238,11 @@ it.each([false, true])("exposes exactly twelve default tools within budget (lega
     const errorText = (invalid.content as Array<{ text: string }>)[0]!.text;
     expect(errorText).toContain("fix:");
     expect(errorText).not.toContain("\n");
+    const brief = await client.callTool({ name: "fabric_status", arguments: { ids: [], wait_seconds: 0 } });
+    expect(brief.structuredContent).toBeUndefined();
+    expect((brief.content as any[])[0]?.text).toBe("no runs");
+    const full = await client.callTool({ name: "fabric_status", arguments: { ids: [], wait_seconds: 0, detail: "full" } });
+    expect(full.structuredContent).toMatchObject({ runs: [] });
   } finally {
     await client.close();
     rmSync(state, { recursive: true, force: true });
@@ -126,6 +253,9 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
   const { mkdirSync, writeFileSync, chmodSync, copyFileSync, readFileSync, existsSync, realpathSync } = await import("node:fs");
   const { execFileSync } = await import("node:child_process");
   const root = mkdtempSync(join(tmpdir(), "fabric-v2-"));
+  const ownerPidLog = join(root, "fixture-pids.jsonl");
+  fixturePidLogs.add(ownerPidLog);
+  fixtureRoots.add(root);
   const primary = join(root, "primary"),
     linked = join(root, "linked"),
     product = join(root, "product");
@@ -165,7 +295,8 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
   const client = new Client({ name: "v2", version: "1" });
   const peer = new Client({ name: "v2-peer", version: "1" });
   const call = async (name: string, args: Record<string, unknown> = {}) => {
-    const result = await client.callTool({ name: "fabric_" + name, arguments: args });
+    const arguments_ = ["dispatch", "status"].includes(name) && args.detail === undefined ? { ...args, detail: "full" } : args;
+    const result = await client.callTool({ name: "fabric_" + name, arguments: arguments_ });
     expect(result.isError, JSON.stringify(result)).not.toBe(true);
     return result;
   };
@@ -186,6 +317,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
           PROVENANT_CHAIR: "chair-seat",
           AGENT_FABRIC_SEAT: "codex",
           AGENT_FABRIC_PRODUCT_ROOT: product,
+          PROVENANT_FIXTURE_PID_LOG: ownerPidLog,
           HARNESS_PYTHON: execFileSync("python3", ["-c", "import sys;print(sys.executable)"], {
             encoding: "utf8",
           }).trim(),
@@ -213,10 +345,6 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
       name: "fabric_dispatch", arguments: { tasks: [{}], concurrency: 0 },
     });
     expect((invalidConcurrency.content as any[])[0].text).toContain("rejected concurrency_invalid");
-    const waitClamped = await call("dispatch", { prompt: "wait clamp", wait_seconds: 56 });
-    expect((waitClamped.content as any[])[0].text).toContain("! wait_seconds 56 clamped to 55");
-    const statusClamped = await call("status", { id: (waitClamped.structuredContent as any).run_id, wait_seconds: 60 });
-    expect((statusClamped.content as any[])[0].text).toContain("! wait_seconds 60 clamped to 55");
     await peer.connect(
       new StdioClientTransport({
         command: resolve(import.meta.dirname, "../bin/fabric-mcp"),
@@ -233,6 +361,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
           AGENT_FABRIC_SEAT: "claude",
           PROVENANT_CHAIR: "chair-seat",
           AGENT_FABRIC_PRODUCT_ROOT: product,
+          PROVENANT_FIXTURE_PID_LOG: ownerPidLog,
           HARNESS_PYTHON: execFileSync("python3", ["-c", "import sys;print(sys.executable)"], {
             encoding: "utf8",
           }).trim(),
@@ -241,7 +370,8 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
       }),
     );
     const peerCall = async (name: string, args: Record<string, unknown> = {}) => {
-      const result = await peer.callTool({ name: "fabric_" + name, arguments: args });
+      const arguments_ = ["dispatch", "status"].includes(name) && args.detail === undefined ? { ...args, detail: "full" } : args;
+      const result = await peer.callTool({ name: "fabric_" + name, arguments: arguments_ });
       expect(result.isError, JSON.stringify(result)).not.toBe(true);
       return result;
     };
@@ -282,6 +412,13 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
       prompt: "writer", mode: "worktree_write", worktree: linked, wait_seconds: 5,
     });
     const writerRow = writer.structuredContent as any;
+    const batchRows = (batch.structuredContent as any).runs as any[];
+    const threeIds = [batchRows[0].run_id, batchRows[1].run_id, writerRow.run_id];
+    const fullThreeStatus = await call("status", { ids: threeIds, wait_seconds: 0, detail: "full" });
+    const briefThreeStatus = await client.callTool({ name: "fabric_status", arguments: { ids: threeIds, wait_seconds: 0 } });
+    expect(briefThreeStatus.structuredContent).toBeUndefined();
+    for (const id of threeIds) expect((briefThreeStatus.content as any[])[0].text).toContain(id);
+    console.log(`FABRIC_REPLY_SIZE three_run_status: ${Buffer.byteLength(JSON.stringify(fullThreeStatus))} -> ${Buffer.byteLength(JSON.stringify(briefThreeStatus))} bytes`);
     expect(writerRow.status).toBe("ok");
     const writerArgs = JSON.parse(
       readFileSync(join(writerRow.run_dir, "_owner", `${writerRow.task_id}-args-1.json`), "utf8"),
@@ -299,30 +436,22 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     const nested = join(linked, "nested");
     mkdirSync(nested);
     writeFileSync(join(linked, "question.md"), "question");
-    const first = await call("dispatch", {
-      prompt_file: "question.md",
-      cwd: nested,
-      timeout_seconds: 1234,
-      wait_seconds: 5,
-      sandbox: "read-only",
-      network: false,
-      effort: "high",
-    });
-    const row = first.structuredContent as Record<string, any>;
-    expect(row, JSON.stringify(row)).toMatchObject({
-      schema: "fabric.status.v1",
-      status: "input_required",
-      applied: { network: false },
-      cwd: expect.stringContaining("/nested"),
-    });
-    expect((first.content as any[])[0].text).toBe(row.digest);
-    expect(row.digest.length / 4).toBeLessThan(120);
-    expect(row.run_dir).toContain("/primary/.agent-run/runs/");
+    const first = await client.callTool({ name: "fabric_dispatch", arguments: {
+      prompt_file: "question.md", cwd: nested, timeout_seconds: 1234, wait_seconds: 5,
+      sandbox: "read-only", network: false, effort: "high",
+    } });
+    expect(first.structuredContent).toBeUndefined();
+    const firstText = (first.content as any[])[0].text as string;
+    const firstRunId = firstText.match(/\bmcp-[A-Za-z0-9_-]+/u)?.[0];
+    expect(firstRunId).toBeDefined();
+    expect(firstText).toContain("input_required");
+    expect(firstText).toContain("codex/fixture@high");
+    expect(firstText).toContain("result ");
+    expect(firstText.length / 4).toBeLessThan(120);
     const notice = await call("inbox");
     expect((notice.structuredContent as any).messages.some((m: any) => m.kind === "run_terminal")).toBe(false);
-    expect(row.attempts).toBeUndefined();
-    expect(row.evidence).toBeUndefined();
-    const full = await call("status", { ids: [row.run_id], detail: "full" });
+    const full = await call("status", { ids: [firstRunId], detail: "full" });
+    const row = (full.structuredContent as any).runs[0] as Record<string, any>;
     expect((full.structuredContent as any).runs[0].attempts).toHaveLength(1);
     expect((full.structuredContent as any).runs[0].evidence).toBeDefined();
     expect((full.structuredContent as any).runs[0].evidence.owner_cwd).toBe(linked.replace("/var/folders/", "/private/var/folders/"));
@@ -358,9 +487,12 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     const retried = await call("dispatch", { resume: row.run_id, prompt: "retry", wait_seconds: 5 });
     expect(retried.structuredContent).toMatchObject({ state: "terminal", status: "ok", attempt: 4 });
     expect(JSON.parse(readFileSync(join(row.run_dir, "dispatch-status.json"), "utf8")).fix).toBeUndefined();
-    const rejectedResume = await call("dispatch", {resume:row.run_id,prompt:"reject-before-attempt",wait_seconds:5});
-    expect(rejectedResume.structuredContent).toMatchObject({state:"terminal",status:"rejected",fix:"dispatch a new run",attempt:5});
-    expect((rejectedResume.structuredContent as any).attempts).toBeUndefined();
+    const rejectedResume = await client.callTool({
+      name: "fabric_dispatch", arguments: { resume: row.run_id, prompt: "reject-before-attempt", wait_seconds: 5 },
+    });
+    expect(rejectedResume.structuredContent).toBeUndefined();
+    expect((rejectedResume.content as any[])[0].text).toContain("rejected");
+    expect((rejectedResume.content as any[])[0].text).toContain("dispatch a new run");
     expect(((await call("inbox")).structuredContent as any).messages).toEqual([]);
     await call("dispatch", {resume:row.run_id,prompt:"main",wait_seconds:5});
     const output = await call("output", { id: row.run_id, max_bytes: 20001 });
@@ -423,15 +555,14 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect((cancelled.structuredContent as any).runs[0].attempts).toBeUndefined();
     // A cancel that has to SIGKILL an owner before it writes a result stays a cancel.
     const stubborn = (await call("dispatch", { prompt: "stubborn", wait_seconds: 0 })).structuredContent as any;
-    await call("cancel", { id: stubborn.id });
-    const closed = await call("status", { ids: [stubborn.id], wait_seconds: 10 });
+    await call("cancel", { id: stubborn.run_id });
+    const closed = await call("status", { ids: [stubborn.run_id], wait_seconds: 10 });
     expect((closed.structuredContent as any).status ?? (closed.structuredContent as any).runs?.[0]?.status).toBe("cancelled");
     expect(((await call("inbox")).structuredContent as any).messages).toEqual([]);
     expect(readFileSync(join(primary, ".git/info/exclude"), "utf8")).toContain("/.agent-run/");
   } finally {
     await peer.close();
     await client.close();
-    rmSync(root, { recursive: true, force: true });
   }
 }, 70000);
 
@@ -463,6 +594,6 @@ it('keeps terminal status readable when the notice database cannot open', async 
  try {
   await client.connect(new StdioClientTransport({command:process.execPath,args:['--import',createRequire(import.meta.url).resolve('tsx'),resolve(import.meta.dirname,'../src/server.ts')],cwd:root,env:{...process.env as Record<string,string>,AGENT_FABRIC_STATE_DIRECTORY:state},stderr:'pipe'}));
   const result=await client.callTool({name:'fabric_status',arguments:{ids:['mcp-a81f3c']}});
-  expect(result.isError).not.toBe(true);expect((result.structuredContent as any).runs[0].status).toBe('ok');
+  expect(result.isError).not.toBe(true);expect(result.structuredContent).toBeUndefined();expect((result.content as any[])[0]?.text).toContain('ok mcp-a81f3c');
  } finally {await client.close();rmSync(root,{recursive:true,force:true});}
 });

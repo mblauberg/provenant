@@ -169,15 +169,17 @@ function register(
   handler: (input: any, extra: any) => unknown | Promise<unknown>,
 ) {
   server.registerTool(name, { description, inputSchema: z.strictObject(schema) }, async (input, extra) => {
+    const includeStructuredContent =
+      !["fabric_dispatch", "fabric_status"].includes(name) || input.detail === "full";
     try {
-      return reply(await handler(input, extra));
+      return reply(await handler(input, extra), includeStructuredContent);
     } catch (error) {
       return {
         ...reply({
           status: "rejected",
           error: "request_failed",
           fix: String(error instanceof Error ? error.message : error).replace(/\s+/gu, " "),
-        }),
+        }, includeStructuredContent),
         isError: true,
       };
     }

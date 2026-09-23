@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 const require = createRequire(import.meta.url);
 const vitest = join(dirname(require.resolve("vitest/package.json")), "vitest.mjs");
-const result = spawnSync(process.execPath, [vitest, "run", "tests/surface.test.ts", "--reporter=verbose"], {
+const result = spawnSync(process.execPath, [vitest, "run", "tests/surface.test.ts", "--reporter=verbose", "--maxWorkers=2"], {
   cwd: import.meta.dirname,
   env: process.env,
   stdio: "inherit",

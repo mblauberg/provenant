@@ -1030,8 +1030,11 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                 elif task.get("worktree"):
                     raise PreflightError("worktree_not_applicable", "Pass mode worktree_write with worktree, or omit worktree.")
                 command = [sys.executable, str(product / "scripts/model_route.py"), "resolve",
-                           "--catalog", str(catalog), "--adapter", adapter, "--role", "worker",
-                           "--alias", task.get("alias") or ("flagship" if task.get("model") else "workhorse")]
+                           "--catalog", str(catalog), "--adapter", adapter, "--role", "worker"]
+                if task.get("alias"):
+                    command.extend(("--alias", task["alias"]))
+                elif not task.get("model"):
+                    command.extend(("--alias", "workhorse"))
                 policy = exec_routing.validate_policy(task.get("fallback"))
                 if policy is not None:
                     command.extend(("--fallback", "true" if isinstance(policy, list) else json.dumps(policy) if type(policy) is bool else policy))

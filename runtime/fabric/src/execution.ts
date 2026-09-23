@@ -461,7 +461,12 @@ function recordedRun(started: StartedOwner): RecordedRun | undefined {
 async function terminateStartedRun(started: StartedOwner, terminalStatus: "interrupted" | "cancelled" = "interrupted"): Promise<void> {
   const run = recordedRun(started);
   if (run !== undefined) {
-    await terminateRecordedRun(run, undefined, terminalStatus);
+    const outcome = await terminateRecordedRun(run, undefined, terminalStatus);
+    // A failed process-group signal must not leave this host's direct owner
+    // alive. The ChildProcess handle identifies the exact child we spawned.
+    if (outcome.reason === "still running" && started.child.exitCode === null && started.child.signalCode === null) {
+      started.child.kill("SIGKILL");
+    }
     return;
   }
   if (started.child.exitCode === null && started.child.signalCode === null) {
