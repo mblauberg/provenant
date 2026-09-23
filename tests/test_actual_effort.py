@@ -222,3 +222,33 @@ def test_sent_effort_is_not_replaced_by_the_rollout(tmp_path, homes):
     record = replay(tmp_path, "codex", route, events("codex"), requested_effort="high")
     assert record["provenance"]["effort_applied"] == "high"
     assert record["provenance"]["effort_observed_source"] is None
+
+
+@pytest.mark.parametrize(("observed_source", "expected"), [("codex:rollout.turn_context", None), (None, "medium")])
+def test_resume_resends_only_an_effort_that_was_sent(tmp_path, observed_source, expected):
+    dispatch = importlib.import_module("skills.orchestrate.scripts.dispatch_run")
+    attempt = tmp_path / "run/tasks/dispatch-001/attempt-001"
+    attempt.mkdir(parents=True)
+    (attempt / "attempt.json").write_text(json.dumps({
+        "run_id": "mcp-effort", "task_id": "dispatch-001", "attempt": 1, "state": "terminal", "status": "ok",
+        "mode": "read_only", "worktree": None, "cwd": str(tmp_path), "session_id": "session-0001",
+        "applied": {"sandbox": "read-only", "network": None, "add_dirs": []},
+        "provenance": {"requested": {"adapter": "codex"}, "resolved_model": "gpt-6-luna",
+                       "effort_applied": "medium", "effort_observed_source": observed_source},
+    }))
+    args = dispatch.argparse.Namespace(run_dir=tmp_path / "run", resume="mcp-effort", task_id=None,
+                                       tool=None, model=None)
+    try:
+        dispatch.prepare_resume(args)
+    except Exception:
+        pass  # later relaunch checks need a real run; the effort is decided first
+    assert args.effort == expected
+
+
+def test_cursor_model_suffix_effort_is_recorded_as_sent(tmp_path):
+    route = resolve("--adapter", "cursor", "--model", "grok-4.7", "--role", "worker", "--effort", "high")
+    assert route["resolved_model"] == "grok-4.7-high"
+    plan = planned("cursor", route, tmp_path, requested_effort="high")
+    assert plan["effort"] == "high"
+    assert plan["route_label"] == "cursor/grok-4.7-high@high"
+    assert not any("does not expose effort control" in warning for warning in plan["warnings"])

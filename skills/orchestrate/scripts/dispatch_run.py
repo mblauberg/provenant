@@ -1356,7 +1356,8 @@ def prepare_resume(args):
     if (args.tool and args.tool!=requested["adapter"]) or (args.model and args.model!=previous["provenance"]["resolved_model"]):
         raise ValueError("dispatch a new run")
     args.tool=requested["adapter"];args.model=previous["provenance"]["resolved_model"];args.alias=None;args.task_class=None
-    args.effort=previous["provenance"]["effort_applied"];args.task_id=previous["task_id"]
+    # An effort the provider only reported was never sent, so resume does not send it.
+    args.effort=None if previous["provenance"].get("effort_observed_source") else previous["provenance"]["effort_applied"];args.task_id=previous["task_id"]
     args.access_mode=previous["mode"];args.worktree=Path(previous["worktree"]) if previous.get("worktree") else None
     args.provider_cwd=Path(previous["cwd"]) if previous["mode"]=="read_only" else None
     args.sandbox=previous["applied"]["sandbox"];args.network=None if previous["applied"]["network"] is None else str(previous["applied"]["network"]).lower()

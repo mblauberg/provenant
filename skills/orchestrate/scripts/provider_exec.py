@@ -149,7 +149,8 @@ def build_plan(
     effort = route.get("effort_applied", route.get("effort")) or ""
     if effort == "default":
         effort = ""
-    if effort and config.EFFORT_FLAG is None:
+    # A model id that carries the effort (cursor grok-4.7-high) sends it without a flag.
+    if effort and config.EFFORT_FLAG is None and not model.casefold().endswith("-" + effort.casefold()):
         warnings.append(f"{adapter} does not expose effort control; requested {effort}")
         effort = ""
     route_label = adapter + "/" + model + ("@" + effort if effort else "")
