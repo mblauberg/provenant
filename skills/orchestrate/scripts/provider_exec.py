@@ -832,6 +832,8 @@ def execute(
         PROVENANT_CHAIR=plan.get("chair", ""),
     )
     environment["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
+    # Linux CI and service shells may have no TMPDIR; providers expect one.
+    environment.setdefault("TMPDIR", tempfile.gettempdir())
     route = plan["route"]
     if (
         plan["adapter"] == "claude"
