@@ -17,7 +17,7 @@ export interface AdapterEntry {
   effort_transport: string;
   aliases: Record<string, string[]>;
   models: string[];
-  model_details: Record<string, unknown>[];
+  model_details: Array<{ id?: string; names?: string[]; [key: string]: unknown }>;
   read_only_guarantee?: string;
   write_modes?: string[];
   disabled_reason?: string;
