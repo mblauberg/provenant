@@ -726,7 +726,9 @@ def _same_model(adapter, resolved, observed):
     if not resolved or not observed or resolved == observed:
         return True
     norm = lambda value: re.sub(r"[\s_]+", "-", str(value).strip().lower())
-    if norm(observed).startswith(norm(resolved)):
+    # Only a display name (spaces, e.g. Cursor) may extend the id with
+    # descriptors; an id-shaped suffix such as -thinking is a different model.
+    if " " in str(observed).strip() and norm(observed).startswith(norm(resolved) + "-"):
         return True
     try:
         try:

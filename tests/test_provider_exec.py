@@ -998,6 +998,7 @@ def test_kiro_stream_json_selects_the_v2_engine():
         ("cursor", "auto", "Auto", True),
         ("codex", "gpt-6-luna", "gpt-6-sol", False),
         ("agy", "gemini-3.8-flash", "claude-opus-4-6", False),
+        ("agy", "claude-opus-4-6", "claude-opus-4-6-thinking", False),
     ],
 )
 def test_alias_and_display_names_are_not_substitutions(adapter, resolved, observed, same):

@@ -4224,6 +4224,7 @@ def test_implied_alias_beside_a_named_model_adds_no_note(tmp_path):
          "--role", "worker", "--alias", "flagship", "--model", "gpt-6-luna"],
         capture_output=True, text=True, env=env, check=False,
     )
+    assert implied.returncode == 0 and json.loads(implied.stdout)["status"] == "ok"
     assert "alias and model both supplied" not in implied.stdout
     env.pop("FABRIC_ALIAS_IMPLIED")
     explicit = subprocess.run(
@@ -4249,4 +4250,7 @@ def test_informational_routes_add_no_warning_notes(tmp_path, adapter, model, abs
          "--role", "worker", "--alias", "flagship", "--model", model],
         capture_output=True, text=True, env=env, check=False,
     )
-    assert absent not in result.stdout, result.stdout
+    route = json.loads(result.stdout)
+    assert result.returncode == 0 and route["status"] == "ok", result.stdout
+    assert route["resolved_model"]
+    assert not any(absent in note for note in route["notes"] + route["warnings"])
