@@ -127,8 +127,9 @@ OpenCode is an ordinary implemented broker for its catalogue (`opencode/<model>`
 Its free models include `mimo-free`, `muse` and `nemotron-free`; they may train
 on prompts during the free period, so do not send sensitive content. Read-only
 runs keep bash declared for Zen but deny every real command. Fabric honours
-read-only `cwd` for OpenCode file access and confines workspace reads to `cwd`
-and `add_dirs` on macOS when `sandbox-exec` is available. Use `opencode models`
+read-only `cwd` for OpenCode file access. On macOS, read-only OpenCode and agy
+runs are confined by `sandbox-exec` to `cwd`, `add_dirs` and their own state:
+home, shared temp and the rest of the workspace are unreadable. Use `opencode models`
 to discover a live slug when overriding with `--model`.
 Nested vendor ids attribute as that vendor; unparseable Zen free ids fall back
 to `generic-open` (worker only, not assurance). See

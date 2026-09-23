@@ -30,9 +30,21 @@ import context_usage
 import process_info
 
 
+# Home-relative paths a confined provider needs for its own state and sign-in,
+# found by probing each CLI under a deny-home profile (2026-09-24). A "*" suffix
+# also covers siblings sharing the prefix, such as an atomic-rewrite temp file.
+CONFINED_STATE = {
+    "agy": {
+        "read_write": (".gemini/antigravity-cli", ".gemini/config", ".gemini/oauth_creds.json*"),
+        # Without the keychain file agy falls back to an interactive sign-in and times out.
+        "read": ("Library/Keychains/login.keychain-db",),
+    },
+    "opencode": {
+        "read_write": (".local/share/opencode", ".local/state/opencode", ".cache/opencode"),
+        "read": (".config/opencode",),
+    },
+}
 EXTRA_DENIED_READS = (".claude/projects", ".codex/sessions")
-ALLOWED_READS = ()
-ALLOWED_WRITES = ()
 
 
 def now():
@@ -109,23 +121,50 @@ def _sbpl_string(path):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+@functools.lru_cache(maxsize=None)
+def _darwin_user_dirs():
+    found = []
+    for name in ("DARWIN_USER_TEMP_DIR", "DARWIN_USER_CACHE_DIR"):
+        try:
+            value = subprocess.run(["getconf", name], capture_output=True, text=True, timeout=5).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if value:
+            found.append(Path(value))
+    return tuple(found)
+
+
+def _sbpl_filter(path):
+    text = str(path)
+    if text.endswith("*"):
+        return '(regex #"^' + re.escape(str(Path(text[:-1]).resolve())).replace('"', '\\"') + '")'
+    return "(subpath " + _sbpl_string(path) + ")"
+
+
+def _sbpl_rule(action, operations, paths):
+    return f"({action} {operations} " + " ".join(_sbpl_filter(path) for path in paths) + ")\n" if paths else ""
+
+
 def os_confinement_profile(plan):
+    """Deny the home directory and shared temp, re-allow the provider's own state, then the task's paths.
+
+    SBPL applies the last matching rule, so each later rule narrows or widens the one before.
+    """
     root = Path(plan.get("workspace_root") or plan["cwd"]).expanduser().resolve()
     home = Path.home().resolve()
-    denied_reads = [root, *(home / path for path in EXTRA_DENIED_READS)]
-    allowed_reads = [
-        Path(plan["cwd"]),
-        *(Path(path) for path in plan.get("applied", {}).get("add_dirs", [])),
-        *(home / path for path in ALLOWED_READS),
-    ]
-    allowed_writes = [home / path for path in ALLOWED_WRITES]
-    deny = " ".join("(subpath " + _sbpl_string(path) + ")" for path in denied_reads)
-    allow = " ".join("(subpath " + _sbpl_string(path) + ")" for path in allowed_reads)
-    write_allow = " ".join("(subpath " + _sbpl_string(path) + ")" for path in allowed_writes)
-    profile = f"(version 1)\n(allow default)\n(deny file-read-data file-write* {deny})\n(allow file-read-data {allow})\n"
-    if write_allow:
-        profile += f"(allow file-write* {write_allow})\n"
-    return profile
+    state = CONFINED_STATE.get(plan.get("adapter"), {})
+    return (
+        "(version 1)\n(allow default)\n"
+        + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
+        + _sbpl_rule("deny", "file-write*", [home, Path("/private/tmp"), Path("/private/var/folders")])
+        + _sbpl_rule("allow", "file-read-data file-write*", list(_darwin_user_dirs()))
+        + _sbpl_rule("allow", "file-read-data file-write*", [home / path for path in state.get("read_write", ())])
+        + _sbpl_rule("allow", "file-read-data", [home / path for path in state.get("read", ())])
+        + _sbpl_rule("deny", "file-read-data file-write*", [root, *(home / path for path in EXTRA_DENIED_READS)])
+        + _sbpl_rule("allow", "file-read-data", [
+            Path(plan["cwd"]), *(Path(path) for path in plan.get("applied", {}).get("add_dirs", []))
+        ])
+    )
 
 
 def confinement_command(plan, command):

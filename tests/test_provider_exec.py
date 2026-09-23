@@ -117,24 +117,71 @@ def test_read_only_confinement_paths_escape_sbpl_literals(tmp_path):
     assert 'space\\"and\\\\slash' in profile
 
 
-def test_os_confinement_profile_includes_configured_home_relative_paths(monkeypatch, tmp_path):
+def test_os_confinement_profile_denies_home_and_reallows_only_the_adapters_state(monkeypatch, tmp_path):
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    home = tmp_path / "home"
     cwd = tmp_path / "workspace"
     cwd.mkdir()
-    monkeypatch.setattr(supervisor.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(supervisor.Path, "home", lambda: home)
+    monkeypatch.setattr(supervisor, "_darwin_user_dirs", lambda: (tmp_path / "T",))
     monkeypatch.setattr(supervisor, "EXTRA_DENIED_READS", ("private/cache",))
-    monkeypatch.setattr(supervisor, "ALLOWED_READS", ("shared/docs",))
-    monkeypatch.setattr(supervisor, "ALLOWED_WRITES", ("shared/output",))
+    monkeypatch.setattr(supervisor, "CONFINED_STATE", {
+        "agy": {"read_write": ("state", "creds.json*"), "read": ("keys/one",)},
+    })
     plan = {
         "adapter": "agy", "mode": "read_only", "workspace_root": str(cwd),
         "cwd": str(cwd), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
     }
 
+    profile = supervisor.os_confinement_profile(plan).splitlines()
+
+    assert profile[2] == f'(deny file-read-data (subpath "{home}") (subpath "/private/tmp"))'
+    assert profile[3].startswith(f'(deny file-write* (subpath "{home}")')
+    assert profile[4] == f'(allow file-read-data file-write* (subpath "{tmp_path / "T"}"))'
+    assert profile[5].startswith(f'(allow file-read-data file-write* (subpath "{home / "state"}") (regex #"^')
+    assert profile[6] == f'(allow file-read-data (subpath "{home / "keys/one"}"))'
+    assert profile[7] == f'(deny file-read-data file-write* (subpath "{cwd}") (subpath "{home / "private/cache"}"))'
+    assert profile[8] == f'(allow file-read-data (subpath "{cwd}"))'
+    plan["adapter"] = "opencode"
+    assert "keys/one" not in supervisor.os_confinement_profile(plan)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+def test_sandbox_exec_profile_denies_home_reads_and_writes_but_keeps_provider_state(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    sandbox_exec = supervisor._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    home = (tmp_path / "home").resolve()
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh/id").write_text("key\n", encoding="utf-8")
+    (home / "state").mkdir()
+    (home / "creds.json").write_text("token\n", encoding="utf-8")
+    cwd = home / "repo/sub"
+    cwd.mkdir(parents=True)
+    (cwd / "note.txt").write_text("note\n", encoding="utf-8")
+    monkeypatch.setattr(supervisor.Path, "home", lambda: home)
+    monkeypatch.setattr(supervisor, "_darwin_user_dirs", lambda: ())
+    monkeypatch.setattr(supervisor, "CONFINED_STATE", {"agy": {"read_write": ("state", "creds.json*"), "read": ()}})
+    plan = {
+        "adapter": "agy", "mode": "read_only", "workspace_root": str(home / "repo"),
+        "cwd": str(cwd), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    }
     profile = supervisor.os_confinement_profile(plan)
 
-    assert '(subpath "' + str(tmp_path / "private/cache") + '")' in profile
-    assert '(allow file-read-data (subpath "' + str(cwd) + '") (subpath "' + str(tmp_path / "shared/docs") + '"))' in profile
-    assert '(allow file-write* (subpath "' + str(tmp_path / "shared/output") + '"))' in profile
+    def run(script):
+        return subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script], capture_output=True, text=True)
+
+    probe = run(f"cat {cwd}/note.txt")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert probe.stdout == "note\n"
+    assert run(f"cat {home}/.ssh/id").returncode != 0
+    assert run(f"echo x > {home}/written").returncode != 0
+    assert not (home / "written").exists()
+    assert run(f"echo x > {cwd}/written").returncode != 0
+    assert run(f"echo x > {home}/state/log && cat {home}/creds.json").stdout == "token\n"
+    assert run(f"echo y > {home}/creds.json.tmp").returncode == 0
 
 
 def test_agy_read_only_guarantee_tracks_os_confinement(monkeypatch, tmp_path):
