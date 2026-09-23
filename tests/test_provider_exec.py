@@ -190,6 +190,11 @@ def fixture_plan(tmp_path, code, adapter="codex", **controls):
     return plan
 
 
+def test_worker_preface_explains_process_cleanup(tmp_path):
+    plan = supervisor().build_plan("codex", {"resolved_model": "fixture"}, "hello", cwd=tmp_path)
+    assert "processes left running are then stopped." in plan["prompt"]
+
+
 @pytest.mark.parametrize("stop", ["cancelled", "timed_out", "normal", "stalled"])
 def test_new_session_grandchild_does_not_outlive_attempt(tmp_path, stop):
     pid_path = tmp_path / "grandchild.pid"
@@ -211,7 +216,7 @@ else:
     plan = fixture_plan(
         tmp_path,
         code,
-        timeout_seconds=1.6 if stop == "timed_out" else 8,
+        timeout_seconds=3 if stop == "timed_out" else 8,
         idle_seconds=1.6 if stop == "stalled" else 8,
     )
     if stop == "normal":
@@ -225,9 +230,18 @@ else:
         stderr=subprocess.DEVNULL,
     )
     try:
+        def wait_for_pid_file(_process):
+            if stop != "timed_out":
+                return
+            deadline = time.monotonic() + 5
+            while not pid_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert pid_path.exists(), "provider did not publish its child PID"
+
         record = supervisor().execute(
             plan,
             tmp_path / "result.md",
+            on_start=wait_for_pid_file,
             cancelled=lambda: stop == "cancelled"
             and pid_path.exists()
             and time.monotonic() - started >= 1.5,
@@ -259,6 +273,40 @@ else:
         unrelated.wait(timeout=3)
 
 
+def test_fast_double_fork_is_reaped_after_provider_exit(tmp_path):
+    pid_path = tmp_path / "double-fork.pid"
+    grandchild = f"""import os,pathlib,time
+pid = os.fork()
+if pid:
+    os._exit(0)
+os.setsid()
+pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()))
+time.sleep(60)
+"""
+    code = f"""import json,subprocess,sys,time
+launcher = subprocess.Popen([sys.executable, '-c', {grandchild!r}],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+launcher.wait()
+time.sleep(.1)
+print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'DONE'}}}}), flush=True)
+print(json.dumps({{'type':'turn.completed'}}), flush=True)
+"""
+    plan = fixture_plan(tmp_path, code, timeout_seconds=8)
+    try:
+        record = supervisor().execute(plan, tmp_path / "result.md")
+        assert record["status"] == "ok"
+        assert pid_path.exists()
+        pid = int(pid_path.read_text())
+        assert not _live_process(pid)
+        assert any(row["pid"] == pid for row in record["reaped"])
+    finally:
+        if pid_path.exists():
+            try:
+                os.killpg(int(pid_path.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 def test_attempt_marker_matches_inherited_environment_only():
     marker = "fixture-marker-123"
     environment = dict(os.environ)
@@ -287,6 +335,267 @@ def test_attempt_marker_matches_inherited_environment_only():
     finally:
         child.terminate()
         child.wait(timeout=3)
+
+
+def _live_process(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    if sys.platform.startswith("linux"):
+        stat = Path(f"/proc/{pid}/stat")
+        if stat.exists() and stat.read_text().rsplit(") ", 1)[-1].startswith("Z"):
+            return False
+    return True
+
+
+def test_snapshot_exception_still_kills_provider_and_records_attempt(tmp_path, monkeypatch):
+    module = supervisor()
+    pid_path = tmp_path / "provider.pid"
+    code = f"import os,pathlib,time; pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    plan = fixture_plan(tmp_path, code, timeout_seconds=8)
+    monkeypatch.setattr(module, "_process_snapshot", lambda: (_ for _ in ()).throw(RuntimeError("census failed")))
+    try:
+        record = module.execute(
+            plan, tmp_path / "result.md", cancelled=lambda: pid_path.exists()
+        )
+        assert record["status"] == "cancelled"
+        assert any("census unavailable" in warning for warning in record["warnings"])
+        assert not _live_process(int(pid_path.read_text()))
+    finally:
+        if pid_path.exists():
+            try:
+                os.killpg(int(pid_path.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_linux_snapshot_replaces_non_utf8_process_names(tmp_path, monkeypatch):
+    module = supervisor()
+    process_dir = tmp_path / "123"
+    process_dir.mkdir()
+    (process_dir / "stat").write_bytes(
+        b"123 (bad\xffname) S 1 123 " + b"0 " * 16 + b"12345 0\n"
+    )
+    real_scandir = os.scandir
+    with monkeypatch.context() as patch:
+        patch.setattr(module.sys, "platform", "linux")
+        patch.setattr(module.os, "scandir", lambda _path: real_scandir(tmp_path))
+        rows = module._process_snapshot()
+    assert rows[123].command == "bad\ufffdname"
+    assert rows[123].started == "12345"
+
+
+def test_darwin_libproc_is_loaded_once(monkeypatch):
+    module = supervisor()
+    loads = []
+
+    class Call:
+        def __call__(self, *_args):
+            return 0
+
+    class Library:
+        proc_listallpids = Call()
+        proc_pidinfo = Call()
+
+    with monkeypatch.context() as patch:
+        module._darwin_libproc.cache_clear()
+        patch.setattr(module.sys, "platform", "darwin")
+        patch.setattr(module.ctypes.util, "find_library", lambda _name: "libproc")
+        patch.setattr(module.ctypes, "CDLL", lambda *_args, **_kwargs: loads.append(1) or Library())
+        module._process_snapshot()
+        module._process_snapshot()
+        module._darwin_libproc.cache_clear()
+    assert len(loads) == 1
+
+
+def test_linux_tree_census_walks_task_children(tmp_path):
+    module = supervisor()
+    for pid, ppid, children in ((101, 1, "102 103"), (102, 101, "104"),
+                                (103, 101, ""), (104, 102, "")):
+        process = tmp_path / str(pid)
+        task = process / "task" / str(pid)
+        task.mkdir(parents=True)
+        (task / "children").write_text(children)
+        (process / "stat").write_text(
+            f"{pid} (fixture) S {ppid} {pid} " + "0 " * 16 + f"{pid * 100} 0\n"
+        )
+    rows = module._linux_tree_snapshot(101, set(), proc_root=tmp_path)
+    assert set(rows) == {101, 102, 103, 104}
+
+
+def test_linux_targeted_tree_census_does_not_warn_without_owner_row(monkeypatch):
+    module = supervisor()
+    process = type("Process", (), {"pid": 123, "poll": lambda self: None})()
+    root = module._ProcessRow(123, 1, 123, "12345", "fixture")
+    with monkeypatch.context() as patch:
+        patch.setattr(module.sys, "platform", "linux")
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: {123: root})
+        tracker = module._Descendants(process, "marker")
+        tracker.sample()
+    assert tracker.snapshot_unavailable is False
+
+
+def test_watchdog_census_runs_about_once_per_second(tmp_path, monkeypatch):
+    module = supervisor()
+    counts = []
+    stopping = []
+    original_sample = module._Descendants.sample
+    original_stop = module._Descendants.stop
+
+    def counted(self, *args, **kwargs):
+        if not stopping:
+            counts.append(time.monotonic())
+        return original_sample(self, *args, **kwargs)
+
+    def stopped(self, *args, **kwargs):
+        stopping.append(True)
+        return original_stop(self, *args, **kwargs)
+
+    monkeypatch.setattr(module._Descendants, "sample", counted)
+    monkeypatch.setattr(module._Descendants, "stop", stopped)
+    plan = fixture_plan(tmp_path, "import time; time.sleep(1.35)", timeout_seconds=5)
+    module.execute(plan, tmp_path / "result.md")
+    assert 1 <= len(counts) <= 3
+
+
+def test_missing_census_still_kills_provider_group_after_leader_exit(tmp_path, monkeypatch):
+    module = supervisor()
+    child_pid = tmp_path / "child.pid"
+    code = f"""import json,pathlib,subprocess
+child = subprocess.Popen(['sleep', '60'], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))
+print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'DONE'}}}}), flush=True)
+print(json.dumps({{'type':'turn.completed'}}), flush=True)
+"""
+    plan = fixture_plan(tmp_path, code, timeout_seconds=8)
+    monkeypatch.setattr(module, "_process_snapshot", lambda: {})
+    leader = []
+    try:
+        record = module.execute(plan, tmp_path / "result.md", on_start=lambda process: leader.append(process.pid))
+        assert record["status"] == "ok"
+        assert child_pid.exists()
+        pid = int(child_pid.read_text())
+        deadline = time.monotonic() + 2
+        while _live_process(pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not _live_process(pid)
+    finally:
+        if leader:
+            try:
+                os.killpg(leader[0], signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if sys.platform.startswith("linux") and child_pid.exists():
+            try:
+                os.waitpid(int(child_pid.read_text()), os.WNOHANG)
+            except ChildProcessError:
+                pass
+
+
+@pytest.mark.parametrize("terminal_event", [False, True])
+def test_cleanly_exiting_child_is_not_reported_as_reaped(tmp_path, terminal_event):
+    pid_path = tmp_path / "closing-child.pid"
+    code = f"""import json,pathlib,subprocess,sys,time
+child = subprocess.Popen(
+    [sys.executable, '-c', 'import sys,time; sys.stdin.read(); time.sleep(.3)'],
+    start_new_session=True, stdin=subprocess.PIPE,
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))
+print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'DONE'}}}}), flush=True)
+print(json.dumps({{'type':'turn.completed'}}), flush=True)
+if {terminal_event!r}:
+    child.stdin.close()
+    time.sleep(30)
+"""
+    plan = fixture_plan(tmp_path, code, timeout_seconds=8, idle_seconds=8)
+    try:
+        record = supervisor().execute(plan, tmp_path / "result.md")
+        assert record["status"] == "ok"
+        assert record["reaped"] == []
+        assert not any("reaped " in warning for warning in record["warnings"])
+    finally:
+        if pid_path.exists():
+            try:
+                os.killpg(int(pid_path.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_root_provider_keeps_two_second_sigterm_flush_grace(tmp_path):
+    code = """import pathlib,signal,time
+def stop(*_args):
+    time.sleep(1)
+    pathlib.Path('flushed').write_text('saved')
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, stop)
+pathlib.Path('ready').touch()
+time.sleep(30)
+"""
+    plan = fixture_plan(tmp_path, code, timeout_seconds=8)
+    root = []
+    try:
+        record = supervisor().execute(
+            plan, tmp_path / "result.md",
+            on_start=lambda process: root.append(process.pid),
+            cancelled=lambda: (tmp_path / "ready").exists(),
+        )
+        assert record["status"] == "cancelled"
+        assert (tmp_path / "flushed").read_text() == "saved"
+    finally:
+        if root:
+            try:
+                os.killpg(root[0], signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.parametrize("stop", ["normal", "cancelled"])
+def test_nested_fabric_owner_and_its_child_are_spared(tmp_path, stop):
+    inner = """import pathlib,subprocess,time
+pathlib.Path('inner-ready').touch()
+child = subprocess.Popen(['sleep', '60'], start_new_session=True,
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pathlib.Path('inner-child.pid').write_text(str(child.pid))
+time.sleep(2.5)
+pathlib.Path('inner-terminal').write_text('ok')
+"""
+    outer = f"""import json,os,pathlib,subprocess,sys,time
+environment = dict(os.environ)
+environment['PROVENANT_RUN_TOKEN'] = 'nested-owner-fixture'
+owner = subprocess.Popen([sys.executable, '-c', {inner!r}],
+    start_new_session=True, env=environment, stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pathlib.Path('inner-owner.pid').write_text(str(owner.pid))
+if {stop!r} == 'normal':
+    print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'DONE'}}}}), flush=True)
+    print(json.dumps({{'type':'turn.completed'}}), flush=True)
+    time.sleep(.5)
+else:
+    time.sleep(60)
+"""
+    plan = fixture_plan(tmp_path, outer, timeout_seconds=8, idle_seconds=8)
+    try:
+        record = supervisor().execute(
+            plan, tmp_path / "result.md",
+            cancelled=lambda: stop == "cancelled" and (tmp_path / "inner-owner.pid").exists(),
+        )
+        assert record["status"] == ("ok" if stop == "normal" else "cancelled")
+        assert record["spared"] >= 1
+        assert record["reaped"] == []
+        deadline = time.monotonic() + 4
+        while not (tmp_path / "inner-terminal").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert (tmp_path / "inner-terminal").read_text() == "ok"
+    finally:
+        for name in ("inner-owner.pid", "inner-child.pid"):
+            path = tmp_path / name
+            if path.exists():
+                try:
+                    os.killpg(int(path.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
 
 
 @pytest.mark.parametrize(

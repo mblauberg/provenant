@@ -74,12 +74,18 @@ attempt or batch directory through `provenant run cancel`. The external command
 never signals a PID or writes terminal evidence. The live dispatch owner polls
 the marker during its bounded wait, stops its provider and tracked descendants
 across process groups and sessions, and writes the normal cancelled attempt.
-The owner snapshots ancestry during the wait and at termination, matching PID
-and start time before signalling even after a child is reparented. A unique
+The owner snapshots ancestry about once per second and at termination, matching
+PID and start time before signalling even after a child is reparented. A unique
 provider-inherited marker covers a child reparented between snapshots. The same
-cleanup runs on timeout, stall and normal exit; leftover children appear in the
-attempt's `reaped` list and digest warning. A missing owner yields bounded missing
-evidence; it never authorises a process-table search or inferred cancellation.
+cleanup runs on timeout, stall and normal exit. On normal exit, children get up to
+1.5 seconds to close naturally; survivors appear in the attempt's `reaped` list
+and digest warning. Descendants get 0.5 seconds of SIGTERM grace, while the root
+provider group gets up to 2 seconds to flush session state. Census failure warns
+but cannot prevent the root group kill or terminal record. A nested Fabric owner
+has its own `PROVENANT_RUN_TOKEN`; it and its subtree are spared for their own
+owner to supervise, and a nonzero `spared` count is recorded. A missing owner
+yields bounded missing evidence; it never authorises a process-table search or
+inferred cancellation.
 On macOS, a child that clears the marker and reparents before the first snapshot
 cannot be attributed safely by this polling owner.
 
