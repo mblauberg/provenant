@@ -193,16 +193,26 @@ def has(argv, pair):
     return any(argv[i:i + 2] == pair for i in range(len(argv)))
 
 
+UNKNOWN = "context_ceiling not applied: {} compaction point for {} unknown"
+
+
 @pytest.mark.parametrize("adapter,model,ceiling,flag,state,tokens", [
     # Codex compacts near 95% of 272k already; the 300k default must not raise that.
     ("codex", "gpt-6-luna", None, None, "provider_default", 258400),
     ("codex", "gpt-6-luna", 200000, ["-c", "model_auto_compact_token_limit=200000"], "enforced", 200000),
     ("codex", "gpt-small", 150000, None, "provider_default", 115200),
-    ("codex", "gpt-unlisted", 250000, ["-c", "model_auto_compact_token_limit=250000"], "enforced", 250000),
+    # A model missing from the cache has no known point: lower-only cannot be proven.
+    ("codex", "gpt-unlisted", None, None, "provider_default", None),
+    ("codex", "gpt-unlisted", 250000, None, "provider_default", None),
     ("claude", "opus", None, ["--autocompact", "300000"], "enforced", 300000),
     ("claude", "claude-opus-5-5", 250000, ["--autocompact", "250000"], "enforced", 250000),
     ("claude", "claude-haiku-4-5", None, None, "provider_default", 200000),
+    # Read-only haiku may be answered by a 1M model in plan mode; the smaller window still bounds the flag.
+    ("claude", "haiku", None, None, "provider_default", 200000),
+    ("claude", "haiku", 250000, None, "provider_default", 200000),
+    ("claude", "haiku", 150000, ["--autocompact", "150000"], "enforced", 150000),
     ("claude", "unknown-model", None, None, "provider_default", None),
+    ("claude", "unknown-model", 250000, None, "provider_default", None),
     ("cursor", "auto", 250000, None, "unsupported", 250000),
     ("opencode", "m", 250000, None, "unsupported", 250000),
     ("kiro", "auto", 250000, None, "unsupported", 250000),
@@ -214,6 +224,7 @@ def test_ceiling_only_lowers_the_provider_compaction_point(tmp_path, provider_ho
     applied = plan["applied"]
     assert (applied["context_ceiling"], applied["context_ceiling_tokens"]) == (state, tokens)
     assert applied["context_ceiling_requested"] == (ceiling or 300000)
+    assert plan["mode"] == "read_only"
     argv = plan["argv"]
     assert not any("model_context_window" in arg for arg in argv)
     if flag:
@@ -221,6 +232,19 @@ def test_ceiling_only_lowers_the_provider_compaction_point(tmp_path, provider_ho
     else:
         assert "--autocompact" not in argv
         assert not any(arg.startswith("model_auto_compact_token_limit") for arg in argv)
+    unknown = [warning for warning in plan["warnings"] if warning == UNKNOWN.format(adapter, model)]
+    assert len(unknown) == (1 if state == "provider_default" and tokens is None else 0)
+
+
+def test_codex_without_a_models_cache_records_an_unknown_point_once(tmp_path, provider_homes):
+    codex, _claude = provider_homes
+    (codex / "models_cache.json").unlink()
+    plan = plan_for(tmp_path, "codex", "gpt-6-luna")
+    context().apply_ceiling(plan, None, supervisor().profile("codex").argv)
+    assert (plan["applied"]["context_ceiling"], plan["applied"]["context_ceiling_tokens"]) == ("provider_default", None)
+    assert "context_ceiling_source" not in plan["applied"]
+    assert plan["warnings"].count(UNKNOWN.format("codex", "gpt-6-luna")) == 1
+    assert not any(arg.startswith("model_auto_compact_token_limit") for arg in plan["argv"])
 
 
 def test_claude_user_autocompact_setting_is_recorded_not_duplicated(tmp_path, provider_homes):

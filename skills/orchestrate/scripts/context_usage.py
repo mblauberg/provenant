@@ -206,24 +206,24 @@ def clamp_ceiling(value):
     return tokens, None
 
 
-CODEX_WINDOW, CODEX_EFFECTIVE_PERCENT = 272000, 95
-# contextWindow from live --safe-mode turns on 2026-09-23; the haiku alias resolved to claude-sonnet-5.
+# contextWindow of the answering model in live turns, 2026-09-23 (Claude Code 2.1.280). A read-only haiku
+# route may be answered by a 1M model in plan mode; its own 200k window still bounds the ceiling.
 CLAUDE_WINDOWS = {"opus": 1000000, "opus-5.5": 1000000, "claude-opus-5-5": 1000000, "sonnet": 1000000,
-                  "claude-sonnet-5": 1000000, "haiku": 1000000, "fable": 1000000, "claude-fable-5-1": 1000000,
-                  "claude-haiku-4-5": 200000}
+                  "claude-sonnet-5": 1000000, "fable": 1000000, "claude-fable-5-1": 1000000,
+                  "haiku": 200000, "claude-haiku-4-5": 200000, "claude-haiku-4-5-20251001": 200000}
 
 
 def _codex_point(model, env):
-    """Codex compacts near effective_context_window_percent of the model window in its models cache."""
-    window, percent = CODEX_WINDOW, CODEX_EFFECTIVE_PERCENT
+    """Codex compacts at effective_context_window_percent of the model window in its models cache."""
     try:
         cache = json.loads((Path(env.get("CODEX_HOME") or Path.home() / ".codex") / "models_cache.json").read_text())
         entry = next((item for item in cache.get("models") or []
                       if isinstance(item, dict) and model and item.get("slug") == model), {})
-        window = _int(entry.get("context_window")) or window
-        percent = _int(entry.get("effective_context_window_percent")) or percent
     except (OSError, ValueError, AttributeError):
-        pass
+        entry = {}
+    window, percent = _int(entry.get("context_window")), _int(entry.get("effective_context_window_percent"))
+    if not window or not percent:
+        return None, None
     return window * percent // 100, "codex models_cache effective window"
 
 
@@ -241,7 +241,7 @@ def _claude_point(model, env):
     user = _int(settings.get("autoCompactWindow")) if isinstance(settings, dict) else None
     if user and settings.get("autoCompactEnabled") is not False and (window is None or user < window):
         return user, "claude user settings autoCompactWindow"
-    return window, "claude model window"
+    return window, "claude model window" if window else None
 
 
 def effective_ceiling(applied):
@@ -260,7 +260,13 @@ def apply_ceiling(plan, value, argv=None, env=None):
     plan["context_ceiling"] = None
     if adapter in CEILING_CONTROL:
         point, source = (_codex_point if adapter == "codex" else _claude_point)(plan.get("model"), env or os.environ)
-        if point is not None and tokens < point:
+        if point is None:
+            # Without a known point, lower-only cannot be proven: pass nothing, claim no number.
+            applied.update(context_ceiling="provider_default", context_ceiling_tokens=None)
+            unknown = f"context_ceiling not applied: {adapter} compaction point for {plan.get('model')} unknown"
+            if unknown not in plan["warnings"]:
+                plan["warnings"].append(unknown)
+        elif tokens < point:
             plan["context_ceiling"] = tokens
             applied.update(context_ceiling="enforced", context_ceiling_tokens=tokens)
         else:
