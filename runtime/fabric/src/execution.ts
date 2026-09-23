@@ -1,5 +1,6 @@
 import {
   normaliseRoute,
+  preflight,
   routeArguments,
   validatePrompt,
   timeoutSeconds,
@@ -43,6 +44,7 @@ import {
   findRecordedRun,
   readOwnerRecord,
   processStartedAt,
+  processMatches,
   pruneDispatchRuns,
   reapOrphanedRuns,
   readProviderRecord,
@@ -350,7 +352,7 @@ function startOwner(
             identification.kind === "dispatch" ? compactDispatch(started, completed) : compactBatch(started, completed);
           writeFileSync(
             path,
-            JSON.stringify({ ...previous, ...result, finished_at: new Date().toISOString() }) + "\n",
+            JSON.stringify({ ...previous, ...Object.fromEntries(Object.entries(result).filter(([, value]) => value !== undefined)), finished_at: new Date().toISOString() }) + "\n",
             { mode: 0o600 },
           );
         } catch {
@@ -573,7 +575,9 @@ async function dispatchConfiguredProviderUnchecked(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<Record<string, unknown>> {
   const workspaceIdentity = identity;
-  identity = workingIdentity(input, identity);
+  const providerIdentity = workingIdentity(input, identity);
+  input = { ...input, ...(input.cwd === undefined ? {} : { cwd: providerIdentity.cwd }),
+    ...(input.prompt_file === undefined ? {} : { prompt_file: resolve(identity.cwd, input.prompt_file) }) };
   validatePrompt(input.prompt, input.prompt_file);
   if (
     !Number.isInteger(input.wait_seconds ?? DEFAULT_WAIT_SECONDS) ||
@@ -678,9 +682,11 @@ function normaliseTask(
   catalogue: CatalogueSnapshot,
 ): Record<string, unknown> {
   validatePrompt(task.prompt, task.prompt_file);
+  const providerIdentity = workingIdentity(task, identity);
+  task = { ...task, ...(task.cwd === undefined ? {} : { cwd: providerIdentity.cwd }) };
   return {
     id: task.id ?? `task-${index + 1}`,
-    ...(task.prompt === undefined ? { prompt_file: task.prompt_file } : { prompt: task.prompt }),
+    ...(task.prompt === undefined ? { prompt_file: resolve(identity.cwd, task.prompt_file!) } : { prompt: task.prompt }),
     timeout: timeoutSeconds(task.timeout_seconds, task.mode),
     ...normaliseRoute(task, identity, catalogue),
   };
@@ -707,7 +713,9 @@ async function dispatchConfiguredBatchUnchecked(
   const errors: Record<string, unknown>[] = [];
   const tasks = input.tasks.flatMap((task, index) => {
     try {
-      return [normaliseTask(task, index, identity, catalogue)];
+      const defaults = Object.fromEntries(Object.entries(input).filter(([key]) =>
+        ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "add_dirs", "fallback", "timeout_seconds"].includes(key)));
+      return [normaliseTask({ ...defaults, ...task }, index, identity, catalogue)];
     } catch (error) {
       errors.push({ task_id: task.id ?? `task-${index + 1}`, ...rejected(error) });
       return [];
@@ -737,7 +745,8 @@ async function dispatchConfiguredBatchUnchecked(
     JSON.stringify(
       {
         schema_version: 1,
-        tasks,
+        tasks: tasks.map((task) => task.model === undefined ? task : Object.fromEntries(
+          Object.entries(task).filter(([key]) => key !== "alias"))),
       },
       null,
       2,
@@ -776,38 +785,6 @@ async function dispatchConfiguredBatchUnchecked(
     : compactBatch(started, completion);
 }
 
-async function preflight(
-  python: string,
-  owner: string,
-  tasks: Record<string, unknown>[],
-  identity: Identity,
-  env: NodeJS.ProcessEnv,
-  signal: AbortSignal,
-): Promise<Record<string, unknown>> {
-  signal.throwIfAborted();
-  const child = execFile(python, [owner, "--preflight-json"], {
-    cwd: identity.cwd,
-    env: withoutGitRedirects(env),
-    signal,
-    killSignal: "SIGKILL",
-    timeout: 50_000,
-    maxBuffer: 1024 * 1024,
-  });
-  const output = new Promise<string>((resolveOutput, rejectOutput) => {
-    let stdout = "";
-    child.stdout!.on("data", (chunk: string) => {
-      stdout += chunk;
-    });
-    child.once("error", rejectOutput);
-    child.once("close", (code) =>
-      code === 0
-        ? resolveOutput(stdout)
-        : rejectOutput(new Error("Preflight unavailable; restore the harness Python environment.")),
-    );
-  });
-  child.stdin!.end(JSON.stringify({ tasks }));
-  return JSON.parse(await output) as Record<string, unknown>;
-}
 
 export async function dispatchConfiguredProvider(
   input: DispatchInput,
@@ -905,7 +882,7 @@ export async function resumeConfiguredProvider(
         return false;
       }
     };
-    if (ownerRecord && alive(ownerRecord.owner_pid))
+    if (ownerRecord && processMatches(ownerRecord.owner_pid, ownerRecord.owner_started_at))
       throw new InputError("resume_not_ready", "Wait for the current owner to exit.");
     mkdirSync(join(runDir, "_owner"), { recursive: true, mode: 0o700 });
     const lockPath = join(runDir, "_owner/resume.lock");
@@ -924,13 +901,25 @@ export async function resumeConfiguredProvider(
     const saved = JSON.parse(readFileSync(join(runDir, "dispatch-status.json"), "utf8")) as Record<string, any>;
     const timeout = Number(saved.timeout_seconds ?? (previous.mode === "worktree_write" ? 10800 : 3600));
     const executionIdentity = { ...identity, cwd: typeof previous.cwd === "string" ? previous.cwd : identity.cwd };
-    const python = await pythonOwner(root, executionIdentity, env);
+    const python = await pythonOwner(root, identity, env);
     const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
     const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
     const path =
       input.prompt === undefined
         ? resolve(identity.cwd, input.prompt_file!)
         : stagingPath(runDir, `resume-${randomUUID()}.md`);
+    const requested = previous.provenance?.requested ?? {};
+    const checked = await preflight(python, owner, [{
+      id: taskId, adapter: requested.adapter ?? previous.adapter ?? identity.provider,
+      model: previous.provenance?.resolved_model ?? requested.model,
+      effort: previous.provenance?.effort_applied,
+      access_mode: previous.mode ?? "read_only", worktree: previous.worktree ?? undefined,
+      cwd: previous.mode === "worktree_write" ? undefined : executionIdentity.cwd,
+      ...Object.fromEntries(Object.entries(previous.applied ?? {}).filter(([key, value]) =>
+        ["sandbox", "network", "add_dirs"].includes(key) && value !== null)),
+      ...(input.prompt === undefined ? { prompt_file: path } : { prompt: input.prompt }),
+    }], identity, env, signal);
+    if (checked.status === "rejected") return { status: "rejected", error: checked.error, fix: checked.fix };
     if (input.prompt !== undefined) writeFileSync(path, input.prompt, { mode: 0o600, flag: "wx" });
     const next = Math.max(0,...(previous.attempts ?? []).map((row:Record<string,any>)=>Number(row.attempt) || 0)) + 1;
     const started = startOwner(
@@ -945,8 +934,9 @@ export async function resumeConfiguredProvider(
         path,
         "--timeout",
         String(timeout),
+        ...(previous.mode === "worktree_write" ? [] : ["--cwd", executionIdentity.cwd]),
       ],
-      executionIdentity,
+      identity,
       env,
       runDir,
       {
@@ -964,7 +954,7 @@ export async function resumeConfiguredProvider(
           "5",
         ],
         targetDirectory: runDir,
-        cwd: executionIdentity.cwd,
+        cwd: identity.cwd,
         env,
       },
       {
@@ -973,6 +963,7 @@ export async function resumeConfiguredProvider(
         identifier: taskId,
         taskIds: [taskId],
         resume: true,
+        routes: checked.routes,
         nextAttempt: next,
         timeout,
       },

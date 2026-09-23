@@ -527,6 +527,11 @@ describe("orphan reaping", () => {
     host.kill("SIGKILL");
     await waitFor(() => host.exitCode !== null || host.signalCode !== null, "the host never died");
 
+    const attempt = join(runDir, "tasks/task-1/attempt-001");
+    mkdirSync(attempt, { recursive: true });
+    const row = JSON.parse(readFileSync(join(testDirectory, "fixtures/attempt.json"), "utf8"));
+    row.run_id = started.id; row.state = "running"; row.status = null;
+    writeFileSync(join(attempt, "attempt.json"), JSON.stringify(row));
     const reaping = reapOrphanedRuns(workspace);
     await waitForFile(join(runDir, "term-ignored.marker"));
     expect(existsSync(join(runDir, OWNER_RECORD_NAME))).toBe(true);
@@ -535,6 +540,7 @@ describe("orphan reaping", () => {
     expect(reaped?.escalated).toBe(true);
     expect(alive(ownerPid)).toBe(false);
     expect(existsSync(join(runDir, OWNER_RECORD_NAME))).toBe(false);
+    expect(await fabricStatus(workspace, String(started.id))).toMatchObject({state:"terminal",status:"interrupted"});
   }, 40_000);
 
   it("does not mask a still-running orphan with the host-gone reason", async () => {
@@ -698,14 +704,18 @@ describe("compact status", () => {
 });
 
 describe("front door model selection", () => {
-  it("resolves unique model tokens from the adapter catalogue", async () => {
+  it("leaves shorthand aliases for the routing owner to resolve", async () => {
     mkdirSync(join(product, "config"));
     copyFileSync(join(repositoryRoot, "config", "model-routing.json"), join(product, "config", "model-routing.json"));
     for (const name of ["luna", "sol", "astra"]) {
       const done = await dispatchConfiguredProvider({ adapter: "codex", alias: name, prompt: "ordinary run", wait_seconds: 5 },
         identity, new AbortController().signal, { ...ownerEnvironment, AGENT_FABRIC_INSTANCE_ROOT: product });
-      expect(done).toMatchObject({ status: "succeeded", route: { resolved_model: `gpt-6-${name}` } });
+      expect(done).toMatchObject({ status: "succeeded", route: { resolved_model: name } });
     }
+  });
+  it("treats an empty model as omitted and keeps the alias", async () => {
+    const done = await dispatchConfiguredProvider({adapter:"codex",alias:"scout",model:"",prompt:"ordinary run",wait_seconds:5}, identity, new AbortController().signal, ownerEnvironment);
+    expect(done).toMatchObject({status:"succeeded",route:{resolved_model:"scout"}});
   });
   it("passes an explicit model and effort without an alias", async () => {
     const done = await dispatchConfiguredProvider({ adapter: "codex", model: "gpt-6-luna", effort: "medium", prompt: "ordinary run", wait_seconds: 5 },
@@ -869,7 +879,8 @@ it('reads v1 attempts verbatim from the shared run root with ledger fields', asy
  const row = JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
  row.cwd=workspace; row.worktree=workspace;
  writeFileSync(join(attempt,'attempt.json'),JSON.stringify(row));
- const status = await fabricStatus(workspace,'mcp-a81f3c');
+ const {statusRows}=await import('../src/run-registry.js');
+ const status = (await statusRows(workspace,['mcp-a81f3c'],0,'all',undefined,'full')).runs![0]!;
  expect(status).toMatchObject({schema:'fabric.status.v1',run_id:row.run_id,status:'ok',digest:row.digest,attempts:[row],worktree:workspace,dirty:null,ahead:null});
  expect(status.provenance).toEqual(row.provenance);
 });
@@ -882,10 +893,10 @@ it('places logs and staging files inside a named run directory', async () => {
  expect(result.id).toMatch(/^mcp-.{6}$/u);
 });
 
-it('watch prints a terminal state once and exits', () => {
+it.each([[[]], [['--interval','2']]])('watch prints a terminal state once and exits with %j', (options) => {
  const dir=join(workspace,'.agent-run/mcp-watch');mkdirSync(dir,{recursive:true});
  writeFileSync(join(dir,'dispatch-status.json'),JSON.stringify({id:'mcp-watch',status:'failed'}));
- expect(fabricCli(['watch','mcp-watch'])).toMatch(/^failed mcp-watch/mu);
+ expect(fabricCli(['watch','mcp-watch',...options])).toMatch(/^failed mcp-watch/mu);
 });
 
 it('keeps unpublished batch tasks visible and honours receipt interruption', async () => {
@@ -929,4 +940,75 @@ it('keeps non-Git cwd dispatches in the caller run root', async () => {
  const path=(result.paths as Record<string,string>).run_dir!;
  expect(path).toContain(join(workspace,'.agent-run/runs').replace('/var/folders/','/private/var/folders/'));
  expect(await fabricStatus(workspace,String(result.id))).toMatchObject({status:'succeeded'});
+});
+
+it('terminalises a stopped v1 run before removing its owner record', async () => {
+ const {terminateRecordedRun}=await import('../src/run-registry.js');
+ const dir=join(workspace,'.agent-run/mcp-stopped');
+ const path=join(dir,'tasks/task-1/attempt-001');mkdirSync(path,{recursive:true});
+ const row=JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
+ row.run_id='mcp-stopped';row.state='running';row.status=null;
+ writeFileSync(join(path,'attempt.json'),JSON.stringify(row));
+ await terminateRecordedRun({schema_version:1,kind:'dispatch',run_dir:dir,workspace,run_token:'gone',owner_pid:999991,owner_pgid:999991,owner_started_at:null,host_pid:999992,host_started_at:null,started_at:new Date().toISOString(),owner_stdout:'',owner_stderr:'',run_id:row.run_id,running:false,orphaned:false,provider:null});
+ expect(await fabricStatus(workspace,row.run_id)).toMatchObject({state:'terminal',status:'interrupted'});
+});
+
+it('preserves a rejected resume and its fix without advising a terminal poll', async () => {
+ const dir=join(workspace,'.agent-run/mcp-resume-rejected');
+ const path=join(dir,'tasks/task-1/attempt-001');mkdirSync(path,{recursive:true});
+ const row=JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
+ row.run_id='mcp-resume-rejected';
+ writeFileSync(join(path,'attempt.json'),JSON.stringify(row));
+ writeFileSync(join(dir,'dispatch-status.json'),JSON.stringify({task_id:'task-1',next_attempt:2,status:'rejected',message:'dispatch a new run',fix:'dispatch a new run',finished_at:new Date().toISOString()}));
+ const result=await fabricStatus(workspace,row.run_id);
+ expect(result).toMatchObject({state:'terminal',status:'rejected',message:'dispatch a new run',fix:'dispatch a new run'});
+ expect(result.digest).not.toContain('fabric_status');
+});
+
+it('paginates UTF-8 without replacement characters and reads bounded live tails', async () => {
+ const {fabricOutput}=await import('../src/run-registry.js');
+ const dir=join(workspace,'.agent-run/mcp-utf8');const attempt=join(dir,'tasks/task-1/attempt-001');mkdirSync(attempt,{recursive:true});
+ const row=JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
+ row.run_id='mcp-utf8';row.paths.result='tasks/task-1/attempt-001/result.md';row.state='running';row.status=null;
+ writeFileSync(join(attempt,'attempt.json'),JSON.stringify(row));
+ const original='a😀é中z';writeFileSync(join(attempt,'result.md'),original);
+ let text='',offset=0;
+ for(let i=0;i<10;i++) {
+  const page=await fabricOutput(workspace,{id:row.run_id,offset,max_bytes:3});
+  if(page.error) { expect(page.error).toBe('output_bounds'); break; }
+  text+=page.digest;offset=Number(page.next_offset);if(page.eof) break;
+ }
+ // A one-codepoint page must fit; normal pages preserve every byte across boundaries.
+ text='';offset=0;
+ for(let i=0;i<10;i++) {
+  const page=await fabricOutput(workspace,{id:row.run_id,offset,max_bytes:4});
+  text+=page.digest;offset=Number(page.next_offset);if(page.eof) break;
+ }
+ expect(text).toBe(original);
+ const tail=await fabricOutput(workspace,{id:row.run_id,tail:true,max_bytes:5});
+ expect(tail).toMatchObject({digest:'中z',eof:true,next_offset:Buffer.byteLength(original)});
+});
+
+it('retains custody when a live owner has no verifiable start identity', async () => {
+ const {terminateRecordedRun}=await import('../src/run-registry.js');
+ const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'});
+ spawnedPids.push(child.pid!);
+ const dir=join(workspace,'.agent-run/mcp-unverified');mkdirSync(dir,{recursive:true});
+ const record={schema_version:1 as const,kind:'dispatch' as const,run_dir:dir,workspace,run_token:'unknown',owner_pid:child.pid!,owner_pgid:child.pid!,owner_started_at:null,host_pid:process.pid,host_started_at:null,started_at:new Date().toISOString(),owner_stdout:'',owner_stderr:''};
+ writeFileSync(join(dir,OWNER_RECORD_NAME),JSON.stringify(record));
+ const result=await terminateRecordedRun({...record,run_id:'mcp-unverified',running:true,orphaned:false,provider:null},0);
+ expect(result).toMatchObject({signalled:false,reason:'still running'});
+ expect(existsSync(join(dir,OWNER_RECORD_NAME))).toBe(true);
+});
+
+it('binds termination writes to the discovered run directory', async () => {
+ const {findRecordedRun,terminateRecordedRun}=await import('../src/run-registry.js');
+ const dir=join(workspace,'.agent-run/mcp-forged'),outside=join(workspace,'outside');
+ mkdirSync(dir,{recursive:true});mkdirSync(outside);
+ const target=join(outside,'dispatch-status.json');writeFileSync(target,'untouched');
+ writeFileSync(join(dir,OWNER_RECORD_NAME),JSON.stringify({schema_version:1,kind:'dispatch',run_dir:outside,workspace,run_token:'gone',owner_pid:999991,owner_pgid:999991,owner_started_at:null,host_pid:999992,host_started_at:null,started_at:new Date().toISOString(),owner_stdout:'',owner_stderr:''}));
+ const record=findRecordedRun(workspace,'mcp-forged')!;
+ await terminateRecordedRun(record);
+ expect(readFileSync(target,'utf8')).toBe('untouched');
+ expect(JSON.parse(readFileSync(join(dir,'dispatch-status.json'),'utf8')).status).toBe('interrupted');
 });

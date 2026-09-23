@@ -16,7 +16,7 @@
  */
 import { runRoot, withoutGitRedirects } from "./identity.js";
 export { runRoot } from "./identity.js";
-import { execFileSync } from "node:child_process";
+import { execFileSync, execFile } from "node:child_process";
 import {
   existsSync,
   renameSync,
@@ -34,7 +34,9 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { promisify } from "node:util";
+const execFileAsync = promisify(execFile);
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export const OWNER_RECORD_NAME = "dispatch-owner.json";
 export const PROVIDER_RECORD_NAME = "dispatch-provider.json";
@@ -144,7 +146,7 @@ export function readOwnerRecord(runDir: string): OwnerRecord | undefined {
   if (record === undefined || record.schema_version !== 1) return undefined;
   if (!positiveInteger(record.owner_pid) || !positiveInteger(record.owner_pgid)) return undefined;
   if (record.kind !== "dispatch" && record.kind !== "batch") return undefined;
-  return record as unknown as OwnerRecord;
+  return { ...record, run_dir: runDir } as unknown as OwnerRecord;
 }
 
 export function readProviderRecord(runDir: string, runToken: string): ProviderRecord | null {
@@ -175,22 +177,22 @@ export function removeOwnerRecord(runDir: string): void {
 
 function runDirectoryNames(workspace: string): string[] {
   const root = runRoot(workspace);
-  try {
-    if (lstatSync(root).isSymbolicLink()) return [];
-  } catch {
-    return [];
-  }
+  let local = resolve(workspace, ".agent-run");
+  try { local = join(realpathSync(workspace), ".agent-run"); } catch { /* Missing workspace. */ }
+  const locations = [{ path: root, modern: true }, ...(local === root ? [] : [{ path: local, modern: false }])];
   const names: string[] = [];
-  for (const sub of ["", "runs"]) {
-    try {
-      if (lstatSync(join(root, sub)).isSymbolicLink()) continue;
-      for (const entry of readdirSync(join(root, sub), { withFileTypes: true })) {
-        if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-        if (sub === "" ? entry.name.startsWith("mcp-") : /^\d{8}-\d{4}-(dispatch|batch)-/u.test(entry.name))
-          names.push(join(sub, entry.name));
-      }
-    } catch {
-      /* Root may not exist yet. */
+  for (const location of locations) {
+    try { if (lstatSync(location.path).isSymbolicLink()) continue; } catch { continue; }
+    for (const sub of location.modern ? ["", "runs"] : [""]) {
+      const directory = join(location.path, sub);
+      try {
+        if (lstatSync(directory).isSymbolicLink()) continue;
+        for (const entry of readdirSync(directory, { withFileTypes: true })) {
+          if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+          if (sub === "" ? entry.name.startsWith("mcp-") : /^\d{8}-\d{4}-(dispatch|batch)-/u.test(entry.name))
+            names.push(relative(root, join(directory, entry.name)));
+        }
+      } catch { /* Root may not exist yet. */ }
     }
   }
   return names.sort();
@@ -266,8 +268,8 @@ export function signalRecordedRun(run: RecordedRun, signal: NodeJS.Signals): boo
 }
 
 function runStillAlive(run: RecordedRun): boolean {
-  if (processMatches(run.owner_pid, run.owner_started_at)) return true;
-  return run.provider !== null && processMatches(run.provider.provider_pid, run.provider.provider_started_at);
+  if (observedAlive(run.owner_pid, run.owner_started_at)) return true;
+  return run.provider !== null && observedAlive(run.provider.provider_pid, run.provider.provider_started_at);
 }
 
 async function waitForRunStop(run: RecordedRun, timeoutMs: number): Promise<boolean> {
@@ -276,6 +278,19 @@ async function waitForRunStop(run: RecordedRun, timeoutMs: number): Promise<bool
     await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   }
   return !runStillAlive(run);
+}
+
+/** Preserve closure even when SIGKILL prevented an attempt receipt. */
+function closeStoppedRun(runDir: string): void {
+  const path = join(runDir, "dispatch-status.json");
+  const status = readJson(path) ?? {};
+  if (!status.finished_at || status.status === "running") {
+    const temporary = `${path}.${process.pid}.tmp`;
+    writeFileSync(temporary, JSON.stringify({ ...status, status: "interrupted",
+      finished_at: new Date().toISOString(), fix: "Dispatch a new run; the owner exited." }) + "\n", { mode: 0o600 });
+    renameSync(temporary, path);
+  }
+  removeOwnerRecord(runDir);
 }
 
 /**
@@ -287,7 +302,7 @@ export async function terminateRecordedRun(
   escalationMs = ESCALATION_MS,
 ): Promise<TerminationOutcome> {
   if (!runStillAlive(run)) {
-    removeOwnerRecord(run.run_dir);
+    closeStoppedRun(run.run_dir);
     return { run_dir: run.run_dir, signalled: false, escalated: false, reason: "not running" };
   }
   const signalled = signalRecordedRun(run, "SIGTERM");
@@ -300,7 +315,7 @@ export async function terminateRecordedRun(
   if (runStillAlive(run)) {
     return { run_dir: run.run_dir, signalled, escalated, reason: "still running" };
   }
-  removeOwnerRecord(run.run_dir);
+  closeStoppedRun(run.run_dir);
   return { run_dir: run.run_dir, signalled, escalated };
 }
 
@@ -439,7 +454,7 @@ export function pruneDispatchRuns(workspace: string, env: NodeJS.ProcessEnv): st
         )
           continue;
       }
-      const siblings = name.startsWith("runs/") ? [] : siblingPaths(root, name);
+      const siblings = name.startsWith("runs/") ? [] : siblingPaths(dirname(runDir), basename(runDir));
       if (newestMtimeMs([runDir, join(runDir, "RUN_RECEIPT.json"), ...siblings]) > runCutoff) continue;
       rmSync(runDir, { recursive: true, force: true });
       for (const sibling of siblings) rmSync(sibling, { recursive: true, force: true });
@@ -678,19 +693,18 @@ export interface StatusResult extends Record<string, unknown> {
   runs?: Record<string, any>[];
 }
 
-function ledger(worktree: unknown): Record<string, unknown> {
+async function ledger(worktree: unknown): Promise<Record<string, unknown>> {
   const empty = { worktree: worktree ?? null, branch_tip: null, dirty: null, ahead: null };
   if (typeof worktree !== "string") return empty;
   try {
-    const git = (...args: string[]) =>
-      execFileSync("git", ["-C", worktree, ...args], {
+    const git = async (...args: string[]) =>
+      (await execFileAsync("git", ["-C", worktree, ...args], {
         env: withoutGitRedirects(process.env),
         encoding: "utf8",
         timeout: 1000,
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-    const branch_tip = git("rev-parse", "HEAD");
-    const status = git("status", "--porcelain=v2", "--branch", "--untracked-files=normal");
+      })).stdout.trim();
+    const branch_tip = await git("rev-parse", "HEAD");
+    const status = await git("status", "--porcelain=v2", "--branch", "--untracked-files=normal");
     const ahead = status.match(/^# branch\.ab \+(\d+)/mu)?.[1];
     return {
       worktree,
@@ -754,6 +768,9 @@ function v1Rows(runDir: string): Record<string, any>[] {
       : undefined;
   const rows: Record<string, any>[] = [...grouped.values()].map((attempts) => {
     const row = attempts.sort((a, b) => Number(a.attempt) - Number(b.attempt)).at(-1)!;
+    const routeIndex = Array.isArray(metadata?.task_ids) ? metadata.task_ids.indexOf(row.task_id) : 0;
+    const route = Array.isArray(metadata?.routes) ? metadata.routes[routeIndex] : undefined;
+    const notes = Array.isArray(route?.notes) ? route.notes.filter((note: unknown) => typeof note === "string") : [];
     const pending = metadata?.task_id === row.task_id && Number(metadata?.next_attempt ?? 0) > Number(row.attempt);
     const effective =
       interrupted && row.state !== "terminal"
@@ -764,7 +781,9 @@ function v1Rows(runDir: string): Record<string, any>[] {
             digest: `interrupted ${row.run_id} · fix: dispatch a new run`,
           }
         : row;
-    if (pending)
+    if (pending) {
+      const status = closed && metadata?.status === "rejected" ? "rejected" : interrupted ? "interrupted" : null;
+      const fix = metadata?.fix ?? metadata?.message ?? "Dispatch a new run; the owner exited.";
       return {
         schema: "fabric.status.v1",
         id: row.run_id,
@@ -775,20 +794,23 @@ function v1Rows(runDir: string): Record<string, any>[] {
         attempts,
         attempt_count: attempts.length,
         state: interrupted ? "terminal" : "queued",
-        status: interrupted ? "interrupted" : null,
+        status,
+        ...(interrupted ? { fix, message: metadata?.message } : {}),
         started_at: metadata!.started_at,
-        digest: `${interrupted ? "interrupted" : "running"} ${row.run_id} attempt ${metadata!.next_attempt} · fabric_status{ids:["${row.run_id}"],wait_seconds:55}`,
+        digest: interrupted ? `${status} ${row.run_id} · fix: ${fix}` : `running ${row.run_id} attempt ${metadata!.next_attempt} · fabric_status{ids:["${row.run_id}"],wait_seconds:55}`,
         paths: {},
       };
+    }
     return {
       ...effective,
+      ...(notes.length ? { notes } : {}),
       schema: "fabric.status.v1",
       id: row.run_id,
       run_dir: runDir,
       attempts,
       attempt_count: attempts.length,
       ...(metadata?.batch_id ? { batch_id: metadata.batch_id } : {}),
-      ...ledger(row.worktree),
+
       result_path: typeof row.paths?.result === "string" ? resolve(runDir, row.paths.result) : null,
     };
   });
@@ -827,6 +849,7 @@ export async function statusRows(
   waitSeconds = 0,
   until: "any" | "all" = "all",
   signal?: AbortSignal,
+  detail: "brief" | "full" = "brief",
 ): Promise<StatusResult> {
   if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 55)
     return { status: "rejected", error: "wait_invalid", fix: "Pass wait_seconds from 0 to 55." };
@@ -852,7 +875,7 @@ export async function statusRows(
         attempt_count: 1,
         started_at: metadata?.started_at ?? owner?.started_at ?? new Date(statSync(row.run_dir).mtimeMs).toISOString(),
         paths: metadata?.paths ?? { result: row.result_path },
-        ...ledger(metadata?.worktree),
+        worktree: metadata?.worktree ?? null,
       };
     };
     let rows: Record<string, any>[] = [];
@@ -885,7 +908,15 @@ export async function statusRows(
     }
     const done =
       until === "any" ? rows.some((row) => row.state === "terminal") : rows.every((row) => row.state === "terminal");
-    if (done || !rows.length || Date.now() >= deadline) return { schema: "fabric.status.v1", runs: rows };
+    if (done || !rows.length || Date.now() >= deadline) {
+      const cache = new Map<unknown, Promise<Record<string, unknown>>>();
+      const enriched = await Promise.all(rows.map(async (row) => {
+        if (row.state === "terminal" && detail !== "full") return row;
+        if (!cache.has(row.worktree)) cache.set(row.worktree, ledger(row.worktree));
+        return { ...row, ...await cache.get(row.worktree) };
+      }));
+      return { schema: "fabric.status.v1", runs: enriched };
+    }
     await new Promise((done) => setTimeout(done, Math.min(100, deadline - Date.now())));
   }
 }
@@ -903,7 +934,7 @@ export async function fabricStatus(
 
 export async function fabricOutput(
   workspace: string,
-  input: { id: string; part?: string; offset?: number; max_bytes?: number },
+  input: { id: string; part?: string; offset?: number; max_bytes?: number; tail?: boolean },
 ) {
   const result = await statusRows(workspace, [input.id]);
   if (!result.runs) return result;
@@ -914,8 +945,8 @@ export async function fabricOutput(
   const raw = row.paths?.[part] ?? (part === "result" ? row.result_path : undefined);
   if (typeof raw !== "string")
     return { status: "rejected", error: "output_unavailable", fix: `Wait for the owner to publish ${part}.` };
-  const offset = input.offset ?? 0,
-    max = input.max_bytes ?? 4000;
+  let offset = input.offset ?? 0;
+  const max = input.max_bytes ?? 4000;
   if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isInteger(max) || max < 1 || max > 20000)
     return { status: "rejected", error: "output_bounds", fix: "Use offset >= 0 and max_bytes 1–20000." };
   let fd: number | undefined;
@@ -926,13 +957,25 @@ export async function fabricOutput(
     if (isAbsolute(rel) || rel === ".." || rel.startsWith(`..${sep}`)) throw new Error("output escapes run directory");
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     if (!fstatSync(fd).isFile()) throw new Error("output is not a regular file");
-    const bytes = Buffer.alloc(max);
-    const count = readSync(fd, bytes, 0, max, offset);
-    const text = bytes.subarray(0, count).toString("utf8");
+    if (input.tail && input.offset !== undefined)
+      return { status: "rejected", error: "output_bounds", fix: "Use tail or offset, not both." };
+    const size = fstatSync(fd).size;
+    if (input.tail) offset = Math.max(0, size - max);
+    const bytes = Buffer.alloc(max + 3);
+    const available = readSync(fd, bytes, 0, bytes.length, offset);
+    const continuation = (byte: number) => (byte & 0xc0) === 0x80;
+    let start = 0, count = Math.min(max, available);
+    if (input.tail) while (start < count && continuation(bytes[start]!)) start++;
+    else if (available && continuation(bytes[0]!))
+      return { status: "rejected", error: "output_bounds", fix: "Use a UTF-8 boundary from next_offset." };
+    if (count < available) while (count > start && continuation(bytes[count]!)) count--;
+    if (count === start && available > start)
+      return { status: "rejected", error: "output_bounds", fix: "Use max_bytes of at least 4 for UTF-8 text." };
+    const text = bytes.subarray(start, count).toString("utf8");
     return {
       id: input.id,
       part,
-      offset,
+      offset: offset + start,
       next_offset: offset + count,
       eof: offset + count >= fstatSync(fd).size,
       digest: text,

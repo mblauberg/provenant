@@ -1,17 +1,19 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs";
+import { join, isAbsolute } from "node:path";
 const args = process.argv.slice(2),
-  value = (key) => args[args.indexOf(key) + 1];
+  value = (key) => args.includes(key) ? args[args.indexOf(key) + 1] : undefined;
 const owner = process.env.PROVENANT_FIXTURE_OWNER;
-if (args.includes("--cwd")) {
-  console.error("unrecognized --cwd");
-  process.exit(2);
-}
 if (args.includes("--preflight-json")) {
   let text = "";
   for await (const chunk of process.stdin) text += chunk;
   const { tasks } = JSON.parse(text);
+  const errors = tasks.filter((t) => t.prompt_file && (!isAbsolute(t.prompt_file) || !existsSync(t.prompt_file)))
+    .map((t) => ({task_id:t.id,error:"prompt_unavailable",fix:"Pass an existing absolute prompt_file."}));
+  if (errors.length) { console.log(JSON.stringify({status:"rejected",...errors[0],errors})); process.exit(); }
+  if (tasks.some((t) => "network" in t && typeof t.network !== "boolean")) {
+    console.log(JSON.stringify({status:"rejected",error:"network_invalid",fix:"Pass network true or false."})); process.exit();
+  }
   console.log(
     JSON.stringify({
       status: "ready",
@@ -20,6 +22,7 @@ if (args.includes("--preflight-json")) {
         resolved_model: t.model ?? "fixture",
         provider_family: "openai",
         execution_intent: "ordinary",
+        notes: t.alias && t.model ? ["alias and model both supplied; model won"] : [],
       })),
     }),
   );
@@ -52,6 +55,7 @@ if (owner === "batch_run.py") {
         prompt,
         "--timeout",
         String(task.timeout ?? 3600),
+        ...["adapter", "alias", "model", "effort", "cwd"].flatMap((key) => task[key] === undefined ? [] : ["--" + key, String(task[key])]),
       ],
       { env: { ...process.env, PROVENANT_FIXTURE_OWNER: "dispatch_run.py" }, encoding: "utf8" },
     );
@@ -71,7 +75,14 @@ if (args.includes("--resume")) {
   task = readdirSync(join(dir, "tasks"))[0];
   attempt = readdirSync(join(dir, "tasks", task)).length + 1;
 }
+if (args.includes("--alias") && args.includes("--model")) {
+  console.error("--alias and --model are mutually exclusive"); process.exit(2);
+}
 const prompt = readFileSync(value("--prompt-file"), "utf8");
+writeFileSync(join(dir, "_owner", `${task}-args-${attempt}.json`), JSON.stringify(args));
+if (prompt === "reject-before-attempt") {
+  console.log(JSON.stringify({schema_version:1,status:"rejected",message:"dispatch a new run",fix:"dispatch a new run"})); process.exit(2);
+}
 if (prompt === "crash-before-attempt") process.exit(2);
 if (prompt === "pause-before-attempt") await new Promise((r) => setTimeout(r, 500));
 const path = join(dir, "tasks", task, `attempt-${String(attempt).padStart(3, "0")}`);
@@ -84,17 +95,17 @@ const row = {
   attempt,
   state: "running",
   status: null,
-  cwd: process.cwd(),
+  cwd: value("--cwd") ?? process.cwd(),
   worktree: process.cwd(),
   started_at: new Date().toISOString(),
   ended_at: null,
-  evidence: { timeout: Number(value("--timeout")) },
+  evidence: { owner_cwd: process.cwd(), prompt_file: value("--prompt-file"), timeout: Number(value("--timeout")) },
   applied: {
-    sandbox: value("--sandbox") ?? "read-only",
-    network: value("--network") === "false" ? false : true,
+    sandbox: prompt === "no-controls" ? null : value("--sandbox") ?? "read-only",
+    network: prompt === "no-controls" ? null : value("--network") === "false" ? false : true,
     add_dirs: [],
   },
-  provenance: { line: "Route: codex/fixture@high (openai; observed)" },
+  provenance: { requested: { adapter: value("--adapter"), model: value("--model"), alias: value("--alias"), effort: value("--effort") }, line: "Route: codex/fixture@high (openai; observed)" },
   paths: {
     result: join(path, "result.md"),
     stderr: join(path, "stderr.log"),
