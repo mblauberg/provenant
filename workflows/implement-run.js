@@ -382,10 +382,11 @@ const runIdClause = runId
     'not), e.g. implement-$(date +%Y%m%d-%H%M%S), so the run dir is empty for run_dir_init.sh.'
 const boot = await agent(
   'Bootstrap a dynamic-workflow run.\n' +
-    `1. Resolve the WORKSPACE ROOT (the dir that holds .work/, or the outermost project dir if none) and ` +
+    `1. For a Git project, run git rev-parse --path-format=absolute --git-common-dir from the target worktree, then take the parent of that directory as the WORKSPACE ROOT (the primary checkout). ` +
+    `For a non-Git project use its workspace root. ` +
     `build an ABSOLUTE run-dir path <workspace-root>/.agent-run/runs/<YYYYMMDD-HHMM>-delivery-<slug>-<rand6> so the run dir never lands ` +
     `under a nested subproject. Derive <slug> from the run id, at most 32 lowercase ASCII characters; mint <rand6> once. ${runIdClause}\n` +
-    '   Write the approved intent to a non-empty workspace-relative file, then initialise RUN.json with the installed `deliver` producer from the workspace root:\n' +
+    '   Write the approved intent, authority and evidence files under the primary checkout, then initialise RUN.json with the installed `deliver` producer from that root. The source target may remain a linked worktree:\n' +
     `   Compute <declared-risk> as the higher of the derived risk-assessment tier and the requested ${minimumRisk} floor, then run: ` +
     '"$(provenant root)/skills/deliver/scripts/delivery_receipt.py" init --run-dir "<abs run-dir>" --run-id "<runId>" --profile software --chair-family anthropic --risk-tier "<declared-risk>" --risk-assessment "<risk-assessment.json>" --intent "<approved-intent-file>" --authority "<authority.json>".\n' +
     '   The authority input is the current Authority V2 object from the approved task. It must bound the exact source and artifact paths, expiry, disclosure, secrets, deployment, irreversible actions, network and budget; do not invent wider authority.\n' +
