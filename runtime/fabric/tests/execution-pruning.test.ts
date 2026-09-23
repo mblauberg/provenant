@@ -184,7 +184,7 @@ describe("run directory pruning", () => {
       new AbortController().signal,
       environment,
     );
-    expect(done.status).toBe("succeeded");
+    expect(done.status).toBe("ok");
   }
 
   it("ages out mcp-* run directories and their sibling owner logs", async () => {

@@ -15,6 +15,7 @@
  * pretend otherwise.
  */
 import { runRoot, withoutGitRedirects } from "./identity.js";
+import { canonicalSuccessStatus, isSuccessStatus } from "./success-status.js";
 export { runRoot } from "./identity.js";
 import { execFileSync, execFile } from "node:child_process";
 import {
@@ -436,7 +437,7 @@ export function pruneDispatchRuns(workspace: string, env: NodeJS.ProcessEnv): st
       const receipt = readJson(join(runDir, "RUN_RECEIPT.json"));
       if (receipt?.status === "active") continue;
       if (receipt?.status === "input_required" || receipt?.resumable === true) continue;
-      const successful = ["ok", "succeeded", "cancelled"].includes(String(receipt?.status));
+      const successful = isSuccessStatus(receipt?.status) || receipt?.status === "cancelled";
       const failed = [
         "failed",
         "partial",
@@ -633,7 +634,7 @@ async function legacyStatus(
         const terminal =
           attempts.length > 0 &&
           attempts.every((attempt) =>
-            ["succeeded", "failed", "blocked", "timed_out", "cancelled"].includes(String(attempt.status)),
+            ["ok", "failed", "blocked", "timed_out", "cancelled"].includes(String(canonicalSuccessStatus(attempt.status))),
           ) &&
           (batchId === undefined ||
             (Array.isArray(status?.task_ids) &&
@@ -650,6 +651,7 @@ async function legacyStatus(
         }
         if (alive) state = "running";
         if (selectedTask !== undefined) state = String(selectedTask.status);
+        state = String(canonicalSuccessStatus(state));
         // Owner logs are siblings created by the front door, never arbitrary receipt paths.
         outputPaths.push(`${runDir}-owner.stdout.jsonl`, `${runDir}-owner.stderr.log`);
         const newest = Math.max(started, newestMtimeMs(outputPaths));
@@ -698,11 +700,9 @@ async function legacyStatus(
     await new Promise((done) => setTimeout(done, Math.min(250, deadline - Date.now())));
   }
 }
-
 export interface StatusResult extends Record<string, unknown> {
   runs?: Record<string, any>[];
 }
-
 async function ledger(worktree: unknown): Promise<Record<string, unknown>> {
   const empty = { worktree: worktree ?? null, branch_tip: null, dirty: null, ahead: null };
   if (typeof worktree !== "string") return empty;
@@ -726,7 +726,6 @@ async function ledger(worktree: unknown): Promise<Record<string, unknown>> {
     return empty;
   }
 }
-
 function v1Rows(runDir: string): Record<string, any>[] {
   const grouped = new Map<string, Record<string, any>[]>();
   for (const tree of ["tasks", "dispatch/tasks"]) {
@@ -803,7 +802,7 @@ function v1Rows(runDir: string): Record<string, any>[] {
         run_dir: runDir,
         task_id: row.task_id,
         attempt: metadata!.next_attempt,
-        attempts,
+        attempts: attempts.map((attempt) => ({ ...attempt, status: canonicalSuccessStatus(attempt.status) })),
         attempt_count: attempts.length,
         state: interrupted ? "terminal" : "queued",
         status,
@@ -815,14 +814,14 @@ function v1Rows(runDir: string): Record<string, any>[] {
     }
     return {
       ...effective,
+      status: canonicalSuccessStatus(effective.status),
       ...(notes.length ? { notes } : {}),
       schema: "fabric.status.v1",
       id: row.run_id,
       run_dir: runDir,
-      attempts,
+      attempts: attempts.map((attempt) => ({ ...attempt, status: canonicalSuccessStatus(attempt.status) })),
       attempt_count: attempts.length,
       ...(metadata?.batch_id ? { batch_id: metadata.batch_id } : {}),
-
       result_path: typeof row.paths?.result === "string" ? resolve(runDir, row.paths.result) : null,
     };
   });
@@ -845,10 +844,10 @@ function v1Rows(runDir: string): Record<string, any>[] {
         attempts: [],
         attempt_count: 0,
         state: terminal ? "terminal" : "queued",
-        status: terminal ? (terminalTask?.status ?? "interrupted") : null,
+        status: terminal ? canonicalSuccessStatus(terminalTask?.status ?? "interrupted") : null,
         started_at: metadata.started_at,
         paths: {},
-        digest: `${terminal ? (terminalTask?.status ?? "interrupted") : "queued"} ${id}`,
+        digest: `${terminal ? canonicalSuccessStatus(terminalTask?.status ?? "interrupted") : "queued"} ${id}`,
       });
     }
   return rows;
