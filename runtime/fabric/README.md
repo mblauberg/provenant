@@ -1,265 +1,160 @@
 # Fabric
 
-Fabric is a project-scoped mailbox, small shared task ledger and activity log.
-One SQLite file, no daemon, no setup. Each process opens it directly. Its MCP
-surface also provides a thin front door to the existing dispatch and batch
-owners; Fabric has no provider implementation, scheduler or workflow engine.
+Fabric provides a project mailbox, task ledger and a thin MCP front door to the
+Python orchestration owners. Full provider output stays in run files.
 
 ## Start
 
-The managed `provenant` shim is the stable entry point. The package launchers
-also run the TypeScript in place, so there is no build to keep in step with the source:
-
 ```sh
 provenant fabric whoami
-runtime/fabric/bin/fabric whoami
 runtime/fabric/bin/fabric-mcp
 ```
 
-The package carries `tsx` as a runtime dependency. The launchers resolve it
-from an installed package or the product root.
-`AGENT_FABRIC_PRODUCT_ROOT` selects an installed product checkout and
-`AGENT_FABRIC_TSX_LOADER` can name an explicit loader. `FABRIC_NODE` can name
-the Node binary. Launchers require Node `>=24.15.0` and `<25`.
+The launchers run TypeScript directly with `tsx`; Node 24.15 or newer within
+major version 24 is required. `FABRIC_NODE`, `AGENT_FABRIC_TSX_LOADER` and
+`AGENT_FABRIC_PRODUCT_ROOT` select the runtime, loader and product checkout.
+Restart an existing MCP connection after changing source. `fabric_whoami`
+reports `server_version`, `build_stale` and a restart fix when needed.
 
-Common CLI operations are:
-
-```sh
-fabric send codex "review auth.ts" --kind request
-fabric send codex "result is ready" --task-id review-auth --output-path /tmp/review.md
-fabric inbox                         # claim available deliveries (default: 20)
-fabric inbox --limit 5               # claim at most five deliveries
-fabric inbox --task-id review-auth    # claim only that task's deliveries
-fabric ack <message-id> <claim-id>   # acknowledge after receipt succeeds
-fabric task "review the change"
-fabric claim <task-id>
-fabric tasks
-fabric watch --interval 2
-fabric status --json                 # read-only; absent state is valid
-fabric doctor --json                 # read-only schema and integrity checks
-```
-
-Run `fabric --help` for every argument. Unknown commands are rejected before
-the state directory is opened or an agent is announced. Expected CLI failures
-are concise and do not print Node stack traces.
-
-## Delivery contract
-
-`fabric inbox` atomically claims each returned delivery. The response contains
-`claimId` and `claimExpiresAt`. Another process sharing the same label cannot
-receive that active claim. A successful transport is not an acknowledgement:
-the consumer must call `fabric ack` or `fabric_acknowledge` after it has the
-message.
-
-The default claim lifetime is five minutes. CLI and MCP callers may choose from
-one second to one hour. An unacknowledged expired claim is available for
-redelivery on the next inbox call; no background process is required. A stale
-claim token cannot acknowledge a delivery after another reader reclaims it.
-Repeating a successful acknowledgement with the same token is idempotent.
-
-MCP callers may set `wait_seconds` from zero to 55 on `fabric_inbox`. An empty
-inbox then waits inside that one tool call until a message arrives or the bound
-expires. It returns `[]` on expiry and stops without claiming a later message
-when the caller cancels. Do not query Fabric's SQLite file or start a shell
-watcher; return or make another bounded MCP call instead.
-
-`inbox --peek` is observation-only: it neither claims nor acknowledges. It can
-show an actively claimed delivery, but never reveals that reader's claim token.
-Existing databases keep their rows. A legacy non-null `read_at` remains an
-acknowledged delivery; the additive `delivery_claims` table holds new claims.
-
-A supplied reply parent must already exist in the caller's project. Missing,
-stale and cross-project IDs fail before a message or activity row is inserted.
-Messages may also carry an existing same-project `task_id` and an opaque
-`output_path`. The path is metadata only: Fabric never reads, stats, hashes,
-canonicalises or
-grants authority to it. Replies do not inherit either link unless supplied.
-`fabric_inbox` can filter by `task_id`; filtering happens before any claim, so
-unrelated pending deliveries remain available and redelivery is unchanged.
-
-## Identity and scope
-
-An identity is `(project, agent_id)`:
-
-- `project` is the primary checkout shared by ordinary registered Git
-  worktrees, otherwise the Git top level or absolute directory outside Git;
-- `cwd` is the caller's resolved working directory;
-- `agent_id` is `AGENT_FABRIC_LABEL`, falling back to the client seat; and
-- the client seat is `AGENT_FABRIC_SEAT`, then
-  `AGENT_FABRIC_CLIENT_LABEL`, then `agent`.
-
-The first announcement binds one project/label to one client seat. Reusing that
-label under another seat is rejected. New team IDs cannot reuse a known agent
-label. A legacy database may already contain an overlapping team and agent ID;
-startup remains compatible, team routing wins deterministically, and `doctor`
-reports the ambiguity so it can be retired deliberately.
-The recipient ID `all` is reserved for broadcast and cannot be announced as an
-agent, created as a team, or used as a team member.
-
-A seat is routing metadata, not model-family proof. In particular,
-`provider: "agy"` proves only that the Agy client used that seat. A separate
-dispatch receipt must establish whether Agy selected a Gemini-family or other
-model route.
-
-Several processes may deliberately share one label. They then compete for the
-same inbox claims, while a distinct `AGENT_FABRIC_LABEL` gives each process its
-own address.
-
-Existing rows keyed by an ordinary primary checkout remain valid. Rows
-previously written under a linked-worktree path are left untouched; Fabric does
-not guess at or bulk-rewrite old coordination state.
-
-## Teams, tasks and activity
-
-`fabric_team_create` creates a team or atomically replaces all membership of an
-existing team. Its returned member list is the effective stored set. This
-replacement contract avoids silent delivery to members omitted from the latest
-call.
-
-Tasks keep their existing free-form state. `fabric_task_claim` and CLI `claim`
-add only one concurrency rule: exactly one caller can take an `open`, unowned
-task. Retrying as that owner is idempotent; other callers fail. Generic task
-updates remain cooperative and do not form a state machine, except that the
-literal state `claimed` is reserved for the atomic ownership operation.
-Create targeted tasks with the MCP `owner` field. An owner-bound task is already
-assigned and is not available to unowned-task claiming; retrying as that owner
-is idempotent. Task ownership is cooperative routing metadata, not an
-access-control boundary, and does not grant or restrict tool or filesystem
-access.
-
-Fabric derives identity from the process working directory. The primary checkout
-and all of its registered linked worktrees share messages, tasks, teams and
-activity without configuration; `cwd` still shows where each caller is working.
-Separate repositories, copied worktree metadata and non-Git directories remain
-separate projects.
-
-Git does not record a main working-tree path for separate-git-dir, bare-main or
-submodule layouts. Fabric keeps those ambiguous working trees separate instead
-of guessing an alias that a copied checkout could inherit.
-
-Activity entries expose their monotonic `seq`. `fabric_activity` accepts
-`after_seq` for ascending cursor reads. CLI `watch` uses that cursor and drains
-bounded pages, so it continues after the first 200 rows and across larger
-bursts.
-
-## MCP surface
-
-The MCP server announces its identity at startup with a 1 ms lock budget. If
-the store is busy, coordination tools retry lazily. It exposes:
+## MCP quickstart
 
 ```text
-fabric_whoami       fabric_send          fabric_inbox
-fabric_acknowledge  fabric_team_create   fabric_task_create
-fabric_task_claim   fabric_task_update   fabric_tasks
-fabric_note         fabric_activity      fabric_dispatch
-fabric_status
-fabric_batch        fabric_adapters
+fabric_dispatch{prompt:"Review the change",adapter:"codex",model:"luna",effort:"high"}
+fabric_status{ids:["mcp-a81f3c"],wait_seconds:55}
+fabric_output{id:"mcp-a81f3c",part:"result",max_bytes:4000}
 ```
 
-### Happy path
+Copy the returned `Route:` line for provenance. `content` contains the owner's
+verbatim digest; `structuredContent` contains `fabric.status.v1` rows. A small
+formatter supports older receipts when no digest exists. Request errors contain
+one line with `fix:`. No provider output is embedded in status responses.
 
-Discover configured adapters once with `fabric_adapters` (CLI: `fabric adapters`).
-It lists aliases, concrete models and read-only guarantees from the instance
-`$AGENT_FABRIC_INSTANCE_ROOT/config/model-routing.json` (default `~/.agents`),
-using the product catalogue only when the instance file is absent.
+Exactly twelve tools are registered by default:
 
-```json
-{ "prompt": "review auth.ts", "adapter": "codex", "model": "gpt-6-luna" }
+| Tool | Purpose |
+| --- | --- |
+| `fabric_dispatch` | One prompt, `tasks[]`, or `resume` |
+| `fabric_status` | Read run/task/batch IDs; bounded wait for `any` or `all` |
+| `fabric_cancel` | Cancel the owner and provider group |
+| `fabric_output` | Bounded result, stderr, events or receipt slice |
+| `fabric_adapters` | Compact catalogue, CLI availability and guarantees |
+| `fabric_whoami` | Seat, project and server freshness |
+| `fabric_send` | Send to a seat, team, chair or all |
+| `fabric_inbox` | Peek headers or claim selected messages |
+| `fabric_acknowledge` | Acknowledge using the claim token |
+| `fabric_note` | Append activity |
+| `fabric_activity` | Read recent activity or continue after a cursor |
+| `fabric_task` | `action: create`, `claim`, `update` or `list` |
+
+`FABRIC_LEGACY_TOOLS=1` additionally registers `fabric_batch`,
+`fabric_team_create`, `fabric_task_create`, `fabric_task_claim`,
+`fabric_task_update` and `fabric_tasks`. Teams remain available through those
+legacy tools; the default task interface is `fabric_task`.
+
+Dispatch accepts exactly one of `prompt` and `prompt_file`. Route controls are
+`adapter`, `alias`, `model`, `effort`, `mode`, `worktree`, `cwd`, `network`,
+`sandbox`, `add_dirs` and `fallback`. Writers use `mode: worktree_write` and an
+owned, registered worktree. `cwd` selects an existing read-only directory inside
+the caller workspace. The Python owner validates provider capabilities and
+applies controls; Fabric does not claim a stronger guarantee than its receipt.
+
+`tasks` contains 1–64 task objects with the same prompt and route fields plus
+optional `id`; `concurrency` is 1–8. Defaults are 55 seconds of waiting for a
+single dispatch and zero for a batch. Timeouts default to 3,600 seconds for
+read-only work and 10,800 seconds for writers. `resume` retains the same run ID,
+route, controls and timeout. Use a new dispatch to change those settings.
+
+Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, and `detail`.
+The wave-1 `id` argument and retained `mcp-*` directories remain readable.
+Without IDs it returns active and last-24-hour runs, capped at 20 rows. Rows
+include the latest attempt, attempt history and count, worktree, branch tip, dirty state and
+ahead count; unavailable Git facts are null. Unpublished batch children remain
+visible until an attempt or terminal batch summary accounts for them.
+
+Output defaults to 4,000 bytes and caps each request at 20,000. Continue at
+`next_offset`; `eof` reflects the current file size. Paths must resolve to
+regular files inside the retained run directory. For a batch, select a task ID.
+`detail: full` adds adapter profiles or the agent list to discovery responses.
+CLI presence does not prove authentication; `auth?` makes that uncertainty explicit.
+
+## Mailbox and identity
+
+`fabric_inbox` defaults to a non-claiming peek of ten headers: ID, sender, kind
+and an 80-character preview. `ids:[...]` claims up to 100 selected messages;
+`claim:true` claims available messages up to `limit`. Bodies are capped at
+4 KiB each, with `body_path` for the full text. Deliveries older than fourteen
+days stay in storage but are excluded from the active inbox.
+
+A claim lasts five minutes by default. Acknowledge only after processing the
+message; expired claims redeliver. Claim tokens prevent another reader from
+acknowledging the delivery. `wait_seconds`, `task_id`, `peek` and
+`claim_seconds` remain available for existing integrations.
+
+`chair` resolves through `PROVENANT_CHAIR`; `/root`, `root` and `parent` use
+`PROVENANT_PARENT`, then the chair. Only known project seats are selected. An
+unbound caller falls back to the named chair or the first registered seat.
+Owner completion posts `run_terminal` to the dispatching seat. Status observation
+acknowledges notices through the returned terminal attempt, including a notice
+that arrives after the status response.
+
+Registered Git worktrees share one project while retaining their own cwd.
+`AGENT_FABRIC_LABEL` separates seats of one provider. A label remains bound to its
+first announced provider. Task ownership is cooperative routing metadata, not
+an access-control boundary. Reply parents and linked task IDs must exist in the
+same project.
+
+The shell mailbox retains its explicit claim workflow:
+
+```sh
+fabric inbox --peek
+fabric inbox --limit 5
+fabric ack <message-id> <claim-id>
+fabric watch mcp-a81f3c mcp-b22c       # state changes; exits when all terminal
+fabric watch --activity --interval 2 # activity stream
+fabric status <run-id> --wait-seconds 55
+fabric adapters --json
 ```
 
-`fabric_dispatch` takes `prompt` or a readable `prompt_file` inside the workspace,
-plus an adapter (default: the current provider seat). Optional `model` selects
-an explicit id, including broker ids such as `opencode/<id>`; optional `alias`
-selects `flagship`, `workhorse` (default), or `scout`. A unique catalogue model
-name such as `luna`, `sol`, `astra` or `opus` also works in `alias`. Pass one
-selector and, optionally, `effort`: `low`, `medium`, `high`, `xhigh`, `max` or
-`ultra`. The router still enforces model and effort admissibility.
+## Run storage and boundaries
 
-Mode defaults to `read_only`; inspect the adapter's `read_only_guarantee`
-(Agy is `prompt_only`; OpenCode is `best_effort`). Writers pass `mode: "worktree_write"` and the registered
-Git `worktree` they own exclusively. Default timeouts are 3600 seconds for
-reads and 10800 for writes; `timeout_seconds` overrides them. OpenCode and
-Cursor select an adapter default model when none is given. OpenCode treats
-progress on either output stream as activity; its idle limit is 600 seconds for
-read-only runs and 1800 for writers unless `CF_DISPATCH_IDLE_SECONDS` is set.
-Cancelling a run stops its provider session.
+`identity.runRoot(cwd)` uses the primary checkout's `.agent-run` for Git and the
+workspace directory's `.agent-run` otherwise. New runs are stored under
+`runs/YYYYMMDD-HHMM-dispatch|batch-slug-rand6/`; IDs stay `mcp-rand6`.
+Owner stdout, stderr and staging inputs live inside `_owner/`. New run creation
+adds `/.agent-run/`, `/.worktrees/` and `/.work/` to Git's local exclude file when
+writable. Existing `mcp-*` paths remain readable.
 
-`fabric_batch` takes 1–64 tasks with the same fields and optional concurrency
-(up to eight). Every task is checked before anything launches, with one
-capability probe per adapter per call. Bad inputs return `status: "rejected"`,
-an `error` code and a one-line `fix`; batches include per-task errors. Rejection
-for caller input creates no run directory, and two writer tasks cannot share a
-worktree. Harness or run-setup failures return `preflight_unavailable` with the
-environment, scripts or permissions to check. Cancelling preflight stops its
-child without launching an execution owner.
+Dispatch-time maintenance scans that shared root. It closes active receipts
+older than 48 hours with no observed live owner as `interrupted`. Retention is
+seven days for successful/cancelled runs and fourteen days for failures
+(`AGENT_FABRIC_RUN_RETENTION_HOURS` overrides). Live runs,
+`KEEP`, active receipts and delivery `RUN.json` files are preserved; unknown new
+run directories are left for the cleanup owner. PID start identity is required
+before signalling a recorded process group. A missing `ps` capability cannot
+certify process death or safe cancellation.
 
-Both tools retain full output in files and return a unique short `id`, compact
-status and paths, whether running or terminal.
-`wait_seconds` defaults to 55; zero returns after preflight and launch. Continue
-with `fabric_status({id: "mcp-AbC123", wait_seconds: 55})`, passing the returned
-`id`. Omit `id` for at most 20 workspace runs from the last 24 hours. Task IDs,
-batch IDs and run directories also work; repeated IDs select the newest run
-and return a one-line `note`.
-The CLI equivalents are `fabric status <id> --wait-seconds 55` and
-`fabric status --runs`; flags may appear before or after the ID. Bare
-`fabric status` retains the store summary.
+`AGENT_FABRIC_STATE_DIRECTORY` defaults to
+`~/.local/state/agent-harness/fabric`. New directories use mode 0700; existing
+permissions are preserved. SQLite WAL, immediate claims and durable terminal
+observation records handle concurrent readers. The boundary is one local OS
+user; the mailbox is not a security boundary between processes of that user.
 
-Status reads owner/provider liveness and retained stdout/stderr/result mtimes without
-writing to SQLite or starting background work. It reports elapsed time,
-seconds since output, and `stalled: true` when a live run has been silent longer
-than the greater of 600 seconds or 20% of its timeout. A dead owner without a
-terminal record is `interrupted`. Timeout and cancellation records retain route
-metadata, including the preflight route when the provider emitted no receipt.
-For MCP runs, owners give the dispatcher a private temporary directory and
-record its location per attempt, so status can also observe buffered provider
-output before a result is retained. Owners remove that temporary directory
-after the provider exits; status reads timestamps only.
+## Verification and integration
 
-Dispatch and batch owners retain their chair context, but provider processes
-start without the chair's Fabric state directory, seat, client label, agent
-label, product-root override or `PROVENANT_RUN_*` / `PROVENANT_PREFLIGHT_*`
-custody variables. Missing instance configuration falls back to the product
-catalogue only for router subprocesses. Worker tests and commands discover
-their own workspace instead of using the chair's state or checkout.
+```sh
+npm --prefix runtime/fabric run typecheck
+npm --prefix runtime/fabric test
+node runtime/fabric/mcp-smoke.mjs
+node runtime/fabric/tests/tool-budget.mjs
+```
 
-MCP execution owners close `RUN_RECEIPT.json` after all attempts finish. This is
-a minimal execution-status update under the existing custody lock: the delivery
-finaliser requires synthesis and review gates that ordinary provider tasks do
-not have. It does not certify delivery acceptance, and manual orchestration runs
-keep their existing finalisation workflow.
+The MCP smoke uses fixture owners only, including a real linked worktree,
+question/resume, duplicate-resume rejection, failed-resume recovery, status,
+cancel, bounded output, mailbox claims and terminal-notice acknowledgement.
+The layout test prefers `tests/fixtures/fabric-v1/layout-cases.json`; its local
+fallback is an unchanged copy from Lane A, with a separate symlinked-cwd test.
 
-Run retention is dispatch-time-only: starting a dispatch prunes that
-workspace's `.agent-run/mcp-*` runs older than the retention window (default
-168 hours, `AGENT_FABRIC_RUN_RETENTION_HOURS` overrides, `0` keeps nothing);
-workspaces that only ever read never prune. `fabric dispatch list` reports the
-effective `retention_hours` for the workspace. There is no background reaper
-and no `run gc` command by design — retention is a bounded side effect of the
-next dispatch, not a second lifecycle.
-
-The existing run controls inspect, retry or cancel an execution after the MCP
-call returns. Closing the MCP transport asks any owner started by that process
-to terminate. Fabric does not add a session database, transcript copy,
-scheduler, retry policy, model-family gate or delivery receipt.
-
-`mcp-smoke.mjs` asserts this wire contract with Claude, Codex and Agy client
-seats. Set `AGENT_FABRIC_MCP_COMMAND` to the managed `provenant` shim to test
-stable installed routing. The smoke forwards an explicit product root and
-loader, so a branch run cannot silently certify another checkout.
-`npm run test:package-install` packs and installs the package in a temporary
-prefix, then asserts its installed CLI and MCP bins without a product checkout
-or loader override.
-
-## State and security boundary
-
-`AGENT_FABRIC_STATE_DIRECTORY` selects the state directory. The default is
-`~/.local/state/agent-harness/fabric`. Newly created directories use mode
-`0700`. Fabric does not change an existing directory's permissions because the
-caller may have supplied a shared parent; inspect and correct that directory
-before use.
-
-The threat model is one local operating-system user. Every participating
-process can open the same file, so capability tokens would not create a real
-isolation boundary. SQLite WAL and immediate transactions provide the required
-concurrency. Provider lifecycle and cancellation remain with the existing
-orchestration owners; Fabric only forwards transport closure to a child it
-started. Wake-up remains outside Fabric.
+Before: 15 tools, 9,077 characters, approximately 2,269 tokens (`chars / 4`).
+The default v2 tool-list test enforces at least a 35% reduction. Verification
+counts and remaining integration dependencies are recorded in
+[the Lane B evidence](tests/fixtures/lane-b-verification.json).

@@ -1,0 +1,146 @@
+{
+  "lane": "B \u2014 Fabric MCP surface",
+  "source_commit": "f325a618",
+  "scope": {
+    "1_tools_list_budget": "done",
+    "2_twelve_tools_and_controls": "TS complete; producer integration gaps listed below",
+    "3_digest_and_structured_rows": "done; attempt history matches Lane A status fixture",
+    "4_mailbox_and_watch": "done",
+    "5_layout_and_maintenance": "TS complete; producer nested non-Git cwd containment pending",
+    "6_lane_ledger": "done; ahead is null without an upstream"
+  },
+  "tool_budget": {
+    "before_tools": 15,
+    "before_chars": 9077,
+    "before_tokens": 2269.25,
+    "after_tools": 12,
+    "after_chars": 5707,
+    "after_tokens": 1426.75,
+    "reduction_percent": 37.13,
+    "method": "JSON.stringify(tools/list).length / 4"
+  },
+  "verification": {
+    "typecheck": {
+      "command": "npm --prefix runtime/fabric run typecheck",
+      "result": "passed"
+    },
+    "typescript_full": {
+      "command": "npm --prefix runtime/fabric test",
+      "passed": 125,
+      "failed": 12,
+      "total": 137,
+      "environmental_failures": [
+        "tests/execution-lifecycle.test.ts > owner records > survives a cold start, so a fresh process can list the run",
+        "tests/execution-lifecycle.test.ts > owner records > holds owner cleanup through host shutdown until a resistant provider stops",
+        "tests/execution-lifecycle.test.ts > cancellation > prints an unconfirmed stop reason from dispatch kill",
+        "tests/execution-lifecycle.test.ts > cancellation > fails dispatch kill after signalling only the owner of a live provider",
+        "tests/execution-lifecycle.test.ts > cancellation > signals the owner process group, so the provider child dies too",
+        "tests/execution-lifecycle.test.ts > cancellation > cancels a cold-start run before the attempt directory exists",
+        "tests/execution-lifecycle.test.ts > orphan reaping > leaves no running provider process after its MCP host is killed",
+        "tests/execution-lifecycle.test.ts > orphan reaping > keeps the owner record until an orphan that ignores SIGTERM is killed",
+        "tests/execution-lifecycle.test.ts > orphan reaping > does not mask a still-running orphan with the host-gone reason",
+        "tests/execution-lifecycle.test.ts > orphan reaping > never reaps a run whose host is still alive",
+        "tests/execution-pruning.test.ts > run directory pruning > never prunes a run still in flight",
+        "tests/execution-pruning.test.ts > run directory pruning > keeps an aged run while its recorded provider session is live"
+      ],
+      "evidence": "/bin/ps -o lstart= -p <pid> is denied with operation not permitted; these process identity/cancellation/reaping failures were present before implementation. Chair must rerun outside sandbox."
+    },
+    "mcp_smoke": {
+      "command": "node runtime/fabric/mcp-smoke.mjs",
+      "passed": 5,
+      "failed": 0,
+      "providers": "fixture owners only",
+      "checks": [
+        "12 default / 18 opt-in tools",
+        "35% tool-schema reduction",
+        "digest <120 tokens",
+        "linked-worktree single and batch dispatch",
+        "status wait",
+        "cancel",
+        "question/resume",
+        "duplicate resume rejection",
+        "failed resume recovery",
+        "timeout inheritance",
+        "bounded output",
+        "inbox peek/claim/body cap",
+        "terminal notice auto-ack",
+        "stale server source detection",
+        "status with unavailable mailbox"
+      ]
+    },
+    "python_full": {
+      "command": "HARNESS_PYTHON=/Users/user/Repos/provenant/.venv/bin/python UV_CACHE_DIR=/tmp/lane-b-uv-cache UV_PROJECT_ENVIRONMENT=/Users/user/Repos/provenant/.venv uv run --no-sync python -m pytest -q tests/",
+      "passed": 1924,
+      "failed": 3,
+      "total": 1927,
+      "failures": [
+        {
+          "test": "tests/test_ci_repository_assurance_policy.py::test_fabric_workspace_and_ci_share_the_locked_daemonless_check_graph",
+          "resolution": "Removed optional package scripts; focused rerun passes."
+        },
+        {
+          "test": "tests/test_quickstart_bootstrap.py::test_documented_fresh_checkout_sequence_produces_runnable_fabric",
+          "resolution": "Linked existing runtime dependencies into local node_modules; focused rerun passes."
+        },
+        {
+          "test": "tests/test_harness_contract.py::test_readme_mermaid_parses_with_available_local_renderer",
+          "resolution": "Sandbox-only: Chromium MachPortRendezvousServer bootstrap_check_in Permission denied (1100), independently reproduced with mmdc."
+        }
+      ]
+    },
+    "python_recheck": {
+      "passed": 15,
+      "failed": 0,
+      "selection": [
+        "tests/test_runtime_architecture.py",
+        "tests/test_ci_repository_assurance_policy.py::test_fabric_workspace_and_ci_share_the_locked_daemonless_check_graph",
+        "tests/test_quickstart_bootstrap.py"
+      ]
+    },
+    "diff_check": "passed"
+  },
+  "reviews": {
+    "native_targeted": [
+      {
+        "model": "gpt-6-luna",
+        "effort": "high",
+        "lens": "mailbox concurrency and safety",
+        "result": "reported fixes applied and regression checked"
+      },
+      {
+        "model": "gpt-6-sol",
+        "effort": "high",
+        "lens": "producer/reader contracts and lifecycle",
+        "result": "reported B defects repaired; producer integration gaps retained below"
+      }
+    ],
+    "other_primary": "NOT RUN: this lane is constrained to no live providers; native reviewers are OpenAI-family only."
+  },
+  "contracts": {
+    "layout_fixture": "Shared fixture absent in this worktree at start. Copied unchanged from lane-exec-supervisor to runtime/fabric/tests/fixtures/layout-cases.json; tests prefer shared path when present. Symlinked cwd tested separately.",
+    "attempt_fixture": "Local unchanged copy of Lane A fabric.attempt.v1.",
+    "status_fixture": "Local unchanged copy of Lane A fabric.status.v1; attempts is a history array, attempt_count is additive.",
+    "catalogue": "Uses existing catalogueSnapshot(root?, env?) export. Consumes optional model_details names from Lane C without editing catalogue.ts.",
+    "resume_transport": "--run-dir <existing> --resume <run-id> --prompt-file <file> --timeout <inherited seconds>.",
+    "control_transport": "--network true|false, --sandbox value, repeated --add-dir, --fallback false|true|any|JSON; single cwd is the owner process cwd; batch cwd remains in its task manifest."
+  },
+  "integration_dependencies": [
+    {
+      "owner": "Lane A",
+      "issue": "Apply per-task cwd from the batch manifest. Its current batch launcher ignores this field; fixture-only B smoke cannot certify that producer behavior."
+    },
+    {
+      "owner": "Lane A",
+      "issue": "For a single non-Git nested cwd, honour the explicitly chosen caller run directory outside nested-cwd/.agent-run. B keeps one caller run root and spawns the owner in the requested cwd; A containment currently derives run_root from the effective cwd."
+    },
+    {
+      "owner": "Lane A",
+      "issue": "A projected interrupted row whose raw attempt is still running cannot be resumed by current prepare_resume. B rejects that case with a dispatch-new-run fix; supporting resume requires a producer interruption marker/terminal row."
+    },
+    {
+      "owner": "Chair",
+      "issue": "Rerun process-group/liveness tests outside sandbox and obtain the required other-primary/distinct-family review before acceptance."
+    }
+  ],
+  "authority": "Only Lane B tracked paths changed. No live providers, pushes, PRs or merges."
+}
