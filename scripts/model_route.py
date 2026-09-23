@@ -190,7 +190,7 @@ def _merge_catalog(base: Any, overlay: Any, path: str, drift: list[str]) -> Any:
     return overlay
 
 
-def catalogue_snapshot(path: Path | None = None, *, refresh_capabilities: bool = False) -> dict[str, Any]:
+def catalogue_snapshot(path: Path | None = None) -> dict[str, Any]:
     product = path or PRODUCT_CATALOG_PATH
     base = json.loads(product.read_text())
     drift: list[str] = []
@@ -212,8 +212,6 @@ def catalogue_snapshot(path: Path | None = None, *, refresh_capabilities: bool =
         for name in model.get("names", []):
             shorthands.setdefault(name.casefold(), []).append(f"{model['adapter']}/{model['id']}")
     digest = hashlib.sha256(json.dumps(base, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    if refresh_capabilities:
-        _refresh_capabilities()
     stale_alias_warnings: list[str] = []
     try:
         capabilities = json.loads((_state_root() / "capabilities.json").read_text())
@@ -373,12 +371,18 @@ def _listed_models(raw: str) -> list[str]:
     return list(dict.fromkeys(listed))
 
 
+def _kiro_probe_enforced(evidence: Any) -> bool:
+    return (isinstance(evidence, dict) and evidence.get("attempted_write") is True
+            and evidence.get("permission_denied") is True and evidence.get("file_created") is False)
+
+
 def probe_capabilities(adapter: str, executable: str, deadline: float | None = None) -> tuple[dict[str, Any], int]:
     commands = {"opencode": ["models"], "cursor": ["models"],
                 "kiro": ["chat", "--list-models", "--format", "json"],
                 "codex": ["debug", "models"]}
     if adapter not in commands:
         return {"status": "unsupported_adapter", "adapter": adapter}, 2
+    executable = shutil.which(executable) or executable
     def remaining(limit: float) -> float:
         return max(0.01, min(limit, deadline - time.monotonic())) if deadline is not None else limit
     try:
@@ -395,10 +399,14 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
     except (OSError, ValueError):
         cache = {}
     previous = cache.get(adapter)
-    if isinstance(previous, dict) and previous.get("version") == version:
+    executable_path = str(Path(executable).resolve())
+    if (isinstance(previous, dict) and previous.get("version") == version
+            and previous.get("executable") == executable_path):
         try:
             observed = datetime.fromisoformat(previous["observed_at"].replace("Z", "+00:00"))
-            if (datetime.now(timezone.utc) - observed).total_seconds() < 86400:
+            ttl = 3600 if (previous.get("status") == "probe_unavailable" or
+                           (adapter == "kiro" and not _kiro_probe_enforced(previous.get("read_only_probe")))) else 86400
+            if (datetime.now(timezone.utc) - observed).total_seconds() < ttl:
                 return {**previous, "cache_hit": True}, 0 if previous.get("status") != "probe_unavailable" else 1
         except (ValueError, KeyError, TypeError):
             pass
@@ -409,11 +417,12 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
                                    timeout=remaining(1), check=False).stdout
     except (OSError, subprocess.SubprocessError):
         record = {"status": "probe_unavailable", "adapter": adapter, "version": version,
+                  "executable": executable_path,
                   "observed_at": datetime.now(timezone.utc).isoformat(), "models": [],
                   "message": "Model list unavailable; fix: check CLI authentication"}
         code = 1
     else:
-        record = {"adapter": adapter, "version": version,
+        record = {"adapter": adapter, "version": version, "executable": executable_path,
                   "observed_at": datetime.now(timezone.utc).isoformat(),
                   "probed_flags": sorted(set(re.findall(r"--[a-z][a-z-]+", help_text))),
                   "models": _listed_models(listing)}
@@ -459,7 +468,7 @@ def _probe_kiro_read_only(executable: str, version: str, deadline: float | None)
         target = Path(scratch) / "denied-write.txt"
         prompt = (f"Security boundary test: use fs_write to write a file at FILE={target} "
                   "with contents 'probe'. Do not use shell. Report the tool result.")
-        timeout = min(3.0, deadline - time.monotonic()) if deadline is not None else 3.0
+        timeout = min(60.0, deadline - time.monotonic()) if deadline is not None else 60.0
         if timeout <= 0.1:
             return evidence
         try:
@@ -495,53 +504,27 @@ def _probe_kiro_read_only(executable: str, version: str, deadline: float | None)
     return evidence
 
 
-def _refresh_capabilities() -> None:
-    path = _state_root() / "capabilities.json"
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        with path.with_suffix(".lock").open("a"):
-            pass
-    except OSError:
-        return
-    try:
-        cache = json.loads(path.read_text())
-    except (OSError, ValueError):
-        cache = {}
-    deadline = time.monotonic() + 4
-    for adapter, executable in (("codex", "codex"), ("opencode", "opencode"),
-                                ("cursor", "cursor-agent"), ("kiro", "kiro-cli")):
-        if time.monotonic() >= deadline:
-            break
-        previous = cache.get(adapter) if isinstance(cache, dict) else None
-        try:
-            observed = datetime.fromisoformat(str(previous["observed_at"]).replace("Z", "+00:00"))
-            if (datetime.now(timezone.utc) - observed).total_seconds() < 86400:
-                continue
-        except (KeyError, TypeError, ValueError):
-            pass
-        command = shutil.which(executable)
-        if command:
-            try:
-                probe_capabilities(adapter, command, deadline)
-            except OSError:
-                pass
-
-
 def _kiro_probe_metadata(adapter: str) -> dict[str, Any]:
     if adapter != "kiro":
         return {}
     try:
+        executable = shutil.which("kiro-cli")
+        if not executable:
+            return {}
+        live_version = subprocess.run([executable, "--version"], capture_output=True, text=True,
+                                      timeout=2, check=True).stdout.strip()
         cache = json.loads((_state_root() / "capabilities.json").read_text())
         entry = cache.get("kiro", {})
         observed = datetime.fromisoformat(str(entry["observed_at"]).replace("Z", "+00:00"))
         if not 0 <= (datetime.now(timezone.utc) - observed).total_seconds() < 86400:
             return {}
-        if not isinstance(entry.get("version"), str):
+        if (entry.get("version") != live_version or
+                entry.get("executable") != str(Path(executable).resolve())):
             return {}
         evidence = entry.get("read_only_probe")
-        return {"cli_version": entry["version"],
+        return {"cli_version": live_version,
                 **({"read_only_probe": evidence} if isinstance(evidence, dict) else {})}
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError, AttributeError):
         return {}
 
 
@@ -658,6 +641,8 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 model = alternative
                 registered, _ = _registered_match(adapter_name, model, catalog)
                 break
+        else:
+            notes.append(f"{model} cooling until {until}; no available alternative in {tier} alias")
     requested_variant = next((level for level, suffix in (registered or {}).get("suffix", {}).items()
                               if requested.casefold() == (registered["id"] + suffix).casefold()), "")
     if args.effort and requested_variant and args.effort != requested_variant:
@@ -1400,7 +1385,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
 
     route_notes: list[str] = []
     route_warnings: list[str] = []
-    if args.model and args.alias:
+    if args.model and args.alias and getattr(args, "alias_supplied", True):
         route_notes.append("alias and model both supplied; model won")
     cooldowns = _cooldowns(catalog)
     cooling_until = _cooling(args.adapter, model, cooldowns, catalog)
@@ -1413,6 +1398,8 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 route_notes.append(f"{model} cooling until {cooling_until}; used {candidate}")
                 model = candidate
                 break
+        else:
+            route_notes.append(f"{model} cooling until {cooling_until}; no available alternative in {args.alias} alias")
     override_families = tuple(override_scan_families(model, catalog).values())
     configured_override_models = [
         candidate
@@ -1694,7 +1681,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "select":
         return _preferences.select(args, TASK_CLASS_POLICY, ALIAS_ORDER, EFFORT_ORDER)
     if args.command == "snapshot":
-        record = catalogue_snapshot(refresh_capabilities=True)
+        record = catalogue_snapshot()
         record.pop("catalogue", None)
         print(json.dumps(record, sort_keys=True))
         return 0
@@ -1704,6 +1691,7 @@ def main(argv: list[str] | None = None) -> int:
         return code
     catalog = load_catalog(Path(args.catalog) if args.catalog else None)
     if args.command == "resolve":
+        args.alias_supplied = bool(args.alias)
         if args.endpoint and args.model and not args.alias:
             args.alias = "workhorse"
         ordinary_name = args.alias and args.alias not in ALIAS_ORDER

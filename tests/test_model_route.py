@@ -105,7 +105,7 @@ def test_python_floor_rejects_missing_interpreter(harness_script, runner):
 
 
 def resolve(*args):
-    arguments = [str(SCRIPT), "resolve", *args]
+    arguments = [sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve", *args]
     # The router reads its catalogue from the instance root, which defaults to
     # ~/.agents. Left unpinned these cases route against whatever catalogue the
     # developer happens to have installed, so they pass or fail on the machine
@@ -115,7 +115,7 @@ def resolve(*args):
         text=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
-        env={**os.environ, "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+        env={**os.environ, "PATH": "", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
              "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT)},
     )
     return result, json.loads(result.stdout) if result.stdout else None
@@ -188,6 +188,7 @@ def test_explicit_endpoint_and_newer_model_preserve_identity(monkeypatch):
                                         "--endpoint", "openrouter-anthropic", "--role", "worker")
     assert no_alias_result.returncode == 0, no_alias_result.stderr
     assert no_alias["endpoint_profile"] == "openrouter-anthropic"
+    assert not any("alias and model both supplied" in note for note in no_alias["notes"])
     result, newer = resolve("--adapter", "codex", "--model", "gpt-7-luna", "--role", "worker")
     assert result.returncode == 0, result.stderr
     assert newer["resolved_model"] == "gpt-7-luna"
@@ -218,6 +219,23 @@ def test_canonical_cooldown_skips_suffix_and_warns_on_shorthand(tmp_path):
     assert opus["model_selection"] == "explicit"
     assert opus["fallback_candidates"] == []
     assert any("cooling" in warning for warning in opus["warnings"])
+
+
+def test_cooling_alias_without_alternative_has_note(tmp_path):
+    until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    (tmp_path / "cooldowns.json").write_text(json.dumps({"cooldowns": {
+        "agy/gemini-3.8-flash": {"cooling_until": until},
+    }}))
+    run = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve",
+         "--adapter", "agy", "--alias", "workhorse", "--role", "worker"],
+        capture_output=True, text=True,
+        env={**os.environ, "PATH": str(tmp_path), "AGENT_FABRIC_STATE_ROOT": str(tmp_path),
+             "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT)},
+    )
+    assert run.returncode == 0, run.stderr
+    route = json.loads(run.stdout)
+    assert any("cooling" in note and "no available alternative" in note for note in route["notes"])
 
 
 def test_account_wide_cooldown_warns_on_explicit_model(tmp_path):
@@ -272,21 +290,50 @@ def test_kiro_is_enabled_for_both_routes():
 
 
 def test_kiro_route_carries_cached_negative_probe_evidence(tmp_path):
+    cli = tmp_path / "kiro-cli"
+    cli.write_text("#!/bin/sh\necho 1.2.3\n")
+    cli.chmod(0o755)
     checked = datetime.now(timezone.utc).isoformat()
     negative = {"cli_version": "1.2.3", "checked_at": checked,
                 "attempted_write": True, "permission_denied": True, "file_created": False}
     (tmp_path / "capabilities.json").write_text(json.dumps({"kiro": {
-        "version": "1.2.3", "observed_at": checked, "read_only_probe": negative,
+        "version": "1.2.3", "executable": str(cli),
+        "observed_at": checked, "read_only_probe": negative,
     }}))
-    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "kiro", "--alias", "scout",
+    run = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"),
+                          "resolve", "--adapter", "kiro", "--alias", "scout",
                           "--model", "deepseek-3.2", "--role", "worker"], capture_output=True, text=True,
-                         env={**os.environ, "HARNESS_PYTHON": sys.executable,
+                         env={**os.environ, "PATH": str(tmp_path),
                               "AGENT_FABRIC_STATE_ROOT": str(tmp_path),
                               "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT)})
     assert run.returncode == 0, run.stderr
     route = json.loads(run.stdout)
     assert route["cli_version"] == "1.2.3"
     assert route["read_only_probe"] == negative
+
+
+def test_kiro_route_discards_probe_after_cli_version_changes(tmp_path):
+    cli = tmp_path / "kiro-cli"
+    cli.write_text("#!/bin/sh\necho 1.2.4\n")
+    cli.chmod(0o755)
+    checked = datetime.now(timezone.utc).isoformat()
+    (tmp_path / "capabilities.json").write_text(json.dumps({"kiro": {
+        "version": "1.2.3", "executable": str(cli), "observed_at": checked,
+        "read_only_probe": {"cli_version": "1.2.3", "checked_at": checked,
+                            "attempted_write": True, "permission_denied": True,
+                            "file_created": False},
+    }}))
+    run = subprocess.run(
+        [sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve",
+         "--adapter", "kiro", "--alias", "scout", "--model", "deepseek-3.2", "--role", "worker"],
+        capture_output=True, text=True,
+        env={**os.environ, "PATH": str(tmp_path), "AGENT_FABRIC_STATE_ROOT": str(tmp_path),
+             "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT)},
+    )
+    assert run.returncode == 0, run.stderr
+    route = json.loads(run.stdout)
+    assert route.get("cli_version") != "1.2.3"
+    assert "read_only_probe" not in route
 
 
 def test_kiro_capability_probe_records_observed_write_denial(tmp_path):
@@ -319,6 +366,37 @@ else:
     assert evidence["attempted_write"] is True
     assert evidence["permission_denied"] is True
     assert evidence["file_created"] is False
+
+
+def test_probe_bare_executable_records_binary_found_on_path(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    monkeypatch.setenv("PATH", str(tmp_path))
+    cli = tmp_path / "kiro-cli"
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.3; exit; fi\n"
+                   "if [ \"$1\" = --help ]; then exit; fi\necho auto\n")
+    cli.chmod(0o755)
+    record, code = router.probe_capabilities("kiro", "kiro-cli")
+    assert code == 0
+    assert record["executable"] == str(cli)
+
+
+def test_explicit_kiro_probe_allows_model_response_budget(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    budgets = []
+
+    def fake_run(argv, **kwargs):
+        if "--no-interactive" in argv:
+            budgets.append(kwargs["timeout"])
+        output = "1.2.3" if argv[-1] == "--version" else "auto"
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    monkeypatch.setattr(router.subprocess, "run", fake_run)
+    record, code = router.probe_capabilities("kiro", "/fake/kiro-cli")
+    assert code == 0
+    assert "read_only_probe" in record
+    assert budgets == [60.0]
 
 
 def test_compatibility_drift_rejection_names_a_fix(tmp_path):
@@ -520,6 +598,25 @@ def test_capability_probe_caches_model_list_by_cli_version(tmp_path):
     assert calls.read_text().splitlines() == ["call", "call"]
 
 
+def test_failed_capability_probe_retries_after_one_hour(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    cli = tmp_path / "opencode"
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.3; exit; fi\n"
+                   "if [ \"$1\" = --help ]; then exit; fi\n"
+                   "echo opencode-go/glm-5.3-flash\n")
+    cli.chmod(0o755)
+    (tmp_path / "capabilities.json").write_text(json.dumps({"opencode": {
+        "status": "probe_unavailable", "version": "1.2.3", "executable": str(cli),
+        "observed_at": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+        "models": [],
+    }}))
+    record, code = router.probe_capabilities("opencode", str(cli))
+    assert code == 0
+    assert record["cache_hit"] is False
+    assert record["models"] == ["opencode-go/glm-5.3-flash"]
+
+
 def test_snapshot_exposes_fresh_stale_alias_warning(tmp_path, monkeypatch):
     router = load_router()
     monkeypatch.setattr(router, "PRODUCT_CATALOG_PATH", ROOT / "config" / "model-routing.json")
@@ -534,21 +631,27 @@ def test_snapshot_exposes_fresh_stale_alias_warning(tmp_path, monkeypatch):
                for note in snapshot["stale_alias_warnings"])
 
 
-def test_snapshot_refreshes_stale_probe_and_surfaces_alias_drift(tmp_path):
+def test_snapshot_reads_cached_probe_without_running_clis(tmp_path):
     cli = tmp_path / "codex"
-    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.2.3; exit; fi\n"
-                   "if [ \"$1\" = --help ]; then exit; fi\necho gpt-7-luna\n")
+    calls = tmp_path / "calls"
+    cli.write_text(f"#!/bin/sh\necho called >> '{calls}'\necho gpt-7-luna\n")
     cli.chmod(0o755)
+    kiro = tmp_path / "kiro-cli"
+    kiro.write_text(f"#!/bin/sh\necho \"$@\" >> '{calls}'\necho auto\n")
+    kiro.chmod(0o755)
     (tmp_path / "capabilities.json").write_text(json.dumps({"codex": {
-        "version": "1.2.2", "observed_at": "2020-01-01T00:00:00Z", "models": ["gpt-6-luna"]}}))
-    run = subprocess.run([str(SCRIPT), "snapshot", "--json"], capture_output=True, text=True,
-                         env={**os.environ, "HARNESS_PYTHON": sys.executable,
-                              "PATH": str(tmp_path) + ":" + os.environ["PATH"], "AGENT_FABRIC_STATE_ROOT": str(tmp_path),
+        "version": "1.2.2", "observed_at": "2020-01-01T00:00:00Z",
+        "models": ["gpt-6-luna"]}}))
+    before = (tmp_path / "capabilities.json").read_bytes()
+    run = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "snapshot", "--json"],
+                         capture_output=True, text=True,
+                         env={**os.environ, "PATH": str(tmp_path), "AGENT_FABRIC_STATE_ROOT": str(tmp_path),
                               "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT)})
     assert run.returncode == 0, run.stderr
     snapshot = json.loads(run.stdout)
-    assert any("gpt-7-luna" in note for note in snapshot["stale_alias_warnings"])
-    assert json.loads((tmp_path / "capabilities.json").read_text())["codex"]["models"] == ["gpt-7-luna"]
+    assert snapshot["stale_alias_warnings"] == []
+    assert (tmp_path / "capabilities.json").read_bytes() == before
+    assert not calls.exists()
 
 
 def test_concurrent_capability_probes_keep_both_adapters(tmp_path):
