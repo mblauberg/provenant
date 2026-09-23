@@ -1,33 +1,54 @@
 #!/usr/bin/env python3
 """Sandbox-safe subset of ps, backed by libproc or /proc."""
 
+import pwd
+import signal
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from process_info import process, processes
 
+def _user(uid):
+    try:
+        return pwd.getpwuid(uid).pw_name
+    except (KeyError, OverflowError):
+        return str(uid) if uid >= 0 else "?"
+
+
+def _visible(text):
+    """One process per line: escape control characters as ps does with vis(3)."""
+    return "".join(char if char.isprintable() else char.encode("unicode_escape").decode() for char in text)
+
+
 FIELDS = {
     "pid": ("PID", lambda p: str(p.pid)),
     "ppid": ("PPID", lambda p: str(p.ppid)),
     "pgid": ("PGID", lambda p: str(p.pgid)),
+    "uid": ("UID", lambda p: str(p.uid)),
+    "user": ("USER", lambda p: _user(p.uid)),
     "lstart": ("STARTED", lambda p: p.lstart),
     "etime": ("ELAPSED", lambda p: p.elapsed),
     "time": ("TIME", lambda p: p.cpu),
-    "command": ("COMMAND", lambda p: p.command),
-    "args": ("COMMAND", lambda p: p.command),
-    "comm": ("COMM", lambda p: p.comm),
+    "command": ("COMMAND", lambda p: _visible(p.command)),
+    "args": ("COMMAND", lambda p: _visible(p.command)),
+    "comm": ("COMM", lambda p: _visible(p.comm)),
     "stat": ("STAT", lambda p: p.stat),
     "rss": ("RSS", lambda p: str(p.rss)),
     "tty": ("TTY", lambda p: p.tty),
-    "cmd": ("CMD", lambda p: p.command),
+    "cmd": ("CMD", lambda p: _visible(p.command)),
 }
 DEFAULT = [("pid", "PID"), ("tty", "TTY"), ("time", "TIME"), ("cmd", "CMD")]
+# ps -f and BSD u: the columns we can report truthfully (no %CPU, %MEM or VSZ).
+FULL = [("uid", "UID"), ("pid", "PID"), ("ppid", "PPID"), ("tty", "TTY"), ("time", "TIME"), ("cmd", "CMD")]
+USER = [("user", "USER"), ("pid", "PID"), ("rss", "RSS"), ("tty", "TT"), ("stat", "STAT"),
+        ("time", "TIME"), ("command", "COMMAND")]
+SWITCHES = set("aexAfuw")
 
 
 def error(message):
-    print(f"ps: {message}; supported subset: -p PID[,PID], -a/-x/-ax/-e/-A, "
-          "-o/-O pid,ppid,pgid,lstart,etime,time,command,args,comm,stat,rss", file=sys.stderr)
+    print(f"ps: {message}; supported subset: -p PID[,PID], -a/-x/-e/-A, -f, BSD aux, "
+          "-o/-O pid,ppid,pgid,uid,user,lstart,etime,time,command,args,comm,stat,rss,tty", file=sys.stderr)
     return 2
 
 
@@ -37,47 +58,58 @@ def parse(argv):
     append_command = False
     all_processes = False
     include_no_tty = False
+    layout = DEFAULT
     index = 0
     while index < len(argv):
         arg = argv[index]
-        if (arg.startswith("-") and len(arg) > 2 and arg[-1] in "oO"
-                and all(flag in "axeA" for flag in arg[1:-1])):
-            all_processes = True
-            include_no_tty = include_no_tty or "x" in arg or "e" in arg or "A" in arg
-            arg = "-" + arg[-1]
-        if arg in {"-p", "-o", "-O"}:
+        # BSD style (ps aux) is a leading word of switches without a dash.
+        bsd = index == 0 and not arg.startswith("-") and arg and set(arg) <= SWITCHES
+        body = arg if bsd else arg[1:] if arg.startswith("-") else None
+        if body is None:
+            raise ValueError(f"unsupported argument {arg}")
+        switches = body.rstrip("oOp") if body[-1:] in {"o", "O", "p"} and len(body) > 1 else body
+        if switches != body and not set(switches) <= SWITCHES:
+            raise ValueError(f"unsupported flag {arg}")
+        if set(switches) <= SWITCHES and switches:
+            all_processes = all_processes or bool(set(switches) & set("axeA"))
+            include_no_tty = include_no_tty or bool(set(switches) & set("xeA"))
+            if "f" in switches:
+                layout = FULL
+            if "u" in switches:
+                layout = USER
+            if switches == body:
+                index += 1
+                continue
+            option = body[len(switches):]
+            value_arg = None
+        else:
+            option = body[:1]
+            value_arg = body[1:] or None
+        if option not in {"o", "O", "p"}:
+            raise ValueError(f"unsupported flag {arg}")
+        if value_arg is None:
             index += 1
             if index == len(argv):
-                raise ValueError(f"{arg} needs a value")
-            value = argv[index]
-        elif arg.startswith(("-p", "-o", "-O")) and len(arg) > 2:
-            value = arg[2:]
-            arg = arg[:2]
-        elif arg in {"-a", "-x", "-ax", "-xa", "-e", "-A"}:
-            all_processes = True
-            include_no_tty = include_no_tty or "x" in arg or arg in {"-e", "-A"}
-            index += 1
-            continue
-        else:
-            raise ValueError(f"unsupported flag {arg}")
-        if arg == "-p":
+                raise ValueError(f"-{option} needs a value")
+            value_arg = argv[index]
+        if option == "p":
             try:
-                selected.extend(int(item) for item in value.split(","))
+                selected.extend(int(item) for item in value_arg.split(","))
             except ValueError as exc:
                 raise ValueError("-p needs numeric PIDs") from exc
         else:
-            if arg == "-O" and not fields:
-                fields.extend(DEFAULT[:-1])
+            if option == "O" and not fields:
+                fields.extend(layout[:-1])
                 append_command = True
-            for field in value.split(","):
+            for field in value_arg.split(","):
                 name, separator, header = field.partition("=")
                 if name not in FIELDS:
                     raise ValueError(f"unsupported field {name}")
                 fields.append((name, header if separator else FIELDS[name][0]))
         index += 1
     if append_command:
-        fields.append(DEFAULT[-1])
-    return selected, fields or DEFAULT, all_processes, include_no_tty
+        fields.append(layout[-1])
+    return selected, fields or layout, all_processes, include_no_tty
 
 
 def main(argv=None):
@@ -90,7 +122,7 @@ def main(argv=None):
     except OSError as exc:
         print(f"ps: cannot inspect processes: {exc}", file=sys.stderr)
         return 1
-    rows = [row for row in rows if row is not None]
+    rows = sorted((row for row in rows if row is not None), key=lambda row: row.pid)
     if all_processes and not include_no_tty and not selected:
         rows = [row for row in rows if row.tty not in {"?", "??"}]
     # Header suppression is per field, matching ps -o field=.
@@ -102,4 +134,5 @@ def main(argv=None):
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGPIPE, signal.SIG_DFL)  # ps | head ends quietly, as ps does
     raise SystemExit(main())

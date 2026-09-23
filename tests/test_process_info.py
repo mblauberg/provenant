@@ -105,3 +105,26 @@ def test_command_preserves_arguments_with_spaces():
     finally:
         child.terminate()
         child.wait(timeout=5)
+
+
+@pytest.mark.parametrize(("argv", "header"), [
+    (["aux"], ["USER", "PID", "RSS", "TT", "STAT", "TIME", "COMMAND"]),
+    (["-ef"], ["UID", "PID", "PPID", "TTY", "TIME", "CMD"]),
+    (["ax"], ["PID", "TTY", "TIME", "CMD"]),
+])
+def test_shim_accepts_the_forms_agents_type(argv, header):
+    shim = SCRIPTS / "bin/ps"
+    result = subprocess.run([str(shim), *argv], capture_output=True, text=True, check=True)
+    lines = result.stdout.splitlines()
+    assert lines[0].split() == header
+    pid_column = header.index("PID")
+    pids = [int(line.split()[pid_column]) for line in lines[1:]]
+    assert os.getpid() in pids
+    assert pids == sorted(pids)
+
+
+def test_shim_ends_quietly_when_its_reader_closes():
+    shim = SCRIPTS / "bin/ps"
+    result = subprocess.run(f"{shlex.quote(str(shim))} ax | head -1", shell=True,
+                            capture_output=True, text=True, check=True)
+    assert result.stderr == ""

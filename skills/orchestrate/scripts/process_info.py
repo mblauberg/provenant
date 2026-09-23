@@ -170,6 +170,7 @@ class ProcessInfo:
     stat: str
     rss: int
     tty: str = "??"
+    uid: int = -1
 
 
 @lru_cache(maxsize=1)
@@ -272,6 +273,9 @@ def process(pid):
             command = _darwin_argv(pid) or row.command
             stat = {2: "R", 3: "S", 4: "T", 5: "Z"}.get(row.status, "S")
             tty = row.tty
+            info = _DarwinBsdInfo()
+            read = libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))
+            uid = info.uid if read == ctypes.sizeof(info) else -1
         elif sys.platform.startswith("linux"):
             raw = Path(f"/proc/{pid}/stat").read_text(errors="replace")
             fields = raw[raw.rfind(") ") + 2:].split()
@@ -286,11 +290,12 @@ def process(pid):
                 command = row.command
             stat = fields[0]
             tty = "?" if fields[4] == "0" else fields[4]
+            uid = Path(f"/proc/{pid}").stat().st_uid
         else:
             return _ps_process(pid)
         return ProcessInfo(pid, row.ppid, row.pgid, _lstart(epoch),
                            _duration(time.time() - epoch, elapsed=True), _duration(cpu),
-                           command, row.command, stat, rss, tty)
+                           command, row.command, stat, rss, tty, uid)
     except (OSError, ValueError, IndexError, TypeError, AttributeError):
         return None
 
