@@ -12,10 +12,10 @@ The default MCP surface has twelve tools: `fabric_dispatch`, `fabric_status`, `f
 
 | Tool | Registered request |
 |---|---|
-| `fabric_dispatch` | One top-level `prompt` or `prompt_file`, `tasks[]` (1–64, `concurrency` 1–8), `resume` with a new prompt, or `handoff` with a new prompt. Optional route and control fields include `adapter`, `alias`, `model`, `effort`, `mode`, `worktree`, `cwd`, `network`, `sandbox`, `add_dirs`, `fallback`, `context_ceiling`, `task_id`, `timeout_seconds`, `wait_seconds` (0–55), and `detail`. With `resume` or `handoff`, `task_id` selects one task of a batch. |
-| `fabric_status` | `ids[]` of run, task or batch IDs, `wait_seconds` (0–55), `until: any|all`, and `detail`; `id` is also accepted for one run. One row per run. |
+| `fabric_dispatch` | One top-level `prompt` or `prompt_file`, `tasks[]` (1–64, `concurrency` 1–8; above 8 clamps with a warning), `resume` with a new prompt, or `handoff` with a new prompt. Optional route and control fields include `adapter`, `alias`, `model`, `effort`, `mode`, `worktree`, `cwd`, `network`, `sandbox`, `add_dirs`, `fallback`, `context_ceiling`, `task_id`, positive finite `timeout_seconds`, `wait_seconds` (non-negative integer; values above 55 clamp to 55 with a warning), and `detail`. With `resume` or `handoff`, `task_id` selects one task of a batch. |
+| `fabric_status` | `ids[]` of run, task or batch IDs, non-negative integer `wait_seconds` (values above 55 clamp to 55 with a warning), `until: any|all`, and `detail`; `id` is also accepted for one run. One row per run. |
 | `fabric_cancel` | Required `id`, optional `reason`; asks the owner to stop the provider and tracked descendants. |
-| `fabric_output` | Required `id`, optional `part: result|stderr|events|receipt`, `offset`, and `max_bytes` (1–20,000); returns a bounded chunk and `next_offset`. |
+| `fabric_output` | Required `id`, optional `part: result|stderr|events|receipt`, `offset`, and `max_bytes` (positive integer; values above 20,000 clamp to 20,000 with a warning); returns a bounded chunk and `next_offset`. |
 
 A worker question yields `input_required`; `fabric_dispatch` with `resume` appends an attempt to the same run. `resume` takes a run ID, a run ID plus `task_id` for one task of a batch, or the task's own ID. A resume may change only `context_ceiling` and the attempt's `timeout_seconds`; any other route or control change is rejected naming the field, and needs a new dispatch. For a batch, use `fabric_dispatch` with `tasks[]`; wait on returned IDs with `fabric_status`.
 

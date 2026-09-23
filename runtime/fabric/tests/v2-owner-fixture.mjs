@@ -1,8 +1,19 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs";
 import { join, isAbsolute } from "node:path";
 const args = process.argv.slice(2),
   value = (key) => args.includes(key) ? args[args.indexOf(key) + 1] : undefined;
+const pidLog = process.env.PROVENANT_FIXTURE_PID_LOG;
+if (pidLog) {
+  appendFileSync(pidLog, JSON.stringify({ pid: process.pid, event: "start" }) + "\n");
+  process.on("exit", () => appendFileSync(pidLog, JSON.stringify({ pid: process.pid, event: "exit" }) + "\n"));
+}
+const deadlineMs = Number(process.env.PROVENANT_FIXTURE_DEADLINE_MS ?? 20000);
+const deadline = setTimeout(() => process.exit(124), Number.isFinite(deadlineMs) && deadlineMs > 0 ? deadlineMs : 20000);
+deadline.unref();
+if (args.includes("--deadline-loop")) {
+  while (true) await new Promise((resolve) => setTimeout(resolve, 20));
+}
 const owner = process.env.PROVENANT_FIXTURE_OWNER;
 if (args.includes("--preflight-json")) {
   let text = "";

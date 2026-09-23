@@ -178,6 +178,37 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
     assert (run_dir / "RUN_RECEIPT.json").read_bytes() == receipt_before
 
 
+def test_batch_preflight_does_not_invent_an_explicit_alias_for_model_routes(tmp_path: Path, monkeypatch) -> None:
+    module = load_dispatch_module()
+    monkeypatch.chdir(tmp_path)
+    commands: list[list[str]] = []
+
+    def resolve(command, **_kwargs):
+        commands.append(command)
+        explicit_alias = "--alias" in command
+        has_model = "--model" in command
+        notes = ["alias and model both supplied; model won"] if explicit_alias and has_model else []
+        return subprocess.CompletedProcess(command, 0, json.dumps({
+            "status": "ok", "adapter": "codex", "resolved_model": "gpt-6-luna",
+            "provider_family": "openai", "execution_intent": "ordinary", "notes": notes,
+        }), "")
+
+    monkeypatch.setattr(module.subprocess, "run", resolve)
+    result = module.preflight_tasks([
+        {"id": "model-only", "adapter": "codex", "model": "gpt-6-luna", "prompt": "hi"},
+        {"id": "explicit-both", "adapter": "codex", "alias": "workhorse", "model": "gpt-6-luna", "prompt": "hi"},
+    ])
+
+    model_only, explicit_both = result["routes"]
+    resolve_commands = [command for command in commands if len(command) > 2 and command[2] == "resolve"]
+    assert len(resolve_commands) == 2
+    assert "--alias" not in resolve_commands[0]
+    assert "--model" in resolve_commands[0]
+    assert model_only["notes"] == []
+    assert "--alias" in resolve_commands[1]
+    assert explicit_both["notes"] == ["alias and model both supplied; model won"]
+
+
 def test_agy_git_evidence_is_copied_into_attempt_and_bound_to_prompt(tmp_path: Path, monkeypatch) -> None:
     run_dir = make_run(tmp_path, "agy-evidence")
     source = run_dir / "evidence" / "git-evidence.md"

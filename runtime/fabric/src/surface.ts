@@ -6,7 +6,20 @@ import type { CatalogueSnapshot } from "./catalogue.js";
 import type { Message } from "./store.js";
 import { databasePath } from "./identity.js";
 
-export function digest(row: Record<string, any>): string {
+function digestBase(row: Record<string, any>): string {
+  if (row.state === "running" || row.status === "running") {
+    const id = row.run_id ?? row.id ?? row.task_id ?? "?";
+    const route = row.provenance?.line;
+    const adapter = row.adapter ?? row.route?.adapter ?? row.provenance?.requested?.adapter;
+    const model = row.model ?? row.route?.resolved_model ?? row.provenance?.resolved_model ?? row.provenance?.requested?.model;
+    const effort = row.provenance?.effort_applied ?? row.route?.effort;
+    const routeText = typeof route === "string"
+      ? route.replace(/^Route:\s*/u, "")
+      : adapter && model ? `${adapter}/${model}${effort ? `@${effort}` : ""}` : "";
+    const resultPath = row.result_path ?? row.paths?.result;
+    const resultText = resultPath ? ` · result ${resultPath}` : ` · fabric_status{ids:["${id}"],wait_seconds:55}`;
+    return `running ${id}${routeText ? ` ${routeText}` : ""}${resultText}`;
+  }
   if (typeof row.digest === "string") return row.digest;
   if (Array.isArray(row.digest)) return row.digest.join("\n");
   if (row.error || row.status === "rejected")
@@ -26,18 +39,26 @@ export function digest(row: Record<string, any>): string {
     }
     return lines;
   }
-  if (row.status) {
+  if (row.status || row.state) {
     const id = row.run_id ?? row.id ?? row.task_id ?? "?";
     const route = row.provenance?.line;
     const adapter = row.adapter ?? row.route?.adapter ?? row.provenance?.requested?.adapter;
     const model = row.model ?? row.route?.resolved_model ?? row.provenance?.resolved_model ?? row.provenance?.requested?.model;
     const effort = row.provenance?.effort_applied ?? row.route?.effort;
-    const routeText = adapter && model ? ` ${adapter}/${model}${effort ? `@${effort}` : ""}` : "";
+    const routeText = adapter && model
+      ? ` ${adapter}/${model}${effort ? `@${effort}` : ""}`
+      : typeof route === "string" ? ` ${route.replace(/^Route:\s*/u, "")}` : "";
     const resultPath = row.result_path ?? row.paths?.result;
-    const resultText = resultPath ? ` · result ${resultPath}` : row.state === "running" ? ` · fabric_status{ids:["${id}"],wait_seconds:55}` : ` · result pending`;
-    return `${row.status} ${id}${routeText}${resultText}${route ? `\n  ${route}` : ""}`;
+    const state = row.status ?? row.state;
+    const resultText = resultPath ? ` · result ${resultPath}` : state === "running" ? ` · fabric_status{ids:["${id}"],wait_seconds:55}` : ` · result pending`;
+    return `${state} ${id}${routeText}${resultText}${route ? `\n  ${route}` : ""}`;
   }
   return JSON.stringify(row);
+}
+export function digest(row: Record<string, any>): string {
+  const base = digestBase(row);
+  const warnings = Array.isArray(row.warnings) ? row.warnings.join("\n") : "";
+  return warnings ? `${base}${base ? "\n" : ""}${warnings}` : base;
 }
 /** Keep the default structured reply as small as its text digest. */
 export function runView(value: Record<string, any>, detail = "brief"): Record<string, any> {
@@ -45,15 +66,18 @@ export function runView(value: Record<string, any>, detail = "brief"): Record<st
   if (Array.isArray(value.runs)) return { ...value, runs: value.runs.map((row: Record<string, any>) => runView(row)) };
   const keys = ["schema", "id", "run_id", "task_id", "batch_id", "run_dir", "state", "status",
     "attempt", "attempt_count", "digest", "paths", "cwd", "worktree", "mode", "applied", "context",
-    "warnings", "notes", "question", "fix", "retryable", "reset_at", "retry_after"];
+    "provenance", "warnings", "notes", "question", "fix", "retryable", "reset_at", "retry_after"];
   return Object.fromEntries(keys.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]).concat(
     value.digest === undefined ? [["digest", digest(value)]] : [],
   ));
 }
 
-export function reply(value: unknown) {
+export function reply(value: unknown, includeStructuredContent = true) {
   const payload = Array.isArray(value) ? { items: value } : (value as Record<string, any>);
-  return { content: [{ type: "text" as const, text: digest(payload) }], structuredContent: payload };
+  return {
+    content: [{ type: "text" as const, text: digest(payload) }],
+    ...(includeStructuredContent ? { structuredContent: payload } : {}),
+  };
 }
 const boot = Date.now();
 export function serverBuild(root = resolve(import.meta.dirname, ".."), loadedAt = boot) {
