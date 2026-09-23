@@ -81,4 +81,6 @@ def argv(p):
         command += ["-m", p["model"]]
     if p["effort"]:
         command += ["-c", EFFORT_FLAG + "=" + json.dumps(p["effort"])]
+    if p.get("context_ceiling"):
+        command += ["-c", "model_auto_compact_token_limit=" + str(int(p["context_ceiling"]))]
     return command + ["-"]

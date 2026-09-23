@@ -393,6 +393,8 @@ def _command(task: dict[str, Any], run_dir: Path) -> list[str]:
             command.extend((flag, str(task[name])))
     if task.get("git_evidence"):
         command.extend(("--git-evidence", str(task["git_evidence"])))
+    if task.get("context_ceiling") is not None:
+        command.extend(("--context-ceiling", str(task["context_ceiling"])))
     for key in ("sandbox","network","fallback","cwd"):
         if key in task:
             value=task[key]

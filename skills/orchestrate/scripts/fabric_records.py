@@ -11,9 +11,11 @@ from pathlib import Path
 import secrets
 
 try:
+    from .context_usage import marker as context_marker
     from .layout import run_root
     from .output_custody import open_parent
 except ImportError:
+    from context_usage import marker as context_marker
     from layout import run_root
     from output_custody import open_parent
 
@@ -111,7 +113,7 @@ def render_digest(row):
             detail += " (resets " + row["reset_at"] + ")"
     text = f"{status} {run_id} {route} {duration}s" + detail
     if prov.get("line"):
-        text += "\n  " + prov["line"]
+        text += "\n  " + prov["line"] + context_marker(row.get("context"))
     warnings = [str(item) for item in row.get("warnings") or [] if item]
     if warnings:
         # Warn, don't block: the caller sees what was substituted or skipped.

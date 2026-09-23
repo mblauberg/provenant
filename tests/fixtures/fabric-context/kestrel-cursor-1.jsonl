@@ -1,0 +1,13 @@
+{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/tmp/fabric-probe","session_id":"session-cursor-001","model":"Auto","permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"You are cursor/auto via Fabric. Attribute work to exactly this route; never guess a model name.\n\nRemember the word KESTREL. Reply with exactly: OK"}]},"session_id":"session-cursor-001"}
+{"type":"thinking","subtype":"delta","text":"The user wants a reply","session_id":"session-cursor-001","timestamp_ms":1790142007368}
+{"type":"thinking","subtype":"delta","text":" of exactly \"OK\" and","session_id":"session-cursor-001","timestamp_ms":1790142007490}
+{"type":"thinking","subtype":"delta","text":" to remember the word","session_id":"session-cursor-001","timestamp_ms":1790142007490}
+{"type":"thinking","subtype":"delta","text":" KESTREL.","session_id":"session-cursor-001","timestamp_ms":1790142007491}
+{"type":"thinking","subtype":"delta","text":"\n\nWork must be attributed","session_id":"session-cursor-001","timestamp_ms":1790142007492}
+{"type":"thinking","subtype":"delta","text":" to this exact route.","session_id":"session-cursor-001","timestamp_ms":1790142007494}
+{"type":"thinking","subtype":"delta","text":" No model names may ","session_id":"session-cursor-001","timestamp_ms":1790142007496}
+{"type":"thinking","subtype":"delta","text":"be guessed.","session_id":"session-cursor-001","timestamp_ms":1790142007496}
+{"type":"thinking","subtype":"completed","session_id":"session-cursor-001","timestamp_ms":1790142007497}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"OK"}]},"session_id":"session-cursor-001"}
+{"type":"result","subtype":"success","duration_ms":9185,"duration_api_ms":9185,"is_error":false,"result":"OK","session_id":"session-cursor-001","request_id":"id-cursor-002","usage":{"inputTokens":12695,"outputTokens":56,"cacheReadTokens":8192,"cacheWriteTokens":0}}

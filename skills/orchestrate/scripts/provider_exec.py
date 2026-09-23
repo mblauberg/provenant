@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from adapters import profile
 from output_custody import install, verify, CustodyError
+import context_usage
 
 
 def now():
@@ -94,6 +95,7 @@ def build_plan(
     requested_model=None,
     requested_effort=None,
     intent="ordinary",
+    context_ceiling=None,
     **metadata,
 ):
     config = profile(adapter)
@@ -246,6 +248,7 @@ def build_plan(
         or os.environ.get("CF_DISPATCH_AGY_SANDBOX", "0") == "1",
         **metadata,
     }
+    context_usage.apply_ceiling(plan, context_ceiling)
     plan["argv"] = config.argv(plan)
     if config.PROMPT_TRANSPORT == "argv":
         ceiling = int(os.environ.get("CF_DISPATCH_ARGV_PROMPT_MAX_BYTES", "65536"))
@@ -877,6 +880,7 @@ def execute(
     terminal_text = None
     text_truncated = False
     old_handlers = {}
+    meter = context_usage.Meter(plan["adapter"])
 
     def consume(data):
         nonlocal pending, terminal_at, text_size, retry_failure, terminal_text, text_truncated, dropping_line
@@ -894,6 +898,7 @@ def execute(
                 continue
             if not isinstance(event, dict):
                 continue
+            meter.observe(event)
             parsed_line = parse_output(plan["adapter"], line.decode(errors="replace"))
             for key in ("session_id", "observed_model", "reset_at", "retry_after"):
                 if parsed_line.get(key) is not None:
@@ -1282,6 +1287,9 @@ def execute(
         "session_id": session,
         "provenance": provenance,
         "applied": plan["applied"],
+        "context": context_usage.with_codex_rollout(meter.result(), session, environment)
+        if plan["adapter"] == "codex"
+        else meter.result(),
         "warnings": warnings,
         "question": parsed["question"],
         "retryable": status
@@ -1341,6 +1349,7 @@ def parser():
     p.add_argument("--requested-model")
     p.add_argument("--requested-effort")
     p.add_argument("--resume-session")
+    p.add_argument("--context-ceiling", type=float)
     p.add_argument("--no-preface", action="store_true")
     p.add_argument("--cleanup-dir", type=Path)
     p.add_argument("--cleanup-prompt", action="store_true")
@@ -1369,6 +1378,7 @@ def main():
             intent=args.intent,
             preface=not args.no_preface,
             resume_session=args.resume_session,
+            context_ceiling=args.context_ceiling,
             orchestrator_family=args.orchestrator_family,
             reviewer_id=args.reviewer_id,
             risk_tier=args.risk_tier,

@@ -1,0 +1,7 @@
+{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/tmp/fabric-probe","session_id":"session-0010","model":"Auto","permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"Reply with exactly: OK"}]},"session_id":"session-0010"}
+{"type":"thinking","subtype":"delta","text":"Preparing to reply with","session_id":"session-0010","timestamp_ms":1790141046990}
+{"type":"thinking","subtype":"delta","text":" exactly \"OK\".","session_id":"session-0010","timestamp_ms":1790141047107}
+{"type":"thinking","subtype":"completed","session_id":"session-0010","timestamp_ms":1790141047112}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"OK"}]},"session_id":"session-0010"}
+{"type":"result","subtype":"success","duration_ms":5998,"duration_api_ms":5998,"is_error":false,"result":"OK","session_id":"session-0010","request_id":"id-0011","usage":{"inputTokens":16922,"outputTokens":26,"cacheReadTokens":2176,"cacheWriteTokens":0}}

@@ -47,4 +47,6 @@ def argv(p):
         command += ["--model", p["model"]]
     if p["effort"]:
         command += [EFFORT_FLAG, p["effort"]]
+    if p.get("context_ceiling"):
+        command += ["--autocompact", str(p["context_ceiling"])]
     return command
