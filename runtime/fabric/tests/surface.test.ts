@@ -19,6 +19,17 @@ it("keeps legacy route and result path in the brief digest", async () => {
   expect(digest(brief)).toContain("result .agent-run/old/result.md");
 });
 
+it("leaves per-task context to the digest in brief rows", async () => {
+  const { runView } = await import("../src/surface.js");
+  const context = { context_tokens: 212000, input_tokens: null, output_tokens: null, cached_input_tokens: null,
+    context_window_tokens: 1000000, context_percent: null, source: "observed" };
+  const row = { status: "ok", run_id: "mcp-ctx", task_id: "one", digest: "ok mcp-ctx\n  Route: x · ctx 212k/1M", context };
+  const brief = runView({ runs: [row, { ...row, task_id: "two" }] });
+  expect(brief.runs.every((item: Record<string, unknown>) => !("context" in item))).toBe(true);
+  expect(brief.runs[0].digest).toContain("ctx 212k/1M");
+  expect(runView(row, "full").context).toEqual(context);
+});
+
 it("reads adapter cooldowns from the configured state root and explicit override", async () => {
   const { adapterView } = await import("../src/surface.js");
   const root = mkdtempSync(join(tmpdir(), "fabric-cooldowns-"));
