@@ -1167,7 +1167,7 @@ def test_disabled_execution_routes_keep_configured_reason_and_never_launch_provi
         write_executable(bin_dir / "provenant", f"""#!/usr/bin/env bash
             [ "$1" = route ] && [ "$2" = resolve ] || exit 2
             shift 2
-            exec python3 {shlex.quote(str(PRODUCT_ROOT / 'scripts/model_route.py'))} resolve "$@" --adapter-compatibility {shlex.quote(str(overlay))}
+            exec {shlex.quote(sys.executable)} {shlex.quote(str(PRODUCT_ROOT / 'scripts/model_route.py'))} resolve "$@" --adapter-compatibility {shlex.quote(str(overlay))}
         """)
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"

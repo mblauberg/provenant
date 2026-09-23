@@ -172,6 +172,4 @@ The layout test reads the shared `tests/fixtures/fabric-v1/layout-cases.json`,
 including its symlinked-cwd case.
 
 Before: 15 tools, 9,077 characters, approximately 2,269 tokens (`chars / 4`).
-The default v2 tool-list test enforces at least a 35% reduction. Verification
-counts and remaining integration dependencies are recorded in
-[the Lane B evidence](tests/fixtures/lane-b-verification.json).
+The default v2 tool-list test enforces at least a 35% reduction.
