@@ -2043,6 +2043,35 @@ def real_owner_fixture(tmp_path, monkeypatch, code):
     return run, prompt, command
 
 
+def test_normal_attempt_records_reaped_new_session_child(tmp_path, monkeypatch):
+    pid_path = tmp_path / "leftover.pid"
+    code = f'''import json, pathlib, subprocess, sys
+sys.stdin.read()
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
+                         start_new_session=True, stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))
+print(json.dumps({{'type': 'result', 'result': 'DONE', 'is_error': False}}), flush=True)
+'''
+    run, _prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    try:
+        result = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True, timeout=12)
+        assert result.returncode == 0, result.stdout + result.stderr
+        pid = int(pid_path.read_text())
+        row = json.loads((run / "tasks/dispatch-001/attempt-001/attempt.json").read_text())
+        assert row["status"] == "ok"
+        assert any(item["pid"] == pid for item in row["reaped"])
+        assert "! reaped 1 leftover process(es)" in row["digest"]
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+    finally:
+        if pid_path.exists():
+            try:
+                os.killpg(int(pid_path.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 def test_close_mcp_run_reads_canonical_single_task_attempts(tmp_path):
     mod = load_dispatch_module()
     run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())

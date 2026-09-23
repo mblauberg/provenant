@@ -4,8 +4,10 @@ import importlib
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -186,6 +188,105 @@ def fixture_plan(tmp_path, code, adapter="codex", **controls):
     plan["argv"] = [sys.executable, "-u", "-c", code]
     plan["grace_seconds"] = 0.1
     return plan
+
+
+@pytest.mark.parametrize("stop", ["cancelled", "timed_out", "normal", "stalled"])
+def test_new_session_grandchild_does_not_outlive_attempt(tmp_path, stop):
+    pid_path = tmp_path / "grandchild.pid"
+    code = f"""import json, pathlib, subprocess, sys, time
+child = subprocess.Popen(
+    [sys.executable, '-c', 'import time; time.sleep(60)'],
+    start_new_session=True,
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))
+if {stop!r} == 'normal':
+    print(json.dumps({{'type': 'item.completed', 'item': {{'type': 'agent_message', 'text': 'DONE'}}}}), flush=True)
+    print(json.dumps({{'type': 'turn.completed'}}), flush=True)
+else:
+    time.sleep(60)
+"""
+    plan = fixture_plan(
+        tmp_path,
+        code,
+        timeout_seconds=1.6 if stop == "timed_out" else 8,
+        idle_seconds=1.6 if stop == "stalled" else 8,
+    )
+    if stop == "normal":
+        plan["warnings"].append("route warning " + "x" * 240)
+    started = time.monotonic()
+    unrelated = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        record = supervisor().execute(
+            plan,
+            tmp_path / "result.md",
+            cancelled=lambda: stop == "cancelled"
+            and pid_path.exists()
+            and time.monotonic() - started >= 1.5,
+        )
+        assert record["status"] == ("ok" if stop == "normal" else stop)
+        assert pid_path.exists()
+        pid = int(pid_path.read_text())
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+        os.kill(unrelated.pid, 0)
+        if stop == "normal":
+            assert any(item["pid"] == pid for item in record["reaped"])
+            assert record["warnings"][0] == "reaped 1 leftover process(es)"
+    finally:
+        if pid_path.exists():
+            try:
+                os.killpg(int(pid_path.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if unrelated.poll() is None:
+            os.killpg(unrelated.pid, signal.SIGKILL)
+        unrelated.wait(timeout=3)
+
+
+def test_attempt_marker_matches_inherited_environment_only():
+    marker = "fixture-marker-123"
+    environment = dict(os.environ)
+    environment.pop("PROVENANT_ATTEMPT_MARKER", None)
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)",
+         "PROVENANT_ATTEMPT_MARKER=" + marker],
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert not supervisor()._has_attempt_marker(child.pid, marker)
+    finally:
+        child.terminate()
+        child.wait(timeout=3)
+    environment["PROVENANT_ATTEMPT_MARKER"] = marker
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert supervisor()._has_attempt_marker(child.pid, marker)
+    finally:
+        child.terminate()
+        child.wait(timeout=3)
 
 
 @pytest.mark.parametrize(
