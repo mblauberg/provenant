@@ -224,6 +224,18 @@ def test_batch_preflight_does_not_invent_an_explicit_alias_for_model_routes(tmp_
     assert explicit_both["notes"] == ["alias and model both supplied; model won"]
 
 
+def test_explicit_model_receipt_does_not_record_an_implied_alias(tmp_path):
+    mod = load_dispatch_module()
+    args = SimpleNamespace(
+        tool="opencode", alias="flagship", model="mimo", effort=None,
+        task_id="dispatch-001", access_mode="read_only", worktree=None,
+        _phase_timings={}, reviewer_id=None, risk_tier=None,
+        model_override_tier=None,
+    )
+    row = mod.contract_row(args, tmp_path, 1, tmp_path / "attempt", {}, "now")
+    assert row["provenance"]["requested"]["alias"] == ""
+
+
 def test_agy_git_evidence_is_copied_into_attempt_and_bound_to_prompt(tmp_path: Path, monkeypatch) -> None:
     run_dir = make_run(tmp_path, "agy-evidence")
     source = run_dir / "evidence" / "git-evidence.md"

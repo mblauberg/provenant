@@ -2149,6 +2149,7 @@ def test_codex_explicit_model_reaches_adapter_and_reports_runtime_failure():
         assert record["status"] == "failed"
         assert record["resolved_model"] == "gpt-5.6-sol"
         assert record["requested_model"] == "gpt-5.6-sol"
+        assert record["route_alias"] == ""
         assert record["catalog_model"] == ""
         assert record["model_selection"] == ""
         assert invoked.exists()

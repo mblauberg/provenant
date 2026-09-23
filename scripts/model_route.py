@@ -1149,7 +1149,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         "schema_version": 1,
         "catalog_date": catalog["catalog_date"],
         "adapter": args.adapter,
-        "alias": args.alias,
+        "alias": "" if args.model and not args.alias_supplied else args.alias,
         "role": args.role,
         "requested_effort": getattr(args, "raw_effort", requested_effort),
         "effort": requested_effort,
