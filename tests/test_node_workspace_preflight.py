@@ -73,6 +73,7 @@ def test_root_check_runs_checkout_dependency_preflight() -> None:
 
     assert "precheck" not in package["scripts"]
     assert package["scripts"]["check"] == (
+        "python3 scripts/node-workspace-provision.py && "
         "node scripts/node-workspace-preflight.mjs && npm run typecheck && npm run test"
     )
 

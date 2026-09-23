@@ -524,6 +524,7 @@ def test_fabric_workspace_and_ci_share_the_locked_daemonless_check_graph() -> No
     root_scripts = root_package.get("scripts")
     assert isinstance(root_scripts, dict)
     assert root_scripts.get("check") == (
+        "python3 scripts/node-workspace-provision.py && "
         "node scripts/node-workspace-preflight.mjs && npm run typecheck && npm run test"
     )
     assert root_scripts.get("typecheck") == "npm run typecheck --workspaces --if-present"

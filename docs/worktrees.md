@@ -58,6 +58,30 @@ For branch worktrees, the default name is the branch with `/` replaced by `-`.
 The helper warns when an explicit name differs, and `provenant clean` sends
 such a worktree to triage rather than guessing its branch.
 
+### npm dependencies
+
+Creating a worktree clones the primary checkout's `node_modules` with
+copy-on-write when its dependency preflight passes and both checkouts have the
+same `package-lock.json`. It also clones existing `runtime/*/node_modules`
+directories. macOS uses APFS clone files; Linux requires reflink support. This
+keeps each worktree's relative `@local/fabric` workspace link pointed at its
+own checkout. The measured primary tree was 131 MB; four worktrees took about
+4.3 seconds to create and added about 3.3 MB on disk.
+
+If the lockfiles differ, the primary dependencies are missing or invalid, or
+the filesystem cannot make a copy-on-write clone, creation succeeds and its
+JSON receipt reports `node_modules: "skipped"` with a reason. It never makes a
+full copy or runs npm during creation. Pass `--no-node-modules` to skip the
+attempt explicitly; the receipt reports `"disabled"`.
+
+When `npm run check` starts in a linked worktree and its dependency preflight
+fails, it first tries the same clone when the lockfiles match. If cloning is
+not available or the lockfiles differ, it runs
+`npm ci --prefer-offline --no-audit --no-fund` in that worktree, then the
+normal preflight continues. It prints one line naming the action. In the
+primary checkout, checks retain the existing behaviour and fail with the
+preflight message; they never install automatically.
+
 ## Ownership and cleanup
 
 Run `provenant clean` from the project for a dry-run classification and plan
