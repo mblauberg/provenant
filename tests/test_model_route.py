@@ -4232,3 +4232,21 @@ def test_implied_alias_beside_a_named_model_adds_no_note(tmp_path):
         capture_output=True, text=True, env=env, check=False,
     )
     assert "alias and model both supplied" in explicit.stdout
+
+
+@pytest.mark.parametrize(
+    "adapter,model,absent",
+    [
+        ("cursor", "auto", "family unknown"),
+        ("kiro", "auto", "not in the kiro registry"),
+        ("opencode", "deepseek-v4.1-flash", "routed to opencode-go/"),
+    ],
+)
+def test_informational_routes_add_no_warning_notes(tmp_path, adapter, model, absent):
+    env = {**os.environ, "AGENT_FABRIC_STATE_ROOT": str(tmp_path), "FABRIC_ALIAS_IMPLIED": "1"}
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/model_route.py"), "resolve", "--adapter", adapter,
+         "--role", "worker", "--alias", "flagship", "--model", model],
+        capture_output=True, text=True, env=env, check=False,
+    )
+    assert absent not in result.stdout, result.stdout

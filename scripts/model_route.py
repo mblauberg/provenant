@@ -622,9 +622,12 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     tier = args.alias if args.alias in ALIAS_ORDER else next(
         (name for name, candidates in aliases.items() if model in candidates), "workhorse"
     )
-    if registered is None:
+    # `auto` is the provider's own chooser; a provider prefix is not a new model.
+    provider_auto = requested.casefold() == "auto"
+    if registered is None and not provider_auto:
         notes.append(f"{requested} is not in the {adapter_name} registry; passed through as given")
-    elif (explicit and model.casefold() != requested.casefold() and not match_notes
+    elif (registered is not None and explicit and model.casefold() != requested.casefold() and not match_notes
+          and not model.casefold().endswith("/" + requested.casefold())
           and not any(requested.casefold() == (model + suffix).casefold()
                       for suffix in registered.get("suffix", {}).values())):
         notes.append(f"{requested} routed to {model}")
@@ -679,7 +682,8 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     family, family_source = attribute_model_family(model, catalog)
     if not family:
         family, family_source = "generic-open", "unknown-passed-through"
-        notes.append(f"{model} family unknown; treated as generic-open")
+        if model.casefold() != "auto":
+            notes.append(f"{model} family unknown; treated as generic-open")
     fixed = adapter.get("fixed_model_family")
     if fixed and family != fixed:
         owner = _owner_adapter(model, catalog)
@@ -1523,7 +1527,9 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             effort = max((candidate for candidate in supported if EFFORT_ORDER[candidate] <= rank),
                          key=lambda candidate: EFFORT_ORDER[candidate],
                          default=min(supported, key=lambda candidate: EFFORT_ORDER[candidate]))
-            effort_substitution = f"{requested_effort} unsupported by {model}; ran at {effort}"
+            effort_substitution = (
+                f"{requested_effort} unsupported by {model}; ran at {effort}" if effort != requested_effort else ""
+            )
             capability_source = "runtime-model-catalog" if probed.get("supported_efforts") else "registry"
             effort_status = ""
     if not effort_status and getattr(args, "raw_effort", None):
