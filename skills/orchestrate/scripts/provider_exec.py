@@ -7,6 +7,7 @@ import argparse
 from collections import deque
 import ctypes
 import ctypes.util
+from functools import lru_cache
 import json
 import math
 import os
@@ -154,7 +155,8 @@ def build_plan(
         raise ValueError("prompt contains NUL")
     if preface:
         prompt = (
-            f"You are {route_label} via Fabric. Attribute work to exactly this route; never guess a model name.\n\n"
+            f"You are {route_label} via Fabric. Attribute work to exactly this route; never guess a model name. "
+            "Processes left running are stopped when this run ends.\n\n"
             + prompt
         )
     guarantee = (
@@ -679,21 +681,81 @@ class _DarwinBsdInfo(ctypes.Structure):
     ]
 
 
-def _process_snapshot():
-    if sys.platform == "darwin":
-        library = ctypes.util.find_library("proc")
-        if not library:
-            return {}
+@lru_cache(maxsize=1)
+def _darwin_libproc():
+    library = ctypes.util.find_library("proc")
+    if not library:
+        return None
+    try:
+        libproc = ctypes.CDLL(library, use_errno=True)
+    except OSError:
+        return None
+    libproc.proc_listallpids.argtypes = (ctypes.c_void_p, ctypes.c_int)
+    libproc.proc_listallpids.restype = ctypes.c_int
+    libproc.proc_pidinfo.argtypes = (
+        ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int,
+    )
+    libproc.proc_pidinfo.restype = ctypes.c_int
+    return libproc
+
+
+def _linux_process_row(pid, proc_root=Path("/proc")):
+    stat = (proc_root / str(pid) / "stat").read_bytes().decode(errors="replace")
+    end = stat.rfind(") ")
+    if end < 0:
+        return None
+    fields = stat[end + 2:].split()
+    if len(fields) < 20:
+        return None
+    return _ProcessRow(
+        pid, int(fields[1]), int(fields[2]), fields[19],
+        stat[stat.find("(") + 1:end], fields[0] == "Z",
+    )
+
+
+def _linux_tree_snapshot(root_pid, known_pids, proc_root=Path("/proc")):
+    """Walk task children from the direct provider and previously seen children."""
+    rows = {}
+    queue = deque([root_pid, *known_pids])
+    visited = set()
+    while queue:
+        pid = queue.popleft()
+        if pid in visited:
+            continue
+        visited.add(pid)
         try:
-            libproc = ctypes.CDLL(library, use_errno=True)
+            row = _linux_process_row(pid, proc_root)
         except OSError:
+            continue
+        if row is None:
+            continue
+        rows[pid] = row
+        task = proc_root / str(pid) / "task"
+        try:
+            threads = list(task.iterdir())
+        except OSError:
+            return None  # Kernel lacks task/children; use the full census.
+        for thread in threads:
+            try:
+                children = (thread / "children").read_text()
+            except OSError:
+                return None
+            queue.extend(int(child) for child in children.split())
+    return rows
+
+
+def _process_snapshot():
+    try:
+        return _process_snapshot_unchecked()
+    except Exception:
+        return {}
+
+
+def _process_snapshot_unchecked():
+    if sys.platform == "darwin":
+        libproc = _darwin_libproc()
+        if libproc is None:
             return {}
-        libproc.proc_listallpids.argtypes = (ctypes.c_void_p, ctypes.c_int)
-        libproc.proc_listallpids.restype = ctypes.c_int
-        libproc.proc_pidinfo.argtypes = (
-            ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int,
-        )
-        libproc.proc_pidinfo.restype = ctypes.c_int
         count = libproc.proc_listallpids(None, 0)
         if count <= 0:
             return {}
@@ -725,59 +787,61 @@ def _process_snapshot():
         for entry in pids:
             if not entry.name.isdecimal():
                 continue
+            pid = int(entry.name)
             try:
-                stat = Path(entry.path, "stat").read_text()
+                row = _linux_process_row(pid, Path(entry.path).parent)
             except OSError:
                 continue
-            end = stat.rfind(") ")
-            if end < 0:
-                continue
-            fields = stat[end + 2:].split()
-            if len(fields) < 20:
-                continue
-            pid = int(entry.name)
-            rows[pid] = _ProcessRow(
-                pid, int(fields[1]), int(fields[2]), fields[19],
-                stat[stat.find("(") + 1:end], fields[0] == "Z",
-            )
+            if row is not None:
+                rows[pid] = row
     return rows
 
 
-def _has_attempt_marker(pid, marker):
-    expected = ("PROVENANT_ATTEMPT_MARKER=" + marker).encode()
+def _process_environment(pid):
     if sys.platform.startswith("linux"):
         try:
-            return expected in Path(f"/proc/{pid}/environ").read_bytes().split(b"\0")
+            with Path(f"/proc/{pid}/environ").open("rb") as stream:
+                return stream.read(1024 * 1024).split(b"\0")
         except OSError:
-            return False
+            return ()
     if sys.platform != "darwin":
-        return False
+        return ()
     libc = ctypes.CDLL(None, use_errno=True)
     mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, pid
     size = ctypes.c_size_t()
     if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0 or size.value > 1024 * 1024:
-        return False
+        return ()
     data = ctypes.create_string_buffer(size.value)
     if libc.sysctl(mib, 3, data, ctypes.byref(size), None, 0) != 0:
-        return False
+        return ()
     # KERN_PROCARGS2 stores argc, executable path, argv, then NUL-separated env.
     raw = data.raw[:size.value]
     if len(raw) < ctypes.sizeof(ctypes.c_int):
-        return False
+        return ()
     argc = ctypes.c_int.from_buffer_copy(raw).value
     if not 0 <= argc <= 65536:
-        return False
+        return ()
     offset = raw.find(b"\0", ctypes.sizeof(ctypes.c_int))
     if offset < 0:
-        return False
+        return ()
     while offset < len(raw) and raw[offset] == 0:
         offset += 1
     for _ in range(argc):
         offset = raw.find(b"\0", offset)
         if offset < 0:
-            return False
+            return ()
         offset += 1
-    return expected in raw[offset:].split(b"\0")
+    return raw[offset:].split(b"\0")
+
+
+def _has_attempt_marker(pid, marker):
+    return ("PROVENANT_ATTEMPT_MARKER=" + marker).encode() in _process_environment(pid)
+
+
+def _is_nested_fabric_owner(pid):
+    prefix = b"PROVENANT_RUN_TOKEN="
+    return any(value.startswith(prefix) and len(value) > len(prefix)
+               for value in _process_environment(pid))
 
 
 class _Descendants:
@@ -795,18 +859,36 @@ class _Descendants:
                 pass
         self.root = None
         self.tracked = {}
+        self.spared = {}
+        self.spared_at_stop = set()
         self.snapshot_unavailable = False
 
     def sample(self, include_reparented=False):
-        rows = _process_snapshot()
-        if os.getpid() not in rows:
+        try:
+            return self._sample(include_reparented)
+        except Exception:
+            self.snapshot_unavailable = True
+            return {}
+
+    def _sample(self, include_reparented):
+        rows = None
+        targeted = False
+        if sys.platform.startswith("linux") and not include_reparented:
+            rows = _linux_tree_snapshot(
+                self.process.pid, {pid for pid, _ in (*self.tracked, *self.spared)}
+            )
+            targeted = rows is not None
+        if rows is None:
+            rows = _process_snapshot()
+        if ((targeted and self.process.poll() is None and self.process.pid not in rows)
+                or (not targeted and os.getpid() not in rows)):
             self.snapshot_unavailable = True
         root = rows.get(self.process.pid)
         if self.root is None and root is not None and self.process.poll() is None:
             self.root = root.identity
         parents = {self.root} if self.root else set()
         parents.update(self.tracked)
-        discovered = {}
+        parents.update(self.spared)
         while True:
             newly = {
                 row.identity: row for row in rows.values()
@@ -816,13 +898,17 @@ class _Descendants:
             }
             if not newly:
                 break
-            discovered.update(newly)
+            for identity, row in newly.items():
+                parent = rows[row.ppid].identity
+                if parent in self.spared or _is_nested_fabric_owner(row.pid):
+                    self.spared[identity] = row
+                else:
+                    self.tracked[identity] = row
             parents.update(newly)
-        self.tracked.update(discovered)
         if include_reparented:
             for row in rows.values():
                 if (row.ppid not in {1, os.getpid()} or row.pid == self.process.pid
-                    or row.identity in self.tracked or row.zombie):
+                    or row.identity in self.tracked or row.identity in self.spared or row.zombie):
                     continue
                 if sys.platform == "darwin" and float(row.started) < self.spawned_at:
                     continue
@@ -831,7 +917,10 @@ class _Descendants:
                 ):
                     continue
                 if _has_attempt_marker(row.pid, self.marker):
-                    self.tracked[row.identity] = row
+                    if _is_nested_fabric_owner(row.pid):
+                        self.spared[row.identity] = row
+                    else:
+                        self.tracked[row.identity] = row
         return rows
 
     def live(self, rows):
@@ -841,12 +930,31 @@ class _Descendants:
             and row.identity == identity and not row.zombie
         }
 
-    def signal(self, signum):
-        rows = _process_snapshot()
+    def live_spared(self, rows):
+        return {
+            identity: row for identity in self.spared
+            if (row := rows.get(identity[0])) is not None
+            and row.identity == identity and not row.zombie
+        }
+
+    def signal(self, signum, *, root_group=True):
+        try:
+            rows = _process_snapshot()
+        except Exception:
+            rows = {}
+            self.snapshot_unavailable = True
         live = self.live(rows)
-        groups = {row.pgid for row in live.values() if row.pgid > 0 and row.pgid != os.getpgrp()}
-        if self.process.poll() is None:
-            groups.add(self.process.pid)  # Popen still proves the direct child.
+        spared_groups = {row.pgid for row in self.live_spared(rows).values()}
+        if not root_group:
+            live.pop(self.root, None)
+        groups = {
+            row.pgid for row in live.values()
+            if row.pgid > 0 and row.pgid != os.getpgrp()
+            and row.pgid not in spared_groups
+            and (root_group or row.pgid != self.process.pid)
+        }
+        if root_group and self.process.pid not in spared_groups:
+            groups.add(self.process.pid)  # The original group may outlive its leader.
         signalled_groups = set()
         for pgid in groups:
             try:
@@ -861,7 +969,7 @@ class _Descendants:
                 os.kill(row.pid, signum)
             except (ProcessLookupError, PermissionError):
                 pass
-        if self.process.poll() is None and (
+        if root_group and self.process.poll() is None and (
             signum != signal.SIGTERM or self.process.pid not in signalled_groups
         ):
             try:
@@ -869,25 +977,40 @@ class _Descendants:
             except (ProcessLookupError, PermissionError):
                 pass
 
-    def stop(self, grace=0.5):
+    def stop(self, *, normal=False, descendant_grace=0.5, root_grace=2.0):
+        if normal:
+            settle_deadline = time.monotonic() + 1.5
+            while time.monotonic() < settle_deadline:
+                rows = self.sample(include_reparented=True)
+                if not any(identity != self.root for identity in self.live(rows)):
+                    break
+                time.sleep(0.05)
         rows = self.sample(include_reparented=True)
+        self.spared_at_stop.update(self.live_spared(rows))
         leftovers = {
             identity: {"pid": row.pid, "command": row.command[:80]}
             for identity, row in self.live(rows).items() if identity != self.root
         }
         self.signal(signal.SIGTERM)
-        deadline = time.monotonic() + grace
+        started = time.monotonic()
+        deadline = started + root_grace
+        descendants_killed = False
         while time.monotonic() < deadline:
             self.process.poll()
             rows = self.sample(include_reparented=True)
+            self.spared_at_stop.update(self.live_spared(rows))
             leftovers.update({
                 identity: {"pid": row.pid, "command": row.command[:80]}
                 for identity, row in self.live(rows).items() if identity != self.root
             })
-            if not self.live(rows):
+            if not descendants_killed and time.monotonic() - started >= descendant_grace:
+                self.signal(signal.SIGKILL, root_group=False)
+                descendants_killed = True
+            if self.process.poll() is not None and not self.live(rows):
                 break
             time.sleep(0.05)
         rows = self.sample(include_reparented=True)
+        self.spared_at_stop.update(self.live_spared(rows))
         leftovers.update({
             identity: {"pid": row.pid, "command": row.command[:80]}
             for identity, row in self.live(rows).items() if identity != self.root
@@ -1259,7 +1382,7 @@ def execute(
                 else None
             )
             cpu, next_sample = (), started + 1
-            next_tree_sample = started + 0.25
+            next_tree_sample = started + 1.0
             while True:
                 for key, mask in selector.select(0.05):
                     data = os.read(key.fileobj.fileno(), 65536)
@@ -1279,12 +1402,12 @@ def execute(
                 current = time.monotonic()
                 if current >= next_tree_sample:
                     descendants.sample()
-                    next_tree_sample = current + 0.25
+                    next_tree_sample = current + 1.0
                 exited = process.poll() is not None
                 if exited and not selector.get_map():
                     break
                 if exited:
-                    reaped = descendants.stop()  # descendants may hold output pipes
+                    reaped = descendants.stop(normal=True)  # descendants may hold output pipes
                     stopped = True
                 if cancel_signal or (cancelled and cancelled()):
                     forced = "cancelled"
@@ -1339,7 +1462,7 @@ def execute(
     finally:
         if process:
             if descendants and not stopped:
-                reaped = descendants.stop()
+                reaped = descendants.stop(normal=forced is None)
             # Drain final bytes after the group exits, without an unbounded communicate.
             for key in list(selector.get_map().values()):
                 while True:
@@ -1557,6 +1680,7 @@ def execute(
         "applied": plan["applied"],
         "warnings": warnings,
         "reaped": reaped,
+        **({"spared": len(descendants.spared_at_stop)} if descendants and descendants.spared_at_stop else {}),
         "question": parsed["question"],
         "retryable": status
         in {"usage_limited", "rate_limited", "model_unavailable", "stalled"},

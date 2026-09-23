@@ -14,6 +14,7 @@ import sys
 import textwrap
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -106,6 +107,20 @@ def load_dispatch_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_terminal_attempt_carries_nested_owner_spared_count(tmp_path: Path) -> None:
+    module = load_dispatch_module()
+    args = SimpleNamespace(tool="codex", alias="workhorse", model="fixture", effort="low",
+                           task_id="task-1", access_mode="read_only", worktree=None,
+                           _last_plan={})
+    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
+              "outcome": "succeeded", "status": "succeeded", "result": "result.md",
+              "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
+    row = module.terminal_contract(args, tmp_path, legacy,
+                                   {"status": "ok", "spared": 2}, 1,
+                                   tmp_path / "tasks/task-1/attempt-001")
+    assert row["spared"] == 2
 
 
 def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_path: Path) -> None:

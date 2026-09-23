@@ -1140,7 +1140,7 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     elif legacy["status"]=="blocked": status="input_required"
     elif legacy["status"]=="succeeded": status="ok"
     if status not in TERMINAL_STATUSES: status="failed"
-    for field in ("session_id","retryable","reset_at","retry_after","fix","evidence","applied","warnings","reaped","provenance","pgid","last_progress_at"):
+    for field in ("session_id","retryable","reset_at","retry_after","fix","evidence","applied","warnings","reaped","spared","provenance","pgid","last_progress_at"):
         if field in adapter: row[field]=adapter[field]
     row.update(state="terminal",status=status,ended_at=legacy["finished_at"],question=adapter.get("question") or (legacy.get("question") or {}).get("prompt"))
     if not legacy.get("result"): row["paths"]["result"]=None
