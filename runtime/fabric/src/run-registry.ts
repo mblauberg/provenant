@@ -16,7 +16,8 @@
  */
 import { runRoot, withoutGitRedirects } from "./identity.js";
 export { runRoot } from "./identity.js";
-import { execFileSync, execFile } from "node:child_process";
+import { execFile } from "node:child_process";
+import { psOutput } from "./ps.mjs";
 import {
   existsSync,
   renameSync,
@@ -92,12 +93,8 @@ export interface TerminationOutcome {
 function readProcessStartedAt(pid: number, canonical: boolean): string | null {
   if (!Number.isInteger(pid) || pid <= 1) return null;
   try {
-    const output = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
-      encoding: "utf8",
-      timeout: 5_000,
-      stdio: ["ignore", "pipe", "ignore"],
-      env: canonical ? { ...process.env, LC_ALL: "C", LANG: "C" } : process.env,
-    });
+    const output = psOutput(["-o", "lstart=", "-p", String(pid)],
+      canonical ? { ...process.env, LC_ALL: "C", LANG: "C" } : process.env);
     const value = output.trim();
     return value.length === 0 ? null : value;
   } catch {
