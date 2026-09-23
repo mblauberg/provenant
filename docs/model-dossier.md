@@ -304,6 +304,42 @@ The practical consequence: do not ask Gemini to write its own output file.
 Generate any diff yourself, pass the directory with `--add-dir`, and redirect
 the CLI's stdout to capture the review. That path needs no allow-rules at all.
 
+## agy mechanics
+
+`agy`'s quota is per account, not per model: a `429` on one model locks out
+every model in the family until the same reset, so switching models buys
+nothing, and a lane that fails within a second or two is a quota hit worth
+checking, not a lane that has not started yet.
+
+On a quota lock, `agy` can silently answer through a substitute model under a
+requested Gemini flag instead of surfacing the quota error. Before a
+Gemini-only pass, send a short prompt asking the model to state its own name
+and confirm the answer is a Gemini model before trusting the run.
+
+`agy` takes its prompt as a single argument, and an effective prompt over
+roughly 124 KiB fails closed. Keep embedded material well under that ceiling
+and point the CLI at a directory to read directly rather than pasting large
+content inline.
+
+A Claude lane run through `agy` in plan mode prints only narration to stdout;
+its report is a file under the `agy` brain directory for that conversation,
+not the captured transcript. Grep that directory for a phrase unique to the
+task before treating the lane as having produced nothing.
+
+Keep an `agy` write brief to one small, well-scoped change with no test suite,
+build or other long-running command inside it. A write lane that runs one of
+those times out and loses everything it had not already written.
+
+## Reaching Codex directly
+
+Invoking `codex exec` directly, rather than through the harness dispatcher,
+carries traps the dispatcher otherwise absorbs. Read the transcript tail for a
+usage-limit message before trusting a non-zero exit; the limit clears on its
+own schedule and is not a permanent failure. When the working directory is not
+a trusted git repository, pass `--skip-git-repo-check` rather than relocating
+the launch. A model-catalogue cache-refresh notice or an internal router log
+line in the transcript is background noise on its own, not a failure signal.
+
 ## Entries awaiting owner assessment
 
 The models below are named by `config/model-routing.json` but the owner has not

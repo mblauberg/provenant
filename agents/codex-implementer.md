@@ -219,6 +219,12 @@ clean or are there stray uncommitted files; did any scaffolding file the brief s
 survive. A transcript claiming success while the tree is empty is a real and recurring failure
 mode, so this step is not optional.
 
+Codex commonly leaves its deliverable uncommitted in the worktree. Commit it, even with a
+placeholder message, before running anything that reverts files as part of proving itself, such
+as a mutation pass. That kind of restore returns a file to the last commit, not to whatever was
+sitting uncommitted in the working tree, and applies it to every changed file, not only the one
+under test: reviewing or mutating uncommitted work is how it gets silently destroyed.
+
 Then read `${TMPDIR:-/tmp}/codex-<slug>-report.md`, which is bounded and holds the outcome.
 Between that file and the git commands above you have everything you need.
 

@@ -18,7 +18,9 @@ CLIs; it does not implement provider mechanics. Answer-bearing coordination uses
 available, otherwise a named degraded artefact records the direct result and collection path.
 Fabric claim/ack records enforce message-delivery ownership and redelivery, not provider liveness
 or completion. Herdr observes and sends fire-and-forget steering only. Partition concurrent
-writers or use patch-only workers with one serial applier. Authors and decision-makers must not
+writers or use patch-only workers with one serial applier. A background command is capped near
+ten minutes; run a longer job under `nohup` with an exit-code file and a waiter that reports
+when it finishes. Authors and decision-makers must not
 certify their own surface. Receipts declare independence and record provider family; family
 separation is an assurance property requiring stronger evidence, not a restriction on ordinary
 execution.
@@ -62,7 +64,9 @@ never invent task-class, role or effort fields. Runtime governs, catalogues
 cache, mechanics live in `orchestrate`.
 Durable knowledge belongs in project state, specs, ADRs and runbooks; harness-private memory
 holds only cross-project preferences. Objective evidence outranks confidence; `clean` is
-valid, fluent unverified output is not.
+valid, fluent unverified output is not. A search that finds nothing is not proof that nothing
+exists; verify an unfamiliar or fast-moving name by searching it as written before asserting
+what it is.
 
 A user correction names a class, not an instance: sweep every artefact in scope for the same
 defect and report what the sweep found.

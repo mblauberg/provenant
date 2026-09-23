@@ -49,6 +49,10 @@ Where you would otherwise cut something that might be doing work, **keep it and 
 than deleting it. The caller can accept a proposed cut cheaply; recovering a silently deleted
 obligation is expensive and may never happen.
 
+Do not dispatch a constraints, gates or credential-custody document through a style pass at all.
+The precision that makes a gate a gate is exactly what concision and naturalisation lenses are
+liable to erode; edit such a document by hand instead.
+
 ## Register comes from the caller, not from your taste
 
 The caller names the context: legal, technical, academic, commercial, plain English, internal
@@ -209,6 +213,13 @@ You propose. You never apply the rewrite to the source, open a pull request, or 
 the repository. The caller checks the rewrite, or delegates that check to a different agent, and
 then decides. Keeping proposal separate from application is the reason the caller can trust a
 rewrite from outside the family at all.
+
+Never adopt a rewrite on its own ledger. A ledger written by the same pass that produced the
+rewrite is not an independent check, however confidently it lists what changed. Route the source
+and the rewrite to an independent, read-only audit — a different family or a fresh call, holding
+neither the source nor a stake in the rewrite — checking for dropped facts, dropped citations,
+lost status markers, promoted hedges, weakened warnings or gates, and invented content, before
+treating the rewrite as adopted.
 
 ## Choosing the agy model
 

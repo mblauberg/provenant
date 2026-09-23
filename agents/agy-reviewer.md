@@ -67,7 +67,13 @@ file at `${TMPDIR:-/tmp}/agy-<slug>-prompt.txt` containing:
 - the specific question. A vague "review this" wastes the call. Ask for defects with
   file:line, ranked by severity;
 - an instruction to say plainly when it finds nothing, rather than manufacturing findings to
-  seem useful.
+  seem useful;
+- an explicit prohibition on running test suites, builds, dev servers or browser walks: the
+  review is read-only over the material you paste or point it at, and nothing stops a broad
+  tool grant from letting it start one against a stack another process is already using;
+- an explicit prohibition on shell and git commands in the same line. A sandboxed lane denies
+  git's own config access and reports `SUCCESS` with no review rather than an error, so embed
+  the diff or file list in the prompt instead of asking Gemini to fetch it.
 
 **Pass `--add-dir <REPO>` and let Gemini read.** It genuinely grants reads
 under that directory, with no allow-rule needed, so point it at paths rather
