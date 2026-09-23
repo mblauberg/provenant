@@ -227,6 +227,25 @@ def test_worker_preface_explains_process_cleanup(tmp_path):
     assert "processes left running are then stopped." in plan["prompt"]
 
 
+@pytest.mark.skipif(sys.platform != "darwin", reason="Codex seatbelt is macOS-only")
+def test_codex_seatbelt_provider_finds_ps_shim_on_path(tmp_path):
+    observed = tmp_path / "ps-path.txt"
+    code = f"""import json, os, pathlib, shutil
+pathlib.Path({str(observed)!r}).write_text(shutil.which('ps') or '')
+print(json.dumps({{'type':'turn.completed'}}), flush=True)
+"""
+    plan = fixture_plan(tmp_path, code)
+    supervisor().execute(plan, tmp_path / "result.md")
+    assert observed.read_text() == str(SCRIPTS / "bin/ps")
+
+
+def test_unknown_cpu_census_is_not_zero_cpu_progress(monkeypatch):
+    mod = supervisor()
+    monkeypatch.setattr(mod.process_info, "processes",
+                        lambda: (_ for _ in ()).throw(OSError("census unavailable")))
+    assert mod._cpu_stamp(os.getpid()) is None
+
+
 @pytest.mark.parametrize("stop", ["cancelled", "timed_out", "normal", "stalled"])
 def test_new_session_grandchild_does_not_outlive_attempt(tmp_path, stop):
     pid_path = tmp_path / "grandchild.pid"

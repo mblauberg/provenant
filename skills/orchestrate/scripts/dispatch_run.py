@@ -37,6 +37,7 @@ from typing import Any
 SKILLS_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SKILLS_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import process_info
 CF_DISPATCH = Path(__file__).with_name("cf_dispatch.sh")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
@@ -1062,11 +1063,7 @@ def _record_provider_process(run_dir: Path, process: subprocess.Popen[Any]) -> N
     """
     token = os.environ.get("PROVENANT_RUN_TOKEN") or run_identity(run_dir)
     try:
-        started_at = subprocess.run(
-            ["/bin/ps", "-o", "lstart=", "-p", str(process.pid)],
-            capture_output=True, text=True, timeout=5, check=False,
-            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
-        ).stdout.strip()
+        started_at = process_info.start_time(process.pid)
         record = {
             "schema_version": 1,
             "run_token": token,

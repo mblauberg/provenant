@@ -1,0 +1,107 @@
+"""Process inspection works without executing the setuid system ps."""
+
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+
+import pytest
+
+SCRIPTS = Path(__file__).resolve().parents[1] / "skills/orchestrate/scripts"
+sys.path.insert(0, str(SCRIPTS))
+
+
+def test_start_time_matches_system_ps():
+    import process_info
+
+    observed = process_info.process(os.getpid())
+    assert observed is not None
+    try:
+        system = subprocess.run(
+            ["/bin/ps", "-o", "lstart=", "-p", str(os.getpid())],
+            capture_output=True, text=True, check=True,
+            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
+        )
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("setuid /bin/ps cannot execute in this sandbox")
+    assert observed.lstart == system.stdout.strip()
+
+
+def test_shim_formats_requested_fields_and_default_output():
+    shim = SCRIPTS / "bin/ps"
+    pid = str(os.getpid())
+    result = subprocess.run([str(shim), "-o", "pid=,ppid=,pgid=,lstart=,etime=,time=,command=", "-p", pid],
+                            capture_output=True, text=True, check=True)
+    assert result.stdout.strip().startswith(pid)
+    assert "python" in result.stdout.lower()
+    assert len(result.stdout.strip().split()) >= 11
+    default = subprocess.run([str(shim), "-p", pid], capture_output=True, text=True, check=True)
+    assert default.stdout.splitlines()[0].split() == ["PID", "TTY", "TIME", "CMD"]
+    unsupported = subprocess.run([str(shim), "-Z"], capture_output=True, text=True)
+    assert unsupported.returncode != 0
+    assert "supported" in unsupported.stderr.lower()
+
+
+def test_shim_accepts_compact_all_process_options():
+    shim = SCRIPTS / "bin/ps"
+    result = subprocess.run([str(shim), "-axo", "pid=,ppid=,etime=,time=,command="],
+                            capture_output=True, text=True, check=True)
+    assert any(line.split()[0] == str(os.getpid()) for line in result.stdout.splitlines())
+
+
+def test_shim_O_adds_fields_to_default_output():
+    shim = SCRIPTS / "bin/ps"
+    result = subprocess.run([str(shim), "-O", "ppid", "-p", str(os.getpid())],
+                            capture_output=True, text=True, check=True)
+    assert result.stdout.splitlines()[0].split() == ["PID", "TTY", "TIME", "PPID", "CMD"]
+    cells = result.stdout.splitlines()[1].split(None, 4)
+    assert cells[3] == str(os.getppid())
+    assert "pytest" in cells[4]
+
+
+def test_shim_cpu_time_retains_hundredths():
+    shim = SCRIPTS / "bin/ps"
+    result = subprocess.run([str(shim), "-o", "time=", "-p", str(os.getpid())],
+                            capture_output=True, text=True, check=True)
+    assert "." in result.stdout.strip()
+
+
+def test_unavailable_census_is_not_an_empty_process_list(monkeypatch):
+    import process_info
+
+    class UnavailableLibproc:
+        def proc_listallpids(self, *_args):
+            return 0
+
+    monkeypatch.setattr(process_info.sys, "platform", "darwin")
+    monkeypatch.setattr(process_info, "_darwin_libproc", lambda: UnavailableLibproc())
+    monkeypatch.setattr(process_info.subprocess, "run",
+                        lambda *_args, **_kwargs: (_ for _ in ()).throw(PermissionError("seatbelt")))
+    with pytest.raises(OSError, match="seatbelt"):
+        process_info.processes()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS tty device naming")
+def test_tty_device_is_rendered_by_name():
+    import process_info
+
+    master, slave = os.openpty()
+    try:
+        assert process_info._tty_name(os.fstat(slave).st_rdev) == Path(os.ttyname(slave)).name
+    finally:
+        os.close(master)
+        os.close(slave)
+
+
+def test_command_preserves_arguments_with_spaces():
+    import process_info
+
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)", "two words"])
+    try:
+        observed = process_info.process(child.pid)
+        assert observed is not None
+        assert shlex.split(observed.command)[-1] == "two words"
+    finally:
+        child.terminate()
+        child.wait(timeout=5)

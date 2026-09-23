@@ -8,6 +8,9 @@ from pathlib import Path
 import re
 import secrets
 import subprocess
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import process_info
 
 
 def run_root(cwd=None):
@@ -144,19 +147,10 @@ def reap_orphans(cwd=None, at=None):
                     except PermissionError:
                         continue
                     else:
-                        observed = subprocess.run(
-                            ["/bin/ps", "-o", "lstart=", "-p", str(pgid)],
-                            capture_output=True,
-                            text=True,
-                            timeout=2,
-                            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
-                        )
-                        if not started or observed.stdout.strip() != started:
-                            inherited = subprocess.run(
-                                ["/bin/ps", "-o", "lstart=", "-p", str(pgid)],
-                                capture_output=True, text=True, timeout=2,
-                            )
-                            if not started or inherited.stdout.strip() != started:
+                        observed = process_info.start_time(pgid)
+                        if not started or observed != started:
+                            inherited = process_info._ps_start_time(pgid, canonical=False)
+                            if not started or inherited != started:
                                 continue
                         os.killpg(pgid, signal.SIGTERM)
                         time.sleep(0.1)

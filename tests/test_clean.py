@@ -25,14 +25,17 @@ def test_pid_alive_accepts_legacy_locale_start_after_canonical_check(monkeypatch
     calls = []
     monkeypatch.setattr(module.os, "kill", lambda _pid, _signal: None)
 
-    def fake_command(*argv, **kwargs):
-        canonical = kwargs.get("env", {}).get("LC_ALL") == "C"
-        calls.append("C" if canonical else "inherited")
-        return subprocess.CompletedProcess(argv, 0,
-                                           stdout="Wed Sep 23 17:17:42 2026" if canonical
-                                           else "Wed 23 Sep 17:17:42 2026")
+    def fake_start(pid):
+        calls.append("C")
+        return "Wed Sep 23 17:17:42 2026"
 
-    monkeypatch.setattr(module, "_command", fake_command)
+    def fake_legacy(pid, *, canonical):
+        assert not canonical
+        calls.append("inherited")
+        return "Wed 23 Sep 17:17:42 2026"
+
+    monkeypatch.setattr(module.process_info, "start_time", fake_start)
+    monkeypatch.setattr(module.process_info, "_ps_start_time", fake_legacy)
     assert module._pid_alive(12345, "Wed 23 Sep 17:17:42 2026")
     assert calls == ["C", "inherited"]
 

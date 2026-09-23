@@ -16,6 +16,9 @@ import subprocess
 import sys
 from typing import Any
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills/orchestrate/scripts"))
+import process_info
+
 
 RUN_NAME = re.compile(r"^\d{8}-\d{4}-(dispatch|batch|orch|delivery|mission|review|wf)-[A-Za-z0-9-]+-[A-Za-z0-9]{6}$")
 LEGACY_ORCH = re.compile(r"^\d{8}(?:[-T]\d{4,6})?(?:[-_].*)?$")
@@ -108,10 +111,9 @@ def _pid_alive(pid: Any, started_at: Any) -> bool:
     if not isinstance(started_at, str) or not started_at:
         return True
     try:
-        args = ("/bin/ps", "-o", "lstart=", "-p", str(pid))
-        observed = _command(*args, env={**os.environ, "LC_ALL": "C", "LANG": "C"}).stdout.strip()
+        observed = process_info.start_time(pid)
         if observed and observed != started_at:
-            observed = _command(*args).stdout.strip()
+            observed = process_info._ps_start_time(pid, canonical=False)
     except (OSError, subprocess.TimeoutExpired):
         return True
     return not observed or observed == started_at
