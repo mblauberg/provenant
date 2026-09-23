@@ -1,0 +1,105 @@
+#!/usr/bin/env python3
+"""Sandbox-safe subset of ps, backed by libproc or /proc."""
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from process_info import process, processes
+
+FIELDS = {
+    "pid": ("PID", lambda p: str(p.pid)),
+    "ppid": ("PPID", lambda p: str(p.ppid)),
+    "pgid": ("PGID", lambda p: str(p.pgid)),
+    "lstart": ("STARTED", lambda p: p.lstart),
+    "etime": ("ELAPSED", lambda p: p.elapsed),
+    "time": ("TIME", lambda p: p.cpu),
+    "command": ("COMMAND", lambda p: p.command),
+    "args": ("COMMAND", lambda p: p.command),
+    "comm": ("COMM", lambda p: p.comm),
+    "stat": ("STAT", lambda p: p.stat),
+    "rss": ("RSS", lambda p: str(p.rss)),
+    "tty": ("TTY", lambda p: p.tty),
+    "cmd": ("CMD", lambda p: p.command),
+}
+DEFAULT = [("pid", "PID"), ("tty", "TTY"), ("time", "TIME"), ("cmd", "CMD")]
+
+
+def error(message):
+    print(f"ps: {message}; supported subset: -p PID[,PID], -a/-x/-ax/-e/-A, "
+          "-o/-O pid,ppid,pgid,lstart,etime,time,command,args,comm,stat,rss", file=sys.stderr)
+    return 2
+
+
+def parse(argv):
+    selected = []
+    fields = []
+    append_command = False
+    all_processes = False
+    include_no_tty = False
+    index = 0
+    while index < len(argv):
+        arg = argv[index]
+        if (arg.startswith("-") and len(arg) > 2 and arg[-1] in "oO"
+                and all(flag in "axeA" for flag in arg[1:-1])):
+            all_processes = True
+            include_no_tty = include_no_tty or "x" in arg or "e" in arg or "A" in arg
+            arg = "-" + arg[-1]
+        if arg in {"-p", "-o", "-O"}:
+            index += 1
+            if index == len(argv):
+                raise ValueError(f"{arg} needs a value")
+            value = argv[index]
+        elif arg.startswith(("-p", "-o", "-O")) and len(arg) > 2:
+            value = arg[2:]
+            arg = arg[:2]
+        elif arg in {"-a", "-x", "-ax", "-xa", "-e", "-A"}:
+            all_processes = True
+            include_no_tty = include_no_tty or "x" in arg or arg in {"-e", "-A"}
+            index += 1
+            continue
+        else:
+            raise ValueError(f"unsupported flag {arg}")
+        if arg == "-p":
+            try:
+                selected.extend(int(item) for item in value.split(","))
+            except ValueError as exc:
+                raise ValueError("-p needs numeric PIDs") from exc
+        else:
+            if arg == "-O" and not fields:
+                fields.extend(DEFAULT[:-1])
+                append_command = True
+            for field in value.split(","):
+                name, separator, header = field.partition("=")
+                if name not in FIELDS:
+                    raise ValueError(f"unsupported field {name}")
+                fields.append((name, header if separator else FIELDS[name][0]))
+        index += 1
+    if append_command:
+        fields.append(DEFAULT[-1])
+    return selected, fields or DEFAULT, all_processes, include_no_tty
+
+
+def main(argv=None):
+    try:
+        selected, fields, all_processes, include_no_tty = parse(sys.argv[1:] if argv is None else argv)
+    except ValueError as exc:
+        return error(str(exc))
+    try:
+        rows = [process(pid) for pid in dict.fromkeys(selected)] if selected else processes()
+    except OSError as exc:
+        print(f"ps: cannot inspect processes: {exc}", file=sys.stderr)
+        return 1
+    rows = [row for row in rows if row is not None]
+    if all_processes and not include_no_tty and not selected:
+        rows = [row for row in rows if row.tty not in {"?", "??"}]
+    # Header suppression is per field, matching ps -o field=.
+    if any(header for _, header in fields):
+        print(" ".join(header for _, header in fields if header))
+    for row in rows:
+        print(" ".join(FIELDS[name][1](row) for name, _ in fields))
+    return 0 if rows else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

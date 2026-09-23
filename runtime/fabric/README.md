@@ -66,6 +66,11 @@ owned, registered worktree. `cwd` selects an existing read-only directory inside
 the caller workspace. The Python owner validates provider capabilities and
 applies controls; Fabric does not claim a stronger guarantee than its receipt.
 
+On macOS, a Codex `read-only` or `workspace-write` provider gets a bundled `ps`
+shim on PATH because seatbelt blocks the setuid `/bin/ps`. Process identity reads
+use libproc and preserve the recorded C-locale start time. Fabric falls back to
+the PATH command when `/bin/ps` cannot execute; unreadable PIDs stay unverifiable.
+
 `tasks` contains 1–64 task objects with the same prompt and route fields plus
 optional `id`; `concurrency` is 1–8. Top-level route controls and timeout apply
 as defaults, with each task taking precedence. Prompt file paths resolve from

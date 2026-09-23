@@ -46,6 +46,11 @@ it("keeps a live host's run when its identity probe fails", () => {
   expect(row?.orphaned).toBe(false);
 });
 
+it("reads the start time through PATH when system ps cannot execute", () => {
+  probe.fail = process.pid;
+  expect(processStartedAt(process.pid)).toMatch(/^\w{3} \w{3} +\d+ \d\d:\d\d:\d\d \d{4}$/);
+});
+
 it("still orphans a run whose host identity was never recorded", () => {
   const workspace = recordRun(null);
   const [row] = listRecordedRuns(workspace);

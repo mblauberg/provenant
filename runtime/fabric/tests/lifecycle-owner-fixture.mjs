@@ -2,7 +2,8 @@
 // A dispatch owner that behaves like the real one where run lifecycle is
 // concerned: it spawns a provider child in its own process group, records both
 // pids in the run directory, and stays alive until something signals it.
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
+import { psOutput } from "../src/ps.mjs";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 
@@ -76,10 +77,8 @@ const startProvider = ({ ignoreTerm = false, detached = false } = {}) => {
   writeFileSync(join(runDir, "provider.pid"), `${provider.pid}\n`);
   let providerStartedAt;
   try {
-    providerStartedAt = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(provider.pid)], {
-      encoding: "utf8",
-      env: { ...process.env, LC_ALL: "C", LANG: "C" },
-    }).trim();
+    providerStartedAt = psOutput(["-o", "lstart=", "-p", String(provider.pid)],
+      { ...process.env, LC_ALL: "C", LANG: "C" }).trim();
   } catch (error) {
     provider.kill("SIGKILL");
     throw error;

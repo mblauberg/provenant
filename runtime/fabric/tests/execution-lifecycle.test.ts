@@ -12,6 +12,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
+import { psOutput } from "../src/ps.mjs";
 import {
   listRecordedRuns,
   fabricStatus,
@@ -168,14 +169,10 @@ describe("owner records", () => {
     try {
       const locales = execFileSync("locale", ["-a"], { encoding: "utf8" });
       const args = ["-o", "lstart=", "-p", String(process.pid)];
-      const canonical = execFileSync("/bin/ps", args, {
-        encoding: "utf8", env: { ...process.env, LC_ALL: "C", LANG: "C" },
-      }).trim();
+      const canonical = psOutput(args, { ...process.env, LC_ALL: "C", LANG: "C" }).trim();
       for (const locale of ["en_AU.UTF-8", "de_DE.UTF-8"]) {
         if (!locales.includes(locale)) continue;
-        const legacy = execFileSync("/bin/ps", args, {
-          encoding: "utf8", env: { ...process.env, LC_ALL: locale, LANG: locale },
-        }).trim();
+        const legacy = psOutput(args, { ...process.env, LC_ALL: locale, LANG: locale }).trim();
         if (legacy !== canonical) return { locale, legacy, canonical };
       }
     } catch { /* ps or a differing locale is unavailable */ }
@@ -365,9 +362,7 @@ describe("owner records", () => {
     };
     expect(providerRecord.run_token).toBe(ownerRecord.run_token);
     expect(processStartedAt(providerPid)).toBe(providerRecord.provider_started_at);
-    expect(Number(execFileSync("/bin/ps", ["-o", "pgid=", "-p", String(providerPid)], {
-      encoding: "utf8",
-    }).trim())).toBe(providerPid);
+    expect(Number(psOutput(["-o", "pgid=", "-p", String(providerPid)]).trim())).toBe(providerPid);
     writeFileSync(join(runDir, "exit-owner.release"), "exit\n");
     await waitFor(() => !alive(Number(started.pid)), "the owner never exited");
     await delay(200);
@@ -1050,7 +1045,7 @@ it('keeps unpublished batch tasks visible and honours receipt interruption', asy
  writeFileSync(join(path,'attempt.json'),JSON.stringify(row));
  writeFileSync(join(dir,'dispatch-status.json'),JSON.stringify({id:row.run_id,batch_id:'batch-001',status:'running',task_ids:['task-1','task-2'],started_at:new Date().toISOString()}));
  const status=await fabricStatus(workspace,row.run_id);
- expect(status.runs).toHaveLength(2);expect(status.runs[1]).toMatchObject({task_id:'task-2',state:'queued'});
+ expect(status.runs).toHaveLength(2);expect(status.runs.find((entry: any) => entry.task_id === 'task-2')).toMatchObject({task_id:'task-2',state:'queued'});
  row.state='running';row.status=null;writeFileSync(join(path,'attempt.json'),JSON.stringify(row));
  writeFileSync(join(dir,'RUN_RECEIPT.json'),JSON.stringify({status:'interrupted'}));
  const interrupted=await fabricStatus(workspace,row.run_id);
