@@ -492,12 +492,17 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         requested_effort = "low"
     supported = (registered or {}).get("efforts", [])
     effort = "default"
+    unverified_effort = False
     if requested_effort and supported:
         rank = EFFORT_ORDER.get(requested_effort, EFFORT_ORDER["medium"])
         effort = max((value for value in supported if EFFORT_ORDER[value] <= rank),
                      key=lambda value: EFFORT_ORDER[value], default=min(supported, key=lambda value: EFFORT_ORDER[value]))
         if effort != requested_effort:
             notes.append(f"{requested_effort} unsupported by {model}; ran at {effort}")
+    elif requested_effort and registered is None and adapter_name in {"agy", "claude", "codex"}:
+        effort = requested_effort if requested_effort in EFFORT_ORDER else "medium"
+        unverified_effort = True
+        notes.append(f"{effort} effort passed through to {model}; provider support unverified")
     elif requested_effort:
         notes.append(f"{model} does not expose effort control; ran at default")
     if registered and registered.get("effort_transport") == "model-suffix" and effort != "default":
@@ -528,7 +533,7 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                  "requested_effort": args.effort or "", "effort": effort if effort != "default" else "", "effort_applied": effort,
                  "effort_note": next((note for note in notes if "effort" in note or "unsupported" in note), ""),
                  "effort_source": "explicit" if args.effort else "model-default" if (registered or {}).get("default_effort") else "adapter-default",
-                 "effort_capability_source": "registry" if supported else "adapter-no-effort-control",
+                 "effort_capability_source": "registry" if supported else "provider-unverified" if unverified_effort else "adapter-no-effort-control",
                  "effort_substitution": next((note for note in notes if "unsupported" in note or "effort control" in note), ""),
                  "substitution": "", "fallback_model": "",
                  "notes": notes, "warnings": warnings, "fallback_candidates": fallback,
