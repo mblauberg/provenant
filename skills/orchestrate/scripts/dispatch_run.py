@@ -359,8 +359,8 @@ def worker_question_envelope(result_path: Path, expected_digest: str) -> dict[st
     return worker_question_envelope_bytes(candidate, expected_digest)
 
 
-def fail(run_dir: Path | None, status: str, message: str) -> int:
-    record = {"schema_version": 1, "status": status, "message": message}
+def fail(run_dir: Path | None, status: str, message: str, error: str | None = None) -> int:
+    record = {"schema_version": 1, "status": status, "message": message, **({"error": error} if error else {})}
     print(json.dumps(record, sort_keys=True))
     return 2
 
@@ -1169,15 +1169,22 @@ def resume_relaunch_context(run_dir, previous):
     return (previous.get("question") or "")+"\n"+tail
 
 
+class ResumeError(ValueError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
 def prepare_resume(args):
     paths=sorted((args.run_dir.resolve()/"tasks").glob("*/attempt-*/attempt.json"))
     rows=[json.loads(path.read_text()) for path in paths]
     rows=[row for row in rows if row.get("run_id")==args.resume]
     if not rows: raise ValueError("resume run not found")
     tasks={row["task_id"] for row in rows}
-    if len(tasks)>1:
-        if args.task_id not in tasks: raise ValueError("resume a batch task: pass task_id")
+    if args.task_id is not None:
         rows=[row for row in rows if row["task_id"]==args.task_id]
+        if not rows: raise ResumeError("resume_task_unknown",f"task {args.task_id} has no attempt in this run")
+    elif len(tasks)>1: raise ResumeError("resume_task_required","resume a batch task: pass task_id")
     previous=max(rows,key=lambda row:row["attempt"])
     if previous["state"]!="terminal": raise ValueError("resume requires a terminal attempt")
     route=previous.get("requested_route") or {}
@@ -1910,11 +1917,10 @@ def dispatch(args: argparse.Namespace) -> int:
         args.timeout_seconds = 10800.0 if args.access_mode == "worktree_write" else DEFAULT_TIMEOUT_SECONDS
     run_dir = args.run_dir.resolve()
     workspace = Path.cwd().resolve()
-    if (
-        not contains_run(run_dir, workspace)
-        or not run_dir.is_dir()
-        or not (run_dir / "MANIFEST.md").is_file()
-    ):
+    owned = contains_run(run_dir, workspace) and run_dir.is_dir() and (run_dir / "MANIFEST.md").is_file()
+    if args.task_id is None and not (args.resume and owned and not args.batch_child):
+        args.task_id = "dispatch-001"  # A resume names its task, or takes the run's only one.
+    if not owned:
         return _dispatch(args)
     if args.batch_child:
         return execute_attempt_sequence(args)
@@ -1925,7 +1931,7 @@ def dispatch(args: argparse.Namespace) -> int:
     try:
         if args.resume:
             try: prepare_resume(args)
-            except (OSError,ValueError) as exc: return fail(run_dir,"rejected",str(exc))
+            except (OSError,ValueError) as exc: return fail(run_dir,"rejected",str(exc),getattr(exc,"code",None))
         if not args.tool or not any((args.alias,args.task_class,args.model)):
             return fail(run_dir,"rejected","adapter and alias or model are required")
         result = execute_attempt_sequence(args,custody)
@@ -1939,7 +1945,7 @@ def dispatch(args: argparse.Namespace) -> int:
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     root.add_argument("--run-dir", type=Path, required=True)
-    root.add_argument("--task-id", default="dispatch-001")
+    root.add_argument("--task-id")
     adapter = root.add_mutually_exclusive_group(required=False)
     adapter.add_argument("--adapter", "--tool", dest="tool")
     prompt = root.add_mutually_exclusive_group(required=True)

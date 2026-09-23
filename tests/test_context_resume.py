@@ -153,6 +153,24 @@ def test_resume_targets_one_task_of_a_multi_task_run(tmp_path, monkeypatch):
     assert not (run / "tasks/one/attempt-002").exists()
 
 
+def test_resume_never_redirects_a_task_without_an_attempt(tmp_path, monkeypatch):
+    """A batch with one finished task and one never started: resuming the second must not resume the first."""
+    run, prompt, command, log = replay_owner(tmp_path, monkeypatch, "claude", FIX / "claude.jsonl",
+                                             FIX / "claude.jsonl", "session-0003", "haiku")
+    done = subprocess.run([*command, "--task-id", "one"], cwd=tmp_path, capture_output=True, text=True)
+    assert done.returncode == 0, done.stdout + done.stderr
+    row = attempt(run, 1, "one")
+    missing = resume(run, row, prompt, "--task-id", "two")
+    assert missing.returncode != 0
+    assert json.loads(missing.stdout) == {"schema_version": 1, "status": "rejected", "error": "resume_task_unknown",
+                                          "message": "task two has no attempt in this run"}
+    assert not (run / "tasks/one/attempt-002").exists() and not (run / "tasks/two").exists()
+    assert len(argv_calls(log)) == 1
+    resumed = resume(run, row, prompt, "--task-id", "one")
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    assert attempt(run, 2, "one")["status"] == "ok"
+
+
 @pytest.mark.parametrize("adapter,model,session,window", [
     ("claude", "haiku", "session-claude-001", 1000000),
     ("cursor", "auto", "session-cursor-001", None),
