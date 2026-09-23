@@ -72,7 +72,7 @@ as defaults, with each task taking precedence. Prompt file paths resolve from
 the caller workspace, including when `cwd` selects a subdirectory. Defaults are
 55 seconds of waiting for a single dispatch and zero for a batch. Timeouts default to 3,600 seconds for
 read-only work and 10,800 seconds for writers. `resume` retains the same run ID,
-route, controls and timeout; only `context_ceiling` may change. Use a new
+route and controls; only `context_ceiling` and `timeout_seconds` may change. Use a new
 dispatch to change the rest. With `resume`, `task_id` selects one task of a
 batch; a task's own ID also works. `handoff: <run id>` starts a fresh run primed
 with that task's route and result tail, the cheap alternative to resuming a large

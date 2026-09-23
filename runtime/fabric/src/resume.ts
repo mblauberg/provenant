@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
-import { preflight, validatePrompt, rejected, InputError, type DispatchInput } from "./execution-input.js";
+import { preflight, validatePrompt, rejected, timeoutSeconds, InputError, type DispatchInput } from "./execution-input.js";
 import {
   dispatchConfiguredProvider,
   executableOwner,
@@ -44,9 +44,10 @@ export async function resumeConfiguredProvider(
       (input.wait_seconds ?? 55) > 55
     )
       throw new InputError("wait_invalid", "Pass wait_seconds from 0 to 55.");
-    const allowed = ["resume", "task_id", "context_ceiling", "prompt", "prompt_file", "wait_seconds", "detail"];
-    if (Object.keys(input).some((key) => !allowed.includes(key)))
-      throw new InputError("resume_route_change", "Dispatch a new run to change route, mode or controls.");
+    const allowed = ["resume", "task_id", "context_ceiling", "timeout_seconds", "prompt", "prompt_file", "wait_seconds", "detail"];
+    const changed = Object.keys(input).filter((key) => !allowed.includes(key));
+    if (changed.length)
+      throw new InputError("resume_route_change", `Resume keeps the route, mode and controls; drop ${changed.join(", ")} or dispatch a new run.`);
     const target = await targetTask(identity.cwd, input.resume!, input.task_id, "resume");
     if (target.rejected) return target.rejected;
     const previous = target.row!;
@@ -83,7 +84,9 @@ export async function resumeConfiguredProvider(
     }
     const saved = JSON.parse(readFileSync(join(runDir, "dispatch-status.json"), "utf8")) as Record<string, any>;
     const batch = saved.batch_id !== undefined && Array.isArray(saved.task_ids) ? saved : undefined;
-    const timeout = Number(saved.timeout_seconds ?? (previous.mode === "worktree_write" ? 10800 : 3600));
+    const timeout = input.timeout_seconds === undefined
+      ? Number(saved.timeout_seconds ?? (previous.mode === "worktree_write" ? 10800 : 3600))
+      : timeoutSeconds(input.timeout_seconds);
     const executionIdentity = { ...identity, cwd: typeof previous.cwd === "string" ? previous.cwd : identity.cwd };
     const python = await pythonOwner(root, identity, env);
     const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");

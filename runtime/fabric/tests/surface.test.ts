@@ -293,8 +293,17 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     ]);
     expect(JSON.parse(readFileSync(join(writerRow.run_dir, "_owner", `${writerRow.task_id}-env-1.json`), "utf8")))
       .toMatchObject({ chair: "chair-seat" });
-    const resumedWriter = await call("dispatch", { resume: writerRow.run_id, prompt: "continue writer", wait_seconds: 5 });
+    const rerouted = await call("dispatch", { resume: writerRow.run_id, prompt: "x", adapter: "codex", wait_seconds: 0 });
+    expect(rerouted.structuredContent).toMatchObject({ status: "rejected", error: "resume_route_change" });
+    expect((rerouted.structuredContent as any).fix).toContain("drop adapter");
+    const resumedWriter = await call("dispatch", {
+      resume: writerRow.run_id, prompt: "continue writer", timeout_seconds: 900, wait_seconds: 5,
+    });
     expect(resumedWriter.structuredContent).toMatchObject({ status: "ok", attempt: 2, run_id: writerRow.run_id });
+    const resumeArgs = JSON.parse(
+      readFileSync(join(writerRow.run_dir, "_owner", `${writerRow.task_id}-args-2.json`), "utf8"),
+    ) as string[];
+    expect(resumeArgs[resumeArgs.indexOf("--timeout") + 1]).toBe("900");
     const nested = join(linked, "nested");
     mkdirSync(nested);
     writeFileSync(join(linked, "question.md"), "question");
