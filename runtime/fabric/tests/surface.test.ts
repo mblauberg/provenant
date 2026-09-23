@@ -6,6 +6,31 @@ import { resolve, join } from "node:path";
 import { createRequire } from "node:module";
 import { expect, it } from "vitest";
 
+it("keeps legacy route and result path in the brief digest", async () => {
+  const { digest, runView } = await import("../src/surface.js");
+  const brief = runView({
+    status: "ok",
+    run_id: "mcp-wave1",
+    adapter: "codex",
+    model: "gpt-6-sol",
+    result_path: ".agent-run/old/result.md",
+  });
+  expect(digest(brief)).toContain("codex/gpt-6-sol");
+  expect(digest(brief)).toContain("result .agent-run/old/result.md");
+});
+
+it("shows the requested route and pending result before the first attempt", async () => {
+  const { digest, runView } = await import("../src/surface.js");
+  const brief = runView({
+    status: "queued",
+    state: "queued",
+    run_id: "mcp-pending",
+    provenance: { requested: { adapter: "claude", model: "opus" } },
+  });
+  expect(digest(brief)).toContain("claude/opus");
+  expect(digest(brief)).toContain("result pending");
+});
+
 it.each([false, true])("exposes exactly twelve default tools within budget (legacy=%s)", async (legacy) => {
   const state = mkdtempSync(join(tmpdir(), "fabric-surface-"));
   const client = new Client({ name: "surface", version: "1" });
@@ -150,7 +175,11 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
           AGENT_FABRIC_STATE_DIRECTORY: join(root, "state"),
           AGENT_FABRIC_LABEL: "worker-seat",
           AGENT_FABRIC_SEAT: "claude",
+          PROVENANT_CHAIR: "chair-seat",
           AGENT_FABRIC_PRODUCT_ROOT: product,
+          HARNESS_PYTHON: execFileSync("python3", ["-c", "import sys;print(sys.executable)"], {
+            encoding: "utf8",
+          }).trim(),
         },
         stderr: "pipe",
       }),
@@ -163,6 +192,11 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect((await peerCall("whoami")).structuredContent).toMatchObject({
       project: projectRoot, cwd: projectRoot, agentId: "worker-seat",
     });
+    const workerRun = await peerCall("dispatch", { prompt: "worker context", wait_seconds: 5 });
+    const workerRow = workerRun.structuredContent as any;
+    expect(workerRow, JSON.stringify(workerRow)).toHaveProperty("run_dir");
+    expect(JSON.parse(readFileSync(join(workerRow.run_dir, "_owner", `${workerRow.task_id}-env-1.json`), "utf8")))
+      .toMatchObject({ chair: "chair-seat" });
     const batch = await call("dispatch", {
       tasks: [
         { id: "one", prompt: "first" },
@@ -202,6 +236,10 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect(writerArgs.slice(writerArgs.indexOf("--worktree"), writerArgs.indexOf("--worktree") + 2)).toEqual([
       "--worktree", linked,
     ]);
+    expect(JSON.parse(readFileSync(join(writerRow.run_dir, "_owner", `${writerRow.task_id}-env-1.json`), "utf8")))
+      .toMatchObject({ chair: "chair-seat" });
+    const resumedWriter = await call("dispatch", { resume: writerRow.run_id, prompt: "continue writer", wait_seconds: 5 });
+    expect(resumedWriter.structuredContent).toMatchObject({ status: "ok", attempt: 2, run_id: writerRow.run_id });
     const nested = join(linked, "nested");
     mkdirSync(nested);
     writeFileSync(join(linked, "question.md"), "question");
