@@ -132,7 +132,10 @@ def test_snapshot_deep_merges_models_and_drops_malformed_overlay(tmp_path):
             {"id": "gpt-6-luna", "names": ["moon"]},
             {"id": 4, "names": ["bad"]},
             {"id": "bad-new", "names": 5},
-        ]}},
+        ]}, "broken": {"models": "not-a-list"},
+        "also-broken": {"endpoint_provider": "new", "fixed_model_family": None,
+                        "effort_transport": "flag", "models": [{"names": ["oops"]}]}},
+        "families": {"bad-family": {"aliases": "not-a-map"}},
         "endpoints": {"bad": {"token_env": 3}},
     }))
     result = subprocess.run(
@@ -149,6 +152,9 @@ def test_snapshot_deep_merges_models_and_drops_malformed_overlay(tmp_path):
     assert "moon" in luna["names"]
     assert "luna" in luna["names"]
     assert "bad-new" not in [model["id"] for model in snapshot["adapters"]["codex"]["models"]]
+    assert "broken" not in snapshot["adapters"]
+    assert "also-broken" not in snapshot["adapters"]
+    assert "bad-family" not in snapshot["families"]
     assert "bad" not in snapshot["endpoints"]
     assert snapshot["adapters"]["codex"]["default_model"] if "default_model" in snapshot["adapters"]["codex"] else True
     assert any("codex.models" in note for note in snapshot["drift"])

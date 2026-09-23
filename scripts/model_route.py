@@ -119,6 +119,23 @@ def _merge_catalog(base: Any, overlay: Any, path: str, drift: list[str]) -> Any:
                 merged[key] = _merge_catalog(base[key], value, child, drift)
             elif path in {"adapters", "families", "endpoints"} and not isinstance(value, dict):
                 drift.append(f"{child}: malformed overlay entry dropped; fix: use an object")
+            elif path == "adapters" and not (
+                isinstance(value.get("endpoint_provider"), str)
+                and (value.get("fixed_model_family") is None or isinstance(value.get("fixed_model_family"), str))
+                and isinstance(value.get("effort_transport"), str)
+                and isinstance(value.get("models", []), list)
+                and all(isinstance(item, dict) and isinstance(item.get("id"), str)
+                        and isinstance(item.get("names", []), list)
+                        and all(isinstance(name, str) for name in item.get("names", []))
+                        for item in value.get("models", []))
+            ):
+                drift.append(f"{child}: malformed overlay entry dropped; fix: complete the adapter profile")
+            elif path == "families" and not (
+                isinstance(value.get("aliases", {}), dict)
+                and all(isinstance(models, list) and all(isinstance(model, str) for model in models)
+                        for models in value.get("aliases", {}).values())
+            ):
+                drift.append(f"{child}: malformed overlay entry dropped; fix: use alias model lists")
             elif path == "endpoints" and not (
                 isinstance(value.get("base_url"), str)
                 and isinstance(value.get("token_env"), str)
