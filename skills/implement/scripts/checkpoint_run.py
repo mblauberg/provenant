@@ -38,8 +38,8 @@ def _update_locked(path: Path, current_slice: str, next_action: str, in_flight: 
     if not isinstance(run, dict) or run.get("contract") != "delivery-run" or run.get("schema_version") != 1:
         raise ValueError("RUN.json must be a canonical delivery-run v1 receipt")
     workspace = (
-        root.parent.parent
-        if root.parent.name == ".agent-run"
+        root.parents[2] if root.parent.name == "runs" and root.parent.parent.name == ".agent-run"
+        else root.parent.parent if root.parent.name == ".agent-run"
         else root
     ).resolve()
     ensure_immutable_risk(run, workspace)

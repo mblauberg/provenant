@@ -38,6 +38,45 @@ def load_producer():
     return load(PRODUCER, "delivery_receipt_under_test")
 
 
+def test_init_accepts_canonical_runs_directory_and_writes_local_exclude(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    (workspace / "intent.md").write_text("# Intent\n")
+    args = init_args("DEL-TEST")
+    name = "20260923-1000-delivery-del-test-a1b2c3"
+    args[2] = f".agent-run/runs/{name}"
+    result = run_cli(workspace, *args)
+    assert result.returncode == 0, result.stderr
+    assert (workspace / ".agent-run" / "runs" / name / "RUN.json").is_file()
+    assert "/.agent-run/" in (workspace / ".git" / "info" / "exclude").read_text()
+    checkpoint = subprocess.run([
+        sys.executable, str(CHECKPOINT), str(workspace / ".agent-run" / "runs" / name / "RUN.json"),
+        "--current-slice", "implementation", "--next-action", "verify",
+        "--artifact-paths-json", '["intent.md"]',
+    ], cwd=workspace, text=True, capture_output=True, check=False)
+    assert checkpoint.returncode == 0, checkpoint.stdout + checkpoint.stderr
+
+
+def test_init_rejects_canonical_run_in_linked_worktree(tmp_path):
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    subprocess.run(["git", "init", "-q", str(primary)], check=True)
+    subprocess.run(["git", "-C", str(primary), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(primary), "config", "user.name", "Test"], check=True)
+    (primary / "intent.md").write_text("# Intent\n")
+    subprocess.run(["git", "-C", str(primary), "add", "intent.md"], check=True)
+    subprocess.run(["git", "-C", str(primary), "commit", "-qm", "init"], check=True)
+    linked = tmp_path / "linked"
+    subprocess.run(["git", "-C", str(primary), "worktree", "add", "-qb", "test/linked", str(linked)], check=True)
+    args = init_args("DEL-TEST")
+    args[2] = ".agent-run/runs/20260923-1000-delivery-del-test-a1b2c3"
+    result = run_cli(linked, *args)
+    assert result.returncode != 0
+    assert "primary checkout" in result.stderr
+    assert not (linked / ".agent-run").exists()
+
+
 def load_validator():
     return load(VALIDATOR, "validate_delivery_for_producer")
 
