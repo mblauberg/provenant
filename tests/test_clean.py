@@ -254,10 +254,25 @@ def test_typed_failures_expire_and_input_required_stays_resumable(tmp_path):
     resumable.mkdir(parents=True)
     (resumable / "RUN_RECEIPT.json").write_text('{"status":"input_required"}\n')
     old(resumable)
+    legacy_resumable = root / ".agent-run" / "runs" / "20260801-1200-dispatch-legacy-a1b2c4"
+    legacy_resumable.mkdir(parents=True)
+    (legacy_resumable / "RUN_RECEIPT.json").write_text('{"status":"failed","resumable":true}\n')
+    old(legacy_resumable)
     rows = {row["path"]: row for row in cleaner().plan(root, pr_bodies=[])["rows"]}
     for status in statuses:
         assert any(row["verdict"] == "delete" for row in rows.values() if status.replace("_", "-") in row["path"])
     assert rows[f".agent-run/runs/{resumable.name}"]["verdict"] == "keep:resumable"
+    assert rows[f".agent-run/runs/{legacy_resumable.name}"]["verdict"] == "keep:resumable"
+
+
+def test_mixed_case_dispatch_run_names_are_classified(tmp_path):
+    root = repo(tmp_path)
+    run = root / ".agent-run" / "runs" / "20260801-1200-dispatch-MyWorkspace-aB3dE4"
+    run.mkdir(parents=True)
+    (run / "RUN_RECEIPT.json").write_text('{"status":"failed"}\n')
+    old(run)
+    rows = {row["path"]: row for row in cleaner().plan(root, pr_bodies=[])["rows"]}
+    assert rows[f".agent-run/runs/{run.name}"]["verdict"] == "delete"
 
 
 def test_sessions_are_triage_only_even_when_old(tmp_path):

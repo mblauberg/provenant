@@ -1900,7 +1900,7 @@ def test_front_door_preflight_rejects_all_invalid_tasks_without_run(tmp_path):
     assert not (tmp_path / '.agent-run').exists()
 
 
-def test_mcp_owner_closes_receipt(tmp_path, monkeypatch):
+def test_mcp_owner_closes_receipt(tmp_path, monkeypatch, capsys):
     run_dir = make_run(tmp_path, 'mcp-finished')
     module = load_dispatch_module()
     adapter = tmp_path / 'adapter'
@@ -1914,6 +1914,10 @@ def test_mcp_owner_closes_receipt(tmp_path, monkeypatch):
     args = module.parser().parse_args(['--run-dir', str(run_dir), '--adapter', 'codex',
         '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker'])
     assert module.dispatch(args) == 0
+    terminal = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert terminal['schema'] == 'fabric.attempt.v1'
+    assert terminal['status'] == 'ok'
+    assert terminal['provenance']['line'].startswith('Route:')
     receipt = json.loads((run_dir / 'RUN_RECEIPT.json').read_text())
     assert receipt['status'] == 'succeeded'
     assert receipt['closed_at']
@@ -2050,6 +2054,20 @@ def test_close_mcp_run_reads_canonical_single_task_attempts(tmp_path):
     receipt = json.loads((run / 'RUN_RECEIPT.json').read_text())
     assert receipt['status'] == 'succeeded'
     assert receipt['attempts'] == [row]
+
+
+def test_close_mcp_run_preserves_input_required_for_resumption(tmp_path):
+    mod = load_dispatch_module()
+    run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())
+    row = json.loads((ROOT / 'tests/fixtures/fabric-v1/attempt.json').read_text())
+    row.update(status='input_required', question='Which branch?')
+    path = run / 'tasks/task-1/attempt-001/attempt.json'
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(row))
+    mod.close_mcp_run(run)
+    receipt = json.loads((run / 'RUN_RECEIPT.json').read_text())
+    assert receipt['status'] == 'input_required'
+    assert receipt['resumable'] is True
 
 
 def test_close_mcp_run_includes_batch_tasks_without_canonical_attempts(tmp_path):

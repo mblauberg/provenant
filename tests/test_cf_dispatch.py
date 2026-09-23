@@ -1154,28 +1154,29 @@ def test_agy_rejects_non_utf8_success_envelope():
 
 
 def test_disabled_execution_routes_keep_configured_reason_and_never_launch_provider():
-    cases = (
-        (
-            "kiro", "deepseek-v3.2", "kiro-cli", "CF_DISPATCH_ENABLE_KIRO",
-            "Provider execution is dormant until one bounded ordinary Kiro "
-            "invocation and safety boundary are verified.",
-        ),
-    )
+    import yaml
+    expected_reason = "Disabled by the test compatibility overlay."
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
+        compatibility = yaml.safe_load((PRODUCT_ROOT / "config/adapter-compatibility.yaml").read_text())
+        compatibility["adapters"]["kiro-acp"].update(enabled=False, disabled_reason=expected_reason)
+        overlay = tmp / "adapter-compatibility.yaml"
+        overlay.write_text(yaml.safe_dump(compatibility))
+        write_executable(bin_dir / "provenant", f"""#!/usr/bin/env bash
+            [ "$1" = route ] && [ "$2" = resolve ] || exit 2
+            shift 2
+            exec python3 {shlex.quote(str(PRODUCT_ROOT / 'scripts/model_route.py'))} resolve "$@" --adapter-compatibility {shlex.quote(str(overlay))}
+        """)
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
-
-        for tool, model, executable, escape_flag, expected_reason in cases:
+        for tool, model, executable in (("kiro", "deepseek-v3.2", "kiro-cli"),):
             invoked = tmp / f"{tool}.invoked"
             write_executable(
                 bin_dir / executable,
                 f"#!/usr/bin/env bash\ntouch {invoked}\nexit 99\n",
             )
-            if escape_flag:
-                env[escape_flag] = "1"
             out = tmp / f"{tool}.txt"
             result = subprocess.run(
                 [

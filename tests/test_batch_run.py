@@ -1172,6 +1172,7 @@ print(json.dumps({'type':'result','result':os.getcwd()}))
     monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
     monkeypatch.setenv('FABRIC_COOLDOWNS_PATH', str(tmp_path / 'cooldowns.json'))
+    monkeypatch.setenv('PROVENANT_RUN_TOKEN', 'batch-canonical-test')
     run = Path(subprocess.check_output([str(INIT), '--kind', 'batch'], cwd=tmp_path, text=True).strip())
     prompt = tmp_path / 'caller.md'
     prompt.write_text('hello')
@@ -1184,6 +1185,10 @@ print(json.dumps({'type':'result','result':os.getcwd()}))
     manifest.write_text(json.dumps({'schema_version':1,'tasks':tasks}))
     result = subprocess.run([str(BATCH), '--run-dir', str(run), '--manifest', str(manifest)], cwd=tmp_path, capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stdout + result.stderr
+    terminal = json.loads(result.stdout.splitlines()[-1])
+    assert terminal['schema'] == 'fabric.status.v1'
+    assert [row['status'] for row in terminal['runs']] == ['ok', 'ok']
+    assert all(row['provenance']['line'].startswith('Route:') for row in terminal['runs'])
     for task in tasks:
         row = json.loads((run / 'tasks' / task['id'] / 'attempt-001/attempt.json').read_text())
         assert row['cwd'] == task['cwd']

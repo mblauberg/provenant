@@ -688,6 +688,22 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
     output = {**summary, "summary_path": str(summary_path.relative_to(run_dir))}
     if index_error:
         output["manifest_index_error"] = index_error
+    if os.environ.get("PROVENANT_RUN_TOKEN"):
+        canonical = []
+        try:
+            for task in tasks:
+                attempts = sorted((run_dir / "tasks" / task["id"]).glob("attempt-*/attempt.json"))
+                if not attempts:
+                    break
+                row = json.loads(read_bound_bytes(run_dir, attempts[-1].relative_to(run_dir), label="canonical attempt"))
+                if row.get("schema") != "fabric.attempt.v1":
+                    break
+                canonical.append(row)
+        except (OSError, ValueError, OwnedFileError):
+            canonical = []
+        if len(canonical) == len(tasks):
+            output = {"schema": "fabric.status.v1", "run_id": run_dir.name,
+                      "batch_id": batch_id, "runs": canonical}
     print(json.dumps(output, sort_keys=True))
     return 1 if (status != "completed" or index_error or any(item["status"] != "succeeded" for item in ordered)) else 0
 

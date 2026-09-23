@@ -1814,7 +1814,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     publish_contract(run_dir,row)
     args._last_row=row
     output_record = {**record, "attempt_digest": attempt_digest, "fabric":row, "digest":row["digest"]}
-    print(json.dumps(output_record, sort_keys=True))
+    # Batch children retain the legacy record for the batch evidence validator.
+    # The MCP front door consumes the canonical attempt as its terminal row.
+    print(json.dumps(row if os.environ.get("PROVENANT_RUN_TOKEN") and not args.batch_child else output_record, sort_keys=True))
     return 0 if status == "succeeded" and not manifest_error else 1
 
 
@@ -1853,7 +1855,7 @@ def close_mcp_run(run_dir: Path) -> None:
         statuses = set(statuses_by_task.values())
         if not statuses:
             return
-        receipt.update(status="succeeded" if statuses == {"succeeded"} else "cancelled" if statuses == {"cancelled"} else "failed",
+        receipt.update(status="succeeded" if statuses == {"succeeded"} else "cancelled" if statuses == {"cancelled"} else "input_required" if receipt.get("resumable") else "failed",
                        closed_at=now(), terminal_reason=None if statuses == {"succeeded"} else "MCP execution attempts are terminal")
         write_owned(run_dir, run_dir / "RUN_RECEIPT.json", json.dumps(receipt, indent=2) + "\n")
     except (OSError, ValueError, OwnedFileError):

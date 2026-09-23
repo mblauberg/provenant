@@ -17,7 +17,7 @@ import sys
 from typing import Any
 
 
-RUN_NAME = re.compile(r"^\d{8}-\d{4}-(dispatch|batch|orch|delivery|mission|review|wf)-[a-z0-9-]+-[a-z0-9]{6}$")
+RUN_NAME = re.compile(r"^\d{8}-\d{4}-(dispatch|batch|orch|delivery|mission|review|wf)-[A-Za-z0-9-]+-[A-Za-z0-9]{6}$")
 LEGACY_ORCH = re.compile(r"^\d{8}(?:[-T]\d{4,6})?(?:[-_].*)?$")
 MCP_NAME = re.compile(r"^mcp-[A-Za-z0-9_-]+$")
 LEGACY_SIBLING = re.compile(r"^(mcp-[A-Za-z0-9_-]+)-(?:owner\.(?:stdout\.jsonl|stderr\.log)|task-manifest\.json)$")
@@ -237,6 +237,8 @@ def _run_verdict(path: Path, kind: str, age: float, refs: str | None, pr_unknown
     if kind not in {"delivery", "mission"} and receipt is None:
         return "triage:missing-receipt"
     status = str((receipt or {}).get("status") or (receipt or {}).get("state") or "").lower()
+    if kind in {"dispatch", "batch"} and ((receipt or {}).get("resumable") is True or status == "input_required"):
+        return "keep:resumable"
     if kind == "delivery":
         retention = 30
     elif kind == "mission":
@@ -244,8 +246,6 @@ def _run_verdict(path: Path, kind: str, age: float, refs: str | None, pr_unknown
     elif status in {"failed", "partial", "stalled", "timed_out", "interrupted", "rejected", "tool_missing",
                     "usage_limited", "rate_limited", "auth_required", "model_unavailable", "permission_blocked"}:
         retention = 14
-    elif status == "input_required":
-        return "keep:resumable"
     elif status in {"active", "running", "queued", ""}:
         if kind not in {"dispatch", "batch"} or not any((path / name).is_file() for name in (
                 "dispatch-owner.json", "dispatch-provider.json", "_owner/dispatch-owner.json",
