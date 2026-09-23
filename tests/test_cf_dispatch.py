@@ -2308,7 +2308,9 @@ def test_chain_tool_missing_uses_the_entry_model_when_recording_alias(tmp_path):
     env["HOME"] = str(tmp_path / "home")
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
-    (bin_dir / "python3").symlink_to(sys.executable)
+    # A wrapper, not a symlink: a symlinked venv python loses its site-packages.
+    (bin_dir / "python3").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+    (bin_dir / "python3").chmod(0o755)
     available_path = os.pathsep.join(
         path for path in os.environ["PATH"].split(os.pathsep)
         if path and not (Path(path) / "cursor-agent").exists()

@@ -137,7 +137,7 @@ def _darwin_user_dirs():
         value = result.stdout.strip()
         if value:
             found.append(Path(value))
-    if found:
+    if len(found) == 2:
         _DARWIN_USER_DIRS_CACHE = tuple(found)
     return tuple(found)
 
@@ -173,6 +173,7 @@ def os_confinement_profile(plan):
         + _sbpl_rule("deny", "file-read-data file-write*", [root, *add_dirs, *(home / path for path in EXTRA_DENIED_READS)])
         + _sbpl_rule("allow", "file-read-data file-write*", [home / path for path in state.get("read_write", ())])
         + _sbpl_rule("allow", "file-read-data", [home / path for path in state.get("read", ())])
+        + _sbpl_rule("deny", "file-write*", add_dirs)
         + _sbpl_rule("allow", "file-read-data", [
             Path(plan["cwd"]), *add_dirs
         ])
@@ -214,12 +215,13 @@ def build_plan(
     **metadata,
 ):
     config = profile(adapter)
-    selected_cwd = Path(worktree or cwd or Path.cwd()).expanduser().resolve()
+    selected_cwd = Path(worktree or cwd or workspace_root or Path.cwd()).expanduser().resolve()
     if not selected_cwd.is_dir():
         raise ValueError("cwd must be a readable directory")
-    workspace_root = str(Path(workspace_root or Path.cwd()).expanduser().resolve())
-    if not selected_cwd.is_relative_to(Path(workspace_root)):
+    # A writer's worktree may sit outside the caller's tree; only a read cwd is bounded here.
+    if workspace_root and not worktree and not selected_cwd.is_relative_to(Path(workspace_root).expanduser().resolve()):
         raise ValueError("cwd must be inside the workspace")
+    workspace_root = str(Path(workspace_root or selected_cwd).expanduser().resolve())
     cwd = str(selected_cwd)
     sandbox = sandbox or (
         "workspace-write" if mode == "worktree_write" else "read-only"
@@ -2110,8 +2112,8 @@ def main():
     writer_lease = None
     try:
         workspace_root = Path(args.workspace_root or Path.cwd()).expanduser().resolve()
-        selected_cwd = Path(args.worktree or args.cwd or Path.cwd()).expanduser().resolve()
-        if not selected_cwd.is_relative_to(workspace_root):
+        selected_cwd = Path(args.cwd or workspace_root).expanduser().resolve()
+        if not args.worktree and not selected_cwd.is_relative_to(workspace_root):
             raise ValueError("cwd must be inside the workspace")
         plan = build_plan(
             args.adapter,

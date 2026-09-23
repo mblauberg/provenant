@@ -142,6 +142,55 @@ def test_build_plan_rejects_cwd_outside_explicit_workspace_root(tmp_path):
         )
 
 
+def test_build_plan_accepts_writer_worktree_outside_the_callers_tree(tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    caller = tmp_path / "repo/.worktrees/one"
+    sibling = tmp_path / "repo/.worktrees/two"
+    caller.mkdir(parents=True)
+    sibling.mkdir(parents=True)
+
+    plan = supervisor.build_plan(
+        "codex", {"resolved_model": "fixture"}, "hello",
+        workspace_root=caller, mode="worktree_write", worktree=sibling,
+    )
+
+    assert plan["cwd"] == str(sibling.resolve())
+
+
+def test_build_plan_defaults_cwd_to_the_workspace_root(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    root = tmp_path / "workspace"
+    elsewhere = tmp_path / "elsewhere"
+    root.mkdir()
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    plan = supervisor.build_plan("agy", {"resolved_model": "fixture"}, "hello", workspace_root=root)
+
+    assert plan["cwd"] == str(root.resolve())
+
+
+def test_os_confinement_profile_keeps_add_dir_under_provider_state_read_only(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    home = tmp_path / "home"
+    cwd = tmp_path / "workspace"
+    cwd.mkdir()
+    add_dir = home / "state/shared"
+    monkeypatch.setattr(supervisor.Path, "home", lambda: home)
+    monkeypatch.setattr(supervisor, "_darwin_user_dirs", lambda: ())
+    monkeypatch.setattr(supervisor, "CONFINED_STATE", {"agy": {"read_write": ("state",), "read": ()}})
+    plan = {
+        "adapter": "agy", "mode": "read_only", "workspace_root": str(cwd),
+        "cwd": str(cwd), "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]},
+    }
+
+    lines = supervisor.os_confinement_profile(plan).splitlines()
+
+    state_allow = next(i for i, line in enumerate(lines) if f'(subpath "{home / "state"}")' in line and "allow" in line)
+    write_deny = lines.index(f'(deny file-write* (subpath "{add_dir}"))')
+    assert write_deny > state_allow
+
+
 def test_os_confinement_profile_places_workspace_denials_before_allows(monkeypatch, tmp_path):
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
     home = tmp_path / "home"
@@ -170,7 +219,8 @@ def test_os_confinement_profile_places_workspace_denials_before_allows(monkeypat
     assert profile[4] == f'(allow file-read-data file-write* (subpath "{tmp_path / "T"}"))'
     assert profile[5] == f'(deny file-read-data file-write* (subpath "{workspace}") (subpath "{add_dir}") (subpath "{home / "private/cache"}"))'
     assert profile[6].startswith(f'(allow file-read-data file-write* (subpath "{home / ".gemini/config"}")')
-    assert profile[7] == f'(allow file-read-data (subpath "{cwd}") (subpath "{add_dir}"))'
+    assert profile[7] == f'(deny file-write* (subpath "{add_dir}"))'
+    assert profile[8] == f'(allow file-read-data (subpath "{cwd}") (subpath "{add_dir}"))'
 
 
 def test_sbpl_filter_star_escapes_regex_without_resolving_symlink_target(tmp_path):
@@ -201,6 +251,7 @@ def test_darwin_user_dirs_uses_absolute_getconf_and_retries_failures(monkeypatch
     monkeypatch.setattr(supervisor, "_DARWIN_USER_DIRS_CACHE", None, raising=False)
     try:
         assert supervisor._darwin_user_dirs() == ()
+        assert supervisor._DARWIN_USER_DIRS_CACHE is None
         assert supervisor._darwin_user_dirs() == (
             Path("/private/var/folders/user/T"), Path("/private/var/folders/user/T"),
         )
