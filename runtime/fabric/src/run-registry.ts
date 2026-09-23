@@ -896,8 +896,8 @@ export async function statusRows(
         const exact = v1.filter((row) => [row.run_id, row.run_dir, basename(row.run_dir)].includes(id));
         const matches = exact.length ? exact : v1.filter((row) => [row.batch_id, row.task_id, row.id].includes(id));
         if (matches.length) {
-          matches.sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at));
-          rows.push(...matches.filter((row) => row.run_dir === matches[0]!.run_dir));
+          const newest = matches.reduce((best, row) => (Date.parse(row.started_at) > Date.parse(best.started_at) ? row : best)); // tasks keep batch order
+          rows.push(...matches.filter((row) => row.run_dir === newest.run_dir));
         } else {
           const legacy = await legacyStatus(workspace, id);
           if (legacy.error) return legacy;
