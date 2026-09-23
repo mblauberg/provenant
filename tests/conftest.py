@@ -37,3 +37,13 @@ def pytest_configure(config) -> None:
 @pytest.fixture(autouse=True)
 def _isolated_cooldowns(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("FABRIC_COOLDOWNS_PATH", str(tmp_path_factory.mktemp("cooldowns") / "cooldowns.json"))
+
+
+@pytest.fixture(autouse=True)
+def _unconfined_provider_stubs(monkeypatch, request):
+    """Keep OS confinement off for tests that execute stub providers in temp dirs."""
+    if (
+        request.node.path.name in {"test_dispatch_run.py", "test_batch_run.py"}
+        and not request.node.name.startswith("test_provider_does_not_inherit_chair_fabric_environment")
+    ):
+        monkeypatch.setenv("PROVENANT_NO_OS_CONFINEMENT", "1")

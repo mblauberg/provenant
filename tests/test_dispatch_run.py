@@ -291,6 +291,41 @@ def test_workspace_identity_keeps_root_and_records_provider_cwd(tmp_path):
     assert identity["root"] == str(root)
 
 
+def test_workspace_identity_canonicalizes_fallback_root(tmp_path):
+    mod = load_dispatch_module()
+    real_root = tmp_path / "workspace"
+    (real_root / "sub").mkdir(parents=True)
+    workspace_link = tmp_path / "workspace-link"
+    workspace_link.symlink_to(real_root, target_is_directory=True)
+
+    identity = mod.workspace_identity(workspace_link, workspace_link / "sub")
+
+    assert identity["root"] == str(real_root.resolve())
+    assert identity["cwd"] == str((real_root / "sub").resolve())
+
+
+def test_workspace_identity_keeps_canonical_caller_root_inside_git_checkout(tmp_path, monkeypatch):
+    mod = load_dispatch_module()
+    repo = tmp_path / "repo"
+    workspace = repo / "workspace"
+    provider_cwd = workspace / "sub"
+    provider_cwd.mkdir(parents=True)
+    monkeypatch.setattr(
+        mod.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0,
+            f"{repo}\n{'a' * 40}\n" if args[0][1:3] == ["rev-parse", "--show-toplevel"] else "",
+            "",
+        ),
+    )
+
+    identity = mod.workspace_identity(workspace, provider_cwd)
+
+    assert identity["root"] == str(workspace.resolve())
+    assert identity["cwd"] == str(provider_cwd.resolve())
+
+
 def test_agy_git_evidence_is_copied_into_attempt_and_bound_to_prompt(tmp_path: Path, monkeypatch) -> None:
     run_dir = make_run(tmp_path, "agy-evidence")
     source = run_dir / "evidence" / "git-evidence.md"

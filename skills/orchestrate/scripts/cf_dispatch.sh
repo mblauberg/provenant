@@ -794,6 +794,7 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
         fi
         local -a supervisor=(python3 "$SCRIPT_DIR/provider_exec.py" --route-file "$tmpdir/route.json"
           --adapter "$tool" --prompt-file "$PROMPT_TMP" --out "$OUT" --mode "$ACCESS_MODE"
+          --workspace-root "$(pwd -P)"
           --intent "$INTENT" --orchestrator-family "$ORCH_FAMILY" --reviewer-id "$REVIEWER_ID"
           --risk-tier "$RISK_TIER" --model-override-tier "$MODEL_OVERRIDE_TIER"
           --requested-model "$model_pin" --requested-effort "$route_effort_input")

@@ -286,6 +286,7 @@ def fabric_free_env():
     }
     env["AGENT_FABRIC_PRODUCT_ROOT"] = str(PRODUCT_ROOT)
     env["AGENT_FABRIC_INSTANCE_ROOT"] = str(PRODUCT_ROOT)
+    env["PROVENANT_NO_OS_CONFINEMENT"] = "1"
     return env
 
 

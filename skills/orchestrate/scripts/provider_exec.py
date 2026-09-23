@@ -30,6 +30,11 @@ import context_usage
 import process_info
 
 
+EXTRA_DENIED_READS = (".claude/projects", ".codex/sessions")
+ALLOWED_READS = ()
+ALLOWED_WRITES = ()
+
+
 def now():
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
@@ -107,11 +112,20 @@ def _sbpl_string(path):
 def os_confinement_profile(plan):
     root = Path(plan.get("workspace_root") or plan["cwd"]).expanduser().resolve()
     home = Path.home().resolve()
-    denied_reads = [root, home / ".claude/projects", home / ".codex/sessions"]
-    allowed_reads = [Path(plan["cwd"]), *(Path(path) for path in plan.get("applied", {}).get("add_dirs", []))]
+    denied_reads = [root, *(home / path for path in EXTRA_DENIED_READS)]
+    allowed_reads = [
+        Path(plan["cwd"]),
+        *(Path(path) for path in plan.get("applied", {}).get("add_dirs", [])),
+        *(home / path for path in ALLOWED_READS),
+    ]
+    allowed_writes = [home / path for path in ALLOWED_WRITES]
     deny = " ".join("(subpath " + _sbpl_string(path) + ")" for path in denied_reads)
     allow = " ".join("(subpath " + _sbpl_string(path) + ")" for path in allowed_reads)
-    return f"(version 1)\n(allow default)\n(deny file-read-data file-write* {deny})\n(allow file-read-data {allow})\n"
+    write_allow = " ".join("(subpath " + _sbpl_string(path) + ")" for path in allowed_writes)
+    profile = f"(version 1)\n(allow default)\n(deny file-read-data file-write* {deny})\n(allow file-read-data {allow})\n"
+    if write_allow:
+        profile += f"(allow file-write* {write_allow})\n"
+    return profile
 
 
 def confinement_command(plan, command):
@@ -2017,6 +2031,7 @@ def parser():
     p.add_argument("--plan-only", action="store_true")
     p.add_argument("--mode", default="read_only")
     p.add_argument("--cwd", type=Path)
+    p.add_argument("--workspace-root", type=Path)
     p.add_argument("--worktree")
     p.add_argument("--sandbox")
     p.add_argument("--network", choices=["true", "false"])
@@ -2051,6 +2066,7 @@ def main():
             args.prompt_file.read_text(),
             mode=args.mode,
             cwd=args.cwd,
+            workspace_root=args.workspace_root,
             worktree=args.worktree,
             sandbox=args.sandbox,
             network=None if args.network is None else args.network == "true",

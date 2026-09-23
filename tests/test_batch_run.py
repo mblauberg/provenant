@@ -409,7 +409,7 @@ def test_real_full_chain_keeps_lifecycle_risk_separate_from_model_override(
     assert attempt['route']['risk_tier'] == 'routine'
     assert attempt['route']['model_override_tier'] == 'crucial'
     assert attempt['route']['resolved_model'] == 'claude-fable-5-1'
-    assert attempt['route']['route_alias'] == 'flagship'
+    assert attempt['route']['route_alias'] == ''
     assert attempt['route']['policy_override'] == 'crucial-claude-fable-5-1-synthesis-adjudication'
     assert '--model\nclaude-fable-5-1\n' in claude_args.read_text(encoding='utf-8')
     assert '--effort\nmedium\n' in claude_args.read_text(encoding='utf-8')

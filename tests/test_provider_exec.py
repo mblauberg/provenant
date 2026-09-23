@@ -79,6 +79,31 @@ def test_read_only_os_confinement_profile_and_argv(monkeypatch, tmp_path):
     ]
 
 
+def test_plan_only_uses_explicit_workspace_root_when_process_cwd_differs(monkeypatch, tmp_path, capsys):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    process_cwd = tmp_path / "launcher"
+    provider_cwd = process_cwd / "provider"
+    workspace_root = tmp_path / "fabric-workspace"
+    provider_cwd.mkdir(parents=True)
+    workspace_root.mkdir()
+    route_file = tmp_path / "route.json"
+    route_file.write_text('{"resolved_model":"fixture"}', encoding="utf-8")
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("hello", encoding="utf-8")
+    output_file = tmp_path / "out.md"
+    monkeypatch.chdir(process_cwd)
+    monkeypatch.setattr(sys, "argv", [
+        "provider_exec.py", "--route-file", str(route_file), "--adapter", "agy",
+        "--prompt-file", str(prompt_file), "--out", str(output_file), "--plan-only",
+        "--cwd", str(provider_cwd), "--workspace-root", str(workspace_root),
+    ])
+
+    assert supervisor.main() == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["cwd"] == str(provider_cwd.resolve())
+    assert plan["workspace_root"] == str(workspace_root.resolve())
+
+
 def test_read_only_confinement_paths_escape_sbpl_literals(tmp_path):
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
     root = tmp_path / 'space"and\\slash'
@@ -90,6 +115,26 @@ def test_read_only_confinement_paths_escape_sbpl_literals(tmp_path):
     }
     profile = supervisor.os_confinement_profile(plan)
     assert 'space\\"and\\\\slash' in profile
+
+
+def test_os_confinement_profile_includes_configured_home_relative_paths(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    cwd = tmp_path / "workspace"
+    cwd.mkdir()
+    monkeypatch.setattr(supervisor.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(supervisor, "EXTRA_DENIED_READS", ("private/cache",))
+    monkeypatch.setattr(supervisor, "ALLOWED_READS", ("shared/docs",))
+    monkeypatch.setattr(supervisor, "ALLOWED_WRITES", ("shared/output",))
+    plan = {
+        "adapter": "agy", "mode": "read_only", "workspace_root": str(cwd),
+        "cwd": str(cwd), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    }
+
+    profile = supervisor.os_confinement_profile(plan)
+
+    assert '(subpath "' + str(tmp_path / "private/cache") + '")' in profile
+    assert '(allow file-read-data (subpath "' + str(cwd) + '") (subpath "' + str(tmp_path / "shared/docs") + '"))' in profile
+    assert '(allow file-write* (subpath "' + str(tmp_path / "shared/output") + '"))' in profile
 
 
 def test_agy_read_only_guarantee_tracks_os_confinement(monkeypatch, tmp_path):

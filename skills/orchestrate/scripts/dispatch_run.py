@@ -223,7 +223,7 @@ def active_receipt_error(receipt: Any) -> str | None:
 def workspace_identity(workspace: Path, provider_cwd: Path | None = None) -> dict[str, Any]:
     identity: dict[str, Any] = {
         "cwd": str((provider_cwd or workspace).resolve()),
-        "root": str(workspace),
+        "root": str(workspace.resolve()),
         "base_revision": None,
         "working_tree": "unavailable",
     }
@@ -249,7 +249,6 @@ def workspace_identity(workspace: Path, provider_cwd: Path | None = None) -> dic
             check=True,
         ).stdout
         identity.update(
-            root=str(Path(base[0]).resolve()),
             base_revision=base[1].lower(),
             working_tree="dirty" if dirty else "clean",
         )
@@ -895,7 +894,8 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
             return None
         plan = provider_exec.build_plan(
             args.tool, route, prompt,
-            cwd=workspace, mode=args.access_mode, timeout_seconds=provider_timeout_seconds(args.timeout_seconds),
+            cwd=workspace, workspace_root=workspace, mode=args.access_mode,
+            timeout_seconds=provider_timeout_seconds(args.timeout_seconds),
             intent=args.intent, preface=args.preface, requested_model=args.model,
             requested_effort=args.effort or "", run_id=os.environ.get("PROVENANT_RUN_ID", ""),
             chair=os.environ.get("PROVENANT_CHAIR", ""),
