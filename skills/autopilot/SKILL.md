@@ -29,7 +29,7 @@ clean exit; otherwise use a lighter-weight skill.
 1. Run `scripts/bootstrap-autopilot.sh <mission-id>`, fill every CONFIG KNOB,
    then rerun to substitute/validate. See
    [state-contract.md](references/state-contract.md) for the file set and
-   `.agent-run/<mission-id>/` location.
+   `.agent-run/runs/<mission-run-dir>/` location.
 2. Use `orchestrate` for every bounded wave: it owns topology, provider
    routing, coordination, the review ladder and degradation.
    Delegate decisions/software change to `implement`/`deliver` and record

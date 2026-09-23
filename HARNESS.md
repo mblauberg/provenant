@@ -19,9 +19,10 @@ available, otherwise a named degraded artefact records the direct result and col
 Fabric claim/ack records enforce message-delivery ownership and redelivery, not provider liveness
 or completion. Herdr observes and sends fire-and-forget steering only. Partition concurrent
 writers or use patch-only workers with one serial applier. Authors and decision-makers must not
-certify their own surface. Receipts declare independence and record provider family; family
-separation is an assurance property requiring stronger evidence, not a restriction on ordinary
-execution.
+certify their own surface. Receipts declare independence and record
+`adapter/model@effort` from the attempt receipt; provider family is derived
+from that route. Family separation is an assurance property requiring stronger
+evidence, not a restriction on ordinary execution.
 
 An authorised chair over a configured workspace may send ordinary workspace content to any
 configured provider family. This default excludes credential and authentication stores,
@@ -55,11 +56,14 @@ each; merge authority is repo-based, agent merges following the repository's own
 surface. An authorised merge prunes its own worktree and merged refs; other deletion,
 force-removal, history rewrites and shared-branch pushes outside authorised merges stay gated.
 
-Route every dispatch by task class to `flagship`, `workhorse` or `scout` where
-the adapter exposes that selection, binding the actual route fields and receipt.
+Route each dispatch by task class to `flagship`, `workhorse` or `scout`, or by
+an explicit model the adapter resolves. Bind the applied route and receipt.
 An ordinary alias-only adapter route records its alias and capability limit;
 never invent task-class, role or effort fields. Runtime governs, catalogues
 cache, mechanics live in `orchestrate`.
+Prefer per-dispatch controls. Editing global provider configuration (for example
+`~/.codex/config.toml`) requires explicit authority for that path and action.
+Run artifacts live under `.agent-run/`; `provenant clean` classifies retention.
 Durable knowledge belongs in project state, specs, ADRs and runbooks; harness-private memory
 holds only cross-project preferences. Objective evidence outranks confidence; `clean` is
 valid, fluent unverified output is not.

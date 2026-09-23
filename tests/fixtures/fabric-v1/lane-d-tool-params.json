@@ -1,0 +1,17 @@
+{
+  "source": "DESIGN-fabric-v2.md §2 and §10.1; replace this fixture with runtime/fabric/src/server.ts schema extraction after lane B merges",
+  "tools": {
+    "fabric_dispatch": ["prompt", "prompt_file", "tasks", "concurrency", "resume", "adapter", "model", "alias", "effort", "mode", "worktree", "cwd", "network", "sandbox", "add_dirs", "task_id", "timeout_seconds", "wait_seconds", "fallback", "detail", "preface"],
+    "fabric_status": ["ids", "wait_seconds", "until", "detail"],
+    "fabric_cancel": ["id", "reason"],
+    "fabric_output": ["id", "part", "offset", "max_bytes"],
+    "fabric_adapters": ["detail"],
+    "fabric_whoami": ["detail"],
+    "fabric_send": ["to", "body", "kind", "reply_to", "task_id", "output_path"],
+    "fabric_inbox": ["ids", "claim", "limit", "task_id", "wait_seconds"],
+    "fabric_acknowledge": ["message_id", "claim_id"],
+    "fabric_note": ["detail"],
+    "fabric_activity": ["limit", "after_seq"],
+    "fabric_task": ["action", "objective", "task_id", "owner", "depends_on", "state", "note", "limit"]
+  }
+}

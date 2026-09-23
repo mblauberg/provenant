@@ -51,13 +51,11 @@ task shape does not establish one.
 | Write and commit in that worktree | `-s workspace-write -C <worktree> --add-dir <primary-repo>/.git` | Use only when the dispatcher is authorised to commit. Grants git metadata only, not the primary working tree. |
 | Never | `-s danger-full-access`, `--dangerously-bypass-approvals-and-sandbox`, `-C <primary-repo>` while another agent works there, or `--add-dir <primary-repo>` or any ancestor of it | The last one is the easy mistake: granting the repo root rather than its `.git` hands over the primary working tree and every sibling worktree at once. |
 
-`-s workspace-write` always writes to `[workdir, /tmp, $TMPDIR]`. `writable_roots` only adds
+`-s workspace-write` also permits writes to system temporary directories. `writable_roots` only adds
 paths; it does not narrow that set. The linked-worktree metadata rule below explains the
 `--add-dir <primary-repo>/.git` case; do not restate or broaden it.
 
-One consequence to keep in mind when testing any of this: a worktree placed under `$TMPDIR` is
-already writable, so it commits happily and proves nothing about the normal case. Put the
-worktree outside `/tmp` and `$TMPDIR` or your sandbox test is measuring the wrong thing.
+When testing containment, place the worktree outside system temporary directories. Those directories are already writable, so a successful commit there proves nothing about the normal case.
 
 ## Procedure
 
@@ -67,7 +65,7 @@ Codex has no context beyond this file. A good brief states: the worktree path an
 background it needs (including anything already verified, so it does not redo it); the work,
 broken into ordered parts; what it must NOT touch; how to verify; the commit convention; and
 an explicit instruction not to push and not to open a PR. Write it to
-`${TMPDIR:-/tmp}/codex-<slug>-brief.txt`.
+`.agent-run/scratch/codex-<slug>-brief.txt`.
 
 **`<slug>` must be unique to this dispatch, not derived from the task.** A slug taken from the
 branch or the subject collides whenever two dispatches run at once, and the collision is silent:
@@ -84,7 +82,7 @@ valuable than complying" reliably produces better work.
 **Tell Codex to write its own report to its own file**, separate from the transcript, and to
 bound its length. End the brief with something close to:
 
-> Write your final report to `${TMPDIR:-/tmp}/codex-<slug>-report.md`, at most 100 lines: what
+> Write your final report to `.agent-run/scratch/codex-<slug>-report.md`, at most 100 lines: what
 > you changed, what you could not do and why, and the exact final line of each verification
 > command. Put it there, not in your final message.
 
@@ -98,8 +96,8 @@ again through you.
 ```
 codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-6-sol \
   -c service_tier=default -c model_reasoning_effort=high - \
-  < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt \
-  > ${TMPDIR:-/tmp}/codex-<slug>-transcript.txt 2>&1
+  < .agent-run/scratch/codex-<slug>-brief.txt \
+  > .agent-run/scratch/codex-<slug>-transcript.txt 2>&1
 STATUS=$?
 ```
 
@@ -120,12 +118,12 @@ directory; it records that child in `worker.pid`, its own wrapper in
 durable completion marker atomically to `run_dir/done`:
 
 ```
-run_dir=${TMPDIR:-/tmp}/codex-<unique-slug>
+run_dir=.agent-run/scratch/codex-<unique-slug>
 "$(provenant root)/skills/orchestrate/scripts/run_worker_detached.sh" \
   --run-dir "$run_dir" -- \
   codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-6-sol \
     -c service_tier=default -c model_reasoning_effort=high - \
-    < ${TMPDIR:-/tmp}/codex-<slug>-brief.txt &
+    < .agent-run/scratch/codex-<slug>-brief.txt &
 WRAPPER_PID=$!
 wait "$WRAPPER_PID"
 STATUS=$?
@@ -196,8 +194,7 @@ report failure having written plenty. Never describe changes you have not confir
 **Tell Codex NOT to commit by default.** A linked worktree keeps its git metadata in the primary
 repo's `.git/worktrees/<name>/`, outside the sandbox root. Whether `git commit` succeeds is
 deterministic: it depends on whether the primary `.git` is inside the default writable roots
-`[workdir, /tmp, $TMPDIR]`. A primary repo under `$TMPDIR` is writable; one under `$HOME` is
-not. Granting only `.git/worktrees/<name>` is insufficient because the linked worktree's objects
+the workdir and system temporary directories. A primary repo in a temporary directory is writable; one under the home directory is not. Granting only `.git/worktrees/<name>` is insufficient because the linked worktree's objects
 remain in the primary `.git/objects`. If a lane must commit its own work, add exactly
 `--add-dir <PRIMARY_REPO>/.git` to the invocation. That grants git metadata only, not the primary
 working tree or any sibling worktree working tree, but the lane could still rewrite refs for
@@ -219,7 +216,7 @@ clean or are there stray uncommitted files; did any scaffolding file the brief s
 survive. A transcript claiming success while the tree is empty is a real and recurring failure
 mode, so this step is not optional.
 
-Then read `${TMPDIR:-/tmp}/codex-<slug>-report.md`, which is bounded and holds the outcome.
+Then read `.agent-run/scratch/codex-<slug>-report.md`, which is bounded and holds the outcome.
 Between that file and the git commands above you have everything you need.
 
 **Do not read the transcript.** Not directly, not a few hundred lines, not "just to check". It
@@ -244,13 +241,13 @@ that is the most important sentence in your report.
 
 The catalogue in `config/model-routing.json` is the authority, and the names
 below are its openai block as of 2026-09-10. When `provenant` is on the path,
-ask it rather than typing a name. The resolver fails closed without a fresh
+ask it rather than typing a name. Direct CLI fallback needs a fresh
 capability snapshot, so take one first:
 
 ```
-provenant capabilities codex --out ${TMPDIR:-/tmp}/codex-caps.json
+provenant capabilities codex --out .agent-run/scratch/codex-caps.json
 provenant route resolve --adapter codex --role worker --task-class legwork \
-  --capabilities-file ${TMPDIR:-/tmp}/codex-caps.json
+  --capabilities-file .agent-run/scratch/codex-caps.json
 ```
 
 Use `--task-class mechanical`, or `--role critical-review --task-class

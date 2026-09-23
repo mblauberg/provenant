@@ -110,7 +110,7 @@ actual provider child PID in `worker.pid`, records its own wrapper PID in
 to `run_dir/done`. The caller captures the wrapper PID separately:
 
 ```bash
-run_dir=${TMPDIR:-/tmp}/provenant-worker-<unique-slug>
+run_dir=.agent-run/scratch/provenant-worker-<unique-slug>
 "$(provenant root)/skills/orchestrate/scripts/run_worker_detached.sh" \
   --run-dir "$run_dir" -- <worker command> &
 WRAPPER_PID=$!

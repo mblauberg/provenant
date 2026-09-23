@@ -31,7 +31,7 @@ finished report.
 1. **This file** → 2. `GOAL.md` (mission + steering directives + the
    `STATUS` switch) → 3. `STATE.md` (heartbeat + Blockers worklist) →
    4. `QUEUE.md` head (what is selectable next) → 5. any delegated
-   `.agent-run/<mission-id>/RUN.json` receipt for decisions this mission
+   `.agent-run/runs/<mission-run-dir>/RUN.json` receipt for decisions this mission
    dispatched to `implement`/`deliver`.
 
 ## How to verify (don't trust)
@@ -47,7 +47,7 @@ finished report.
 The mission is driven entirely through **`GOAL.md`**.
 
 - **Resume / launch:** set `GOAL.md` → `STATUS: RUN`, open a Claude Code
-  session **in the mission root** (`.agent-run/<mission-id>/`) at high
+  session **in the mission root** (`.agent-run/runs/<mission-run-dir>/`) at high
   effort, and paste the self-pacing loop below:
 
   ```
@@ -98,7 +98,7 @@ The mission is driven entirely through **`GOAL.md`**.
 ## Navigation map
 
 ```
-.agent-run/<mission-id>/
+.agent-run/runs/<mission-run-dir>/
 ├── README.md   ← you are here (the single human entry point)
 ├── GOAL.md     ← mission + Active directives + the STATUS: RUN/STOP switch
 ├── STATE.md    ← live heartbeat + Blockers worklist (resume from this alone)

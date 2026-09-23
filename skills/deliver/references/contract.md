@@ -85,7 +85,7 @@ From the project root:
 
 ```sh
 "$(provenant root)/skills/deliver/scripts/validate_delivery.py" \
-  .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes \
+  .agent-run/runs/<run-dir>/RUN.json --workspace-root "$PWD" --verify-hashes \
   --product-root "<product-root>"
 ```
 

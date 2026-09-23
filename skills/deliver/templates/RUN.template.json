@@ -26,7 +26,7 @@
   "risk_override": {"status": "not-required", "approved_by": "", "evidence": "", "reason": ""},
   "high_stakes": false,
   "intent": {
-    "artifact": ".agent-run/DEL-001/intent.md",
+    "artifact": ".agent-run/runs/20260923-1000-delivery-del-001-a1b2c3/intent.md",
     "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "decision_owner": "human-maintainer",
     "approval": {
@@ -43,7 +43,7 @@
     "workspace_roots": ["."],
     "expires_at": "2026-07-11T00:00:00Z",
     "allowed_source_paths": ["."],
-    "allowed_artifact_paths": [".agent-run/DEL-001"],
+    "allowed_artifact_paths": [".agent-run/runs/20260923-1000-delivery-del-001-a1b2c3"],
     "denied_paths": [],
     "prohibited_actions": ["external-publish", "deployment", "irreversible-action"],
     "disclosure": "local-only",
@@ -59,7 +59,7 @@
   },
   "artifacts": [{
     "id": "intent",
-    "path": ".agent-run/DEL-001/intent.md",
+    "path": ".agent-run/runs/20260923-1000-delivery-del-001-a1b2c3/intent.md",
     "media_type": "text/markdown",
     "artifact_type": "report",
     "digest": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

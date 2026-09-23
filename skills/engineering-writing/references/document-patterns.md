@@ -167,7 +167,16 @@ Validate token expiry before refresh
 
 Add a body only when the reason is not obvious or the change is breaking,
 security-sensitive, a migration, or a revert. Preserve required issue and
-attribution trailers. The writing skill returns a message; staging, committing
+attribution trailers. Agent-authored commits use one trailer per contributing
+route, copied from the attempt receipt:
+
+```text
+Agent-Route: codex/gpt-6-luna@high
+```
+
+Use `adapter/model@effort`, not a family-only label. Native Claude subagents
+use `claude/<model>@<effort> (anthropic; resolved)` from the Agent tool model
+parameter, not self-report. The writing skill returns a message; staging, committing
 or amending requires separate authority.
 
 ## Changelog and Release Notes

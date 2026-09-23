@@ -6,7 +6,7 @@ import subprocess
 
 ROOT = Path(__file__).resolve().parents[1]
 VALIDATE = '"$(provenant root)/skills/deliver/scripts/validate_delivery.py"'
-RECEIPT_AND_ARGS = '.agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes'
+RECEIPT_AND_ARGS = 'RUN.json --workspace-root "$PWD" --verify-hashes'
 RECEIPT_INIT = '"$(provenant root)/skills/deliver/scripts/delivery_receipt.py" init'
 REQUIRED_INIT_FLAGS = {
     "--run-dir",
@@ -33,6 +33,7 @@ def test_delivery_and_implementation_guidance_names_receipt_and_safe_root():
         source = read(path)
         assert VALIDATE in source, path
         assert RECEIPT_AND_ARGS in source, path
+        assert '.agent-run/runs/' in source, path
 
     deliver = read("skills/deliver/SKILL.md")
     assert RECEIPT_INIT in deliver

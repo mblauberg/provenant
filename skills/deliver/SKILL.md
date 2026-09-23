@@ -22,10 +22,10 @@ inventing.
 
 ## Lifecycle
 
-1. From the authorised workspace root, create `.agent-run/<id>/RUN.json`:
+1. From the authorised workspace root, create `.agent-run/runs/<YYYYMMDD-HHMM>-delivery-<slug>-<rand6>/RUN.json`:
    ```sh
    "$(provenant root)/skills/deliver/scripts/delivery_receipt.py" init \
-     --run-dir ".agent-run/<id>" --run-id "<id>" --profile "<profile>" \
+     --run-dir ".agent-run/runs/<YYYYMMDD-HHMM>-delivery-<slug>-<rand6>" --run-id "<id>" --profile "<profile>" \
      --chair-family "<family>" --risk-assessment "<risk-assessment.json>" \
      --intent "<approved-intent-file>" --authority "<authority.json>"
    ```
@@ -44,16 +44,17 @@ inventing.
    gate must bind and hash-verify a passing canonical `evaluation-run` receipt;
    copied scores or sampling metadata are not evidence. Retain failed or
    incomplete evaluation receipts as non-gating history.
-5. Review independently with lenses from the dependency cone.
-   Substantial+ follows `HARNESS.md`: targeted lenses plus the other primary;
-   distinct-family review when available, with terminal pressure made
-   stronger and skipped optional legs recorded.
+5. Review independently with lenses from the dependency cone under the
+   `HARNESS.md` risk ladder. Record `adapter/model@effort` from each Fabric
+   attempt receipt; derive family. Native Claude subagents record
+   `claude/<model>@<effort> (anthropic; resolved)` from the Agent tool model
+   parameter. Record skipped legs.
 6. Repair under the risk-tier scaled budget in [the receipt
    contract](references/contract.md). Scope/design drift returns to the user
    gate.
 7. Validate from the project root with
    `"$(provenant root)/skills/deliver/scripts/validate_delivery.py"
-   .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes` (plus
+   .agent-run/runs/<YYYYMMDD-HHMM>-delivery-<slug>-<rand6>/RUN.json --workspace-root "$PWD" --verify-hashes` (plus
    digest-bound `--project-policy` when used).
    A receipt that clears the machine gates is machine-ready, not complete.
 8. User acceptance and external release are separate. Define observation

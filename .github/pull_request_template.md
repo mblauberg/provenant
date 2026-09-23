@@ -63,8 +63,9 @@ rerun both against the new head.
 
 ## Independent review
 
+- Author route: <!-- adapter/model@effort from the attempt receipt; include receipt path -->
+- Reviewer route: <!-- adapter/model@effort from the review receipt; model family derives from the resolved model; native: claude/<model>@<effort> (anthropic; resolved) -->
 - Reviewer role:
-- Model family:
 - Independence from authorship/implementation context:
 - Exact head reviewed:
 - Unresolved P0-P2 findings:
