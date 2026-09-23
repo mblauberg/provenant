@@ -70,6 +70,8 @@ def supervisor():
         ("rate limit exceeded; HTTP 429", "rate_limited"),
         ("Login expired; not logged in", "auth_required"),
         ("model not found", "model_unavailable"),
+        ('error: invalid model selection (--model "gemini-3.8-pro" --effort "high"): --effort is not supported for model "gemini-3.8-pro"', "model_unavailable"),
+        ("invalid model selection; quota exceeded", "usage_limited"),
         ("permission denied", "permission_blocked"),
     ],
 )
@@ -91,6 +93,34 @@ def test_provider_golden(fixture):
         )
         for key, value in case["expected"].items():
             assert result[key] == value
+
+
+def test_unregistered_model_failure_fix_names_adapter_models(tmp_path, monkeypatch):
+    exec_routing = importlib.import_module("skills.orchestrate.scripts.exec_routing")
+    monkeypatch.setattr(
+        exec_routing,
+        "snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("snapshot subprocess called")),
+    )
+    plan = fixture_plan(tmp_path, 'import sys; print("model not found", file=sys.stderr); sys.exit(1)', "agy")
+    plan["requested_model"] = "gemini-3.8-pro"
+    plan["route"]["identity_source"] = "passed-through"
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "model_unavailable"
+    assert record["fix"] == (
+        "choose a registered model: gemini-3.8-flash, "
+        "claude-opus-4-6-thinking, claude-sonnet-4-6"
+    )
+
+
+def test_model_families_load_catalog_without_snapshot(monkeypatch):
+    exec_routing = importlib.import_module("skills.orchestrate.scripts.exec_routing")
+    monkeypatch.setattr(
+        exec_routing,
+        "snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("snapshot subprocess called")),
+    )
+    assert exec_routing.model_families("claude-sonnet-5") == ("anthropic",)
 
 
 def test_structured_result_and_question_take_precedence_over_prose():
@@ -1107,6 +1137,84 @@ def test_observed_substitution_cannot_certify_the_resolved_family(tmp_path):
     assert not record["certification_eligible"]
 
 
+def test_catalogued_observed_substitution_records_answering_family_without_certifying(tmp_path):
+    code = """import json
+events = [
+    {"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"},
+    {"type":"assistant","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"DONE"}]}},
+    {"type":"result","result":"DONE","is_error":False,"session_id":"s-1"},
+]
+for event in events:
+    print(json.dumps(event), flush=True)
+"""
+    plan = fixture_plan(
+        tmp_path,
+        code,
+        "claude",
+        intent="assurance",
+        orchestrator_family="openai",
+    )
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["provenance"]["observed_model"] == "claude-sonnet-5"
+    assert record["provenance"]["family"] == "anthropic"
+    assert record["provenance"]["identity"] == "observed"
+    assert "observed family anthropic inferred from catalogue" in record["provenance"]["notes"]
+    assert not record["cross_family"]
+    assert not record["certification_eligible"]
+
+
+def test_catalogue_lookup_oserror_does_not_fail_finalisation(tmp_path, monkeypatch):
+    exec_routing = importlib.import_module("skills.orchestrate.scripts.exec_routing")
+
+    def unavailable():
+        raise OSError("catalogue unavailable")
+
+    monkeypatch.setattr(
+        exec_routing,
+        "_model_route_module",
+        lambda: SimpleNamespace(load_catalog=unavailable),
+    )
+    code = """import json
+for event in [
+    {"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"},
+    {"type":"assistant","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"DONE"}]}},
+    {"type":"result","result":"DONE","is_error":False,"session_id":"s-1"},
+]:
+    print(json.dumps(event), flush=True)
+"""
+    plan = fixture_plan(tmp_path, code, "claude")
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["provenance"]["family"] == "unknown"
+    assert "observed model family unverified after substitution" in record["provenance"]["notes"]
+
+
+def test_ambiguous_catalogued_observed_substitution_keeps_family_unknown(tmp_path):
+    code = """import json
+events = [
+    {"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"},
+    {"type":"assistant","message":{"model":"gpt-claude-model","content":[{"type":"text","text":"DONE"}]}},
+    {"type":"result","result":"DONE","is_error":False,"session_id":"s-1"},
+]
+for event in events:
+    print(json.dumps(event), flush=True)
+"""
+    plan = fixture_plan(
+        tmp_path,
+        code,
+        "claude",
+        intent="assurance",
+        orchestrator_family="openai",
+    )
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["provenance"]["observed_model"] == "gpt-claude-model"
+    assert record["provenance"]["family"] == "unknown"
+    assert not record["cross_family"]
+    assert not record["certification_eligible"]
+
+
 def test_preface_env_and_credential_path_controls(tmp_path):
     plan = fixture_plan(
         tmp_path,
@@ -1578,6 +1686,8 @@ def test_claude_plan_isolates_settings_and_mcp(tmp_path, monkeypatch, api_key):
     plan = supervisor().build_plan('claude', {'resolved_model': 'opus'}, 'hello', cwd=tmp_path)
     assert ('--bare' if api_key else '--safe-mode') in plan['argv']
     assert '--strict-mcp-config' in plan['argv']
+    assert plan['argv'][plan['argv'].index('--permission-mode') + 1] == 'default'
+    assert plan['argv'][plan['argv'].index('--tools') + 1] == 'Read,Grep,Glob'
     assert 'fixture-key' not in ' '.join(plan['argv'])
 
 @pytest.mark.parametrize('adapter', ['claude', 'codex', 'opencode'])

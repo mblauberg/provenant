@@ -2569,7 +2569,7 @@ def test_claude_read_only_route_remains_the_default():
     assert record["access_mode"] == "read_only"
     assert record["worktree"] == ""
     assert record["read_only_guarantee"] == "enforced"
-    assert "--permission-mode\nplan" in recorded
+    assert "--permission-mode\ndefault" in recorded
     assert "--tools\nRead,Grep,Glob" in recorded
     assert "acceptEdits" not in recorded
     assert "--allowedTools" not in recorded

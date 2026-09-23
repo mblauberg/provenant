@@ -280,10 +280,33 @@ SIGNATURES = (
     ("rate_limited", r"rate.?limit|too many requests|overloaded|\b(?:429|529)\b"),
     (
         "model_unavailable",
-        r"model[^\n]*(?:unavailable|not available|not found|unsupported|does not exist)|unknown model",
+        r"invalid model selection|not supported for model|model[^\n]*(?:unavailable|not available|not found|unsupported|does not exist)|unknown model",
     ),
     ("permission_blocked", r"\b403\b|forbidden"),
 )
+
+
+def _model_unavailable_fix(plan):
+    route = plan.get("route") or {}
+    if route.get("identity_source") != "passed-through":
+        return "choose another model"
+    try:
+        try:
+            from . import exec_routing
+        except ImportError:
+            import exec_routing
+        route = exec_routing._model_route_module()
+        catalogue = route.load_catalog()
+        adapter = catalogue.get("adapters", {}).get(plan.get("adapter"), {})
+        registered = route.registered_model_ids(adapter)
+    except Exception:
+        registered = []
+    if registered:
+        choices = ", ".join(registered[:6])
+        if len(registered) > 6:
+            choices += ", …"
+        return "choose a registered model: " + choices
+    return "choose another model"
 
 
 def _objects(value):
@@ -1736,7 +1759,7 @@ def execute(
     warnings = list(plan["warnings"])
     reported = {}
     if plan["adapter"] == "claude":
-        # init.model is the request; plan mode may answer with another model.
+        # init.model is the request; Claude may answer with another model.
         answered = meter.models["answered"]
         reported = {"init_model": meter.models["init"], "answered_models": list(answered)}
         answering, answering_source = meter.answering_model()
@@ -1767,10 +1790,20 @@ def execute(
     identity = "observed" if observed else "resolved" if plan["model"] else "unknown"
     family = route.get("model_family") or route.get("family") or "unknown"
     if substituted:
-        # Routing attributed the requested model, not the provider's substitution.
-        # Do not certify a different family without model-router evidence for it.
-        family = "unknown"
-        notes.append("observed model family unverified after substitution")
+        try:
+            try:
+                from . import exec_routing
+            except ImportError:
+                import exec_routing
+            observed_families = exec_routing.model_families(observed)
+        except Exception:
+            observed_families = ()
+        if len(observed_families) == 1:
+            family = observed_families[0]
+            notes.append(f"observed family {family} inferred from catalogue")
+        else:
+            family = "unknown"
+            notes.append("observed model family unverified after substitution")
     model = observed or plan["model"]
     line = (
         f"Route: {plan['adapter']}/{model}"
@@ -1825,11 +1858,24 @@ def execute(
         status = "output_identity_invalid" if digest_value else "output_write_error"
         digest_value = ""
     cross = bool(
-        plan.get("orchestrator_family")
+        not substituted
+        and plan.get("orchestrator_family")
         and family not in {"unknown", "generic-open", "open-weight"}
         and family != plan["orchestrator_family"]
     )
     guarantee = plan["applied"]["guarantee"]
+    fix = (
+        _model_unavailable_fix(plan)
+        if status == "model_unavailable"
+        else {
+            "auth_required": "authenticate the provider CLI",
+            "permission_blocked": "check the requested sandbox and directory grants",
+            "tool_missing": "install the provider CLI",
+            "stalled": "inspect events or try another model",
+            "usage_limited": "wait for reset or choose another model",
+            "rate_limited": "retry after the recorded cooldown",
+        }.get(status)
+    )
     record = {
         **{
             key: route.get(key, "")
@@ -1879,6 +1925,7 @@ def execute(
         "cross_family": cross,
         "certification_eligible": plan["intent"] == "assurance"
         and status == "ok"
+        and not substituted
         and cross
         and plan["mode"] == "read_only"
         and guarantee == "enforced",
@@ -1896,15 +1943,7 @@ def execute(
         in {"usage_limited", "rate_limited", "model_unavailable", "stalled"},
         "reset_at": parsed["reset_at"],
         "retry_after": parsed["retry_after"],
-        "fix": {
-            "auth_required": "authenticate the provider CLI",
-            "model_unavailable": "choose another model",
-            "permission_blocked": "check the requested sandbox and directory grants",
-            "tool_missing": "install the provider CLI",
-            "stalled": "inspect events or try another model",
-            "usage_limited": "wait for reset or choose another model",
-            "rate_limited": "retry after the recorded cooldown",
-        }.get(status),
+        "fix": fix,
         "evidence": {
             "exit": exit_code,
             "signal": -exit_code if exit_code and exit_code < 0 else None,

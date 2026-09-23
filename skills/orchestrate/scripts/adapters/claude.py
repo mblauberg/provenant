@@ -39,7 +39,7 @@ def argv(p):
             "Bash,Edit,Write,MultiEdit,NotebookEdit,Read,Grep,Glob",
         ]
     else:
-        command += ["--permission-mode", "plan", "--tools", "Read,Grep,Glob"]
+        command += ["--permission-mode", "default", "--tools", "Read,Grep,Glob"]
     command += ["--system-prompt", p["boundary_prompt"]]
     for directory in p["applied"]["add_dirs"]:
         command += ["--add-dir", directory]
