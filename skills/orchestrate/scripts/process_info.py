@@ -223,6 +223,22 @@ class _DarwinTaskInfo(ctypes.Structure):
     ]
 
 
+class _MachTimebase(ctypes.Structure):
+    _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
+
+
+@lru_cache(maxsize=1)
+def _mach_tick_seconds():
+    """Task CPU counters are Mach ticks: nanoseconds on Intel, 125/3 ns on Apple Silicon."""
+    timebase = _MachTimebase()
+    try:
+        if ctypes.CDLL(None).mach_timebase_info(ctypes.byref(timebase)) == 0 and timebase.denom:
+            return timebase.numer / timebase.denom / 1_000_000_000
+    except (OSError, AttributeError):
+        pass
+    return 1 / 1_000_000_000
+
+
 def _darwin_argv(pid):
     libc = ctypes.CDLL(None, use_errno=True)
     mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2
@@ -268,10 +284,12 @@ def process(pid):
             task = _DarwinTaskInfo()
             libproc = _darwin_libproc()
             read = libproc.proc_pidinfo(pid, 4, 0, ctypes.byref(task), ctypes.sizeof(task))
-            cpu = (task.total_user + task.total_system) / 1_000_000_000 if read == ctypes.sizeof(task) else 0
+            complete = read == ctypes.sizeof(task)
+            cpu = (task.total_user + task.total_system) * _mach_tick_seconds() if complete else 0
             rss = task.resident_size // 1024 if read == ctypes.sizeof(task) else 0
             command = _darwin_argv(pid) or row.command
-            stat = {2: "R", 3: "S", 4: "T", 5: "Z"}.get(row.status, "S")
+            # The BSD status says SRUN for sleeping processes too; running threads decide R or S.
+            stat = {4: "T", 5: "Z"}.get(row.status) or ("R" if complete and task.numrunning > 0 else "S")
             tty = row.tty
             info = _DarwinBsdInfo()
             read = libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info))

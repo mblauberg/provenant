@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Sandbox-safe subset of ps, backed by libproc or /proc."""
 
+import os
 import pwd
 import signal
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from process_info import process, processes
@@ -63,7 +65,8 @@ def parse(argv):
     while index < len(argv):
         arg = argv[index]
         # BSD style (ps aux) is a leading word of switches without a dash.
-        bsd = index == 0 and not arg.startswith("-") and arg and set(arg) <= SWITCHES
+        bsd = (index == 0 and not arg.startswith("-") and arg
+               and set(arg[:-1] if arg[-1] in "oOp" else arg) <= SWITCHES)
         body = arg if bsd else arg[1:] if arg.startswith("-") else None
         if body is None:
             raise ValueError(f"unsupported argument {arg}")
@@ -112,6 +115,20 @@ def parse(argv):
     return selected, fields or layout, all_processes, include_no_tty
 
 
+def unreadable(pid):
+    """A process that exists but cannot be read (another user's) is shown, never reported gone."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass
+    print(f"ps: {pid}: exists but cannot be read here; fields show ?", file=sys.stderr)
+    unknown = dict.fromkeys(("ppid", "pgid", "lstart", "elapsed", "cpu", "command", "comm",
+                             "stat", "rss", "tty"), "?")
+    return SimpleNamespace(pid=pid, uid=-1, **unknown)
+
+
 def main(argv=None):
     try:
         selected, fields, all_processes, include_no_tty = parse(sys.argv[1:] if argv is None else argv)
@@ -122,6 +139,8 @@ def main(argv=None):
     except OSError as exc:
         print(f"ps: cannot inspect processes: {exc}", file=sys.stderr)
         return 1
+    if selected:
+        rows = [row or unreadable(pid) for pid, row in zip(dict.fromkeys(selected), rows)]
     rows = sorted((row for row in rows if row is not None), key=lambda row: row.pid)
     if all_processes and not include_no_tty and not selected:
         rows = [row for row in rows if row.tty not in {"?", "??"}]

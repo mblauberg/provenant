@@ -5,14 +5,15 @@ import { afterEach, expect, it, vi } from "vitest";
 
 // A process-identity probe can fail transiently; that alone must not orphan a
 // live host's run, because the next dispatch's orphan reap would kill it.
-const probe = { fail: 0 };
+const probe = { fail: 0, code: undefined as string | undefined };
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
   return {
     ...actual,
     execFileSync: ((file: string, ...rest: unknown[]) => {
       const args = rest[0] as string[] | undefined;
-      if (probe.fail && file === "/bin/ps" && args?.includes(String(probe.fail))) throw new Error("ps unavailable");
+      if (probe.fail && file === "/bin/ps" && args?.includes(String(probe.fail)))
+        throw Object.assign(new Error("ps unavailable"), { code: probe.code });
       return (actual.execFileSync as (...args: unknown[]) => unknown)(file, ...rest);
     }) as typeof actual.execFileSync,
   };
@@ -22,6 +23,7 @@ const { listRecordedRuns, processStartedAt } = await import("../src/run-registry
 const roots: string[] = [];
 afterEach(() => {
   probe.fail = 0;
+  probe.code = undefined;
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
@@ -46,9 +48,15 @@ it("keeps a live host's run when its identity probe fails", () => {
   expect(row?.orphaned).toBe(false);
 });
 
-it("reads the start time through PATH when system ps cannot execute", () => {
+it("reads the start time through the bundled shim when system ps cannot start", () => {
   probe.fail = process.pid;
+  probe.code = "EPERM"; // seatbelt refuses to exec the setuid /bin/ps
   expect(processStartedAt(process.pid)).toMatch(/^\w{3} \w{3} +\d+ \d\d:\d\d:\d\d \d{4}$/);
+});
+
+it("does not fall back when system ps started and failed", () => {
+  probe.fail = process.pid;
+  expect(processStartedAt(process.pid)).toBeNull();
 });
 
 it("still orphans a run whose host identity was never recorded", () => {

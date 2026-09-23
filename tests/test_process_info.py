@@ -130,3 +130,50 @@ def test_shim_ends_quietly_when_its_reader_closes():
     reader.stdout.close()  # as head -1 does
     _, stderr = reader.communicate(timeout=30)
     assert stderr == b""
+
+
+def test_cpu_time_matches_what_the_process_used():
+    """macOS task counters are Mach ticks (125/3 ns on Apple Silicon), not nanoseconds."""
+    import process_info
+    import resource
+    import time
+
+    started = time.process_time()
+    while time.process_time() - started < 1.0:
+        pass
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    minutes, seconds = process_info.process(os.getpid()).cpu.split(":")
+    reported = int(minutes) * 60 + float(seconds)
+    assert abs(reported - (usage.ru_utime + usage.ru_stime)) < 0.5
+
+
+def test_a_sleeping_process_is_not_reported_running():
+    import process_info
+    import time
+
+    sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+    try:
+        time.sleep(0.5)
+        assert process_info.process(sleeper.pid).stat == "S"
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+
+
+def test_shim_accepts_bsd_axo():
+    shim = SCRIPTS / "bin/ps"
+    result = subprocess.run([str(shim), "axo", "pid,comm"], capture_output=True, text=True, check=True)
+    assert result.stdout.splitlines()[0].split() == ["PID", "COMM"]
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read every process")
+def test_shim_shows_an_unreadable_live_process_rather_than_dropping_it():
+    import process_info
+
+    if process_info.process(1) is not None:
+        pytest.skip("pid 1 is readable on this host")
+    shim = SCRIPTS / "bin/ps"
+    result = subprocess.run([str(shim), "-o", "pid=,stat=", "-p", f"{os.getpid()},1"],
+                            capture_output=True, text=True, check=True)
+    assert [line.split()[0] for line in result.stdout.splitlines()] == ["1", str(os.getpid())]
+    assert "cannot be read" in result.stderr
