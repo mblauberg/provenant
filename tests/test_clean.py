@@ -326,6 +326,28 @@ def test_ignored_worktree_run_is_never_pruned(tmp_path):
     assert rows[".worktrees/lane-merged"]["verdict"] == "keep:worktree-runs"
 
 
+def test_legacy_delivery_and_research_keep_merged_worktree(tmp_path):
+    root = repo(tmp_path)
+    shared = root / ".worktrees"
+    shared.mkdir()
+    target = shared / "lane-merged"
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", "lane/merged", str(target)], check=True)
+    (target / "work.txt").write_text("merged work\n")
+    subprocess.run(["git", "-C", str(target), "add", "work.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "work"], check=True)
+    subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", "merge lane", "lane/merged"], check=True)
+    delivery = target / ".agent-run" / "DEL-1"
+    delivery.mkdir(parents=True)
+    (delivery / "RUN.json").write_text('{"human_gates":{"acceptance":{"status":"pending"}}}\n')
+    research = target / ".agent-run" / "research"
+    research.mkdir()
+    (research / "notes.md").write_text("keep this research\n")
+    (root / ".git" / "info" / "exclude").write_text("/.agent-run/\n")
+
+    rows = {row["path"]: row for row in cleaner().plan(root, pr_bodies=[])["rows"]}
+    assert rows[".worktrees/lane-merged"]["verdict"] == "keep:worktree-runs"
+
+
 def test_worktree_scratch_does_not_count_as_a_run(tmp_path):
     root = repo(tmp_path)
     target = root / ".worktrees" / "lane-done"
