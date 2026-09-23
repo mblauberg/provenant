@@ -444,11 +444,17 @@ def test_ordinary_unknown_model_passes_through_and_conflict_prefers_model():
 
 
 def test_unregistered_agy_model_passes_explicit_effort_unverified():
-    result, route = resolve("--adapter", "agy", "--model", "gemini-3.7-flash",
+    result, route = resolve("--adapter", "agy", "--model", "gemini-3.8-pro",
                             "--effort", "medium", "--role", "worker")
     assert result.returncode == 0, route
     assert route["effort"] == route["effort_applied"] == "medium"
     assert route["effort_capability_source"] == "provider-unverified"
+    assert route["notes"][0] == (
+        "gemini-3.8-pro is not in the agy registry "
+        "(registered: gemini-3.8-flash, claude-opus-4-6-thinking, claude-sonnet-4-6; "
+        "closest: gemini-3.8-flash); "
+        "passed through as given"
+    )
 
 
 def test_opencode_training_warning_and_paid_fallback_excludes_free():

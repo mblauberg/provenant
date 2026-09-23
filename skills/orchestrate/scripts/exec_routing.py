@@ -89,10 +89,7 @@ def registered_model(adapter, model, catalogue=None, warnings=None):
         if adapter not in catalogue.get("adapters", {}):
             return model
         # The router owns alias, retired-name and provider-suffix resolution.
-        product = Path(os.environ.get("AGENT_FABRIC_PRODUCT_ROOT") or Path(__file__).resolve().parents[3])
-        spec = importlib.util.spec_from_file_location("fabric_model_route", product / "scripts/model_route.py")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
+        module = _model_route_module()
         entry, _ = module._registered_match(adapter, model, catalogue)
         return entry["id"] if entry else model
     except (KeyError, AttributeError, TypeError, ValueError) as exc:
@@ -102,6 +99,28 @@ def registered_model(adapter, model, catalogue=None, warnings=None):
         else:
             print(warning, file=sys.stderr)
         return model
+
+
+def _model_route_module():
+    product = Path(os.environ.get("AGENT_FABRIC_PRODUCT_ROOT") or Path(__file__).resolve().parents[3])
+    spec = importlib.util.spec_from_file_location("fabric_model_route", product / "scripts/model_route.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def model_families(model, catalogue=None):
+    """Return catalogue-pattern families for a model id, preserving ambiguity."""
+    try:
+        route = _model_route_module()
+        raw_catalogue = catalogue if isinstance(catalogue, dict) else {}
+        if isinstance(raw_catalogue.get("catalogue"), dict):
+            raw_catalogue = raw_catalogue["catalogue"]
+        if "model_patterns" not in raw_catalogue:
+            raw_catalogue = route.load_catalog()
+        return route.matching_model_families(model, raw_catalogue)
+    except (AttributeError, KeyError, TypeError, ValueError):
+        return ()
 
 
 

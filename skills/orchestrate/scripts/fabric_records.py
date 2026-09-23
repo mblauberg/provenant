@@ -11,9 +11,11 @@ from pathlib import Path
 import secrets
 
 try:
+    from .context_usage import marker as context_marker
     from .layout import run_root
     from .output_custody import open_parent
 except ImportError:
+    from context_usage import marker as context_marker
     from layout import run_root
     from output_custody import open_parent
 
@@ -102,16 +104,22 @@ def render_digest(row):
         result = str(Path(row["run_dir"]) / result)
     detail = " · result " + result if result else ""
     if status not in {"ok", "partial"}:
+        excerpt = row.get("evidence", {}).get("excerpt") or ""
+        excerpt_line = next(
+            (" ".join(line.split())[:120] for line in excerpt.splitlines() if line.strip()),
+            "",
+        ) if isinstance(excerpt, str) else ""
         detail = " · " + (
             row.get("fix")
             or row.get("evidence", {}).get("signature")
+            or excerpt_line
             or "inspect stderr"
         )
         if row.get("reset_at"):
             detail += " (resets " + row["reset_at"] + ")"
     text = f"{status} {run_id} {route} {duration}s" + detail
     if prov.get("line"):
-        text += "\n  " + prov["line"]
+        text += "\n  " + prov["line"] + context_marker(row.get("context"))
     warnings = [str(item) for item in row.get("warnings") or [] if item]
     if warnings:
         # Warn, don't block: the caller sees what was substituted or skipped.
@@ -202,7 +210,9 @@ def write_cooldown(row, *, path=None, at=None):
     adapter = prov["requested"]["adapter"]
     model = registered_model(adapter, prov["resolved_model"] or "*", warnings=row.setdefault("warnings", []))
     excerpt = row.get("evidence", {}).get("excerpt", "")
-    if row["status"] == "usage_limited" and re.search(
+    # Antigravity meters each hosted model pool separately; its quota message
+    # names one pool, so it never cools the whole adapter.
+    if adapter != "agy" and row["status"] == "usage_limited" and re.search(
         r"(?:usage|session|weekly|account|plan) limit|individual quota reached|insufficient_quota", excerpt, re.I
     ):
         model = "*"

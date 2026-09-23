@@ -7,12 +7,17 @@ declared once, in `[tool.pytest.ini_options] pythonpath` in `pyproject.toml`.
 This file does not add paths. It fails collection loudly if the declared roots
 are missing, so a suite that quietly reverts to per-file path repair is caught
 here rather than by a confusing `ModuleNotFoundError` in one test.
+
+It also points Fabric's cooldown store at a per-test file, so no test reads or
+writes the host's live cooldowns.
 """
 
 from __future__ import annotations
 
 import sys
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 DECLARED_IMPORT_ROOTS = (ROOT, ROOT / "scripts", ROOT / "skills")
@@ -27,3 +32,8 @@ def pytest_configure(config) -> None:
             f"{missing}. Restore `pythonpath` in pyproject.toml rather than "
             "repairing sys.path inside a test."
         )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_cooldowns(tmp_path_factory, monkeypatch):
+    monkeypatch.setenv("FABRIC_COOLDOWNS_PATH", str(tmp_path_factory.mktemp("cooldowns") / "cooldowns.json"))

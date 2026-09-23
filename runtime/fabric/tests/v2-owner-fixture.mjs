@@ -1,8 +1,19 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs";
 import { join, isAbsolute } from "node:path";
 const args = process.argv.slice(2),
   value = (key) => args.includes(key) ? args[args.indexOf(key) + 1] : undefined;
+const pidLog = process.env.PROVENANT_FIXTURE_PID_LOG;
+if (pidLog) {
+  appendFileSync(pidLog, JSON.stringify({ pid: process.pid, event: "start" }) + "\n");
+  process.on("exit", () => appendFileSync(pidLog, JSON.stringify({ pid: process.pid, event: "exit" }) + "\n"));
+}
+const deadlineMs = Number(process.env.PROVENANT_FIXTURE_DEADLINE_MS ?? 20000);
+const deadline = setTimeout(() => process.exit(124), Number.isFinite(deadlineMs) && deadlineMs > 0 ? deadlineMs : 20000);
+deadline.unref();
+if (args.includes("--deadline-loop")) {
+  while (true) await new Promise((resolve) => setTimeout(resolve, 20));
+}
 const owner = process.env.PROVENANT_FIXTURE_OWNER;
 if (args.includes("--preflight-json")) {
   let text = "";
@@ -58,7 +69,7 @@ if (owner === "batch_run.py") {
         prompt,
         "--timeout",
         String(task.timeout ?? 3600),
-        ...["adapter", "alias", "model", "effort", "cwd"].flatMap((key) => task[key] === undefined ? [] : ["--" + key, String(task[key])]),
+        ...["adapter", "alias", "model", "effort", "cwd", "context_ceiling"].flatMap((key) => task[key] === undefined ? [] : ["--" + key, String(task[key])]),
       ],
       { env: { ...process.env, PROVENANT_FIXTURE_OWNER: "dispatch_run.py" }, encoding: "utf8" },
     );
@@ -75,7 +86,7 @@ if (owner === "batch_run.py") {
 let task = value("--task-id"),
   attempt = 1;
 if (args.includes("--resume")) {
-  task = readdirSync(join(dir, "tasks"))[0];
+  task = value("--task-id") ?? readdirSync(join(dir, "tasks"))[0];
   attempt = readdirSync(join(dir, "tasks", task)).length + 1;
 }
 if (args.includes("--alias") && args.includes("--model")) {
@@ -84,6 +95,7 @@ if (args.includes("--alias") && args.includes("--model")) {
 const prompt = readFileSync(value("--prompt-file"), "utf8");
 writeFileSync(join(dir, "_owner", `${task}-args-${attempt}.json`), JSON.stringify(args));
 writeFileSync(join(dir, "_owner", `${task}-env-${attempt}.json`), JSON.stringify({ chair: process.env.PROVENANT_CHAIR }));
+writeFileSync(join(dir, "_owner", `${task}-prompt-${attempt}.md`), prompt);
 if (prompt === "reject-before-attempt") {
   console.log(JSON.stringify({schema_version:1,status:"rejected",message:"dispatch a new run",fix:"dispatch a new run"})); process.exit(2);
 }

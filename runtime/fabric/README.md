@@ -41,7 +41,7 @@ Exactly twelve tools are registered by default:
 
 | Tool | Purpose |
 | --- | --- |
-| `fabric_dispatch` | One prompt, `tasks[]`, or `resume` |
+| `fabric_dispatch` | One prompt, `tasks[]`, `resume` or `handoff` |
 | `fabric_status` | Read run/task/batch IDs; bounded wait for `any` or `all` |
 | `fabric_cancel` | Cancel the owner and provider group |
 | `fabric_output` | Bounded result, stderr, events or receipt slice |
@@ -72,7 +72,14 @@ as defaults, with each task taking precedence. Prompt file paths resolve from
 the caller workspace, including when `cwd` selects a subdirectory. Defaults are
 55 seconds of waiting for a single dispatch and zero for a batch. Timeouts default to 3,600 seconds for
 read-only work and 10,800 seconds for writers. `resume` retains the same run ID,
-route, controls and timeout. Use a new dispatch to change those settings.
+route and controls; only `context_ceiling` and `timeout_seconds` may change. Use a new
+dispatch to change the rest. With `resume`, `task_id` selects one task of a
+batch; a task's own ID also works. `handoff: <run id>` starts a fresh run primed
+with that task's route and result tail, the cheap alternative to resuming a large
+session. `context_ceiling` (default 300,000 tokens, clamped to 100k–1M) lowers
+auto-compaction where the provider supports it; it never raises it. Each attempt records `context`,
+and the terminal Route line shows it as `ctx 212k/1M`. See
+[`docs/specs/fabric-v2.md`](../../docs/specs/fabric-v2.md#session-context).
 
 Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, and `detail`.
 The wave-1 `id` argument and retained `mcp-*` directories remain readable.

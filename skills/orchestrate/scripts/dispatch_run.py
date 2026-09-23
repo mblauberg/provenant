@@ -9,9 +9,11 @@ live progress, typed terminal states, provenance, and controls.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 import fcntl
 import hashlib
+import importlib.util
+import io
 import json
 import math
 import os
@@ -51,6 +53,7 @@ from _shared.bounded_process import stop_process_group
 from layout import run_workspace, run_root, contains_run
 import provider_exec
 import exec_routing
+import context_usage
 from fabric_records import render_digest, write_cooldown, append_index, TERMINAL_STATUSES
 from _shared.custody import (
     OwnedFileError, OwnedLinkError, atomic_write_contained, contained_regular_path,
@@ -358,8 +361,8 @@ def worker_question_envelope(result_path: Path, expected_digest: str) -> dict[st
     return worker_question_envelope_bytes(candidate, expected_digest)
 
 
-def fail(run_dir: Path | None, status: str, message: str) -> int:
-    record = {"schema_version": 1, "status": status, "message": message}
+def fail(run_dir: Path | None, status: str, message: str, error: str | None = None) -> int:
+    record = {"schema_version": 1, "status": status, "message": message, **({"error": error} if error else {})}
     print(json.dumps(record, sort_keys=True))
     return 2
 
@@ -747,6 +750,163 @@ def build_command(
     return command
 
 
+FAST_PLAN_SHELL_ENV_READS = {
+    "CF_DISPATCH_IDLE_SECONDS", "CF_DISPATCH_AGY_ADD_DIR", "CF_DISPATCH_ENABLE_KIRO",
+    "CF_DISPATCH_ENABLE_COPILOT", "CF_DISPATCH_CURSOR_MODEL", "CF_DISPATCH_KIRO_MODEL",
+    "CF_DISPATCH_COPILOT_MODEL", "CF_DISPATCH_OPENCODE_MODEL", "CF_DISPATCH_ENDPOINT",
+    "CF_DISPATCH_CODEX_NETWORK", "CF_DISPATCH_AGY_SANDBOX",
+}
+FAST_PLAN_ROUTE_REQUIRED = (
+    "resolved_model", "model_family", "endpoint_provider", "identity_source",
+)
+FAST_PLAN_ROUTE_FIELDS = (
+    "status", "resolved_model", "model_family", "endpoint_provider",
+    "identity_source", "requested_effort", "effort", "effort_source",
+    "effort_capability_source", "effort_substitution", "substitution",
+    "fallback_model", "catalog_model", "model_selection",
+    "model_override_tier", "policy_override", "alias", "reason",
+    "endpoint_profile", "endpoint_base_url", "endpoint_token_env", "endpoint_wire_api",
+)
+
+
+def parse_fast_route_json(raw: str) -> dict:
+    """Apply the shell planner's parse_route_json field contract before fast planning."""
+    def reject_duplicate_members(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate route member: {key}")
+            value[key] = item
+        return value
+
+    route = json.loads(raw, object_pairs_hook=reject_duplicate_members)
+    if not isinstance(route, dict):
+        raise ValueError("route must be a JSON object")
+    if route.get("status") == "ok":
+        for key in FAST_PLAN_ROUTE_REQUIRED:
+            value = route.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"successful route requires non-empty {key}")
+    for key in FAST_PLAN_ROUTE_FIELDS:
+        value = route.get(key, "")
+        if value is not None and (not isinstance(value, str) or "\0" in value):
+            raise ValueError(f"route field {key} must be a NUL-free string")
+    return route
+
+
+PLANNER_MODEL_STATUSES = {"capability_model_unavailable", "no_candidate_available", "alias_unavailable",
+                          "adapter_default_model_invalid", "model_required_for_broker"}
+PLANNER_TRANSIENT_STATUSES = {"capability_discovery_failed", "capability_snapshot_untrusted",
+                              "capability_snapshot_stale", "probe_unavailable", "probe_cache_busy"}
+
+
+def planner_result(planning):
+    """The route plan, or a typed failure when the planner produced none."""
+    try:
+        return json.loads(planning.stdout)
+    except ValueError:
+        if planning.returncode in (-signal.SIGTERM, -signal.SIGINT, -signal.SIGHUP):
+            return {"status": "interrupted", "fix": f"route planning stopped by signal {-planning.returncode}; retry"}
+        if planning.returncode < 0:
+            return {"status": "failed", "fix": f"route planner crashed (signal {-planning.returncode}); inspect stderr"}
+        return {"status": "rejected", "fix": "route planner returned invalid JSON"}
+
+
+def route_refusal(record, adapter=""):
+    """A planner refusal in the router's vocabulary; provider-exec records carry provenance."""
+    status = record.get("status")
+    if not status or status in TERMINAL_STATUSES or "provenance" in record or record.get("schema") == "fabric.exec-plan.v1":
+        return None
+    return router_failure(str(status), adapter)
+
+
+def router_failure(signature, adapter=""):
+    """Fabric's status and fix for a router refusal; the router's own status stays the signature."""
+    if signature in PLANNER_MODEL_STATUSES:
+        status = "model_unavailable"
+        fix = provider_exec._model_unavailable_fix({"adapter": adapter, "route": {"identity_source": "passed-through"}})
+    elif signature in PLANNER_TRANSIENT_STATUSES:
+        status, fix = "failed", f"provider capability check failed ({signature}); check the provider CLI login and retry"
+    else:
+        status, fix = "rejected", f"route planner refused the route ({signature}); change the requested route"
+    return {"status": status, "error": signature, "fix": fix,
+            "evidence": {"exit": None, "signal": None, "signature": signature, "excerpt": ""}}
+
+
+def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path):
+    """Plan a simple explicit route in the owner process using the same router and supervisor."""
+    if (not args.model or args.tool not in {"claude", "codex"}
+            or any(str(value).startswith("-") for value in (args.model, args.effort, args.role) if value)
+            or any(value for key, value in os.environ.items() if key.startswith("CF_DISPATCH_"))
+            or not Path(os.environ.get("TMPDIR") or "/tmp").is_dir()
+            or args.access_mode != "read_only"
+            or args.task_class or args.alias or args.resume or getattr(args, "resume_session", None) or args.worktree
+            or args.provider_cwd or args.sandbox or args.network is not None or args.add_dirs
+            or args.git_evidence or args.model_override_tier or args.orchestrator_family
+            or args.intent != "ordinary" or args.fallback not in (None, False, "false")):
+        return None
+    executable = {"cursor": "cursor-agent", "kiro": "kiro-cli"}.get(args.tool, args.tool)
+    if not shutil.which(executable):
+        return None
+    environment = routing_environment()
+    product = Path(environment.get("AGENT_FABRIC_PRODUCT_ROOT") or SKILLS_ROOT.parent)
+    path = product / "scripts/model_route.py"
+    if not path.is_file():
+        return None
+    try:
+        prompt = prompt_path.read_text(encoding="utf-8")
+        if not prompt or "\0" in prompt:
+            return None
+        context_spec = importlib.util.spec_from_file_location("fabric_fast_worktree", product / "scripts/worktree.py")
+        context_module = importlib.util.module_from_spec(context_spec)
+        context_spec.loader.exec_module(context_module)
+        try:
+            context_module.validate_context(argparse.Namespace(repo=workspace, allow_non_git=True))
+        except context_module.PolicyError:
+            return None
+        spec = importlib.util.spec_from_file_location("fabric_fast_model_route", path)
+        module = importlib.util.module_from_spec(spec)
+        overrides = {"FABRIC_ALIAS_IMPLIED": "1", "AGENT_FABRIC_PRODUCT_ROOT": str(product),
+                     "AGENT_FABRIC_INSTANCE_ROOT": environment.get("AGENT_FABRIC_INSTANCE_ROOT")
+                     or str(Path.home() / ".agents")}
+        previous = {key: os.environ.get(key) for key in overrides}
+        os.environ.update(overrides)
+        try:
+            with redirect_stdout(io.StringIO()) as output:
+                spec.loader.exec_module(module)
+                argv = ["resolve", "--adapter", args.tool, "--role", args.role,
+                        "--lead-family", "", "--alias", "flagship", f"--model={args.model}"]
+                if args.effort:
+                    argv += ["--effort", args.effort]
+                if args.fallback is not None:
+                    argv += ["--fallback", "false"]
+                code = module.main(argv)
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        if code != 0:
+            return None
+        route = parse_fast_route_json(output.getvalue())
+        if route.get("status") != "ok":
+            return None
+        plan = provider_exec.build_plan(
+            args.tool, route, prompt,
+            cwd=workspace, mode=args.access_mode, timeout_seconds=provider_timeout_seconds(args.timeout_seconds),
+            intent=args.intent, preface=args.preface, requested_model=args.model,
+            requested_effort=args.effort or "", run_id=os.environ.get("PROVENANT_RUN_ID", ""),
+            chair=os.environ.get("PROVENANT_CHAIR", ""),
+            reviewer_id=args.reviewer_id or "", risk_tier=args.risk_tier or "",
+            model_override_tier=args.model_override_tier or "", orchestrator_family="",
+        )
+        plan["output_path"] = str(result_path.absolute())
+        return plan
+    except (Exception, SystemExit):
+        return None
+
+
 def _read_prompt_once(workspace: Path, prompt_source: Path) -> bytes:
     """Read the validated prompt inode once for both retention and provider use."""
     try:
@@ -905,6 +1065,7 @@ def _record_provider_process(run_dir: Path, process: subprocess.Popen[Any]) -> N
         started_at = subprocess.run(
             ["/bin/ps", "-o", "lstart=", "-p", str(process.pid)],
             capture_output=True, text=True, timeout=5, check=False,
+            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
         ).stdout.strip()
         record = {
             "schema_version": 1,
@@ -983,10 +1144,6 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
     catalog = instance / "config/model-routing.json"
     errors = []
     routes = []
-    try:
-        routing_catalog = exec_routing.snapshot() or json.loads(catalog.read_text())
-    except (OSError, ValueError):
-        routing_catalog = {}
     seen = set()
     writers = set()
     probes: dict[str, Path | None] = {}
@@ -1030,8 +1187,11 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                 elif task.get("worktree"):
                     raise PreflightError("worktree_not_applicable", "Pass mode worktree_write with worktree, or omit worktree.")
                 command = [sys.executable, str(product / "scripts/model_route.py"), "resolve",
-                           "--catalog", str(catalog), "--adapter", adapter, "--role", "worker",
-                           "--alias", task.get("alias") or ("flagship" if task.get("model") else "workhorse")]
+                           "--catalog", str(catalog), "--adapter", adapter, "--role", "worker"]
+                if task.get("alias"):
+                    command.extend(("--alias", task["alias"]))
+                elif not task.get("model"):
+                    command.extend(("--alias", "workhorse"))
                 policy = exec_routing.validate_policy(task.get("fallback"))
                 if policy is not None:
                     command.extend(("--fallback", "true" if isinstance(policy, list) else json.dumps(policy) if type(policy) is bool else policy))
@@ -1065,6 +1225,10 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                         route = resolve_route()
                 if route.get("status") != "ok":
                     code = route.get("status", "routing_record_invalid")
+                    try:
+                        routing_catalog = exec_routing.snapshot() or json.loads(catalog.read_text())
+                    except (OSError, ValueError):
+                        routing_catalog = {}
                     fixes = {
                         "model_required_for_broker": "Pass model=<provider/model id> for " + adapter + ".",
                         "effort_unsupported": "Pass an effort supported by the selected model, or omit effort.",
@@ -1120,6 +1284,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         "evidence":{"exit":None,"signal":None,"signature":None,"excerpt":""},"question":None,
         "applied":plan.get("applied",{"sandbox":None,"network":None,"add_dirs":[],"guarantee":"prompt_only"}),
         "warnings":list(plan.get("warnings",[])),"provenance":provenance,
+        "timing":{"phases":getattr(args,"_phase_timings",{}).copy()},
         "paths":{"result":relative_path(run_dir,attempt_dir/"result.md"),"stderr":relative_path(run_dir,attempt_dir/"stderr.log"),
                  "events":relative_path(run_dir,attempt_dir/"events.jsonl"),"receipt":f"tasks/{args.task_id}/attempt-{number:03d}/attempt.json"},"digest":""}
 
@@ -1139,9 +1304,13 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     elif legacy["status"] in {"cancelled","timed_out"}: status=legacy["status"]
     elif legacy["status"]=="blocked": status="input_required"
     elif legacy["status"]=="succeeded": status="ok"
+    refusal=route_refusal(adapter,args.tool)
+    if refusal: status=refusal["status"]
     if status not in TERMINAL_STATUSES: status="failed"
-    for field in ("session_id","retryable","reset_at","retry_after","fix","evidence","applied","warnings","provenance","pgid","last_progress_at"):
+    for field in ("session_id","retryable","reset_at","retry_after","fix","evidence","applied","context","warnings","reaped","spared","provenance","pgid","last_progress_at"):
         if field in adapter: row[field]=adapter[field]
+    if refusal:
+        row["fix"]=adapter.get("fix") or adapter.get("reason") or refusal["fix"];row["evidence"]=refusal["evidence"];row["error"]=refusal["error"]
     row.update(state="terminal",status=status,ended_at=legacy["finished_at"],question=adapter.get("question") or (legacy.get("question") or {}).get("prompt"))
     if not legacy.get("result"): row["paths"]["result"]=None
     row["legacy_attempt_path"]=legacy["attempt_path"]
@@ -1168,12 +1337,22 @@ def resume_relaunch_context(run_dir, previous):
     return (previous.get("question") or "")+"\n"+tail
 
 
+class ResumeError(ValueError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
 def prepare_resume(args):
     paths=sorted((args.run_dir.resolve()/"tasks").glob("*/attempt-*/attempt.json"))
     rows=[json.loads(path.read_text()) for path in paths]
     rows=[row for row in rows if row.get("run_id")==args.resume]
     if not rows: raise ValueError("resume run not found")
-    if len({row["task_id"] for row in rows})!=1: raise ValueError("resume requires a single-task run")
+    tasks={row["task_id"] for row in rows}
+    if args.task_id is not None:
+        rows=[row for row in rows if row["task_id"]==args.task_id]
+        if not rows: raise ResumeError("resume_task_unknown",f"task {args.task_id} has no attempt in this run")
+    elif len(tasks)>1: raise ResumeError("resume_task_required","resume a batch task: pass task_id")
     previous=max(rows,key=lambda row:row["attempt"])
     if previous["state"]!="terminal": raise ValueError("resume requires a terminal attempt")
     route=previous.get("requested_route") or {}
@@ -1221,6 +1400,11 @@ def prepare_resume(args):
             raise ValueError("Claude session unavailable after incomplete writer turn; review worktree changes, then dispatch a new run")
         args.resume_session=None
         args.resume_relaunch=resume_relaunch_context(args.run_dir,previous)
+    if args.context_ceiling is None:
+        prior=previous.get("applied") or {}
+        args.context_ceiling=prior.get("context_ceiling_requested") or (prior.get("context_ceiling_tokens") if prior.get("context_ceiling")=="enforced" else None)
+    if args.resume_session:
+        args.resume_advice=(previous,previous["task_id"] if len(tasks)>1 else None)
     receipt=json.loads(read_bound_bytes(args.run_dir,"RUN_RECEIPT.json",label="RUN_RECEIPT.json"))
     receipt.update(status="active",closed_at=None)
     write_owned(args.run_dir,args.run_dir/"RUN_RECEIPT.json",json.dumps(receipt,indent=2)+"\n")
@@ -1229,6 +1413,20 @@ def prepare_resume(args):
 def _dispatch(args: argparse.Namespace, custody=None) -> int:
     args._last_plan={}
     args._last_row=None
+    owner_started_ms = None
+    try:
+        incoming = ({} if getattr(args, "retry_of", None) or getattr(args, "fallback_from", None)
+                    else json.loads(os.environ.get("PROVENANT_FABRIC_PHASES", "{}")))
+        owner_started_ms = incoming.get("owner_started_at_ms")
+        measured = {key: round(float(value), 3) for key, value in incoming.items()
+                    if key in {"validate", "run_dir_init", "snapshot"}
+                    and type(value) in (int, float) and math.isfinite(value) and value >= 0}
+    except (ValueError, TypeError, AttributeError):
+        measured = {}
+    args._phase_timings = dict.fromkeys(
+        ("validate", "run_dir_init", "owner_setup", "route_plan", "snapshot", "spawn", "provider", "finalize")
+    )
+    args._phase_timings.update(measured)
     run_dir = args.run_dir.resolve()
     workspace = Path.cwd().resolve()
     if not contains_run(run_dir, workspace):
@@ -1405,11 +1603,18 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         old_handlers={sig:signal.getsignal(sig) for sig in (signal.SIGTERM,signal.SIGHUP)}
         for sig in old_handlers: signal.signal(sig,cancel_owner)
         try:
+            plan_started = time.monotonic()
+            if (type(owner_started_ms) in (int, float) and math.isfinite(owner_started_ms)
+                    and not getattr(args, "fallback_from", None)):
+                args._phase_timings["owner_setup"] = round(max(0, time.time() * 1000 - owner_started_ms), 3)
             plan_environment=routing_environment()
             if git_evidence_requested: plan_environment.pop("CF_DISPATCH_AGY_ADD_DIR",None)
-            planning = subprocess.run([*command,"--plan-only"],cwd=workspace,env=plan_environment,capture_output=True,text=True,timeout=30)
-            try: plan = json.loads(planning.stdout)
-            except ValueError: plan = {"status":"rejected","fix":"route planner returned invalid JSON"}
+            fast_plan = fast_fabric_plan(args, prompt_path, result_path, workspace)
+            planning = None
+            if fast_plan is None:
+                planning = subprocess.run([*command,"--plan-only"],cwd=workspace,env=plan_environment,capture_output=True,text=True,timeout=30)
+            args._phase_timings["route_plan"] = round((time.monotonic() - plan_started) * 1000, 3)
+            plan = fast_plan if fast_plan is not None else planner_result(planning)
             if plan.get("schema") == "fabric.exec-plan.v1":
                 plan.update(timeout_seconds=args.timeout_seconds,run_id=run_identity(run_dir,run_receipt),chair=os.environ.get("PROVENANT_CHAIR") or os.environ.get("AGENT_FABRIC_SEAT", ""),fallback_from=getattr(args,"fallback_from",None))
                 if hasattr(args,"resume_relaunch"):
@@ -1434,12 +1639,23 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         else:
                             plan["warnings"].append("all alias candidates cooling")
                             plan["cooldown_blocked"]=cooling
+                if args.context_ceiling is not None:
+                    context_usage.apply_ceiling(plan,args.context_ceiling,provider_exec.profile(plan["adapter"]).argv)
+                if getattr(args,"resume_advice",None) and plan.get("resume_session"):
+                    previous_row,advice_task=args.resume_advice
+                    args.resume_warning=context_usage.resume_warning(previous_row,plan["adapter"],
+                        context_usage.effective_ceiling(plan["applied"]),args.resume,task_id=advice_task)
+                    if args.resume_warning: plan["warnings"].insert(0,args.resume_warning)
                 active = contract_row(args,run_dir,attempt_number,attempt_dir,plan,started_at)
                 active["requested_route"] = requested_route
                 publish_contract(run_dir,active)
+                spawn_started = time.monotonic()
+                provider_started_at = [None]
                 def provider_started(child):
                     nonlocal process
                     process=child
+                    provider_started_at[0] = time.monotonic()
+                    args._phase_timings["spawn"] = round((provider_started_at[0] - spawn_started) * 1000, 3)
                     active["pgid"]=child.pid
                     _record_provider_process(run_dir,child)
                     write_owned(run_dir,attempt_dir/"pgid",str(child.pid)+"\n")
@@ -1454,6 +1670,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     return owner_cancel[0] or cancellation_marker_present(run_dir,attempt_dir) or (batch_dir is not None and cancellation_marker_present(run_dir,batch_dir))
                 adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
                     on_start=provider_started,on_progress=progress,cancelled=cancellation)
+                args._phase_timings["provider"] = round((time.monotonic() - (provider_started_at[0] or spawn_started)) * 1000, 3)
                 if (args.resume and args.tool=="claude" and plan.get("resume_session")
                     and adapter_record.get("status")=="failed"
                     and re.search(r"no conversation found",adapter_record.get("evidence",{}).get("excerpt") or "",re.I)):
@@ -1466,6 +1683,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         for diagnostic in (attempt_dir/"events.jsonl",stderr_path):
                             if diagnostic.exists(): diagnostic.rename(diagnostic.with_name(diagnostic.name+".resume-failed"))
                         plan["resume_session"]=None
+                        if getattr(args,"resume_warning",None) in plan["warnings"]: plan["warnings"].remove(args.resume_warning)
                         plan["session_id"]=str(uuid.uuid4())
                         args.resume_relaunch=resume_relaunch_context(run_dir,previous)
                         plan["prompt"] += "\n\nPrevious turn and question:\n"+args.resume_relaunch
@@ -1480,7 +1698,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 args._last_plan=plan
             else:
                 adapter_record=plan
-                write_owned(run_dir,stderr_path,planning.stderr)
+                write_owned(run_dir,stderr_path,planning.stderr if planning is not None else "")
             write_owned(run_dir,adapter_path,json.dumps(adapter_record)+"\n")
             exit_code=adapter_record.get("exit")
             if type(exit_code) is not int: exit_code=1
@@ -1522,7 +1740,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     # Owners retain chair custody; provider work must discover its own
                     # seat, state directory and checkout rather than inherit the chair's.
                     for name in ("AGENT_FABRIC_STATE_DIRECTORY", "AGENT_FABRIC_SEAT",
-                                 "AGENT_FABRIC_CLIENT_LABEL", "AGENT_FABRIC_LABEL", "AGENT_FABRIC_PRODUCT_ROOT"):
+                                 "AGENT_FABRIC_CLIENT_LABEL", "AGENT_FABRIC_LABEL", "AGENT_FABRIC_PRODUCT_ROOT",
+                                 "PROVENANT_FABRIC_PHASES"):
                         provider_environment.pop(name, None)
                     for name in list(provider_environment):
                         if name.startswith(("PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")):
@@ -1623,6 +1842,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             if provider_temporary is not None:
                 provider_temporary.cleanup()
 
+    finalize_started = time.monotonic()
     finished_at = now()
     duration_seconds = round(time.monotonic() - started, 6)
     adapter: dict[str, Any] = {}
@@ -1812,6 +2032,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         try: action()
         except (OSError,ValueError) as exc: row["warnings"].append("terminal index unavailable: "+str(exc))
     publish_contract(run_dir,row)
+    # Include the first durable terminal publication; rewrite only its timing.
+    row["timing"]["phases"]["finalize"] = round((time.monotonic() - finalize_started) * 1000, 3)
+    publish_contract(run_dir,row)
     args._last_row=row
     output_record = {**record, "attempt_digest": attempt_digest, "fabric":row, "digest":row["digest"]}
     # Batch children retain the legacy record for the batch evidence validator.
@@ -1893,11 +2116,10 @@ def dispatch(args: argparse.Namespace) -> int:
         args.timeout_seconds = 10800.0 if args.access_mode == "worktree_write" else DEFAULT_TIMEOUT_SECONDS
     run_dir = args.run_dir.resolve()
     workspace = Path.cwd().resolve()
-    if (
-        not contains_run(run_dir, workspace)
-        or not run_dir.is_dir()
-        or not (run_dir / "MANIFEST.md").is_file()
-    ):
+    owned = contains_run(run_dir, workspace) and run_dir.is_dir() and (run_dir / "MANIFEST.md").is_file()
+    if args.task_id is None and not (args.resume and owned and not args.batch_child):
+        args.task_id = "dispatch-001"  # A resume names its task, or takes the run's only one.
+    if not owned:
         return _dispatch(args)
     if args.batch_child:
         return execute_attempt_sequence(args)
@@ -1908,7 +2130,7 @@ def dispatch(args: argparse.Namespace) -> int:
     try:
         if args.resume:
             try: prepare_resume(args)
-            except (OSError,ValueError) as exc: return fail(run_dir,"rejected",str(exc))
+            except (OSError,ValueError) as exc: return fail(run_dir,"rejected",str(exc),getattr(exc,"code",None))
         if not args.tool or not any((args.alias,args.task_class,args.model)):
             return fail(run_dir,"rejected","adapter and alias or model are required")
         result = execute_attempt_sequence(args,custody)
@@ -1922,7 +2144,7 @@ def dispatch(args: argparse.Namespace) -> int:
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     root.add_argument("--run-dir", type=Path, required=True)
-    root.add_argument("--task-id", default="dispatch-001")
+    root.add_argument("--task-id")
     adapter = root.add_mutually_exclusive_group(required=False)
     adapter.add_argument("--adapter", "--tool", dest="tool")
     prompt = root.add_mutually_exclusive_group(required=True)
@@ -1965,6 +2187,7 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--batch-id", help=argparse.SUPPRESS)
     root.add_argument("--cwd",dest="provider_cwd",type=Path)
     root.add_argument("--resume", help="resume this run id; inherit route and controls")
+    root.add_argument("--context-ceiling", type=float, help="auto-compaction threshold in tokens, clamped to 100k-1M")
     root.add_argument("--sandbox", choices=("read-only","workspace-write","full"))
     root.add_argument("--network", choices=("true","false"))
     root.add_argument("--add-dir", dest="add_dirs", action="append", default=[])

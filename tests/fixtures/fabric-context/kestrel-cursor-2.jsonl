@@ -1,0 +1,7 @@
+{"type":"system","subtype":"init","apiKeySource":"login","cwd":"/tmp/fabric-probe","session_id":"session-cursor-001","model":"Auto","permissionMode":"default"}
+{"type":"user","message":{"role":"user","content":[{"type":"text","text":"You are cursor/auto via Fabric. Attribute work to exactly this route; never guess a model name.\n\nWhat word did I ask you to remember? Reply with that word only."}]},"session_id":"session-cursor-001"}
+{"type":"thinking","subtype":"delta","text":"The word to remember","session_id":"session-cursor-001","timestamp_ms":1790142033704}
+{"type":"thinking","subtype":"delta","text":" is KESTREL.","session_id":"session-cursor-001","timestamp_ms":1790142033770}
+{"type":"thinking","subtype":"completed","session_id":"session-cursor-001","timestamp_ms":1790142033772}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"KESTREL"}]},"session_id":"session-cursor-001"}
+{"type":"result","subtype":"success","duration_ms":5626,"duration_api_ms":5626,"is_error":false,"result":"KESTREL","session_id":"session-cursor-001","request_id":"id-cursor-003","usage":{"inputTokens":225,"outputTokens":31,"cacheReadTokens":20864,"cacheWriteTokens":0}}

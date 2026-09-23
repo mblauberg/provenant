@@ -48,12 +48,14 @@ export interface RouteInput {
   sandbox?: string;
   add_dirs?: string[];
   fallback?: boolean | "any" | Array<string | Record<string, unknown>>;
+  context_ceiling?: number;
 }
 
 export interface DispatchInput extends RouteInput {
   prompt?: string;
   prompt_file?: string;
   resume?: string;
+  handoff?: string;
   task_id?: string;
   timeout_seconds?: number;
   wait_seconds?: number;
@@ -81,6 +83,7 @@ export interface NormalisedRoute {
   role: string;
   access_mode: AccessMode;
   worktree?: string;
+  context_ceiling?: number;
 }
 
 export function normaliseRoute(input: RouteInput, identity: Identity, catalogue: CatalogueSnapshot): NormalisedRoute {
@@ -128,7 +131,7 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
     access_mode: mode,
     ...(input.worktree === undefined ? {} : { worktree: input.worktree }),
     ...Object.fromEntries(
-      ["cwd", "network", "sandbox", "add_dirs", "fallback"]
+      ["cwd", "network", "sandbox", "add_dirs", "fallback", "context_ceiling"]
         .filter((key) => input[key as keyof RouteInput] !== undefined)
         .map((key) => [key, input[key as keyof RouteInput]]),
     ),

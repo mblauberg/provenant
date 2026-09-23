@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import fcntl
 import hashlib
 from datetime import datetime, timezone
@@ -98,6 +99,7 @@ if _preferences is None:
 EFFORT_ORDER = _catalog_validation.EFFORT_ORDER
 ALIAS_ORDER = _catalog_validation.ALIAS_ORDER
 infer_family = _catalog_validation.infer_family
+matching_model_families = _catalog_validation.matching_model_families
 model_slug_for_family = _catalog_validation.model_slug_for_family
 family_is_assurance_eligible = _catalog_validation.family_is_assurance_eligible
 attribute_model_family = _catalog_validation.attribute_model_family
@@ -258,6 +260,25 @@ def catalogue_snapshot(path: Path | None = None) -> dict[str, Any]:
 
 def load_catalog(path: Path | None = None) -> dict[str, Any]:
     return catalogue_snapshot(path)["catalogue"]
+
+
+def registered_model_ids(adapter: dict[str, Any]) -> list[str]:
+    """Return adapter model ids first, then alias-only ids, in catalogue order."""
+    ids: list[str] = []
+    models = adapter.get("models", []) if isinstance(adapter, dict) else []
+    entries = models.values() if isinstance(models, dict) else models if isinstance(models, list) else []
+    for entry in entries:
+        model = entry.get("id") if isinstance(entry, dict) else entry
+        if isinstance(model, str) and model not in ids:
+            ids.append(model)
+    aliases = adapter.get("aliases", {}) if isinstance(adapter, dict) else {}
+    if isinstance(aliases, dict):
+        for candidates in aliases.values():
+            if isinstance(candidates, list):
+                for model in candidates:
+                    if isinstance(model, str) and model not in ids:
+                        ids.append(model)
+    return ids
 
 
 def _registered_match(adapter: str, requested: str, catalog: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
@@ -625,7 +646,19 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     # `auto` is the provider's own chooser; a provider prefix is not a new model.
     provider_auto = requested.casefold() == "auto"
     if registered is None and not provider_auto:
-        notes.append(f"{requested} is not in the {adapter_name} registry; passed through as given")
+        registered_ids = registered_model_ids(adapter)
+        registry = ", ".join(registered_ids[:6])
+        if len(registered_ids) > 6:
+            registry += ", …"
+        details = f" (registered: {registry}" if registry else ""
+        closest = difflib.get_close_matches(requested, registered_ids, n=1)
+        if closest:
+            details += ("; " if registry else " (") + f"closest: {closest[0]}"
+        if details:
+            details += ")"
+        notes.append(
+            f"{requested} is not in the {adapter_name} registry{details}; passed through as given"
+        )
     elif (registered is not None and explicit and model.casefold() != requested.casefold() and not match_notes
           and not model.casefold().endswith("/" + requested.casefold())
           and not any(requested.casefold() == (model + suffix).casefold()

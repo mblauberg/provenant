@@ -4,8 +4,12 @@ import importlib
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
+import ctypes
 import sys
+import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -67,6 +71,8 @@ def supervisor():
         ("rate limit exceeded; HTTP 429", "rate_limited"),
         ("Login expired; not logged in", "auth_required"),
         ("model not found", "model_unavailable"),
+        ('error: invalid model selection (--model "gemini-3.8-pro" --effort "high"): --effort is not supported for model "gemini-3.8-pro"', "model_unavailable"),
+        ("invalid model selection; quota exceeded", "usage_limited"),
         ("permission denied", "permission_blocked"),
     ],
 )
@@ -88,6 +94,34 @@ def test_provider_golden(fixture):
         )
         for key, value in case["expected"].items():
             assert result[key] == value
+
+
+def test_unregistered_model_failure_fix_names_adapter_models(tmp_path, monkeypatch):
+    exec_routing = importlib.import_module("skills.orchestrate.scripts.exec_routing")
+    monkeypatch.setattr(
+        exec_routing,
+        "snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("snapshot subprocess called")),
+    )
+    plan = fixture_plan(tmp_path, 'import sys; print("model not found", file=sys.stderr); sys.exit(1)', "agy")
+    plan["requested_model"] = "gemini-3.8-pro"
+    plan["route"]["identity_source"] = "passed-through"
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "model_unavailable"
+    assert record["fix"] == (
+        "choose a registered model: gemini-3.8-flash, "
+        "claude-opus-4-6-thinking, claude-sonnet-4-6"
+    )
+
+
+def test_model_families_load_catalog_without_snapshot(monkeypatch):
+    exec_routing = importlib.import_module("skills.orchestrate.scripts.exec_routing")
+    monkeypatch.setattr(
+        exec_routing,
+        "snapshot",
+        lambda: (_ for _ in ()).throw(AssertionError("snapshot subprocess called")),
+    )
+    assert exec_routing.model_families("claude-sonnet-5") == ("anthropic",)
 
 
 def test_structured_result_and_question_take_precedence_over_prose():
@@ -188,6 +222,981 @@ def fixture_plan(tmp_path, code, adapter="codex", **controls):
     return plan
 
 
+def test_worker_preface_explains_process_cleanup(tmp_path):
+    plan = supervisor().build_plan("codex", {"resolved_model": "fixture"}, "hello", cwd=tmp_path)
+    assert "processes left running are then stopped." in plan["prompt"]
+
+
+@pytest.mark.parametrize("stop", ["cancelled", "timed_out", "normal", "stalled"])
+def test_new_session_grandchild_does_not_outlive_attempt(tmp_path, stop):
+    pid_path = tmp_path / "grandchild.pid"
+    code = f"""import json, pathlib, subprocess, sys, time
+child = subprocess.Popen(
+    [sys.executable, '-c', 'import time; time.sleep(60)'],
+    start_new_session=True,
+    stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))
+if {stop!r} == 'normal':
+    print(json.dumps({{'type': 'item.completed', 'item': {{'type': 'agent_message', 'text': 'DONE'}}}}), flush=True)
+    print(json.dumps({{'type': 'turn.completed'}}), flush=True)
+else:
+    time.sleep(60)
+"""
+    plan = fixture_plan(
+        tmp_path,
+        code,
+        timeout_seconds=3 if stop == "timed_out" else 8,
+        idle_seconds=1.6 if stop == "stalled" else 8,
+    )
+    if stop == "normal":
+        plan["warnings"].append("route warning " + "x" * 240)
+    started = time.monotonic()
+    unrelated = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(60)"],
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        def wait_for_pid_file(_process):
+            if stop != "timed_out":
+                return
+            deadline = time.monotonic() + 5
+            while not pid_path.exists() and time.monotonic() < deadline:
+                time.sleep(0.02)
+            assert pid_path.exists(), "provider did not publish its child PID"
+
+        record = supervisor().execute(
+            plan,
+            tmp_path / "result.md",
+            on_start=wait_for_pid_file,
+            cancelled=lambda: stop == "cancelled"
+            and pid_path.exists()
+            and time.monotonic() - started >= 1.5,
+        )
+        assert record["status"] == ("ok" if stop == "normal" else stop)
+        assert pid_path.exists()
+        pid = int(pid_path.read_text())
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(0.02)
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+        os.kill(unrelated.pid, 0)
+        if stop == "normal":
+            assert any(item["pid"] == pid for item in record["reaped"])
+            assert record["warnings"][0] == "reaped 1 leftover process(es)"
+    finally:
+        if pid_path.exists():
+            try:
+                os.killpg(int(pid_path.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if unrelated.poll() is None:
+            os.killpg(unrelated.pid, signal.SIGKILL)
+        unrelated.wait(timeout=3)
+
+
+def test_fast_double_fork_is_reaped_after_provider_exit(tmp_path):
+    pid_path = tmp_path / "double-fork.pid"
+    grandchild = f"""import os,pathlib,time
+pid = os.fork()
+if pid:
+    os._exit(0)
+os.setsid()
+pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid()))
+time.sleep(60)
+"""
+    code = f"""import json,subprocess,sys,time
+launcher = subprocess.Popen([sys.executable, '-c', {grandchild!r}],
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+launcher.wait()
+time.sleep(.1)
+print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'DONE'}}}}), flush=True)
+print(json.dumps({{'type':'turn.completed'}}), flush=True)
+"""
+    plan = fixture_plan(tmp_path, code, timeout_seconds=8)
+    try:
+        record = supervisor().execute(plan, tmp_path / "result.md")
+        assert record["status"] == "ok"
+        assert pid_path.exists()
+        pid = int(pid_path.read_text())
+        assert not _live_process(pid)
+        assert any(row["pid"] == pid for row in record["reaped"])
+    finally:
+        if pid_path.exists():
+            try:
+                os.killpg(int(pid_path.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_attempt_marker_matches_inherited_environment_only():
+    marker = "fixture-marker-123"
+    environment = dict(os.environ)
+    environment.pop("PROVENANT_ATTEMPT_MARKER", None)
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)",
+         "PROVENANT_ATTEMPT_MARKER=" + marker],
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert not supervisor()._has_attempt_marker(child.pid, marker)
+    finally:
+        child.terminate()
+        child.wait(timeout=3)
+    environment["PROVENANT_ATTEMPT_MARKER"] = marker
+    child = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"],
+        env=environment,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        assert supervisor()._has_attempt_marker(child.pid, marker)
+    finally:
+        child.terminate()
+        child.wait(timeout=3)
+
+
+def _live_process(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    if sys.platform.startswith("linux"):
+        stat = Path(f"/proc/{pid}/stat")
+        if stat.exists() and stat.read_text().rsplit(") ", 1)[-1].startswith("Z"):
+            return False
+    return True
+
+
+def test_snapshot_exception_still_kills_provider_and_records_attempt(tmp_path, monkeypatch):
+    module = supervisor()
+    pid_path = tmp_path / "provider.pid"
+    code = f"import os,pathlib,time; pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    plan = fixture_plan(tmp_path, code, timeout_seconds=8)
+    monkeypatch.setattr(module, "_process_snapshot", lambda: (_ for _ in ()).throw(RuntimeError("census failed")))
+    try:
+        record = module.execute(
+            plan, tmp_path / "result.md", cancelled=lambda: pid_path.exists()
+        )
+        assert record["status"] == "cancelled"
+        assert any("census unavailable" in warning for warning in record["warnings"])
+        assert not _live_process(int(pid_path.read_text()))
+    finally:
+        if pid_path.exists():
+            try:
+                os.killpg(int(pid_path.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_internal_census_failure_warns_and_kills_provider(tmp_path, monkeypatch):
+    module = supervisor()
+    pid_path = tmp_path / "provider.pid"
+    code = f"import os,pathlib,time; pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    monkeypatch.setattr(module, "_process_snapshot_unchecked",
+                        lambda: (_ for _ in ()).throw(RuntimeError("census failed")))
+    try:
+        record = module.execute(
+            fixture_plan(tmp_path, code, timeout_seconds=8), tmp_path / "result.md",
+            cancelled=lambda: pid_path.exists(),
+        )
+        assert record["status"] == "cancelled"
+        assert any("census unavailable" in warning for warning in record["warnings"])
+        assert not _live_process(int(pid_path.read_text()))
+    finally:
+        if pid_path.exists():
+            try:
+                os.killpg(int(pid_path.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_linux_snapshot_replaces_non_utf8_process_names(tmp_path, monkeypatch):
+    module = supervisor()
+    process_dir = tmp_path / "123"
+    process_dir.mkdir()
+    (process_dir / "stat").write_bytes(
+        b"123 (bad\xffname) S 1 123 " + b"0 " * 16 + b"12345 0\n"
+    )
+    real_scandir = os.scandir
+    with monkeypatch.context() as patch:
+        patch.setattr(module.sys, "platform", "linux")
+        patch.setattr(module.os, "scandir", lambda _path: real_scandir(tmp_path))
+        rows = module._process_snapshot()
+    assert rows[123].command == "bad\ufffdname"
+    assert rows[123].started == "12345"
+
+
+def test_darwin_libproc_is_loaded_once(monkeypatch):
+    module = supervisor()
+    loads = []
+
+    class Call:
+        def __call__(self, *_args):
+            return 0
+
+    class Library:
+        proc_listallpids = Call()
+        proc_pidinfo = Call()
+
+    with monkeypatch.context() as patch:
+        module._darwin_libproc.cache_clear()
+        patch.setattr(module.sys, "platform", "darwin")
+        patch.setattr(module.ctypes.util, "find_library", lambda _name: "libproc")
+        patch.setattr(module.ctypes, "CDLL", lambda *_args, **_kwargs: loads.append(1) or Library())
+        module._process_snapshot()
+        module._process_snapshot()
+        module._darwin_libproc.cache_clear()
+    assert len(loads) == 1
+
+
+def test_linux_tree_census_walks_task_children(tmp_path):
+    module = supervisor()
+    for pid, ppid, children in ((101, 1, "102 103"), (102, 101, "104"),
+                                (103, 101, ""), (104, 102, "")):
+        process = tmp_path / str(pid)
+        task = process / "task" / str(pid)
+        task.mkdir(parents=True)
+        (task / "children").write_text(children)
+        (process / "stat").write_text(
+            f"{pid} (fixture) S {ppid} {pid} " + "0 " * 16 + f"{pid * 100} 0\n"
+        )
+    rows = module._linux_tree_snapshot(101, set(), proc_root=tmp_path)
+    assert set(rows) == {101, 102, 103, 104}
+
+
+def test_linux_targeted_tree_census_does_not_warn_without_owner_row(monkeypatch):
+    module = supervisor()
+    process = type("Process", (), {"pid": 123, "poll": lambda self: None})()
+    root = module._ProcessRow(123, 1, 123, "12345", "fixture")
+    with monkeypatch.context() as patch:
+        patch.setattr(module.sys, "platform", "linux")
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: {123: root})
+        tracker = module._Descendants(process, "marker")
+        tracker.sample()
+    assert tracker.snapshot_unavailable is False
+
+
+def test_watchdog_census_runs_about_once_per_second(tmp_path, monkeypatch):
+    module = supervisor()
+    counts = []
+    stopping = []
+    original_sample = module._Descendants.sample
+    original_stop = module._Descendants.stop
+
+    def counted(self, *args, **kwargs):
+        if not stopping:
+            counts.append(time.monotonic())
+        return original_sample(self, *args, **kwargs)
+
+    def stopped(self, *args, **kwargs):
+        stopping.append(True)
+        return original_stop(self, *args, **kwargs)
+
+    monkeypatch.setattr(module._Descendants, "sample", counted)
+    monkeypatch.setattr(module._Descendants, "stop", stopped)
+    plan = fixture_plan(tmp_path, "import time; time.sleep(1.35)", timeout_seconds=5)
+    module.execute(plan, tmp_path / "result.md")
+    assert 1 <= len(counts) <= 3
+
+
+def test_missing_census_still_kills_provider_group_after_leader_exit(tmp_path, monkeypatch):
+    module = supervisor()
+    child_pid = tmp_path / "child.pid"
+    code = f"""import json,pathlib,subprocess
+child = subprocess.Popen(['sleep', '60'], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))
+print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'DONE'}}}}), flush=True)
+print(json.dumps({{'type':'turn.completed'}}), flush=True)
+"""
+    plan = fixture_plan(tmp_path, code, timeout_seconds=8)
+    monkeypatch.setattr(module, "_process_snapshot", lambda: {})
+    leader = []
+    try:
+        record = module.execute(plan, tmp_path / "result.md", on_start=lambda process: leader.append(process.pid))
+        assert record["status"] == "ok"
+        assert child_pid.exists()
+        pid = int(child_pid.read_text())
+        deadline = time.monotonic() + 2
+        while _live_process(pid) and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert not _live_process(pid)
+    finally:
+        if leader:
+            try:
+                os.killpg(leader[0], signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        if sys.platform.startswith("linux") and child_pid.exists():
+            try:
+                os.waitpid(int(child_pid.read_text()), os.WNOHANG)
+            except ChildProcessError:
+                pass
+
+
+@pytest.mark.parametrize("terminal_event", [False, True])
+def test_cleanly_exiting_child_is_not_reported_as_reaped(tmp_path, terminal_event):
+    pid_path = tmp_path / "closing-child.pid"
+    code = f"""import json,pathlib,subprocess,sys,time
+child = subprocess.Popen(
+    [sys.executable, '-c', 'import sys,time; sys.stdin.read(); time.sleep(.3)'],
+    start_new_session=True, stdin=subprocess.PIPE,
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))
+print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'DONE'}}}}), flush=True)
+print(json.dumps({{'type':'turn.completed'}}), flush=True)
+if {terminal_event!r}:
+    child.stdin.close()
+    time.sleep(30)
+"""
+    plan = fixture_plan(tmp_path, code, timeout_seconds=8, idle_seconds=8)
+    try:
+        record = supervisor().execute(plan, tmp_path / "result.md")
+        assert record["status"] == "ok"
+        assert record["reaped"] == []
+        assert not any("reaped " in warning for warning in record["warnings"])
+    finally:
+        if pid_path.exists():
+            try:
+                os.killpg(int(pid_path.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_root_provider_keeps_two_second_sigterm_flush_grace(tmp_path):
+    code = """import pathlib,signal,time
+def stop(*_args):
+    time.sleep(1)
+    pathlib.Path('flushed').write_text('saved')
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, stop)
+pathlib.Path('ready').touch()
+time.sleep(30)
+"""
+    plan = fixture_plan(tmp_path, code, timeout_seconds=8)
+    root = []
+    try:
+        record = supervisor().execute(
+            plan, tmp_path / "result.md",
+            on_start=lambda process: root.append(process.pid),
+            cancelled=lambda: (tmp_path / "ready").exists(),
+        )
+        assert record["status"] == "cancelled"
+        assert (tmp_path / "flushed").read_text() == "saved"
+    finally:
+        if root:
+            try:
+                os.killpg(root[0], signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def _write_fake_owner_record(module, run_dir, row, token):
+    run_dir.mkdir(exist_ok=True)
+    (run_dir / "dispatch-owner.json").write_text(json.dumps({
+        "schema_version": 1, "kind": "dispatch", "run_dir": str(run_dir),
+        "run_token": token, "owner_pid": row.pid, "owner_pgid": row.pgid,
+        "owner_started_at": module._recorded_start_time(row),
+    }))
+
+
+@pytest.mark.parametrize("terminal_event", [False, True])
+def test_forged_fabric_token_does_not_spare_command(tmp_path, terminal_event):
+    pid_path = tmp_path / "forged.pid"
+    code = f"""import json,os,pathlib,subprocess,time
+environment = dict(os.environ)
+environment.update(PROVENANT_RUN_TOKEN='x', PROVENANT_RUN_DIR={str(tmp_path / 'not-a-run')!r})
+child = subprocess.Popen(['sleep', '60'], start_new_session=True, env=environment,
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))
+if {terminal_event!r}:
+    print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'DONE'}}}}), flush=True)
+    print(json.dumps({{'type':'turn.completed'}}), flush=True)
+time.sleep(1.2)
+"""
+    try:
+        record = supervisor().execute(fixture_plan(tmp_path, code), tmp_path / "result.md")
+        pid = int(pid_path.read_text())
+        assert any(item["pid"] == pid for item in record["reaped"]), (
+            record["reaped"], record.get("spared"), record["warnings"], _live_process(pid)
+        )
+        assert record.get("spared", 0) == 0
+        assert not _live_process(pid)
+    finally:
+        if pid_path.exists():
+            try:
+                os.killpg(int(pid_path.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_tracked_pre_exec_child_is_rechecked_before_signal(tmp_path, monkeypatch):
+    module = supervisor()
+    root = module._ProcessRow(501, os.getpid(), 501, str(int(time.time())), "root")
+    owner = module._ProcessRow(502, 501, 502, str(int(time.time())), "owner")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(),
+                                             str(int(time.time())), "test"),
+            501: root, 502: owner}
+    run_dir = tmp_path / "nested-run"
+    environment = []
+    signals = []
+    process = type("Process", (), {"pid": 501, "poll": lambda self: None})()
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: rows)
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: None)
+        patch.setattr(module, "_process_environment", lambda pid: environment if pid == 502 else ())
+        patch.setattr(module.os, "killpg", lambda pgid, signum: signals.append(("group", pgid)))
+        patch.setattr(module.os, "kill", lambda pid, signum: signals.append(("pid", pid)))
+        tracker = module._Descendants(process, "fixture")
+        tracker.sample()
+        assert owner.identity in tracker.tracked
+        _write_fake_owner_record(module, run_dir, owner, "inner-token")
+        environment[:] = [b"PROVENANT_RUN_TOKEN=inner-token",
+                          ("PROVENANT_RUN_DIR=" + str(run_dir)).encode()]
+        tracker.signal(signal.SIGTERM)
+    assert owner.identity in tracker.spared
+    assert ("group", owner.pgid) not in signals
+    assert ("pid", owner.pid) not in signals
+
+
+def test_owner_promoted_at_signal_is_not_reported_as_reaped(tmp_path, monkeypatch):
+    module = supervisor()
+    root = module._ProcessRow(501, os.getpid(), 501, str(int(time.time())), "root")
+    owner = module._ProcessRow(502, 501, 502, str(int(time.time())), "owner")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(),
+                                             str(int(time.time())), "test"),
+            501: root, 502: owner}
+    run_dir = tmp_path / "nested-run"
+    environment = []
+    signals = []
+    process = type("Process", (), {"pid": 501, "poll": lambda self: None,
+                                   "wait": lambda self, timeout: None})()
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: rows)
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: None)
+        patch.setattr(module, "_process_environment", lambda pid: environment if pid == 502 else ())
+        patch.setattr(module.os, "killpg", lambda pgid, signum: signals.append(("group", pgid)))
+        patch.setattr(module.os, "kill", lambda pid, signum: signals.append(("pid", pid)))
+        tracker = module._Descendants(process, "fixture")
+        tracker.sample()
+        original_sample = tracker.sample
+        published = []
+
+        def publish_after_snapshot(*args, **kwargs):
+            snapshot = original_sample(*args, **kwargs)
+            if not published:
+                _write_fake_owner_record(module, run_dir, owner, "inner-token")
+                environment[:] = [b"PROVENANT_RUN_TOKEN=inner-token",
+                                  ("PROVENANT_RUN_DIR=" + str(run_dir)).encode()]
+                published.append(True)
+            return snapshot
+
+        patch.setattr(tracker, "sample", publish_after_snapshot)
+        reaped = tracker.stop(root_grace=0.1, descendant_grace=0.02)
+    assert reaped == []
+    assert owner.identity in tracker.spared_at_stop
+    assert ("group", owner.pgid) not in signals
+    assert ("pid", owner.pid) not in signals
+
+
+@pytest.mark.parametrize("failure", ["env_error", "partial_record", "record_removed"])
+def test_verified_owner_stays_spared_through_transient_validation_loss(tmp_path, monkeypatch, failure):
+    module = supervisor()
+    root_pid = os.getpid() + 100000
+    owner_pid = root_pid + 1
+    root = module._ProcessRow(root_pid, os.getpid(), root_pid, str(int(time.time())), "provider")
+    owner = module._ProcessRow(owner_pid, root_pid, owner_pid, str(int(time.time())), "owner")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(),
+                                             str(int(time.time())), "test"),
+            root_pid: root, owner_pid: owner}
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, owner, "inner-token")
+    lost = []
+    signals = []
+    process = type("Process", (), {"pid": root_pid, "poll": lambda self: None,
+                                   "wait": lambda self, timeout: None})()
+
+    def environment(pid):
+        if pid != owner_pid:
+            return ()
+        if lost and failure == "env_error":
+            raise RuntimeError("environment unavailable")
+        return [b"PROVENANT_RUN_TOKEN=inner-token",
+                ("PROVENANT_RUN_DIR=" + str(run_dir)).encode()]
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: rows)
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: None)
+        patch.setattr(module, "_process_environment", environment)
+        patch.setattr(module.os, "killpg", lambda pgid, _signal: signals.append(("group", pgid)))
+        patch.setattr(module.os, "kill", lambda pid, _signal: signals.append(("pid", pid)))
+        tracker = module._Descendants(process, "fixture")
+        tracker.sample()
+        assert owner.identity in tracker.spared
+        original_sample = tracker.sample
+
+        def lose_after_first_stop_sample(*args, **kwargs):
+            snapshot = original_sample(*args, **kwargs)
+            if not lost:
+                lost.append(True)
+                if failure == "partial_record":
+                    (run_dir / "dispatch-owner.json").write_text("{}")
+                elif failure == "record_removed":
+                    (run_dir / "dispatch-owner.json").unlink()
+            return snapshot
+
+        patch.setattr(tracker, "sample", lose_after_first_stop_sample)
+        reaped = tracker.stop(root_grace=0.1, descendant_grace=0.02)
+    assert reaped == []
+    assert owner.identity in tracker.spared_at_stop
+    assert ("group", owner_pid) not in signals
+    assert ("pid", owner_pid) not in signals
+
+
+@pytest.mark.parametrize("probe", ["unreadable", "recycled"])
+def test_partial_census_keeps_a_live_verified_owner_group_spared(tmp_path, monkeypatch, probe):
+    # A census that loses one row (a failed per-pid probe) must not turn the
+    # owner's children into targets and killpg the owner's group with them.
+    module = supervisor()
+    root_pid = os.getpid() + 100000
+    owner_pid, child_pid = root_pid + 1, root_pid + 2
+    root = module._ProcessRow(root_pid, os.getpid(), root_pid, str(int(time.time())), "provider")
+    owner = module._ProcessRow(owner_pid, root_pid, owner_pid, str(int(time.time())), "owner")
+    child = module._ProcessRow(child_pid, owner_pid, owner_pid, str(int(time.time())), "nested provider")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(), str(int(time.time())), "test"),
+            root_pid: root, owner_pid: owner, child_pid: child}
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, owner, "inner-token")
+    signals = []
+    # A recycled pid shows a different start time when probed on its own.
+    probed = {} if probe == "unreadable" else {owner_pid: module._ProcessRow(
+        owner_pid, 1, owner_pid, str(int(time.time()) + 50), "recycled")}
+    process = type("Process", (), {"pid": root_pid, "poll": lambda self: None,
+                                   "wait": lambda self, timeout: None})()
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: rows)
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: None)
+        patch.setattr(module, "_process_environment", lambda pid: [
+            b"PROVENANT_RUN_TOKEN=inner-token",
+            ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+        ] if pid == owner_pid else ())
+        patch.setattr(module, "_pid_exists", lambda pid: pid in {owner_pid, child_pid, root_pid})
+        patch.setattr(module, "_probe_process_row", lambda pid: probed.get(pid))
+        patch.setattr(module.os, "killpg", lambda pgid, _signal: signals.append(("group", pgid)))
+        patch.setattr(module.os, "kill", lambda pid, _signal: signals.append(("pid", pid)))
+        tracker = module._Descendants(process, "fixture")
+        tracker.sample()
+        assert {owner.identity, child.identity} <= set(tracker.spared)
+        del rows[owner_pid]
+        tracker.stop(root_grace=0.05, descendant_grace=0.01)
+    assert ("group", root_pid) in signals
+    if probe == "unreadable":
+        assert ("group", owner_pid) not in signals
+        assert ("pid", child_pid) not in signals
+    else:
+        assert ("pid", child_pid) in signals
+
+
+def test_unavailable_census_preserves_verified_owner_and_root_kill(tmp_path, monkeypatch):
+    module = supervisor()
+    root_pid = os.getpid() + 100000
+    owner = module._ProcessRow(root_pid + 1, root_pid, root_pid + 1,
+                               str(int(time.time())), "nested owner")
+    root = module._ProcessRow(root_pid, os.getpid(), root_pid,
+                              str(int(time.time())), "provider")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(),
+                                             str(int(time.time())), "test"),
+            root_pid: root, owner.pid: owner}
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, owner, "inner-token")
+    signals = []
+    available = [True]
+    process = type("Process", (), {"pid": root_pid,
+                                   "poll": lambda self: None if available[0] else 0,
+                                   "wait": lambda self, timeout: None})()
+
+    def census():
+        if available[0]:
+            return rows
+        raise RuntimeError("census failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: None)
+        patch.setattr(module, "_process_snapshot_unchecked", census)
+        patch.setattr(module, "_process_environment", lambda pid: [
+            b"PROVENANT_RUN_TOKEN=inner-token",
+            ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+        ] if pid == owner.pid else ())
+        patch.setattr(module.os, "killpg", lambda pgid, _signal: signals.append(pgid))
+        patch.setattr(module.os, "kill", lambda *_args: None)
+        tracker = module._Descendants(process, "fixture")
+        tracker.sample()
+        assert owner.identity in tracker.spared
+        available[0] = False
+        assert module._process_snapshot() is None
+        tracker.stop(root_grace=0.02, descendant_grace=0.01)
+    assert tracker.snapshot_unavailable
+    assert owner.identity in tracker.spared_at_stop
+    assert owner.pgid not in signals
+    assert root_pid in signals
+
+
+def test_verified_owner_identity_does_not_spare_reused_pid(tmp_path, monkeypatch):
+    module = supervisor()
+    root = module._ProcessRow(501, os.getpid(), 501, str(int(time.time())), "provider")
+    owner = module._ProcessRow(502, 501, 502, str(int(time.time())), "owner")
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, owner, "inner-token")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(),
+                                             str(int(time.time())), "test"),
+            501: root, 502: owner}
+    process = type("Process", (), {"pid": 501, "poll": lambda self: None})()
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: rows)
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: None)
+        patch.setattr(module, "_process_environment", lambda pid: [
+            b"PROVENANT_RUN_TOKEN=inner-token",
+            ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+        ] if pid == 502 else ())
+        tracker = module._Descendants(process, "fixture")
+        tracker.sample()
+        assert owner.identity in tracker.spared
+        start_delta = os.sysconf("SC_CLK_TCK") * 5 if sys.platform.startswith("linux") else 5
+        replacement = module._ProcessRow(502, 501, 502,
+                                         str(int(owner.started) + start_delta), "replacement")
+        rows[502] = replacement
+        tracker.sample()
+    assert replacement.identity in tracker.tracked
+    assert replacement.identity not in tracker.spared
+
+
+def test_provider_exit_with_open_pipe_stops_once_and_keeps_reaped(tmp_path, monkeypatch):
+    module = supervisor()
+    child_pid = tmp_path / "pipe-holder.pid"
+    code = f"""import pathlib,subprocess,sys
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(.7)'],
+    start_new_session=True, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))
+print('DONE', flush=True)
+"""
+    calls = []
+    first_reaped = [{"pid": 424242, "command": "fixture-child"}]
+
+    def fake_stop(self, *args, **kwargs):
+        calls.append(kwargs)
+        return first_reaped if len(calls) == 1 else []
+
+    monkeypatch.setattr(module._Descendants, "stop", fake_stop)
+    try:
+        record = module.execute(fixture_plan(tmp_path, code), tmp_path / "result.md")
+        assert len(calls) == 1
+        assert record["reaped"] == first_reaped
+    finally:
+        if child_pid.exists():
+            pid = int(child_pid.read_text())
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            if sys.platform.startswith("linux"):
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    pass
+
+
+def test_token_without_owner_record_is_not_nested_owner(tmp_path, monkeypatch):
+    module = supervisor()
+    row = module._ProcessRow(502, 501, 502, str(int(time.time())), "sleep")
+    monkeypatch.setattr(module, "_process_environment", lambda _pid: [
+        b"PROVENANT_RUN_TOKEN=x",
+        ("PROVENANT_RUN_DIR=" + str(tmp_path / "absent-run")).encode(),
+    ])
+    assert not module._is_nested_fabric_owner(row)
+
+
+def test_owner_validation_error_cannot_prevent_root_group_kill(monkeypatch):
+    module = supervisor()
+    process = type("Process", (), {"pid": 501, "poll": lambda self: None})()
+    root = module._ProcessRow(501, os.getpid(), 501, str(int(time.time())), "root")
+    tracker = module._Descendants(process, "fixture")
+    tracker.root = root.identity
+    tracker.tracked[root.identity] = root
+    groups = []
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: {501: root})
+        patch.setattr(module, "_process_environment",
+                      lambda _pid: (_ for _ in ()).throw(RuntimeError("env failed")))
+        patch.setattr(module.os, "killpg", lambda pgid, _signal: groups.append(pgid))
+        patch.setattr(module.os, "kill", lambda *_args: None)
+        tracker.signal(signal.SIGTERM)
+    assert 501 in groups
+
+
+def test_forged_same_group_owner_cannot_suppress_provider_kill(tmp_path, monkeypatch):
+    module = supervisor()
+    root_pid = os.getpid() + 100000
+    child_pid = root_pid + 1
+    root = module._ProcessRow(root_pid, os.getpid(), root_pid, str(int(time.time())), "provider")
+    child = module._ProcessRow(child_pid, root_pid, root_pid, str(int(time.time())), "forged")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(),
+                                             str(int(time.time())), "test"),
+            root_pid: root, child_pid: child}
+    run_dir = tmp_path / "forged-run"
+    _write_fake_owner_record(module, run_dir, child, "forged-token")
+    signals = []
+    process = type("Process", (), {"pid": root_pid, "poll": lambda self: None})()
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: rows)
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: None)
+        patch.setattr(module, "_process_environment", lambda pid: [
+            b"PROVENANT_RUN_TOKEN=forged-token",
+            ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+        ] if pid == child_pid else ())
+        patch.setattr(module.os, "killpg", lambda pgid, _signal: signals.append(pgid))
+        patch.setattr(module.os, "kill", lambda *_args: None)
+        tracker = module._Descendants(process, "fixture")
+        tracker.sample()
+        tracker.signal(signal.SIGTERM)
+    assert root_pid in signals
+    assert child.identity not in tracker.spared
+
+
+def test_owner_without_observed_parent_is_not_spared(tmp_path, monkeypatch):
+    module = supervisor()
+    row = module._ProcessRow(502, 999, 502, str(int(time.time())), "claimed-owner")
+    run_dir = tmp_path / "forged-run"
+    _write_fake_owner_record(module, run_dir, row, "forged-token")
+    monkeypatch.setattr(module, "_process_environment", lambda _pid: [
+        b"PROVENANT_RUN_TOKEN=forged-token",
+        ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+    ])
+    process = type("Process", (), {"pid": 501, "poll": lambda self: None})()
+    tracker = module._Descendants(process, "fixture")
+    tracker.tracked[row.identity] = row
+    tracker._refresh_spared({row.pid: row})
+    assert row.identity not in tracker.spared
+
+
+def test_reparented_marker_owner_with_valid_record_is_spared(tmp_path, monkeypatch):
+    module = supervisor()
+    root_pid = os.getpid() + 100000
+    owner = module._ProcessRow(root_pid + 1, 1, root_pid + 1,
+                               str(int(time.time())), "nested owner")
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, owner, "inner-token")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(),
+                                             str(int(time.time())), "test"), owner.pid: owner}
+    process = type("Process", (), {"pid": root_pid, "poll": lambda self: 0})()
+    signals = []
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: rows)
+        patch.setattr(module, "_has_attempt_marker", lambda pid, _marker: pid == owner.pid)
+        patch.setattr(module, "_process_environment", lambda pid: [
+            b"PROVENANT_RUN_TOKEN=inner-token",
+            ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+        ] if pid == owner.pid else ())
+        patch.setattr(module.os, "killpg", lambda pgid, _signal: signals.append(pgid))
+        patch.setattr(module.os, "kill", lambda *_args: None)
+        tracker = module._Descendants(process, "fixture")
+        tracker.spawned_at = 0
+        tracker.spawned_ticks = 0
+        tracker.sample(include_reparented=True)
+        assert owner.identity in tracker.spared
+        tracker.signal(signal.SIGTERM)
+    assert owner.pgid not in signals
+    assert root_pid in signals
+
+
+@pytest.mark.parametrize("field,value", [
+    ("owner_pid", 999999), ("owner_started_at", "old process"),
+    ("owner_started_at", None), ("run_token", "wrong token"),
+])
+def test_nested_owner_record_must_match_live_identity(tmp_path, monkeypatch, field, value):
+    module = supervisor()
+    row = module._ProcessRow(502, 501, 502, str(int(time.time())), "owner")
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, row, "inner-token")
+    path = run_dir / "dispatch-owner.json"
+    record = json.loads(path.read_text())
+    record[field] = value
+    path.write_text(json.dumps(record))
+    monkeypatch.setattr(module, "_process_environment", lambda _pid: [
+        b"PROVENANT_RUN_TOKEN=inner-token",
+        ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+    ])
+    assert not module._is_nested_fabric_owner(row)
+
+
+def test_nested_owner_accepts_legacy_inherited_locale_start(tmp_path, monkeypatch):
+    module = supervisor()
+    row = module._ProcessRow(502, 501, 502, str(int(time.time())), "owner")
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, row, "inner-token")
+    path = run_dir / "dispatch-owner.json"
+    record = json.loads(path.read_text())
+    weekday, month, day, clock, year = record["owner_started_at"].split()
+    legacy = f"{weekday} {day} {month} {clock} {year}"
+    record["owner_started_at"] = legacy
+    path.write_text(json.dumps(record))
+    monkeypatch.setenv("LC_ALL", "en_AU.UTF-8")
+    monkeypatch.setenv("LANG", "en_AU.UTF-8")
+    monkeypatch.setattr(module, "_process_environment", lambda _pid: [
+        b"PROVENANT_RUN_TOKEN=inner-token",
+        ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+    ])
+    calls = []
+
+    def locale_ps(argv, **kwargs):
+        calls.append((argv, kwargs))
+        output = record["owner_started_at"] if kwargs.get("env", {}).get("LC_ALL") != "C" else module._recorded_start_time(row)
+        return subprocess.CompletedProcess(argv, 0, stdout=output)
+
+    monkeypatch.setattr(module.subprocess, "run", locale_ps)
+    assert module._is_nested_fabric_owner(row)
+    assert [call[1].get("env", {}).get("LC_ALL") for call in calls] == ["C", "en_AU.UTF-8"]
+
+
+def test_nested_owner_accepts_canonical_ps_when_computed_start_differs(tmp_path, monkeypatch):
+    module = supervisor()
+    row = module._ProcessRow(502, 501, 502, str(int(time.time())), "owner")
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, row, "inner-token")
+    canonical = json.loads((run_dir / "dispatch-owner.json").read_text())["owner_started_at"]
+    monkeypatch.setattr(module, "_recorded_start_time", lambda _row: "rounded differently")
+    monkeypatch.setattr(module, "_process_environment", lambda _pid: [
+        b"PROVENANT_RUN_TOKEN=inner-token",
+        ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+    ])
+    calls = []
+
+    def canonical_ps(argv, **kwargs):
+        calls.append(kwargs.get("env", {}).get("LC_ALL"))
+        return subprocess.CompletedProcess(argv, 0, stdout=canonical if calls[-1] == "C" else "other locale")
+
+    monkeypatch.setattr(module.subprocess, "run", canonical_ps)
+    assert module._is_nested_fabric_owner(row)
+    assert calls == ["C"]
+
+
+@pytest.mark.parametrize("stop", ["normal", "cancelled"])
+def test_nested_fabric_owner_and_its_child_are_spared(tmp_path, stop):
+    inner = """import pathlib,subprocess,time
+pathlib.Path('inner-ready').touch()
+child = subprocess.Popen(['sleep', '60'], start_new_session=True,
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pathlib.Path('inner-child.pid').write_text(str(child.pid))
+time.sleep(2.5)
+pathlib.Path('inner-terminal').write_text('ok')
+"""
+    run_dir = tmp_path / "nested-run"
+    outer = f"""import json,os,pathlib,subprocess,sys,time
+environment = dict(os.environ)
+environment['PROVENANT_RUN_TOKEN'] = 'nested-owner-fixture'
+environment['PROVENANT_RUN_DIR'] = {str(run_dir)!r}
+owner = subprocess.Popen([sys.executable, '-c', {inner!r}],
+    start_new_session=True, env=environment, stdin=subprocess.DEVNULL,
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pathlib.Path('inner-owner.pid').write_text(str(owner.pid))
+print(json.dumps({{'type':'owner.ready'}}), flush=True)
+if {stop!r} == 'normal':
+    print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'DONE'}}}}), flush=True)
+    print(json.dumps({{'type':'turn.completed'}}), flush=True)
+    time.sleep(.5)
+else:
+    time.sleep(60)
+"""
+    plan = fixture_plan(tmp_path, outer, timeout_seconds=8, idle_seconds=8)
+    recorded = []
+
+    def record_owner(_timestamp):
+        if recorded or not (tmp_path / "inner-owner.pid").exists():
+            return
+        pid = int((tmp_path / "inner-owner.pid").read_text())
+        row = supervisor()._process_snapshot().get(pid)
+        assert row is not None
+        _write_fake_owner_record(supervisor(), run_dir, row, "nested-owner-fixture")
+        recorded.append(True)
+
+    try:
+        record = supervisor().execute(
+            plan, tmp_path / "result.md",
+            on_progress=record_owner,
+            cancelled=lambda: stop == "cancelled" and (tmp_path / "inner-owner.pid").exists(),
+        )
+        assert recorded
+        assert record["status"] == ("ok" if stop == "normal" else "cancelled")
+        assert record["spared"] >= 1
+        assert record["reaped"] == []
+        deadline = time.monotonic() + 4
+        while not (tmp_path / "inner-terminal").exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert (tmp_path / "inner-terminal").read_text() == "ok"
+    finally:
+        for name in ("inner-owner.pid", "inner-child.pid"):
+            path = tmp_path / name
+            if path.exists():
+                try:
+                    os.killpg(int(path.read_text()), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+
+def test_terminal_grace_with_live_claude_skips_settle_and_eof_child(tmp_path, monkeypatch):
+    module = supervisor()
+    child_pid = tmp_path / "mcp-child.pid"
+    code = f"""import json,pathlib,signal,subprocess,sys,time
+child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))
+def stop(*_args):
+    child.stdin.close()
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, stop)
+print(json.dumps({{'type':'result','is_error':False,'result':'DONE'}}), flush=True)
+time.sleep(60)
+"""
+    modes = []
+    saw_child = []
+    original_stop = module._Descendants.stop
+
+    def observed_stop(self, *args, **kwargs):
+        modes.append(kwargs.get("normal"))
+        rows = self.sample(include_reparented=True)
+        saw_child.append(any(row.pid == int(child_pid.read_text())
+                             for row in self.live(rows).values()))
+        return original_stop(self, *args, **kwargs)
+
+    monkeypatch.setattr(module._Descendants, "stop", observed_stop)
+    try:
+        record = module.execute(fixture_plan(tmp_path, code, "claude"), tmp_path / "result.md")
+        assert record["status"] == "ok"
+        assert saw_child == [True]
+        assert modes == [False]
+        assert record["reaped"] == []
+    finally:
+        if child_pid.exists():
+            try:
+                os.killpg(int(child_pid.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 @pytest.mark.parametrize(
     "adapter", ["claude", "codex", "opencode", "cursor", "agy", "kiro", "copilot"]
 )
@@ -227,6 +1236,45 @@ time.sleep(30)
     assert record["provenance"]["identity"] == "observed"
 
 
+def test_claude_resume_preamble_result_does_not_end_the_run(tmp_path):
+    # A resumed Claude session first settles leftover background-task
+    # notifications with an empty result, then starts the real turn.
+    code = """import json,time
+emit=lambda e: print(json.dumps(e), flush=True)
+emit({'type':'system','subtype':'task_notification','task_id':'b1','status':'stopped'})
+emit({'type':'system','subtype':'init','model':'claude-opus-5-5','session_id':'s-1'})
+emit({'type':'result','subtype':'success','result':'','is_error':False,'num_turns':0})
+emit({'type':'system','subtype':'init','model':'claude-opus-5-5','session_id':'s-1'})
+time.sleep(0.6)
+emit({'type':'assistant','message':{'content':[{'type':'text','text':'working'}]}})
+time.sleep(0.6)
+emit({'type':'result','subtype':'success','result':'DONE','is_error':False,'num_turns':3})
+"""
+    plan = fixture_plan(tmp_path, code, "claude", timeout_seconds=10, idle_seconds=5)
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert (tmp_path / "result.md").read_text() == "DONE"
+
+
+def test_claude_resume_preamble_does_not_start_terminal_grace(tmp_path):
+    # The real turn can start later than the grace period after the empty
+    # preamble result, for example while a large session reloads.
+    code = """import json,time
+emit=lambda e: print(json.dumps(e), flush=True)
+emit({'type':'system','subtype':'init','model':'claude-opus-5-5','session_id':'s-1'})
+emit({'type':'result','subtype':'success','result':'','is_error':False,'num_turns':0})
+time.sleep(0.8)
+emit({'type':'system','subtype':'init','model':'claude-opus-5-5','session_id':'s-1'})
+emit({'type':'assistant','message':{'content':[{'type':'text','text':'working'}]}})
+emit({'type':'result','subtype':'success','result':'DONE','is_error':False,'num_turns':3})
+"""
+    plan = fixture_plan(tmp_path, code, "claude", timeout_seconds=10, idle_seconds=5)
+    plan["grace_seconds"] = 0.3
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert (tmp_path / "result.md").read_text() == "DONE"
+
+
 def test_wall_timeout_is_distinct_from_idle(tmp_path):
     plan = fixture_plan(
         tmp_path, "import time; time.sleep(30)", idle_seconds=3, timeout_seconds=0.2
@@ -245,6 +1293,84 @@ def test_observed_substitution_cannot_certify_the_resolved_family(tmp_path):
     )
     record = supervisor().execute(plan, tmp_path / "result.md")
     assert record["status"] == "ok"
+    assert record["provenance"]["family"] == "unknown"
+    assert not record["cross_family"]
+    assert not record["certification_eligible"]
+
+
+def test_catalogued_observed_substitution_records_answering_family_without_certifying(tmp_path):
+    code = """import json
+events = [
+    {"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"},
+    {"type":"assistant","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"DONE"}]}},
+    {"type":"result","result":"DONE","is_error":False,"session_id":"s-1"},
+]
+for event in events:
+    print(json.dumps(event), flush=True)
+"""
+    plan = fixture_plan(
+        tmp_path,
+        code,
+        "claude",
+        intent="assurance",
+        orchestrator_family="openai",
+    )
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["provenance"]["observed_model"] == "claude-sonnet-5"
+    assert record["provenance"]["family"] == "anthropic"
+    assert record["provenance"]["identity"] == "observed"
+    assert "observed family anthropic inferred from catalogue" in record["provenance"]["notes"]
+    assert not record["cross_family"]
+    assert not record["certification_eligible"]
+
+
+def test_catalogue_lookup_oserror_does_not_fail_finalisation(tmp_path, monkeypatch):
+    exec_routing = importlib.import_module("skills.orchestrate.scripts.exec_routing")
+
+    def unavailable():
+        raise OSError("catalogue unavailable")
+
+    monkeypatch.setattr(
+        exec_routing,
+        "_model_route_module",
+        lambda: SimpleNamespace(load_catalog=unavailable),
+    )
+    code = """import json
+for event in [
+    {"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"},
+    {"type":"assistant","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"DONE"}]}},
+    {"type":"result","result":"DONE","is_error":False,"session_id":"s-1"},
+]:
+    print(json.dumps(event), flush=True)
+"""
+    plan = fixture_plan(tmp_path, code, "claude")
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["provenance"]["family"] == "unknown"
+    assert "observed model family unverified after substitution" in record["provenance"]["notes"]
+
+
+def test_ambiguous_catalogued_observed_substitution_keeps_family_unknown(tmp_path):
+    code = """import json
+events = [
+    {"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"},
+    {"type":"assistant","message":{"model":"gpt-claude-model","content":[{"type":"text","text":"DONE"}]}},
+    {"type":"result","result":"DONE","is_error":False,"session_id":"s-1"},
+]
+for event in events:
+    print(json.dumps(event), flush=True)
+"""
+    plan = fixture_plan(
+        tmp_path,
+        code,
+        "claude",
+        intent="assurance",
+        orchestrator_family="openai",
+    )
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["provenance"]["observed_model"] == "gpt-claude-model"
     assert record["provenance"]["family"] == "unknown"
     assert not record["cross_family"]
     assert not record["certification_eligible"]
@@ -493,7 +1619,7 @@ def test_codex_observed_model_comes_from_rollout_turn_context(tmp_path):
     assert record["provenance"]["observed_model"] == "gpt-6-luna"
     assert record["provenance"]["observed_source"] == "codex:rollout.turn_context.model"
     assert record["provenance"]["identity"] == "observed"
-    assert "mismatch" in record["warnings"][0]
+    assert any("mismatch" in warning for warning in record["warnings"])
 
 
 def test_opencode_observed_model_comes_from_export(tmp_path):
@@ -721,6 +1847,8 @@ def test_claude_plan_isolates_settings_and_mcp(tmp_path, monkeypatch, api_key):
     plan = supervisor().build_plan('claude', {'resolved_model': 'opus'}, 'hello', cwd=tmp_path)
     assert ('--bare' if api_key else '--safe-mode') in plan['argv']
     assert '--strict-mcp-config' in plan['argv']
+    assert plan['argv'][plan['argv'].index('--permission-mode') + 1] == 'default'
+    assert plan['argv'][plan['argv'].index('--tools') + 1] == 'Read,Grep,Glob'
     assert 'fixture-key' not in ' '.join(plan['argv'])
 
 @pytest.mark.parametrize('adapter', ['claude', 'codex', 'opencode'])
@@ -857,17 +1985,120 @@ time.sleep(30)
     assert (tmp_path / 'flushed').read_text() == 'saved'
 
 
-def test_writer_progress_includes_files_after_ten_thousand(tmp_path):
+def test_writer_progress_probe_is_bounded_and_reaches_late_files(tmp_path):
     mod = supervisor()
     directory = tmp_path / 'source'
     directory.mkdir()
-    for number in range(10001):
+    for number in range(60000):
         (directory / str(number)).touch()
-    before = mod._workspace_stamp(tmp_path)
-    # Modify the last entry in the same traversal order used by the watchdog.
+    scanner = mod.WorkspaceProgress(tmp_path)
+    while not scanner.initial_pass_complete:
+        scanner.probe()
+        assert scanner.last_visited <= 2000
+    first_pass = scanner.completed_pass_started_at
     last = list(os.walk(directory))[0][2][-1]
     (directory / last).write_text('changed')
-    assert mod._workspace_stamp(tmp_path) != before
+    # A slow host may need many probes; one full later pass is the real bound.
+    for _ in range(60001):
+        changed = scanner.probe()
+        assert scanner.last_visited <= 2000
+        if changed or scanner.completed_pass_started_at != first_pass:
+            break
+    assert changed
+
+
+def test_writer_progress_uses_string_keys_for_large_tree_memory(tmp_path):
+    mod = supervisor()
+    (tmp_path / 'source.txt').touch()
+    scanner = mod.WorkspaceProgress(tmp_path)
+    scanner.probe()
+    assert scanner.known and all(type(key) is str for key in scanner.known)
+    assert scanner._seen and all(type(key) is str for key in scanner._seen)
+
+
+def test_writer_progress_advances_when_probe_budget_expires_immediately(tmp_path, monkeypatch):
+    mod = supervisor()
+    for number in range(10):
+        (tmp_path / str(number)).touch()
+    ticks = iter(number * 0.1 for number in range(10000))
+    monkeypatch.setattr(mod, 'time', SimpleNamespace(time_ns=time.time_ns,
+                                                     monotonic=lambda: next(ticks)))
+    scanner = mod.WorkspaceProgress(tmp_path)
+    for _ in range(10):
+        scanner.probe()
+        if scanner.initial_pass_complete:
+            break
+    assert scanner.initial_pass_complete
+
+
+def test_writer_progress_tolerates_coarse_creation_clock(tmp_path, monkeypatch):
+    mod = supervisor()
+    monkeypatch.setattr(mod, 'time', SimpleNamespace(time_ns=lambda: time.time_ns() + 10_000_000,
+                                                     monotonic=time.monotonic))
+    scanner = mod.WorkspaceProgress(tmp_path)
+    copied = tmp_path / 'copied.txt'
+    copied.write_text('new file')
+    os.utime(copied, (1, 1))
+    assert scanner.probe()
+
+
+def test_writer_stall_waits_for_full_idle_interval_scan(tmp_path):
+    plan = fixture_plan(tmp_path, 'import time; time.sleep(30)',
+                        mode='worktree_write', idle_seconds=1.2, timeout_seconds=1.6)
+    record = supervisor().execute(plan, tmp_path / 'result.md')
+    assert record['status'] == 'timed_out'
+
+
+def test_writer_progress_sees_preserved_mtime_copy_during_initial_scan(tmp_path):
+    mod = supervisor()
+    directory = tmp_path / 'source'
+    directory.mkdir()
+    scanner = mod.WorkspaceProgress(tmp_path)
+    copied = directory / 'copied.txt'
+    copied.write_text('new file')
+    os.utime(copied, (1, 1))
+    assert scanner.probe()
+
+
+def test_writer_progress_sees_preserved_mtime_copy_at_root(tmp_path):
+    mod = supervisor()
+    scanner = mod.WorkspaceProgress(tmp_path)
+    copied = tmp_path / 'copied.txt'
+    copied.write_text('new file')
+    os.utime(copied, (1, 1))
+    assert scanner.probe()
+
+
+def test_writer_progress_tracks_deletion_without_counting_excluded_paths(tmp_path):
+    mod = supervisor()
+    directory = tmp_path / 'source'
+    directory.mkdir()
+    source = directory / 'source.txt'
+    source.write_text('content')
+    ignored = tmp_path / '.git'
+    ignored.mkdir()
+    metadata = ignored / 'metadata'
+    metadata.write_text('before')
+    output = tmp_path / 'events.jsonl'
+    output.write_text('before')
+    scanner = mod.WorkspaceProgress(tmp_path, {output})
+    assert not scanner.probe()
+    output.write_text('after')
+    metadata.write_text('after')
+    assert not scanner.probe()
+    source.unlink()
+    assert scanner.probe()
+    (directory / 'added.txt').write_text('new')
+    assert scanner.probe()
+
+
+def test_writer_progress_ignores_new_excluded_and_ignored_paths(tmp_path):
+    mod = supervisor()
+    output = tmp_path / 'events.jsonl'
+    scanner = mod.WorkspaceProgress(tmp_path, {output})
+    output.write_text('event')
+    (tmp_path / 'node_modules').mkdir()
+    assert not scanner.probe()
 
 
 def test_stream_rollover_preserves_unclassified_structured_failure(tmp_path, monkeypatch):
@@ -1020,3 +2251,60 @@ def test_kiro_v2_engine_stream_is_parsed_and_auto_is_not_passed():
     command = kiro.argv({"mode": "read_only", "resume_session": None, "model": "auto",
                          "effort": None, "boundary_prompt": "B", "prompt": "P"})
     assert "--model" not in command
+
+
+def test_claude_reported_ids_match_their_aliases():
+    module = supervisor()
+    assert module._same_model("claude", "haiku", "claude-haiku-4-5-20251001")
+    assert module._same_model("claude", "sonnet", "claude-sonnet-5")
+    assert not module._same_model("claude", "haiku", "claude-sonnet-5")
+
+
+def test_subreaper_is_held_only_while_attempts_run(tmp_path, monkeypatch):
+    # A process left as a child subreaper adopts unrelated orphans it never
+    # reaps; a detached server then lingers as a zombie of the caller.
+    module = supervisor()
+    calls = []
+
+    def prctl(option, argument):
+        calls.append((option, argument if isinstance(argument, int) else "get"))
+        return 0
+
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    monkeypatch.setattr(module, "_prctl", prctl)
+    monkeypatch.setattr(module, "_SUBREAPER", {"users": 0, "previous": 0})
+    assert module._enable_subreaper() and module._enable_subreaper()
+    module._release_subreaper()
+    assert (36, 0) not in calls  # another attempt still runs
+    module._release_subreaper()
+    assert calls == [(37, "get"), (36, 1), (36, 0)]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="PR_SET_CHILD_SUBREAPER is Linux-only")
+def test_attempt_restores_the_callers_subreaper_setting(tmp_path):
+    module = supervisor()
+    plan = fixture_plan(tmp_path, "import json; print(json.dumps({'type':'result','result':'DONE','is_error':False}))")
+    assert module.execute(plan, tmp_path / "result.md")["status"] == "ok"
+    value = ctypes.c_int(-1)
+    ctypes.CDLL(None, use_errno=True).prctl(37, ctypes.byref(value), 0, 0, 0)
+    assert value.value == 0
+
+
+def test_subreaper_is_released_when_attempt_cleanup_raises(tmp_path, monkeypatch):
+    module = supervisor()
+    held = []
+    monkeypatch.setattr(module, "_enable_subreaper", lambda: held.append("on") or True)
+    monkeypatch.setattr(module, "_release_subreaper", lambda: held.append("off"))
+
+    import selectors
+
+    class FailingClose(selectors.DefaultSelector):
+        def close(self):
+            super().close()
+            raise RuntimeError("cleanup failed")
+
+    monkeypatch.setattr(selectors, "DefaultSelector", FailingClose)
+    plan = fixture_plan(tmp_path, "import json; print(json.dumps({'type':'result','result':'DONE','is_error':False}))")
+    with pytest.raises(RuntimeError, match="cleanup failed"):
+        module.execute(plan, tmp_path / "result.md")
+    assert held == ["on", "off"]

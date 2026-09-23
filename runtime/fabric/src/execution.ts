@@ -110,7 +110,7 @@ function canonical(path: string): string {
   }
 }
 
-function productRoot(env: NodeJS.ProcessEnv): string {
+export function productRoot(env: NodeJS.ProcessEnv): string {
   const configured = env.AGENT_FABRIC_PRODUCT_ROOT;
   if (configured !== undefined && !isAbsolute(configured)) {
     throw new Error("AGENT_FABRIC_PRODUCT_ROOT must be an absolute path");
@@ -118,7 +118,7 @@ function productRoot(env: NodeJS.ProcessEnv): string {
   return canonical(configured ?? resolve(import.meta.dirname, "../../.."));
 }
 
-function executableOwner(root: string, relativePath: string): string {
+export function executableOwner(root: string, relativePath: string): string {
   const path = join(root, relativePath);
   let metadata;
   try {
@@ -133,7 +133,7 @@ function executableOwner(root: string, relativePath: string): string {
   return path;
 }
 
-async function pythonOwner(root: string, identity: Identity, env: NodeJS.ProcessEnv): Promise<string> {
+export async function pythonOwner(root: string, identity: Identity, env: NodeJS.ProcessEnv): Promise<string> {
   const helper = join(root, "scripts/lib/harness-python.sh");
   const metadata = lstatSync(helper);
   if (!metadata.isFile() || metadata.isSymbolicLink()) {
@@ -248,18 +248,19 @@ async function initialiseRun(
   return runDir;
 }
 
-interface OwnerIdentification {
+export interface OwnerIdentification {
   kind: "dispatch" | "batch";
   identifier: string;
   routes?: unknown;
   taskIds?: string[];
   timeout?: number;
   resume?: boolean;
+  batchId?: string;
   nextAttempt?: number;
   workspace?: string;
 }
 
-function startOwner(
+export function startOwner(
   owner: string,
   args: string[],
   identity: Identity,
@@ -297,7 +298,7 @@ function startOwner(
     JSON.stringify({
       id: shortRunId(runDir),
       ...(identification.kind === "dispatch"
-        ? { task_id: identification.identifier }
+        ? { task_id: identification.identifier, ...(identification.batchId ? { batch_id: identification.batchId } : {}) }
         : { batch_id: identification.identifier }),
       next_attempt: identification.nextAttempt,
       kind: identification.kind,
@@ -416,7 +417,7 @@ function startOwner(
       owner_stdout: stdoutPath,
       owner_stderr: stderrPath,
       ...(identification.kind === "dispatch"
-        ? { task_id: identification.identifier }
+        ? { task_id: identification.identifier, ...(identification.batchId ? { batch_id: identification.batchId } : {}) }
         : { batch_id: identification.identifier }),
     };
     started.record = record;
@@ -461,7 +462,12 @@ function recordedRun(started: StartedOwner): RecordedRun | undefined {
 async function terminateStartedRun(started: StartedOwner, terminalStatus: "interrupted" | "cancelled" = "interrupted"): Promise<void> {
   const run = recordedRun(started);
   if (run !== undefined) {
-    await terminateRecordedRun(run, undefined, terminalStatus);
+    const outcome = await terminateRecordedRun(run, undefined, terminalStatus);
+    // A failed process-group signal must not leave this host's direct owner
+    // alive. The ChildProcess handle identifies the exact child we spawned.
+    if (outcome.reason === "still running" && started.child.exitCode === null && started.child.signalCode === null) {
+      started.child.kill("SIGKILL");
+    }
     return;
   }
   if (started.child.exitCode === null && started.child.signalCode === null) {
@@ -504,7 +510,7 @@ async function requestOwnerCancellation(started: StartedOwner): Promise<void> {
   await started.cancellation;
 }
 
-async function observeOwner(
+export async function observeOwner(
   started: StartedOwner,
   waitSeconds: number | undefined,
   signal: AbortSignal,
@@ -574,7 +580,7 @@ function running(
   };
 }
 
-function stagingPath(runDir: string, name: string): string {
+export function stagingPath(runDir: string, name: string): string {
   return join(runDir, "_owner", name);
 }
 
@@ -596,9 +602,10 @@ async function dispatchConfiguredProviderUnchecked(
   ) {
     throw new InputError("wait_invalid", "Pass wait_seconds from 0 to 55.");
   }
-  const callStarted = Date.now();
+  const callStarted = Date.now(), validateStarted = performance.now();
   const root = productRoot(env);
-  const route = normaliseRoute(input, identity, catalogueSnapshot(root, env));
+  const snapshotStarted = performance.now(), route = normaliseRoute(input, identity, catalogueSnapshot(root, env));
+  const snapshotMs = performance.now() - snapshotStarted;
   const timeout = timeoutSeconds(input.timeout_seconds, input.mode);
   const taskId = input.task_id ?? `task-${randomUUID().slice(0, 8)}`;
   const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
@@ -620,7 +627,9 @@ async function dispatchConfiguredProviderUnchecked(
   );
   signal.throwIfAborted();
   if (checked.status === "rejected") return { status: "rejected", error: checked.error, fix: checked.fix };
-  const runDir = await initialiseRun(workspaceIdentity, env, root, signal);
+  const validateMs = performance.now() - validateStarted - snapshotMs;
+  const initStarted = performance.now(), runDir = await initialiseRun(workspaceIdentity, env, root, signal);
+  const initMs = performance.now() - initStarted;
   if (signal.aborted) rmSync(runDir, { recursive: true, force: true });
   signal.throwIfAborted();
   const promptPath = input.prompt === undefined ? input.prompt_file! : stagingPath(runDir, "prompt.md");
@@ -642,7 +651,7 @@ async function dispatchConfiguredProviderUnchecked(
     python,
     [owner, ...args],
     identity,
-    env,
+    { ...env, PROVENANT_FABRIC_PHASES: JSON.stringify({ validate: validateMs, snapshot: snapshotMs, run_dir_init: initMs, owner_started_at_ms: Date.now() }) },
     runDir,
     {
       command: python,
@@ -724,7 +733,7 @@ async function dispatchConfiguredBatchUnchecked(
   const tasks = input.tasks.flatMap((task, index) => {
     try {
       const defaults = Object.fromEntries(Object.entries(input).filter(([key]) =>
-        ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "add_dirs", "fallback", "timeout_seconds"].includes(key)));
+        ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "add_dirs", "fallback", "timeout_seconds", "context_ceiling"].includes(key)));
       return [normaliseTask({ ...defaults, ...task }, index, identity, catalogue)];
     } catch (error) {
       errors.push({ task_id: task.id ?? `task-${index + 1}`, ...rejected(error) });
@@ -854,144 +863,4 @@ export async function cancelConfiguredRun(
       };
   }
   return { ...(await statusRows(identity.cwd, [id])), ...(reason ? { reason } : {}) };
-}
-
-export async function resumeConfiguredProvider(
-  input: DispatchInput,
-  identity: Identity,
-  signal: AbortSignal,
-  env: NodeJS.ProcessEnv = process.env,
-): Promise<Record<string, unknown>> {
-  let lock: string | undefined,
-    launched = false;
-  try {
-    validatePrompt(input.prompt, input.prompt_file);
-    if (
-      !Number.isInteger(input.wait_seconds ?? 55) ||
-      (input.wait_seconds ?? 55) < 0 ||
-      (input.wait_seconds ?? 55) > 55
-    )
-      throw new InputError("wait_invalid", "Pass wait_seconds from 0 to 55.");
-    if (Object.keys(input).some((key) => !["resume", "prompt", "prompt_file", "wait_seconds", "detail"].includes(key)))
-      throw new InputError("resume_route_change", "Dispatch a new run to change route, mode or controls.");
-    const result = await statusRows(identity.cwd, [input.resume!]);
-    if (!result.runs) return result;
-    if (result.runs.length !== 1 || result.runs[0]!.state !== "terminal")
-      throw new InputError("resume_not_ready", "Resume one terminal task; wait for its active attempt to finish.");
-    const previous = result.runs[0]!;
-    if(previous.attempts?.at(-1)?.state === "running") throw new InputError("resume_not_ready", "Dispatch a new run; the owner did not terminalise this attempt.");
-    const root = productRoot(env),
-      runDir = String(previous.run_dir),
-      taskId = String(previous.task_id);
-    const ownerRecord = readOwnerRecord(runDir);
-    const alive = (pid: number) => {
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch {
-        return false;
-      }
-    };
-    if (ownerRecord && processMatches(ownerRecord.owner_pid, ownerRecord.owner_started_at))
-      throw new InputError("resume_not_ready", "Wait for the current owner to exit.");
-    mkdirSync(join(runDir, "_owner"), { recursive: true, mode: 0o700 });
-    const lockPath = join(runDir, "_owner/resume.lock");
-    try {
-      const old = JSON.parse(readFileSync(lockPath, "utf8"));
-      if (Number.isInteger(old.pid) && !alive(old.pid)) unlinkSync(lockPath);
-    } catch {
-      /* A competing live claim is rejected by exclusive creation. */
-    }
-    try {
-      writeFileSync(lockPath, JSON.stringify({ pid: process.pid }), { flag: "wx", mode: 0o600 });
-      lock = lockPath;
-    } catch {
-      throw new InputError("resume_not_ready", "Wait for the existing resume owner to finish.");
-    }
-    const saved = JSON.parse(readFileSync(join(runDir, "dispatch-status.json"), "utf8")) as Record<string, any>;
-    const timeout = Number(saved.timeout_seconds ?? (previous.mode === "worktree_write" ? 10800 : 3600));
-    const executionIdentity = { ...identity, cwd: typeof previous.cwd === "string" ? previous.cwd : identity.cwd };
-    const python = await pythonOwner(root, identity, env);
-    const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
-    const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
-    const path =
-      input.prompt === undefined
-        ? resolve(identity.cwd, input.prompt_file!)
-        : stagingPath(runDir, `resume-${randomUUID()}.md`);
-    const requested = previous.provenance?.requested ?? {};
-    const checked = await preflight(python, owner, [{
-      id: taskId, adapter: requested.adapter ?? previous.adapter ?? identity.provider,
-      model: previous.provenance?.resolved_model ?? requested.model,
-      effort: previous.provenance?.effort_applied,
-      access_mode: previous.mode ?? "read_only", worktree: previous.worktree ?? undefined,
-      cwd: previous.mode === "worktree_write" ? undefined : executionIdentity.cwd,
-      ...Object.fromEntries(Object.entries(previous.applied ?? {}).filter(([key, value]) =>
-        ["sandbox", "network", "add_dirs"].includes(key) && value !== null)),
-      ...(input.prompt === undefined ? { prompt_file: path } : { prompt: input.prompt }),
-    }], identity, env, signal);
-    if (checked.status === "rejected") return { status: "rejected", error: checked.error, fix: checked.fix };
-    if (input.prompt !== undefined) writeFileSync(path, input.prompt, { mode: 0o600, flag: "wx" });
-    const next = Math.max(0,...(previous.attempts ?? []).map((row:Record<string,any>)=>Number(row.attempt) || 0)) + 1;
-    const started = startOwner(
-      python,
-      [
-        owner,
-        "--run-dir",
-        runDir,
-        "--resume",
-        String(previous.run_id),
-        "--prompt-file",
-        path,
-        "--timeout",
-        String(timeout),
-        ...(previous.mode === "worktree_write" ? [] : ["--cwd", executionIdentity.cwd]),
-      ],
-      identity,
-      env,
-      runDir,
-      {
-        command: python,
-        args: [
-          controls,
-          "cancel",
-          "--run-dir",
-          runDir,
-          "--task-id",
-          taskId,
-          "--attempt-id",
-          `attempt-${String(next).padStart(3, "0")}`,
-          "--wait-seconds",
-          "5",
-        ],
-        targetDirectory: runDir,
-        cwd: identity.cwd,
-        env,
-      },
-      {
-        workspace: identity.cwd,
-        kind: "dispatch",
-        identifier: taskId,
-        taskIds: [taskId],
-        resume: true,
-        routes: checked.routes,
-        nextAttempt: next,
-        timeout,
-      },
-      [lockPath, ...(input.prompt === undefined ? [] : [path])],
-    );
-    launched = true;
-    await observeOwner(started, input.wait_seconds ?? 55, signal);
-    return await fabricStatus(identity.cwd, String(previous.run_id));
-  } catch (error) {
-    if (signal.aborted) throw error;
-    return rejected(error);
-  } finally {
-    if (lock && !launched) {
-      try {
-        unlinkSync(lock);
-      } catch {
-        /* Already released. */
-      }
-    }
-  }
 }

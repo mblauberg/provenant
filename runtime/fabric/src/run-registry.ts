@@ -88,18 +88,15 @@ export interface TerminationOutcome {
   reason?: string;
 }
 
-/**
- * A pid alone is not an identity: the kernel recycles it. `ps -o lstart=` gives
- * a stable start timestamp for the same pid, so a record can be matched against
- * the process it was written for. Both macOS and procps support this field.
- */
-export function processStartedAt(pid: number): string | null {
+/** `ps` start time distinguishes a live process from a recycled PID. */
+function readProcessStartedAt(pid: number, canonical: boolean): string | null {
   if (!Number.isInteger(pid) || pid <= 1) return null;
   try {
     const output = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
       encoding: "utf8",
       timeout: 5_000,
       stdio: ["ignore", "pipe", "ignore"],
+      env: canonical ? { ...process.env, LC_ALL: "C", LANG: "C" } : process.env,
     });
     const value = output.trim();
     return value.length === 0 ? null : value;
@@ -108,11 +105,13 @@ export function processStartedAt(pid: number): string | null {
   }
 }
 
-/**
- * Is this pid still the process the record was written for? Fails closed: an
- * unverifiable pid is never signalled, because signalling a recycled pid is
- * worse than leaving one stray process for the next dispatch to find.
- */
+export function processStartedAt(pid: number): string | null { return readProcessStartedAt(pid, true); }
+
+function startMatches(pid: number, startedAt: string, canonical: string | null): boolean {
+  return canonical === startedAt || (canonical !== null && readProcessStartedAt(pid, false) === startedAt);
+}
+
+/** Refuse to signal a PID whose recorded start time cannot be verified. */
 export function processMatches(pid: number, startedAt: string | null): boolean {
   if (!Number.isInteger(pid) || pid <= 1) return false;
   if (startedAt === null) return false;
@@ -121,7 +120,8 @@ export function processMatches(pid: number, startedAt: string | null): boolean {
   } catch {
     return false;
   }
-  return processStartedAt(pid) === startedAt;
+  const canonical = processStartedAt(pid);
+  return startMatches(pid, startedAt, canonical);
 }
 
 function readJson(path: string): Record<string, unknown> | undefined {
@@ -218,7 +218,7 @@ export function listRecordedRuns(workspace: string): RecordedRun[] {
     const running = processMatches(record.owner_pid, record.owner_started_at);
     const provider = readProviderRecord(runDir, record.run_token);
     const providerRunning = provider !== null && processMatches(provider.provider_pid, provider.provider_started_at);
-    const hostAlive = processMatches(record.host_pid, record.host_started_at);
+    const hostAlive = record.host_started_at !== null && observedAlive(record.host_pid, record.host_started_at); // a failed probe is not death
     runs.push({
       ...record,
       run_id: shortRunId(runDir),
@@ -486,7 +486,7 @@ function observedAlive(pid: number, startedAt: string | null): boolean {
   if (startedAt === null) return true;
   const observed = processStartedAt(pid);
   // An unavailable process identity is not evidence of death. Signalling stays strict.
-  return observed === null || observed === startedAt;
+  return observed === null || startMatches(pid, startedAt, observed);
 }
 
 /** Status observes retained files and process identities; it never repairs or reaps runs. */

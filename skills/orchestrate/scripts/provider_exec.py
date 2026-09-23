@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""One provider process-group supervisor, shared by direct and Fabric owners."""
+"""One provider descendant supervisor, shared by direct and Fabric owners."""
 
 from __future__ import annotations
 
 import argparse
 from collections import deque
+import ctypes
+import ctypes.util
+from functools import lru_cache
 import json
 import math
 import os
@@ -15,13 +18,16 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from adapters import profile
 from output_custody import install, verify, CustodyError
+import context_usage
 
 
 def now():
@@ -94,6 +100,7 @@ def build_plan(
     requested_model=None,
     requested_effort=None,
     intent="ordinary",
+    context_ceiling=None,
     **metadata,
 ):
     config = profile(adapter)
@@ -151,7 +158,8 @@ def build_plan(
         raise ValueError("prompt contains NUL")
     if preface:
         prompt = (
-            f"You are {route_label} via Fabric. Attribute work to exactly this route; never guess a model name.\n\n"
+            f"You are {route_label} via Fabric. Attribute work to exactly this route; never guess a model name. "
+            "This is a headless run that ends when you reply: run commands in the foreground and finish before answering; processes left running are then stopped.\n\n"
             + prompt
         )
     guarantee = (
@@ -246,6 +254,7 @@ def build_plan(
         or os.environ.get("CF_DISPATCH_AGY_SANDBOX", "0") == "1",
         **metadata,
     }
+    context_usage.apply_ceiling(plan, context_ceiling)
     plan["argv"] = config.argv(plan)
     if config.PROMPT_TRANSPORT == "argv":
         ceiling = int(os.environ.get("CF_DISPATCH_ARGV_PROMPT_MAX_BYTES", "65536"))
@@ -272,10 +281,33 @@ SIGNATURES = (
     ("rate_limited", r"rate.?limit|too many requests|overloaded|\b(?:429|529)\b"),
     (
         "model_unavailable",
-        r"model[^\n]*(?:unavailable|not available|not found|unsupported|does not exist)|unknown model",
+        r"invalid model selection|not supported for model|model[^\n]*(?:unavailable|not available|not found|unsupported|does not exist)|unknown model",
     ),
     ("permission_blocked", r"\b403\b|forbidden"),
 )
+
+
+def _model_unavailable_fix(plan):
+    route = plan.get("route") or {}
+    if route.get("identity_source") != "passed-through":
+        return "choose another model"
+    try:
+        try:
+            from . import exec_routing
+        except ImportError:
+            import exec_routing
+        route = exec_routing._model_route_module()
+        catalogue = route.load_catalog()
+        adapter = catalogue.get("adapters", {}).get(plan.get("adapter"), {})
+        registered = route.registered_model_ids(adapter)
+    except Exception:
+        registered = []
+    if registered:
+        choices = ", ".join(registered[:6])
+        if len(registered) > 6:
+            choices += ", …"
+        return "choose a registered model: " + choices
+    return "choose another model"
 
 
 def _objects(value):
@@ -646,61 +678,669 @@ class BoundedCapture:
         self.file.close()
 
 
-def _stop_group(process, grace=2.0):
+@dataclass(frozen=True)
+class _ProcessRow:
+    pid: int
+    ppid: int
+    pgid: int
+    started: str
+    command: str
+    zombie: bool = False
+
+    @property
+    def identity(self):
+        return self.pid, self.started
+
+
+class _DarwinBsdInfo(ctypes.Structure):
+    _fields_ = [
+        ("flags", ctypes.c_uint32), ("status", ctypes.c_uint32),
+        ("xstatus", ctypes.c_uint32), ("pid", ctypes.c_uint32),
+        ("ppid", ctypes.c_uint32), ("uid", ctypes.c_uint32),
+        ("gid", ctypes.c_uint32), ("ruid", ctypes.c_uint32),
+        ("rgid", ctypes.c_uint32), ("svuid", ctypes.c_uint32),
+        ("svgid", ctypes.c_uint32), ("reserved", ctypes.c_uint32),
+        ("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32),
+        ("nfiles", ctypes.c_uint32), ("pgid", ctypes.c_uint32),
+        ("pjobc", ctypes.c_uint32), ("tdev", ctypes.c_uint32),
+        ("tpgid", ctypes.c_uint32), ("nice", ctypes.c_int32),
+        ("start_sec", ctypes.c_uint64), ("start_usec", ctypes.c_uint64),
+    ]
+
+
+@lru_cache(maxsize=1)
+def _darwin_libproc():
+    library = ctypes.util.find_library("proc")
+    if not library:
+        return None
     try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    deadline = time.monotonic() + grace
-    while time.monotonic() < deadline:
+        libproc = ctypes.CDLL(library, use_errno=True)
+    except OSError:
+        return None
+    libproc.proc_listallpids.argtypes = (ctypes.c_void_p, ctypes.c_int)
+    libproc.proc_listallpids.restype = ctypes.c_int
+    libproc.proc_pidinfo.argtypes = (
+        ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int,
+    )
+    libproc.proc_pidinfo.restype = ctypes.c_int
+    return libproc
+
+
+def _linux_process_row(pid, proc_root=Path("/proc")):
+    stat = (proc_root / str(pid) / "stat").read_bytes().decode(errors="replace")
+    end = stat.rfind(") ")
+    if end < 0:
+        return None
+    fields = stat[end + 2:].split()
+    if len(fields) < 20:
+        return None
+    return _ProcessRow(
+        pid, int(fields[1]), int(fields[2]), fields[19],
+        stat[stat.find("(") + 1:end], fields[0] == "Z",
+    )
+
+
+def _linux_tree_snapshot(root_pid, known_pids, proc_root=Path("/proc")):
+    """Walk task children from the direct provider and previously seen children."""
+    rows = {}
+    queue = deque([root_pid, *known_pids])
+    visited = set()
+    while queue:
+        pid = queue.popleft()
+        if pid in visited:
+            continue
+        visited.add(pid)
         try:
-            os.killpg(process.pid, 0)
-        except ProcessLookupError:
-            break
-        except PermissionError:
-            pass  # Some host sandboxes deny signal 0 even for our group.
-        process.poll()
-        time.sleep(0.01)
-    # The leader may have exited while descendants remain in the group.
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        process.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        pass
-
-
-def _workspace_stamp(cwd, excluded=()):
-    modified, size, count = 0, 0, 0
-    for root, dirs, files in os.walk(cwd):
-        dirs[:] = [
-            d
-            for d in dirs
-            if d
-            not in {
-                ".git",
-                ".agent-run",
-                ".worktrees",
-                "node_modules",
-                ".venv",
-                "__pycache__",
-            }
-            and not Path(root, d).is_symlink()
-        ]
-        for name in files:
-            path = Path(root, name)
-            if path in excluded:
-                continue
+            row = _linux_process_row(pid, proc_root)
+        except OSError:
+            continue
+        if row is None:
+            continue
+        rows[pid] = row
+        task = proc_root / str(pid) / "task"
+        try:
+            threads = list(task.iterdir())
+        except OSError:
+            return None  # Kernel lacks task/children; use the full census.
+        for thread in threads:
             try:
-                metadata = path.lstat()
-                modified += metadata.st_mtime_ns
-                size += metadata.st_size
+                children = (thread / "children").read_text()
+            except OSError:
+                return None
+            queue.extend(int(child) for child in children.split())
+    return rows
+
+
+def _darwin_process_row(libproc, pid):
+    info = _DarwinBsdInfo()
+    if libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(info):
+        return None
+    return _ProcessRow(
+        pid, info.ppid, info.pgid,
+        f"{info.start_sec}.{info.start_usec:06d}",
+        info.name.split(b"\0", 1)[0].decode(errors="replace")
+        or info.comm.split(b"\0", 1)[0].decode(errors="replace"),
+        info.status == 5,
+    )
+
+
+def _probe_process_row(pid):
+    """One pid's row, or None when it cannot be read."""
+    try:
+        if sys.platform == "darwin":
+            libproc = _darwin_libproc()
+            return _darwin_process_row(libproc, pid) if libproc is not None else None
+        if sys.platform.startswith("linux"):
+            return _linux_process_row(pid)
+    except Exception:
+        return None
+    return None
+
+
+def _process_snapshot():
+    try:
+        return _process_snapshot_unchecked()
+    except Exception:
+        return None
+
+
+def _process_snapshot_unchecked():
+    if sys.platform == "darwin":
+        libproc = _darwin_libproc()
+        if libproc is None:
+            return {}
+        count = libproc.proc_listallpids(None, 0)
+        if count <= 0:
+            return {}
+        pids = (ctypes.c_int * (count + 128))()
+        count = libproc.proc_listallpids(pids, ctypes.sizeof(pids))
+        rows = {}
+        for pid in pids[:max(0, count)]:
+            if pid > 0 and (row := _darwin_process_row(libproc, pid)) is not None:
+                rows[pid] = row
+        return rows
+    if not sys.platform.startswith("linux"):
+        return {}
+    rows = {}
+    try:
+        pids = os.scandir("/proc")
+    except OSError:
+        return rows
+    with pids:
+        for entry in pids:
+            if not entry.name.isdecimal():
+                continue
+            pid = int(entry.name)
+            try:
+                row = _linux_process_row(pid, Path(entry.path).parent)
             except OSError:
                 continue
-            count += 1
-    return modified, size, count
+            if row is not None:
+                rows[pid] = row
+    return rows
+
+
+def _process_environment(pid):
+    if sys.platform.startswith("linux"):
+        try:
+            with Path(f"/proc/{pid}/environ").open("rb") as stream:
+                return stream.read(1024 * 1024).split(b"\0")
+        except OSError:
+            return ()
+    if sys.platform != "darwin":
+        return ()
+    libc = ctypes.CDLL(None, use_errno=True)
+    mib = (ctypes.c_int * 3)(1, 49, pid)  # CTL_KERN, KERN_PROCARGS2, pid
+    size = ctypes.c_size_t()
+    if libc.sysctl(mib, 3, None, ctypes.byref(size), None, 0) != 0 or size.value > 1024 * 1024:
+        return ()
+    data = ctypes.create_string_buffer(size.value)
+    if libc.sysctl(mib, 3, data, ctypes.byref(size), None, 0) != 0:
+        return ()
+    # KERN_PROCARGS2 stores argc, executable path, argv, then NUL-separated env.
+    raw = data.raw[:size.value]
+    if len(raw) < ctypes.sizeof(ctypes.c_int):
+        return ()
+    argc = ctypes.c_int.from_buffer_copy(raw).value
+    if not 0 <= argc <= 65536:
+        return ()
+    offset = raw.find(b"\0", ctypes.sizeof(ctypes.c_int))
+    if offset < 0:
+        return ()
+    while offset < len(raw) and raw[offset] == 0:
+        offset += 1
+    for _ in range(argc):
+        offset = raw.find(b"\0", offset)
+        if offset < 0:
+            return ()
+        offset += 1
+    return raw[offset:].split(b"\0")
+
+
+def _has_attempt_marker(pid, marker):
+    return ("PROVENANT_ATTEMPT_MARKER=" + marker).encode() in _process_environment(pid)
+
+
+@lru_cache(maxsize=1)
+def _linux_boot_time():
+    for line in Path("/proc/stat").read_text().splitlines():
+        if line.startswith("btime "):
+            return int(line.split()[1])
+    raise ValueError("Linux boot time unavailable")
+
+
+def _recorded_start_time(row):
+    """Match the seconds-resolution `ps -o lstart=` used by run-registry.ts."""
+    if sys.platform == "darwin":
+        epoch = float(row.started)
+    elif sys.platform.startswith("linux"):
+        epoch = _linux_boot_time() + int(row.started) / os.sysconf("SC_CLK_TCK")
+    else:
+        return None
+    return time.strftime("%a %b %e %H:%M:%S %Y", time.localtime(epoch))
+
+
+def _ps_start_time(pid, *, canonical):
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2, check=False,
+            env={**os.environ, **({"LC_ALL": "C", "LANG": "C"} if canonical else {})},
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _pid_exists(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _is_nested_fabric_owner(row):
+    try:
+        values = {}
+        for entry in _process_environment(row.pid):
+            key, _, value = entry.partition(b"=")
+            if key in {b"PROVENANT_RUN_DIR", b"PROVENANT_RUN_TOKEN"}:
+                values[key] = value
+        token = values.get(b"PROVENANT_RUN_TOKEN")
+        directory = values.get(b"PROVENANT_RUN_DIR")
+        if not token or not directory:
+            return False
+        run_dir = Path(os.fsdecode(directory))
+        if not run_dir.is_absolute():
+            return False
+        path = run_dir / "dispatch-owner.json"
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 65536:
+            return False
+        record = json.loads(path.read_text())
+        started_at = record.get("owner_started_at")
+        return (
+            record.get("schema_version") == 1
+            and record.get("kind") in {"dispatch", "batch"}
+            and Path(record.get("run_dir", "")).resolve() == run_dir.resolve()
+            and record.get("run_token") == os.fsdecode(token)
+            and record.get("owner_pid") == row.pid
+            and row.pgid == row.pid
+            and record.get("owner_pgid") == row.pid
+            and isinstance(started_at, str) and bool(started_at)
+            and (
+                started_at == _recorded_start_time(row)
+                or started_at == _ps_start_time(row.pid, canonical=True)
+                or started_at == _ps_start_time(row.pid, canonical=False)
+            )
+        )
+    except Exception:
+        return False
+
+
+class _Descendants:
+    def __init__(self, process, marker):
+        self.process = process
+        self.marker = marker
+        self.spawned_at = time.time() - 1
+        self.spawned_ticks = None
+        if sys.platform.startswith("linux"):
+            try:
+                ticks_per_second = os.sysconf("SC_CLK_TCK")
+                uptime = float(Path("/proc/uptime").read_text().split()[0])
+                self.spawned_ticks = int((uptime - 1) * ticks_per_second)
+            except (OSError, ValueError):
+                pass
+        self.root = None
+        self.tracked = {}
+        self.spared = {}
+        self.verified_owners = set()
+        self.parents = {}
+        self.orphan_candidates = set()
+        self.spared_at_stop = set()
+        self.snapshot_unavailable = False
+
+    def sample(self, include_reparented=False):
+        try:
+            return self._sample(include_reparented)
+        except Exception:
+            self.snapshot_unavailable = True
+            return {}
+
+    def _sample(self, include_reparented):
+        rows = None
+        targeted = False
+        if sys.platform.startswith("linux") and not include_reparented:
+            rows = _linux_tree_snapshot(
+                self.process.pid, {pid for pid, _ in (*self.tracked, *self.spared)}
+            )
+            targeted = rows is not None
+        if rows is None:
+            rows = _process_snapshot()
+        if rows is None:
+            self.snapshot_unavailable = True
+            return {}
+        if ((targeted and self.process.poll() is None and self.process.pid not in rows)
+                or (not targeted and os.getpid() not in rows)):
+            self.snapshot_unavailable = True
+        root = rows.get(self.process.pid)
+        if self.root is None and root is not None and self.process.poll() is None:
+            self.root = root.identity
+        parents = {self.root} if self.root else set()
+        parents.update(self.tracked)
+        parents.update(self.spared)
+        while True:
+            newly = {
+                row.identity: row for row in rows.values()
+                if row.identity not in parents
+                and (parent := rows.get(row.ppid)) is not None
+                and parent.identity in parents
+            }
+            if not newly:
+                break
+            for identity, row in newly.items():
+                self.parents[identity] = rows[row.ppid].identity
+                self.tracked[identity] = row
+            parents.update(newly)
+        if include_reparented:
+            for row in rows.values():
+                if (row.ppid not in {1, os.getpid()} or row.pid == self.process.pid
+                    or row.identity in self.tracked or row.identity in self.spared or row.zombie):
+                    continue
+                if sys.platform == "darwin" and float(row.started) < self.spawned_at:
+                    continue
+                if sys.platform.startswith("linux") and (
+                    self.spawned_ticks is None or int(row.started) < self.spawned_ticks
+                ):
+                    continue
+                if _has_attempt_marker(row.pid, self.marker):
+                    self.tracked[row.identity] = row
+                    self.orphan_candidates.add(row.identity)
+        self._refresh_spared(rows)
+        return rows
+
+    def _refresh_spared(self, rows):
+        observed = {**self.tracked, **self.spared}
+        # A row missing from one census is not evidence of death: probe that pid
+        # alone, and when even that cannot be read, keep a verified owner spared
+        # while its pid exists.
+        def held(identity):
+            row = rows.get(identity[0]) or _probe_process_row(identity[0])
+            if row is not None:
+                return row.identity == identity and not row.zombie
+            return _pid_exists(identity[0])
+
+        spared = {identity for identity in self.verified_owners if held(identity)}
+        own_groups = {self.process.pid, os.getpgrp()}
+        for identity in observed:
+            if identity in self.verified_owners:
+                continue
+            row = rows.get(identity[0])
+            parent = self.parents.get(identity)
+            if (row is not None and row.identity == identity and not row.zombie
+                    and row.pgid not in own_groups
+                    and (identity in self.orphan_candidates
+                         or (parent is not None and (parent == self.root or parent in observed)))
+                    and parent not in self.spared):
+                if _is_nested_fabric_owner(row):
+                    self.verified_owners.add(identity)
+                    spared.add(identity)
+        changed = True
+        while changed:
+            changed = False
+            for identity, parent in self.parents.items():
+                if identity in observed and parent in spared and identity not in spared:
+                    spared.add(identity)
+                    changed = True
+        self.spared = {identity: row for identity, row in observed.items() if identity in spared}
+        self.tracked = {identity: row for identity, row in observed.items() if identity not in spared}
+
+    def live(self, rows):
+        return {
+            identity: row for identity in (set(self.tracked) | ({self.root} if self.root else set()))
+            if (row := rows.get(identity[0])) is not None
+            and row.identity == identity and not row.zombie
+        }
+
+    def live_spared(self, rows):
+        return {
+            identity: row for identity in self.spared
+            if (row := rows.get(identity[0])) is not None
+            and row.identity == identity and not row.zombie
+        }
+
+    def signal(self, signum, *, root_group=True, skip=frozenset(), only=None):
+        try:
+            rows = _process_snapshot()
+        except Exception:
+            rows = None
+        if rows is None:
+            self.snapshot_unavailable = True
+            rows = {}
+        else:
+            self._refresh_spared(rows)  # A fork observed before exec may now be a recorded owner.
+        live = self.live(rows)
+        live = {
+            identity: row for identity, row in live.items()
+            if identity not in skip and (only is None or identity in only)
+        }
+        spared_groups = {
+            row.pgid for row in self.live_spared(rows).values()
+        } | {identity[0] for identity in self.spared if identity in self.verified_owners}
+        spared_groups -= {self.process.pid, os.getpgrp()}
+        if not root_group:
+            live.pop(self.root, None)
+        groups = {
+            row.pgid for row in live.values()
+            if row.pgid > 0 and row.pgid != os.getpgrp()
+            and row.pgid not in spared_groups
+            and (root_group or row.pgid != self.process.pid)
+        }
+        if root_group:
+            groups.add(self.process.pid)  # The original group may outlive its leader.
+        signalled_groups = set()
+        for pgid in groups:
+            try:
+                os.killpg(pgid, signum)
+                signalled_groups.add(pgid)
+            except (ProcessLookupError, PermissionError):
+                pass
+        for row in live.values():
+            if signum == signal.SIGTERM and row.pgid in signalled_groups:
+                continue
+            try:
+                os.kill(row.pid, signum)
+            except (ProcessLookupError, PermissionError):
+                pass
+        if root_group and self.process.poll() is None and (
+            signum != signal.SIGTERM or self.process.pid not in signalled_groups
+        ):
+            try:
+                os.kill(self.process.pid, signum)
+            except (ProcessLookupError, PermissionError):
+                pass
+
+    def stop(self, *, normal=False, terminal_grace=False,
+             descendant_grace=0.5, root_grace=2.0):
+        if normal:
+            settle_deadline = time.monotonic() + 1.5
+            while time.monotonic() < settle_deadline:
+                rows = self.sample(include_reparented=True)
+                if not any(identity != self.root for identity in self.live(rows)):
+                    break
+                time.sleep(0.05)
+        rows = self.sample(include_reparented=True)
+        self.spared_at_stop.update(self.live_spared(rows))
+        pending = {
+            identity for identity, row in self.live(rows).items()
+            if terminal_grace and row.ppid == self.process.pid
+        }
+        deferred = {
+            identity for identity, row in self.live(rows).items()
+            if identity in pending and row.pgid != self.process.pid
+        }
+        leftovers = {
+            identity: {"pid": row.pid, "command": row.command[:80]}
+            for identity, row in self.live(rows).items()
+            if identity != self.root and identity not in pending
+        }
+        self.signal(signal.SIGTERM, skip=deferred)
+        started = time.monotonic()
+        deadline = started + root_grace
+        descendants_killed = False
+        deferred_killed = False
+        while time.monotonic() < deadline:
+            self.process.poll()
+            rows = self.sample(include_reparented=True)
+            self.spared_at_stop.update(self.live_spared(rows))
+            leftovers.update({
+                identity: {"pid": row.pid, "command": row.command[:80]}
+                for identity, row in self.live(rows).items() if identity != self.root
+                and (identity not in pending or time.monotonic() - started >= descendant_grace)
+            })
+            if not descendants_killed and time.monotonic() - started >= descendant_grace:
+                if deferred:
+                    self.signal(signal.SIGTERM, root_group=False, only=deferred)
+                self.signal(signal.SIGKILL, root_group=False, skip=deferred)
+                descendants_killed = True
+            if deferred and not deferred_killed and time.monotonic() - started >= 2 * descendant_grace:
+                self.signal(signal.SIGKILL, root_group=False, only=deferred)
+                deferred_killed = True
+            if self.process.poll() is not None and not self.live(rows):
+                break
+            time.sleep(0.05)
+        rows = self.sample(include_reparented=True)
+        self.spared_at_stop.update(self.live_spared(rows))
+        leftovers.update({
+            identity: {"pid": row.pid, "command": row.command[:80]}
+            for identity, row in self.live(rows).items() if identity != self.root
+        })
+        self.signal(signal.SIGKILL)
+        self.spared_at_stop.update(self.spared)
+        try:
+            self.process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
+        if sys.platform.startswith("linux") and self.tracked:
+            deadline = time.monotonic() + 2
+            while True:
+                rows = self.sample(include_reparented=True)
+                remaining = []
+                for identity in self.tracked:
+                    row = rows.get(identity[0])
+                    if row is None or row.identity != identity:
+                        continue
+                    try:
+                        os.waitpid(row.pid, os.WNOHANG)
+                    except ChildProcessError:
+                        pass
+                    remaining.append(identity)
+                if not remaining or time.monotonic() >= deadline:
+                    break
+                time.sleep(0.02)
+        return [item for identity, item in leftovers.items()
+                if identity not in self.spared_at_stop]
+
+
+_SUBREAPER_LOCK = threading.Lock()
+_SUBREAPER = {"users": 0, "previous": 0}
+
+
+def _prctl(option, argument):
+    libc = ctypes.CDLL(None, use_errno=True)
+    return libc.prctl(option, argument, 0, 0, 0)
+
+
+def _enable_subreaper():
+    """Adopt orphaned descendants for this attempt only; True when held."""
+    if not sys.platform.startswith("linux"):
+        return False
+    with _SUBREAPER_LOCK:
+        if _SUBREAPER["users"] == 0:
+            try:
+                previous = ctypes.c_int(0)
+                _prctl(37, ctypes.byref(previous))  # PR_GET_CHILD_SUBREAPER
+                _prctl(36, 1)  # PR_SET_CHILD_SUBREAPER
+            except (AttributeError, OSError):
+                return False
+            _SUBREAPER["previous"] = previous.value
+        _SUBREAPER["users"] += 1
+    return True
+
+
+def _release_subreaper():
+    """Restore the host's own setting once no attempt in this process needs it."""
+    with _SUBREAPER_LOCK:
+        if _SUBREAPER["users"] == 0:
+            return
+        _SUBREAPER["users"] -= 1
+        if _SUBREAPER["users"] == 0 and not _SUBREAPER["previous"]:
+            try:
+                _prctl(36, 0)
+            except (AttributeError, OSError):
+                pass
+
+
+class WorkspaceProgress:
+    """Rotate a bounded filesystem scan across writer watchdog samples."""
+
+    IGNORED = {".git", ".agent-run", ".worktrees", "node_modules", ".venv", "__pycache__"}
+
+    def __init__(self, cwd, excluded=()):
+        self.cwd = Path(cwd)
+        self.excluded = {os.fspath(path) for path in excluded}
+        self.started_wall_ns = time.time_ns() - 20_000_000
+        self.known = {}
+        self.initial_pass_complete = False
+        self.completed_pass_started_at = None
+        self.last_visited = 0
+        self._stack = []
+        self._seen = set()
+        self._pass_started_at = None
+
+    def _start_pass(self):
+        self._seen = set()
+        self._pass_started_at = time.monotonic()
+        try:
+            self._stack = [os.scandir(self.cwd)]
+        except OSError:
+            self._stack = []
+
+    def probe(self):
+        deadline = time.monotonic() + 0.025
+        self.last_visited = 0
+        if not self._stack:
+            self._start_pass()
+        changed = False
+        while (self._stack and self.last_visited < 2000
+               and (self.last_visited < 32 or time.monotonic() < deadline)):
+            try:
+                entry = next(self._stack[-1])
+            except StopIteration:
+                self._stack.pop().close()
+                continue
+            except OSError:
+                self._stack.pop().close()
+                continue
+            self.last_visited += 1
+            path = entry.path
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if entry.name not in self.IGNORED:
+                        self._stack.append(os.scandir(entry.path))
+                    continue
+                if path in self.excluded:
+                    continue
+                metadata = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            signature = (metadata.st_mtime_ns, metadata.st_size)
+            previous = self.known.get(path)
+            if previous is not None and previous != signature:
+                changed = True
+            elif previous is None and (self.initial_pass_complete
+                                       or metadata.st_mtime_ns > self.started_wall_ns + 20_000_000
+                                       or (metadata.st_mtime_ns < self.started_wall_ns
+                                           and metadata.st_ctime_ns > self.started_wall_ns)):
+                changed = True
+            self.known[path] = signature
+            self._seen.add(path)
+        if not self._stack:
+            if self.initial_pass_complete:
+                missing = self.known.keys() - self._seen
+                if missing:
+                    changed = True
+                    for path in missing:
+                        del self.known[path]
+            self.initial_pass_complete = True
+            self.completed_pass_started_at = self._pass_started_at
+        return changed
+
+    def close(self):
+        while self._stack:
+            self._stack.pop().close()
 
 
 def _cpu_stamp(pgid):
@@ -819,6 +1459,7 @@ def execute(
         if key.startswith(
             ("GIT_", "PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")
         ) or key in {
+            "PROVENANT_FABRIC_PHASES",
             "AGENT_FABRIC_STATE_DIRECTORY",
             "AGENT_FABRIC_SEAT",
             "AGENT_FABRIC_CLIENT_LABEL",
@@ -831,6 +1472,8 @@ def execute(
         PROVENANT_RUN_ID=plan.get("run_id", ""),
         PROVENANT_CHAIR=plan.get("chair", ""),
     )
+    attempt_marker = uuid.uuid4().hex
+    environment["PROVENANT_ATTEMPT_MARKER"] = attempt_marker
     environment["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
     # Linux CI and service shells may have no TMPDIR; providers expect one.
     environment.setdefault("TMPDIR", tempfile.gettempdir())
@@ -867,7 +1510,12 @@ def execute(
     started_at, started = now(), time.monotonic()
     last_progress, last_progress_at = started, started_at
     process = None
+    descendants = None
+    subreaper = False
+    reaped = []
+    stopped = False
     forced, terminal_at, cancel_signal = None, None, False
+    terminal_grace_break = False
     pending = b""
     dropping_line = False
     semantic = {}
@@ -877,6 +1525,7 @@ def execute(
     terminal_text = None
     text_truncated = False
     old_handlers = {}
+    meter = context_usage.Meter(plan["adapter"])
 
     def consume(data):
         nonlocal pending, terminal_at, text_size, retry_failure, terminal_text, text_truncated, dropping_line
@@ -894,12 +1543,28 @@ def execute(
                 continue
             if not isinstance(event, dict):
                 continue
+            meter.observe(event)
             parsed_line = parse_output(plan["adapter"], line.decode(errors="replace"))
             for key in ("session_id", "observed_model", "reset_at", "retry_after"):
                 if parsed_line.get(key) is not None:
                     semantic[key] = parsed_line[key]
-            if parsed_line["terminal"] and terminal_at is None:
+            # A resumed Claude session's empty preamble result (no turns) is not
+            # completion evidence; the real turn may start after the grace.
+            preamble = (
+                event.get("type") == "result"
+                and event.get("num_turns") == 0
+                and not event.get("result")
+                and event.get("is_error") is False
+            )
+            if parsed_line["terminal"] and terminal_at is None and not preamble:
                 terminal_at = time.monotonic()
+            elif not parsed_line["terminal"] and (
+                event.get("type") in {"assistant", "user"}
+                or (event.get("type") == "system" and event.get("subtype") == "init")
+            ):
+                # A resumed Claude session settles leftover background tasks with
+                # an empty result before its real turn; later activity reopens it.
+                terminal_at = None
             if parsed_line["status"] not in {"ok", "input_required"} and parsed_line["signature"] != "empty_output":
                 failure = {key: parsed_line[key] for key in ("status", "signature", "excerpt", "reset_at", "retry_after")}
                 if event.get("type") == "api_retry":
@@ -940,6 +1605,7 @@ def execute(
         for sig in old_handlers:
             signal.signal(sig, handle_signal)
     input_file = None
+    workspace = None
     selector = selectors.DefaultSelector()
     try:
         if plan["stdin_policy"] == "prompt":
@@ -969,6 +1635,7 @@ def execute(
             command[0] = (
                 shutil.which(command[0], path=environment.get("PATH")) or command[0]
             )
+            subreaper = _enable_subreaper()
             process = subprocess.Popen(
                 command,
                 cwd=plan["cwd"],
@@ -978,6 +1645,8 @@ def execute(
                 stderr=subprocess.PIPE,
                 start_new_session=True,
             )
+            descendants = _Descendants(process, attempt_marker)
+            descendants.sample()
             if on_start:
                 on_start(process)
             for stream, name in (
@@ -990,12 +1659,13 @@ def execute(
             excluded = {
                 path.resolve() for path in (output_path, events_path, stderr_path)
             }
-            stamp = (
-                _workspace_stamp(plan["cwd"], excluded)
+            workspace = (
+                WorkspaceProgress(plan["cwd"], excluded)
                 if plan["mode"] == "worktree_write"
                 else None
             )
             cpu, next_sample = (), started + 1
+            next_tree_sample = started + 1.0
             while True:
                 for key, mask in selector.select(0.05):
                     data = os.read(key.fileobj.fileno(), 65536)
@@ -1013,11 +1683,15 @@ def execute(
                     if on_progress:
                         on_progress(last_progress_at)
                 current = time.monotonic()
+                if current >= next_tree_sample:
+                    descendants.sample()
+                    next_tree_sample = current + 1.0
                 exited = process.poll() is not None
                 if exited and not selector.get_map():
                     break
-                if exited:
-                    _stop_group(process)  # descendants may still hold our output pipes
+                if exited and not stopped:
+                    reaped.extend(descendants.stop(normal=True))  # descendants may hold output pipes
+                    stopped = True
                 if cancel_signal or (cancelled and cancelled()):
                     forced = "cancelled"
                     break
@@ -1026,27 +1700,27 @@ def execute(
                     and current - terminal_at >= plan["grace_seconds"]
                 ):
                     # Completion is evidenced by the event, even when the CLI hangs.
+                    terminal_grace_break = True
                     break
                 if current - started >= plan["timeout_seconds"]:
                     forced = "timed_out"
                     break
                 if current >= next_sample:
                     next_sample = current + 1
-                    new_stamp = (
-                        _workspace_stamp(plan["cwd"], excluded)
-                        if plan["mode"] == "worktree_write"
-                        else None
-                    )
+                    changed = workspace.probe() if workspace is not None else False
                     new_cpu = _cpu_stamp(process.pid)
-                    if new_stamp != stamp or (cpu and new_cpu and new_cpu != cpu):
+                    if changed or (cpu and new_cpu and new_cpu != cpu):
                         last_progress = current
                         last_progress_at = now()
                         warned = False
                         if on_progress:
                             on_progress(last_progress_at)
-                    stamp, cpu = new_stamp, new_cpu
+                    cpu = new_cpu
                 idle = current - last_progress
-                if idle >= plan["idle_seconds"]:
+                covered_idle = idle if workspace is None else max(
+                    0, (workspace.completed_pass_started_at or last_progress) - last_progress
+                )
+                if covered_idle >= plan["idle_seconds"]:
                     forced = "stalled"
                     break
                 if idle >= plan["idle_seconds"] / 2 and not warned:
@@ -1069,28 +1743,39 @@ def execute(
         forced = "failed"
         diagnostics.write(str(exc).encode())
     finally:
-        if process:
-            _stop_group(process)
-            # Drain final bytes after the group exits, without an unbounded communicate.
-            for key in list(selector.get_map().values()):
-                while True:
-                    try:
-                        data = os.read(key.fileobj.fileno(), 65536)
-                    except (BlockingIOError, OSError):
-                        break
-                    if not data:
-                        break
-                    (raw if key.data == "stdout" else diagnostics).write(data)
-                    if key.data == "stdout":
-                        consume(data)
-            for stream in (process.stdin, process.stdout, process.stderr):
-                if stream:
-                    stream.close()
-        selector.close()
-        if input_file:
-            input_file.close()
-        for sig, handler in old_handlers.items():
-            signal.signal(sig, handler)
+        try:
+            if workspace is not None:
+                workspace.close()
+            if process:
+                if descendants and not stopped:
+                    exited_at_stop = process.poll() is not None
+                    reaped.extend(descendants.stop(
+                        normal=exited_at_stop,
+                        terminal_grace=terminal_grace_break and not exited_at_stop,
+                    ))
+                # Drain final bytes after the group exits, without an unbounded communicate.
+                for key in list(selector.get_map().values()):
+                    while True:
+                        try:
+                            data = os.read(key.fileobj.fileno(), 65536)
+                        except (BlockingIOError, OSError):
+                            break
+                        if not data:
+                            break
+                        (raw if key.data == "stdout" else diagnostics).write(data)
+                        if key.data == "stdout":
+                            consume(data)
+                for stream in (process.stdin, process.stdout, process.stderr):
+                    if stream:
+                        stream.close()
+            selector.close()
+            if input_file:
+                input_file.close()
+            for sig, handler in old_handlers.items():
+                signal.signal(sig, handler)
+        finally:
+            if subreaper:
+                _release_subreaper()
     exit_code = process.returncode if process else None
     if pending:
         consume(b"\n")
@@ -1148,6 +1833,22 @@ def execute(
     parsed["session_id"] = session
     observed, source = _observed_model(plan, parsed, environment)
     warnings = list(plan["warnings"])
+    reported = {}
+    if plan["adapter"] == "claude":
+        # init.model is the request; Claude may answer with another model.
+        answered = meter.models["answered"]
+        reported = {"init_model": meter.models["init"], "answered_models": list(answered)}
+        answering, answering_source = meter.answering_model()
+        if answering:
+            observed, source = answering, answering_source
+        if len(answered) > 1:
+            warnings.append("claude answered as " + ", ".join(answered) + "; route records " + observed)
+        elif answering and meter.models["init"] and answering != meter.models["init"]:
+            warnings.append("claude answered as " + answering + "; init reported " + meter.models["init"])
+    if descendants and descendants.snapshot_unavailable:
+        warnings.insert(0, "descendant census unavailable; process cleanup could not be verified")
+    if reaped:
+        warnings.insert(0, f"reaped {len(reaped)} leftover process(es)")
     if route.get("effort_substitution") and route["effort_substitution"] not in warnings:
         warnings.append(route["effort_substitution"])
     if text_truncated or (raw.total > MAX_EVENTS_BYTES and terminal_text is None and not text_chunks):
@@ -1165,10 +1866,20 @@ def execute(
     identity = "observed" if observed else "resolved" if plan["model"] else "unknown"
     family = route.get("model_family") or route.get("family") or "unknown"
     if substituted:
-        # Routing attributed the requested model, not the provider's substitution.
-        # Do not certify a different family without model-router evidence for it.
-        family = "unknown"
-        notes.append("observed model family unverified after substitution")
+        try:
+            try:
+                from . import exec_routing
+            except ImportError:
+                import exec_routing
+            observed_families = exec_routing.model_families(observed)
+        except Exception:
+            observed_families = ()
+        if len(observed_families) == 1:
+            family = observed_families[0]
+            notes.append(f"observed family {family} inferred from catalogue")
+        else:
+            family = "unknown"
+            notes.append("observed model family unverified after substitution")
     model = observed or plan["model"]
     line = (
         f"Route: {plan['adapter']}/{model}"
@@ -1185,6 +1896,7 @@ def execute(
         "resolved_model": plan["model"],
         "observed_model": observed,
         "observed_source": source,
+        **reported,
         "identity": identity,
         "provider": route.get("endpoint_provider") or plan["adapter"],
         "transport": plan["adapter"],
@@ -1222,11 +1934,24 @@ def execute(
         status = "output_identity_invalid" if digest_value else "output_write_error"
         digest_value = ""
     cross = bool(
-        plan.get("orchestrator_family")
+        not substituted
+        and plan.get("orchestrator_family")
         and family not in {"unknown", "generic-open", "open-weight"}
         and family != plan["orchestrator_family"]
     )
     guarantee = plan["applied"]["guarantee"]
+    fix = (
+        _model_unavailable_fix(plan)
+        if status == "model_unavailable"
+        else {
+            "auth_required": "authenticate the provider CLI",
+            "permission_blocked": "check the requested sandbox and directory grants",
+            "tool_missing": "install the provider CLI",
+            "stalled": "inspect events or try another model",
+            "usage_limited": "wait for reset or choose another model",
+            "rate_limited": "retry after the recorded cooldown",
+        }.get(status)
+    )
     record = {
         **{
             key: route.get(key, "")
@@ -1276,27 +2001,25 @@ def execute(
         "cross_family": cross,
         "certification_eligible": plan["intent"] == "assurance"
         and status == "ok"
+        and not substituted
         and cross
         and plan["mode"] == "read_only"
         and guarantee == "enforced",
         "session_id": session,
         "provenance": provenance,
         "applied": plan["applied"],
+        "context": context_usage.with_codex_rollout(meter.result(), session, environment)
+        if plan["adapter"] == "codex"
+        else meter.result(),
         "warnings": warnings,
+        "reaped": reaped,
+        **({"spared": len(descendants.spared_at_stop)} if descendants and descendants.spared_at_stop else {}),
         "question": parsed["question"],
         "retryable": status
         in {"usage_limited", "rate_limited", "model_unavailable", "stalled"},
         "reset_at": parsed["reset_at"],
         "retry_after": parsed["retry_after"],
-        "fix": {
-            "auth_required": "authenticate the provider CLI",
-            "model_unavailable": "choose another model",
-            "permission_blocked": "check the requested sandbox and directory grants",
-            "tool_missing": "install the provider CLI",
-            "stalled": "inspect events or try another model",
-            "usage_limited": "wait for reset or choose another model",
-            "rate_limited": "retry after the recorded cooldown",
-        }.get(status),
+        "fix": fix,
         "evidence": {
             "exit": exit_code,
             "signal": -exit_code if exit_code and exit_code < 0 else None,
@@ -1341,6 +2064,7 @@ def parser():
     p.add_argument("--requested-model")
     p.add_argument("--requested-effort")
     p.add_argument("--resume-session")
+    p.add_argument("--context-ceiling", type=float)
     p.add_argument("--no-preface", action="store_true")
     p.add_argument("--cleanup-dir", type=Path)
     p.add_argument("--cleanup-prompt", action="store_true")
@@ -1369,6 +2093,7 @@ def main():
             intent=args.intent,
             preface=not args.no_preface,
             resume_session=args.resume_session,
+            context_ceiling=args.context_ceiling,
             orchestrator_family=args.orchestrator_family,
             reviewer_id=args.reviewer_id,
             risk_tier=args.risk_tier,

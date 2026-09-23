@@ -16,8 +16,10 @@ import {
   listRecordedRuns,
   fabricStatus,
   OWNER_RECORD_NAME,
+  processMatches,
   processStartedAt,
   reapOrphanedRuns,
+  terminateRecordedRun,
 } from "../src/run-registry.js";
 import type { Identity } from "../src/identity.js";
 
@@ -162,6 +164,72 @@ afterEach(async () => {
 });
 
 describe("owner records", () => {
+  const localeCase = (() => {
+    try {
+      const locales = execFileSync("locale", ["-a"], { encoding: "utf8" });
+      const args = ["-o", "lstart=", "-p", String(process.pid)];
+      const canonical = execFileSync("/bin/ps", args, {
+        encoding: "utf8", env: { ...process.env, LC_ALL: "C", LANG: "C" },
+      }).trim();
+      for (const locale of ["en_AU.UTF-8", "de_DE.UTF-8"]) {
+        if (!locales.includes(locale)) continue;
+        const legacy = execFileSync("/bin/ps", args, {
+          encoding: "utf8", env: { ...process.env, LC_ALL: locale, LANG: locale },
+        }).trim();
+        if (legacy !== canonical) return { locale, legacy, canonical };
+      }
+    } catch { /* ps or a differing locale is unavailable */ }
+    return undefined;
+  })();
+  it.skipIf(!localeCase)("writes C-locale start times and accepts a legacy inherited-locale record", () => {
+    const { locale, legacy, canonical } = localeCase!;
+    const priorAll = process.env.LC_ALL;
+    const priorLang = process.env.LANG;
+    try {
+      process.env.LC_ALL = locale;
+      process.env.LANG = locale;
+      expect(processStartedAt(process.pid)).toBe(canonical);
+      expect(processMatches(process.pid, legacy)).toBe(true);
+    } finally {
+      if (priorAll === undefined) delete process.env.LC_ALL;
+      else process.env.LC_ALL = priorAll;
+      if (priorLang === undefined) delete process.env.LANG;
+      else process.env.LANG = priorLang;
+    }
+  });
+  it.skipIf(!localeCase)("keeps a live legacy-locale owner running during termination", async () => {
+    const { locale, legacy } = localeCase!;
+    const priorAll = process.env.LC_ALL;
+    const priorLang = process.env.LANG;
+    const runDir = join(workspace, ".agent-run", "legacy-owner");
+    mkdirSync(runDir, { recursive: true });
+    let ownerAlive = true;
+    const signals: NodeJS.Signals[] = [];
+    const probe = vi.spyOn(process, "kill").mockImplementation((_pid, signal) => {
+      if (signal === 0 && !ownerAlive) throw new Error("ESRCH");
+      if (signal === "SIGTERM") { signals.push(signal); ownerAlive = false; }
+      return true;
+    });
+    try {
+      process.env.LC_ALL = locale;
+      process.env.LANG = locale;
+      const run: Parameters<typeof terminateRecordedRun>[0] = {
+        schema_version: 1, kind: "dispatch", run_dir: runDir, workspace,
+        run_id: "legacy-owner", run_token: "legacy", owner_pid: process.pid, owner_pgid: process.pid + 100,
+        owner_started_at: legacy, host_pid: process.pid, host_started_at: null,
+        started_at: new Date().toISOString(), owner_stdout: "", owner_stderr: "",
+        running: true, orphaned: false, provider: null,
+      };
+      expect((await terminateRecordedRun(run, 0)).signalled).toBe(true);
+      expect(signals).toEqual(["SIGTERM"]);
+    } finally {
+      probe.mockRestore();
+      if (priorAll === undefined) delete process.env.LC_ALL;
+      else process.env.LC_ALL = priorAll;
+      if (priorLang === undefined) delete process.env.LANG;
+      else process.env.LANG = priorLang;
+    }
+  });
   it("initialises a run with the real scaffolder and owner logs", async () => {
     copyFileSync(join(repositoryRoot, "skills/orchestrate/scripts/run_dir_init.sh"),
       join(product, "skills/orchestrate/scripts/run_dir_init.sh"));

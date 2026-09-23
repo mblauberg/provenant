@@ -8,7 +8,7 @@ IDLE_READ = 600
 IDLE_WRITE = 1800
 EFFORT_FLAG = "--effort"
 SESSION_KEYS = ("session_id",)
-MODEL_SOURCE = "claude:init.model"
+MODEL_SOURCE = "claude:init.model"  # fallback; answering models are read from the stream
 SIGNATURES = (("usage_limited", r"you.ve hit your (?:usage|session|weekly) limit"),)
 
 
@@ -39,7 +39,7 @@ def argv(p):
             "Bash,Edit,Write,MultiEdit,NotebookEdit,Read,Grep,Glob",
         ]
     else:
-        command += ["--permission-mode", "plan", "--tools", "Read,Grep,Glob"]
+        command += ["--permission-mode", "default", "--tools", "Read,Grep,Glob"]
     command += ["--system-prompt", p["boundary_prompt"]]
     for directory in p["applied"]["add_dirs"]:
         command += ["--add-dir", directory]
@@ -47,4 +47,6 @@ def argv(p):
         command += ["--model", p["model"]]
     if p["effort"]:
         command += [EFFORT_FLAG, p["effort"]]
+    if p.get("context_ceiling"):
+        command += ["--autocompact", str(p["context_ceiling"])]
     return command
