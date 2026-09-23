@@ -596,9 +596,10 @@ async function dispatchConfiguredProviderUnchecked(
   ) {
     throw new InputError("wait_invalid", "Pass wait_seconds from 0 to 55.");
   }
-  const callStarted = Date.now();
+  const callStarted = Date.now(), validateStarted = performance.now();
   const root = productRoot(env);
-  const route = normaliseRoute(input, identity, catalogueSnapshot(root, env));
+  const snapshotStarted = performance.now(), route = normaliseRoute(input, identity, catalogueSnapshot(root, env));
+  const snapshotMs = performance.now() - snapshotStarted;
   const timeout = timeoutSeconds(input.timeout_seconds, input.mode);
   const taskId = input.task_id ?? `task-${randomUUID().slice(0, 8)}`;
   const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
@@ -620,7 +621,9 @@ async function dispatchConfiguredProviderUnchecked(
   );
   signal.throwIfAborted();
   if (checked.status === "rejected") return { status: "rejected", error: checked.error, fix: checked.fix };
-  const runDir = await initialiseRun(workspaceIdentity, env, root, signal);
+  const validateMs = performance.now() - validateStarted - snapshotMs;
+  const initStarted = performance.now(), runDir = await initialiseRun(workspaceIdentity, env, root, signal);
+  const initMs = performance.now() - initStarted;
   if (signal.aborted) rmSync(runDir, { recursive: true, force: true });
   signal.throwIfAborted();
   const promptPath = input.prompt === undefined ? input.prompt_file! : stagingPath(runDir, "prompt.md");
@@ -642,7 +645,7 @@ async function dispatchConfiguredProviderUnchecked(
     python,
     [owner, ...args],
     identity,
-    env,
+    { ...env, PROVENANT_FABRIC_PHASES: JSON.stringify({ validate: validateMs, snapshot: snapshotMs, run_dir_init: initMs, owner_started_at_ms: Date.now() }) },
     runDir,
     {
       command: python,

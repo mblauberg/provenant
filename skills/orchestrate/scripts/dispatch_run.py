@@ -9,9 +9,11 @@ live progress, typed terminal states, provenance, and controls.
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 import fcntl
 import hashlib
+import importlib.util
+import io
 import json
 import math
 import os
@@ -747,6 +749,81 @@ def build_command(
     return command
 
 
+def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path):
+    """Plan a simple explicit route in the owner process using the same router and supervisor."""
+    idle = os.environ.get("CF_DISPATCH_IDLE_SECONDS", "")
+    if (not args.model or args.tool not in {"claude", "codex"}
+            or (idle and (not re.fullmatch(r"[0-9]+", idle) or int(idle) == 0))
+            or args.access_mode != "read_only"
+            or args.task_class or args.alias or args.resume or args.worktree
+            or args.provider_cwd or args.sandbox or args.network is not None or args.add_dirs
+            or args.git_evidence or args.model_override_tier or args.orchestrator_family
+            or args.intent != "ordinary" or args.fallback not in (None, False, "false")
+            or os.environ.get("CF_DISPATCH_ENDPOINT")
+            or os.environ.get("CF_DISPATCH_CODEX_NETWORK", "1") not in {"0", "1"}):
+        return None
+    executable = {"cursor": "cursor-agent", "kiro": "kiro-cli"}.get(args.tool, args.tool)
+    if not shutil.which(executable):
+        return None
+    environment = routing_environment()
+    product = Path(environment.get("AGENT_FABRIC_PRODUCT_ROOT") or SKILLS_ROOT.parent)
+    path = product / "scripts/model_route.py"
+    if not path.is_file():
+        return None
+    try:
+        prompt_bytes = prompt_path.read_bytes()
+        if not prompt_bytes or b"\0" in prompt_bytes:
+            return None
+        context_spec = importlib.util.spec_from_file_location("fabric_fast_worktree", product / "scripts/worktree.py")
+        context_module = importlib.util.module_from_spec(context_spec)
+        context_spec.loader.exec_module(context_module)
+        try:
+            context_module.validate_context(argparse.Namespace(repo=workspace, allow_non_git=True))
+        except context_module.PolicyError:
+            return None
+        spec = importlib.util.spec_from_file_location("fabric_fast_model_route", path)
+        module = importlib.util.module_from_spec(spec)
+        overrides = {"FABRIC_ALIAS_IMPLIED": "1", "AGENT_FABRIC_PRODUCT_ROOT": str(product),
+                     "AGENT_FABRIC_INSTANCE_ROOT": environment.get("AGENT_FABRIC_INSTANCE_ROOT")
+                     or str(Path.home() / ".agents")}
+        previous = {key: os.environ.get(key) for key in overrides}
+        os.environ.update(overrides)
+        try:
+            with redirect_stdout(io.StringIO()) as output:
+                spec.loader.exec_module(module)
+                argv = ["resolve", "--adapter", args.tool, "--role", args.role,
+                        "--lead-family", "", "--alias", "flagship", "--model", args.model]
+                if args.effort:
+                    argv += ["--effort", args.effort]
+                if args.fallback is not None:
+                    argv += ["--fallback", "false"]
+                code = module.main(argv)
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        if code != 0:
+            return None
+        route = json.loads(output.getvalue())
+        if route.get("status") != "ok":
+            return None
+        plan = provider_exec.build_plan(
+            args.tool, route, prompt_bytes.decode("utf-8"),
+            cwd=workspace, mode=args.access_mode, timeout_seconds=provider_timeout_seconds(args.timeout_seconds),
+            intent=args.intent, preface=args.preface, requested_model=args.model,
+            requested_effort=args.effort or "", run_id=os.environ.get("PROVENANT_RUN_ID", ""),
+            chair=os.environ.get("PROVENANT_CHAIR", ""),
+            reviewer_id=args.reviewer_id or "", risk_tier=args.risk_tier or "",
+            model_override_tier=args.model_override_tier or "", orchestrator_family="",
+        )
+        plan["output_path"] = str(result_path.absolute())
+        return plan
+    except (OSError, ValueError, TypeError, AttributeError, KeyError):
+        return None
+
+
 def _read_prompt_once(workspace: Path, prompt_source: Path) -> bytes:
     """Read the validated prompt inode once for both retention and provider use."""
     try:
@@ -983,10 +1060,6 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
     catalog = instance / "config/model-routing.json"
     errors = []
     routes = []
-    try:
-        routing_catalog = exec_routing.snapshot() or json.loads(catalog.read_text())
-    except (OSError, ValueError):
-        routing_catalog = {}
     seen = set()
     writers = set()
     probes: dict[str, Path | None] = {}
@@ -1065,6 +1138,10 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                         route = resolve_route()
                 if route.get("status") != "ok":
                     code = route.get("status", "routing_record_invalid")
+                    try:
+                        routing_catalog = exec_routing.snapshot() or json.loads(catalog.read_text())
+                    except (OSError, ValueError):
+                        routing_catalog = {}
                     fixes = {
                         "model_required_for_broker": "Pass model=<provider/model id> for " + adapter + ".",
                         "effort_unsupported": "Pass an effort supported by the selected model, or omit effort.",
@@ -1120,6 +1197,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         "evidence":{"exit":None,"signal":None,"signature":None,"excerpt":""},"question":None,
         "applied":plan.get("applied",{"sandbox":None,"network":None,"add_dirs":[],"guarantee":"prompt_only"}),
         "warnings":list(plan.get("warnings",[])),"provenance":provenance,
+        "timing":{"phases":getattr(args,"_phase_timings",{}).copy()},
         "paths":{"result":relative_path(run_dir,attempt_dir/"result.md"),"stderr":relative_path(run_dir,attempt_dir/"stderr.log"),
                  "events":relative_path(run_dir,attempt_dir/"events.jsonl"),"receipt":f"tasks/{args.task_id}/attempt-{number:03d}/attempt.json"},"digest":""}
 
@@ -1229,6 +1307,19 @@ def prepare_resume(args):
 def _dispatch(args: argparse.Namespace, custody=None) -> int:
     args._last_plan={}
     args._last_row=None
+    owner_started_ms = None
+    try:
+        incoming = json.loads(os.environ.get("PROVENANT_FABRIC_PHASES", "{}"))
+        owner_started_ms = incoming.get("owner_started_at_ms")
+        measured = {key: round(float(value), 3) for key, value in incoming.items()
+                    if key in {"validate", "run_dir_init", "snapshot"}
+                    and type(value) in (int, float) and math.isfinite(value) and value >= 0}
+    except (ValueError, TypeError, AttributeError):
+        measured = {}
+    args._phase_timings = dict.fromkeys(
+        ("validate", "run_dir_init", "owner_setup", "route_plan", "snapshot", "spawn", "provider", "finalize")
+    )
+    args._phase_timings.update(measured)
     run_dir = args.run_dir.resolve()
     workspace = Path.cwd().resolve()
     if not contains_run(run_dir, workspace):
@@ -1405,10 +1496,18 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         old_handlers={sig:signal.getsignal(sig) for sig in (signal.SIGTERM,signal.SIGHUP)}
         for sig in old_handlers: signal.signal(sig,cancel_owner)
         try:
+            plan_started = time.monotonic()
+            if (type(owner_started_ms) in (int, float) and math.isfinite(owner_started_ms)
+                    and not getattr(args, "fallback_from", None)):
+                args._phase_timings["owner_setup"] = round(max(0, time.time() * 1000 - owner_started_ms), 3)
             plan_environment=routing_environment()
             if git_evidence_requested: plan_environment.pop("CF_DISPATCH_AGY_ADD_DIR",None)
-            planning = subprocess.run([*command,"--plan-only"],cwd=workspace,env=plan_environment,capture_output=True,text=True,timeout=30)
-            try: plan = json.loads(planning.stdout)
+            fast_plan = fast_fabric_plan(args, prompt_path, result_path, workspace)
+            planning = None
+            if fast_plan is None:
+                planning = subprocess.run([*command,"--plan-only"],cwd=workspace,env=plan_environment,capture_output=True,text=True,timeout=30)
+            args._phase_timings["route_plan"] = round((time.monotonic() - plan_started) * 1000, 3)
+            try: plan = fast_plan if fast_plan is not None else json.loads(planning.stdout)
             except ValueError: plan = {"status":"rejected","fix":"route planner returned invalid JSON"}
             if plan.get("schema") == "fabric.exec-plan.v1":
                 plan.update(timeout_seconds=args.timeout_seconds,run_id=run_identity(run_dir,run_receipt),chair=os.environ.get("PROVENANT_CHAIR") or os.environ.get("AGENT_FABRIC_SEAT", ""),fallback_from=getattr(args,"fallback_from",None))
@@ -1437,9 +1536,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 active = contract_row(args,run_dir,attempt_number,attempt_dir,plan,started_at)
                 active["requested_route"] = requested_route
                 publish_contract(run_dir,active)
+                spawn_started = time.monotonic()
+                provider_started_at = [None]
                 def provider_started(child):
                     nonlocal process
                     process=child
+                    provider_started_at[0] = time.monotonic()
+                    args._phase_timings["spawn"] = round((provider_started_at[0] - spawn_started) * 1000, 3)
                     active["pgid"]=child.pid
                     _record_provider_process(run_dir,child)
                     write_owned(run_dir,attempt_dir/"pgid",str(child.pid)+"\n")
@@ -1454,6 +1557,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     return owner_cancel[0] or cancellation_marker_present(run_dir,attempt_dir) or (batch_dir is not None and cancellation_marker_present(run_dir,batch_dir))
                 adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
                     on_start=provider_started,on_progress=progress,cancelled=cancellation)
+                args._phase_timings["provider"] = round((time.monotonic() - (provider_started_at[0] or spawn_started)) * 1000, 3)
                 if (args.resume and args.tool=="claude" and plan.get("resume_session")
                     and adapter_record.get("status")=="failed"
                     and re.search(r"no conversation found",adapter_record.get("evidence",{}).get("excerpt") or "",re.I)):
@@ -1480,7 +1584,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 args._last_plan=plan
             else:
                 adapter_record=plan
-                write_owned(run_dir,stderr_path,planning.stderr)
+                write_owned(run_dir,stderr_path,planning.stderr if planning is not None else "")
             write_owned(run_dir,adapter_path,json.dumps(adapter_record)+"\n")
             exit_code=adapter_record.get("exit")
             if type(exit_code) is not int: exit_code=1
@@ -1522,7 +1626,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     # Owners retain chair custody; provider work must discover its own
                     # seat, state directory and checkout rather than inherit the chair's.
                     for name in ("AGENT_FABRIC_STATE_DIRECTORY", "AGENT_FABRIC_SEAT",
-                                 "AGENT_FABRIC_CLIENT_LABEL", "AGENT_FABRIC_LABEL", "AGENT_FABRIC_PRODUCT_ROOT"):
+                                 "AGENT_FABRIC_CLIENT_LABEL", "AGENT_FABRIC_LABEL", "AGENT_FABRIC_PRODUCT_ROOT",
+                                 "PROVENANT_FABRIC_PHASES"):
                         provider_environment.pop(name, None)
                     for name in list(provider_environment):
                         if name.startswith(("PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")):
@@ -1623,6 +1728,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             if provider_temporary is not None:
                 provider_temporary.cleanup()
 
+    finalize_started = time.monotonic()
     finished_at = now()
     duration_seconds = round(time.monotonic() - started, 6)
     adapter: dict[str, Any] = {}
@@ -1811,6 +1917,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     for action in (lambda: write_cooldown(row),lambda: append_index(row,run_dir,root=run_workspace(run_dir, Path.cwd())/".agent-run")):
         try: action()
         except (OSError,ValueError) as exc: row["warnings"].append("terminal index unavailable: "+str(exc))
+    row["timing"]["phases"]["finalize"] = round((time.monotonic() - finalize_started) * 1000, 3)
     publish_contract(run_dir,row)
     args._last_row=row
     output_record = {**record, "attempt_digest": attempt_digest, "fabric":row, "digest":row["digest"]}

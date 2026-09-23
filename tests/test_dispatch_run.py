@@ -1984,6 +1984,7 @@ else:
     names = ['AGENT_FABRIC_STATE_DIRECTORY', 'AGENT_FABRIC_SEAT', 'AGENT_FABRIC_CLIENT_LABEL',
              'AGENT_FABRIC_LABEL', 'AGENT_FABRIC_PRODUCT_ROOT']
     names += [k for k in os.environ if k.startswith(('PROVENANT_RUN_', 'PROVENANT_PREFLIGHT_'))]
+    names += ['PROVENANT_FABRIC_PHASES']
     Path(os.environ['PROVIDER_ENV_CAPTURE']).write_text(json.dumps({k: os.environ[k] for k in names if k in os.environ}))
     Path(os.environ['PROVIDER_INSTANCE_CAPTURE']).write_text(os.environ.get('AGENT_FABRIC_INSTANCE_ROOT', ''))
     Path(os.environ['PROVIDER_TMP_CAPTURE']).write_text(os.environ['TMPDIR'])
@@ -1999,6 +2000,7 @@ else:
            'PROVIDER_TMP_CAPTURE': str(tmp_path / 'provider-tmp.txt'),
            'PROVENANT_RUN_TOKEN': 'mcp-fixture-token', 'PROVENANT_RUN_DIR': str(run_dir),
            'PROVENANT_PREFLIGHT_ROUTES': '{}', 'PROVENANT_RUN_PARENT_TOKEN': 'parent-token',
+           'PROVENANT_FABRIC_PHASES': '{"validate":1}',
            'PROVIDER_INSTANCE_CAPTURE': str(tmp_path / 'provider-instance.txt')}
     if instance != 'configured':
         env['HOME'] = str(tmp_path / 'home')
@@ -2139,6 +2141,96 @@ def test_real_dispatcher_restores_signal_handlers(tmp_path, monkeypatch):
     handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
     assert mod.dispatch(mod.parser().parse_args(command[2:])) == 0
     assert {sig: signal.getsignal(sig) for sig in handlers} == handlers
+
+
+def test_real_dispatcher_records_attempt_phase_timings(tmp_path, monkeypatch):
+    run, prompt, command = real_owner_fixture(
+        tmp_path, monkeypatch,
+        'import sys,json\nsys.stdin.read()\nprint(json.dumps({"type":"result","result":"DONE"}))\n',
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('PROVENANT_FABRIC_PHASES', json.dumps({'owner_started_at_ms': time.time() * 1000}))
+    assert subprocess.run(command, cwd=tmp_path, capture_output=True).returncode == 0
+    attempt = json.loads(next(run.glob('tasks/*/attempt-*/attempt.json')).read_text())
+    phases = attempt['timing']['phases']
+    assert set(phases) == {'validate', 'run_dir_init', 'owner_setup', 'route_plan', 'snapshot',
+                           'spawn', 'provider', 'finalize'}
+    assert phases['validate'] is None
+    assert all(type(phases[name]) in (int, float) and phases[name] >= 0
+               for name in ('owner_setup', 'route_plan', 'spawn', 'provider', 'finalize'))
+    assert phases['route_plan'] > 0
+
+
+@pytest.mark.parametrize('adapter, model, effort', [
+    ('claude', 'opus', None), ('codex', 'gpt-6-luna', 'low'),
+])
+def test_fabric_fast_plan_matches_shell_for_explicit_model(tmp_path, monkeypatch, adapter, model, effort):
+    run, prompt, command = real_owner_fixture(
+        tmp_path, monkeypatch,
+        'import sys,json\nsys.stdin.read()\nprint(json.dumps({"type":"result","result":"DONE"}))\n',
+    )
+    monkeypatch.chdir(tmp_path)
+    if adapter == 'codex':
+        write_executable(tmp_path / 'provider-bin/codex', '#!/bin/sh\nexit 0\n')
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.tool = adapter
+    args.model = model
+    args.effort = effort
+    args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
+    result = run / 'result.md'
+    shell = subprocess.run(
+        [*mod.build_command(args, prompt, result), '--plan-only'],
+        cwd=tmp_path, env=mod.routing_environment(), capture_output=True, text=True, check=True,
+    )
+    planned = mod.fast_fabric_plan(args, prompt, result, tmp_path)
+    assert planned is not None
+    expected = json.loads(shell.stdout)
+    for value in (planned, expected):
+        session = value.pop('session_id', None)
+        value['argv'] = [arg.replace(session, '<session>') if session else arg
+                         for arg in value['argv']]
+    assert planned == expected
+
+
+@pytest.mark.parametrize('adapter, idle', [('agy', None), ('claude', '0.5')])
+def test_fabric_fast_plan_delegates_routes_needing_shell_checks(tmp_path, monkeypatch, adapter, idle):
+    run, prompt, command = real_owner_fixture(
+        tmp_path, monkeypatch, 'import sys\nsys.stdin.read()\n',
+    )
+    monkeypatch.chdir(tmp_path)
+    if idle is not None:
+        monkeypatch.setenv('CF_DISPATCH_IDLE_SECONDS', idle)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.tool = adapter
+    args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
+    assert mod.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
+
+
+def test_fabric_fast_plan_rejects_invalid_git_context(tmp_path, monkeypatch):
+    run, prompt, command = real_owner_fixture(
+        tmp_path, monkeypatch, 'import sys\nsys.stdin.read()\n',
+    )
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / '.git').symlink_to(tmp_path / 'missing-git')
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
+    assert mod.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
+
+
+@pytest.mark.parametrize('content', ['', 'hello\x00world'])
+def test_fabric_fast_plan_preserves_shell_prompt_rejections(tmp_path, monkeypatch, content):
+    run, prompt, command = real_owner_fixture(
+        tmp_path, monkeypatch, 'import sys\nsys.stdin.read()\n',
+    )
+    monkeypatch.chdir(tmp_path)
+    prompt.write_text(content)
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
+    assert mod.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
 
 
 @pytest.mark.parametrize('previous_status', ['interrupted', 'timed_out', 'cancelled', 'stalled'])
