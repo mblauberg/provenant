@@ -1021,7 +1021,8 @@ def resolve_effort(
 
     # A registered model whose id carries the effort (cursor grok-4.7-high) is not
     # an adapter-wide model-id route: its catalogue lists the efforts it takes.
-    if registered and registered.get("effort_transport") == "model-suffix" and requested_effort:
+    if (args.effort_transport == "model-id" and registered
+            and registered.get("effort_transport") == "model-suffix" and requested_effort):
         offered = [value.lower() for value in registered.get("efforts", []) if value.lower() in EFFORT_ORDER]
         if requested_effort in offered:
             return requested_effort, "", "", "registry-model-suffix"
@@ -1601,7 +1602,8 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if not effort_status and getattr(args, "raw_effort", None):
         effort_substitution = f"{args.raw_effort} unknown; ran at {effort or 'default'}"
     # The effort reaches a suffix model only through its id, so the id must carry it.
-    suffix = ((registered_model or {}).get("suffix", {}) if (registered_model or {}).get("effort_transport") == "model-suffix" else {}).get(effort or "", "")
+    suffix_model = args.effort_transport == "model-id" and (registered_model or {}).get("effort_transport") == "model-suffix"
+    suffix = (registered_model.get("suffix", {}) if suffix_model else {}).get(effort or "", "")
     if not effort_status and suffix and not model.endswith(suffix):
         model += suffix
     # A Claude snapshot cannot evidence the effective effort, but its existence
