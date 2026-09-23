@@ -133,3 +133,41 @@ def test_primary_checkout_keeps_preflight_failure_without_installing(tmp_path):
     assert "node-workspace-preflight: missing checkout dependencies" in result.stderr
     assert "node-workspace-provision:" not in result.stdout + result.stderr
     assert not marker.exists()
+
+
+def test_borrowed_link_to_primary_dependencies_is_replaced_not_written_through(tmp_path):
+    primary, worktree = linked_project(tmp_path)
+    (worktree / "node_modules").symlink_to(primary / "node_modules")
+    # The preflight rejects a borrowed tree even when the package resolves through it.
+    before = sorted(path.name for path in (primary / "node_modules").iterdir())
+
+    result = run_provision(worktree, tmp_path, "raise SystemExit(99)\n")
+
+    assert result.returncode == 0, result.stderr
+    assert not (worktree / "node_modules").is_symlink()
+    assert (worktree / "node_modules" / "fake-dep" / "package.json").is_file()
+    assert sorted(path.name for path in (primary / "node_modules").iterdir()) == before
+
+
+def test_stale_worktree_dependencies_are_replaced_not_nested(tmp_path):
+    primary, worktree = linked_project(tmp_path)
+    stale = worktree / "node_modules" / "old-dep"
+    stale.mkdir(parents=True)
+    (stale / "package.json").write_text('{"name":"old-dep"}\n')
+
+    result = run_provision(worktree, tmp_path, "raise SystemExit(99)\n")
+
+    assert result.returncode == 0, result.stderr
+    assert (worktree / "node_modules" / "fake-dep" / "package.json").is_file()
+    assert not (worktree / "node_modules" / "node_modules").exists()
+    assert not (worktree / "node_modules" / "old-dep").exists()
+    assert not list(worktree.glob("node_modules.stale-*"))
+
+
+def test_outside_a_git_checkout_provisioning_steps_aside(tmp_path):
+    exported = tmp_path / "exported"
+    exported.mkdir()
+    result = run_provision(exported, tmp_path, "raise SystemExit(99)\n")
+
+    assert result.returncode == 0
+    assert "skipped" in result.stderr

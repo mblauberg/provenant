@@ -373,6 +373,10 @@ def node_modules_preflight_passes(root: Path) -> bool:
 
 
 def cow_clone(source: Path, target: Path) -> None:
+    # cp into an existing directory or link nests the copy inside it, or writes
+    # through the link into another checkout.
+    if target.exists() or target.is_symlink():
+        raise OSError(f"clone target already exists: {target}")
     if sys.platform == "darwin":
         command = ["cp", "-cR", str(source), str(target)]
     elif sys.platform.startswith("linux"):

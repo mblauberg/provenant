@@ -31,6 +31,17 @@ def primary_checkout(root: Path) -> Path:
     return Path(first.removeprefix("worktree ")).resolve()
 
 
+def dependency_targets(root: Path) -> list[Path]:
+    return [root / "node_modules", *sorted((root / "runtime").glob("*/node_modules"))]
+
+
+def drop_borrowed_links(worktree: Path) -> None:
+    """A linked node_modules belongs to another checkout; never write through it."""
+    for target in dependency_targets(worktree):
+        if target.is_symlink():
+            target.unlink()
+
+
 def clone_dependencies(primary: Path, worktree: Path) -> bool:
     primary_lock = primary / "package-lock.json"
     worktree_lock = worktree / "package-lock.json"
@@ -45,12 +56,16 @@ def clone_dependencies(primary: Path, worktree: Path) -> bool:
         return False
 
     cloned: list[Path] = []
-    sources = [primary / "node_modules", *sorted((primary / "runtime").glob("*/node_modules"))]
+    stale: list[tuple[Path, Path]] = []
     try:
-        for source in sources:
+        for source in dependency_targets(primary):
             if source.is_symlink() or not source.is_dir():
                 continue
             target = worktree / source.relative_to(primary)
+            if target.exists():
+                aside = target.with_name(f"{target.name}.stale-{os.getpid()}")
+                target.rename(aside)
+                stale.append((target, aside))
             target.parent.mkdir(parents=True, exist_ok=True)
             cloned.append(target)
             cow_clone(source, target)
@@ -60,7 +75,11 @@ def clone_dependencies(primary: Path, worktree: Path) -> bool:
                 path.unlink()
             elif path.is_dir():
                 shutil.rmtree(path)
+        for target, aside in stale:
+            aside.rename(target)
         return False
+    for _, aside in stale:
+        shutil.rmtree(aside, ignore_errors=True)
     return True
 
 
@@ -69,11 +88,14 @@ def main() -> int:
         worktree = checkout_root()
         primary = primary_checkout(worktree)
     except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
-        print(f"node-workspace-provision: cannot identify checkout: {exc}", file=sys.stderr)
-        return 2
+        # Not a git checkout (an exported tree): nothing to provision from; the
+        # preflight that follows still reports missing dependencies.
+        print(f"node-workspace-provision: skipped, cannot identify checkout: {exc}", file=sys.stderr)
+        return 0
 
     if worktree == primary or node_modules_preflight_passes(worktree):
         return 0
+    drop_borrowed_links(worktree)
     if clone_dependencies(primary, worktree):
         print("node-workspace-provision: cloned node_modules from primary checkout")
         return 0
