@@ -30,9 +30,10 @@ class CleanError(ValueError):
     """The cleanup request cannot be proved safe."""
 
 
-def _command(*argv: str, cwd: Path | None = None) -> subprocess.CompletedProcess[str]:
+def _command(*argv: str, cwd: Path | None = None,
+             env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     return subprocess.run(argv, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                          stdin=subprocess.DEVNULL, timeout=10, check=False)
+                          stdin=subprocess.DEVNULL, timeout=10, check=False, env=env)
 
 
 def primary_root(path: Path) -> Path:
@@ -107,7 +108,10 @@ def _pid_alive(pid: Any, started_at: Any) -> bool:
     if not isinstance(started_at, str) or not started_at:
         return True
     try:
-        observed = _command("/bin/ps", "-o", "lstart=", "-p", str(pid)).stdout.strip()
+        args = ("/bin/ps", "-o", "lstart=", "-p", str(pid))
+        observed = _command(*args, env={**os.environ, "LC_ALL": "C", "LANG": "C"}).stdout.strip()
+        if observed and observed != started_at:
+            observed = _command(*args).stdout.strip()
     except (OSError, subprocess.TimeoutExpired):
         return True
     return not observed or observed == started_at

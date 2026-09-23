@@ -16,6 +16,7 @@ import {
   listRecordedRuns,
   fabricStatus,
   OWNER_RECORD_NAME,
+  processMatches,
   processStartedAt,
   reapOrphanedRuns,
 } from "../src/run-registry.js";
@@ -162,6 +163,39 @@ afterEach(async () => {
 });
 
 describe("owner records", () => {
+  const localeCase = (() => {
+    try {
+      const locales = execFileSync("locale", ["-a"], { encoding: "utf8" });
+      const args = ["-o", "lstart=", "-p", String(process.pid)];
+      const canonical = execFileSync("/bin/ps", args, {
+        encoding: "utf8", env: { ...process.env, LC_ALL: "C", LANG: "C" },
+      }).trim();
+      for (const locale of ["en_AU.UTF-8", "de_DE.UTF-8"]) {
+        if (!locales.includes(locale)) continue;
+        const legacy = execFileSync("/bin/ps", args, {
+          encoding: "utf8", env: { ...process.env, LC_ALL: locale, LANG: locale },
+        }).trim();
+        if (legacy !== canonical) return { locale, legacy, canonical };
+      }
+    } catch { /* ps or a differing locale is unavailable */ }
+    return undefined;
+  })();
+  it.skipIf(!localeCase)("writes C-locale start times and accepts a legacy inherited-locale record", () => {
+    const { locale, legacy, canonical } = localeCase!;
+    const priorAll = process.env.LC_ALL;
+    const priorLang = process.env.LANG;
+    try {
+      process.env.LC_ALL = locale;
+      process.env.LANG = locale;
+      expect(processStartedAt(process.pid)).toBe(canonical);
+      expect(processMatches(process.pid, legacy)).toBe(true);
+    } finally {
+      if (priorAll === undefined) delete process.env.LC_ALL;
+      else process.env.LC_ALL = priorAll;
+      if (priorLang === undefined) delete process.env.LANG;
+      else process.env.LANG = priorLang;
+    }
+  });
   it("initialises a run with the real scaffolder and owner logs", async () => {
     copyFileSync(join(repositoryRoot, "skills/orchestrate/scripts/run_dir_init.sh"),
       join(product, "skills/orchestrate/scripts/run_dir_init.sh"));

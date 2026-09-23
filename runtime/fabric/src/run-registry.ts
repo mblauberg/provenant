@@ -93,19 +93,24 @@ export interface TerminationOutcome {
  * a stable start timestamp for the same pid, so a record can be matched against
  * the process it was written for. Both macOS and procps support this field.
  */
-export function processStartedAt(pid: number): string | null {
+function readProcessStartedAt(pid: number, canonical: boolean): string | null {
   if (!Number.isInteger(pid) || pid <= 1) return null;
   try {
     const output = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
       encoding: "utf8",
       timeout: 5_000,
       stdio: ["ignore", "pipe", "ignore"],
+      env: canonical ? { ...process.env, LC_ALL: "C", LANG: "C" } : process.env,
     });
     const value = output.trim();
     return value.length === 0 ? null : value;
   } catch {
     return null;
   }
+}
+
+export function processStartedAt(pid: number): string | null {
+  return readProcessStartedAt(pid, true);
 }
 
 /**
@@ -121,7 +126,8 @@ export function processMatches(pid: number, startedAt: string | null): boolean {
   } catch {
     return false;
   }
-  return processStartedAt(pid) === startedAt;
+  const canonical = processStartedAt(pid);
+  return canonical === startedAt || (canonical !== null && readProcessStartedAt(pid, false) === startedAt);
 }
 
 function readJson(path: string): Record<string, unknown> | undefined {

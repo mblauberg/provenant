@@ -707,6 +707,37 @@ def test_nested_owner_record_must_match_live_identity(tmp_path, monkeypatch, fie
     assert not module._is_nested_fabric_owner(row)
 
 
+def test_nested_owner_accepts_legacy_inherited_locale_start(tmp_path, monkeypatch):
+    available = subprocess.run(["locale", "-a"], capture_output=True, text=True).stdout
+    if "en_AU.UTF-8" not in available:
+        pytest.skip("en_AU.UTF-8 unavailable")
+    module = supervisor()
+    row = module._ProcessRow(502, 501, 502, str(int(time.time())), "owner")
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, row, "inner-token")
+    path = run_dir / "dispatch-owner.json"
+    record = json.loads(path.read_text())
+    weekday, month, day, clock, year = record["owner_started_at"].split()
+    legacy = f"{weekday} {day} {month} {clock} {year}"
+    record["owner_started_at"] = legacy
+    path.write_text(json.dumps(record))
+    monkeypatch.setenv("LC_ALL", "en_AU.UTF-8")
+    monkeypatch.setenv("LANG", "en_AU.UTF-8")
+    monkeypatch.setattr(module, "_process_environment", lambda _pid: [
+        b"PROVENANT_RUN_TOKEN=inner-token",
+        ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+    ])
+    calls = []
+
+    def locale_ps(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, stdout=legacy)
+
+    monkeypatch.setattr(module.subprocess, "run", locale_ps)
+    assert module._is_nested_fabric_owner(row)
+    assert calls and calls[0][1].get("env", {}).get("LC_ALL") != "C"
+
+
 @pytest.mark.parametrize("stop", ["normal", "cancelled"])
 def test_nested_fabric_owner_and_its_child_are_spared(tmp_path, stop):
     inner = """import pathlib,subprocess,time

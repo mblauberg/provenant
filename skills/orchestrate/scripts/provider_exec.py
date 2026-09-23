@@ -857,6 +857,17 @@ def _recorded_start_time(row):
     return time.strftime("%a %b %e %H:%M:%S %Y", time.localtime(epoch))
 
 
+def _inherited_ps_start_time(pid):
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def _is_nested_fabric_owner(row):
     try:
         values = {}
@@ -882,7 +893,10 @@ def _is_nested_fabric_owner(row):
             and record.get("run_token") == os.fsdecode(token)
             and record.get("owner_pid") == row.pid
             and record.get("owner_pgid") == row.pgid
-            and record.get("owner_started_at") == _recorded_start_time(row)
+            and (
+                record.get("owner_started_at") == _recorded_start_time(row)
+                or record.get("owner_started_at") == _inherited_ps_start_time(row.pid)
+            )
         )
     except Exception:
         return False
