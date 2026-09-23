@@ -847,7 +847,9 @@ function v1Rows(runDir: string): Record<string, any>[] {
         digest: `${terminal ? canonicalSuccessStatus(terminalTask?.status ?? "interrupted") : "queued"} ${id}`,
       });
     }
-  return rows;
+  const order = Array.isArray(metadata?.task_ids) ? metadata.task_ids.map(String) : []; // manifest order, else task-2 before task-10
+  const rank = (row: Record<string, any>) => { const at = order.indexOf(String(row.task_id)); return at < 0 ? order.length : at; };
+  return rows.sort((a, b) => rank(a) - rank(b) || String(a.task_id).localeCompare(String(b.task_id), "en", { numeric: true }));
 }
 
 /** v1 is authoritative; the old reader remains isolated for wave-1 receipts. */

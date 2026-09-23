@@ -1038,6 +1038,18 @@ it.each([[[]], [['--interval','2']]])('watch prints a terminal state once and ex
  expect(fabricCli(['watch','mcp-watch',...options])).toMatch(/^failed mcp-watch/mu);
 });
 
+it('lists a batch in manifest order whatever the directory or clock order', async () => {
+ const dir=join(workspace,'.agent-run/runs/20260923-1012-batch-fixture-d81f3c');
+ const row=JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
+ for (const task of ['task-10','task-1']) {
+  const path=join(dir,`tasks/${task}/attempt-001`);mkdirSync(path,{recursive:true});
+  writeFileSync(join(path,'attempt.json'),JSON.stringify({...row,task_id:task}));
+ }
+ writeFileSync(join(dir,'dispatch-status.json'),JSON.stringify({id:row.run_id,batch_id:'batch-002',status:'running',task_ids:['task-1','task-2','task-10'],started_at:new Date().toISOString()}));
+ const status=await fabricStatus(workspace,row.run_id);
+ expect(status.runs.map((entry:any)=>entry.task_id)).toEqual(['task-1','task-2','task-10']);
+});
+
 it('keeps unpublished batch tasks visible and honours receipt interruption', async () => {
  const dir=join(workspace,'.agent-run/runs/20260923-1012-batch-fixture-a81f3c');
  const path=join(dir,'tasks/task-1/attempt-001');mkdirSync(path,{recursive:true});
