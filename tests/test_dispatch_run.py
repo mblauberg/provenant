@@ -2602,3 +2602,14 @@ def test_planner_stopped_by_signal_is_interrupted_not_rejected():
     assert mod.planner_result(stopped)["status"] == "interrupted"
     broken = subprocess.CompletedProcess([], 0, stdout="not json", stderr="")
     assert mod.planner_result(broken) == {"status": "rejected", "fix": "route planner returned invalid JSON"}
+
+
+def test_planner_capability_statuses_become_typed_failures_with_fixes():
+    mod = load_dispatch_module()
+    unknown = subprocess.CompletedProcess([], 0, stdout=json.dumps({"status": "capability_model_unavailable"}), stderr="")
+    row = mod.planner_result(unknown, "codex")
+    assert row["status"] == "model_unavailable"
+    assert row["fix"].startswith("choose a registered model:") and "gpt-6-luna" in row["fix"]
+    assert row["evidence"]["signature"] == "capability_model_unavailable"
+    discovery = subprocess.CompletedProcess([], 0, stdout=json.dumps({"status": "capability_discovery_failed"}), stderr="")
+    assert mod.planner_result(discovery, "codex")["status"] == "failed"
