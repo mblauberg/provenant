@@ -22,7 +22,11 @@ inventing.
 
 ## Lifecycle
 
-1. From the authorised workspace root, create `.agent-run/runs/<YYYYMMDD-HHMM>-delivery-<slug>-<rand6>/RUN.json`:
+1. From the authorised workspace root, create `.agent-run/runs/<YYYYMMDD-HHMM>-delivery-<slug>-<rand6>/RUN.json`.
+   For a Git linked worktree, resolve the primary checkout with
+   `dirname "$(git rev-parse --path-format=absolute --git-common-dir)"`
+   and run the producer there. Keep intent, authority and evidence paths under
+   that primary checkout; source edits may remain in the linked worktree:
    ```sh
    "$(provenant root)/skills/deliver/scripts/delivery_receipt.py" init \
      --run-dir ".agent-run/runs/<YYYYMMDD-HHMM>-delivery-<slug>-<rand6>" --run-id "<id>" --profile "<profile>" \

@@ -193,12 +193,21 @@ def test_installed_template_routes_clean_to_product_owner(tmp_path):
     assert json.loads(result.stdout)["root"] == str(tmp_path.resolve())
 
 
+def test_checkout_entry_point_routes_clean(tmp_path):
+    result = subprocess.run([
+        "python3", str(SCRIPT.with_name("provenant")), "clean", "--repo", str(tmp_path), "--json",
+    ], text=True, capture_output=True, check=False)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["root"] == str(tmp_path.resolve())
+
+
 def test_abandoned_active_run_closes_before_retention_deletion(tmp_path):
     root = repo(tmp_path)
     run = root / ".agent-run" / "runs" / "20260801-1200-dispatch-lost-a1b2c3"
     run.mkdir(parents=True)
     receipt = run / "RUN_RECEIPT.json"
     receipt.write_text('{"status":"active","closed_at":null}\n')
+    (run / "dispatch-owner.json").write_text('{"owner_pid":999999}\n')
     old(run, 3)
     module = cleaner()
     proposal = module.plan(root, pr_bodies=[])
@@ -208,6 +217,58 @@ def test_abandoned_active_run_closes_before_retention_deletion(tmp_path):
     result = json.loads(receipt.read_text())
     assert result["status"] == "interrupted"
     assert result["terminal_reason"] == "abandoned: owner gone"
+
+
+def test_active_orchestration_is_never_abandoned(tmp_path):
+    root = repo(tmp_path)
+    run = root / ".agent-run" / "runs" / "20260801-1200-orch-long-a1b2c3"
+    run.mkdir(parents=True)
+    (run / "RUN_RECEIPT.json").write_text('{"status":"active"}\n')
+    old(run, 3)
+    row = next(row for row in cleaner().plan(root, pr_bodies=[])["rows"] if row["path"].endswith(run.name))
+    assert row["verdict"] == "triage:active-no-owner"
+
+
+def test_recent_progress_prevents_abandoning_dispatch(tmp_path):
+    root = repo(tmp_path)
+    run = root / ".agent-run" / "runs" / "20260801-1200-dispatch-long-a1b2c3"
+    owner = run / "_owner"
+    owner.mkdir(parents=True)
+    (run / "RUN_RECEIPT.json").write_text('{"status":"active"}\n')
+    (owner / "dispatch-owner.json").write_text('{"owner_pid":999999}\n')
+    old(run, 3)
+    (owner / "progress.log").write_text("recent\n")
+    row = next(row for row in cleaner().plan(root, pr_bodies=[])["rows"] if row["path"].endswith(run.name))
+    assert row["verdict"] == "keep:active"
+
+
+def test_typed_failures_expire_and_input_required_stays_resumable(tmp_path):
+    root = repo(tmp_path)
+    statuses = ("usage_limited", "rate_limited", "auth_required", "model_unavailable", "permission_blocked")
+    for index, status in enumerate(statuses):
+        run = root / ".agent-run" / "runs" / f"20260801-1200-dispatch-{status.replace('_', '-')}-{index:06x}"
+        run.mkdir(parents=True)
+        (run / "RUN_RECEIPT.json").write_text(json.dumps({"status": status}))
+        old(run)
+    resumable = root / ".agent-run" / "runs" / "20260801-1200-dispatch-question-a1b2c3"
+    resumable.mkdir(parents=True)
+    (resumable / "RUN_RECEIPT.json").write_text('{"status":"input_required"}\n')
+    old(resumable)
+    rows = {row["path"]: row for row in cleaner().plan(root, pr_bodies=[])["rows"]}
+    for status in statuses:
+        assert any(row["verdict"] == "delete" for row in rows.values() if status.replace("_", "-") in row["path"])
+    assert rows[f".agent-run/runs/{resumable.name}"]["verdict"] == "keep:resumable"
+
+
+def test_sessions_are_triage_only_even_when_old(tmp_path):
+    root = repo(tmp_path)
+    session = root / ".agent-run" / "sessions" / "20260801-chair"
+    session.mkdir(parents=True)
+    (session / "STATE.md").write_text("durable\n")
+    old(session)
+    row = next(row for row in cleaner().plan(root, include=frozenset({"sessions"}), pr_bodies=[])["rows"]
+               if row["path"].endswith(session.name))
+    assert row["verdict"] == "triage:session-idle"
 
 
 def test_owner_logs_expire_before_a_failed_run_but_manifest_remains(tmp_path):
@@ -263,6 +324,108 @@ def test_ignored_worktree_run_is_never_pruned(tmp_path):
     (root / ".git" / "info" / "exclude").write_text("/.agent-run/\n")
     rows = {row["path"]: row for row in cleaner().plan(root, pr_bodies=[])["rows"]}
     assert rows[".worktrees/lane-merged"]["verdict"] == "keep:worktree-runs"
+
+
+def test_worktree_scratch_does_not_count_as_a_run(tmp_path):
+    root = repo(tmp_path)
+    target = root / ".worktrees" / "lane-done"
+    target.parent.mkdir()
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", "lane/done", str(target)], check=True)
+    (target / "work.txt").write_text("done\n")
+    subprocess.run(["git", "-C", str(target), "add", "work.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "work"], check=True)
+    subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", "merge lane", "lane/done"], check=True)
+    (root / ".git" / "info" / "exclude").write_text("/.agent-run/\n")
+    scratch = target / ".agent-run" / "scratch"
+    scratch.mkdir(parents=True)
+    (scratch / "note.txt").write_text("scratch\n")
+    module = cleaner()
+    proposal = module.plan(root, pr_bodies=[])
+    row = next(row for row in proposal["rows"] if row["path"] == ".worktrees/lane-done")
+    assert row["verdict"] == "delete"
+    assert module.apply(root, proposal["plan_sha256"], pr_bodies=[], human_authorised=True) == [".worktrees/lane-done"]
+
+
+def test_missing_gh_warns_and_git_proven_worktree_can_expire(tmp_path, monkeypatch):
+    root = repo(tmp_path)
+    target = root / ".worktrees" / "lane-done"
+    target.parent.mkdir()
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", "lane/done", str(target)], check=True)
+    (target / "work.txt").write_text("done\n")
+    subprocess.run(["git", "-C", str(target), "add", "work.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "work"], check=True)
+    subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", "merge lane", "lane/done"], check=True)
+    subprocess.run(["git", "-C", str(root), "remote", "add", "origin", "https://example.invalid/repo.git"], check=True)
+    module = cleaner()
+    original = module._command
+
+    def missing_gh(*args, **kwargs):
+        if args[0] == "gh":
+            raise FileNotFoundError("gh missing")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_command", missing_gh)
+    report = module.plan(root)
+    row = next(row for row in report["rows"] if row["path"] == ".worktrees/lane-done")
+    assert row["verdict"] == "delete"
+    assert any("GitHub" in warning for warning in report["warnings"])
+
+
+def test_worktree_liveness_probe_does_not_walk_large_tree(tmp_path, monkeypatch):
+    root = repo(tmp_path)
+    target = root / ".worktrees" / "lane-done"
+    target.parent.mkdir()
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", "lane/done", str(target)], check=True)
+    (target / "work.txt").write_text("done\n")
+    subprocess.run(["git", "-C", str(target), "add", "work.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "work"], check=True)
+    subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", "merge lane", "lane/done"], check=True)
+    module = cleaner()
+    original = module._command
+    probes = []
+
+    def observe(*args, **kwargs):
+        if args[0] == "lsof":
+            probes.append(args)
+            return subprocess.CompletedProcess(args, 0, "p123\nn/elsewhere\n", "")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(module, "_command", observe)
+    row = next(row for row in module.plan(root, pr_bodies=[])["rows"] if row["path"] == ".worktrees/lane-done")
+    assert row["verdict"] == "delete"
+    assert probes and all("+D" not in probe for probe in probes)
+
+
+def test_terminal_attempt_pgid_and_server_host_pid_do_not_pin_run(tmp_path, monkeypatch):
+    root = repo(tmp_path)
+    run = root / ".agent-run" / "runs" / "20260801-1200-dispatch-old-a1b2c3"
+    attempt = run / "tasks" / "one" / "attempt-001"
+    attempt.mkdir(parents=True)
+    (run / "RUN_RECEIPT.json").write_text('{"status":"ok"}\n')
+    (run / "_owner").mkdir()
+    (run / "_owner" / "dispatch-owner.json").write_text('{"host_pid":123}\n')
+    (attempt / "attempt.json").write_text('{"state":"terminal","pgid":456}\n')
+    old(run)
+    module = cleaner()
+    monkeypatch.setattr(module, "_pid_alive", lambda pid, started_at: pid is not None)
+    row = next(row for row in module.plan(root, pr_bodies=[])["rows"] if row["path"].endswith(run.name))
+    assert row["verdict"] == "delete"
+
+
+def test_clean_output_hides_internal_identity_and_summarises_kept_rows(tmp_path):
+    root = repo(tmp_path)
+    active = root / ".agent-run" / "runs" / "20260923-1200-dispatch-active-a1b2c3"
+    active.mkdir(parents=True)
+    (active / "RUN_RECEIPT.json").write_text('{"status":"input_required"}\n')
+    json_result = subprocess.run(["python3", str(SCRIPT), "--repo", str(root), "--json"],
+                                 text=True, capture_output=True, check=False)
+    assert json_result.returncode == 0, json_result.stderr
+    assert all("_identity" not in row for row in json.loads(json_result.stdout)["rows"])
+    text_result = subprocess.run(["python3", str(SCRIPT), "--repo", str(root)],
+                                 text=True, capture_output=True, check=False)
+    assert text_result.returncode == 0, text_result.stderr
+    assert "kept: 1 paths" in text_result.stdout
+    assert active.name not in text_result.stdout
 
 
 def test_worktree_apply_requires_explicit_authority_attestation(tmp_path):

@@ -94,9 +94,10 @@ def test_bootstrap_rerun_does_not_clobber_existing_state(tmp_path):
     state = mission / "STATE.md"
     state.write_text("user-owned state\n")
 
-    run_bootstrap("--repo-root", str(tmp_path), "mission-id")
+    rerun = run_bootstrap("--repo-root", str(tmp_path), "mission-id")
 
     assert state.read_text() == "user-owned state\n"
+    assert "exists, kept (not clobbered): " + str(mission / ".mission-id") not in rerun.stderr
 
 
 def test_bootstrap_refuses_a_mission_id_that_escapes_agent_run(tmp_path):

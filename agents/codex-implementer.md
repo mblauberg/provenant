@@ -61,11 +61,22 @@ When testing containment, place the worktree outside system temporary directorie
 
 **1. Write the brief to a file.** Never pass it as a shell argument.
 
+Resolve the primary checkout once from the caller's Git working directory:
+
+```sh
+ROOT=$(dirname "$(git rev-parse --path-format=absolute --git-common-dir)")
+SCRATCH="$ROOT/.agent-run/scratch"
+mkdir -p "$SCRATCH"
+```
+
+Use absolute paths under `$SCRATCH` for the brief, report and transcript even
+when Codex runs with `-C` in another worktree.
+
 Codex has no context beyond this file. A good brief states: the worktree path and branch; the
 background it needs (including anything already verified, so it does not redo it); the work,
 broken into ordered parts; what it must NOT touch; how to verify; the commit convention; and
 an explicit instruction not to push and not to open a PR. Write it to
-`.agent-run/scratch/codex-<slug>-brief.txt`.
+`$SCRATCH/codex-<slug>-brief.txt`.
 
 **`<slug>` must be unique to this dispatch, not derived from the task.** A slug taken from the
 branch or the subject collides whenever two dispatches run at once, and the collision is silent:
@@ -79,13 +90,14 @@ the claims it is given and to report anything that turns out to be wrong rather 
 following it into a mistake. A brief that says "if I am wrong about this, saying so is more
 valuable than complying" reliably produces better work.
 
-**Tell Codex to write its own report to its own file**, separate from the transcript, and to
+**Tell Codex to make its final message the report**, separate from the transcript, and to
 bound its length. End the brief with something close to:
 
-> Write your final report to `.agent-run/scratch/codex-<slug>-report.md`, at most 100 lines: what
-> you changed, what you could not do and why, and the exact final line of each verification
-> command. Put it there, not in your final message.
+> Make your final message the report, at most 100 lines: what you changed,
+> what you could not do and why, and the exact final line of each verification
+> command. The caller passes `-o <REPORT_PATH>`; do not write that file yourself.
 
+The CLI writes the final message to the report path via `-o`, outside the sandbox.
 The transcript holds Codex's whole reasoning trace and every command it ran, often tens of
 thousands of tokens. The report holds only the outcome. Reading the report instead of the
 transcript is what stops the caller paying twice for the same thinking, once through Codex and
@@ -94,10 +106,11 @@ again through you.
 **2. Run Codex in the foreground and let the call block.**
 
 ```
-codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-6-sol \
+codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> \
+  -o "$SCRATCH/codex-<slug>-report.md" -m gpt-6-sol \
   -c service_tier=default -c model_reasoning_effort=high - \
-  < .agent-run/scratch/codex-<slug>-brief.txt \
-  > .agent-run/scratch/codex-<slug>-transcript.txt 2>&1
+  < "$SCRATCH/codex-<slug>-brief.txt" \
+  > "$SCRATCH/codex-<slug>-transcript.txt" 2>&1
 STATUS=$?
 ```
 
@@ -118,12 +131,13 @@ directory; it records that child in `worker.pid`, its own wrapper in
 durable completion marker atomically to `run_dir/done`:
 
 ```
-run_dir=.agent-run/scratch/codex-<unique-slug>
+run_dir="$SCRATCH/codex-<unique-slug>"
 "$(provenant root)/skills/orchestrate/scripts/run_worker_detached.sh" \
   --run-dir "$run_dir" -- \
-  codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> -m gpt-6-sol \
+  codex exec -s workspace-write -C <ABSOLUTE_WORKTREE> \
+    -o "$SCRATCH/codex-<slug>-report.md" -m gpt-6-sol \
     -c service_tier=default -c model_reasoning_effort=high - \
-    < .agent-run/scratch/codex-<slug>-brief.txt &
+    < "$SCRATCH/codex-<slug>-brief.txt" &
 WRAPPER_PID=$!
 wait "$WRAPPER_PID"
 STATUS=$?
@@ -216,7 +230,7 @@ clean or are there stray uncommitted files; did any scaffolding file the brief s
 survive. A transcript claiming success while the tree is empty is a real and recurring failure
 mode, so this step is not optional.
 
-Then read `.agent-run/scratch/codex-<slug>-report.md`, which is bounded and holds the outcome.
+Then read `$SCRATCH/codex-<slug>-report.md`, which is bounded and holds the outcome.
 Between that file and the git commands above you have everything you need.
 
 **Do not read the transcript.** Not directly, not a few hundred lines, not "just to check". It
@@ -245,9 +259,9 @@ ask it rather than typing a name. Direct CLI fallback needs a fresh
 capability snapshot, so take one first:
 
 ```
-provenant capabilities codex --out .agent-run/scratch/codex-caps.json
+provenant capabilities codex --out "$SCRATCH/codex-caps.json"
 provenant route resolve --adapter codex --role worker --task-class legwork \
-  --capabilities-file .agent-run/scratch/codex-caps.json
+  --capabilities-file "$SCRATCH/codex-caps.json"
 ```
 
 Use `--task-class mechanical`, or `--role critical-review --task-class

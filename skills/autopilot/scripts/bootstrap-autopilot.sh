@@ -311,19 +311,23 @@ if [ ! -d "$MISSION_DIR" ]; then
 fi
 if [ -d "$MISSION_DIR" ]; then
   MISSION="$(cd "$MISSION_DIR" && pwd -P)"
-  # Boundary check: reject any path escape (e.g. a symlink swapped in after
-  # the earlier -L check, or an unexpected resolution) — the physically
-  # resolved mission dir must land EXACTLY on its chosen canonical or legacy path.
-  if [ "$MISSION" != "$AGENT_RUN_ROOT/$MISSION_ID" ]; then
-    if [ "$MISSION" != "$MISSION_DIR" ]; then
-      die "refusing: resolved mission path escaped the .agent-run/ boundary: $MISSION"
-    fi
-  fi
+  # Accept the one-release legacy path or a canonical run under the resolved
+  # runs root; a substituted symlink must not escape either boundary.
+  case "$MISSION" in
+    "$AGENT_RUN_ROOT/$MISSION_ID"|"$RUNS_ROOT"/*) ;;
+    *) die "refusing: resolved mission path escaped the .agent-run/ boundary: $MISSION" ;;
+  esac
 else
   # DRY-RUN with nothing created yet: report the path that WOULD be used.
   MISSION="$MISSION_DIR"
 fi
-printf '%s\n' "$MISSION_ID" | do_write "$MISSION/.mission-id"
+if [ -f "$MISSION/.mission-id" ]; then
+  existing_id=""
+  IFS= read -r existing_id < "$MISSION/.mission-id" || true
+  [ "$existing_id" = "$MISSION_ID" ] || die "mission identity mismatch: $MISSION"
+else
+  printf '%s\n' "$MISSION_ID" | do_write "$MISSION/.mission-id"
+fi
 
 # Detect whether this is a first scaffold or a re-run (GOAL.md present already).
 RERUN=false
@@ -581,7 +585,11 @@ fi
 # ---- placeholder canary: report any {{...}} still left behind ---------------
 note ""
 note "[3/3] scanning for unsubstituted {{...}} placeholders"
-if [ "$DRY_RUN" = true ]; then LEFTOVER_FILE=/dev/null; else LEFTOVER_FILE="$(mktemp "$SCRATCH_ROOT/bootstrap-autopilot.leftover.XXXXXX")"; fi
+if [ "$DRY_RUN" = true ]; then
+  LEFTOVER_FILE="$(mktemp "${TMPDIR:-/tmp}/bootstrap-autopilot.leftover.XXXXXX")"
+else
+  LEFTOVER_FILE="$(mktemp "$SCRATCH_ROOT/bootstrap-autopilot.leftover.XXXXXX")"
+fi
 : > "$LEFTOVER_FILE"
 SCAN_TARGETS="README.md STATE.md HANDOFF.md QUEUE.md"
 for t in $SCAN_TARGETS; do
@@ -638,7 +646,7 @@ note "                   bounded waves + model routing -> orchestrate"
 if [ "$DRY_RUN" = true ]; then
   note "  mode:            DRY-RUN — nothing was changed."
   note "=============================================================="
-  [ "$DRY_RUN" = true ] || rm -f "$LEFTOVER_FILE"
+  rm -f "$LEFTOVER_FILE"
   exit 0
 fi
 

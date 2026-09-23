@@ -63,7 +63,8 @@ such a worktree to triage rather than guessing its branch.
 Run `provenant clean` from the project for a dry-run classification and plan
 digest. It protects dirty, unmerged, open-PR and active worktrees; `--apply
 --plan <digest> --human-authorised` delegates eligible removal to `scripts/worktree remove`
-after merge proof. Run artifacts and retention are described in
+after merge proof. The flag records the caller's attestation of human authority;
+it does not verify who approved removal. Run artifacts and retention are described in
 [Fabric v2](specs/fabric-v2.md).
 
 - One stage owner writes a worktree at a time. Sibling agents use separate

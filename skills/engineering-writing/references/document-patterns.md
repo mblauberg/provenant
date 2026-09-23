@@ -175,8 +175,9 @@ Agent-Route: codex/gpt-6-luna@high
 ```
 
 Use `adapter/model@effort`, not a family-only label. Native Claude subagents
-use `claude/<model>@<effort> (anthropic; resolved)` from the Agent tool model
-parameter, not self-report. The writing skill returns a message; staging, committing
+use `claude/<model>@<effort>` from the Agent tool model parameter for the
+trailer; the provider and identity parenthetical belongs in a `Route:` line,
+not the trailer. The writing skill returns a message; staging, committing
 or amending requires separate authority.
 
 ## Changelog and Release Notes
