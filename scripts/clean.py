@@ -16,8 +16,16 @@ import subprocess
 import sys
 from typing import Any
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills/orchestrate/scripts"))
-import process_info
+import importlib.util
+
+# Loaded by file: this script may run by path with nothing on sys.path (#755).
+_PROCESS_INFO = Path(__file__).resolve().parents[1] / "skills/orchestrate/scripts/process_info.py"
+_process_info_spec = importlib.util.spec_from_file_location("provenant_process_info", _PROCESS_INFO)
+if _process_info_spec is None or _process_info_spec.loader is None:  # pragma: no cover - defensive
+    raise ModuleNotFoundError(f"process inspection is missing: {_PROCESS_INFO}")
+process_info = importlib.util.module_from_spec(_process_info_spec)
+sys.modules[_process_info_spec.name] = process_info  # dataclasses resolve their module here
+_process_info_spec.loader.exec_module(process_info)
 
 
 RUN_NAME = re.compile(r"^\d{8}-\d{4}-(dispatch|batch|orch|delivery|mission|review|wf)-[A-Za-z0-9-]+-[A-Za-z0-9]{6}$")

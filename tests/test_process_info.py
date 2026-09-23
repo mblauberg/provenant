@@ -8,12 +8,12 @@ import sys
 
 import pytest
 
+from skills.orchestrate.scripts import process_info
+
 SCRIPTS = Path(__file__).resolve().parents[1] / "skills/orchestrate/scripts"
-sys.path.insert(0, str(SCRIPTS))
 
 
 def test_start_time_matches_system_ps():
-    import process_info
 
     observed = process_info.process(os.getpid())
     assert observed is not None
@@ -68,7 +68,6 @@ def test_shim_cpu_time_retains_hundredths():
 
 
 def test_unavailable_census_is_not_an_empty_process_list(monkeypatch):
-    import process_info
 
     class UnavailableLibproc:
         def proc_listallpids(self, *_args):
@@ -84,7 +83,6 @@ def test_unavailable_census_is_not_an_empty_process_list(monkeypatch):
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS tty device naming")
 def test_tty_device_is_rendered_by_name():
-    import process_info
 
     master, slave = os.openpty()
     try:
@@ -95,7 +93,6 @@ def test_tty_device_is_rendered_by_name():
 
 
 def test_command_preserves_arguments_with_spaces():
-    import process_info
 
     child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(5)", "two words"])
     try:
@@ -134,7 +131,6 @@ def test_shim_ends_quietly_when_its_reader_closes():
 
 def test_cpu_time_matches_what_the_process_used():
     """macOS task counters are Mach ticks (125/3 ns on Apple Silicon), not nanoseconds."""
-    import process_info
     import resource
     import time
 
@@ -148,7 +144,6 @@ def test_cpu_time_matches_what_the_process_used():
 
 
 def test_a_sleeping_process_is_not_reported_running():
-    import process_info
     import time
 
     sleeper = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
@@ -168,7 +163,6 @@ def test_shim_accepts_bsd_axo():
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="root can read every process")
 def test_shim_shows_an_unreadable_live_process_rather_than_dropping_it():
-    import process_info
 
     if process_info.process(1) is not None:
         pytest.skip("pid 1 is readable on this host")
