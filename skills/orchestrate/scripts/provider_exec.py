@@ -1153,6 +1153,18 @@ def execute(
     parsed["session_id"] = session
     observed, source = _observed_model(plan, parsed, environment)
     warnings = list(plan["warnings"])
+    reported = {}
+    if plan["adapter"] == "claude":
+        # init.model is the request; plan mode may answer with another model.
+        answered = meter.models["answered"]
+        reported = {"init_model": meter.models["init"], "answered_models": list(answered)}
+        answering, answering_source = meter.answering_model()
+        if answering:
+            observed, source = answering, answering_source
+        if len(answered) > 1:
+            warnings.append("claude answered as " + ", ".join(answered) + "; route records " + observed)
+        elif answering and meter.models["init"] and answering != meter.models["init"]:
+            warnings.append("claude answered as " + answering + "; init reported " + meter.models["init"])
     if route.get("effort_substitution") and route["effort_substitution"] not in warnings:
         warnings.append(route["effort_substitution"])
     if text_truncated or (raw.total > MAX_EVENTS_BYTES and terminal_text is None and not text_chunks):
@@ -1190,6 +1202,7 @@ def execute(
         "resolved_model": plan["model"],
         "observed_model": observed,
         "observed_source": source,
+        **reported,
         "identity": identity,
         "provider": route.get("endpoint_provider") or plan["adapter"],
         "transport": plan["adapter"],

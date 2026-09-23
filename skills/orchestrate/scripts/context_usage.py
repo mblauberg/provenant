@@ -36,7 +36,7 @@ class Meter:
         self.adapter = adapter
         self.value = dict.fromkeys(FIELDS)
         self.totals = {"input_tokens": None, "output_tokens": None, "cached_input_tokens": None}
-        self.last_model = None
+        self.models = {"init": None, "answered": [], "final": None, "usage": []}
 
     def _add(self, input_tokens, output_tokens, cached):
         for key, value in (("input_tokens", input_tokens), ("output_tokens", output_tokens),
@@ -53,10 +53,17 @@ class Meter:
             pass  # A malformed usage field never fails an attempt.
 
     def _claude(self, event):
-        kind = event.get("type")
+        kind, models = event.get("type"), self.models
+        if kind == "system" and event.get("subtype") == "init" and isinstance(event.get("model"), str):
+            models["init"] = event["model"]
         if kind == "assistant" and isinstance(event.get("message"), dict):
             message = event["message"]
-            self.last_model = message.get("model") or self.last_model
+            model = message.get("model")
+            if isinstance(model, str) and model:
+                if model not in models["answered"]:
+                    models["answered"].append(model)
+                if event.get("parent_tool_use_id") is None:
+                    models["final"] = model
             self._claude_request(message.get("usage"))
         if kind == "result":
             usage = event.get("usage") or {}
@@ -69,11 +76,20 @@ class Meter:
             iterations = [item for item in usage.get("iterations") or [] if isinstance(item, dict)]
             if iterations:
                 self._claude_request(iterations[-1])
-            models = event.get("modelUsage") or {}
-            chosen = models.get(self.last_model) if isinstance(models, dict) else None
-            windows = [_int(item.get("contextWindow")) for item in models.values() if isinstance(item, dict)]
-            window = _int((chosen or {}).get("contextWindow")) or max((w for w in windows if w), default=None)
-            self.value["context_window_tokens"] = window
+            usage_models = event.get("modelUsage") if isinstance(event.get("modelUsage"), dict) else {}
+            models["usage"] = list(usage_models)
+            answering = self.answering_model()[0]
+            chosen = usage_models.get(answering) if answering else None
+            self.value["context_window_tokens"] = _int(chosen.get("contextWindow")) if isinstance(chosen, dict) else None
+
+    def answering_model(self):
+        """(model, source): the model that answered, then a lone modelUsage key; init only as a last resort."""
+        models = self.models
+        if models["answered"]:
+            return models["final"] or models["answered"][-1], "claude:assistant.message.model"
+        if len(models["usage"]) == 1:
+            return models["usage"][0], "claude:result.modelUsage"
+        return models["init"], "claude:init.model" if models["init"] else None
 
     def _claude_request(self, usage):
         if isinstance(usage, dict):

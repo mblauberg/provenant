@@ -3,6 +3,7 @@
 import importlib
 import json
 from pathlib import Path
+import sys
 
 import pytest
 
@@ -29,8 +30,13 @@ def measured(adapter, name=None):
 @pytest.mark.parametrize(
     "adapter,expected",
     [
+        # Plan mode: init says haiku, claude-sonnet-5 (1M) answers.
         ("claude", {"context_tokens": 8039, "input_tokens": 8035, "output_tokens": 4,
                     "cached_input_tokens": 4587, "context_window_tokens": 1000000, "source": "observed"}),
+        # acceptEdits: haiku answers with its 200k window.
+        ("claude-direct-haiku", {"context_tokens": 4977, "input_tokens": 4934, "output_tokens": 43,
+                                 "cached_input_tokens": 4098, "context_window_tokens": 200000,
+                                 "source": "observed"}),
         ("codex", {"context_tokens": 16986, "input_tokens": 16981, "output_tokens": 5,
                    "cached_input_tokens": 11008, "context_window_tokens": None, "source": "estimated"}),
         ("cursor", {"context_tokens": 19124, "input_tokens": 19098, "output_tokens": 26,
@@ -45,7 +51,93 @@ def measured(adapter, name=None):
     ],
 )
 def test_live_samples_yield_context(adapter, expected):
-    assert measured(adapter) == {**{"context_percent": None}, **expected}
+    name = adapter
+    adapter = adapter.split("-", 1)[0]
+    assert measured(adapter, name) == {**{"context_percent": None}, **expected}
+
+
+def claude_events(*answered, usage=None, init="claude-haiku-4-5-20251001"):
+    events = [{"type": "system", "subtype": "init", "model": init, "session_id": "s1"}] if init else []
+    for model, parent in answered:
+        events.append({"type": "assistant", "parent_tool_use_id": parent, "message": {
+            "model": model, "content": [{"type": "text", "text": "OK"}],
+            "usage": {"input_tokens": 10, "output_tokens": 1}}})
+    events.append({"type": "result", "is_error": False, "result": "OK", "session_id": "s1",
+                   "usage": {"input_tokens": 10, "output_tokens": 1}, "modelUsage": usage or {}})
+    return events
+
+
+def test_claude_window_comes_from_the_answering_model_never_init_or_the_largest():
+    meter = context().Meter("claude")
+    for event in claude_events(("claude-sonnet-5", "tool-1"), ("claude-haiku-4-5-20251001", None),
+                               usage={"claude-sonnet-5": {"contextWindow": 1000000},
+                                      "claude-haiku-4-5-20251001": {"contextWindow": 200000}}):
+        meter.observe(event)
+    assert meter.result()["context_window_tokens"] == 200000
+    unmatched = context().Meter("claude")
+    for event in claude_events(usage={"a": {"contextWindow": 1000000}, "b": {"contextWindow": 200000}}):
+        unmatched.observe(event)
+    assert unmatched.result()["context_window_tokens"] is None
+    single = context().Meter("claude")
+    for event in claude_events(usage={"claude-sonnet-5": {"contextWindow": 1000000}}):
+        single.observe(event)
+    assert single.result()["context_window_tokens"] == 1000000
+
+
+def replayed(tmp_path, events):
+    stream = tmp_path / "stream.jsonl"
+    stream.write_text("".join(json.dumps(event) + "\n" for event in events))
+    plan = supervisor().build_plan("claude", {"resolved_model": "haiku", "model_family": "anthropic",
+                                              "endpoint_provider": "anthropic"}, "hello", cwd=tmp_path)
+    plan["argv"] = [sys.executable, "-c", f"import sys; sys.stdout.write(open({str(stream)!r}).read())"]
+    plan["grace_seconds"] = 0.1
+    return supervisor().execute(plan, tmp_path / "result.md")
+
+
+def fixture_events(name):
+    return [json.loads(line) for line in (FIX / f"{name}.jsonl").read_text().splitlines()]
+
+
+def test_plan_mode_substitution_is_attributed_to_the_answering_model(tmp_path, provider_homes):
+    record = replayed(tmp_path, fixture_events("claude"))
+    provenance = record["provenance"]
+    assert provenance["observed_model"] == "claude-sonnet-5"
+    assert provenance["observed_source"] == "claude:assistant.message.model"
+    assert provenance["init_model"] == "claude-haiku-4-5-20251001"
+    assert provenance["answered_models"] == ["claude-sonnet-5"]
+    assert provenance["line"].startswith("Route: claude/claude-sonnet-5 ")
+    assert "claude answered as claude-sonnet-5; init reported claude-haiku-4-5-20251001" in record["warnings"]
+    assert record["context"]["context_window_tokens"] == 1000000
+
+
+def test_direct_haiku_answers_as_haiku_without_warning(tmp_path, provider_homes):
+    record = replayed(tmp_path, fixture_events("claude-direct-haiku"))
+    provenance = record["provenance"]
+    assert provenance["observed_model"] == provenance["init_model"] == "claude-haiku-4-5-20251001"
+    assert provenance["answered_models"] == ["claude-haiku-4-5-20251001"]
+    assert not any("answered as" in warning for warning in record["warnings"])
+    assert record["context"]["context_window_tokens"] == 200000
+
+
+def test_several_answering_models_are_all_recorded_and_the_final_one_routes(tmp_path, provider_homes):
+    record = replayed(tmp_path, claude_events(("claude-sonnet-5", None), ("claude-opus-5-5", "tool-1"),
+                                              ("claude-haiku-4-5-20251001", None)))
+    provenance = record["provenance"]
+    assert provenance["answered_models"] == ["claude-sonnet-5", "claude-opus-5-5", "claude-haiku-4-5-20251001"]
+    assert provenance["observed_model"] == "claude-haiku-4-5-20251001"
+    assert ("claude answered as claude-sonnet-5, claude-opus-5-5, claude-haiku-4-5-20251001; "
+            "route records claude-haiku-4-5-20251001") in record["warnings"]
+
+
+def test_model_usage_then_init_are_fallbacks_for_the_answering_model(tmp_path, provider_homes):
+    usage = replayed(tmp_path, claude_events(usage={"claude-sonnet-5": {"contextWindow": 1000000}}))
+    assert (usage["provenance"]["observed_model"], usage["provenance"]["observed_source"]) == (
+        "claude-sonnet-5", "claude:result.modelUsage")
+    assert "claude answered as claude-sonnet-5; init reported claude-haiku-4-5-20251001" in usage["warnings"]
+    ambiguous = replayed(tmp_path, claude_events(usage={"a": {}, "b": {}}))
+    assert (ambiguous["provenance"]["observed_model"], ambiguous["provenance"]["observed_source"]) == (
+        "claude-haiku-4-5-20251001", "claude:init.model")
+    assert not any("answered as" in warning for warning in ambiguous["warnings"])
 
 
 def test_adapter_without_usage_records_null():

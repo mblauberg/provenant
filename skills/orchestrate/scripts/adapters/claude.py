@@ -8,7 +8,7 @@ IDLE_READ = 600
 IDLE_WRITE = 1800
 EFFORT_FLAG = "--effort"
 SESSION_KEYS = ("session_id",)
-MODEL_SOURCE = "claude:init.model"
+MODEL_SOURCE = "claude:init.model"  # fallback; answering models are read from the stream
 SIGNATURES = (("usage_limited", r"you.ve hit your (?:usage|session|weekly) limit"),)
 
 
