@@ -1419,7 +1419,15 @@ def execute(
             for key in ("session_id", "observed_model", "reset_at", "retry_after"):
                 if parsed_line.get(key) is not None:
                     semantic[key] = parsed_line[key]
-            if parsed_line["terminal"] and terminal_at is None:
+            # A resumed Claude session's empty preamble result (no turns) is not
+            # completion evidence; the real turn may start after the grace.
+            preamble = (
+                event.get("type") == "result"
+                and event.get("num_turns") == 0
+                and not event.get("result")
+                and event.get("is_error") is False
+            )
+            if parsed_line["terminal"] and terminal_at is None and not preamble:
                 terminal_at = time.monotonic()
             elif not parsed_line["terminal"] and (
                 event.get("type") in {"assistant", "user"}

@@ -871,6 +871,25 @@ emit({'type':'result','subtype':'success','result':'DONE','is_error':False,'num_
     assert (tmp_path / "result.md").read_text() == "DONE"
 
 
+def test_claude_resume_preamble_does_not_start_terminal_grace(tmp_path):
+    # The real turn can start later than the grace period after the empty
+    # preamble result, for example while a large session reloads.
+    code = """import json,time
+emit=lambda e: print(json.dumps(e), flush=True)
+emit({'type':'system','subtype':'init','model':'claude-opus-5-5','session_id':'s-1'})
+emit({'type':'result','subtype':'success','result':'','is_error':False,'num_turns':0})
+time.sleep(0.8)
+emit({'type':'system','subtype':'init','model':'claude-opus-5-5','session_id':'s-1'})
+emit({'type':'assistant','message':{'content':[{'type':'text','text':'working'}]}})
+emit({'type':'result','subtype':'success','result':'DONE','is_error':False,'num_turns':3})
+"""
+    plan = fixture_plan(tmp_path, code, "claude", timeout_seconds=10, idle_seconds=5)
+    plan["grace_seconds"] = 0.3
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert (tmp_path / "result.md").read_text() == "DONE"
+
+
 def test_wall_timeout_is_distinct_from_idle(tmp_path):
     plan = fixture_plan(
         tmp_path, "import time; time.sleep(30)", idle_seconds=3, timeout_seconds=0.2
