@@ -1594,7 +1594,7 @@ sys.exit(1 if model=='opus' else 0)
     assert [row["status"] for row in rows] == ["usage_limited", "ok"]
     assert len({row["run_id"] for row in rows}) == 1
     assert rows[1]["provenance"]["fallback_from"]["status"] == "usage_limited"
-    assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "succeeded"
+    assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "ok"
     assert (
         json.loads((tmp_path / "cooldowns.json").read_text())["cooldowns"][
             "claude/*"

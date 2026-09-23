@@ -258,6 +258,7 @@ def _run_verdict(path: Path, kind: str, age: float, refs: str | None, pr_unknown
         if _activity_age(path, now) > 2:
             return "abandon"
         return "keep:active"
+    # Drop succeeded when pre-upgrade run receipts are no longer retained.
     elif status in {"succeeded", "ok", "cancelled", "canceled", "complete", "completed"}:
         retention = 7
     else:

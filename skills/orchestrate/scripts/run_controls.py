@@ -18,7 +18,7 @@ from typing import Any
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?:\d{3}|[1-9]\d{3,})$")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 BATCH_ID_RE = re.compile(r"^batch-(?:\d{3}|[1-9]\d{3,})$")
-TERMINAL_STATUSES = {"blocked", "succeeded", "failed", "timed_out", "cancelled"}
+TERMINAL_STATUSES = {"blocked", "ok", "failed", "timed_out", "cancelled"}
 DISPATCH_RUN = Path(__file__).with_name("dispatch_run.py")
 MAX_WORKER_QUESTION_PROMPT = 4096
 MAX_OPERATOR_RESPONSE_BYTES = 64 * 1024
@@ -39,7 +39,7 @@ from dispatch_run import (
     remove_cancellation_marker,
     worker_question_envelope_bytes,
 )
-from attempt_evidence import AttemptEvidenceError, validate_successful_attempt
+from attempt_evidence import AttemptEvidenceError, canonical_success_status, is_success_status, validate_successful_attempt
 from _shared.custody import OwnedFileError, open_contained_regular, read_contained_regular
 
 
@@ -262,7 +262,7 @@ def _summary_bundle_incomplete(run_dir: Path, batch_id: str) -> bool:
             or summary["task_count"] != len(summary["tasks"])):
         return False
     for item in summary["tasks"]:
-        if not isinstance(item, dict) or item.get("status") not in TERMINAL_STATUSES:
+        if not isinstance(item, dict) or canonical_success_status(item.get("status")) not in TERMINAL_STATUSES:
             return False
         attempt_path = item.get("attempt_path")
         if attempt_path is None:
@@ -429,7 +429,7 @@ def _attempt(run_dir: Path, task_id: str, attempt_id: str) -> tuple[dict[str, An
         or record.get("task_id") != task_id
         or record.get("attempt_id") != attempt_id
         or record.get("attempt_path") != attempt_rel
-        or record.get("status") not in TERMINAL_STATUSES
+        or canonical_success_status(record.get("status")) not in TERMINAL_STATUSES
     ):
         raise ControlError(f"attempt receipt has invalid identity or status: {attempt_rel}")
     sidecar_rel, _, sidecar_bytes = _read_regular(run_dir, (root / "attempt.sha256").as_posix(), "attempt digest", (root / "attempt.sha256").as_posix())
@@ -467,7 +467,7 @@ def _attempt(run_dir: Path, task_id: str, attempt_id: str) -> tuple[dict[str, An
             raise ControlError(f"result digest does not match retained evidence: {rel}")
         artifacts["result"] = rel
         payloads["result"] = data
-    elif record.get("status") == "succeeded":
+    elif is_success_status(record.get("status")):
         raise ControlError(f"successful attempt has no result evidence: {attempt_rel}")
     git_evidence = record.get("git_evidence")
     if git_evidence is not None:
@@ -532,7 +532,7 @@ def _inspect_batches(run_dir: Path) -> list[dict[str, Any]]:
                     or not TASK_ID_RE.fullmatch(item["task_id"]) or item["task_id"] in seen):
                 raise ControlError(f"batch summary has invalid task universe: {summary_path}")
             seen.add(item["task_id"])
-            task = {"task_id": item["task_id"], "status": item.get("status"),
+            task = {"task_id": item["task_id"], "status": canonical_success_status(item.get("status")),
                     "receipt_status": "unavailable"}
             if task["status"] not in TERMINAL_STATUSES:
                 raise ControlError(f"batch summary has invalid task status: {summary_path}")
@@ -558,9 +558,9 @@ def _inspect_batches(run_dir: Path) -> list[dict[str, Any]]:
                         task["receipt_status"] = "receipt_unavailable"
                     else:
                         record, artifacts, _, _ = _attempt(run_dir, item["task_id"], attempt_id)
-                        if record["status"] != item["status"]:
+                        if canonical_success_status(record["status"]) != task["status"]:
                             raise ControlError(f"batch summary status disagrees with attempt: {item['task_id']}")
-                        if item["status"] == "succeeded" and item.get("result_path") != artifacts.get("result"):
+                        if is_success_status(item["status"]) and item.get("result_path") != artifacts.get("result"):
                             raise ControlError(f"batch summary result identity disagrees with attempt: {item['task_id']}")
                         task.update({"attempt_id": record["attempt_id"], "attempt_path": artifacts["attempt"],
                                      "receipt_status": "validated"})
@@ -624,7 +624,7 @@ def _inspect(args: argparse.Namespace) -> int:
     by_task: dict[str, list[dict[str, Any]]] = {}
     for record, artifacts in selected:
         item: dict[str, Any] = {
-            "attempt_id": record["attempt_id"], "status": record["status"],
+            "attempt_id": record["attempt_id"], "status": canonical_success_status(record["status"]),
             "outcome": record.get("outcome"), "artifacts": artifacts,
         }
         if record["status"] == "blocked":
@@ -636,7 +636,7 @@ def _inspect(args: argparse.Namespace) -> int:
     tasks = [{"task_id": task_id, "attempts": attempts} for task_id, attempts in sorted(by_task.items())]
     receipt = json.loads((run_dir / "RUN_RECEIPT.json").read_text(encoding="utf-8"))
     print(json.dumps({"schema_version": 1, "run_id": run_dir.name,
-                      "run_status": receipt.get("status"), "tasks": tasks,
+                      "run_status": canonical_success_status(receipt.get("status")), "tasks": tasks,
                       "batches": _inspect_batches(run_dir)}, sort_keys=True))
     return 0
 
@@ -726,7 +726,7 @@ def _continuation_prompt(original: bytes, question: dict[str, Any], response: by
 def _retry(args: argparse.Namespace) -> int:
     run_dir = _run_dir(args.run_dir)
     parent, artifacts, _, payloads = _attempt(run_dir, args.task_id, args.attempt_id)
-    if parent["status"] == "succeeded":
+    if is_success_status(parent["status"]):
         raise ControlError("successful attempts cannot be retried")
     process = parent.get("process")
     if not isinstance(process, dict) or process.get("observed_exit") is not True:
@@ -831,12 +831,12 @@ def _load_summary(run_dir: Path, batch_id: str, *, require_complete: bool = Fals
             raise ControlError(f"batch summary has invalid task universe: {summary_path}")
         seen.add(item["task_id"])
         status = item.get("status")
-        if status not in TERMINAL_STATUSES:
+        if canonical_success_status(status) not in TERMINAL_STATUSES:
             raise ControlError(f"batch summary has invalid task status: {summary_path}")
         actual_counts[status] = actual_counts.get(status, 0) + 1
         attempt_path = item.get("attempt_path")
         if attempt_path is None:
-            if status == "succeeded":
+            if is_success_status(status):
                 raise ControlError(f"successful batch task has no attempt path: {summary_path}")
             continue
         attempt_rel = _relative(run_dir, attempt_path, "batch attempt")
@@ -845,7 +845,7 @@ def _load_summary(run_dir: Path, batch_id: str, *, require_complete: bool = Fals
             raise ControlError(f"batch summary attempt identity is invalid: {summary_path}")
         attempt_id = attempt_rel[len(expected_prefix):-len("/attempt.json")]
         record, artifacts, _, payloads = _attempt(run_dir, item["task_id"], attempt_id)
-        if record["status"] != status:
+        if canonical_success_status(record["status"]) != canonical_success_status(status):
             raise ControlError(f"batch summary status disagrees with attempt: {item['task_id']}")
         for field in ("requested_route", "route"):
             flattened = item.get(field)
@@ -875,9 +875,9 @@ def _load_summary(run_dir: Path, batch_id: str, *, require_complete: bool = Fals
         result_path = item.get("result_path")
         if result_path is not None and result_path != artifacts.get("result"):
             raise ControlError(f"batch summary result identity disagrees with attempt: {item['task_id']}")
-        if status == "succeeded" and result_path is None:
+        if is_success_status(status) and result_path is None:
             raise ControlError(f"successful batch task has no result path: {summary_path}")
-        if require_complete and status == "succeeded":
+        if require_complete and is_success_status(status):
             _validate_successful_adapter(run_dir, record, payloads)
     if require_complete:
         if summary.get("counts") != dict(sorted(actual_counts.items())):
@@ -927,9 +927,9 @@ def validate_retained_dispatch(run_dir: Path) -> list[str]:
                     and process.get("exit_code") is None
                 ):
                     raise ControlError("attempt does not prove observed completion")
-                if record.get("status") == "succeeded" and process.get("exit_code") != 0:
+                if is_success_status(record.get("status")) and process.get("exit_code") != 0:
                     raise ControlError("successful attempt does not prove exit 0")
-                if record.get("status") == "succeeded":
+                if is_success_status(record.get("status")):
                     _validate_successful_adapter(run_dir, record, payloads)
             except (ControlError, OSError, ValueError) as exc:
                 errors.append(f"dispatch attempt {attempt_path.relative_to(run_dir)}: {exc}")
@@ -997,7 +997,7 @@ def _reduce(args: argparse.Namespace) -> int:
             raise ControlError(f"duplicate reduction input: {value}")
         seen.add((task_id, attempt_id))
         record, artifacts, _, payloads = _attempt(run_dir, task_id, attempt_id)
-        if record["status"] != "succeeded" or "result" not in artifacts:
+        if not is_success_status(record["status"]) or "result" not in artifacts:
             raise ControlError(f"reduction input is not a successful retained result: {value}")
         selected.append((record, artifacts, payloads["result"]))
     summary = _load_summary(run_dir, args.batch_id)
@@ -1015,7 +1015,7 @@ def _reduce(args: argparse.Namespace) -> int:
                 label = f"{task_id}/{attempt_path[len(prefix):-len('/attempt.json')]}"
         if attempt_path is not None:
             universe.add((task_id, attempt_path))
-        if item.get("status") == "succeeded":
+        if is_success_status(item.get("status")):
             if (task_id, attempt_path) not in selected_paths:
                 omitted.add(label)
         elif isinstance(item.get("status"), str):
