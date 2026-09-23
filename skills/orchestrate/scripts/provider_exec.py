@@ -923,6 +923,7 @@ class _Descendants:
         self.spared = {}
         self.verified_owners = set()
         self.parents = {}
+        self.orphan_candidates = set()
         self.spared_at_stop = set()
         self.snapshot_unavailable = False
 
@@ -978,6 +979,7 @@ class _Descendants:
                     continue
                 if _has_attempt_marker(row.pid, self.marker):
                     self.tracked[row.identity] = row
+                    self.orphan_candidates.add(row.identity)
         self._refresh_spared(rows)
         return rows
 
@@ -996,8 +998,8 @@ class _Descendants:
             parent = self.parents.get(identity)
             if (row is not None and row.identity == identity and not row.zombie
                     and row.pgid not in own_groups
-                    and parent is not None
-                    and (parent == self.root or parent in observed)
+                    and (identity in self.orphan_candidates
+                         or (parent is not None and (parent == self.root or parent in observed)))
                     and parent not in self.spared):
                 if _is_nested_fabric_owner(row):
                     self.verified_owners.add(identity)

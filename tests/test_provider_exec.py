@@ -850,6 +850,36 @@ def test_owner_without_observed_parent_is_not_spared(tmp_path, monkeypatch):
     assert row.identity not in tracker.spared
 
 
+def test_reparented_marker_owner_with_valid_record_is_spared(tmp_path, monkeypatch):
+    module = supervisor()
+    root_pid = os.getpid() + 100000
+    owner = module._ProcessRow(root_pid + 1, 1, root_pid + 1,
+                               str(int(time.time())), "nested owner")
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, owner, "inner-token")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(),
+                                             str(int(time.time())), "test"), owner.pid: owner}
+    process = type("Process", (), {"pid": root_pid, "poll": lambda self: 0})()
+    signals = []
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: rows)
+        patch.setattr(module, "_has_attempt_marker", lambda pid, _marker: pid == owner.pid)
+        patch.setattr(module, "_process_environment", lambda pid: [
+            b"PROVENANT_RUN_TOKEN=inner-token",
+            ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+        ] if pid == owner.pid else ())
+        patch.setattr(module.os, "killpg", lambda pgid, _signal: signals.append(pgid))
+        patch.setattr(module.os, "kill", lambda *_args: None)
+        tracker = module._Descendants(process, "fixture")
+        tracker.spawned_at = 0
+        tracker.spawned_ticks = 0
+        tracker.sample(include_reparented=True)
+        assert owner.identity in tracker.spared
+        tracker.signal(signal.SIGTERM)
+    assert owner.pgid not in signals
+    assert root_pid in signals
+
+
 @pytest.mark.parametrize("field,value", [
     ("owner_pid", 999999), ("owner_started_at", "old process"),
     ("owner_started_at", None), ("run_token", "wrong token"),
