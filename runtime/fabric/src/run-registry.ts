@@ -97,7 +97,7 @@ function readProcessStartedAt(pid: number, canonical: boolean): string | null {
     const output = psOutput(["-o", "lstart=", "-p", String(pid)],
       canonical ? { ...process.env, LC_ALL: "C", LANG: "C" } : process.env);
     const value = output.trim();
-    return value.length === 0 ? null : value;
+    return /\d{4}$/u.test(value) ? value : null; // the shim prints ? for an unreadable pid: unknown, not a time
   } catch {
     return null;
   }
