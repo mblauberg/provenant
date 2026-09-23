@@ -838,10 +838,54 @@ def _has_attempt_marker(pid, marker):
     return ("PROVENANT_ATTEMPT_MARKER=" + marker).encode() in _process_environment(pid)
 
 
-def _is_nested_fabric_owner(pid):
-    prefix = b"PROVENANT_RUN_TOKEN="
-    return any(value.startswith(prefix) and len(value) > len(prefix)
-               for value in _process_environment(pid))
+@lru_cache(maxsize=1)
+def _linux_boot_time():
+    for line in Path("/proc/stat").read_text().splitlines():
+        if line.startswith("btime "):
+            return int(line.split()[1])
+    raise ValueError("Linux boot time unavailable")
+
+
+def _recorded_start_time(row):
+    """Match the seconds-resolution `ps -o lstart=` used by run-registry.ts."""
+    if sys.platform == "darwin":
+        epoch = float(row.started)
+    elif sys.platform.startswith("linux"):
+        epoch = _linux_boot_time() + int(row.started) / os.sysconf("SC_CLK_TCK")
+    else:
+        return None
+    return time.strftime("%a %b %e %H:%M:%S %Y", time.localtime(epoch))
+
+
+def _is_nested_fabric_owner(row):
+    try:
+        values = {}
+        for entry in _process_environment(row.pid):
+            key, _, value = entry.partition(b"=")
+            if key in {b"PROVENANT_RUN_DIR", b"PROVENANT_RUN_TOKEN"}:
+                values[key] = value
+        token = values.get(b"PROVENANT_RUN_TOKEN")
+        directory = values.get(b"PROVENANT_RUN_DIR")
+        if not token or not directory:
+            return False
+        run_dir = Path(os.fsdecode(directory))
+        if not run_dir.is_absolute():
+            return False
+        path = run_dir / "dispatch-owner.json"
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 65536:
+            return False
+        record = json.loads(path.read_text())
+        return (
+            record.get("schema_version") == 1
+            and record.get("kind") in {"dispatch", "batch"}
+            and Path(record.get("run_dir", "")).resolve() == run_dir.resolve()
+            and record.get("run_token") == os.fsdecode(token)
+            and record.get("owner_pid") == row.pid
+            and record.get("owner_pgid") == row.pgid
+            and record.get("owner_started_at") == _recorded_start_time(row)
+        )
+    except Exception:
+        return False
 
 
 class _Descendants:
@@ -860,6 +904,7 @@ class _Descendants:
         self.root = None
         self.tracked = {}
         self.spared = {}
+        self.parents = {}
         self.spared_at_stop = set()
         self.snapshot_unavailable = False
 
@@ -899,11 +944,8 @@ class _Descendants:
             if not newly:
                 break
             for identity, row in newly.items():
-                parent = rows[row.ppid].identity
-                if parent in self.spared or _is_nested_fabric_owner(row.pid):
-                    self.spared[identity] = row
-                else:
-                    self.tracked[identity] = row
+                self.parents[identity] = rows[row.ppid].identity
+                self.tracked[identity] = row
             parents.update(newly)
         if include_reparented:
             for row in rows.values():
@@ -917,11 +959,27 @@ class _Descendants:
                 ):
                     continue
                 if _has_attempt_marker(row.pid, self.marker):
-                    if _is_nested_fabric_owner(row.pid):
-                        self.spared[row.identity] = row
-                    else:
-                        self.tracked[row.identity] = row
+                    self.tracked[row.identity] = row
+        self._refresh_spared(rows)
         return rows
+
+    def _refresh_spared(self, rows):
+        observed = {**self.tracked, **self.spared}
+        spared = set()
+        for identity in observed:
+            row = rows.get(identity[0])
+            if row is not None and row.identity == identity and not row.zombie:
+                if _is_nested_fabric_owner(row):
+                    spared.add(identity)
+        changed = True
+        while changed:
+            changed = False
+            for identity, parent in self.parents.items():
+                if identity in observed and parent in spared and identity not in spared:
+                    spared.add(identity)
+                    changed = True
+        self.spared = {identity: row for identity, row in observed.items() if identity in spared}
+        self.tracked = {identity: row for identity, row in observed.items() if identity not in spared}
 
     def live(self, rows):
         return {
@@ -937,13 +995,18 @@ class _Descendants:
             and row.identity == identity and not row.zombie
         }
 
-    def signal(self, signum, *, root_group=True):
+    def signal(self, signum, *, root_group=True, skip=frozenset(), only=None):
         try:
             rows = _process_snapshot()
         except Exception:
             rows = {}
             self.snapshot_unavailable = True
+        self._refresh_spared(rows)  # A fork observed before exec may now be a recorded owner.
         live = self.live(rows)
+        live = {
+            identity: row for identity, row in live.items()
+            if identity not in skip and (only is None or identity in only)
+        }
         spared_groups = {row.pgid for row in self.live_spared(rows).values()}
         if not root_group:
             live.pop(self.root, None)
@@ -977,7 +1040,8 @@ class _Descendants:
             except (ProcessLookupError, PermissionError):
                 pass
 
-    def stop(self, *, normal=False, descendant_grace=0.5, root_grace=2.0):
+    def stop(self, *, normal=False, terminal_grace=False,
+             descendant_grace=0.5, root_grace=2.0):
         if normal:
             settle_deadline = time.monotonic() + 1.5
             while time.monotonic() < settle_deadline:
@@ -987,14 +1051,24 @@ class _Descendants:
                 time.sleep(0.05)
         rows = self.sample(include_reparented=True)
         self.spared_at_stop.update(self.live_spared(rows))
+        pending = {
+            identity for identity, row in self.live(rows).items()
+            if terminal_grace and row.ppid == self.process.pid
+        }
+        deferred = {
+            identity for identity, row in self.live(rows).items()
+            if identity in pending and row.pgid != self.process.pid
+        }
         leftovers = {
             identity: {"pid": row.pid, "command": row.command[:80]}
-            for identity, row in self.live(rows).items() if identity != self.root
+            for identity, row in self.live(rows).items()
+            if identity != self.root and identity not in pending
         }
-        self.signal(signal.SIGTERM)
+        self.signal(signal.SIGTERM, skip=deferred)
         started = time.monotonic()
         deadline = started + root_grace
         descendants_killed = False
+        deferred_killed = False
         while time.monotonic() < deadline:
             self.process.poll()
             rows = self.sample(include_reparented=True)
@@ -1002,10 +1076,16 @@ class _Descendants:
             leftovers.update({
                 identity: {"pid": row.pid, "command": row.command[:80]}
                 for identity, row in self.live(rows).items() if identity != self.root
+                and (identity not in pending or time.monotonic() - started >= descendant_grace)
             })
             if not descendants_killed and time.monotonic() - started >= descendant_grace:
-                self.signal(signal.SIGKILL, root_group=False)
+                if deferred:
+                    self.signal(signal.SIGTERM, root_group=False, only=deferred)
+                self.signal(signal.SIGKILL, root_group=False, skip=deferred)
                 descendants_killed = True
+            if deferred and not deferred_killed and time.monotonic() - started >= 2 * descendant_grace:
+                self.signal(signal.SIGKILL, root_group=False, only=deferred)
+                deferred_killed = True
             if self.process.poll() is not None and not self.live(rows):
                 break
             time.sleep(0.05)
@@ -1251,6 +1331,7 @@ def execute(
     reaped = []
     stopped = False
     forced, terminal_at, cancel_signal = None, None, False
+    terminal_grace_break = False
     pending = b""
     dropping_line = False
     semantic = {}
@@ -1417,6 +1498,7 @@ def execute(
                     and current - terminal_at >= plan["grace_seconds"]
                 ):
                     # Completion is evidenced by the event, even when the CLI hangs.
+                    terminal_grace_break = True
                     break
                 if current - started >= plan["timeout_seconds"]:
                     forced = "timed_out"
@@ -1462,7 +1544,11 @@ def execute(
     finally:
         if process:
             if descendants and not stopped:
-                reaped = descendants.stop(normal=forced is None)
+                exited_at_stop = process.poll() is not None
+                reaped = descendants.stop(
+                    normal=exited_at_stop,
+                    terminal_grace=terminal_grace_break and not exited_at_stop,
+                )
             # Drain final bytes after the group exits, without an unbounded communicate.
             for key in list(selector.get_map().values()):
                 while True:

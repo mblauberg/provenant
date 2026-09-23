@@ -551,6 +551,122 @@ time.sleep(30)
                 pass
 
 
+def _write_fake_owner_record(module, run_dir, row, token):
+    run_dir.mkdir(exist_ok=True)
+    (run_dir / "dispatch-owner.json").write_text(json.dumps({
+        "schema_version": 1, "kind": "dispatch", "run_dir": str(run_dir),
+        "run_token": token, "owner_pid": row.pid, "owner_pgid": row.pgid,
+        "owner_started_at": module._recorded_start_time(row),
+    }))
+
+
+@pytest.mark.parametrize("terminal_event", [False, True])
+def test_forged_fabric_token_does_not_spare_command(tmp_path, terminal_event):
+    pid_path = tmp_path / "forged.pid"
+    code = f"""import json,os,pathlib,subprocess,time
+environment = dict(os.environ)
+environment.update(PROVENANT_RUN_TOKEN='x', PROVENANT_RUN_DIR={str(tmp_path / 'not-a-run')!r})
+child = subprocess.Popen(['sleep', '60'], start_new_session=True, env=environment,
+    stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))
+if {terminal_event!r}:
+    print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'DONE'}}}}), flush=True)
+    print(json.dumps({{'type':'turn.completed'}}), flush=True)
+time.sleep(1.2)
+"""
+    try:
+        record = supervisor().execute(fixture_plan(tmp_path, code), tmp_path / "result.md")
+        pid = int(pid_path.read_text())
+        assert any(item["pid"] == pid for item in record["reaped"]), (
+            record["reaped"], record.get("spared"), record["warnings"], _live_process(pid)
+        )
+        assert record.get("spared", 0) == 0
+        assert not _live_process(pid)
+    finally:
+        if pid_path.exists():
+            try:
+                os.killpg(int(pid_path.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+def test_tracked_pre_exec_child_is_rechecked_before_signal(tmp_path, monkeypatch):
+    module = supervisor()
+    root = module._ProcessRow(501, os.getpid(), 501, str(int(time.time())), "root")
+    owner = module._ProcessRow(502, 501, 502, str(int(time.time())), "owner")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(),
+                                             str(int(time.time())), "test"),
+            501: root, 502: owner}
+    run_dir = tmp_path / "nested-run"
+    environment = []
+    signals = []
+    process = type("Process", (), {"pid": 501, "poll": lambda self: None})()
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: rows)
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: None)
+        patch.setattr(module, "_process_environment", lambda pid: environment if pid == 502 else ())
+        patch.setattr(module.os, "killpg", lambda pgid, signum: signals.append(("group", pgid)))
+        patch.setattr(module.os, "kill", lambda pid, signum: signals.append(("pid", pid)))
+        tracker = module._Descendants(process, "fixture")
+        tracker.sample()
+        assert owner.identity in tracker.tracked
+        _write_fake_owner_record(module, run_dir, owner, "inner-token")
+        environment[:] = [b"PROVENANT_RUN_TOKEN=inner-token",
+                          ("PROVENANT_RUN_DIR=" + str(run_dir)).encode()]
+        tracker.signal(signal.SIGTERM)
+    assert owner.identity in tracker.spared
+    assert ("group", owner.pgid) not in signals
+    assert ("pid", owner.pid) not in signals
+
+
+def test_token_without_owner_record_is_not_nested_owner(tmp_path, monkeypatch):
+    module = supervisor()
+    row = module._ProcessRow(502, 501, 502, str(int(time.time())), "sleep")
+    monkeypatch.setattr(module, "_process_environment", lambda _pid: [
+        b"PROVENANT_RUN_TOKEN=x",
+        ("PROVENANT_RUN_DIR=" + str(tmp_path / "absent-run")).encode(),
+    ])
+    assert not module._is_nested_fabric_owner(row)
+
+
+def test_owner_validation_error_cannot_prevent_root_group_kill(monkeypatch):
+    module = supervisor()
+    process = type("Process", (), {"pid": 501, "poll": lambda self: None})()
+    root = module._ProcessRow(501, os.getpid(), 501, str(int(time.time())), "root")
+    tracker = module._Descendants(process, "fixture")
+    tracker.root = root.identity
+    tracker.tracked[root.identity] = root
+    groups = []
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: {501: root})
+        patch.setattr(module, "_process_environment",
+                      lambda _pid: (_ for _ in ()).throw(RuntimeError("env failed")))
+        patch.setattr(module.os, "killpg", lambda pgid, _signal: groups.append(pgid))
+        patch.setattr(module.os, "kill", lambda *_args: None)
+        tracker.signal(signal.SIGTERM)
+    assert 501 in groups
+
+
+@pytest.mark.parametrize("field,value", [
+    ("owner_pid", 999999), ("owner_started_at", "old process"),
+    ("run_token", "wrong token"),
+])
+def test_nested_owner_record_must_match_live_identity(tmp_path, monkeypatch, field, value):
+    module = supervisor()
+    row = module._ProcessRow(502, 501, 502, str(int(time.time())), "owner")
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, row, "inner-token")
+    path = run_dir / "dispatch-owner.json"
+    record = json.loads(path.read_text())
+    record[field] = value
+    path.write_text(json.dumps(record))
+    monkeypatch.setattr(module, "_process_environment", lambda _pid: [
+        b"PROVENANT_RUN_TOKEN=inner-token",
+        ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+    ])
+    assert not module._is_nested_fabric_owner(row)
+
+
 @pytest.mark.parametrize("stop", ["normal", "cancelled"])
 def test_nested_fabric_owner_and_its_child_are_spared(tmp_path, stop):
     inner = """import pathlib,subprocess,time
@@ -561,13 +677,16 @@ pathlib.Path('inner-child.pid').write_text(str(child.pid))
 time.sleep(2.5)
 pathlib.Path('inner-terminal').write_text('ok')
 """
+    run_dir = tmp_path / "nested-run"
     outer = f"""import json,os,pathlib,subprocess,sys,time
 environment = dict(os.environ)
 environment['PROVENANT_RUN_TOKEN'] = 'nested-owner-fixture'
+environment['PROVENANT_RUN_DIR'] = {str(run_dir)!r}
 owner = subprocess.Popen([sys.executable, '-c', {inner!r}],
     start_new_session=True, env=environment, stdin=subprocess.DEVNULL,
     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 pathlib.Path('inner-owner.pid').write_text(str(owner.pid))
+print(json.dumps({{'type':'owner.ready'}}), flush=True)
 if {stop!r} == 'normal':
     print(json.dumps({{'type':'item.completed','item':{{'type':'agent_message','text':'DONE'}}}}), flush=True)
     print(json.dumps({{'type':'turn.completed'}}), flush=True)
@@ -576,11 +695,24 @@ else:
     time.sleep(60)
 """
     plan = fixture_plan(tmp_path, outer, timeout_seconds=8, idle_seconds=8)
+    recorded = []
+
+    def record_owner(_timestamp):
+        if recorded or not (tmp_path / "inner-owner.pid").exists():
+            return
+        pid = int((tmp_path / "inner-owner.pid").read_text())
+        row = supervisor()._process_snapshot().get(pid)
+        assert row is not None
+        _write_fake_owner_record(supervisor(), run_dir, row, "nested-owner-fixture")
+        recorded.append(True)
+
     try:
         record = supervisor().execute(
             plan, tmp_path / "result.md",
+            on_progress=record_owner,
             cancelled=lambda: stop == "cancelled" and (tmp_path / "inner-owner.pid").exists(),
         )
+        assert recorded
         assert record["status"] == ("ok" if stop == "normal" else "cancelled")
         assert record["spared"] >= 1
         assert record["reaped"] == []
@@ -596,6 +728,47 @@ else:
                     os.killpg(int(path.read_text()), signal.SIGKILL)
                 except ProcessLookupError:
                     pass
+
+
+def test_terminal_grace_with_live_claude_skips_settle_and_eof_child(tmp_path, monkeypatch):
+    module = supervisor()
+    child_pid = tmp_path / "mcp-child.pid"
+    code = f"""import json,pathlib,signal,subprocess,sys,time
+child = subprocess.Popen([sys.executable, '-c', 'import sys; sys.stdin.read()'],
+    stdin=subprocess.PIPE,
+    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))
+def stop(*_args):
+    child.stdin.close()
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, stop)
+print(json.dumps({{'type':'result','is_error':False,'result':'DONE'}}), flush=True)
+time.sleep(60)
+"""
+    modes = []
+    saw_child = []
+    original_stop = module._Descendants.stop
+
+    def observed_stop(self, *args, **kwargs):
+        modes.append(kwargs.get("normal"))
+        rows = self.sample(include_reparented=True)
+        saw_child.append(any(row.pid == int(child_pid.read_text())
+                             for row in self.live(rows).values()))
+        return original_stop(self, *args, **kwargs)
+
+    monkeypatch.setattr(module._Descendants, "stop", observed_stop)
+    try:
+        record = module.execute(fixture_plan(tmp_path, code, "claude"), tmp_path / "result.md")
+        assert record["status"] == "ok"
+        assert saw_child == [True]
+        assert modes == [False]
+        assert record["reaped"] == []
+    finally:
+        if child_pid.exists():
+            try:
+                os.killpg(int(child_pid.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 @pytest.mark.parametrize(
