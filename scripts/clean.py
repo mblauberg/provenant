@@ -79,6 +79,21 @@ def _age(path: Path, now: datetime) -> float:
     return max(0.0, (now.timestamp() - path.lstat().st_mtime) / DAY)
 
 
+def _activity_age(path: Path, now: datetime) -> float:
+    """Active runs may update descendants without changing the run directory."""
+    newest = path.lstat().st_mtime
+    for base, directories, files in os.walk(path, followlinks=False):
+        directories[:] = [name for name in directories if not (Path(base) / name).is_symlink()]
+        for name in (*directories, *files):
+            child = Path(base) / name
+            if not child.is_symlink():
+                try:
+                    newest = max(newest, child.lstat().st_mtime)
+                except OSError:
+                    pass
+    return max(0.0, (now.timestamp() - newest) / DAY)
+
+
 def _pid_alive(pid: Any, started_at: Any) -> bool:
     """Match run-registry's PID/start check; uncertain identity stays protected."""
     if type(pid) is not int or pid <= 1:
@@ -123,11 +138,11 @@ def _live(run_dir: Path) -> bool:
                  "_owner/dispatch-provider.json"):
         record = _json(run_dir / name)
         if record and any(_pid_alive(record.get(prefix + "_pid"), record.get(prefix + "_started_at"))
-                          for prefix in ("owner", "host", "provider")):
+                          for prefix in ("owner", "provider")):
             return True
     for attempt in run_dir.glob("tasks/*/attempt-*/attempt.json"):
         record = _json(attempt)
-        if record and _pid_alive(record.get("pgid"), None):
+        if record and record.get("state") != "terminal" and _pid_alive(record.get("pgid"), None):
             return True
     return False
 
@@ -195,7 +210,7 @@ def _run_kind(path: Path, canonical: bool) -> str | None:
 
 
 def _run_verdict(path: Path, kind: str, age: float, refs: str | None, pr_unknown: bool,
-                 older_than: float | None, indexed_ids: set[str]) -> str:
+                 older_than: float | None, indexed_ids: set[str], now: datetime) -> str:
     if (path / "KEEP").exists():
         return "keep:KEEP"
     if _live(path):
@@ -226,10 +241,17 @@ def _run_verdict(path: Path, kind: str, age: float, refs: str | None, pr_unknown
         retention = 30
     elif kind == "mission":
         retention = 7
-    elif status in {"failed", "partial", "stalled", "timed_out", "interrupted", "rejected", "tool_missing"}:
+    elif status in {"failed", "partial", "stalled", "timed_out", "interrupted", "rejected", "tool_missing",
+                    "usage_limited", "rate_limited", "auth_required", "model_unavailable", "permission_blocked"}:
         retention = 14
+    elif status == "input_required":
+        return "keep:resumable"
     elif status in {"active", "running", "queued", ""}:
-        if age > 2:
+        if kind not in {"dispatch", "batch"} or not any((path / name).is_file() for name in (
+                "dispatch-owner.json", "dispatch-provider.json", "_owner/dispatch-owner.json",
+                "_owner/dispatch-provider.json")):
+            return "triage:active-no-owner"
+        if _activity_age(path, now) > 2:
             return "abandon"
         return "keep:active"
     elif status in {"succeeded", "ok", "cancelled", "canceled", "complete", "completed"}:
@@ -273,15 +295,17 @@ def _indexed_run_ids(index: Path) -> dict[str, set[str]]:
     return ids
 
 
-def _worktree_verdict(root: Path, path: Path, pr_unknown: bool, open_heads: set[str],
+def _worktree_verdict(root: Path, path: Path, open_heads: set[str],
                       registered: set[Path]) -> str:
     if path.resolve() not in registered:
         return "triage:unregistered"
-    for artifact_root in (path / ".agent-run", path / ".work" / "wf"):
-        if artifact_root.is_symlink() or (artifact_root.is_dir() and any(artifact_root.iterdir())):
-            return "keep:worktree-runs"
-    if pr_unknown:
-        return "keep:pr-unknown"
+    agent = path / ".agent-run"
+    if agent.is_symlink() or any((agent / name).exists() for name in ("runs", "RUN.json", "RUN_RECEIPT.json")) or (
+            agent.is_dir() and any(child.name.startswith("mcp-") for child in agent.iterdir())):
+        return "keep:worktree-runs"
+    legacy = path / ".work" / "wf"
+    if legacy.is_symlink() or (legacy.is_dir() and any(legacy.iterdir())):
+        return "keep:worktree-runs"
     branch_result = _command("git", "symbolic-ref", "--quiet", "--short", "HEAD", cwd=path)
     if branch_result.returncode != 0:
         return "triage:detached"
@@ -299,15 +323,16 @@ def _worktree_verdict(root: Path, path: Path, pr_unknown: bool, open_heads: set[
         base = "refs/heads/main" if _command("git", "show-ref", "--verify", "--quiet", "refs/heads/main", cwd=root).returncode == 0 else "HEAD"
         if _command("git", "rev-parse", branch, cwd=root).stdout.strip() == _command("git", "rev-parse", base, cwd=root).stdout.strip():
             return "keep:branch-at-base"
-        # lsof checks cwd, including descendants; a missing or failing probe
-        # cannot prove the worktree is free of live processes.
+        # Query all process cwd paths once; +D recursively stats the worktree
+        # and can time out on node_modules before finding a live process.
         try:
-            liveness = _command("lsof", "-n", "-a", "-d", "cwd", "+D", str(path), cwd=root)
+            liveness = _command("lsof", "-n", "-a", "-d", "cwd", "-Fn", cwd=root)
         except (OSError, subprocess.TimeoutExpired):
             return "keep:liveness-unknown"
-        if len(liveness.stdout.splitlines()) > 1:
+        if any(line.startswith("n") and (line[1:] == str(path) or line[1:].startswith(str(path) + os.sep))
+               for line in liveness.stdout.splitlines()):
             return "keep:live"
-        if liveness.returncode != 1 or liveness.stderr.strip():
+        if liveness.returncode not in {0, 1} or liveness.stderr.strip():
             return "keep:liveness-unknown"
         return "delete"
     return "keep:unmerged"
@@ -381,7 +406,8 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
             if kind is None:
                 rows.append(_row(root, path, "unknown", "triage:hand-named", now))
                 continue
-            verdict = _run_verdict(path, kind, _age(path, now), refs, pr_unknown, older_than, indexed_ids.get(path.name, set()))
+            verdict = _run_verdict(path, kind, _age(path, now), refs, pr_unknown, older_than,
+                                   indexed_ids.get(path.name, set()), now)
             if "runs" not in include and verdict in {"delete", "abandon"}:
                 verdict = "keep:excluded"
             rows.append(_row(root, path, kind, verdict, now))
@@ -411,8 +437,8 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
         for path in sorted(sessions.iterdir()):
             if path.is_symlink():
                 verdict = "triage:symlink"
-            elif _age(path, now) >= max(14.0, older_than or 0):
-                verdict = "delete" if "sessions" in include else "triage:session-idle"
+            elif _activity_age(path, now) >= max(14.0, older_than or 0):
+                verdict = "triage:session-idle"
             else:
                 verdict = "keep:session"
             rows.append(_row(root, path, "session", verdict, now))
@@ -423,7 +449,7 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
             if path.is_symlink() or not path.is_dir():
                 verdict = "triage:unregistered"
             else:
-                verdict = _worktree_verdict(root, path, pr_unknown, open_heads, registered)
+                verdict = _worktree_verdict(root, path, open_heads, registered)
             if "worktrees" not in include and verdict == "delete":
                 verdict = "keep:excluded"
             elif verdict == "delete" and older_than is not None and _age(path, now) < older_than:
@@ -442,7 +468,9 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
     digest = "sha256:" + hashlib.sha256(json.dumps(digest_data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     total = sum(row["size_bytes"] for row in rows if row["verdict"] == "delete")
     all_size = sum(row["size_bytes"] for row in rows if row["kind"] not in {"owner-log", "index"})
-    result: dict[str, Any] = {"root": str(root), "rows": rows, "reclaimable_bytes": total, "plan_sha256": digest}
+    result: dict[str, Any] = {"root": str(root), "rows": rows, "reclaimable_bytes": total, "plan_sha256": digest,
+                              "warnings": (["GitHub PR state unavailable; run deletion held, merged worktrees use Git proof"]
+                                           if pr_bodies is None else [])}
     if all_size > 500 * 1024 * 1024:
         result["warning"] = {"message": "run artifacts exceed 500 MB", "largest": sorted(
             [{"path": row["path"], "size_bytes": row["size_bytes"]} for row in rows if row["kind"] not in {"owner-log", "index"}],
@@ -481,7 +509,8 @@ def apply(repo: Path, approved_plan: str, *, include: frozenset[str] = DEFAULT_I
         if row["kind"] == "worktree":
             command = [sys.executable, str(Path(__file__).with_name("worktree.py")), "remove", path.name,
                        "--repo", str(root), "--human-authorised"]
-            result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+            result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    timeout=120, check=False)
             if result.returncode != 0:
                 raise CleanError(f"worktree removal failed for {path}: {result.stderr.strip()}")
         elif path.is_dir():
@@ -523,14 +552,20 @@ def main(argv: list[str] | None = None) -> int:
         print(f"provenant clean: {exc}", file=sys.stderr)
         return 2
     if args.json:
-        print(json.dumps(report, indent=2, sort_keys=True))
+        public = {**report, "rows": [{key: value for key, value in row.items() if key != "_identity"}
+                                     for row in report["rows"]]} if not args.apply else report
+        print(json.dumps(public, indent=2, sort_keys=True))
     elif args.apply:
         print(f"removed {report['count']} paths")
         for path in report["removed"]:
             print(path)
     else:
+        keep = sum(row["verdict"].startswith("keep:") for row in report["rows"])
+        print(f"kept: {keep} paths")
         print("path | kind | age | size | verdict")
         for row in report["rows"]:
+            if row["verdict"].startswith("keep:"):
+                continue
             print(f"{row['path']} | {row['kind']} | {row['age_days']}d | {row['size_bytes']} B | {row['verdict']}")
         print(f"reclaimable: {report['reclaimable_bytes']} B")
         print(f"plan_sha256: {report['plan_sha256']}")
@@ -538,6 +573,8 @@ def main(argv: list[str] | None = None) -> int:
             print(report["warning"]["message"], file=sys.stderr)
             for row in report["warning"]["largest"]:
                 print(f"  {row['path']}: {row['size_bytes']} B", file=sys.stderr)
+        for warning in report["warnings"]:
+            print(f"warning: {warning}", file=sys.stderr)
     return 0
 
 
