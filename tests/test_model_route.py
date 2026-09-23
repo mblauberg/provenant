@@ -458,6 +458,11 @@ def test_unregistered_agy_model_passes_explicit_effort_unverified():
 
 
 def test_opencode_training_warning_and_paid_fallback_excludes_free():
+    for model in ("opencode/mimo-v2.6-flash-free", "opencode/nemotron-3-ultra-free"):
+        result, free_route = resolve("--adapter", "opencode", "--model", model, "--role", "worker")
+        assert result.returncode == 0, free_route
+        assert free_route["trains_on_prompts"] is True
+        assert free_route["warnings"]
     result, route = resolve("--adapter", "opencode", "--model",
                             "opencode/muse-spark-1.3-contributor-free", "--role", "worker")
     assert result.returncode == 0, route
@@ -3676,6 +3681,40 @@ def test_opencode_route_resolves_explicit_free_model():
     assert route["family_source"] == "broker-default"
     assert route["resolved_model"] == "opencode/union-alpha"
     assert route["endpoint_provider"] == "opencode"
+
+
+@pytest.mark.parametrize(("adapter", "model"), [
+    ("opencode", "mimo"),
+    ("agy", "gemini-3.8-flash"),
+])
+def test_ordinary_route_drops_only_an_implied_alias_for_explicit_model(adapter, model):
+    command = [sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve",
+               "--adapter", adapter, "--alias", "flagship", "--model", model,
+               "--role", "worker"]
+    env = {**os.environ, "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+           "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "FABRIC_ALIAS_IMPLIED": "1"}
+    implied = subprocess.run(command, capture_output=True, text=True, env=env)
+    assert implied.returncode == 0, implied.stderr
+    assert json.loads(implied.stdout)["alias"] == ""
+
+    env["FABRIC_ALIAS_IMPLIED"] = "0"
+    explicit = subprocess.run(command, capture_output=True, text=True, env=env)
+    assert explicit.returncode == 0, explicit.stderr
+    assert json.loads(explicit.stdout)["alias"] == "flagship"
+
+
+def test_model_route_namespace_without_alias_supplied_keeps_explicit_alias(monkeypatch, capsys):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    args = router.parser().parse_args([
+        "resolve", "--adapter", "codex", "--alias", "workhorse",
+        "--model", "gpt-6-luna", "--role", "worker",
+    ])
+    args.task_class_effort = None
+    args.model_override = {}
+    assert router.resolve(args, router.load_catalog(None)) == 0
+    assert json.loads(capsys.readouterr().out)["alias"] == "workhorse"
 
 
 @pytest.mark.parametrize("model", [

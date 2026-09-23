@@ -735,7 +735,8 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     fallback = _fallback_candidates(adapter_name, tier, model, catalog, cooldowns,
                                     args.fallback, args.fallback_route, explicit)
     return emit({"schema_version": 1, "status": "ok", "adapter": adapter_name,
-                 "alias": args.alias or "", "role": args.role, "requested_model": requested if explicit else "",
+                 "alias": "" if args.model and not getattr(args, "alias_supplied", True) else args.alias or "",
+                 "role": args.role, "requested_model": requested if explicit else "",
                  "resolved_model": model, "model_family": family, "family_source": family_source,
                  "identity_source": "registry" if registered else "passed-through",
                  "endpoint_provider": adapter.get("endpoint_provider", adapter_name), "provider": provider,
@@ -1149,7 +1150,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         "schema_version": 1,
         "catalog_date": catalog["catalog_date"],
         "adapter": args.adapter,
-        "alias": args.alias,
+        "alias": "" if args.model and not getattr(args, "alias_supplied", True) else args.alias,
         "role": args.role,
         "requested_effort": getattr(args, "raw_effort", requested_effort),
         "effort": requested_effort,

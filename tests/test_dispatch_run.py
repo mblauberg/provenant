@@ -123,6 +123,35 @@ def test_terminal_attempt_carries_nested_owner_spared_count(tmp_path: Path) -> N
     assert row["spared"] == 2
 
 
+def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
+    module = load_dispatch_module()
+    run_dir = make_run(tmp_path, "resume-root")
+    attempt_dir = run_dir / "tasks/task-1/attempt-001"
+    attempt_dir.mkdir(parents=True)
+    workspace = tmp_path / "recorded-workspace"
+    workspace.mkdir()
+    previous = {
+        "run_id": "resume-me", "task_id": "task-1", "attempt": 1, "state": "terminal",
+        "status": "ok", "mode": "read_only", "cwd": str(workspace / "src"), "worktree": None,
+        "workspace": {"root": str(workspace)}, "session_id": "saved-session",
+        "provenance": {"requested": {"adapter": "codex"}, "resolved_model": "fixture", "effort_applied": ""},
+        "applied": {"sandbox": "read-only", "network": None, "add_dirs": []},
+        "paths": {"events": None}, "requested_route": {},
+    }
+    (attempt_dir / "attempt.json").write_text(json.dumps(previous), encoding="utf-8")
+    args = SimpleNamespace(
+        run_dir=run_dir, resume="resume-me", task_id=None, tool=None, model=None, effort=None,
+        access_mode=None, worktree=None, provider_cwd=None, sandbox=None, network=None,
+        add_dirs=[], resume_session=None, fallback=None, context_ceiling=None,
+        intent="ordinary", orchestrator_family="", role="worker", risk_tier="",
+        model_override_tier="", reviewer_id="", preface=True,
+    )
+
+    module.prepare_resume(args)
+
+    assert args.workspace_root == workspace
+
+
 def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path, "one")
     receipt_before = (run_dir / "RUN_RECEIPT.json").read_bytes()
@@ -193,6 +222,39 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
     assert (run_dir / "RUN_RECEIPT.json").read_bytes() == receipt_before
 
 
+def test_opencode_explicit_model_receipt_drops_implied_alias(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "opencode-explicit-model")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Reply exactly OK\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_executable(
+        bin_dir / "opencode",
+        """#!/usr/bin/env bash
+        printf '{\"type\":\"text\",\"part\":{\"text\":\"OK\"}}\\n'
+        """,
+    )
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
+    env["PROVENANT_NO_OS_CONFINEMENT"] = "1"
+
+    result = subprocess.run(
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "task-1",
+         "--adapter", "opencode", "--prompt-file", str(prompt),
+         "--orchestrator-family", "openai", "--model", "mimo", "--role", "worker"],
+        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    attempt = run_dir / "dispatch/tasks/task-1/attempt-001"
+    adapter_receipt = json.loads((attempt / "adapter-receipt.json").read_text(encoding="utf-8"))
+    record = json.loads(
+        (run_dir / "tasks/task-1/attempt-001/attempt.json").read_text(encoding="utf-8")
+    )
+    assert adapter_receipt["route_alias"] == ""
+    assert record["provenance"]["requested"]["alias"] == ""
+
+
 def test_batch_preflight_does_not_invent_an_explicit_alias_for_model_routes(tmp_path: Path, monkeypatch) -> None:
     module = load_dispatch_module()
     monkeypatch.chdir(tmp_path)
@@ -222,6 +284,75 @@ def test_batch_preflight_does_not_invent_an_explicit_alias_for_model_routes(tmp_
     assert model_only["notes"] == []
     assert "--alias" in resolve_commands[1]
     assert explicit_both["notes"] == ["alias and model both supplied; model won"]
+
+
+def test_explicit_model_receipt_does_not_record_an_implied_alias(tmp_path):
+    mod = load_dispatch_module()
+    args = SimpleNamespace(
+        tool="opencode", alias="flagship", model="mimo", alias_supplied=False, effort=None,
+        task_id="dispatch-001", access_mode="read_only", worktree=None,
+        _phase_timings={}, reviewer_id=None, risk_tier=None,
+        model_override_tier=None,
+    )
+    row = mod.contract_row(args, tmp_path, 1, tmp_path / "attempt", {}, "now")
+    assert row["provenance"]["requested"]["alias"] == ""
+
+
+def test_explicit_model_and_alias_are_both_recorded_in_receipt(tmp_path):
+    mod = load_dispatch_module()
+    args = SimpleNamespace(
+        tool="opencode", alias="workhorse", model="gpt-6-luna", alias_supplied=True,
+        effort=None, task_id="dispatch-001", access_mode="read_only", worktree=None,
+        _phase_timings={}, reviewer_id=None, risk_tier=None,
+        model_override_tier=None,
+    )
+    row = mod.contract_row(args, tmp_path, 1, tmp_path / "attempt", {}, "now")
+    assert row["provenance"]["requested"]["alias"] == "workhorse"
+
+
+def test_workspace_identity_keeps_root_and_records_provider_cwd(tmp_path):
+    mod = load_dispatch_module()
+    root = tmp_path / "workspace"
+    cwd = root / "sub"
+    cwd.mkdir(parents=True)
+    identity = mod.workspace_identity(root, cwd)
+    assert identity["cwd"] == str(cwd)
+    assert identity["root"] == str(root)
+
+
+def test_workspace_identity_canonicalizes_fallback_root(tmp_path):
+    mod = load_dispatch_module()
+    real_root = tmp_path / "workspace"
+    (real_root / "sub").mkdir(parents=True)
+    workspace_link = tmp_path / "workspace-link"
+    workspace_link.symlink_to(real_root, target_is_directory=True)
+
+    identity = mod.workspace_identity(workspace_link, workspace_link / "sub")
+
+    assert identity["root"] == str(real_root.resolve())
+    assert identity["cwd"] == str((real_root / "sub").resolve())
+
+
+def test_workspace_identity_keeps_canonical_caller_root_inside_git_checkout(tmp_path, monkeypatch):
+    mod = load_dispatch_module()
+    repo = tmp_path / "repo"
+    workspace = repo / "workspace"
+    provider_cwd = workspace / "sub"
+    provider_cwd.mkdir(parents=True)
+    monkeypatch.setattr(
+        mod.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0,
+            f"{repo}\n{'a' * 40}\n" if args[0][1:3] == ["rev-parse", "--show-toplevel"] else "",
+            "",
+        ),
+    )
+
+    identity = mod.workspace_identity(workspace, provider_cwd)
+
+    assert identity["root"] == str(workspace.resolve())
+    assert identity["cwd"] == str(provider_cwd.resolve())
 
 
 def test_agy_git_evidence_is_copied_into_attempt_and_bound_to_prompt(tmp_path: Path, monkeypatch) -> None:
@@ -2552,6 +2683,8 @@ print(json.dumps({"type":"result","result":os.getcwd()}))
     second = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
     assert second['status'] == 'ok'
     assert second['cwd'] == str(nested)
+    second_legacy = json.loads((run / second['legacy_attempt_path']).read_text())
+    assert second_legacy['workspace']['root'] == str(tmp_path.resolve())
     assert second['requested_route']['preface'] is False
     assert second['requested_route']['intent'] == row['requested_route']['intent']
     assert 'resumed_by_relaunch' in second['provenance']['notes']

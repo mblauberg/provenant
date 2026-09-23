@@ -286,6 +286,7 @@ def fabric_free_env():
     }
     env["AGENT_FABRIC_PRODUCT_ROOT"] = str(PRODUCT_ROOT)
     env["AGENT_FABRIC_INSTANCE_ROOT"] = str(PRODUCT_ROOT)
+    env["PROVENANT_NO_OS_CONFINEMENT"] = "1"
     return env
 
 
@@ -2149,6 +2150,7 @@ def test_codex_explicit_model_reaches_adapter_and_reports_runtime_failure():
         assert record["status"] == "failed"
         assert record["resolved_model"] == "gpt-5.6-sol"
         assert record["requested_model"] == "gpt-5.6-sol"
+        assert record["route_alias"] == ""
         assert record["catalog_model"] == ""
         assert record["model_selection"] == ""
         assert invoked.exists()
@@ -2299,6 +2301,35 @@ def test_chain_all_failed_uses_dispatch_schema():
         assert record["tool"] == "chain"
         assert record["status"] == "all_failed"
         assert record["read_only_guarantee"] == "none"
+
+
+def test_chain_tool_missing_uses_the_entry_model_when_recording_alias(tmp_path):
+    env = fabric_free_env()
+    env["HOME"] = str(tmp_path / "home")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    # A wrapper, not a symlink: a symlinked venv python loses its site-packages.
+    (bin_dir / "python3").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+    (bin_dir / "python3").chmod(0o755)
+    available_path = os.pathsep.join(
+        path for path in os.environ["PATH"].split(os.pathsep)
+        if path and not (Path(path) / "cursor-agent").exists()
+    )
+    env["PATH"] = f"{bin_dir}:{available_path}"
+    result = subprocess.run(
+        [str(SCRIPT), "--intent", "ordinary", "--chain", "cursor:cursor-grok-4.5-high:",
+         "--orchestrator-family", "openai", "--prompt", "Reply OK"],
+        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode != 0
+    entry_record = next(
+        json.loads(line) for line in result.stderr.splitlines() if line.startswith("{")
+    )
+    assert entry_record["tool"] == "cursor"
+    assert entry_record["status"] == "tool_missing", result.stderr
+    assert entry_record["requested_model"] == "cursor-grok-4.5-high"
+    assert entry_record["route_alias"] == ""
 
 
 def test_opencode_chain_all_failed_removes_raw_sidecar():

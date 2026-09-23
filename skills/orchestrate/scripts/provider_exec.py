@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import deque
 import ctypes
+import functools
 import json
 import math
 import os
@@ -27,6 +28,24 @@ from adapters import profile
 from output_custody import install, verify, CustodyError
 import context_usage
 import process_info
+
+
+# Home-relative paths a confined provider needs for its own state and sign-in,
+# found by probing each CLI under a deny-home profile (2026-09-24). A "*" suffix
+# also covers siblings sharing the prefix, such as an atomic-rewrite temp file.
+CONFINED_STATE = {
+    "agy": {
+        "read_write": (".gemini/antigravity-cli", ".gemini/config", ".gemini/oauth_creds.json*"),
+        # Without the keychain file agy falls back to an interactive sign-in and times out.
+        "read": ("Library/Keychains/login.keychain-db",),
+    },
+    "opencode": {
+        "read_write": (".local/share/opencode", ".local/state/opencode", ".cache/opencode"),
+        "read": (".config/opencode",),
+    },
+}
+EXTRA_DENIED_READS = (".claude/projects", ".codex/sessions")
+_DARWIN_USER_DIRS_CACHE = None
 
 
 def now():
@@ -78,12 +97,105 @@ def credential_path(path):
     )
 
 
+def _sandbox_exec_path():
+    if sys.platform != "darwin" or os.environ.get("PROVENANT_NO_OS_CONFINEMENT") == "1":
+        return None
+    path = shutil.which("sandbox-exec")
+    return path if path and _sandbox_exec_usable(path) else None
+
+
+@functools.lru_cache(maxsize=None)
+def _sandbox_exec_usable(path):
+    # macOS refuses a nested sandbox; a sandboxed caller runs unconfined with a warning.
+    try:
+        probe = subprocess.run(
+            [path, "-p", "(version 1)(allow default)", "/usr/bin/true"],
+            capture_output=True, timeout=10, stdin=subprocess.DEVNULL,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0
+
+
+def _sbpl_string(path):
+    value = str(Path(path).expanduser().resolve())
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _darwin_user_dirs():
+    global _DARWIN_USER_DIRS_CACHE
+    if _DARWIN_USER_DIRS_CACHE is not None:
+        return _DARWIN_USER_DIRS_CACHE
+    found = []
+    for name in ("DARWIN_USER_TEMP_DIR", "DARWIN_USER_CACHE_DIR"):
+        try:
+            result = subprocess.run(["/usr/bin/getconf", name], capture_output=True, text=True, timeout=5)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if result.returncode != 0:
+            continue
+        value = result.stdout.strip()
+        if value:
+            found.append(Path(value))
+    if len(found) == 2:
+        _DARWIN_USER_DIRS_CACHE = tuple(found)
+    return tuple(found)
+
+
+def _sbpl_filter(path):
+    text = str(path)
+    if text.endswith("*"):
+        pattern = text[:-1]
+        regex_metacharacters = set(r'.^$*+?()[]{}|\\"')
+        pattern = "".join("\\" + char if char in regex_metacharacters else char for char in pattern)
+        return '(regex #"^' + pattern + '[^/]*$")'
+    return "(subpath " + _sbpl_string(path) + ")"
+
+
+def _sbpl_rule(action, operations, paths):
+    return f"({action} {operations} " + " ".join(_sbpl_filter(path) for path in paths) + ")\n" if paths else ""
+
+
+def os_confinement_profile(plan):
+    """Deny the home directory and shared temp, re-allow the provider's own state, then the task's paths.
+
+    SBPL applies the last matching rule, so each later rule narrows or widens the one before.
+    """
+    root = Path(plan.get("workspace_root") or plan["cwd"]).expanduser().resolve()
+    home = Path.home().resolve()
+    state = CONFINED_STATE.get(plan.get("adapter"), {})
+    add_dirs = [Path(path) for path in plan.get("applied", {}).get("add_dirs", [])]
+    return (
+        "(version 1)\n(allow default)\n"
+        + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
+        + _sbpl_rule("deny", "file-write*", [home, Path("/private/tmp"), Path("/private/var/folders")])
+        + _sbpl_rule("allow", "file-read-data file-write*", list(_darwin_user_dirs()))
+        + _sbpl_rule("deny", "file-read-data file-write*", [root, *add_dirs, *(home / path for path in EXTRA_DENIED_READS)])
+        + _sbpl_rule("allow", "file-read-data file-write*", [home / path for path in state.get("read_write", ())])
+        + _sbpl_rule("allow", "file-read-data", [home / path for path in state.get("read", ())])
+        + _sbpl_rule("deny", "file-write*", add_dirs)
+        + _sbpl_rule("allow", "file-read-data", [
+            Path(plan["cwd"]), *add_dirs
+        ])
+    )
+
+
+def confinement_command(plan, command):
+    if plan.get("applied", {}).get("confinement") != "sandbox-exec":
+        return list(command)
+    sandbox_exec = _sandbox_exec_path()
+    if not sandbox_exec:
+        raise RuntimeError("sandbox-exec is unavailable for a confined provider launch")
+    return [sandbox_exec, "-p", os_confinement_profile(plan), *command]
+
+
 def build_plan(
     adapter,
     route,
     prompt,
     *,
     cwd=None,
+    workspace_root=None,
     mode="read_only",
     worktree=None,
     sandbox=None,
@@ -103,9 +215,13 @@ def build_plan(
     **metadata,
 ):
     config = profile(adapter)
-    selected_cwd = Path(worktree or cwd or Path.cwd()).expanduser().resolve()
+    selected_cwd = Path(worktree or cwd or workspace_root or Path.cwd()).expanduser().resolve()
     if not selected_cwd.is_dir():
         raise ValueError("cwd must be a readable directory")
+    # A writer's worktree may sit outside the caller's tree; only a read cwd is bounded here.
+    if workspace_root and not worktree and not selected_cwd.is_relative_to(Path(workspace_root).expanduser().resolve()):
+        raise ValueError("cwd must be inside the workspace")
+    workspace_root = str(Path(workspace_root or selected_cwd).expanduser().resolve())
     cwd = str(selected_cwd)
     sandbox = sandbox or (
         "workspace-write" if mode == "worktree_write" else "read-only"
@@ -175,6 +291,21 @@ def build_plan(
         mode == "worktree_write" and adapter in {"claude", "cursor"}
     ):
         guarantee = "best_effort"
+    confinement = "none"
+    confinement_requested = mode == "read_only" and adapter in {"agy", "opencode"}
+    if confinement_requested and _sandbox_exec_path():
+        confinement = "sandbox-exec"
+        if adapter == "agy":
+            guarantee = "best_effort"
+    elif confinement_requested:
+        warnings.append(f"{adapter} read-only reads are unconfined")
+    if (
+        mode == "read_only"
+        and cwd != workspace_root
+        and adapter in {"codex", "claude", "cursor", "kiro", "agy", "opencode"}
+        and confinement != "sandbox-exec"
+    ):
+        warnings.append(f"{adapter} read_only: cwd is not a read boundary")
     if adapter in {"agy", "kiro"} or (
         mode == "worktree_write" and guarantee != "enforced"
     ):
@@ -226,6 +357,7 @@ def build_plan(
         "prompt": prompt,
         "network_requested": network,
         "cwd": cwd,
+        "workspace_root": workspace_root,
         "mode": mode,
         "worktree": str(worktree) if worktree else None,
         "timeout_seconds": timeout,
@@ -249,6 +381,7 @@ def build_plan(
             "network": applied_network,
             "add_dirs": directories,
             "guarantee": guarantee,
+            "confinement": confinement,
         },
         "agy_sandbox": intent == "assurance"
         or os.environ.get("CF_DISPATCH_AGY_SANDBOX", "0") == "1",
@@ -582,6 +715,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         if errors
         else stderr
     )
+    result["failure_text"] = failure_text
     # Permission denials in diagnostics invalidate a claimed success (Agy does this).
     denial = adapter == "agy" and re.search(SIGNATURES[0][1], stderr, re.I)
     if denial:
@@ -1339,6 +1473,7 @@ def execute(
             ("GIT_", "PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")
         ) or key in {
             "PROVENANT_FABRIC_PHASES",
+            "PROVENANT_NO_OS_CONFINEMENT",
             "AGENT_FABRIC_STATE_DIRECTORY",
             "AGENT_FABRIC_SEAT",
             "AGENT_FABRIC_CLIENT_LABEL",
@@ -1350,6 +1485,7 @@ def execute(
         PROVENANT_ROUTE=plan["route_label"],
         PROVENANT_RUN_ID=plan.get("run_id", ""),
         PROVENANT_CHAIR=plan.get("chair", ""),
+        PWD=plan["cwd"],
     )
     attempt_marker = uuid.uuid4().hex
     environment["PROVENANT_ATTEMPT_MARKER"] = attempt_marker
@@ -1368,14 +1504,18 @@ def execute(
             ANTHROPIC_API_KEY="",
         )
     if plan["adapter"] == "opencode":
+        bash_permission = {"*": "allow"} if plan["mode"] == "worktree_write" else {
+            "*": "deny",
+            "provenant-no-shell": "allow",
+        }
         permission = {
             "edit": {"*": "allow" if plan["mode"] == "worktree_write" else "deny"},
-            "bash": {"*": "allow" if plan["mode"] == "worktree_write" else "deny"},
+            "bash": bash_permission,
             "question": "deny",
             "external_directory": {"*": "deny"},
             "webfetch": "deny" if plan.get("network_requested") is False else "allow",
         }
-        # No shell-pattern allowlist: "git diff; write" must remain denied on reads.
+        # The sentinel matches no real command and exists only so Zen declares bash.
         environment["OPENCODE_CONFIG_CONTENT"] = json.dumps({"permission": permission})
     warning_text = "\n".join(plan["warnings"])
     if warning_text:
@@ -1514,6 +1654,7 @@ def execute(
             command[0] = (
                 shutil.which(command[0], path=environment.get("PATH")) or command[0]
             )
+            command = confinement_command(plan, command)
             subreaper = _enable_subreaper()
             process = subprocess.Popen(
                 command,
@@ -1827,7 +1968,15 @@ def execute(
     )
     guarantee = plan["applied"]["guarantee"]
     fix = (
-        _model_unavailable_fix(plan)
+        "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"
+        if status == "model_unavailable"
+        and plan["adapter"] == "opencode"
+        and re.search(
+            r"FreeTierError|free tier can only be used from within OpenCode",
+            parsed.get("failure_text", stderr),
+            re.I,
+        )
+        else _model_unavailable_fix(plan)
         if status == "model_unavailable"
         else {
             "auth_required": "authenticate the provider CLI",
@@ -1937,6 +2086,7 @@ def parser():
     p.add_argument("--plan-only", action="store_true")
     p.add_argument("--mode", default="read_only")
     p.add_argument("--cwd", type=Path)
+    p.add_argument("--workspace-root", type=Path)
     p.add_argument("--worktree")
     p.add_argument("--sandbox")
     p.add_argument("--network", choices=["true", "false"])
@@ -1961,16 +2111,17 @@ def main():
     args = parser().parse_args()
     writer_lease = None
     try:
-        if args.cwd and not args.cwd.expanduser().resolve().is_relative_to(
-            Path.cwd().resolve()
-        ):
-            raise ValueError("cwd must be inside the current workspace")
+        workspace_root = Path(args.workspace_root or Path.cwd()).expanduser().resolve()
+        selected_cwd = Path(args.cwd or workspace_root).expanduser().resolve()
+        if not args.worktree and not selected_cwd.is_relative_to(workspace_root):
+            raise ValueError("cwd must be inside the workspace")
         plan = build_plan(
             args.adapter,
             json.loads(args.route_file.read_text()),
             args.prompt_file.read_text(),
             mode=args.mode,
             cwd=args.cwd,
+            workspace_root=workspace_root,
             worktree=args.worktree,
             sandbox=args.sandbox,
             network=None if args.network is None else args.network == "true",

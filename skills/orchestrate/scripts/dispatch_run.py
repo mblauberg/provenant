@@ -220,10 +220,10 @@ def active_receipt_error(receipt: Any) -> str | None:
     return None
 
 
-def workspace_identity(workspace: Path) -> dict[str, Any]:
+def workspace_identity(workspace: Path, provider_cwd: Path | None = None) -> dict[str, Any]:
     identity: dict[str, Any] = {
-        "cwd": str(workspace),
-        "root": str(workspace),
+        "cwd": str((provider_cwd or workspace).resolve()),
+        "root": str(workspace.resolve()),
         "base_revision": None,
         "working_tree": "unavailable",
     }
@@ -249,7 +249,6 @@ def workspace_identity(workspace: Path) -> dict[str, Any]:
             check=True,
         ).stdout
         identity.update(
-            root=str(Path(base[0]).resolve()),
             base_revision=base[1].lower(),
             working_tree="dirty" if dirty else "clean",
         )
@@ -895,7 +894,8 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
             return None
         plan = provider_exec.build_plan(
             args.tool, route, prompt,
-            cwd=workspace, mode=args.access_mode, timeout_seconds=provider_timeout_seconds(args.timeout_seconds),
+            cwd=workspace, workspace_root=workspace, mode=args.access_mode,
+            timeout_seconds=provider_timeout_seconds(args.timeout_seconds),
             intent=args.intent, preface=args.preface, requested_model=args.model,
             requested_effort=args.effort or "", run_id=os.environ.get("PROVENANT_RUN_ID", ""),
             chair=os.environ.get("PROVENANT_CHAIR", ""),
@@ -1269,13 +1269,14 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     family=route.get("model_family") or "unknown"
     label=args.tool+"/"+model+("@"+effort if effort else "")
     identity="resolved" if model else "unknown"
-    provenance={"requested":{"adapter":args.tool,"alias":args.alias,"model":args.model,"effort":args.effort},
+    provenance={"requested":{"adapter":args.tool,"alias":"" if args.model and not getattr(args,"alias_supplied",True) else args.alias or "","model":args.model,"effort":args.effort},
         "resolved_model":model,"observed_model":None,"observed_source":None,"identity":identity,
         "provider":route.get("endpoint_provider") or args.tool,"transport":args.tool,"family":family,
         "effort_requested":args.effort,"effort_applied":effort,"cli_version":route.get("cli_version"),
         "fallback_from":getattr(args,"fallback_from",None),"notes":[],"line":f"Route: {label} ({family}; {identity})"}
     return {"schema":"fabric.attempt.v1","run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,
         "attempt":number,"state":"running","status":None,"mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
+        "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
         "worktree":str(args.worktree) if args.worktree else None,"started_at":started_at,"ended_at":None,"last_progress_at":started_at,
         "pgid":None,"session_id":plan.get("session_id"),"retryable":False,"reset_at":None,"retry_after":None,"fix":None,
         "evidence":{"exit":None,"signal":None,"signature":None,"excerpt":""},"question":None,
@@ -1360,6 +1361,7 @@ def prepare_resume(args):
     args.effort=None if previous["provenance"].get("effort_observed_source") else previous["provenance"]["effort_applied"];args.task_id=previous["task_id"]
     args.access_mode=previous["mode"];args.worktree=Path(previous["worktree"]) if previous.get("worktree") else None
     args.provider_cwd=Path(previous["cwd"]) if previous["mode"]=="read_only" else None
+    args.workspace_root=Path(previous.get("workspace_root") or (previous.get("workspace") or {}).get("root") or Path.cwd()).expanduser().resolve()
     args.sandbox=previous["applied"]["sandbox"];args.network=None if previous["applied"]["network"] is None else str(previous["applied"]["network"]).lower()
     args.add_dirs=previous["applied"]["add_dirs"];args.resume_session=previous["session_id"]
     args.fallback="false"
@@ -1425,7 +1427,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     )
     args._phase_timings.update(measured)
     run_dir = args.run_dir.resolve()
-    workspace = Path.cwd().resolve()
+    workspace = Path(getattr(args, "workspace_root", None) or Path.cwd()).expanduser().resolve()
+    provider_cwd = Path(args.provider_cwd).expanduser().resolve() if args.provider_cwd else workspace
+    workspace_observation = workspace_identity(workspace, provider_cwd)
     if not contains_run(run_dir, workspace):
         return fail(run_dir, "run_dir_invalid", "run directory must be inside run_root(cwd)")
     if not run_dir.is_dir():
@@ -1578,7 +1582,6 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "access_mode": args.access_mode,
         "worktree": str(args.worktree) if args.worktree else "",
     }
-    workspace_observation = workspace_identity(workspace)
     worktree_lease = None
     if args.access_mode == "worktree_write" and args.worktree is not None:
         try:
@@ -1613,6 +1616,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             args._phase_timings["route_plan"] = round((time.monotonic() - plan_started) * 1000, 3)
             plan = fast_plan if fast_plan is not None else planner_result(planning)
             if plan.get("schema") == "fabric.exec-plan.v1":
+                provider_cwd = Path(plan.get("cwd") or workspace).resolve()
+                workspace_observation["cwd"] = str(provider_cwd)
                 plan.update(timeout_seconds=args.timeout_seconds,run_id=run_identity(run_dir,run_receipt),chair=os.environ.get("PROVENANT_CHAIR") or os.environ.get("AGENT_FABRIC_SEAT", ""),fallback_from=getattr(args,"fallback_from",None))
                 if hasattr(args,"resume_relaunch"):
                     plan["prompt"] += "\n\nPrevious turn and question:\n"+args.resume_relaunch
@@ -1738,7 +1743,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     # seat, state directory and checkout rather than inherit the chair's.
                     for name in ("AGENT_FABRIC_STATE_DIRECTORY", "AGENT_FABRIC_SEAT",
                                  "AGENT_FABRIC_CLIENT_LABEL", "AGENT_FABRIC_LABEL", "AGENT_FABRIC_PRODUCT_ROOT",
-                                 "PROVENANT_FABRIC_PHASES"):
+                                 "PROVENANT_FABRIC_PHASES", "PROVENANT_NO_OS_CONFINEMENT"):
                         provider_environment.pop(name, None)
                     for name in list(provider_environment):
                         if name.startswith(("PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")):

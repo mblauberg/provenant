@@ -409,6 +409,8 @@ emit_record() {
   local risk_tier="${20:-$RISK_TIER}" policy_override="${21:-}"
   local model_override_tier="${22:-$MODEL_OVERRIDE_TIER}"
   local reason="${23:-}"
+  local receipt_alias="$MODEL_ALIAS"
+  if [ -n "$model" ] && [ "$ALIAS_EXPLICIT" -eq 0 ]; then receipt_alias=""; fi
   local output_digest=""
   model="$(resolve_model "$tool" "$model")"
   [ -n "$endpoint_provider" ] || endpoint_provider="$(endpoint_provider "$tool")"
@@ -462,7 +464,7 @@ emit_record() {
     "$(printf '%s' "$identity" | json_escape)" \
     "$(printf '%s' "$catalog_model" | json_escape)" \
     "$(printf '%s' "$model_selection" | json_escape)" \
-    "$(printf '%s' "$MODEL_ALIAS" | json_escape)" \
+    "$(printf '%s' "$receipt_alias" | json_escape)" \
     "$(printf '%s' "$REVIEWER_ID" | json_escape)" \
     "$(printf '%s' "$risk_tier" | json_escape)" \
     "$(printf '%s' "$model_override_tier" | json_escape)" \
@@ -792,6 +794,7 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
         fi
         local -a supervisor=(python3 "$SCRIPT_DIR/provider_exec.py" --route-file "$tmpdir/route.json"
           --adapter "$tool" --prompt-file "$PROMPT_TMP" --out "$OUT" --mode "$ACCESS_MODE"
+          --workspace-root "$(pwd -P)"
           --intent "$INTENT" --orchestrator-family "$ORCH_FAMILY" --reviewer-id "$REVIEWER_ID"
           --risk-tier "$RISK_TIER" --model-override-tier "$MODEL_OVERRIDE_TIER"
           --requested-model "$model_pin" --requested-effort "$route_effort_input")
