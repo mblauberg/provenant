@@ -235,6 +235,33 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect((batch.structuredContent as any).runs).toHaveLength(2);
     expect((batch.content as any[])[0].text).toMatch(/^batch mcp-.* 2 tasks: 2 ok/u);
     await call("status", { ids: [(batch.structuredContent as any).runs[0].run_id] });
+    const batchRow = (batch.structuredContent as any).runs[0];
+    const unnamed = await call("dispatch", { resume: batchRow.run_id, prompt: "again", wait_seconds: 5 });
+    expect(unnamed.structuredContent).toMatchObject({ status: "rejected", error: "resume_task_required" });
+    const resumedTask = await call("dispatch", {
+      resume: batchRow.run_id, task_id: "two", prompt: "again", context_ceiling: 250000, wait_seconds: 5,
+    });
+    expect(resumedTask.structuredContent).toMatchObject({ status: "ok", run_id: batchRow.run_id, task_id: "two", attempt: 2 });
+    expect(JSON.parse(readFileSync(join(batchRow.run_dir, "_owner", "two-args-2.json"), "utf8")))
+      .toEqual(expect.arrayContaining(["--task-id", "two", "--context-ceiling", "250000"]));
+    const byOwnId = await call("dispatch", { resume: "one", prompt: "again", wait_seconds: 5 });
+    expect(byOwnId.structuredContent).toMatchObject({ status: "ok", run_id: batchRow.run_id, task_id: "one", attempt: 2 });
+    const batchStatus = (await call("status", { ids: [batchRow.run_id] })).structuredContent as any;
+    expect(batchStatus.runs.map((row: any) => [row.task_id, row.attempt, row.batch_id]).sort())
+      .toEqual([["one", 2, batchRow.batch_id], ["two", 2, batchRow.batch_id]]);
+    const handed = (await call("dispatch", {
+      handoff: batchRow.run_id, task_id: "two", prompt: "carry on", context_ceiling: 150000, wait_seconds: 5,
+    })).structuredContent as any;
+    expect(handed).toMatchObject({ status: "ok", attempt: 1 });
+    expect(handed.run_id).not.toBe(batchRow.run_id);
+    const handedArgs = JSON.parse(readFileSync(join(handed.run_dir, "_owner", `${handed.task_id}-args-1.json`), "utf8"));
+    expect(handedArgs).toEqual(expect.arrayContaining(["--adapter", "codex", "--context-ceiling", "150000"]));
+    const brief = readFileSync(join(handed.run_dir, "_owner", `${handed.task_id}-prompt-1.md`), "utf8");
+    expect(brief.startsWith(`Fresh session handed off from Fabric run ${batchRow.run_id} task two (codex/fixture@high`)).toBe(true);
+    expect(brief.endsWith("x".repeat(100) + "\n>>>\n\ncarry on")).toBe(true);
+    expect(brief.length).toBeLessThan(8400);
+    expect((await call("dispatch", { handoff: batchRow.run_id, prompt: "x", wait_seconds: 0 })).structuredContent)
+      .toMatchObject({ status: "rejected", error: "handoff_task_required" });
     mkdirSync(join(linked, "nested-batch"));
     writeFileSync(join(linked, "batch.md"), "first");
     const routed = await call("dispatch", {

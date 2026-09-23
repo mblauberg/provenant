@@ -53,6 +53,7 @@ from _shared.bounded_process import stop_process_group
 from layout import run_workspace, run_root, contains_run
 import provider_exec
 import exec_routing
+import context_usage
 from fabric_records import render_digest, write_cooldown, append_index, TERMINAL_STATUSES
 from _shared.custody import (
     OwnedFileError, OwnedLinkError, atomic_write_contained, contained_regular_path,
@@ -1218,7 +1219,7 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     elif legacy["status"]=="blocked": status="input_required"
     elif legacy["status"]=="succeeded": status="ok"
     if status not in TERMINAL_STATUSES: status="failed"
-    for field in ("session_id","retryable","reset_at","retry_after","fix","evidence","applied","warnings","reaped","provenance","pgid","last_progress_at"):
+    for field in ("session_id","retryable","reset_at","retry_after","fix","evidence","applied","context","warnings","reaped","provenance","pgid","last_progress_at"):
         if field in adapter: row[field]=adapter[field]
     row.update(state="terminal",status=status,ended_at=legacy["finished_at"],question=adapter.get("question") or (legacy.get("question") or {}).get("prompt"))
     if not legacy.get("result"): row["paths"]["result"]=None
@@ -1251,7 +1252,10 @@ def prepare_resume(args):
     rows=[json.loads(path.read_text()) for path in paths]
     rows=[row for row in rows if row.get("run_id")==args.resume]
     if not rows: raise ValueError("resume run not found")
-    if len({row["task_id"] for row in rows})!=1: raise ValueError("resume requires a single-task run")
+    tasks={row["task_id"] for row in rows}
+    if len(tasks)>1:
+        if args.task_id not in tasks: raise ValueError("resume a batch task: pass task_id")
+        rows=[row for row in rows if row["task_id"]==args.task_id]
     previous=max(rows,key=lambda row:row["attempt"])
     if previous["state"]!="terminal": raise ValueError("resume requires a terminal attempt")
     route=previous.get("requested_route") or {}
@@ -1299,6 +1303,11 @@ def prepare_resume(args):
             raise ValueError("Claude session unavailable after incomplete writer turn; review worktree changes, then dispatch a new run")
         args.resume_session=None
         args.resume_relaunch=resume_relaunch_context(args.run_dir,previous)
+    if args.context_ceiling is None:
+        prior=previous.get("applied") or {}
+        args.context_ceiling=prior.get("context_ceiling_requested") or (prior.get("context_ceiling_tokens") if prior.get("context_ceiling")=="enforced" else None)
+    if args.resume_session:
+        args.resume_advice=(previous,previous["task_id"] if len(tasks)>1 else None)
     receipt=json.loads(read_bound_bytes(args.run_dir,"RUN_RECEIPT.json",label="RUN_RECEIPT.json"))
     receipt.update(status="active",closed_at=None)
     write_owned(args.run_dir,args.run_dir/"RUN_RECEIPT.json",json.dumps(receipt,indent=2)+"\n")
@@ -1533,6 +1542,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         else:
                             plan["warnings"].append("all alias candidates cooling")
                             plan["cooldown_blocked"]=cooling
+                if args.context_ceiling is not None:
+                    context_usage.apply_ceiling(plan,args.context_ceiling,provider_exec.profile(plan["adapter"]).argv)
+                if getattr(args,"resume_advice",None) and plan.get("resume_session"):
+                    previous_row,advice_task=args.resume_advice
+                    args.resume_warning=context_usage.resume_warning(previous_row,plan["adapter"],
+                        context_usage.effective_ceiling(plan["applied"]),args.resume,task_id=advice_task)
+                    if args.resume_warning: plan["warnings"].insert(0,args.resume_warning)
                 active = contract_row(args,run_dir,attempt_number,attempt_dir,plan,started_at)
                 active["requested_route"] = requested_route
                 publish_contract(run_dir,active)
@@ -1570,6 +1586,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         for diagnostic in (attempt_dir/"events.jsonl",stderr_path):
                             if diagnostic.exists(): diagnostic.rename(diagnostic.with_name(diagnostic.name+".resume-failed"))
                         plan["resume_session"]=None
+                        if getattr(args,"resume_warning",None) in plan["warnings"]: plan["warnings"].remove(args.resume_warning)
                         plan["session_id"]=str(uuid.uuid4())
                         args.resume_relaunch=resume_relaunch_context(run_dir,previous)
                         plan["prompt"] += "\n\nPrevious turn and question:\n"+args.resume_relaunch
@@ -2072,6 +2089,7 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--batch-id", help=argparse.SUPPRESS)
     root.add_argument("--cwd",dest="provider_cwd",type=Path)
     root.add_argument("--resume", help="resume this run id; inherit route and controls")
+    root.add_argument("--context-ceiling", type=float, help="auto-compaction threshold in tokens, clamped to 100k-1M")
     root.add_argument("--sandbox", choices=("read-only","workspace-write","full"))
     root.add_argument("--network", choices=("true","false"))
     root.add_argument("--add-dir", dest="add_dirs", action="append", default=[])
