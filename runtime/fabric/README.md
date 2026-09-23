@@ -65,6 +65,10 @@ Dispatch accepts exactly one of `prompt` and `prompt_file`. Route controls are
 owned, registered worktree. `cwd` selects an existing read-only directory inside
 the caller workspace. The Python owner validates provider capabilities and
 applies controls; Fabric does not claim a stronger guarantee than its receipt.
+On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available
+to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes.
+The receipt records `applied.confinement` as `sandbox-exec` or `none`;
+`workspace.cwd` is the provider cwd and `workspace.root` is the caller workspace.
 
 On macOS, a Codex `read-only` or `workspace-write` provider gets a bundled `ps`
 shim on PATH because seatbelt blocks the setuid `/bin/ps`. Process identity reads

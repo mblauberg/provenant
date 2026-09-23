@@ -4,7 +4,7 @@ The dated source is `config/model-routing.json`; `scripts/model-route snapshot -
 
 For ordinary provider work, use `fabric_dispatch`: one top-level task or `tasks[]` (1–64, concurrency at most 8). Pass `prompt` or `prompt_file`, optional `adapter`, `model` or `alias`, `effort`, `mode`, `worktree`, and per-run controls. A model shorthand such as `luna`, `sol`, `astra` or `opus` resolves to its owner. A non-tier `alias` is treated as a model with a note. An explicit model wins over a conflicting alias with a note. Unknown models pass through when the provider can run them. Unsupported effort moves to the nearest supported value and the receipt records requested and applied values. Applied effort is only what reached the provider. A model the catalogue gives no effort control (no `efforts` list or `effort_transport: "none"`, for example Claude `haiku`, agy `opus` and `sonnet`, Cursor `auto` and every OpenCode model) is sent no effort flag, even through an alias default. Its applied effort is empty, its route line has no `@effort` suffix, and the receipt keeps the requested value with the note `effort <x> ignored: <model> has no effort control`, shown once among the digest warnings. The run is not blocked. When no effort is sent, applied stays empty unless the provider reports one: Codex writes it to its session rollout, recorded with `effort_observed_source: codex:rollout.turn_context`. Fallback candidates and resumes re-resolve through the router, so they never resend an effort to such a model.
 
-Writes require an owned registered worktree. Only impossible execution or a hard boundary fails preflight: missing prompt, missing CLI, unowned writer worktree, credential-store exposure or write sandbox on a read-only run. Read-only guarantees vary by adapter and appear in the receipt; `best_effort` and `prompt_only` must not be claimed as enforced.
+Writes require an owned registered worktree. Only impossible execution or a hard boundary fails preflight: missing prompt, missing CLI, unowned writer worktree, credential-store exposure or write sandbox on a read-only run. Read-only guarantees vary by adapter and appear in the receipt; `best_effort` and `prompt_only` must not be claimed as enforced. On macOS, agy and OpenCode read-only launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. `applied.confinement` records `sandbox-exec` or `none`; without confinement, reads are unconfined. Agy reports `prompt_only` without OS confinement and `best_effort` with it.
 
 On macOS, Codex `read-only` and `workspace-write` runs put the bundled `ps` shim first on the provider PATH. Seatbelt cannot execute the setuid `/bin/ps`; the shim reads same-user process facts through libproc and supports the common `ps` fields and selectors. An inaccessible PID remains unverifiable, so liveness checks retain their conservative handling. Linux continues to use `/proc` and the normal `ps` command.
 
@@ -127,8 +127,9 @@ OpenCode is an ordinary implemented broker for its catalogue (`opencode/<model>`
 Its free models include `mimo-free`, `muse` and `nemotron-free`; they may train
 on prompts during the free period, so do not send sensitive content. Read-only
 runs keep bash declared for Zen but deny every real command. Fabric honours
-read-only `cwd` for OpenCode file access. Use `opencode models` to discover a
-live slug when overriding with `--model`.
+read-only `cwd` for OpenCode file access and confines workspace reads to `cwd`
+and `add_dirs` on macOS when `sandbox-exec` is available. Use `opencode models`
+to discover a live slug when overriding with `--model`.
 Nested vendor ids attribute as that vendor; unparseable Zen free ids fall back
 to `generic-open` (worker only, not assurance). See
 [ADR 0025](../../../docs/adr/0025-broker-upstream-family-attribution.md).
