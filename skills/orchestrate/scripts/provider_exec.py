@@ -18,6 +18,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -1223,14 +1224,43 @@ class _Descendants:
                 if identity not in self.spared_at_stop]
 
 
+_SUBREAPER_LOCK = threading.Lock()
+_SUBREAPER = {"users": 0, "previous": 0}
+
+
+def _prctl(option, argument):
+    libc = ctypes.CDLL(None, use_errno=True)
+    return libc.prctl(option, argument, 0, 0, 0)
+
+
 def _enable_subreaper():
+    """Adopt orphaned descendants for this attempt only; True when held."""
     if not sys.platform.startswith("linux"):
-        return
-    try:
-        libc = ctypes.CDLL(None, use_errno=True)
-        libc.prctl(36, 1, 0, 0, 0)  # PR_SET_CHILD_SUBREAPER
-    except (AttributeError, OSError):
-        pass
+        return False
+    with _SUBREAPER_LOCK:
+        if _SUBREAPER["users"] == 0:
+            try:
+                previous = ctypes.c_int(0)
+                _prctl(37, ctypes.byref(previous))  # PR_GET_CHILD_SUBREAPER
+                _prctl(36, 1)  # PR_SET_CHILD_SUBREAPER
+            except (AttributeError, OSError):
+                return False
+            _SUBREAPER["previous"] = previous.value
+        _SUBREAPER["users"] += 1
+    return True
+
+
+def _release_subreaper():
+    """Restore the host's own setting once no attempt in this process needs it."""
+    with _SUBREAPER_LOCK:
+        if _SUBREAPER["users"] == 0:
+            return
+        _SUBREAPER["users"] -= 1
+        if _SUBREAPER["users"] == 0 and not _SUBREAPER["previous"]:
+            try:
+                _prctl(36, 0)
+            except (AttributeError, OSError):
+                pass
 
 
 class WorkspaceProgress:
@@ -1481,6 +1511,7 @@ def execute(
     last_progress, last_progress_at = started, started_at
     process = None
     descendants = None
+    subreaper = False
     reaped = []
     stopped = False
     forced, terminal_at, cancel_signal = None, None, False
@@ -1604,7 +1635,7 @@ def execute(
             command[0] = (
                 shutil.which(command[0], path=environment.get("PATH")) or command[0]
             )
-            _enable_subreaper()
+            subreaper = _enable_subreaper()
             process = subprocess.Popen(
                 command,
                 cwd=plan["cwd"],
@@ -1741,6 +1772,8 @@ def execute(
             input_file.close()
         for sig, handler in old_handlers.items():
             signal.signal(sig, handler)
+        if subreaper:
+            _release_subreaper()
     exit_code = process.returncode if process else None
     if pending:
         consume(b"\n")

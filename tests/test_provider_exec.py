@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import ctypes
 import sys
 import time
 from types import SimpleNamespace
@@ -2257,3 +2258,33 @@ def test_claude_reported_ids_match_their_aliases():
     assert module._same_model("claude", "haiku", "claude-haiku-4-5-20251001")
     assert module._same_model("claude", "sonnet", "claude-sonnet-5")
     assert not module._same_model("claude", "haiku", "claude-sonnet-5")
+
+
+def test_subreaper_is_held_only_while_attempts_run(tmp_path, monkeypatch):
+    # A process left as a child subreaper adopts unrelated orphans it never
+    # reaps; a detached server then lingers as a zombie of the caller.
+    module = supervisor()
+    calls = []
+
+    def prctl(option, argument):
+        calls.append((option, argument if isinstance(argument, int) else "get"))
+        return 0
+
+    monkeypatch.setattr(module.sys, "platform", "linux")
+    monkeypatch.setattr(module, "_prctl", prctl)
+    monkeypatch.setattr(module, "_SUBREAPER", {"users": 0, "previous": 0})
+    assert module._enable_subreaper() and module._enable_subreaper()
+    module._release_subreaper()
+    assert (36, 0) not in calls  # another attempt still runs
+    module._release_subreaper()
+    assert calls == [(37, "get"), (36, 1), (36, 0)]
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="PR_SET_CHILD_SUBREAPER is Linux-only")
+def test_attempt_restores_the_callers_subreaper_setting(tmp_path):
+    module = supervisor()
+    plan = fixture_plan(tmp_path, "import json; print(json.dumps({'type':'result','result':'DONE','is_error':False}))")
+    assert module.execute(plan, tmp_path / "result.md")["status"] == "ok"
+    value = ctypes.c_int(-1)
+    ctypes.CDLL(None, use_errno=True).prctl(37, ctypes.byref(value), 0, 0, 0)
+    assert value.value == 0
