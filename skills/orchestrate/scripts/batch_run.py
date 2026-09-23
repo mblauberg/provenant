@@ -53,7 +53,7 @@ from dispatch_run import (
     create_cancellation_marker,
     remove_cancellation_marker,
 )
-from attempt_evidence import AttemptEvidenceError as SharedAttemptEvidenceError, validate_successful_attempt
+from attempt_evidence import AttemptEvidenceError as SharedAttemptEvidenceError, canonical_success_status, validate_successful_attempt
 from _shared.custody import (
     OwnedFileError, atomic_write_contained, contained_regular_path, open_contained_regular,
     read_bound_bytes, read_contained_regular,
@@ -69,7 +69,7 @@ DEFAULT_TIMEOUT_SECONDS = 3600.0
 # must be allowed to stop/reap its provider and publish the attempt receipt
 # before the batch falls back to killing that owner.
 CANCEL_DISPATCH_GRACE_SECONDS = 2.0
-TERMINAL_TASK_STATUSES = {"blocked", "succeeded", "failed", "timed_out", "cancelled"}
+TERMINAL_TASK_STATUSES = {"blocked", "ok", "failed", "timed_out", "cancelled"}
 
 
 class BatchInputError(ValueError):
@@ -462,10 +462,10 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
             raise BatchInputError(f"child attempt path does not match its receipt: {attempt_path}")
         if record.get("attempt_digest") != "sha256:" + hashlib.sha256(attempt_bytes).hexdigest():
             raise BatchInputError(f"child attempt digest does not match: {task_id}")
-        status = attempt.get("status") if isinstance(attempt.get("status"), str) else "failed"
+        status = canonical_success_status(attempt.get("status")) if isinstance(attempt.get("status"), str) else "failed"
         if status not in TERMINAL_TASK_STATUSES:
             raise BatchInputError(f"child status is unsupported: {task_id}")
-        if isinstance(record.get("status"), str) and record["status"] != status:
+        if isinstance(record.get("status"), str) and canonical_success_status(record["status"]) != status:
             raise BatchInputError(f"child status does not match retained attempt: {task_id}")
         outcome = attempt.get("outcome", status)
         if "outcome" in record and record["outcome"] != outcome:
@@ -486,16 +486,16 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
         if requested.get("orchestrator_family", "") != task.get("orchestrator_family", ""):
             raise BatchInputError(f"child requested provider family does not match task: {task_id}")
         route = route if isinstance(route, dict) else {}
-        if status == "succeeded" and any(not isinstance(route.get(field), str) or not route[field]
+        if status == "ok" and any(not isinstance(route.get(field), str) or not route[field]
                                          for field in ("adapter", "provider_family", "resolved_model", "execution_intent")):
             raise BatchInputError(f"successful child route identity is incomplete: {task_id}")
-        if status == "succeeded" and route.get("execution_intent") != "ordinary":
+        if status == "ok" and route.get("execution_intent") != "ordinary":
             raise BatchInputError(f"successful child intent is not ordinary: {task_id}")
-        if status == "succeeded" and route.get("adapter") != task["adapter"]:
+        if status == "ok" and route.get("adapter") != task["adapter"]:
             raise BatchInputError(f"successful child adapter does not match task: {task_id}")
         adapter_receipt = route.get("adapter_receipt")
         adapter_bytes = None
-        if status == "succeeded" and not isinstance(adapter_receipt, dict):
+        if status == "ok" and not isinstance(adapter_receipt, dict):
             raise BatchInputError(f"successful child adapter receipt is missing: {task_id}")
         if adapter_receipt is not None:
             if not isinstance(adapter_receipt, dict):
@@ -507,8 +507,8 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
                 raise BatchInputError(f"child adapter receipt path does not match attempt: {task_id}")
             if adapter_receipt.get("digest") != "sha256:" + hashlib.sha256(adapter_bytes).hexdigest():
                 raise BatchInputError(f"child adapter receipt digest does not match: {task_id}")
-        if status == "succeeded" and process_exit != 0:
-            raise BatchInputError(f"succeeded child exited non-zero: {task_id}")
+        if status == "ok" and process_exit != 0:
+            raise BatchInputError(f"successful child exited non-zero: {task_id}")
         retained_result = attempt.get("result")
         if retained_result is not None:
             if not isinstance(retained_result, dict):
@@ -519,7 +519,7 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
             expected_digest = retained_result.get("digest")
             if not isinstance(expected_digest, str) or expected_digest != "sha256:" + hashlib.sha256(result_bytes).hexdigest():
                 raise BatchInputError(f"child result digest does not match: {task_id}")
-            if status == "succeeded" and not result_bytes:
+            if status == "ok" and not result_bytes:
                 raise BatchInputError(f"successful child result is empty: {task_id}")
             child_result = record.get("result")
             if (
@@ -530,7 +530,7 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
                 raise BatchInputError(f"child result path does not match retained attempt: {task_id}")
         elif record.get("result") is not None:
             raise BatchInputError(f"child result receipt does not match retained attempt: {task_id}")
-        if status == "succeeded":
+        if status == "ok":
             try:
                 validate_successful_attempt(
                     run_dir, attempt, {
@@ -549,10 +549,10 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
                 if isinstance(route.get(field), str)
             }, "question": attempt.get("question", record.get("question")),
         }
-    status = record.get("status") if isinstance(record.get("status"), str) else "failed"
+    status = canonical_success_status(record.get("status")) if isinstance(record.get("status"), str) else "failed"
     if status not in TERMINAL_TASK_STATUSES:
         raise BatchInputError(f"child status is unsupported: {task_id}")
-    if status == "succeeded":
+    if status == "ok":
         raise BatchInputError(f"successful child has no retained attempt: {task_id}")
     compact = {"task_id": task_id, "status": status, "outcome": record.get("outcome", status),
                "dispatch_exit": process_exit}
@@ -707,7 +707,7 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
             output = {"schema": "fabric.status.v1", "run_id": canonical[0]["run_id"],
                       "batch_id": batch_id, "runs": canonical}
     print(json.dumps(output, sort_keys=True))
-    return 1 if (status != "completed" or index_error or any(item["status"] != "succeeded" for item in ordered)) else 0
+    return 1 if (status != "completed" or index_error or any(item["status"] != "ok" for item in ordered)) else 0
 
 
 def batch(args: argparse.Namespace) -> int:

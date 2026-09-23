@@ -160,7 +160,7 @@ if (owner === "dispatch_run.py") {
     const record = {
       schema_version: 1,
       record_type: "dispatch-attempt",
-      status: "succeeded",
+      status: "ok",
       outcome: "ok",
       task_id: taskId,
       attempt_id: "attempt-001",
@@ -193,7 +193,7 @@ if (owner === "dispatch_run.py") {
     const record = {
       schema_version: 1,
       record_type: "dispatch-attempt",
-      status: "succeeded",
+      status: "ok",
       outcome: "ok",
       task_id: taskId,
       attempt_id: "attempt-001",
@@ -226,8 +226,8 @@ if (owner === "dispatch_run.py") {
     const summary = join(runDir, "summary.json");
     writeFileSync(summary, "{}");
     process.stdout.write(JSON.stringify({ schema_version: 1, record_type: "dispatch-batch", status: "completed",
-      batch_id: "batch-001", task_count: 1, concurrency: 1, counts: { succeeded: 1 }, summary_path: "summary.json",
-      tasks: [{ task_id: taskId, status: "succeeded", outcome: "ok", attempt_path: relative(runDir, join(dir, "attempt.json")),
+      batch_id: "batch-001", task_count: 1, concurrency: 1, counts: { ok: 1 }, summary_path: "summary.json",
+      tasks: [{ task_id: taskId, status: "ok", outcome: "ok", attempt_path: relative(runDir, join(dir, "attempt.json")),
         result_path: relative(runDir, join(dir, "result.md")), route: { adapter: "codex", provider_family: "openai", resolved_model: "luna", execution_intent: "ordinary" } }] }) + "\n");
     process.exit(0);
   } else {

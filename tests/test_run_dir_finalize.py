@@ -797,7 +797,7 @@ def test_non_success_terminalisation_preserves_possible_worker_partial(tmp_path,
 
 def test_success_requires_closed_final_gate(tmp_path):
     run = init_run(tmp_path)
-    assert run_dir_finalize.main([str(run), "--status", "succeeded"]) == 1
+    assert run_dir_finalize.main([str(run), "--status", "ok"]) == 1
 
 
 def test_pruning_is_dry_run_then_removes_only_classified_ephemeral(tmp_path):
@@ -900,8 +900,8 @@ def test_successful_terminalisation_closes_a_complete_run(tmp_path):
             line = "| " + " | ".join(cells) + " |"
         rewritten.append(line)
     gate.write_text("\n".join(rewritten) + "\n")
-    assert run_dir_finalize.main([str(run), "--status", "succeeded"]) == 0
-    assert json.loads(receipt.read_text())["status"] == "succeeded"
+    assert run_dir_finalize.main([str(run), "--status", "ok"]) == 0
+    assert json.loads(receipt.read_text())["status"] == "ok"
 
 
 def test_success_rejects_incomplete_gate_schema(tmp_path):
@@ -912,7 +912,7 @@ def test_success_rejects_incomplete_gate_schema(tmp_path):
     receipt.write_text(json.dumps(data))
     (run / "SYNTHESIS.md").write_text("done")
     (run / "FINAL_GATE.md").write_text("| gate | status | evidence |\n|---|---|---|\n| arbitrary | PASS | none |\n")
-    errors, _ = run_dir_finalize.validate(run, "succeeded", None)
+    errors, _ = run_dir_finalize.validate(run, "ok", None)
     assert any("missing gates" in error for error in errors)
 
 

@@ -36,8 +36,9 @@ from _shared.custody import (
 SCRIPTS_ROOT = Path(__file__).resolve().parent
 if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
+from attempt_evidence import canonical_success_status
 
-TERMINAL = {"succeeded", "failed", "cancelled"}
+TERMINAL = {"ok", "failed", "cancelled"}
 STATUSES = {"draft", "verified", "superseded", "retired"}
 RETENTION = {"capsule", "evidence", "ephemeral"}
 SCAFFOLD = {
@@ -571,8 +572,9 @@ def validate(run_dir: Path, terminal_status: str, reason: str | None,
              manifest_text: str | None = None) -> tuple[list[str], list[dict[str, str]]]:
     errors: list[str] = []
     run_dir = run_dir.resolve()
+    terminal_status = canonical_success_status(terminal_status)
     if terminal_status not in TERMINAL:
-        return ["status must be succeeded, failed, or cancelled"], []
+        return ["status must be ok, failed, or cancelled"], []
     if terminal_status in {"failed", "cancelled"} and not reason:
         errors.append("failed/cancelled finalisation requires --reason")
     for name in SCAFFOLD:
@@ -602,11 +604,11 @@ def validate(run_dir: Path, terminal_status: str, reason: str | None,
         errors.append("receipt schema_version must be 1")
     if not _utc_timestamp(receipt.get("created_at")):
         errors.append("receipt created_at must be a UTC timestamp")
-    if receipt.get("status") not in {"active", terminal_status}:
+    if canonical_success_status(receipt.get("status")) not in {"active", terminal_status}:
         errors.append(f"receipt status {receipt.get('status')!r} cannot transition to {terminal_status}")
     if receipt.get("status") == "active" and receipt.get("closed_at") is not None:
         errors.append("active receipt closed_at must be null")
-    if receipt.get("status") in TERMINAL and not _utc_timestamp(receipt.get("closed_at")):
+    if canonical_success_status(receipt.get("status")) in TERMINAL and not _utc_timestamp(receipt.get("closed_at")):
         errors.append("terminal receipt closed_at must be a UTC timestamp")
     if not isinstance(receipt.get("owner"), str) or not receipt.get("owner"):
         errors.append("receipt owner is required")
@@ -767,18 +769,18 @@ def validate(run_dir: Path, terminal_status: str, reason: str | None,
         for index, handoff in enumerate(receipt.get("handed_off_panes", [])):
             if isinstance(handoff, dict) and handoff.get("lease_generation") != pair.get("lease_generation"):
                 errors.append(f"receipt handed_off_panes[{index}] does not match pair lease generation")
-    if terminal_status == "succeeded" and not receipt.get("task"):
+    if terminal_status == "ok" and not receipt.get("task"):
         errors.append("successful finalisation requires receipt task")
-    if terminal_status == "succeeded" and (reason or receipt.get("terminal_reason")):
+    if terminal_status == "ok" and (reason or receipt.get("terminal_reason")):
         errors.append("successful finalisation cannot record a terminal failure reason")
-    if terminal_status == "succeeded":
+    if terminal_status == "ok":
         try:
             _synthesis_rel, synthesis_bytes = _owned_bytes(run_dir, "SYNTHESIS.md", "SYNTHESIS.md")
         except (OwnedFileError, OSError):
             synthesis_bytes = b""
         if not synthesis_bytes.strip():
             errors.append("successful finalisation requires non-empty SYNTHESIS.md")
-    if terminal_status == "succeeded":
+    if terminal_status == "ok":
         errors.extend(_validate_review_plan(receipt.get("review_plan"), run_dir))
 
     columns = ["id", "path", "topic", "produced_by", "date", "status", "retention", "supersedes"]
@@ -817,7 +819,7 @@ def validate(run_dir: Path, terminal_status: str, reason: str | None,
         supersedes = row["supersedes"]
         if supersedes and supersedes != "-" and supersedes not in ids:
             errors.append(f"{artifact_id}: supersedes must reference an artifact id")
-        if terminal_status == "succeeded" and row["status"] == "draft":
+        if terminal_status == "ok" and row["status"] == "draft":
             errors.append(f"{artifact_id}: draft artifact blocks successful finalisation")
 
     payloads = {
@@ -825,12 +827,12 @@ def validate(run_dir: Path, terminal_status: str, reason: str | None,
         for path in run_dir.rglob("*")
         if path.is_file() and path.relative_to(run_dir).as_posix() not in SCAFFOLD
     }
-    if terminal_status == "succeeded":
+    if terminal_status == "ok":
         errors.extend(_validate_dispatch_evidence(run_dir))
         for rel in sorted(payloads - listed):
             errors.append(f"unmanifested payload: {rel}")
 
-    if terminal_status == "succeeded":
+    if terminal_status == "ok":
         try:
             gates = _table(_owned_bytes(run_dir, "FINAL_GATE.md", "FINAL_GATE.md")[1].decode("utf-8"), ["gate", "status", "evidence"])
         except (OSError, UnicodeDecodeError, ValueError, OwnedFileError) as exc:
@@ -902,11 +904,12 @@ def prune_candidates(run_dir: Path, rows: list[dict[str, str]]) -> list[Path]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("run_dir", type=Path)
-    parser.add_argument("--status", required=True, choices=sorted(TERMINAL))
+    parser.add_argument("--status", required=True, choices=sorted(TERMINAL | {"succeeded"}))
     parser.add_argument("--reason")
     parser.add_argument("--prune-ephemeral", action="store_true", help="list safe candidates (dry-run)")
     parser.add_argument("--apply", action="store_true", help="apply --prune-ephemeral after validation")
     args = parser.parse_args(argv)
+    args.status = canonical_success_status(args.status)
     args.run_dir = args.run_dir.resolve()
     if args.apply and not args.prune_ephemeral:
         print("--apply requires --prune-ephemeral", file=sys.stderr)

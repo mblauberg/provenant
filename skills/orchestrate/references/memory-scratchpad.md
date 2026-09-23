@@ -68,7 +68,7 @@ project `MEMORY.md`), record only durable, non-obvious decisions there — not t
 
 ## Terminalisation and retention
 
-Every bounded run ends `succeeded`, `failed` or `cancelled` in `RUN_RECEIPT.json`.
+Every bounded run ends `ok`, `failed` or `cancelled` in `RUN_RECEIPT.json`. Readers still accept `succeeded` in retained receipts written before this change.
 Run `provenant clean` for repository retention; it protects live, pinned and
 referenced capsules and lists unknown paths for triage.
 Use `scripts/run_dir_finalize.py`; successful runs require closed gates, valid

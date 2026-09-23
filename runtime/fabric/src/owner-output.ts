@@ -2,6 +2,7 @@
 import { lstatSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { shortRunId } from "./run-registry.js";
+import { canonicalSuccessStatus, isSuccessStatus } from "./success-status.js";
 
 interface OwnerFiles {
   runDir: string;
@@ -26,7 +27,7 @@ export interface OwnerCompletion {
   error?: string;
 }
 
-const DISPATCH_TERMINAL_STATUSES = new Set(["succeeded", "failed", "blocked", "timed_out", "cancelled"]);
+const DISPATCH_TERMINAL_STATUSES = new Set(["ok", "succeeded", "failed", "blocked", "timed_out", "cancelled"]);
 const BATCH_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const RESERVED_UNTYPED_STATUSES = new Set([...DISPATCH_TERMINAL_STATUSES, ...BATCH_TERMINAL_STATUSES, "running"]);
 
@@ -94,7 +95,7 @@ function validOwnerRecord(record: Record<string, unknown>, kind: "dispatch" | "b
   if (record.record_type !== (kind === "dispatch" ? "dispatch-attempt" : "dispatch-batch")) return false;
   const terminalStatuses = kind === "dispatch" ? DISPATCH_TERMINAL_STATUSES : BATCH_TERMINAL_STATUSES;
   if (!terminalStatuses.has(record.status)) return false;
-  if (kind === "dispatch" && record.status === "succeeded") {
+  if (kind === "dispatch" && isSuccessStatus(record.status)) {
     const result = objectValue(record.result);
     const stderr = objectValue(record.stderr);
     return (
@@ -122,7 +123,7 @@ function validOwnerRecord(record: Record<string, unknown>, kind: "dispatch" | "b
         if (task === undefined || !nonEmptyString(task.task_id) || !DISPATCH_TERMINAL_STATUSES.has(String(task.status)))
           return false;
         return (
-          task.status !== "succeeded" ||
+          !isSuccessStatus(task.status) ||
           (nonEmptyString(task.outcome) &&
             retainedRegularFile(runDir, task.attempt_path) !== null &&
             retainedRegularFile(runDir, task.result_path) !== null &&
@@ -170,7 +171,7 @@ export function basePaths(started: OwnerFiles): Record<string, string> {
 }
 
 function emptyProviderResult(record: Record<string, unknown>, runDir: string): boolean {
-  if (record.record_type !== "dispatch-attempt" || record.status !== "succeeded") return false;
+  if (record.record_type !== "dispatch-attempt" || !isSuccessStatus(record.status)) return false;
   const result = objectValue(record.result);
   const path = retainedRegularFile(runDir, result?.path);
   return path !== null && lstatSync(path).size === 0;
@@ -181,10 +182,11 @@ export function compactDispatch(started: OwnerFiles, completion: OwnerCompletion
   if (record?.schema === "fabric.attempt.v1")
     return {
       ...record,
+      status: canonicalSuccessStatus(record.status),
       schema: "fabric.status.v1",
       id: record.run_id,
       run_dir: started.runDir,
-      attempts: [record],
+      attempts: [{ ...record, status: canonicalSuccessStatus(record.status) }],
       attempt_count: record.attempt,
       paths: { ...basePaths(started), ...objectValue(record.paths) },
     };
@@ -219,12 +221,12 @@ export function compactDispatch(started: OwnerFiles, completion: OwnerCompletion
       paths: basePaths(started),
     };
   }
-  if (completionConflict(completion, record.status === "succeeded")) {
+  if (completionConflict(completion, isSuccessStatus(record.status))) {
     return {
       schema_version: 1,
       id: shortRunId(started.runDir),
       status: "owner_completion_conflict",
-      owner_status: record.status,
+      owner_status: canonicalSuccessStatus(record.status),
       owner_exit: completion.exitCode,
       owner_signal: completion.signal,
       ...(completion.error === undefined ? {} : { message: completion.error }),
@@ -236,7 +238,7 @@ export function compactDispatch(started: OwnerFiles, completion: OwnerCompletion
   return {
     schema_version: 1,
     id: shortRunId(started.runDir),
-    status: record.status,
+    status: canonicalSuccessStatus(record.status),
     ...(record.message === undefined ? {} : { message: record.message }),
     ...(record.fix === undefined ? {} : { fix: record.fix }),
     outcome: record.outcome,
@@ -257,14 +259,18 @@ export function compactDispatch(started: OwnerFiles, completion: OwnerCompletion
 function batchStatus(runs: unknown): string {
   const statuses = Array.isArray(runs) ? runs.map((run) => objectValue(run)?.status) : [];
   if (statuses.length === 0) return "failed";
-  if (statuses.every((status) => status === "ok")) return "ok";
-  return statuses.some((status) => status === "ok") ? "partial" : "failed";
+  if (statuses.every(isSuccessStatus)) return "ok";
+  return statuses.some(isSuccessStatus) ? "partial" : "failed";
 }
 
 export function compactBatch(started: OwnerFiles, completion: OwnerCompletion): Record<string, unknown> {
   const record = parseOwnerOutput(started.stdoutPath);
   if (record?.schema === "fabric.status.v1" || record?.schema === "fabric.batch.v1")
-    return { ...record, id: shortRunId(started.runDir), status: record.status ?? batchStatus(record.runs), paths: basePaths(started) };
+    return { ...record, id: shortRunId(started.runDir), status: canonicalSuccessStatus(record.status ?? batchStatus(record.runs)),
+      runs: Array.isArray(record.runs) ? record.runs.map((value) => {
+        const row = objectValue(value);
+        return row === undefined ? value : { ...row, status: canonicalSuccessStatus(row.status) };
+      }) : record.runs, paths: basePaths(started) };
   if (record === undefined || !validOwnerRecord(record, "batch", started.runDir)) {
     return {
       schema_version: 1,
@@ -282,14 +288,14 @@ export function compactBatch(started: OwnerFiles, completion: OwnerCompletion): 
     record.tasks.every((value) => {
       const task = objectValue(value);
       const path = retainedRegularFile(started.runDir, task?.result_path);
-      return task?.status === "succeeded" && path !== null && lstatSync(path).size > 0;
+      return isSuccessStatus(task?.status) && path !== null && lstatSync(path).size > 0;
     });
   if (completionConflict(completion, allTasksSucceeded)) {
     return {
       schema_version: 1,
       id: shortRunId(started.runDir),
       status: "owner_completion_conflict",
-      owner_status: record.status,
+      owner_status: canonicalSuccessStatus(record.status),
       owner_exit: completion.exitCode,
       owner_signal: completion.signal,
       ...(completion.error === undefined ? {} : { message: completion.error }),
@@ -301,10 +307,10 @@ export function compactBatch(started: OwnerFiles, completion: OwnerCompletion): 
         const task = objectValue(value);
         if (task === undefined) return { status: "owner_task_invalid" };
         const resultPath = retainedRegularFile(started.runDir, task.result_path);
-        const empty = task.status === "succeeded" && resultPath !== null && lstatSync(resultPath).size === 0;
+        const empty = isSuccessStatus(task.status) && resultPath !== null && lstatSync(resultPath).size === 0;
         return {
           task_id: task.task_id,
-          status: empty ? "failed" : task.status,
+          status: empty ? "failed" : canonicalSuccessStatus(task.status),
           outcome: empty ? "empty_output" : task.outcome,
           route: compactRoute(task.route),
           paths: {
@@ -317,7 +323,7 @@ export function compactBatch(started: OwnerFiles, completion: OwnerCompletion): 
   return {
     schema_version: 1,
     id: shortRunId(started.runDir),
-    status: record.status,
+    status: canonicalSuccessStatus(record.status),
     ...(record.message === undefined ? {} : { message: record.message }),
     ...(record.fix === undefined ? {} : { fix: record.fix }),
     batch_id: record.batch_id,

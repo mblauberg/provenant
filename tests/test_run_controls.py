@@ -32,7 +32,7 @@ def write_attempt(
     task_id: str = "task-1",
     attempt_id: str = "attempt-001",
     *,
-    status: str = "succeeded",
+    status: str = "ok",
     result: str | None = "result\n",
     question: dict[str, str] | None = None,
     observed_exit: bool = True,
@@ -55,7 +55,7 @@ def write_attempt(
         result_path.write_text(result, encoding="utf-8")
         result_ref = {"path": str(result_path.relative_to(run_dir)), "digest": file_digest(result_path)}
     adapter = {}
-    if status == "succeeded":
+    if status in {"ok", "succeeded"}:
         adapter = {
             "tool": "codex", "adapter": "codex", "execution_intent": "ordinary",
             "resolved_model": "fixture-model", "provider_family": "fixture-provider",
@@ -73,7 +73,7 @@ def write_attempt(
         "task_id": task_id,
         "attempt_id": attempt_id,
         "status": status,
-        "outcome": "ok" if status == "succeeded" else status,
+        "outcome": "ok" if status in {"ok", "succeeded"} else status,
         "requested_route": {
             "intent": "ordinary", "adapter": "codex", "alias": "scout",
             "task_class": "", "model": "", "role": "worker", "orchestrator_family": "openai",
@@ -82,7 +82,7 @@ def write_attempt(
         },
         "route": {
             **({field: adapter[field] for field in ("adapter", "execution_intent", "provider_family", "resolved_model")}
-               if status == "succeeded" else {}),
+               if status in {"ok", "succeeded"} else {}),
             "adapter_receipt": {"path": str(adapter_path.relative_to(run_dir)), "digest": file_digest(adapter_path)},
         },
         "prompt": {"path": str(prompt_path.relative_to(run_dir)), "digest": file_digest(prompt_path)},
@@ -104,6 +104,23 @@ def write_attempt(
 
 def file_digest(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def test_retained_legacy_success_is_valid_and_cannot_be_retried(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    write_attempt(run_dir, status="succeeded")
+    spec = importlib.util.spec_from_file_location("legacy_run_controls", SCRIPT)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    assert module.validate_retained_dispatch(run_dir) == []
+    result = invoke(
+        "run", "retry", "--run-dir", str(run_dir), "--task-id", "task-1",
+        "--attempt-id", "attempt-001", "--same-route", cwd=tmp_path,
+    )
+    assert result.returncode == 2
+    assert "successful attempts cannot be retried" in json.loads(result.stdout)["message"]
 
 
 def test_retained_git_evidence_path_digest_and_payload_are_validated(tmp_path: Path):
@@ -636,7 +653,7 @@ def test_same_route_retry_runs_full_provider_free_chain_and_retains_risk_and_pro
     attempt = json.loads(
         (run_dir / "dispatch/tasks/retry-chain/attempt-002/attempt.json").read_text(encoding="utf-8")
     )
-    assert attempt["status"] == "succeeded"
+    assert attempt["status"] == "ok"
     assert attempt["retry_of"] == "attempt-001"
     assert attempt["requested_route"]["alias"] == "workhorse"
     assert attempt["requested_route"]["risk_tier"] == "substantial"
@@ -1022,9 +1039,9 @@ def test_reduce_requires_explicit_successes_and_names_batch_omissions(tmp_path: 
         "record_type": "dispatch-batch",
         "batch_id": "batch-001",
         "tasks": [
-            {"task_id": "one", "status": "succeeded", "attempt_path": str(selected.relative_to(run_dir)),
+            {"task_id": "one", "status": "ok", "attempt_path": str(selected.relative_to(run_dir)),
              "result_path": "dispatch/tasks/one/attempt-001/result.md"},
-            {"task_id": "two", "status": "succeeded", "attempt_path": str(omitted.relative_to(run_dir)),
+            {"task_id": "two", "status": "ok", "attempt_path": str(omitted.relative_to(run_dir)),
              "result_path": "dispatch/tasks/two/attempt-001/result.md"},
             {"task_id": "three", "status": "failed", "attempt_path": str(failed.relative_to(run_dir))},
         ],
@@ -1070,7 +1087,7 @@ def test_reduce_does_not_conflate_repeated_task_across_batch_summaries(tmp_path:
         summary.parent.mkdir(parents=True, exist_ok=True)
         summary.write_text(json.dumps({
             "schema_version": 1, "record_type": "dispatch-batch", "batch_id": batch_id,
-            "tasks": [{"task_id": "same", "status": "succeeded",
+            "tasks": [{"task_id": "same", "status": "ok",
                        "attempt_path": str(attempt.relative_to(run_dir)),
                        "result_path": str(attempt.parent / "result.md").replace(str(run_dir) + "/", "")}],
         }) + "\n", encoding="utf-8")
@@ -1106,7 +1123,7 @@ def test_retry_and_reduce_use_real_dispatch_owner_and_retain_new_attempts(tmp_pa
     assert module.run(retry_args) == 0
     assert parent.read_bytes() == parent_before
     retry_record = json.loads((retry_run / "dispatch/tasks/task-1/attempt-002/attempt.json").read_text(encoding="utf-8"))
-    assert retry_record["retry_of"] == "attempt-001" and retry_record["status"] == "succeeded"
+    assert retry_record["retry_of"] == "attempt-001" and retry_record["status"] == "ok"
 
     reduce_root = tmp_path / "reduce"
     reduce_run = make_run(reduce_root)
@@ -1115,7 +1132,7 @@ def test_retry_and_reduce_use_real_dispatch_owner_and_retain_new_attempts(tmp_pa
     summary.parent.mkdir(parents=True)
     summary.write_text(json.dumps({
         "schema_version": 1, "record_type": "dispatch-batch", "batch_id": "batch-001",
-        "tasks": [{"task_id": "source", "status": "succeeded",
+        "tasks": [{"task_id": "source", "status": "ok",
                    "attempt_path": str(selected.relative_to(reduce_run)),
                    "result_path": "dispatch/tasks/source/attempt-001/result.md"}],
     }) + "\n", encoding="utf-8")

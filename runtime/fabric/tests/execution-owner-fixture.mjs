@@ -108,20 +108,20 @@ if (owner === "run_controls.py") {
   } else if (prompt === "emit untyped success") {
     process.stdout.write(JSON.stringify({
       schema_version: 1,
-      status: "succeeded",
+      status: "ok",
       message: "not an attempt",
     }) + "\n");
   } else if (prompt === "emit incomplete success") {
     process.stdout.write(JSON.stringify({
       schema_version: 1,
       record_type: "dispatch-attempt",
-      status: "succeeded",
+      status: "ok",
     }) + "\n");
   } else if (prompt === "emit nonexistent success") {
     process.stdout.write(JSON.stringify({
       schema_version: 1,
       record_type: "dispatch-attempt",
-      status: "succeeded",
+      status: "ok",
       outcome: "ok",
       task_id: taskId,
       attempt_id: "attempt-001",
@@ -144,7 +144,7 @@ if (owner === "run_controls.py") {
       const record = {
         schema_version: 1,
         record_type: "dispatch-attempt",
-        status: kind === "success" ? "succeeded" : kind === "timeout" ? "timed_out" : "failed",
+        status: kind === "success" ? "ok" : kind === "timeout" ? "timed_out" : "failed",
         outcome: `delayed dispatch ${kind}`,
         task_id: taskId,
         attempt_id: "attempt-001",
@@ -212,7 +212,7 @@ if (owner === "run_controls.py") {
     const record = {
       schema_version: 1,
       record_type: "dispatch-attempt",
-      status: "succeeded",
+      status: "ok",
       outcome: "ok",
       task_id: taskId,
       attempt_id: "attempt-001",
@@ -238,7 +238,7 @@ if (owner === "run_controls.py") {
       mkdirSync(attemptDir, { recursive: true });
       mkdirSync(batchDir, { recursive: true });
       const attemptPath = join(attemptDir, "attempt.json");
-      const taskStatus = kind === "success" ? "succeeded" : kind === "timeout" ? "timed_out" : "failed";
+      const taskStatus = kind === "success" ? "ok" : kind === "timeout" ? "timed_out" : "failed";
       const taskRecord = {
         task_id: task.id,
         status: taskStatus,
@@ -325,8 +325,8 @@ if (owner === "run_controls.py") {
       batch_id: "batch-001",
       task_count: 1,
       concurrency: 1,
-      counts: { succeeded: 1 },
-      tasks: [{ task_id: "missing", status: "succeeded" }],
+      counts: { ok: 1 },
+      tasks: [{ task_id: "missing", status: "ok" }],
       summary_path: "dispatch/batches/batch-001/summary.json",
     }) + "\n");
     process.exit(0);
@@ -342,7 +342,7 @@ if (owner === "run_controls.py") {
     writeFileSync(resultPath, `fixture result for: ${task.prompt}`);
     return {
       task_id: task.id,
-      status: "succeeded",
+      status: "ok",
       outcome: "ok",
       attempt_path: relative(runDir, attemptPath),
       result_path: relative(runDir, resultPath),
@@ -362,7 +362,7 @@ if (owner === "run_controls.py") {
     batch_id: "batch-001",
     task_count: tasks.length,
     concurrency: Number(value("--concurrency")),
-    counts: { succeeded: tasks.length },
+    counts: { ok: tasks.length },
     tasks,
     summary_path: relative(runDir, summaryPath),
   };
