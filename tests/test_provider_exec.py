@@ -2250,3 +2250,10 @@ def test_kiro_v2_engine_stream_is_parsed_and_auto_is_not_passed():
     command = kiro.argv({"mode": "read_only", "resume_session": None, "model": "auto",
                          "effort": None, "boundary_prompt": "B", "prompt": "P"})
     assert "--model" not in command
+
+
+def test_claude_reported_ids_match_their_aliases():
+    module = supervisor()
+    assert module._same_model("claude", "haiku", "claude-haiku-4-5-20251001")
+    assert module._same_model("claude", "sonnet", "claude-sonnet-5")
+    assert not module._same_model("claude", "haiku", "claude-sonnet-5")
