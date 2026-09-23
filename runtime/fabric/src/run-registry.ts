@@ -298,8 +298,13 @@ function closeStoppedRun(runDir: string, terminalStatus: "interrupted" | "cancel
         finished_at: new Date().toISOString(), ...(terminalStatus === "interrupted"
           ? { fix: "Dispatch a new run; the owner exited." } : {}) }) + "\n", { mode: 0o600 });
       renameSync(temporary, path);
-    } catch {
-      /* The run directory was removed (cleaned or pruned); nothing is left to close. */
+    } catch (error) {
+      // A cleaned or pruned run has nothing left to close. Any other failure
+      // keeps the owner record, so status can still infer the interruption.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        console.error(`fabric: could not close ${runDir}: ${(error as Error).message}`);
+        return;
+      }
     }
   }
   removeOwnerRecord(runDir);
