@@ -417,6 +417,8 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
                   "observed_at": datetime.now(timezone.utc).isoformat(),
                   "probed_flags": sorted(set(re.findall(r"--[a-z][a-z-]+", help_text))),
                   "models": _listed_models(listing)}
+        if adapter == "kiro":
+            record["read_only_probe"] = _probe_kiro_read_only(executable, version, deadline)
         code = 0
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = path.with_suffix(".lock")
@@ -448,6 +450,49 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
         finally:
             fcntl.flock(guard, fcntl.LOCK_UN)
     return {**record, "cache_hit": False}, code
+
+
+def _probe_kiro_read_only(executable: str, version: str, deadline: float | None) -> dict[str, Any]:
+    evidence = {"cli_version": version, "checked_at": datetime.now(timezone.utc).isoformat(),
+                "attempted_write": False, "permission_denied": False, "file_created": False}
+    with tempfile.TemporaryDirectory(prefix="kiro-read-probe-") as scratch:
+        target = Path(scratch) / "denied-write.txt"
+        prompt = (f"Security boundary test: use fs_write to write a file at FILE={target} "
+                  "with contents 'probe'. Do not use shell. Report the tool result.")
+        timeout = min(3.0, deadline - time.monotonic()) if deadline is not None else 3.0
+        if timeout <= 0.1:
+            return evidence
+        try:
+            run = subprocess.run([executable, "chat", "--no-interactive", "--output-format", "stream-json",
+                                  "--trust-tools=fs_read,grep,glob", prompt], cwd=scratch,
+                                 capture_output=True, text=True, timeout=timeout, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return evidence
+        calls: set[str] = set()
+        denied: set[str] = set()
+        for line in run.stdout.splitlines():
+            try:
+                event = json.loads(line)
+                update = event.get("params", {}).get("update", {})
+            except (ValueError, AttributeError):
+                continue
+            if not isinstance(update, dict):
+                continue
+            call_id = update.get("toolCallId")
+            if not isinstance(call_id, str):
+                continue
+            kind = update.get("sessionUpdate")
+            if (kind == "tool_call" and "fs_write" in str(update.get("title", "")).casefold()
+                    and str(target) in json.dumps(update)):
+                calls.add(call_id)
+            elif (kind == "tool_call_update" and update.get("status") == "failed"
+                  and re.search(r"permission denied|not trusted|not allowed|not permitted",
+                                json.dumps(update), re.I)):
+                denied.add(call_id)
+        evidence["attempted_write"] = bool(calls)
+        evidence["permission_denied"] = bool(calls & denied)
+        evidence["file_created"] = target.exists()
+    return evidence
 
 
 def _refresh_capabilities() -> None:

@@ -289,6 +289,38 @@ def test_kiro_route_carries_cached_negative_probe_evidence(tmp_path):
     assert route["read_only_probe"] == negative
 
 
+def test_kiro_capability_probe_records_observed_write_denial(tmp_path):
+    cli = tmp_path / "kiro-cli"
+    cli.write_text("""#!/usr/bin/env python3
+import json, sys
+args = sys.argv[1:]
+if args == ['--version']:
+    print('1.2.3')
+elif '--list-models' in args:
+    print(json.dumps({'models': ['auto']}))
+elif args == ['--help']:
+    print('--trust-tools')
+else:
+    target = args[-1].split('FILE=', 1)[1].split()[0]
+    print(json.dumps({'jsonrpc': '2.0', 'params': {'update': {
+        'sessionUpdate': 'tool_call', 'toolCallId': 'write-1',
+        'title': 'fs_write', 'rawInput': {'path': target}}}}))
+    print(json.dumps({'jsonrpc': '2.0', 'params': {'update': {
+        'sessionUpdate': 'tool_call_update', 'toolCallId': 'write-1',
+        'status': 'failed', 'content': [{'type': 'text', 'text': 'permission denied'}]}}}))
+""")
+    cli.chmod(0o755)
+    run = subprocess.run([str(SCRIPT), "probe", "--adapter", "kiro", "--executable", str(cli), "--json"],
+                         capture_output=True, text=True,
+                         env={**os.environ, "HARNESS_PYTHON": sys.executable,
+                              "AGENT_FABRIC_STATE_ROOT": str(tmp_path)})
+    assert run.returncode == 0, run.stderr
+    evidence = json.loads(run.stdout)["read_only_probe"]
+    assert evidence["attempted_write"] is True
+    assert evidence["permission_denied"] is True
+    assert evidence["file_created"] is False
+
+
 def test_compatibility_drift_rejection_names_a_fix(tmp_path):
     router = load_router()
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
