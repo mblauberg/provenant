@@ -56,6 +56,90 @@ def test_plan_only_resolves_without_launch(tmp_path):
     assert not (tmp_path / "launched").exists()
 
 
+def test_read_only_os_confinement_profile_and_argv(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    root = tmp_path / "workspace"
+    cwd = root / "sub"
+    add_dir = tmp_path / "extra"
+    cwd.mkdir(parents=True)
+    add_dir.mkdir()
+    plan = {
+        "adapter": "agy", "mode": "read_only", "workspace_root": str(root),
+        "cwd": str(cwd), "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]},
+    }
+    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    profile = supervisor.os_confinement_profile(plan)
+    assert '(deny file-read-data file-write* (subpath "' + str(root) + '")' in profile
+    assert '(subpath "' + str(Path.home() / ".claude/projects") + '")' in profile
+    assert '(subpath "' + str(Path.home() / ".codex/sessions") + '")' in profile
+    assert '(allow file-read-data (subpath "' + str(cwd) + '") (subpath "' + str(add_dir) + '"))' in profile
+    monkeypatch.setattr(supervisor, "os_confinement_profile", lambda _plan: "(version 1)")
+    assert supervisor.confinement_command(plan, ["/bin/cat", "file"]) == [
+        "/usr/bin/sandbox-exec", "-p", "(version 1)", "/bin/cat", "file",
+    ]
+
+
+def test_read_only_confinement_paths_escape_sbpl_literals(tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    root = tmp_path / 'space"and\\slash'
+    cwd = root / "sub"
+    cwd.mkdir(parents=True)
+    plan = {
+        "adapter": "opencode", "mode": "read_only", "workspace_root": str(root),
+        "cwd": str(cwd), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    }
+    profile = supervisor.os_confinement_profile(plan)
+    assert 'space\\"and\\\\slash' in profile
+
+
+def test_agy_read_only_guarantee_tracks_os_confinement(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    confined = supervisor.build_plan("agy", {"resolved_model": "gemini-test"}, "prompt", cwd=tmp_path)
+    assert confined["applied"]["confinement"] == "sandbox-exec"
+    assert confined["applied"]["guarantee"] == "best_effort"
+    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: None)
+    unconfined = supervisor.build_plan("agy", {"resolved_model": "gemini-test"}, "prompt", cwd=tmp_path)
+    assert unconfined["applied"]["confinement"] == "none"
+    assert unconfined["applied"]["guarantee"] == "prompt_only"
+    assert any("reads are unconfined" in warning for warning in unconfined["warnings"])
+
+
+def test_os_confinement_opt_out_disables_sandbox_exec(monkeypatch):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisor.shutil, "which", lambda _name: "/usr/bin/sandbox-exec")
+    monkeypatch.setenv("PROVENANT_NO_OS_CONFINEMENT", "1")
+    assert supervisor._sandbox_exec_path() is None
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+def test_sandbox_exec_profile_confines_reads_to_temp_subdirectory(tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    sandbox_exec = supervisor._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    root = tmp_path / "workspace"
+    cwd = root / "sub"
+    cwd.mkdir(parents=True)
+    allowed = cwd / "allowed.txt"
+    denied = root / "denied.txt"
+    allowed.write_text("allowed\n", encoding="utf-8")
+    denied.write_text("denied\n", encoding="utf-8")
+    plan = {
+        "adapter": "agy", "mode": "read_only", "workspace_root": str(root),
+        "cwd": str(cwd), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    }
+    profile = supervisor.os_confinement_profile(plan)
+    permitted = subprocess.run([sandbox_exec, "-p", profile, "/bin/cat", str(allowed)], capture_output=True, text=True)
+    if permitted.returncode and any(word in permitted.stderr.lower() for word in ("sandbox_apply", "operation not permitted")):
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert permitted.returncode == 0, permitted.stderr
+    assert permitted.stdout == "allowed\n"
+    blocked = subprocess.run([sandbox_exec, "-p", profile, "/bin/cat", str(denied)], capture_output=True, text=True)
+    assert blocked.returncode != 0
+
+
 def supervisor():
     return importlib.import_module("skills.orchestrate.scripts.provider_exec")
 
@@ -205,18 +289,26 @@ def test_reset_evidence_uses_provider_time_units():
 
 def fixture_plan(tmp_path, code, adapter="codex", **controls):
     mod = supervisor()
-    plan = mod.build_plan(
-        adapter,
-        {
-            "resolved_model": "fixture",
-            "model_family": "openai",
-            "endpoint_provider": "openai",
-            "effort": "high",
-        },
-        "hello",
-        cwd=tmp_path,
-        **controls,
-    )
+    previous = os.environ.get("PROVENANT_NO_OS_CONFINEMENT")
+    os.environ["PROVENANT_NO_OS_CONFINEMENT"] = "1"
+    try:
+        plan = mod.build_plan(
+            adapter,
+            {
+                "resolved_model": "fixture",
+                "model_family": "openai",
+                "endpoint_provider": "openai",
+                "effort": "high",
+            },
+            "hello",
+            cwd=tmp_path,
+            **controls,
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("PROVENANT_NO_OS_CONFINEMENT", None)
+        else:
+            os.environ["PROVENANT_NO_OS_CONFINEMENT"] = previous
     plan["argv"] = [sys.executable, "-u", "-c", code]
     plan["grace_seconds"] = 0.1
     return plan
@@ -1608,6 +1700,7 @@ sys.exit(1 if model=='opus' else 0)
     fallback_cli.chmod(0o755)
     env = {
         **os.environ,
+        "PROVENANT_NO_OS_CONFINEMENT": "1",
         "PATH": str(bindir) + ":" + os.environ["PATH"],
         "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
         "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),

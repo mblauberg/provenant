@@ -78,12 +78,43 @@ def credential_path(path):
     )
 
 
+def _sandbox_exec_path():
+    if sys.platform != "darwin" or os.environ.get("PROVENANT_NO_OS_CONFINEMENT") == "1":
+        return None
+    return shutil.which("sandbox-exec")
+
+
+def _sbpl_string(path):
+    value = str(Path(path).expanduser().resolve())
+    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def os_confinement_profile(plan):
+    root = Path(plan.get("workspace_root") or plan["cwd"]).expanduser().resolve()
+    home = Path.home().resolve()
+    denied_reads = [root, home / ".claude/projects", home / ".codex/sessions"]
+    allowed_reads = [Path(plan["cwd"]), *(Path(path) for path in plan.get("applied", {}).get("add_dirs", []))]
+    deny = " ".join("(subpath " + _sbpl_string(path) + ")" for path in denied_reads)
+    allow = " ".join("(subpath " + _sbpl_string(path) + ")" for path in allowed_reads)
+    return f"(version 1)\n(allow default)\n(deny file-read-data file-write* {deny})\n(allow file-read-data {allow})\n"
+
+
+def confinement_command(plan, command):
+    if plan.get("applied", {}).get("confinement") != "sandbox-exec":
+        return list(command)
+    sandbox_exec = _sandbox_exec_path()
+    if not sandbox_exec:
+        raise RuntimeError("sandbox-exec is unavailable for a confined provider launch")
+    return [sandbox_exec, "-p", os_confinement_profile(plan), *command]
+
+
 def build_plan(
     adapter,
     route,
     prompt,
     *,
     cwd=None,
+    workspace_root=None,
     mode="read_only",
     worktree=None,
     sandbox=None,
@@ -107,6 +138,7 @@ def build_plan(
     if not selected_cwd.is_dir():
         raise ValueError("cwd must be a readable directory")
     cwd = str(selected_cwd)
+    workspace_root = str(Path(workspace_root or Path.cwd()).expanduser().resolve())
     sandbox = sandbox or (
         "workspace-write" if mode == "worktree_write" else "read-only"
     )
@@ -175,6 +207,14 @@ def build_plan(
         mode == "worktree_write" and adapter in {"claude", "cursor"}
     ):
         guarantee = "best_effort"
+    confinement = "none"
+    confinement_requested = mode == "read_only" and adapter in {"agy", "opencode"}
+    if confinement_requested and _sandbox_exec_path():
+        confinement = "sandbox-exec"
+        if adapter == "agy":
+            guarantee = "best_effort"
+    elif confinement_requested:
+        warnings.append(f"{adapter} read-only reads are unconfined")
     if adapter in {"agy", "kiro"} or (
         mode == "worktree_write" and guarantee != "enforced"
     ):
@@ -226,6 +266,7 @@ def build_plan(
         "prompt": prompt,
         "network_requested": network,
         "cwd": cwd,
+        "workspace_root": workspace_root,
         "mode": mode,
         "worktree": str(worktree) if worktree else None,
         "timeout_seconds": timeout,
@@ -249,6 +290,7 @@ def build_plan(
             "network": applied_network,
             "add_dirs": directories,
             "guarantee": guarantee,
+            "confinement": confinement,
         },
         "agy_sandbox": intent == "assurance"
         or os.environ.get("CF_DISPATCH_AGY_SANDBOX", "0") == "1",
@@ -1519,6 +1561,7 @@ def execute(
             command[0] = (
                 shutil.which(command[0], path=environment.get("PATH")) or command[0]
             )
+            command = confinement_command(plan, command)
             subreaper = _enable_subreaper()
             process = subprocess.Popen(
                 command,
