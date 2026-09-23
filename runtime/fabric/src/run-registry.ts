@@ -232,11 +232,8 @@ export function listRecordedRuns(workspace: string): RecordedRun[] {
 
 export function findRecordedRun(workspace: string, reference: string): RecordedRun | undefined {
   const runs = listRecordedRuns(workspace);
-  // A run dir may be named through a symlinked path (macOS /var → /private/var).
-  const real = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
-  const wanted = real(reference);
-  return runs.find((run) => run.run_id === reference) ??
-    runs.find((run) => run.run_dir === reference || real(run.run_dir) === wanted);
+  const real = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } }; // macOS /var
+  return runs.find((run) => run.run_id === reference) ?? runs.find((run) => real(run.run_dir) === real(reference));
 }
 
 /**
@@ -291,20 +288,15 @@ function closeStoppedRun(runDir: string, terminalStatus: "interrupted" | "cancel
   const receipt = readJson(join(runDir, "RUN_RECEIPT.json"));
   if ((!status.finished_at || status.status === "running") &&
       (receipt?.status === undefined || receipt.status === "active")) {
-    const temporary = `${path}.${process.pid}.tmp`;
-    const { fix: _staleFix, ...prior } = status;
+    const [temporary, { fix: _staleFix, ...prior }] = [`${path}.${process.pid}.tmp`, status];
     try {
       writeFileSync(temporary, JSON.stringify({ ...prior, status: terminalStatus,
         finished_at: new Date().toISOString(), ...(terminalStatus === "interrupted"
           ? { fix: "Dispatch a new run; the owner exited." } : {}) }) + "\n", { mode: 0o600 });
       renameSync(temporary, path);
-    } catch (error) {
-      // A cleaned or pruned run has nothing left to close. Any other failure
-      // keeps the owner record, so status can still infer the interruption.
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        console.error(`fabric: could not close ${runDir}: ${(error as Error).message}`);
-        return;
-      }
+    } catch (error) { // A pruned run has nothing to close; else keep the owner record for status.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT")
+        return void console.error(`fabric: could not close ${runDir}: ${(error as Error).message}`);
     }
   }
   removeOwnerRecord(runDir);
