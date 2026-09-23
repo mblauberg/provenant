@@ -296,6 +296,10 @@ def _load_manifest(
                 "use access_mode worktree_write with a worktree"
             )
         timeout = _finite_timeout(task.get("timeout",task.get("timeout_seconds")), 10800.0 if access_mode == "worktree_write" else DEFAULT_TIMEOUT_SECONDS)
+        try:
+            __import__("exec_routing").validate_policy(task.get("fallback"))
+        except ValueError as exc:
+            raise BatchInputError(f"task {task_id}: {exc}") from exc
         normalized = dict(task)
         normalized.update({
             "id": task_id, "adapter": adapter, "role": role, "timeout": timeout,

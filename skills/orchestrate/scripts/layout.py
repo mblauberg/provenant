@@ -37,9 +37,24 @@ def run_root(cwd=None):
     return cwd
 
 
-def contains_run(path, cwd=None):
+def run_workspace(path, cwd=None):
+    """Locate the workspace of an explicitly supplied run, without ambient discovery."""
+    cwd = Path(cwd or Path.cwd()).resolve()
+    path = Path(path).resolve()
     root = run_root(cwd)
-    return Path(path).resolve().is_relative_to(root)
+    if path.is_relative_to(root):
+        return root
+    # A non-Git owner may execute in a nested task cwd. Its supplied run path
+    # identifies the workspace; unrelated ancestor .agent-run directories do not.
+    if root == cwd and not (root / ".git").exists():
+        for ancestor in path.parents:
+            if ancestor.name == ".agent-run" and cwd.is_relative_to(ancestor.parent):
+                return ancestor.parent
+    return root
+
+
+def contains_run(path, cwd=None):
+    return Path(path).resolve().is_relative_to(run_workspace(path, cwd))
 
 
 def new_run_dir(cwd=None, kind="dispatch", slug="task", owner=False):
@@ -143,31 +158,30 @@ def reap_orphans(cwd=None, at=None):
                             os.killpg(pgid, signal.SIGKILL)
                         except ProcessLookupError:
                             pass
-            if not provider_file.is_file():
-                live_provider = False
-                for attempt in (directory / "tasks").glob("*/attempt-*/attempt.json"):
-                    row = json.loads(
-                        read_bound_bytes(
-                            directory,
-                            attempt.relative_to(directory),
-                            label="attempt receipt",
-                        )
+            live_provider = False
+            for attempt in (directory / "tasks").glob("*/attempt-*/attempt.json"):
+                row = json.loads(
+                    read_bound_bytes(
+                        directory,
+                        attempt.relative_to(directory),
+                        label="attempt receipt",
                     )
-                    pgid = row.get("pgid")
-                    if (
-                        row.get("state") != "terminal"
-                        and isinstance(pgid, int)
-                        and pgid > 0
-                    ):
-                        try:
-                            os.kill(pgid, 0)
-                        except ProcessLookupError:
-                            continue
-                        except PermissionError:
-                            pass
-                        live_provider = True
-                if live_provider:
-                    continue
+                )
+                pgid = row.get("pgid")
+                if (
+                    row.get("state") != "terminal"
+                    and isinstance(pgid, int)
+                    and pgid > 0
+                ):
+                    try:
+                        os.kill(pgid, 0)
+                    except ProcessLookupError:
+                        continue
+                    except PermissionError:
+                        pass
+                    live_provider = True
+            if live_provider:
+                continue
             ended = datetime.fromtimestamp(at, UTC).isoformat().replace("+00:00", "Z")
             rows = []
             for attempt in (directory / "tasks").glob("*/attempt-*/attempt.json"):

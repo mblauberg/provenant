@@ -112,3 +112,38 @@ def test_orphan_reaping_does_not_close_a_live_unindexed_provider(tmp_path):
     attempt.write_text(json.dumps(row))
     assert layout.reap_orphans(tmp_path) == []
     assert json.loads(receipt.read_text())["status"] == "active"
+
+
+def test_nested_non_git_cwd_accepts_explicit_workspace_run(tmp_path):
+    from skills.orchestrate.scripts import layout
+    (tmp_path / '.agent-run/runs').mkdir(parents=True)
+    nested = tmp_path / 'src/nested'
+    nested.mkdir(parents=True)
+    assert layout.run_root(nested) == nested
+    assert layout.contains_run(tmp_path / '.agent-run/runs/one', nested)
+    assert not layout.contains_run(tmp_path.parent / 'other', nested)
+
+
+def test_stale_batch_with_provider_record_still_checks_every_attempt(tmp_path):
+    from skills.orchestrate.scripts import layout
+    import os, time
+    run = tmp_path / '.agent-run/runs/stale-batch'
+    run.mkdir(parents=True)
+    receipt = run / 'RUN_RECEIPT.json'
+    receipt.write_text(json.dumps({'status':'active'}))
+    os.utime(receipt, (time.time() - 49*3600,) * 2)
+    (run / 'dispatch-provider.json').write_text(json.dumps({'provider_pgid':99999999}))
+    row = json.loads((ROOT / 'tests/fixtures/fabric-v1/attempt.json').read_text())
+    row.update(state='running', status=None, pgid=os.getpid())
+    attempt = run / 'tasks/other/attempt-001/attempt.json'
+    attempt.parent.mkdir(parents=True)
+    attempt.write_text(json.dumps(row))
+    assert layout.reap_orphans(tmp_path) == []
+
+
+def test_stray_ancestor_run_directory_does_not_relocate_new_non_git_runs(tmp_path):
+    from skills.orchestrate.scripts import layout
+    (tmp_path / '.agent-run').mkdir()
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    assert layout.new_run_dir(workspace).parent == workspace / '.agent-run/runs'

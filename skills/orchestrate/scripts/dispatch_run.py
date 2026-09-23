@@ -47,7 +47,7 @@ GIT_EVIDENCE_RECORD_TYPE = "provenant-git-evidence"
 CANCEL_MARKER_NAME = "cancel.request"
 
 from _shared.bounded_process import stop_process_group
-from layout import run_root, contains_run
+from layout import run_workspace, run_root, contains_run
 import provider_exec
 import exec_routing
 from fabric_records import render_digest, write_cooldown, append_index, TERMINAL_STATUSES
@@ -445,6 +445,22 @@ def reconcile_manifest(run_dir: Path, custody=None) -> None:
         custody.seek(0)
         existing = custody.read()
     attempt_dirs = sorted((run_dir / "dispatch" / "tasks").glob("*/attempt-*"))
+    # A recovered interrupted attempt has no legacy terminal envelope. Its
+    # canonical terminal row is the recovery evidence; retain partial files.
+    recoverable = set()
+    for directory in attempt_dirs:
+        if (directory / "attempt.json").exists():
+            continue
+        canonical = Path("tasks") / directory.parent.name / directory.name / "attempt.json"
+        try:
+            row = json.loads(read_bound_bytes(run_dir, canonical, label="interrupted attempt"))
+            if (row.get("schema") == "fabric.attempt.v1" and row.get("state") == "terminal"
+                    and row.get("status") == "interrupted" and row.get("task_id") == directory.parent.name
+                    and directory.name == f"attempt-{row.get('attempt', 0):03d}"):
+                recoverable.add(directory)
+        except (OSError, ValueError, OwnedFileError):
+            pass
+    attempt_dirs = [directory for directory in attempt_dirs if directory not in recoverable]
     for attempt_dir in attempt_dirs:
         try:
             relative_path(run_dir, attempt_dir)
@@ -724,6 +740,9 @@ def build_command(
         if value is not None: command.extend((flag,str(value)))
     for directory in getattr(args,"add_dirs",[]): command.extend(("--add-dir",str(directory)))
     if not getattr(args,"preface",True): command.append("--no-preface")
+    policy = exec_routing.validate_policy(getattr(args, "fallback", None))
+    if policy is not None:
+        command.extend(("--fallback", "true" if isinstance(policy, list) else json.dumps(policy) if type(policy) is bool else policy))
     return command
 
 
@@ -916,7 +935,9 @@ def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path) -> byte
     if prompt_source is not None:
         if not prompt_source.exists():
             raise PreflightError("prompt_unavailable", f"cannot read prompt file: {prompt_source}")
-        if not (prompt_source == run_dir or run_dir in prompt_source.parents or workspace in prompt_source.parents):
+        prompt_root = next((root for root in (run_dir, workspace, run_workspace(run_dir, workspace))
+                            if prompt_source.is_relative_to(root)), None)
+        if prompt_root is None:
             raise PreflightError("prompt_path_forbidden", "prompt file must be inside the run directory or current workspace")
         sensitive_roots = {".ssh", ".aws", ".azure", ".gnupg"}
         sensitive_files = {
@@ -932,7 +953,7 @@ def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path) -> byte
         if sensitive_roots.intersection(parts) or prompt_source.name.casefold() in sensitive_files or config_auth:
             raise PreflightError("credential_or_auth_store_denied", "prompt path is a credential or authentication store")
         try:
-            prompt_bytes = _read_prompt_once(run_dir if prompt_source.is_relative_to(run_dir) else workspace, prompt_source)
+            prompt_bytes = _read_prompt_once(prompt_root, prompt_source)
         except OwnedLinkError as exc:
             raise PreflightError("prompt_hard_link_denied", str(exc))
         except OwnedFileError as exc:
@@ -976,6 +997,10 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                 if not isinstance(task_id, str) or not TASK_ID_RE.fullmatch(task_id) or task_id in seen:
                     raise PreflightError("invalid_task_id", "Pass unique task ids containing letters, numbers, '.', '_' or '-'.")
                 seen.add(task_id)
+                try:
+                    exec_routing.validate_policy(task.get("fallback"))
+                except ValueError as exc:
+                    raise PreflightError("fallback_invalid", str(exc)) from exc
                 if task.get("sandbox") not in {None,"read-only","workspace-write","full"}:
                     raise PreflightError("sandbox_invalid","Pass read-only, workspace-write or full.")
                 if task.get("access_mode","read_only")=="read_only" and task.get("sandbox") not in {None,"read-only"}:
@@ -1006,6 +1031,9 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                 command = [sys.executable, str(product / "scripts/model_route.py"), "resolve",
                            "--catalog", str(catalog), "--adapter", adapter, "--role", "worker",
                            "--alias", task.get("alias") or ("flagship" if task.get("model") else "workhorse")]
+                policy = exec_routing.validate_policy(task.get("fallback"))
+                if policy is not None:
+                    command.extend(("--fallback", "true" if isinstance(policy, list) else json.dumps(policy) if type(policy) is bool else policy))
                 for key in ("model", "effort"):
                     if task.get(key):
                         command.extend(["--" + key, task[key]])
@@ -1096,6 +1124,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
 
 
 def publish_contract(run_dir,row):
+    row["run_dir"] = str(run_dir)
     row["digest"]=render_digest(row)
     path=run_dir/row["paths"]["receipt"]
     ensure_owned_directory(run_dir,path.parent)
@@ -1138,13 +1167,22 @@ def prepare_resume(args):
     args.sandbox=previous["applied"]["sandbox"];args.network=None if previous["applied"]["network"] is None else str(previous["applied"]["network"]).lower()
     args.add_dirs=previous["applied"]["add_dirs"];args.resume_session=previous["session_id"]
     args.fallback="false"
+    for field in ("intent", "orchestrator_family", "role", "risk_tier", "model_override_tier", "reviewer_id", "preface"):
+        if field in route:
+            setattr(args, field, route[field])
     if not args.resume_session or args.tool=="copilot":
         args.resume_session=None
         tail=""
         result=previous["paths"].get("result")
         if result:
-            data=read_bound_bytes(args.run_dir,retained_path(args.run_dir,result),label="resume result")
-            tail=data[-4096:].decode(errors="replace")
+            retained = retained_path(args.run_dir, result)
+            try:
+                (args.run_dir / retained).lstat()
+            except FileNotFoundError:
+                pass  # An interrupted provider may never have produced a result.
+            else:
+                data = read_bound_bytes(args.run_dir, retained, label="resume result")
+                tail = data[-4096:].decode(errors="replace")
         args.resume_relaunch=(previous.get("question") or "")+"\n"+tail
     receipt=json.loads(read_bound_bytes(args.run_dir,"RUN_RECEIPT.json",label="RUN_RECEIPT.json"))
     receipt.update(status="active",closed_at=None)
@@ -1253,7 +1291,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         if not (retry_dir.is_dir() and (retry_dir / "attempt.json").is_file()):
             return fail(run_dir, "retry_of_missing", f"retry attempt does not exist: {args.retry_of}")
         retry_of = args.retry_of
-    attempt_number = existing_attempt_number(task_dir)
+    attempt_number = max(existing_attempt_number(task_dir), existing_attempt_number(run_dir / "tasks" / args.task_id))
     attempt_id = f"attempt-{attempt_number:03d}"
     attempt_dir = task_dir / attempt_id
     try:
@@ -1294,6 +1332,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     command = build_command(args, prompt_path, result_path, evidence_dir)
     requested_route = {
         "intent": args.intent,
+        "preface": args.preface,
         "adapter": args.tool,
         "alias": args.alias or "",
         "task_class": args.task_class or "",
@@ -1359,6 +1398,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                             plan["warnings"].append("all alias candidates cooling")
                             plan["cooldown_blocked"]=cooling
                 active = contract_row(args,run_dir,attempt_number,attempt_dir,plan,started_at)
+                active["requested_route"] = requested_route
                 publish_contract(run_dir,active)
                 def provider_started(child):
                     nonlocal process
@@ -1709,7 +1749,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     for sig, handler in old_handlers.items():
         signal.signal(sig, handler)
     row = terminal_contract(args,run_dir,record,adapter,attempt_number,attempt_dir)
-    for action in (lambda: write_cooldown(row),lambda: append_index(row,run_dir,root=run_root(Path.cwd())/".agent-run")):
+    for action in (lambda: write_cooldown(row),lambda: append_index(row,run_dir,root=run_workspace(run_dir, Path.cwd())/".agent-run")):
         try: action()
         except (OSError,ValueError) as exc: row["warnings"].append("terminal index unavailable: "+str(exc))
     publish_contract(run_dir,row)
@@ -1726,8 +1766,6 @@ def close_mcp_run(run_dir: Path) -> None:
     try:
         attempts = list((run_dir / "dispatch/tasks").glob("*/attempt-*/attempt.json"))
         records = [json.loads(read_bound_bytes(run_dir, path.relative_to(run_dir), label="attempt.json")) for path in attempts]
-        if any(record.get("status") not in {"succeeded", "failed", "blocked", "timed_out", "cancelled"} for record in records):
-            return
         # The batch owner calls this after joining all children, under its custody lock.
         receipt = json.loads(read_bound_bytes(run_dir, "RUN_RECEIPT.json", label="RUN_RECEIPT.json"))
         if receipt.get("status") != "active":
@@ -1738,17 +1776,22 @@ def close_mcp_run(run_dir: Path) -> None:
             if summary.get("status") not in {"completed", "failed", "cancelled"}:
                 return
             statuses.update(task.get("status", "failed") for task in summary.get("tasks", []))
-        if not statuses:
-            return
-        canonical=[json.loads(path.read_text()) for path in (run_dir/"tasks").glob("*/attempt-*/attempt.json")]
+        canonical = [json.loads(read_bound_bytes(run_dir, path.relative_to(run_dir), label="attempt.json"))
+                     for path in (run_dir / "tasks").glob("*/attempt-*/attempt.json")]
         if canonical:
             latest={}
             for row in canonical:
                 if row["task_id"] not in latest or row["attempt"]>latest[row["task_id"]]["attempt"]: latest[row["task_id"]]=row
+            if any(row.get("state") != "terminal" or row.get("status") not in TERMINAL_STATUSES for row in latest.values()):
+                return
             receipt["attempts"]=sorted(canonical,key=lambda row:(row["task_id"],row["attempt"]))
             receipt["run_id"]=canonical[0]["run_id"]
             receipt["resumable"]=any(row.get("status")=="input_required" for row in latest.values())
             statuses={"succeeded" if row["status"]=="ok" else row["status"] for row in latest.values()}
+        elif any(record.get("status") not in {"succeeded", "failed", "blocked", "timed_out", "cancelled"} for record in records):
+            return
+        if not statuses:
+            return
         receipt.update(status="succeeded" if statuses == {"succeeded"} else "cancelled" if statuses == {"cancelled"} else "failed",
                        closed_at=now(), terminal_reason=None if statuses == {"succeeded"} else "MCP execution attempts are terminal")
         write_owned(run_dir, run_dir / "RUN_RECEIPT.json", json.dumps(receipt, indent=2) + "\n")
@@ -1757,6 +1800,10 @@ def close_mcp_run(run_dir: Path) -> None:
 
 
 def execute_attempt_sequence(args,custody=None):
+    try:
+        exec_routing.validate_policy(args.fallback)
+    except ValueError as exc:
+        return fail(args.run_dir, "fallback_invalid", str(exc))
     sequence_start=time.monotonic()
     sequence_budget=args.timeout_seconds
     result = _dispatch(args, custody)
@@ -1768,7 +1815,7 @@ def execute_attempt_sequence(args,custody=None):
             if remaining<=0: break
             args.timeout_seconds=remaining
             if exec_routing.cooling(candidate["adapter"],candidate["model"]): continue
-            args.fallback_from={"attempt":previous["attempt"],"status":previous["status"],"route":previous["provenance"]["line"].split(" (",1)[0].removeprefix("Route: ")}
+            args.fallback_from={"attempt":previous["attempt"],"status":previous["status"],"reset_at":previous.get("reset_at"),"route":previous["provenance"]["line"].split(" (",1)[0].removeprefix("Route: ")}
             args.tool=candidate["adapter"];args.model=candidate["model"];args.effort=candidate.get("effort")
             args.alias=None;args.task_class=None;args.retry_of=f"attempt-{previous['attempt']:03d}"
             result=_dispatch(args,custody)

@@ -404,12 +404,13 @@ def test_fallback_training_requires_explicit_opt_in(tmp_path):
     assert [item["model"] for item in mod.candidates(plan, "any", catalogue)] == [
         "paid",
         "training",
-        "opencode/free-free",
+        "free-free",
     ]
     assert mod.candidates(plan, False, catalogue) == []
 
 
-def test_usage_limit_falls_back_as_attempt_two(tmp_path):
+@pytest.mark.parametrize("explicit", [False, True])
+def test_usage_limit_falls_back_as_attempt_two(tmp_path, explicit):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     cli = bindir / "claude"
@@ -421,6 +422,9 @@ print(json.dumps({'type':'result','is_error':model=='opus','result':"You've hit 
 sys.exit(1 if model=='opus' else 0)
 """)
     cli.chmod(0o755)
+    fallback_cli = bindir / 'opencode'
+    fallback_cli.write_text("#!/usr/bin/env python3\nimport json\nprint(json.dumps({'type':'text','part':{'text':'DONE'}}))\n")
+    fallback_cli.chmod(0o755)
     env = {
         **os.environ,
         "PATH": str(bindir) + ":" + os.environ["PATH"],
@@ -445,8 +449,9 @@ sys.exit(1 if model=='opus' else 0)
             str(run),
             "--tool",
             "claude",
-            "--alias",
-            "workhorse",
+            "--model" if explicit else "--alias",
+            "opus" if explicit else "workhorse",
+            "--fallback", "true",
             "--prompt-file",
             str(prompt),
         ],
@@ -467,7 +472,7 @@ sys.exit(1 if model=='opus' else 0)
     assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "succeeded"
     assert (
         json.loads((tmp_path / "cooldowns.json").read_text())["cooldowns"][
-            "claude/opus"
+            "claude/*"
         ]["source_run"]
         == rows[0]["run_id"]
     )
@@ -706,3 +711,229 @@ def test_writer_watchdog_does_not_count_its_own_warning_as_progress(tmp_path):
     )
     record = supervisor().execute(plan, tmp_path / "result.md")
     assert record["status"] == "stalled"
+
+@pytest.mark.parametrize('api_key', [False, True])
+def test_claude_plan_isolates_settings_and_mcp(tmp_path, monkeypatch, api_key):
+    monkeypatch.delenv('ANTHROPIC_BASE_URL', raising=False)
+    monkeypatch.delenv('ANTHROPIC_AUTH_TOKEN', raising=False)
+    monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
+    if api_key:
+        monkeypatch.setenv('ANTHROPIC_API_KEY', 'fixture-key')
+    plan = supervisor().build_plan('claude', {'resolved_model': 'opus'}, 'hello', cwd=tmp_path)
+    assert ('--bare' if api_key else '--safe-mode') in plan['argv']
+    assert '--strict-mcp-config' in plan['argv']
+    assert 'fixture-key' not in ' '.join(plan['argv'])
+
+@pytest.mark.parametrize('adapter', ['claude', 'codex', 'opencode'])
+def test_successful_answer_survives_tool_permission_diagnostic(adapter):
+    parsed = supervisor().parse_output(adapter, '{"type":"result","result":"DONE"}', 'ls: /root: Permission denied', 0)
+    assert parsed['status'] == 'ok'
+
+
+def test_question_example_in_middle_of_answer_does_not_suspend():
+    parsed = supervisor().parse_output('claude', json.dumps({'type':'result','result':'Example:\n```\nQUESTION: Which?\n```\nEnd of explanation.'}))
+    assert parsed['status'] == 'ok'
+
+
+@pytest.mark.parametrize('directory', ['.config', 'Library', '.local/share', '.local'])
+def test_add_dirs_deny_ancestors_of_credential_stores(tmp_path, monkeypatch, directory):
+    monkeypatch.setenv('HOME', str(tmp_path))
+    target = tmp_path / directory
+    target.mkdir(parents=True)
+    with pytest.raises(ValueError, match='credential'):
+        supervisor().build_plan('codex', {}, 'hello', cwd=tmp_path, add_dirs=[target])
+
+
+def test_opencode_does_not_claim_unsupported_add_dirs(tmp_path):
+    plan = supervisor().build_plan('opencode', {}, 'hello', cwd=tmp_path, add_dirs=[tmp_path])
+    assert plan['applied']['add_dirs'] == []
+    assert 'additional directories unsupported by opencode' in plan['warnings']
+
+
+def test_failure_classification_uses_diagnostics_not_answer_prose():
+    parsed = supervisor().parse_output('opencode', 'Explain the rate limit algorithm', '', 1)
+    assert parsed['status'] == 'failed'
+    assert supervisor().parse_output('claude', '', '529 overloaded', 1)['status'] == 'rate_limited'
+
+
+def test_kiro_tool_echo_does_not_override_observed_model():
+    output = '\n'.join(map(json.dumps, [
+        {'type':'system', 'model':'actual'},
+        {'type':'tool_result','data':{'model':'echoed'}},
+        {'type':'result','result':'DONE'},
+    ]))
+    assert supervisor().parse_output('kiro', output)['observed_model'] == 'actual'
+
+
+def test_capture_rollover_writes_linear_bytes_and_preserves_terminal_result(tmp_path):
+    mod = supervisor()
+    capture = mod.BoundedCapture(tmp_path / 'capture', limit=1000)
+    class Meter:
+        def __init__(self, file):
+            self.file, self.written = file, 0
+        def write(self, data):
+            self.written += len(data)
+            return self.file.write(data)
+        def __getattr__(self, name):
+            return getattr(self.file, name)
+    meter = Meter(capture.file)
+    capture.file = meter
+    for _ in range(1000):
+        capture.write(b'x' * 100)
+    capture.close()
+    assert meter.written <= 102000
+    assert (tmp_path / 'capture').stat().st_size == 1000
+
+
+def test_stream_capture_retains_early_semantic_events_with_bounded_storage(tmp_path, monkeypatch):
+    mod = supervisor()
+    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048)
+    code = '''import json
+print(json.dumps({'type':'system','model':'observed','session_id':'retained'}))
+print(json.dumps({'type':'result','result':'DONE'}))
+for i in range(10000): print(json.dumps({'type':'telemetry','data':'x'*100}))
+'''
+    plan = fixture_plan(tmp_path, code, 'claude')
+    record = mod.execute(plan, tmp_path / 'result.md')
+    assert record['status'] == 'ok'
+    assert record['session_id'] == 'retained'
+    assert (tmp_path / 'result.md').read_text() == 'DONE'
+    assert (tmp_path / 'events.jsonl').stat().st_size <= 2048
+
+
+def test_plan_uses_router_applied_effort(tmp_path):
+    plan = supervisor().build_plan('opencode', {'resolved_model':'fixture', 'effort':'high', 'effort_applied':'medium'}, 'hello', cwd=tmp_path)
+    assert plan['effort'] == 'medium'
+    assert plan['argv'][plan['argv'].index('--variant') + 1] == 'medium'
+
+
+def test_fallback_uses_router_candidates_and_parses_explicit_routes():
+    mod = importlib.import_module('skills.orchestrate.scripts.exec_routing')
+    plan = {'adapter':'claude','model':'opus','effort':'high','route':{'fallback_candidates':[{'adapter':'codex','model':'gpt-6-sol','effort_applied':'medium'}]}}
+    assert mod.candidates(plan, True, {}) == [{'adapter':'codex','model':'gpt-6-sol','effort':'medium'}]
+    assert mod.candidates(plan, ['codex/gpt-6-sol@low'], {}) == [{'adapter':'codex','model':'gpt-6-sol','effort':'low'}]
+
+
+@pytest.mark.parametrize('policy', ['yes', 'codex/gpt-6-sol', 3, {}, [''], [3], [{'adapter': [], 'model': 'sol'}]])
+def test_invalid_fallback_rejected_during_preflight(tmp_path, monkeypatch, policy):
+    mod = importlib.import_module('skills.orchestrate.scripts.dispatch_run')
+    monkeypatch.chdir(tmp_path)
+    result = mod.preflight_tasks([{'id':'one','adapter':'claude','model':'opus','prompt':'hello','fallback':policy}])
+    assert result['status'] == 'rejected'
+    assert result['error'] == 'fallback_invalid'
+
+
+def test_cancel_allows_provider_session_flush(tmp_path):
+    code = '''import signal,time
+from pathlib import Path
+def stop(*args):
+    time.sleep(.3)
+    Path('flushed').write_text('saved')
+    raise SystemExit(0)
+signal.signal(signal.SIGTERM, stop)
+Path('ready').touch()
+time.sleep(30)
+'''
+    plan = fixture_plan(tmp_path, code, timeout_seconds=5)
+    record = supervisor().execute(plan, tmp_path / 'result.md', cancelled=lambda: (tmp_path / 'ready').exists())
+    assert record['status'] == 'cancelled'
+    assert (tmp_path / 'flushed').read_text() == 'saved'
+
+
+def test_writer_progress_includes_files_after_ten_thousand(tmp_path):
+    mod = supervisor()
+    directory = tmp_path / 'source'
+    directory.mkdir()
+    for number in range(10001):
+        (directory / str(number)).touch()
+    before = mod._workspace_stamp(tmp_path)
+    # Modify the last entry in the same traversal order used by the watchdog.
+    last = list(os.walk(directory))[0][2][-1]
+    (directory / last).write_text('changed')
+    assert mod._workspace_stamp(tmp_path) != before
+
+
+def test_stream_rollover_preserves_unclassified_structured_failure(tmp_path, monkeypatch):
+    mod = supervisor()
+    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048)
+    code = '''import json
+print(json.dumps({'type':'result','is_error':True,'result':'backend exploded'}))
+for i in range(1000): print(json.dumps({'type':'telemetry','data':'x'*100}))
+'''
+    record = mod.execute(fixture_plan(tmp_path, code, 'claude'), tmp_path / 'result.md')
+    assert record['status'] == 'failed'
+
+
+def test_explicit_route_fallback_policy_reaches_router(tmp_path, monkeypatch):
+    mod = importlib.import_module('skills.orchestrate.scripts.dispatch_run')
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    result = mod.preflight_tasks([{'id':'one','adapter':'claude','model':'opus','prompt':'hello','fallback':True}])
+    assert result['status'] == 'validated'
+    assert result['routes'][0]['fallback_candidates']
+
+
+def test_oversized_plain_result_is_partial_and_not_certifiable(tmp_path, monkeypatch):
+    mod = supervisor()
+    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048)
+    plan = fixture_plan(tmp_path, "print('a' * 10000)", intent='assurance', orchestrator_family='anthropic')
+    record = mod.execute(plan, tmp_path / 'result.md')
+    assert record['status'] == 'partial'
+    assert not record['certification_eligible']
+    assert any('truncated' in warning for warning in record['warnings'])
+    assert (tmp_path / 'result.md').stat().st_size <= 2048
+
+
+def test_oversized_split_result_cannot_certify_preliminary_text(tmp_path, monkeypatch):
+    mod = supervisor()
+    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048)
+    code = '''import json,sys,time
+print(json.dumps({'type':'assistant','message':{'content':'preliminary'}}), flush=True)
+result = json.dumps({'type':'result','result':'a'*100000})+'\\n'
+for offset in range(0, len(result), 1024):
+    sys.stdout.write(result[offset:offset+1024]); sys.stdout.flush(); time.sleep(.001)
+'''
+    record = mod.execute(fixture_plan(tmp_path, code, 'claude'), tmp_path / 'result.md')
+    assert record['status'] == 'partial'
+    assert any('truncated' in warning for warning in record['warnings'])
+
+
+def test_malformed_router_fallback_does_not_crash_finished_attempt():
+    mod = importlib.import_module('skills.orchestrate.scripts.exec_routing')
+    plan = {'adapter':'claude','model':'opus','route':{'fallback_candidates':[None, {'adapter':'future','model':'x'}, {'adapter':'codex','model':'sol'}]}}
+    assert mod.candidates(plan, True, {}) == [{'adapter':'codex','model':'sol','effort':None}]
+
+
+@pytest.mark.parametrize('rollover', [False, True])
+def test_successful_terminal_result_supersedes_transient_retry_error(tmp_path, monkeypatch, rollover):
+    mod = supervisor()
+    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048 if rollover else 20*1024*1024)
+    code = '''import json
+print(json.dumps({'type':'api_retry','error':'529 overloaded'}))
+for i in range(1000): print(json.dumps({'type':'telemetry','data':'x'*100}))
+print(json.dumps({'type':'result','is_error':False,'result':'DONE'}))
+'''
+    record = mod.execute(fixture_plan(tmp_path, code, 'claude'), tmp_path / 'result.md')
+    assert record['status'] == 'ok'
+
+
+@pytest.mark.parametrize('rollover', [False, True])
+def test_retry_success_never_erases_a_separate_hard_failure(tmp_path, monkeypatch, rollover):
+    mod = supervisor()
+    monkeypatch.setattr(mod, 'MAX_EVENTS_BYTES', 2048 if rollover else 20*1024*1024)
+    code = '''import json
+print(json.dumps({'type':'error','error':'permission denied'}))
+print(json.dumps({'type':'api_retry','error':'529 overloaded'}))
+for i in range(1000): print(json.dumps({'type':'telemetry','data':'x'*100}))
+print(json.dumps({'type':'result','is_error':False,'result':'DONE'}))
+'''
+    record = mod.execute(fixture_plan(tmp_path, code, 'claude'), tmp_path / 'result.md')
+    assert record['status'] == 'permission_blocked'
+
+
+@pytest.mark.parametrize('raw,models,expected', [(None, {}, []), (3, {}, []), ([{'adapter':'codex','model':'sol'}], None, ['sol']), ([{'adapter':'codex','model':'sol'}], {'sol':None}, ['sol'])])
+def test_malformed_router_candidate_containers_are_tolerated(raw, models, expected):
+    mod = importlib.import_module('skills.orchestrate.scripts.exec_routing')
+    plan = {'adapter':'claude','model':'opus','route':{'fallback_candidates':raw}}
+    assert [item['model'] for item in mod.candidates(plan, True, {'models':models})] == expected

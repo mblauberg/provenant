@@ -212,7 +212,7 @@ def test_output_parent_swap_cannot_certify_an_identical_outside_file():
         bin_dir = root / "bin"
         bin_dir.mkdir()
         payload = root / "payload"
-        payload.write_bytes(b"A" * (32 * 1024 * 1024))
+        payload.write_bytes(b"A" * (16 * 1024 * 1024))
         write_executable(
             bin_dir / "codex",
             """#!/usr/bin/env bash
@@ -2981,8 +2981,8 @@ def test_unimplemented_adapter_is_refused_before_any_provider_work():
             assert not invoked.exists()
 
 
-def test_opencode_arm_runs_with_explicit_model_and_records_variant():
-    """OpenCode is an ordinary implemented adapter: explicit model, no --auto."""
+def test_opencode_arm_runs_with_explicit_model_and_reports_unsupported_variant():
+    """Unknown OpenCode models run with the router-applied effort and a note."""
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         bin_dir = tmp / "bin"
@@ -3020,8 +3020,9 @@ def test_opencode_arm_runs_with_explicit_model_and_records_variant():
         assert "json" in recorded
         assert "--model" in recorded
         assert "opencode/union-alpha" in recorded
-        assert "--variant" in recorded
-        assert "high" in recorded
+        assert "--variant" not in recorded
+        assert record["provenance"]["effort_applied"] == ""
+        assert any("effort control" in note for note in record["warnings"])
         assert "--auto" in recorded
         assert out.read_text(encoding="utf-8") == "OPENCODE OK"
         assert '"type":"text"' in (tmp / "out.txt.raw.jsonl").read_text()

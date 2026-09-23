@@ -1158,3 +1158,43 @@ def test_batch_rejects_a_worktree_without_the_writer_access_mode(tmp_path, monke
     value = task(tmp_path, 'reader', worktree=str(worktree))
     with pytest.raises(module.BatchInputError, match='requires worktree_write'):
         module.load_manifest(task_manifest(tmp_path, [value]), concurrency=1)
+
+
+def test_real_batch_passes_each_task_cwd_and_absolute_prompt(tmp_path, monkeypatch):
+    bindir = tmp_path / 'bin'
+    bindir.mkdir()
+    write_executable(bindir / 'claude', '''#!/usr/bin/env python3
+import json, os, sys
+sys.stdin.read()
+print(json.dumps({'type':'result','result':os.getcwd()}))
+''')
+    monkeypatch.setenv('PATH', str(bindir) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    monkeypatch.setenv('FABRIC_COOLDOWNS_PATH', str(tmp_path / 'cooldowns.json'))
+    run = Path(subprocess.check_output([str(INIT), '--kind', 'batch'], cwd=tmp_path, text=True).strip())
+    prompt = tmp_path / 'caller.md'
+    prompt.write_text('hello')
+    tasks = []
+    for name in ('one', 'two'):
+        cwd = tmp_path / name
+        cwd.mkdir()
+        tasks.append({'id':name,'adapter':'claude','model':'opus','prompt_file':str(prompt),'cwd':str(cwd),'fallback':False})
+    manifest = tmp_path / 'manifest.json'
+    manifest.write_text(json.dumps({'schema_version':1,'tasks':tasks}))
+    result = subprocess.run([str(BATCH), '--run-dir', str(run), '--manifest', str(manifest)], cwd=tmp_path, capture_output=True, text=True, timeout=20)
+    assert result.returncode == 0, result.stdout + result.stderr
+    for task in tasks:
+        row = json.loads((run / 'tasks' / task['id'] / 'attempt-001/attempt.json').read_text())
+        assert row['cwd'] == task['cwd']
+        assert (run / row['paths']['result']).read_text() == task['cwd']
+
+
+@pytest.mark.parametrize('fallback', ['yes', {'model':'oops'}, ['']])
+def test_batch_rejects_invalid_fallback_before_launch(tmp_path, monkeypatch, fallback):
+    monkeypatch.chdir(tmp_path)
+    manifest = tmp_path / 'tasks.json'
+    manifest.write_text(json.dumps({'schema_version':1,'tasks':[{'id':'one','adapter':'claude','model':'opus','prompt':'hello','fallback':fallback}]}))
+    mod = load_module()
+    with pytest.raises(mod.BatchInputError, match='fallback'):
+        mod.load_manifest(manifest)

@@ -64,6 +64,7 @@ TOOL="" MODEL="" EFFORT="" OUT="" PROMPT="" PROMPT_FILE="" CHAIN="" ORCH_FAMILY=
 PLAN_ONLY=0
 SANDBOX="" NETWORK="" RESUME_SESSION="" PROVIDER_CWD=""
 PREFACE=1
+FALLBACK=""
 ALIAS_EXPLICIT=0
 OUT_CREATED=false
 ACTIVE_RUN_TMPDIR=""
@@ -87,6 +88,7 @@ while [ $# -gt 0 ]; do
     -h|--help) usage; exit 0;;
     --doctor) DOCTOR=1; shift;;
     --plan-only) PLAN_ONLY=1; shift;;
+    --fallback) need_value "$@"; FALLBACK="$2"; shift 2;;
     --cwd) need_value "$@"; PROVIDER_CWD="$2"; shift 2;;
     --sandbox) need_value "$@"; SANDBOX="$2"; shift 2;;
     --network) need_value "$@"; NETWORK="$2"; shift 2;;
@@ -531,6 +533,7 @@ resolve_routing() {
     route_args+=(--alias "$alias")
   fi
   [ "$INTENT" = "assurance" ] && route_args+=(--require-distinct)
+  [ -n "$FALLBACK" ] && route_args+=(--fallback "$FALLBACK")
   [ -n "$model" ] && route_args+=(--model "$model")
   [ -n "$effort" ] && route_args+=(--effort "$effort")
   [ -n "$model_override_tier" ] && route_args+=(--model-override-tier "$model_override_tier")

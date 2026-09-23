@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import deque
 import json
 import math
 import os
@@ -28,7 +29,17 @@ def now():
 
 
 def credential_path(path):
-    parts = [part.lower() for part in Path(path).expanduser().resolve().parts]
+    candidate = Path(path).expanduser().resolve()
+    home = Path.home().resolve()
+    stores = [home / name for name in (
+        '.ssh', '.aws', '.azure', '.gnupg', '.codex', '.claude',
+        '.config/gh', '.config/gcloud', '.config/claude', '.config/codex',
+        '.config/openai', '.local/share/opencode', 'Library/Keychains',
+        'Library/Application Support',
+    )]
+    if any(candidate.is_relative_to(store) or store.is_relative_to(candidate) for store in stores):
+        return True
+    parts = [part.lower() for part in candidate.parts]
     return (
         bool(set(parts) & {".ssh", ".aws", ".azure", ".gnupg", ".codex", ".claude"})
         or any(
@@ -124,7 +135,9 @@ def build_plan(
         if common.returncode == 0 and common.stdout.strip() not in directories:
             directories.append(common.stdout.strip())
     model = route.get("resolved_model") or route.get("model") or ""
-    effort = route.get("effort") or ""
+    effort = route.get("effort_applied", route.get("effort")) or ""
+    if effort == "default":
+        effort = ""
     warnings = list(route.get("notes") or [])
     if effort and config.EFFORT_FLAG is None:
         warnings.append(f"{adapter} does not expose effort control; requested {effort}")
@@ -176,7 +189,7 @@ def build_plan(
     )
     if sandbox == "full" and adapter != "codex":
         warnings.append("sandbox control unsupported by " + adapter)
-    if adapter in {"cursor", "kiro", "copilot"} and directories:
+    if adapter in {"cursor", "kiro", "copilot", "opencode"} and directories:
         warnings.append("additional directories unsupported by " + adapter)
         directories = []
     timeout = float(timeout_seconds or (10800 if mode == "worktree_write" else 3600))
@@ -252,10 +265,10 @@ SIGNATURES = (
         "auth_required",
         r"authentication required|please sign in|please(?: run)? login|not logged in|not authenticated|unauthenticated|unauthorized|login expired|\b401\b",
     ),
-    ("rate_limited", r"rate.?limit|too many requests|\b429\b"),
+    ("rate_limited", r"rate.?limit|too many requests|overloaded|\b(?:429|529)\b"),
     (
         "model_unavailable",
-        r"model[^\n]*(?:unavailable|not available|not found|unsupported|does not exist)|unknown model|overloaded",
+        r"model[^\n]*(?:unavailable|not available|not found|unsupported|does not exist)|unknown model",
     ),
     ("permission_blocked", r"\b403\b|forbidden"),
 )
@@ -319,6 +332,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         "question": None,
     }
     events, plain, parts, errors = [], [], [], []
+    retry_errors = []
     duplicate_json = False
 
     def no_duplicates(pairs):
@@ -391,7 +405,6 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
                     "session.created",
                     "message_start",
                 }
-                or adapter == "kiro"
             ):
                 for item in _objects(event):
                     if isinstance(item.get("model"), str):
@@ -413,7 +426,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         if error_event:
             error_text = json.dumps(event, ensure_ascii=False)
             if not (adapter == "codex" and "reconnecting" in error_text.lower()):
-                errors.append(error_text)
+                (retry_errors if kind == "api_retry" else errors).append(error_text)
         if event.get("denied_actions") is not None and not isinstance(
             event["denied_actions"], list
         ):
@@ -423,6 +436,8 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         ):
             errors.append("denied_actions " + json.dumps(event["denied_actions"]))
         if kind == "result":
+            if event.get("is_error") is False:
+                retry_errors.clear()
             result["terminal"] = True
             text = event.get("result", event.get("text", event.get("response")))
             if isinstance(text, str):
@@ -504,13 +519,14 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         if parts
         else "".join(plain)
     )
+    errors.extend(retry_errors)
     failure_text = (
         "\n".join(errors)
         if errors
-        else stderr + ("\n" + stdout if exit_code != 0 else "")
+        else stderr
     )
     # Permission denials in diagnostics invalidate a claimed success (Agy does this).
-    denial = re.search(SIGNATURES[0][1], stderr, re.I)
+    denial = adapter == "agy" and re.search(SIGNATURES[0][1], stderr, re.I)
     if denial:
         errors.insert(0, stderr)
         failure_text = stderr + "\n" + failure_text
@@ -536,7 +552,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         result["excerpt"] = ("no assistant text: " + stdout.strip())[:200]
     if status == "ok":
         question = re.search(
-            r"```(?:[^\n`]*\n)?\s*QUESTION:\s*(.*?)\s*```", result["text"], re.S
+            r"```(?:[^\n`]*\n)?\s*QUESTION:\s*((?:(?!```).)*?)\s*```\s*\Z", result["text"], re.S
         )
         if question and question[1].strip():
             result["question"] = question[1].strip()[:4096]
@@ -552,7 +568,8 @@ MAX_EVENTS_BYTES = 20 * 1024 * 1024
 class BoundedCapture:
     """Keep a fixed head and rolling tail on disk; never discard the diagnostics file."""
 
-    def __init__(self, path, limit=MAX_EVENTS_BYTES):
+    def __init__(self, path, limit=None):
+        limit = MAX_EVENTS_BYTES if limit is None else limit
         self.path, self.limit = Path(path), limit
         parent, leaf = __import__("output_custody").open_parent(str(path))
         try:
@@ -566,29 +583,45 @@ class BoundedCapture:
             os.close(parent)
         self.file = os.fdopen(fd, "w+b", buffering=0)
         self.total = 0
+        self.tail = deque()
+        self.tail_size = 0
 
     def write(self, data):
+        # Append to disk only until the cap. Keep subsequent tail chunks in a
+        # deque: every byte is copied a bounded number of times, even for JSONL.
+        room = max(0, self.limit - self.total)
+        if room:
+            self.file.write(data[:room])
         self.total += len(data)
-        self.file.seek(0, os.SEEK_END)
-        if self.file.tell() + len(data) <= self.limit:
-            self.file.write(data)
-        else:
-            half = self.limit // 2
-            self.file.seek(max(half, self.file.tell() - half))
-            tail = (self.file.read() + data)[-half:]
-            self.file.seek(half)
-            self.file.write(tail)
+        half = self.limit - self.limit // 2
+        self.tail.append(data[-half:])
+        self.tail_size += len(self.tail[-1])
+        while self.tail_size > half:
+            excess = self.tail_size - half
+            first = self.tail.popleft()
+            if len(first) > excess:
+                self.tail.appendleft(first[excess:])
+                self.tail_size -= excess
+            else:
+                self.tail_size -= len(first)
+
+    def _flush_tail(self):
+        if self.total > self.limit:
+            self.file.seek(self.limit // 2)
+            self.file.write(b"".join(self.tail))
             self.file.truncate(self.limit)
 
     def text(self):
+        self._flush_tail()
         self.file.seek(0)
         return self.file.read().decode("utf-8", errors="replace")
 
     def close(self):
+        self._flush_tail()
         self.file.close()
 
 
-def _stop_group(process, grace=0.2):
+def _stop_group(process, grace=2.0):
     try:
         os.killpg(process.pid, signal.SIGTERM)
     except ProcessLookupError:
@@ -633,17 +666,15 @@ def _workspace_stamp(cwd, excluded=()):
         ]
         for name in files:
             path = Path(root, name)
-            if path.resolve() in excluded:
+            if path in excluded:
                 continue
             try:
-                metadata = path.stat()
+                metadata = path.lstat()
                 modified += metadata.st_mtime_ns
                 size += metadata.st_size
             except OSError:
                 continue
             count += 1
-            if count >= 10000:
-                return modified, size, count
     return modified, size, count
 
 
@@ -784,7 +815,6 @@ def execute(
         suffix = uuid.uuid4().hex[:6]
         events_path = events_path.with_name(events_path.name + "." + suffix)
         stderr_path = stderr_path.with_name(stderr_path.name + "." + suffix)
-    full_output = tempfile.TemporaryFile()
     raw = BoundedCapture(events_path)
     diagnostics = BoundedCapture(stderr_path)
     started_at, started = now(), time.monotonic()
@@ -792,7 +822,64 @@ def execute(
     process = None
     forced, terminal_at, cancel_signal = None, None, False
     pending = b""
+    dropping_line = False
+    semantic = {}
+    text_chunks, text_size = deque(), 0
+    semantic_failures = {}
+    retry_failure = None
+    terminal_text = None
+    text_truncated = False
     old_handlers = {}
+
+    def consume(data):
+        nonlocal pending, terminal_at, text_size, retry_failure, terminal_text, text_truncated, dropping_line
+        if dropping_line:
+            if b"\n" not in data:
+                return
+            data = data.split(b"\n", 1)[1]
+            dropping_line = False
+        pending += data
+        while b"\n" in pending:
+            line, pending = pending.split(b"\n", 1)
+            try:
+                event = json.loads(line)
+            except (ValueError, UnicodeDecodeError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            parsed_line = parse_output(plan["adapter"], line.decode(errors="replace"))
+            for key in ("session_id", "observed_model", "reset_at", "retry_after"):
+                if parsed_line.get(key) is not None:
+                    semantic[key] = parsed_line[key]
+            if parsed_line["terminal"] and terminal_at is None:
+                terminal_at = time.monotonic()
+            if parsed_line["status"] not in {"ok", "input_required"} and parsed_line["signature"] != "empty_output":
+                failure = {key: parsed_line[key] for key in ("status", "signature", "excerpt", "reset_at", "retry_after")}
+                if event.get("type") == "api_retry":
+                    retry_failure = failure
+                else:
+                    semantic_failures[parsed_line["status"]] = failure
+            elif event.get("type") == "result" and event.get("is_error") is False:
+                retry_failure = None
+            if parsed_line["text"]:
+                encoded = parsed_line["text"].encode()
+                text_truncated |= len(encoded) > MAX_EVENTS_BYTES
+                chunk = encoded[:MAX_EVENTS_BYTES]
+                if event.get("type") == "result" or (plan["adapter"] == "agy" and "status" in event):
+                    terminal_text = chunk.decode(errors="replace")
+                else:
+                    text_chunks.append(chunk)
+                    text_size += len(chunk)
+                    while text_size > MAX_EVENTS_BYTES:
+                        text_truncated = True
+                        text_size -= len(text_chunks.popleft())
+        if len(pending) > MAX_EVENTS_BYTES:
+            # Do not parse a clipped JSON suffix or certify preliminary text
+            # when the final result event exceeded the semantic buffer.
+            pending = b""
+            dropping_line = True
+            text_truncated = True
+
 
     def handle_signal(signum, frame):
         nonlocal cancel_signal
@@ -870,16 +957,7 @@ def execute(
                         continue
                     if key.data == "stdout":
                         raw.write(data)
-                        full_output.write(data)
-                        pending += data
-                        while b"\n" in pending:
-                            line, pending = pending.split(b"\n", 1)
-                            parsed_line = parse_output(
-                                plan["adapter"], line.decode(errors="replace")
-                            )
-                            if parsed_line["terminal"] and terminal_at is None:
-                                terminal_at = time.monotonic()
-                        pending = pending[-MAX_EVENTS_BYTES:]
+                        consume(data)
                     else:
                         diagnostics.write(data)
                     last_progress = time.monotonic()
@@ -957,7 +1035,7 @@ def execute(
                         break
                     (raw if key.data == "stdout" else diagnostics).write(data)
                     if key.data == "stdout":
-                        full_output.write(data)
+                        consume(data)
             for stream in (process.stdin, process.stdout, process.stderr):
                 if stream:
                     stream.close()
@@ -967,7 +1045,8 @@ def execute(
         for sig, handler in old_handlers.items():
             signal.signal(sig, handler)
     exit_code = process.returncode if process else None
-    full_output.seek(0)
+    if pending:
+        consume(b"\n")
     if forced == "stalled":
         diagnostics.write(
             f"idle for {plan['idle_seconds']:g}s; try another model\n".encode()
@@ -975,10 +1054,9 @@ def execute(
     elif forced == "timed_out":
         diagnostics.write(b"wall clock deadline exceeded\n")
     stdout, stderr = (
-        full_output.read().decode("utf-8", errors="replace"),
+        raw.text(),
         diagnostics.text(),
     )
-    full_output.close()
     raw.close()
     diagnostics.close()
     parsed = parse_output(
@@ -992,6 +1070,23 @@ def execute(
         and exit_code < 0
         else (exit_code if exit_code is not None else 1),
     )
+    parsed.update(semantic)
+    if raw.total > MAX_EVENTS_BYTES:
+        # The complete stream is never buffered or reread. Preserve semantic
+        # state observed before the diagnostic tail rolled over.
+        if terminal_text is not None or text_chunks:
+            text = terminal_text if terminal_text is not None else b"\n".join(text_chunks).decode(errors="replace")
+            recovered = parse_output(plan["adapter"], json.dumps({"type": "result", "result": text}), stderr,
+                                     0 if terminal_at is not None and exit_code is not None and exit_code < 0 else (exit_code or 0))
+            for key in ("text", "status", "question", "signature", "excerpt"):
+                parsed[key] = recovered[key]
+        failures = dict(semantic_failures)
+        if retry_failure:
+            failures.setdefault(retry_failure["status"], retry_failure)
+        if failures:
+            priority = [status for status, _ in (*profile(plan["adapter"]).SIGNATURES, *SIGNATURES)]
+            selected = next((failures[status] for status in priority if status in failures), next(iter(failures.values())))
+            parsed.update(selected)
     if forced:
         parsed["status"] = forced
         parsed["signature"] = {
@@ -1006,6 +1101,10 @@ def execute(
     parsed["session_id"] = session
     observed, source = _observed_model(plan, parsed, environment)
     warnings = list(plan["warnings"])
+    if text_truncated or (raw.total > MAX_EVENTS_BYTES and terminal_text is None and not text_chunks):
+        warnings.append("result truncated at capture limit; inspect provider session for complete output")
+        if parsed["status"] in {"ok", "input_required"}:
+            parsed.update(status="partial", question=None, signature="output_truncated")
     notes = list(route.get("notes") or [])
     if observed and observed != plan["model"]:
         notes.append("mismatch: resolved " + plan["model"] + "; observed " + observed)

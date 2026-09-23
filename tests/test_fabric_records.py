@@ -31,7 +31,7 @@ def test_cooldown_locked_merge_expiry_and_defaults(tmp_path):
     at = datetime(2026, 9, 23, tzinfo=UTC)
     module.write_cooldown(row, path=path, at=at)
     data = json.loads(path.read_text())
-    assert data["cooldowns"]["claude/opus"]["cooling_until"] == "2026-09-23T01:00:00Z"
+    assert data["cooldowns"]["claude/claude-opus-5-5"]["cooling_until"] == "2026-09-23T01:00:00Z"
     row["provenance"]["resolved_model"] = "sonnet"
     row.update(status="rate_limited", retry_after=30)
     module.write_cooldown(row, path=path, at=at + timedelta(hours=2))
@@ -63,3 +63,49 @@ def test_cooldown_writer_refuses_symlinked_store(tmp_path):
     with pytest.raises((ValueError, OSError)):
         records().write_cooldown(row, path=linked / "cooldowns.json")
     assert list(outside.iterdir()) == []
+
+
+def test_cooldown_normalizes_registered_id_and_preserves_origin(tmp_path, monkeypatch):
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(FIX.parents[2]))
+    row = json.loads((FIX / 'attempt.json').read_text())
+    row.update(status='rate_limited')
+    row['provenance']['requested']['adapter'] = 'codex'
+    row['provenance']['resolved_model'] = 'sol@high'
+    path = tmp_path / 'cooldowns.json'
+    records().write_cooldown(row, path=path)
+    first = json.loads(path.read_text())['cooldowns']
+    assert 'codex/gpt-6-sol' in first
+    row['run_id'] = 'synthetic'
+    row['evidence']['signature'] = 'cooldown_active'
+    records().write_cooldown(row, path=path)
+    assert json.loads(path.read_text())['cooldowns'] == first
+
+
+def test_account_usage_limit_cools_all_models(tmp_path):
+    row = json.loads((FIX / 'attempt.json').read_text())
+    row.update(status='usage_limited')
+    row['provenance']['requested']['adapter'] = 'claude'
+    row['evidence'].update(signature='usage_limited', excerpt="You've hit your weekly limit")
+    path = tmp_path / 'cooldowns.json'
+    records().write_cooldown(row, path=path)
+    assert 'claude/*' in json.loads(path.read_text())['cooldowns']
+
+
+def test_digest_result_is_openable_from_caller_and_fallback_shows_reset(tmp_path):
+    row = json.loads((FIX / 'attempt.json').read_text())
+    row['run_dir'] = str(tmp_path)
+    assert str(tmp_path / row['paths']['result']) in records().render_digest(row)
+    row.update(state='running', status=None)
+    row['provenance']['fallback_from'] = {'attempt':1,'status':'usage_limited','route':'claude/opus','reset_at':'2026-09-23T14:00:00Z'}
+    assert '(resets 2026-09-23T14:00:00Z)' in records().render_digest(row)
+
+
+@pytest.mark.parametrize('model', ['grok', 'grok-4.7-high', 'grok-4.7@high'])
+def test_cooldown_identity_strips_provider_effort_suffix(tmp_path, model):
+    row = json.loads((FIX / 'attempt.json').read_text())
+    row.update(status='rate_limited')
+    row['provenance']['requested']['adapter'] = 'cursor'
+    row['provenance']['resolved_model'] = model
+    path = tmp_path / 'cooldowns.json'
+    records().write_cooldown(row, path=path)
+    assert set(json.loads(path.read_text())['cooldowns']) == {'cursor/grok-4.7'}

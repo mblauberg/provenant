@@ -1,3 +1,5 @@
+import os
+
 CLI = "claude"
 PROMPT_TRANSPORT = "stdin"
 STDIN = "prompt"
@@ -14,6 +16,8 @@ def argv(p):
     command = [
         CLI,
         "-p",
+        "--bare" if os.environ.get("ANTHROPIC_API_KEY") or p["route"].get("endpoint_base_url") else "--safe-mode",
+        "--strict-mcp-config",
         "--disable-slash-commands",
         "--permission-prompts",
         "none",

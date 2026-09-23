@@ -626,6 +626,7 @@ def test_route_failure_is_typed_and_provider_is_not_invoked(tmp_path: Path) -> N
             "--run-dir", str(run_dir), "--task-id", "route-failure",
             "--adapter", "codex", "--prompt-file", str(prompt),
             "--alias", "does-not-exist", "--role", "worker",
+            "--intent", "assurance", "--orchestrator-family", "anthropic",
         ], cwd=tmp_path, env=env, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
@@ -849,7 +850,7 @@ def test_timeout_records_reaped_exit(tmp_path: Path) -> None:
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "timeout", "--adapter", "codex",
-         "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker", "--timeout", "0.1"],
+         "--prompt-file", str(prompt), "--model", "gpt-6-luna", "--role", "worker", "--timeout", "0.1"],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     assert result.returncode != 0
@@ -1940,7 +1941,7 @@ def test_front_door_mode_timeout_defaults(tmp_path, mode, timeout):
     assert args.timeout_seconds == timeout
 
 
-def test_front_door_preflight_caches_capability_probe_per_adapter(tmp_path, monkeypatch):
+def test_front_door_preflight_reuses_registered_routes_without_capability_probe(tmp_path, monkeypatch):
     bin_dir = tmp_path / 'bin'
     bin_dir.mkdir()
     counter = tmp_path / 'probes'
@@ -1959,7 +1960,7 @@ print(json.dumps({'models': [{'slug': 'gpt-6-luna', 'supported_reasoning_levels'
     record = json.loads(result.stdout)
     assert record['status'] == 'validated', record
     assert len(record['routes']) == 3
-    assert counter.read_text().splitlines() == ['probe']
+    assert not counter.exists()
 
 
 @pytest.mark.parametrize('owner', ['dispatch', 'batch'])
@@ -2018,3 +2019,117 @@ else:
     scratch = Path((tmp_path / 'provider-tmp.txt').read_text())
     assert scratch.is_dir()  # Full provider diagnostics now live in the attempt, not a removed tmp directory.
     assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'succeeded'
+
+
+def real_owner_fixture(tmp_path, monkeypatch, code):
+    """Exercise cf_dispatch --plan-only and the production supervisor, no owner stub."""
+    bindir = tmp_path / 'provider-bin'
+    bindir.mkdir()
+    write_executable(bindir / 'claude', '#!/usr/bin/env python3\n' + code)
+    monkeypatch.setenv('PATH', str(bindir) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    monkeypatch.setenv('FABRIC_COOLDOWNS_PATH', str(tmp_path / 'cooldowns.json'))
+    monkeypatch.delenv('PROVENANT_RUN_TOKEN', raising=False)
+    run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())
+    prompt = tmp_path / 'caller-prompt.md'
+    prompt.write_text('hello')
+    command = [sys.executable, str(SCRIPT), '--run-dir', str(run), '--adapter', 'claude',
+               '--model', 'opus', '--prompt-file', str(prompt), '--fallback', 'false']
+    return run, prompt, command
+
+
+def test_close_mcp_run_reads_canonical_single_task_attempts(tmp_path):
+    mod = load_dispatch_module()
+    run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())
+    row = json.loads((ROOT / 'tests/fixtures/fabric-v1/attempt.json').read_text())
+    path = run / 'tasks/task-1/attempt-001/attempt.json'
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(row))
+    mod.close_mcp_run(run)
+    receipt = json.loads((run / 'RUN_RECEIPT.json').read_text())
+    assert receipt['status'] == 'succeeded'
+    assert receipt['attempts'] == [row]
+
+
+@pytest.mark.parametrize('stop', ['marker', 'SIGTERM', 'timeout'])
+def test_real_dispatcher_stops_group_releases_writer_lease_and_closes_receipt(tmp_path, monkeypatch, stop):
+    code = '''import json, os, subprocess, sys, time
+from pathlib import Path
+sys.stdin.read()
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+Path('provider-pids').write_text(json.dumps([os.getpid(), child.pid]))
+print(json.dumps({'type':'system','session_id':'cancel-session','model':'opus'}), flush=True)
+time.sleep(30)
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path)
+    command += ['--access-mode', 'worktree_write', '--worktree', str(worktree), '--timeout', '1' if stop == 'timeout' else '15']
+    process = subprocess.Popen(command, cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 10
+        while not (worktree / 'provider-pids').exists() and time.monotonic() < deadline and process.poll() is None:
+            time.sleep(.02)
+        assert (worktree / 'provider-pids').exists()
+        mod = load_dispatch_module()
+        with pytest.raises(mod.WorktreeLeaseError):
+            mod.acquire_worktree_lease(worktree)
+        if stop == 'SIGTERM':
+            process.send_signal(signal.SIGTERM)
+        elif stop == 'marker':
+            mod.create_cancellation_marker(run, run / 'dispatch/tasks/dispatch-001/attempt-001')
+        stdout, stderr = process.communicate(timeout=10)
+        row = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
+        assert row['status'] == ('timed_out' if stop == 'timeout' else 'cancelled'), stdout + stderr
+        assert row['evidence']['exit'] is not None
+        pids = json.loads((worktree / 'provider-pids').read_text())
+        for pid in pids:
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+        lease = mod.acquire_worktree_lease(worktree)
+        mod.release_worktree_lease(lease)
+        receipt = json.loads((run / 'RUN_RECEIPT.json').read_text())
+        assert receipt['status'] == ('failed' if stop == 'timeout' else 'cancelled')
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.communicate(timeout=10)
+
+
+def test_real_dispatcher_restores_signal_handlers(tmp_path, monkeypatch):
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, 'import sys,json\nsys.stdin.read()\nprint(json.dumps({"type":"result","result":"DONE"}))\n')
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    assert mod.dispatch(mod.parser().parse_args(command[2:])) == 0
+    assert {sig: signal.getsignal(sig) for sig in handlers} == handlers
+
+
+def test_interrupted_attempt_resumes_from_nested_cwd_with_absolute_caller_prompt(tmp_path, monkeypatch):
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, 'import sys,json,os\nsys.stdin.read()\nprint(json.dumps({"type":"result","result":os.getcwd()}))\n')
+    nested = tmp_path / 'src'
+    nested.mkdir()
+    first = subprocess.run([*command, '--cwd', str(nested), '--no-preface'], cwd=tmp_path, capture_output=True, text=True)
+    assert first.returncode == 0, first.stdout + first.stderr
+    path = run / 'tasks/dispatch-001/attempt-001/attempt.json'
+    row = json.loads(path.read_text())
+    # Model the B-owner recovery contract: terminal interrupted canonical row,
+    # before the owner could publish its legacy terminal evidence.
+    row.update(status='interrupted', state='terminal', session_id=None)
+    path.write_text(json.dumps(row))
+    legacy_path = run / row['legacy_attempt_path']
+    legacy_path.unlink()
+    legacy_path.with_name('attempt.sha256').unlink()
+    (run / row['paths']['result']).unlink()
+    receipt = json.loads((run / 'RUN_RECEIPT.json').read_text())
+    receipt['status'] = 'interrupted'
+    (run / 'RUN_RECEIPT.json').write_text(json.dumps(receipt))
+    resumed = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', row['run_id'],
+                              '--prompt-file', str(prompt), '--cwd', str(nested)],
+                             cwd=nested, capture_output=True, text=True)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    second = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
+    assert second['status'] == 'ok'
+    assert second['cwd'] == str(nested)
+    assert second['requested_route']['preface'] is False
+    assert second['requested_route']['intent'] == row['requested_route']['intent']

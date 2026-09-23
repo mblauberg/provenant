@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 
@@ -77,7 +78,8 @@ def render_digest(row):
         fallback = prov.get("fallback_from")
         if fallback:
             previous = fallback.get("route", "")
-            return f"running {run_id} attempt {row['attempt']}: {previous} {fallback['status']} → {route}"
+            reset = f" (resets {fallback['reset_at']})" if fallback.get("reset_at") else ""
+            return f"running {run_id} attempt {row['attempt']}: {previous} {fallback['status']}{reset} → {route}"
         access = (
             ("write " + str(row.get("worktree") or row.get("cwd")))
             if row.get("mode") == "worktree_write"
@@ -96,6 +98,8 @@ def render_digest(row):
     except (KeyError, TypeError, ValueError):
         duration = 0
     result = row.get("paths", {}).get("result")
+    if result and row.get("run_dir"):
+        result = str(Path(row["run_dir"]) / result)
     detail = " · result " + result if result else ""
     if status not in {"ok", "partial"}:
         detail = " · " + (
@@ -181,11 +185,22 @@ def read_cooldowns(path=None, at=None):
 def write_cooldown(row, *, path=None, at=None):
     if row["status"] not in {"usage_limited", "rate_limited"}:
         return
+    if row.get("evidence", {}).get("signature") == "cooldown_active":
+        return
+    try:
+        from .exec_routing import registered_model
+    except ImportError:
+        from exec_routing import registered_model
     path = Path(path or cooldown_path())
     at = at or datetime.now(UTC)
     prov = row["provenance"]
     adapter = prov["requested"]["adapter"]
-    model = prov["resolved_model"] or "*"
+    model = registered_model(adapter, prov["resolved_model"] or "*")
+    excerpt = row.get("evidence", {}).get("excerpt", "")
+    if row["status"] == "usage_limited" and re.search(
+        r"(?:usage|session|weekly|account|plan) limit|individual quota reached|insufficient_quota", excerpt, re.I
+    ):
+        model = "*"
     reset = row.get("reset_at")
     try:
         until = parse_time(reset) if reset else None
