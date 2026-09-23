@@ -2,7 +2,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 
@@ -42,10 +42,11 @@ function findProductRoot(): string {
 
 function sourceStamp(productRoot: string, instanceRoot: string, env: NodeJS.ProcessEnv): string {
   const stateRoot = env.AGENT_FABRIC_STATE_ROOT ?? join(homedir(), ".local", "state", "agent-harness", "fabric");
-  return [join(productRoot, "config", "model-routing.json"),
+  const paths = [join(productRoot, "config", "model-routing.json"),
     join(instanceRoot, "config", "model-routing.json"),
     join(stateRoot, "capabilities.json"),
-    join(productRoot, "config", "adapter-compatibility.yaml")]
+    join(productRoot, "config", "adapter-compatibility.yaml")];
+  return `${Math.floor(Date.now() / 3_600_000)}|${paths
     .map((path) => {
       try {
         const stat = statSync(path);
@@ -53,11 +54,12 @@ function sourceStamp(productRoot: string, instanceRoot: string, env: NodeJS.Proc
       } catch {
         return `${path}:absent`;
       }
-    }).join("|");
+    }).join("|")}`;
 }
 
 export function catalogueSnapshot(root?: string, env: NodeJS.ProcessEnv = process.env): CatalogueSnapshot {
-  const productRoot = root ?? env.AGENT_FABRIC_PRODUCT_ROOT ?? findProductRoot();
+  const configuredRoot = root || env.AGENT_FABRIC_PRODUCT_ROOT;
+  const productRoot = configuredRoot && isAbsolute(configuredRoot) ? configuredRoot : findProductRoot();
   const configuredInstance = env.AGENT_FABRIC_INSTANCE_ROOT || join(homedir(), ".agents");
   const instanceRoot = configuredInstance === "~" ? homedir()
     : configuredInstance.startsWith("~/") ? join(homedir(), configuredInstance.slice(2)) : configuredInstance;
@@ -67,18 +69,28 @@ export function catalogueSnapshot(root?: string, env: NodeJS.ProcessEnv = proces
   if (previous?.stamp === stamp) return previous.value;
   const configuredScript = join(productRoot, "scripts", "model_route.py");
   const script = existsSync(configuredScript) ? configuredScript : join(findProductRoot(), "scripts", "model_route.py");
-  if (!existsSync(script)) return empty;
-  const run = spawnSync(env.HARNESS_PYTHON || "python3", [script, "snapshot", "--json"], {
+  const failed = (message: string): CatalogueSnapshot => {
+    const value = { ...empty, drift: [message] };
+    cache.set(key, { stamp, value });
+    return value;
+  };
+  if (!existsSync(script)) return failed("catalogue snapshot unavailable; fix: restore scripts/model_route.py");
+  const configuredPython = env.HARNESS_PYTHON;
+  const python = configuredPython && isAbsolute(configuredPython) ? configuredPython : "python3";
+  const run = spawnSync(python, [script, "snapshot", "--json"], {
     cwd: productRoot,
     env: { ...process.env, ...env, AGENT_FABRIC_PRODUCT_ROOT: productRoot, AGENT_FABRIC_INSTANCE_ROOT: instanceRoot },
     encoding: "utf8",
     timeout: 10_000,
     maxBuffer: 4 * 1024 * 1024,
   });
-  if (run.status !== 0) return { ...empty, drift: ["catalogue snapshot unavailable; fix: check the harness Python installation"] };
+  if (run.status !== 0) {
+    const detail = ((run.stderr || run.error?.message || "unknown error").split("\n", 1)[0] ?? "unknown error").slice(0, 160);
+    return failed(`catalogue snapshot unavailable: ${detail}; fix: check the harness Python installation`);
+  }
   let routing: any;
   try { routing = JSON.parse(run.stdout); }
-  catch { return { ...empty, drift: ["catalogue snapshot invalid; fix: check model-route"] }; }
+  catch { return failed("catalogue snapshot invalid; fix: check model-route"); }
   let compatibility: any;
   try {
     const { parse: parseYaml } = require("yaml") as { parse: (text: string) => unknown };
