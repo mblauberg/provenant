@@ -105,6 +105,41 @@ def test_agy_read_only_guarantee_tracks_os_confinement(monkeypatch, tmp_path):
     assert any("reads are unconfined" in warning for warning in unconfined["warnings"])
 
 
+@pytest.mark.parametrize("adapter", ["codex", "claude", "cursor", "kiro", "agy", "opencode"])
+def test_read_only_cwd_outside_workspace_warns_when_reads_are_unconfined(
+    monkeypatch, tmp_path, adapter,
+):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    root = tmp_path / "workspace"
+    cwd = root / "sub"
+    cwd.mkdir(parents=True)
+    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: None)
+
+    plan = supervisor.build_plan(
+        adapter, {"resolved_model": "fixture"}, "prompt", cwd=cwd, workspace_root=root,
+    )
+
+    warning = f"{adapter} read_only: cwd is not a read boundary"
+    assert plan["warnings"].count(warning) == 1
+
+
+@pytest.mark.parametrize("adapter", ["agy", "opencode"])
+def test_read_only_cwd_warning_is_omitted_with_os_read_confinement(
+    monkeypatch, tmp_path, adapter,
+):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    root = tmp_path / "workspace"
+    cwd = root / "sub"
+    cwd.mkdir(parents=True)
+    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+
+    plan = supervisor.build_plan(
+        adapter, {"resolved_model": "fixture"}, "prompt", cwd=cwd, workspace_root=root,
+    )
+
+    assert f"{adapter} read_only: cwd is not a read boundary" not in plan["warnings"]
+
+
 def test_os_confinement_opt_out_disables_sandbox_exec(monkeypatch):
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
     monkeypatch.setattr(supervisor.sys, "platform", "darwin")
@@ -350,6 +385,40 @@ def test_opencode_free_tier_refusal_is_model_unavailable(tmp_path):
     record = supervisor().execute(
         fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md"
     )
+    assert record["status"] == "model_unavailable"
+    assert record["fix"] == (
+        "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"
+    )
+
+
+def test_opencode_free_tier_fix_uses_failure_text_beyond_excerpt_limit(tmp_path):
+    preamble = "diagnostic preamble " * 20
+    code = (
+        "import sys; print(" + repr(preamble +
+        "403 FreeTierError: OpenCode's free tier can only be used from within OpenCode") +
+        ", file=sys.stderr); sys.exit(1)"
+    )
+    record = supervisor().execute(
+        fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md"
+    )
+
+    assert record["status"] == "model_unavailable"
+    assert record["fix"] == (
+        "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"
+    )
+
+
+def test_opencode_free_tier_fix_uses_structured_failure_text(tmp_path):
+    event = {
+        "type": "error",
+        "error": "diagnostic preamble " * 20
+        + "403 FreeTierError: OpenCode's free tier can only be used from within OpenCode",
+    }
+    code = "import json, sys; print(json.dumps(" + repr(event) + ")); sys.exit(1)"
+    record = supervisor().execute(
+        fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md"
+    )
+
     assert record["status"] == "model_unavailable"
     assert record["fix"] == (
         "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"

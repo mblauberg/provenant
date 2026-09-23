@@ -193,6 +193,39 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
     assert (run_dir / "RUN_RECEIPT.json").read_bytes() == receipt_before
 
 
+def test_opencode_explicit_model_receipt_drops_implied_alias(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "opencode-explicit-model")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Reply exactly OK\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_executable(
+        bin_dir / "opencode",
+        """#!/usr/bin/env bash
+        printf '{\"type\":\"text\",\"part\":{\"text\":\"OK\"}}\\n'
+        """,
+    )
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
+    env["PROVENANT_NO_OS_CONFINEMENT"] = "1"
+
+    result = subprocess.run(
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "task-1",
+         "--adapter", "opencode", "--prompt-file", str(prompt),
+         "--orchestrator-family", "openai", "--model", "mimo", "--role", "worker"],
+        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    attempt = run_dir / "dispatch/tasks/task-1/attempt-001"
+    adapter_receipt = json.loads((attempt / "adapter-receipt.json").read_text(encoding="utf-8"))
+    record = json.loads(
+        (run_dir / "tasks/task-1/attempt-001/attempt.json").read_text(encoding="utf-8")
+    )
+    assert adapter_receipt["route_alias"] == ""
+    assert record["provenance"]["requested"]["alias"] == ""
+
+
 def test_batch_preflight_does_not_invent_an_explicit_alias_for_model_routes(tmp_path: Path, monkeypatch) -> None:
     module = load_dispatch_module()
     monkeypatch.chdir(tmp_path)

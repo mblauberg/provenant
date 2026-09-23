@@ -2302,6 +2302,33 @@ def test_chain_all_failed_uses_dispatch_schema():
         assert record["read_only_guarantee"] == "none"
 
 
+def test_chain_tool_missing_uses_the_entry_model_when_recording_alias(tmp_path):
+    env = fabric_free_env()
+    env["HOME"] = str(tmp_path / "home")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "python3").symlink_to(sys.executable)
+    available_path = os.pathsep.join(
+        path for path in os.environ["PATH"].split(os.pathsep)
+        if path and not (Path(path) / "cursor-agent").exists()
+    )
+    env["PATH"] = f"{bin_dir}:{available_path}"
+    result = subprocess.run(
+        [str(SCRIPT), "--intent", "ordinary", "--chain", "cursor:cursor-grok-4.5-high:",
+         "--orchestrator-family", "openai", "--prompt", "Reply OK"],
+        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode != 0
+    entry_record = next(
+        json.loads(line) for line in result.stderr.splitlines() if line.startswith("{")
+    )
+    assert entry_record["tool"] == "cursor"
+    assert entry_record["status"] == "tool_missing", result.stderr
+    assert entry_record["requested_model"] == "cursor-grok-4.5-high"
+    assert entry_record["route_alias"] == ""
+
+
 def test_opencode_chain_all_failed_removes_raw_sidecar():
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)

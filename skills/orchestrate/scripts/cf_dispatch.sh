@@ -410,7 +410,7 @@ emit_record() {
   local model_override_tier="${22:-$MODEL_OVERRIDE_TIER}"
   local reason="${23:-}"
   local receipt_alias="$MODEL_ALIAS"
-  if [ -n "$MODEL" ] && [ "$ALIAS_EXPLICIT" -eq 0 ]; then receipt_alias=""; fi
+  if [ -n "$model" ] && [ "$ALIAS_EXPLICIT" -eq 0 ]; then receipt_alias=""; fi
   local output_digest=""
   model="$(resolve_model "$tool" "$model")"
   [ -n "$endpoint_provider" ] || endpoint_provider="$(endpoint_provider "$tool")"

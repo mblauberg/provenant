@@ -215,6 +215,13 @@ def build_plan(
             guarantee = "best_effort"
     elif confinement_requested:
         warnings.append(f"{adapter} read-only reads are unconfined")
+    if (
+        mode == "read_only"
+        and cwd != workspace_root
+        and adapter in {"codex", "claude", "cursor", "kiro", "agy", "opencode"}
+        and confinement != "sandbox-exec"
+    ):
+        warnings.append(f"{adapter} read_only: cwd is not a read boundary")
     if adapter in {"agy", "kiro"} or (
         mode == "worktree_write" and guarantee != "enforced"
     ):
@@ -624,6 +631,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         if errors
         else stderr
     )
+    result["failure_text"] = failure_text
     # Permission denials in diagnostics invalidate a claimed success (Agy does this).
     denial = adapter == "agy" and re.search(SIGNATURES[0][1], stderr, re.I)
     if denial:
@@ -1881,7 +1889,7 @@ def execute(
         and plan["adapter"] == "opencode"
         and re.search(
             r"FreeTierError|free tier can only be used from within OpenCode",
-            parsed["excerpt"],
+            parsed.get("failure_text", stderr),
             re.I,
         )
         else _model_unavailable_fix(plan)
