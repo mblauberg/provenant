@@ -91,8 +91,8 @@ async function waitForPid(path: string): Promise<number> {
 }
 
 function runDirectories(): string[] {
-  const root = join(workspace, ".agent-run");
-  return existsSync(root) ? readdirSync(root).filter((name) => name.startsWith("mcp-")).sort() : [];
+  const root = join(workspace, ".agent-run", "runs");
+  return existsSync(root) ? readdirSync(root).filter((name) => /^\d{8}-\d{4}-(dispatch|batch)-/u.test(name)).sort() : [];
 }
 
 function fabricCli(args: string[]): string {
@@ -860,4 +860,73 @@ describe("status CLI flags", () => {
     expect(JSON.parse(fabricCli(["status", ...args]))).toMatchObject({ id: "cli-task", status: "failed" });
     expect(existsSync(join(temporaryDirectory, "state"))).toBe(false);
   });
+});
+
+it('reads v1 attempts verbatim from the shared run root with ledger fields', async () => {
+ const run = join(workspace,'.agent-run/runs/20260923-1012-dispatch-fixture-a81f3c');
+ const attempt = join(run,'tasks/task-1/attempt-001');
+ mkdirSync(attempt,{recursive:true});
+ const row = JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
+ row.cwd=workspace; row.worktree=workspace;
+ writeFileSync(join(attempt,'attempt.json'),JSON.stringify(row));
+ const status = await fabricStatus(workspace,'mcp-a81f3c');
+ expect(status).toMatchObject({schema:'fabric.status.v1',run_id:row.run_id,status:'ok',digest:row.digest,attempts:[row],worktree:workspace,dirty:null,ahead:null});
+ expect(status.provenance).toEqual(row.provenance);
+});
+
+it('places logs and staging files inside a named run directory', async () => {
+ const result = await dispatchConfiguredProvider({prompt:'fixture',wait_seconds:5},identity,new AbortController().signal,ownerEnvironment);
+ const paths=result.paths as Record<string,string>;
+ expect(paths.run_dir).toMatch(/\/\.agent-run\/runs\/\d{8}-\d{4}-dispatch-.*-[a-zA-Z0-9]{6}$/u);
+ expect(paths.owner_stdout).toBe(join(paths.run_dir!,'_owner/stdout.jsonl'));
+ expect(result.id).toMatch(/^mcp-.{6}$/u);
+});
+
+it('watch prints a terminal state once and exits', () => {
+ const dir=join(workspace,'.agent-run/mcp-watch');mkdirSync(dir,{recursive:true});
+ writeFileSync(join(dir,'dispatch-status.json'),JSON.stringify({id:'mcp-watch',status:'failed'}));
+ expect(fabricCli(['watch','mcp-watch'])).toMatch(/^failed mcp-watch/mu);
+});
+
+it('keeps unpublished batch tasks visible and honours receipt interruption', async () => {
+ const dir=join(workspace,'.agent-run/runs/20260923-1012-batch-fixture-a81f3c');
+ const path=join(dir,'tasks/task-1/attempt-001');mkdirSync(path,{recursive:true});
+ const row=JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
+ writeFileSync(join(path,'attempt.json'),JSON.stringify(row));
+ writeFileSync(join(dir,'dispatch-status.json'),JSON.stringify({id:row.run_id,batch_id:'batch-001',status:'running',task_ids:['task-1','task-2'],started_at:new Date().toISOString()}));
+ const status=await fabricStatus(workspace,row.run_id);
+ expect(status.runs).toHaveLength(2);expect(status.runs[1]).toMatchObject({task_id:'task-2',state:'queued'});
+ row.state='running';row.status=null;writeFileSync(join(path,'attempt.json'),JSON.stringify(row));
+ writeFileSync(join(dir,'RUN_RECEIPT.json'),JSON.stringify({status:'interrupted'}));
+ const interrupted=await fabricStatus(workspace,row.run_id);
+ expect(interrupted.runs.every((r:any)=>r.status === 'interrupted')).toBe(true);
+});
+
+it('bounds output slices, rejects escaped output, and waits for all requested tasks', async () => {
+ const {statusRows,fabricOutput}=await import('../src/run-registry.js');
+ const dir=join(workspace,'.agent-run/runs/20260923-1012-dispatch-fixture-b81f3c');
+ const attempt=join(dir,'tasks/task-1/attempt-001');mkdirSync(attempt,{recursive:true});
+ const row=JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
+ row.run_id='mcp-b81f3c';row.paths.result='tasks/task-1/attempt-001/result.md';
+ writeFileSync(join(attempt,'attempt.json'),JSON.stringify(row));writeFileSync(join(attempt,'result.md'),'abcdef');
+ expect(await fabricOutput(workspace,{id:row.run_id,offset:2,max_bytes:2})).toMatchObject({digest:'cd',next_offset:4,eof:false});
+ row.paths.result='../../outside';writeFileSync(join(attempt,'attempt.json'),JSON.stringify(row));
+ expect(await fabricOutput(workspace,{id:row.run_id})).toMatchObject({status:'rejected',error:'output_unavailable'});
+ row.state='running';row.status=null;writeFileSync(join(attempt,'attempt.json'),JSON.stringify(row));
+ const timer=setTimeout(()=>{row.state='terminal';row.status='ok';writeFileSync(join(attempt,'attempt.json'),JSON.stringify(row));},200);
+ try {const result=await statusRows(workspace,[row.run_id],1,'all');expect(result.runs?.[0]?.status).toBe('ok');}finally{clearTimeout(timer);}
+});
+
+it('selects the catalogue owner for a model-only request from another seat', async () => {
+ mkdirSync(join(product,'config'));copyFileSync(join(repositoryRoot,'config/model-routing.json'),join(product,'config/model-routing.json'));
+ const result=await dispatchConfiguredProvider({model:'gpt-6-luna',prompt:'fixture',wait_seconds:5},{...identity,provider:'claude'},new AbortController().signal,{...ownerEnvironment,AGENT_FABRIC_INSTANCE_ROOT:product});
+ expect(result).toMatchObject({status:'succeeded',route:{adapter:'codex',resolved_model:'gpt-6-luna'}});
+});
+
+it('keeps non-Git cwd dispatches in the caller run root', async () => {
+ const nested=join(workspace,'nested');mkdirSync(nested);
+ const result=await dispatchConfiguredProvider({cwd:nested,prompt:'fixture',wait_seconds:5},identity,new AbortController().signal,ownerEnvironment);
+ const path=(result.paths as Record<string,string>).run_dir!;
+ expect(path).toContain(join(workspace,'.agent-run/runs').replace('/var/folders/','/private/var/folders/'));
+ expect(await fabricStatus(workspace,String(result.id))).toMatchObject({status:'succeeded'});
 });

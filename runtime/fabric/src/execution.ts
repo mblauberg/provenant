@@ -1,7 +1,23 @@
-import { execFile, spawn, type ChildProcess } from "node:child_process";
+import {
+  normaliseRoute,
+  routeArguments,
+  validatePrompt,
+  timeoutSeconds,
+  workingIdentity,
+  rejected,
+  InputError,
+  type DispatchInput,
+  type BatchInput,
+  type BatchTaskInput,
+} from "./execution-input.js";
+export { ACCESS_MODES, DISPATCH_ADAPTERS } from "./execution-input.js";
+export type { AccessMode, RouteInput, DispatchInput, BatchInput, BatchTaskInput } from "./execution-input.js";
+import { compactRoute, basePaths, compactDispatch, compactBatch, type OwnerCompletion } from "./owner-output.js";
+import { execFileSync, execFile, spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
   accessSync,
+  appendFileSync,
   closeSync,
   constants,
   lstatSync,
@@ -15,12 +31,17 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { catalogueSnapshot, type CatalogueSnapshot } from "./catalogue.js";
-import { withoutGitRedirects, type Identity } from "./identity.js";
+import { runRoot, databasePath, withoutGitRedirects, type Identity } from "./identity.js";
 import {
+  shortRunId,
+  fabricStatus,
+  statusRows,
+  findRecordedRun,
+  readOwnerRecord,
   processStartedAt,
   pruneDispatchRuns,
   reapOrphanedRuns,
@@ -32,76 +53,14 @@ import {
   type RecordedRun,
 } from "./run-registry.js";
 
+import { Store } from "./store.js";
+import { digest } from "./surface.js";
+
 const execFileAsync = promisify(execFile);
 export const MAX_EXECUTION_WAIT_SECONDS = 55;
 const DEFAULT_WAIT_SECONDS = 55;
-const DEFAULT_TIMEOUT_SECONDS = 3600;
 const FIRST_ATTEMPT_ID = "attempt-001";
 const FIRST_BATCH_ID = "batch-001";
-/**
- * Adapters this front door can actually run: each has an executing arm in
- * skills/orchestrate/scripts/cf_dispatch.sh and is marked `"dispatch":
- * "implemented"` in the product-owned `dispatch_registry` in
- * config/adapter-compatibility.yaml. Adapters the registry marks dormant or
- * unsupported are absent on purpose, so they are a typed input error here
- * rather than a refusal paid for with a run directory, prompt staging and
- * route resolution. tests/adapter-registry.test.ts binds this list to the
- * registry and to the dispatcher.
- */
-export const DISPATCH_ADAPTERS = ["agy", "claude", "codex", "copilot", "cursor", "kiro", "opencode"] as const;
-const SUPPORTED_ADAPTERS = new Set<string>(DISPATCH_ADAPTERS);
-const DISPATCH_TERMINAL_STATUSES = new Set(["succeeded", "failed", "blocked", "timed_out", "cancelled"]);
-const BATCH_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
-const RESERVED_UNTYPED_STATUSES = new Set([
-  ...DISPATCH_TERMINAL_STATUSES,
-  ...BATCH_TERMINAL_STATUSES,
-  "running",
-]);
-
-export const ACCESS_MODES = ["read_only", "worktree_write"] as const;
-export type AccessMode = (typeof ACCESS_MODES)[number];
-
-/**
- * The whole routing surface: who runs it, which route, and how much access it
- * gets. Assurance selectors are deliberately absent, because this front door
- * always dispatches ordinary work and cannot honour them.
- */
-export interface RouteInput {
-  adapter?: string;
-  alias?: string;
-  model?: string;
-  effort?: string;
-  mode?: AccessMode;
-  worktree?: string;
-}
-
-export interface DispatchInput extends RouteInput {
-  prompt?: string;
-  prompt_file?: string;
-  task_id?: string;
-  timeout_seconds?: number;
-  wait_seconds?: number;
-}
-
-export interface BatchTaskInput extends RouteInput {
-  id?: string;
-  prompt?: string;
-  prompt_file?: string;
-  timeout_seconds?: number;
-}
-
-export interface BatchInput {
-  tasks: BatchTaskInput[];
-  concurrency?: number;
-  wait_seconds?: number;
-}
-
-interface OwnerCompletion {
-  exitCode: number | null;
-  signal: NodeJS.Signals | null;
-  error?: string;
-}
-
 interface StartedOwner {
   child: ChildProcess;
   completion: Promise<OwnerCompletion>;
@@ -121,45 +80,24 @@ interface CancelSpec {
   env: NodeJS.ProcessEnv;
 }
 
-interface NormalisedRoute {
-  adapter: string;
-  alias?: string;
-  model?: string;
-  effort?: string;
-  role: string;
-  access_mode: AccessMode;
-  worktree?: string;
-}
-
 const activeOwners = new Set<StartedOwner>();
 
-/**
- * Cancel everything this host started, and resolve only once each owner has
- * been signalled and given its bounded chance to stop. Callers that tear the
- * process down must await this, or they race their own cleanup.
- */
+/** Await bounded owner cancellation before releasing the host. */
 export async function cancelActiveExecutions(): Promise<void> {
-  await Promise.allSettled([...activeOwners].map(async (started) => {
-    await requestOwnerCancellation(started);
-  }));
+  await Promise.allSettled(
+    [...activeOwners].map(async (started) => {
+      await requestOwnerCancellation(started);
+    }),
+  );
 }
 
-/**
- * The last resort, for a signal handler or an exit hook that cannot await:
- * deliver SIGTERM to every owner process group synchronously. Signal delivery
- * is immediate, so this survives the process exiting straight afterwards.
- */
+/** Synchronous signal path when the host cannot await teardown. */
 export function terminateActiveExecutionGroups(): void {
   for (const started of activeOwners) {
     const record = started.record;
     if (record === undefined) continue;
     signalRunGroup(record.owner_pid, record.owner_pgid, record.owner_started_at, "SIGTERM");
   }
-}
-
-function inside(root: string, candidate: string): boolean {
-  const path = relative(root, candidate);
-  return path === "" || (!isAbsolute(path) && path !== ".." && !path.startsWith(`..${sep}`));
 }
 
 function canonical(path: string): string {
@@ -200,18 +138,17 @@ async function pythonOwner(root: string, identity: Identity, env: NodeJS.Process
     throw new Error(`Python owner selector must be a regular local file: ${helper}`);
   }
   try {
-    const { stdout } = await execFileAsync("/bin/bash", [
-      "-c",
-      'source "$1"; run_stdlib -c "import sys; print(sys.executable)"',
-      "provenant-python-owner",
-      helper,
-    ], {
-      cwd: identity.cwd,
-      env: withoutGitRedirects(env),
-      encoding: "utf8",
-      timeout: 10_000,
-      maxBuffer: 64 * 1024,
-    });
+    const { stdout } = await execFileAsync(
+      "/bin/bash",
+      ["-c", 'source "$1"; run_stdlib -c "import sys; print(sys.executable)"', "provenant-python-owner", helper],
+      {
+        cwd: identity.cwd,
+        env: withoutGitRedirects(env),
+        encoding: "utf8",
+        timeout: 10_000,
+        maxBuffer: 64 * 1024,
+      },
+    );
     const selected = resolve(stdout.trim());
     const selectedMetadata = statSync(selected);
     accessSync(selected, constants.X_OK);
@@ -223,17 +160,40 @@ async function pythonOwner(root: string, identity: Identity, env: NodeJS.Process
   }
 }
 
-function createRunDirectory(identity: Identity): string {
-  const workspace = canonical(identity.cwd);
-  const agentRun = join(workspace, ".agent-run");
+function createRunDirectory(identity: Identity, kind: "dispatch" | "batch"): string {
+  const agentRun = runRoot(identity.cwd);
   mkdirSync(agentRun, { recursive: true, mode: 0o700 });
-  const metadata = lstatSync(agentRun);
-  if (!metadata.isDirectory() || metadata.isSymbolicLink()) {
-    throw new Error(`execution run root must be a local directory: ${agentRun}`);
+  if (lstatSync(agentRun).isSymbolicLink()) throw new Error("run root must not be a symlink");
+  const runs = join(agentRun, "runs");
+  mkdirSync(runs, { recursive: true, mode: 0o700 });
+  if (lstatSync(runs).isSymbolicLink()) throw new Error("runs directory must not be a symlink");
+  try {
+    const common = execFileSync(
+      "git",
+      ["-C", identity.cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+      { env: withoutGitRedirects(process.env), encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    const exclude = join(common, "info/exclude");
+    mkdirSync(dirname(exclude), { recursive: true });
+    let current = "";
+    try {
+      current = readFileSync(exclude, "utf8");
+    } catch {
+      /* first creation */
+    }
+    const entries = ["/.agent-run/", "/.worktrees/", "/.work/"].filter((line) => !current.split("\n").includes(line));
+    if (entries.length) appendFileSync(exclude, `\n${entries.join("\n")}\n`);
+  } catch {
+    /* Non-Git workspace or read-only metadata. */
   }
-  const runRoot = canonical(agentRun);
-  if (!inside(workspace, runRoot)) throw new Error("execution run root escapes the caller workspace");
-  return mkdtempSync(join(runRoot, "mcp-"));
+  const stamp = new Date().toISOString().replace(/[-:]/gu, "").replace("T", "-").slice(0, 13);
+  const slug =
+    basename(identity.cwd)
+      .replace(/[^a-zA-Z0-9-]/gu, "-")
+      .slice(0, 32) || "workspace";
+  const dir = mkdtempSync(join(runs, `${stamp}-${kind}-${slug}-`));
+  mkdirSync(join(dir, "_owner"), { mode: 0o700 });
+  return dir;
 }
 
 /**
@@ -247,17 +207,27 @@ async function maintainRunRoot(identity: Identity, env: NodeJS.ProcessEnv): Prom
   const workspace = canonical(identity.cwd);
   try {
     await reapOrphanedRuns(workspace);
-  } catch { /* Reaping is best effort; the run it protects still starts. */ }
+  } catch {
+    /* Reaping is best effort; the run it protects still starts. */
+  }
   try {
     pruneDispatchRuns(workspace, env);
-  } catch { /* Pruning is best effort; the run it tidies still starts. */ }
+  } catch {
+    /* Pruning is best effort; the run it tidies still starts. */
+  }
 }
 
-async function initialiseRun(identity: Identity, env: NodeJS.ProcessEnv, root: string, signal: AbortSignal): Promise<string> {
+async function initialiseRun(
+  identity: Identity,
+  env: NodeJS.ProcessEnv,
+  root: string,
+  signal: AbortSignal,
+  kind: "dispatch" | "batch" = "dispatch",
+): Promise<string> {
   const owner = executableOwner(root, "skills/orchestrate/scripts/run_dir_init.sh");
   await maintainRunRoot(identity, env);
   signal.throwIfAborted();
-  const runDir = createRunDirectory(identity);
+  const runDir = createRunDirectory(identity, kind);
   try {
     await execFileAsync(owner, [runDir], {
       cwd: identity.cwd,
@@ -276,70 +246,15 @@ async function initialiseRun(identity: Identity, env: NodeJS.ProcessEnv, root: s
   return runDir;
 }
 
-function normaliseRoute(
-  input: RouteInput,
-  identity: Identity,
-  catalogue: CatalogueSnapshot,
-): NormalisedRoute {
-  const adapter = input.adapter ?? (SUPPORTED_ADAPTERS.has(identity.provider) ? identity.provider : undefined);
-  if (adapter === undefined) throw new InputError("adapter_required", `Pass adapter ${DISPATCH_ADAPTERS.join(", ")}.`);
-  if (!SUPPORTED_ADAPTERS.has(adapter)) {
-    throw new InputError("adapter_invalid", `Pass adapter ${DISPATCH_ADAPTERS.join(", ")}.`);
-  }
-  const catalogueAdapter = catalogue.adapters.find((entry) => entry.name === adapter);
-  let alias = input.alias;
-  let model = input.model;
-  if (alias !== undefined && !["flagship", "workhorse", "scout"].includes(alias)) {
-    const models = catalogueAdapter?.models ?? [];
-    const matches = models.includes(alias) ? [alias] : models.filter((name) =>
-      name.toLowerCase().split(/[^a-z0-9]+/u).includes(alias!.toLowerCase()));
-    if (matches.length !== 1 || model !== undefined) {
-      throw new InputError("unknown_alias", `Pass alias flagship, workhorse or scout, or model ${models.join(", ") || "<provider/model id>"} for ${adapter}.`);
-    }
-    model = matches[0];
-    alias = undefined;
-  }
-  if (model !== undefined && alias !== undefined) {
-    throw new InputError("route_selector_conflict", "Pass either alias or model, plus optional effort.");
-  }
-  const mode = input.mode ?? "read_only";
-  if (!ACCESS_MODES.includes(mode)) throw new InputError("mode_invalid", `Pass mode ${ACCESS_MODES.join(" or ")}.`);
-  if (mode === "worktree_write" && input.worktree === undefined) {
-    throw new InputError("worktree_required", "Pass worktree=<registered Git worktree root> with mode worktree_write.");
-  }
-  if (mode !== "worktree_write" && input.worktree !== undefined) {
-    throw new InputError("worktree_not_applicable", "Pass mode worktree_write with worktree, or omit worktree.");
-  }
-  return {
-    adapter,
-    ...(model === undefined ? { alias: alias ?? "workhorse" } : { model }),
-    ...(input.effort === undefined ? {} : { effort: input.effort }),
-    role: "worker",
-    access_mode: mode,
-    ...(input.worktree === undefined ? {} : { worktree: input.worktree }),
-  };
-}
-
-function routeArguments(route: NormalisedRoute): string[] {
-  const args: string[] = [];
-  for (const [key, value] of Object.entries(route)) {
-    if (value !== undefined) args.push(`--${key.replaceAll("_", "-")}`, value);
-  }
-  return args;
-}
-
-function validatePrompt(prompt: string | undefined, promptFile: string | undefined): void {
-  if ((prompt === undefined) === (promptFile === undefined)) {
-    throw new InputError("prompt_required", "Pass exactly one of prompt or prompt_file.");
-  }
-}
-
 interface OwnerIdentification {
   kind: "dispatch" | "batch";
   identifier: string;
   routes?: unknown;
   taskIds?: string[];
   timeout?: number;
+  resume?: boolean;
+  nextAttempt?: number;
+  workspace?: string;
 }
 
 function startOwner(
@@ -359,20 +274,41 @@ function startOwner(
     ...withoutGitRedirects(env),
     PROVENANT_RUN_TOKEN: runToken,
     PROVENANT_RUN_DIR: runDir,
-    PROVENANT_PREFLIGHT_ROUTES: JSON.stringify(Object.fromEntries((identification.taskIds ?? []).map((id, index) =>
-      [id, compactRoute((identification.routes as unknown[] | undefined)?.[index])]))),
+    PROVENANT_RUN_ID: shortRunId(runDir),
+    PROVENANT_CHAIR: identity.agentId,
+    PROVENANT_PARENT: identity.agentId,
+    PROVENANT_PREFLIGHT_ROUTES: JSON.stringify(
+      Object.fromEntries(
+        (identification.taskIds ?? []).map((id, index) => [
+          id,
+          compactRoute((identification.routes as unknown[] | undefined)?.[index]),
+        ]),
+      ),
+    ),
   };
-  const logPrefix = join(dirname(runDir), basename(runDir));
-  const stdoutPath = `${logPrefix}-owner.stdout.jsonl`;
-  const stderrPath = `${logPrefix}-owner.stderr.log`;
+  const suffix = identification.resume ? `-resume-${Date.now()}` : "";
+  const stdoutPath = join(runDir, "_owner", `stdout${suffix}.jsonl`);
+  const stderrPath = join(runDir, "_owner", `stderr${suffix}.log`);
   // Persist required status before spawning: a failed write cannot orphan a provider.
-  writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({
-    id: basename(runDir),
-    ...(identification.kind === "dispatch" ? { task_id: identification.identifier } : { batch_id: identification.identifier }),
-    kind: identification.kind, started_at: new Date().toISOString(),
-    routes: identification.routes, task_ids: identification.taskIds, timeout_seconds: identification.timeout,
-    status: "running", owner_stdout: stdoutPath, owner_stderr: stderrPath,
-  }) + "\n", { mode: 0o600 });
+  writeFileSync(
+    join(runDir, "dispatch-status.json"),
+    JSON.stringify({
+      id: shortRunId(runDir),
+      ...(identification.kind === "dispatch"
+        ? { task_id: identification.identifier }
+        : { batch_id: identification.identifier }),
+      next_attempt: identification.nextAttempt,
+      kind: identification.kind,
+      started_at: new Date().toISOString(),
+      routes: identification.routes,
+      task_ids: identification.taskIds,
+      timeout_seconds: identification.timeout,
+      status: "running",
+      owner_stdout: stdoutPath,
+      owner_stderr: stderrPath,
+    }) + "\n",
+    { mode: 0o600 },
+  );
   const stdout = openSync(stdoutPath, "wx", 0o600);
   const stderr = openSync(stderrPath, "wx", 0o600);
   let child: ChildProcess;
@@ -393,20 +329,50 @@ function startOwner(
   let started: StartedOwner;
   const completion = new Promise<OwnerCompletion>((resolveCompletion) => {
     let spawnError: string | undefined;
-    child.once("error", (error) => { spawnError = error.message; });
+    child.once("error", (error) => {
+      spawnError = error.message;
+    });
     child.once("close", (exitCode, signal) => {
-      void terminateStartedRun(started).finally(() => {
+      void terminateStartedRun(started).finally(async () => {
         activeOwners.delete(started);
         for (const path of cleanupPaths) {
-          try { unlinkSync(path); } catch { /* Exact staging input may already be absent. */ }
+          try {
+            unlinkSync(path);
+          } catch {
+            /* Exact staging input may already be absent. */
+          }
         }
         const completed = { exitCode, signal, ...(spawnError === undefined ? {} : { error: spawnError }) };
         try {
           const path = join(runDir, "dispatch-status.json");
           const previous = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
-          const result = identification.kind === "dispatch" ? compactDispatch(started, completed) : compactBatch(started, completed);
-          writeFileSync(path, JSON.stringify({ ...previous, ...result, finished_at: new Date().toISOString() }) + "\n", { mode: 0o600 });
-        } catch { /* The retained owner/attempt files remain the status fallback. */ }
+          const result =
+            identification.kind === "dispatch" ? compactDispatch(started, completed) : compactBatch(started, completed);
+          writeFileSync(
+            path,
+            JSON.stringify({ ...previous, ...result, finished_at: new Date().toISOString() }) + "\n",
+            { mode: 0o600 },
+          );
+        } catch {
+          /* The retained owner/attempt files remain the status fallback. */
+        }
+        try {
+          const result = await statusRows(identification.workspace ?? identity.cwd, [shortRunId(runDir)]);
+          const mailbox = new Store(databasePath(env));
+          try {
+            mailbox.announce(identity);
+            for (const row of result.runs ?? [])
+              if (row.state === "terminal")
+                mailbox.send(identity, identity.agentId, digest(row), {
+                  kind: "run_terminal",
+                  outputPath: `${row.run_id}:${row.task_id}:${row.attempt ?? row.attempt_count}`,
+                });
+          } finally {
+            mailbox.close();
+          }
+        } catch {
+          /* Durable run evidence still survives unavailable mailbox storage. */
+        }
         resolveCompletion(completed);
       });
     });
@@ -444,7 +410,9 @@ function startOwner(
     started.record = record;
     try {
       writeOwnerRecord(record);
-    } catch { /* An unwritable record costs reaping, never the run. */ }
+    } catch {
+      /* An unwritable record costs reaping, never the run. */
+    }
   }
   activeOwners.add(started);
   return started;
@@ -452,7 +420,12 @@ function startOwner(
 
 function cancellationTargetReady(path: string): boolean {
   try {
-    const metadata = lstatSync(path);
+    let metadata;
+    try {
+      metadata = lstatSync(path);
+    } catch {
+      metadata = lstatSync(path.replace("/dispatch/tasks/", "/tasks/"));
+    }
     return metadata.isDirectory() && !metadata.isSymbolicLink();
   } catch {
     return false;
@@ -465,7 +438,7 @@ function recordedRun(started: StartedOwner): RecordedRun | undefined {
   if (record === undefined) return undefined;
   return {
     ...record,
-    run_id: basename(record.run_dir),
+    run_id: shortRunId(record.run_dir),
     running: true,
     orphaned: false,
     provider: readProviderRecord(record.run_dir, record.run_token),
@@ -488,8 +461,12 @@ async function requestOwnerCancellation(started: StartedOwner): Promise<void> {
   if (started.cancellation !== undefined) return await started.cancellation;
   started.cancellation = (async () => {
     const deadline = Date.now() + 5_000;
-    while (started.child.exitCode === null && started.child.signalCode === null
-      && !cancellationTargetReady(started.cancelSpec.targetDirectory) && Date.now() < deadline) {
+    while (
+      started.child.exitCode === null &&
+      started.child.signalCode === null &&
+      !cancellationTargetReady(started.cancelSpec.targetDirectory) &&
+      Date.now() < deadline
+    ) {
       await new Promise((resolveWait) => setTimeout(resolveWait, 25));
     }
     if (started.child.exitCode !== null || started.child.signalCode !== null) {
@@ -529,9 +506,7 @@ async function observeOwner(
     signal.throwIfAborted();
   }
   if (seconds === 0) {
-    return started.child.exitCode === null && started.child.signalCode === null
-      ? undefined
-      : await started.completion;
+    return started.child.exitCode === null && started.child.signalCode === null ? undefined : await started.completion;
   }
   return await new Promise<OwnerCompletion | undefined>((resolveWait, rejectWait) => {
     let settled = false;
@@ -551,260 +526,13 @@ async function observeOwner(
         rejectWait(signal.reason instanceof Error ? signal.reason : new Error("execution wait cancelled"));
       });
     };
-    const timer = setTimeout(() => { finish(undefined); }, seconds * 1000);
+    const timer = setTimeout(() => {
+      finish(undefined);
+    }, seconds * 1000);
     signal.addEventListener("abort", aborted, { once: true });
     if (signal.aborted) aborted();
     void started.completion.then(finish);
   });
-}
-
-function parseOwnerOutput(path: string): Record<string, unknown> | undefined {
-  const lines = readFileSync(path, "utf8").split(/\r?\n/u).filter((line) => line.trim().length > 0);
-  for (const line of lines.reverse()) {
-    try {
-      const value: unknown = JSON.parse(line);
-      if (typeof value === "object" && value !== null && !Array.isArray(value)) {
-        return value as Record<string, unknown>;
-      }
-    } catch {
-      // Owner diagnostics can precede its final JSON record.
-    }
-  }
-  return undefined;
-}
-
-function retainedAbsolute(runDir: string, value: unknown): string | null {
-  if (typeof value !== "string" || value.length === 0 || isAbsolute(value)) return null;
-  const path = resolve(runDir, value);
-  return inside(runDir, path) ? path : null;
-}
-
-function retainedRegularFile(runDir: string, value: unknown): string | null {
-  const path = retainedAbsolute(runDir, value);
-  if (path === null) return null;
-  try {
-    const metadata = lstatSync(path);
-    return metadata.isFile() && !metadata.isSymbolicLink() && inside(canonical(runDir), realpathSync(path)) ? path : null;
-  } catch {
-    return null;
-  }
-}
-
-function objectValue(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
-}
-
-function nonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0;
-}
-
-function completeRoute(value: unknown): boolean {
-  const route = objectValue(value);
-  return route !== undefined && ["adapter", "provider_family", "resolved_model", "execution_intent"]
-    .every((field) => nonEmptyString(route[field]));
-}
-
-function validOwnerRecord(
-  record: Record<string, unknown>,
-  kind: "dispatch" | "batch",
-  runDir: string,
-): boolean {
-  if (record.schema_version !== 1 || typeof record.status !== "string" || record.status.length === 0) return false;
-  if (record.record_type === undefined) {
-    return !RESERVED_UNTYPED_STATUSES.has(record.status) &&
-      typeof record.message === "string" && record.message.length > 0;
-  }
-  if (record.record_type !== (kind === "dispatch" ? "dispatch-attempt" : "dispatch-batch")) return false;
-  const terminalStatuses = kind === "dispatch" ? DISPATCH_TERMINAL_STATUSES : BATCH_TERMINAL_STATUSES;
-  if (!terminalStatuses.has(record.status)) return false;
-  if (kind === "dispatch" && record.status === "succeeded") {
-    const result = objectValue(record.result);
-    const stderr = objectValue(record.stderr);
-    return nonEmptyString(record.outcome) && nonEmptyString(record.task_id) && nonEmptyString(record.attempt_id) &&
-      retainedRegularFile(runDir, record.attempt_path) !== null &&
-      retainedRegularFile(runDir, result?.path) !== null &&
-      retainedRegularFile(runDir, stderr?.path) !== null && completeRoute(record.route);
-  }
-  if (kind === "batch" && record.status === "completed") {
-    const tasks = Array.isArray(record.tasks) ? record.tasks : [];
-    const counts = objectValue(record.counts);
-    return nonEmptyString(record.batch_id) && Number.isInteger(record.task_count) && Number(record.task_count) > 0 &&
-      Number.isInteger(record.concurrency) && Number(record.concurrency) > 0 &&
-      tasks.length === record.task_count && tasks.every((value) => {
-        const task = objectValue(value);
-        if (task === undefined || !nonEmptyString(task.task_id) || !DISPATCH_TERMINAL_STATUSES.has(String(task.status))) return false;
-        return task.status !== "succeeded" || (
-          nonEmptyString(task.outcome) && retainedRegularFile(runDir, task.attempt_path) !== null &&
-          retainedRegularFile(runDir, task.result_path) !== null && completeRoute(task.route)
-        );
-      }) && counts !== undefined && Object.keys(counts).length > 0 &&
-      retainedRegularFile(runDir, record.summary_path) !== null;
-  }
-  return true;
-}
-
-function completionConflict(completion: OwnerCompletion, successful: boolean): boolean {
-  return completion.error !== undefined || completion.signal !== null || (successful && completion.exitCode !== 0);
-}
-
-function compactRoute(value: unknown): Record<string, string> | null {
-  const route = objectValue(value);
-  if (route === undefined) return null;
-  const compact: Record<string, string> = {};
-  for (const field of [
-    "adapter", "alias", "model", "effort", "provider_family", "model_family", "resolved_model", "endpoint_provider", "execution_intent",
-  ]) {
-    if (typeof route[field] === "string" && route[field].length > 0) compact[field] = route[field];
-  }
-  return Object.keys(compact).length === 0 ? null : compact;
-}
-
-function basePaths(started: StartedOwner): Record<string, string> {
-  return {
-    run_dir: started.runDir,
-    owner_stdout: started.stdoutPath,
-    owner_stderr: started.stderrPath,
-  };
-}
-
-function emptyProviderResult(record: Record<string, unknown>, runDir: string): boolean {
-  if (record.record_type !== "dispatch-attempt" || record.status !== "succeeded") return false;
-  const result = objectValue(record.result);
-  const path = retainedRegularFile(runDir, result?.path);
-  return path !== null && lstatSync(path).size === 0;
-}
-
-function compactDispatch(started: StartedOwner, completion: OwnerCompletion): Record<string, unknown> {
-  const record = parseOwnerOutput(started.stdoutPath);
-  if (record !== undefined && emptyProviderResult(record, started.runDir)) {
-    const result = objectValue(record.result);
-    const stderr = objectValue(record.stderr);
-    return {
-      schema_version: 1,
-      id: basename(started.runDir),
-      status: "failed",
-      outcome: "empty_output",
-      task_id: record.task_id,
-      attempt_id: record.attempt_id,
-      route: compactRoute(record.route),
-      owner_exit: completion.exitCode,
-      paths: {
-        ...basePaths(started),
-        attempt: retainedAbsolute(started.runDir, record.attempt_path),
-        result: retainedAbsolute(started.runDir, result?.path),
-        stderr: retainedAbsolute(started.runDir, stderr?.path),
-      },
-    };
-  }
-  if (record === undefined || !validOwnerRecord(record, "dispatch", started.runDir)) {
-    return {
-      schema_version: 1,
-      id: basename(started.runDir),
-      status: "owner_output_invalid",
-      owner_exit: completion.exitCode,
-      owner_signal: completion.signal,
-      ...(completion.error === undefined ? {} : { message: completion.error }),
-      paths: basePaths(started),
-    };
-  }
-  if (completionConflict(completion, record.status === "succeeded")) {
-    return {
-      schema_version: 1,
-      id: basename(started.runDir),
-      status: "owner_completion_conflict",
-      owner_status: record.status,
-      owner_exit: completion.exitCode,
-      owner_signal: completion.signal,
-      ...(completion.error === undefined ? {} : { message: completion.error }),
-      paths: basePaths(started),
-    };
-  }
-  const result = objectValue(record.result);
-  const stderr = objectValue(record.stderr);
-  return {
-    schema_version: 1,
-    id: basename(started.runDir),
-    status: record.status,
-    ...(record.message === undefined ? {} : { message: record.message }),
-    outcome: record.outcome,
-    task_id: record.task_id,
-    attempt_id: record.attempt_id,
-    route: compactRoute(record.route),
-    owner_exit: completion.exitCode,
-    paths: {
-      ...basePaths(started),
-      attempt: retainedAbsolute(started.runDir, record.attempt_path),
-      result: retainedAbsolute(started.runDir, result?.path),
-      stderr: retainedAbsolute(started.runDir, stderr?.path),
-    },
-  };
-}
-
-function compactBatch(started: StartedOwner, completion: OwnerCompletion): Record<string, unknown> {
-  const record = parseOwnerOutput(started.stdoutPath);
-  if (record === undefined || !validOwnerRecord(record, "batch", started.runDir)) {
-    return {
-      schema_version: 1,
-      id: basename(started.runDir),
-      status: "owner_output_invalid",
-      owner_exit: completion.exitCode,
-      owner_signal: completion.signal,
-      ...(completion.error === undefined ? {} : { message: completion.error }),
-      paths: basePaths(started),
-    };
-  }
-  const allTasksSucceeded = Array.isArray(record.tasks) && record.tasks.length > 0 &&
-    record.tasks.every((value) => {
-      const task = objectValue(value);
-      const path = retainedRegularFile(started.runDir, task?.result_path);
-      return task?.status === "succeeded" && path !== null && lstatSync(path).size > 0;
-    });
-  if (completionConflict(completion, allTasksSucceeded)) {
-    return {
-      schema_version: 1,
-      id: basename(started.runDir),
-      status: "owner_completion_conflict",
-      owner_status: record.status,
-      owner_exit: completion.exitCode,
-      owner_signal: completion.signal,
-      ...(completion.error === undefined ? {} : { message: completion.error }),
-      paths: basePaths(started),
-    };
-  }
-  const tasks = Array.isArray(record.tasks) ? record.tasks.map((value) => {
-    const task = objectValue(value);
-    if (task === undefined) return { status: "owner_task_invalid" };
-    const resultPath = retainedRegularFile(started.runDir, task.result_path);
-    const empty = task.status === "succeeded" && resultPath !== null && lstatSync(resultPath).size === 0;
-    return {
-      task_id: task.task_id,
-      status: empty ? "failed" : task.status,
-      outcome: empty ? "empty_output" : task.outcome,
-      route: compactRoute(task.route),
-      paths: {
-        attempt: retainedAbsolute(started.runDir, task.attempt_path),
-        result: retainedAbsolute(started.runDir, task.result_path),
-      },
-    };
-  }) : [];
-  return {
-    schema_version: 1,
-    id: basename(started.runDir),
-    status: record.status,
-    ...(record.message === undefined ? {} : { message: record.message }),
-    batch_id: record.batch_id,
-    task_count: record.task_count,
-    concurrency: record.concurrency,
-    counts: tasks.reduce<Record<string, number>>((counts, task) => { const key = String(task.status); counts[key] = (counts[key] ?? 0) + 1; return counts; }, {}),
-    tasks,
-    owner_exit: completion.exitCode,
-    paths: {
-      ...basePaths(started),
-      summary: retainedAbsolute(started.runDir, record.summary_path),
-    },
-  };
 }
 
 function running(
@@ -813,12 +541,16 @@ function running(
   identity: Identity,
   identifier: string,
 ): Record<string, unknown> {
-  const paths = kind === "dispatch"
-    ? { ...basePaths(started), attempt: join(started.runDir, "dispatch", "tasks", identifier, FIRST_ATTEMPT_ID, "attempt.json") }
-    : { ...basePaths(started), summary: join(started.runDir, "dispatch", "batches", FIRST_BATCH_ID, "summary.json") };
+  const paths =
+    kind === "dispatch"
+      ? {
+          ...basePaths(started),
+          attempt: join(started.runDir, "dispatch", "tasks", identifier, FIRST_ATTEMPT_ID, "attempt.json"),
+        }
+      : { ...basePaths(started), summary: join(started.runDir, "dispatch", "batches", FIRST_BATCH_ID, "summary.json") };
   return {
     schema_version: 1,
-    id: basename(started.runDir),
+    id: shortRunId(started.runDir),
     status: "running",
     kind,
     ...(kind === "dispatch" ? { task_id: identifier } : { batch_id: identifier }),
@@ -830,14 +562,8 @@ function running(
   };
 }
 
-function timeoutSeconds(value: number | undefined, mode?: AccessMode): number {
-  const timeout = value ?? (mode === "worktree_write" ? 10800 : DEFAULT_TIMEOUT_SECONDS);
-  if (!Number.isFinite(timeout) || timeout <= 0) throw new InputError("invalid_input", "timeout_seconds must be finite and positive");
-  return timeout;
-}
-
 function stagingPath(runDir: string, name: string): string {
-  return join(dirname(runDir), `${basename(runDir)}-${name}`);
+  return join(runDir, "_owner", name);
 }
 
 async function dispatchConfiguredProviderUnchecked(
@@ -846,8 +572,14 @@ async function dispatchConfiguredProviderUnchecked(
   signal: AbortSignal,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<Record<string, unknown>> {
+  const workspaceIdentity = identity;
+  identity = workingIdentity(input, identity);
   validatePrompt(input.prompt, input.prompt_file);
-  if (!Number.isInteger(input.wait_seconds ?? DEFAULT_WAIT_SECONDS) || (input.wait_seconds ?? 0) < 0 || (input.wait_seconds ?? 0) > 55) {
+  if (
+    !Number.isInteger(input.wait_seconds ?? DEFAULT_WAIT_SECONDS) ||
+    (input.wait_seconds ?? 0) < 0 ||
+    (input.wait_seconds ?? 0) > 55
+  ) {
     throw new InputError("wait_invalid", "Pass wait_seconds from 0 to 55.");
   }
   const callStarted = Date.now();
@@ -858,33 +590,85 @@ async function dispatchConfiguredProviderUnchecked(
   const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
   const python = await pythonOwner(root, identity, env);
-  const checked = await preflight(python, owner, [{ id: taskId, ...route,
-    ...(input.prompt === undefined ? { prompt_file: input.prompt_file } : { prompt: input.prompt }) }], identity, env, signal);
+  const checked = await preflight(
+    python,
+    owner,
+    [
+      {
+        id: taskId,
+        ...route,
+        ...(input.prompt === undefined ? { prompt_file: input.prompt_file } : { prompt: input.prompt }),
+      },
+    ],
+    identity,
+    env,
+    signal,
+  );
   signal.throwIfAborted();
   if (checked.status === "rejected") return { status: "rejected", error: checked.error, fix: checked.fix };
-  const runDir = await initialiseRun(identity, env, root, signal);
+  const runDir = await initialiseRun(workspaceIdentity, env, root, signal);
   if (signal.aborted) rmSync(runDir, { recursive: true, force: true });
   signal.throwIfAborted();
   const promptPath = input.prompt === undefined ? input.prompt_file! : stagingPath(runDir, "prompt.md");
   if (input.prompt !== undefined) writeFileSync(promptPath, input.prompt, { flag: "wx", mode: 0o600 });
   const args = [
-    "--run-dir", runDir,
-    "--task-id", taskId,
-    "--prompt-file", promptPath,
-    "--intent", "ordinary",
-    "--timeout", String(timeout),
+    "--run-dir",
+    runDir,
+    "--task-id",
+    taskId,
+    "--prompt-file",
+    promptPath,
+    "--intent",
+    "ordinary",
+    "--timeout",
+    String(timeout),
     ...routeArguments(route),
   ];
-  const started = startOwner(python, [owner, ...args], identity, env, runDir, {
-    command: python,
-    args: [controls, "cancel", "--run-dir", runDir, "--task-id", taskId,
-      "--attempt-id", FIRST_ATTEMPT_ID, "--wait-seconds", "5"],
-    targetDirectory: join(runDir, "dispatch", "tasks", taskId, FIRST_ATTEMPT_ID),
-    cwd: identity.cwd,
+  const started = startOwner(
+    python,
+    [owner, ...args],
+    identity,
     env,
-  }, { kind: "dispatch", identifier: taskId, routes: checked.routes, taskIds: [taskId], timeout }, input.prompt === undefined ? [] : [promptPath]);
-  const completion = await observeOwner(started, Math.max(0, Math.min(input.wait_seconds ?? DEFAULT_WAIT_SECONDS, Math.floor(55 - (Date.now() - callStarted) / 1000))), signal);
-  return completion === undefined ? running(started, "dispatch", identity, taskId) : compactDispatch(started, completion);
+    runDir,
+    {
+      command: python,
+      args: [
+        controls,
+        "cancel",
+        "--run-dir",
+        runDir,
+        "--task-id",
+        taskId,
+        "--attempt-id",
+        FIRST_ATTEMPT_ID,
+        "--wait-seconds",
+        "5",
+      ],
+      targetDirectory: join(runDir, "dispatch", "tasks", taskId, FIRST_ATTEMPT_ID),
+      cwd: identity.cwd,
+      env,
+    },
+    {
+      workspace: workspaceIdentity.cwd,
+      kind: "dispatch",
+      identifier: taskId,
+      routes: checked.routes,
+      taskIds: [taskId],
+      timeout,
+    },
+    input.prompt === undefined ? [] : [promptPath],
+  );
+  const completion = await observeOwner(
+    started,
+    Math.max(
+      0,
+      Math.min(input.wait_seconds ?? DEFAULT_WAIT_SECONDS, Math.floor(55 - (Date.now() - callStarted) / 1000)),
+    ),
+    signal,
+  );
+  return completion === undefined
+    ? running(started, "dispatch", identity, taskId)
+    : compactDispatch(started, completion);
 }
 
 function normaliseTask(
@@ -908,12 +692,13 @@ async function dispatchConfiguredBatchUnchecked(
   signal: AbortSignal,
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<Record<string, unknown>> {
-  if (input.tasks.length < 1 || input.tasks.length > 64) throw new InputError("invalid_input", "tasks must contain 1-64 items");
+  if (input.tasks.length < 1 || input.tasks.length > 64)
+    throw new InputError("invalid_input", "tasks must contain 1-64 items");
   const concurrency = input.concurrency ?? Math.min(4, input.tasks.length);
   if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) {
     throw new InputError("invalid_input", "concurrency must be an integer from 1 to 8");
   }
-  if (!Number.isInteger(input.wait_seconds ?? DEFAULT_WAIT_SECONDS) || (input.wait_seconds ?? 0) < 0 || (input.wait_seconds ?? 0) > 55) {
+  if (!Number.isInteger(input.wait_seconds ?? 0) || (input.wait_seconds ?? 0) < 0 || (input.wait_seconds ?? 0) > 55) {
     throw new InputError("wait_invalid", "Pass wait_seconds from 0 to 55.");
   }
   const callStarted = Date.now();
@@ -921,76 +706,291 @@ async function dispatchConfiguredBatchUnchecked(
   const catalogue = catalogueSnapshot(root, env);
   const errors: Record<string, unknown>[] = [];
   const tasks = input.tasks.flatMap((task, index) => {
-    try { return [normaliseTask(task, index, identity, catalogue)]; }
-    catch (error) { errors.push({ task_id: task.id ?? `task-${index + 1}`, ...rejected(error) }); return []; }
+    try {
+      return [normaliseTask(task, index, identity, catalogue)];
+    } catch (error) {
+      errors.push({ task_id: task.id ?? `task-${index + 1}`, ...rejected(error) });
+      return [];
+    }
   });
   if (tasks.length === 0) return { status: "rejected", error: errors[0]!.error, fix: errors[0]!.fix, errors };
   const owner = executableOwner(root, "skills/orchestrate/scripts/batch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
   const python = await pythonOwner(root, identity, env);
-  const checked = await preflight(python, executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py"), tasks, identity, env, signal);
+  const checked = await preflight(
+    python,
+    executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py"),
+    tasks,
+    identity,
+    env,
+    signal,
+  );
   signal.throwIfAborted();
-  if (checked.status === "rejected") errors.push(...checked.errors as Record<string, unknown>[]);
+  if (checked.status === "rejected") errors.push(...(checked.errors as Record<string, unknown>[]));
   if (errors.length > 0) return { status: "rejected", error: errors[0]!.error, fix: errors[0]!.fix, errors };
-  const runDir = await initialiseRun(identity, env, root, signal);
+  const runDir = await initialiseRun(identity, env, root, signal, "batch");
   if (signal.aborted) rmSync(runDir, { recursive: true, force: true });
   signal.throwIfAborted();
   const manifestPath = stagingPath(runDir, "task-manifest.json");
-  writeFileSync(manifestPath, JSON.stringify({
-    schema_version: 1,
-    tasks,
-  }, null, 2) + "\n", { flag: "wx", mode: 0o600 });
-  const started = startOwner(python, [owner,
-    "--run-dir", runDir,
-    "--manifest", manifestPath,
-    "--concurrency", String(concurrency),
-  ], identity, env, runDir, {
-    command: python,
-    args: [controls, "cancel", "--run-dir", runDir, "--batch-id", FIRST_BATCH_ID,
-      "--wait-seconds", "5"],
-    targetDirectory: join(runDir, "dispatch", "batches", FIRST_BATCH_ID),
-    cwd: identity.cwd,
+  writeFileSync(
+    manifestPath,
+    JSON.stringify(
+      {
+        schema_version: 1,
+        tasks,
+      },
+      null,
+      2,
+    ) + "\n",
+    { flag: "wx", mode: 0o600 },
+  );
+  const started = startOwner(
+    python,
+    [owner, "--run-dir", runDir, "--manifest", manifestPath, "--concurrency", String(concurrency)],
+    identity,
     env,
-  }, { kind: "batch", identifier: FIRST_BATCH_ID, routes: checked.routes, taskIds: tasks.map((task) => String(task.id)), timeout: Math.max(...tasks.map((task) => Number(task.timeout))) }, [manifestPath]);
-  const completion = await observeOwner(started, Math.max(0, Math.min(input.wait_seconds ?? DEFAULT_WAIT_SECONDS, Math.floor(55 - (Date.now() - callStarted) / 1000))), signal);
-  return completion === undefined ? running(started, "batch", identity, FIRST_BATCH_ID) : compactBatch(started, completion);
+    runDir,
+    {
+      command: python,
+      args: [controls, "cancel", "--run-dir", runDir, "--batch-id", FIRST_BATCH_ID, "--wait-seconds", "5"],
+      targetDirectory: join(runDir, "dispatch", "batches", FIRST_BATCH_ID),
+      cwd: identity.cwd,
+      env,
+    },
+    {
+      kind: "batch",
+      identifier: FIRST_BATCH_ID,
+      routes: checked.routes,
+      taskIds: tasks.map((task) => String(task.id)),
+      timeout: Math.max(...tasks.map((task) => Number(task.timeout))),
+    },
+    [manifestPath],
+  );
+  const completion = await observeOwner(
+    started,
+    Math.max(0, Math.min(input.wait_seconds ?? 0, Math.floor(55 - (Date.now() - callStarted) / 1000))),
+    signal,
+  );
+  return completion === undefined
+    ? running(started, "batch", identity, FIRST_BATCH_ID)
+    : compactBatch(started, completion);
 }
 
-class InputError extends Error {
-  constructor(readonly code: string, readonly fix: string) { super(fix); }
-}
-
-function rejected(error: unknown): Record<string, unknown> {
-  if (error instanceof InputError) return { status: "rejected", error: error.code, fix: error.fix };
-  const detail = (error instanceof Error ? error.message : String(error)).replace(/\s+/gu, " ").trim();
-  return { status: "rejected", error: "preflight_unavailable",
-    fix: `Check the harness Python environment, execution owner scripts and workspace permissions: ${detail}` };
-}
-
-async function preflight(python: string, owner: string, tasks: Record<string, unknown>[], identity: Identity,
-  env: NodeJS.ProcessEnv, signal: AbortSignal): Promise<Record<string, unknown>> {
+async function preflight(
+  python: string,
+  owner: string,
+  tasks: Record<string, unknown>[],
+  identity: Identity,
+  env: NodeJS.ProcessEnv,
+  signal: AbortSignal,
+): Promise<Record<string, unknown>> {
   signal.throwIfAborted();
   const child = execFile(python, [owner, "--preflight-json"], {
-    cwd: identity.cwd, env: withoutGitRedirects(env), signal, killSignal: "SIGKILL", timeout: 50_000, maxBuffer: 1024 * 1024,
+    cwd: identity.cwd,
+    env: withoutGitRedirects(env),
+    signal,
+    killSignal: "SIGKILL",
+    timeout: 50_000,
+    maxBuffer: 1024 * 1024,
   });
   const output = new Promise<string>((resolveOutput, rejectOutput) => {
     let stdout = "";
-    child.stdout!.on("data", (chunk: string) => { stdout += chunk; });
+    child.stdout!.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
     child.once("error", rejectOutput);
-    child.once("close", (code) => code === 0 ? resolveOutput(stdout) : rejectOutput(new Error("Preflight unavailable; restore the harness Python environment.")));
+    child.once("close", (code) =>
+      code === 0
+        ? resolveOutput(stdout)
+        : rejectOutput(new Error("Preflight unavailable; restore the harness Python environment.")),
+    );
   });
   child.stdin!.end(JSON.stringify({ tasks }));
   return JSON.parse(await output) as Record<string, unknown>;
 }
 
-export async function dispatchConfiguredProvider(input: DispatchInput, identity: Identity, signal: AbortSignal,
-  env: NodeJS.ProcessEnv = process.env): Promise<Record<string, unknown>> {
-  try { return await dispatchConfiguredProviderUnchecked(input, identity, signal, env); }
-  catch (error) { if (signal.aborted && !(error instanceof InputError)) throw error; return rejected(error); }
+export async function dispatchConfiguredProvider(
+  input: DispatchInput,
+  identity: Identity,
+  signal: AbortSignal,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<Record<string, unknown>> {
+  try {
+    return await dispatchConfiguredProviderUnchecked(input, identity, signal, env);
+  } catch (error) {
+    if (signal.aborted && !(error instanceof InputError)) throw error;
+    return rejected(error);
+  }
 }
 
-export async function dispatchConfiguredBatch(input: BatchInput, identity: Identity, signal: AbortSignal,
-  env: NodeJS.ProcessEnv = process.env): Promise<Record<string, unknown>> {
-  try { return await dispatchConfiguredBatchUnchecked(input, identity, signal, env); }
-  catch (error) { if (signal.aborted && !(error instanceof InputError)) throw error; return rejected(error); }
+export async function dispatchConfiguredBatch(
+  input: BatchInput,
+  identity: Identity,
+  signal: AbortSignal,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<Record<string, unknown>> {
+  try {
+    return await dispatchConfiguredBatchUnchecked(input, identity, signal, env);
+  } catch (error) {
+    if (signal.aborted && !(error instanceof InputError)) throw error;
+    return rejected(error);
+  }
+}
+
+export async function cancelConfiguredRun(
+  id: string,
+  identity: Identity,
+  reason?: string,
+): Promise<Record<string, unknown>> {
+  const rows = await statusRows(identity.cwd, [id]);
+  if (!rows.runs) return rows;
+  const row = rows.runs[0]!;
+  if (rows.runs.every((row) => row.state === "terminal")) return rows;
+  const started = [...activeOwners].find((owner) => owner.runDir === row.run_dir);
+  if (started) {
+    await requestOwnerCancellation(started);
+    await observeOwner(started, 5, new AbortController().signal);
+  } else {
+    const recorded = findRecordedRun(identity.cwd, row.run_dir);
+    if (!recorded)
+      return {
+        status: "rejected",
+        error: "owner_unavailable",
+        fix: "Inspect the retained owner record before cancellation.",
+      };
+    const outcome = await terminateRecordedRun(recorded);
+    if (outcome.reason === "still running")
+      return {
+        status: "rejected",
+        error: "cancel_unconfirmed",
+        fix: "Inspect owner/provider liveness; cancellation was not confirmed.",
+      };
+  }
+  return { ...(await statusRows(identity.cwd, [id])), ...(reason ? { reason } : {}) };
+}
+
+export async function resumeConfiguredProvider(
+  input: DispatchInput,
+  identity: Identity,
+  signal: AbortSignal,
+  env: NodeJS.ProcessEnv = process.env,
+): Promise<Record<string, unknown>> {
+  let lock: string | undefined,
+    launched = false;
+  try {
+    validatePrompt(input.prompt, input.prompt_file);
+    if (
+      !Number.isInteger(input.wait_seconds ?? 55) ||
+      (input.wait_seconds ?? 55) < 0 ||
+      (input.wait_seconds ?? 55) > 55
+    )
+      throw new InputError("wait_invalid", "Pass wait_seconds from 0 to 55.");
+    if (Object.keys(input).some((key) => !["resume", "prompt", "prompt_file", "wait_seconds", "detail"].includes(key)))
+      throw new InputError("resume_route_change", "Dispatch a new run to change route, mode or controls.");
+    const result = await statusRows(identity.cwd, [input.resume!]);
+    if (!result.runs) return result;
+    if (result.runs.length !== 1 || result.runs[0]!.state !== "terminal")
+      throw new InputError("resume_not_ready", "Resume one terminal task; wait for its active attempt to finish.");
+    const previous = result.runs[0]!;
+    if(previous.attempts?.at(-1)?.state === "running") throw new InputError("resume_not_ready", "Dispatch a new run; the owner did not terminalise this attempt.");
+    const root = productRoot(env),
+      runDir = String(previous.run_dir),
+      taskId = String(previous.task_id);
+    const ownerRecord = readOwnerRecord(runDir);
+    const alive = (pid: number) => {
+      try {
+        process.kill(pid, 0);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    if (ownerRecord && alive(ownerRecord.owner_pid))
+      throw new InputError("resume_not_ready", "Wait for the current owner to exit.");
+    mkdirSync(join(runDir, "_owner"), { recursive: true, mode: 0o700 });
+    const lockPath = join(runDir, "_owner/resume.lock");
+    try {
+      const old = JSON.parse(readFileSync(lockPath, "utf8"));
+      if (Number.isInteger(old.pid) && !alive(old.pid)) unlinkSync(lockPath);
+    } catch {
+      /* A competing live claim is rejected by exclusive creation. */
+    }
+    try {
+      writeFileSync(lockPath, JSON.stringify({ pid: process.pid }), { flag: "wx", mode: 0o600 });
+      lock = lockPath;
+    } catch {
+      throw new InputError("resume_not_ready", "Wait for the existing resume owner to finish.");
+    }
+    const saved = JSON.parse(readFileSync(join(runDir, "dispatch-status.json"), "utf8")) as Record<string, any>;
+    const timeout = Number(saved.timeout_seconds ?? (previous.mode === "worktree_write" ? 10800 : 3600));
+    const executionIdentity = { ...identity, cwd: typeof previous.cwd === "string" ? previous.cwd : identity.cwd };
+    const python = await pythonOwner(root, executionIdentity, env);
+    const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
+    const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
+    const path =
+      input.prompt === undefined
+        ? resolve(identity.cwd, input.prompt_file!)
+        : stagingPath(runDir, `resume-${randomUUID()}.md`);
+    if (input.prompt !== undefined) writeFileSync(path, input.prompt, { mode: 0o600, flag: "wx" });
+    const next = Math.max(0,...(previous.attempts ?? []).map((row:Record<string,any>)=>Number(row.attempt) || 0)) + 1;
+    const started = startOwner(
+      python,
+      [
+        owner,
+        "--run-dir",
+        runDir,
+        "--resume",
+        String(previous.run_id),
+        "--prompt-file",
+        path,
+        "--timeout",
+        String(timeout),
+      ],
+      executionIdentity,
+      env,
+      runDir,
+      {
+        command: python,
+        args: [
+          controls,
+          "cancel",
+          "--run-dir",
+          runDir,
+          "--task-id",
+          taskId,
+          "--attempt-id",
+          `attempt-${String(next).padStart(3, "0")}`,
+          "--wait-seconds",
+          "5",
+        ],
+        targetDirectory: runDir,
+        cwd: executionIdentity.cwd,
+        env,
+      },
+      {
+        workspace: identity.cwd,
+        kind: "dispatch",
+        identifier: taskId,
+        taskIds: [taskId],
+        resume: true,
+        nextAttempt: next,
+        timeout,
+      },
+      [lockPath, ...(input.prompt === undefined ? [] : [path])],
+    );
+    launched = true;
+    await observeOwner(started, input.wait_seconds ?? 55, signal);
+    return await fabricStatus(identity.cwd, String(previous.run_id));
+  } catch (error) {
+    if (signal.aborted) throw error;
+    return rejected(error);
+  } finally {
+    if (lock && !launched) {
+      try {
+        unlinkSync(lock);
+      } catch {
+        /* Already released. */
+      }
+    }
+  }
 }

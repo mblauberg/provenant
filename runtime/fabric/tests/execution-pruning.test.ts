@@ -18,6 +18,7 @@ import {
   processStartedAt,
   pruneDispatchRuns,
   retentionHours,
+  reapOrphanedRuns,
 } from "../src/run-registry.js";
 import type { Identity } from "../src/identity.js";
 
@@ -82,8 +83,8 @@ async function waitForFile(path: string, label = `file ${path}`): Promise<string
 }
 
 function runDirectories(): string[] {
-  const root = join(workspace, ".agent-run");
-  return existsSync(root) ? readdirSync(root).filter((name) => name.startsWith("mcp-")).sort() : [];
+  const root = join(workspace, ".agent-run", "runs");
+  return existsSync(root) ? readdirSync(root).filter((name) => /^\d{8}-\d{4}-(dispatch|batch)-/u.test(name)).sort() : [];
 }
 
 async function startSleepingRun(prompt: string): Promise<Record<string, unknown>> {
@@ -262,4 +263,26 @@ describe("retention configuration", () => {
     expect(retentionHours({ AGENT_FABRIC_RUN_RETENTION_HOURS: "2" })).toBe(2);
     expect(retentionHours({ AGENT_FABRIC_RUN_RETENTION_HOURS: "0" })).toBe(0);
   });
+});
+
+it('closes an abandoned active receipt as interrupted and keeps protected runs', async () => {
+ const root = join(workspace,'.agent-run/runs');
+ const run=join(root,'20260920-1010-dispatch-fixture-abcdef');
+ mkdirSync(run,{recursive:true});
+ const receipt=join(run,'RUN_RECEIPT.json');
+ writeFileSync(receipt,JSON.stringify({status:'active'}));
+ const old=new Date(Date.now()-72*3600000);utimesSync(receipt,old,old);
+ writeFileSync(join(run,'KEEP'),'');
+ await reapOrphanedRuns(workspace);
+ expect(JSON.parse(readFileSync(receipt,'utf8')).status).toBe('interrupted');
+ expect(pruneDispatchRuns(workspace,{AGENT_FABRIC_RUN_RETENTION_HOURS:'0'})).not.toContain(run);
+});
+
+it('retains failed v2 runs for fourteen days and unknown receipts for triage', () => {
+ const root=join(workspace,'.agent-run/runs');const when=new Date(Date.now()-8*86400000);
+ for(const status of ['failed','mystery']) {
+  const dir=join(root,`20260915-1010-dispatch-${status}-abcdef`);mkdirSync(dir,{recursive:true});
+  const receipt=join(dir,'RUN_RECEIPT.json');writeFileSync(receipt,JSON.stringify({status}));utimesSync(receipt,when,when);utimesSync(dir,when,when);
+ }
+ expect(pruneDispatchRuns(workspace,{})).toEqual([]);
 });
