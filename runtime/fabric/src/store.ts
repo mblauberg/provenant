@@ -633,17 +633,16 @@ export class Store {
     return row?.conversation_id;
   }
 
-  #firstSeat(project:string):string|undefined {
-    return (this.#db.prepare("SELECT agent_id FROM agents WHERE project = ? ORDER BY first_seen LIMIT 1").get(project) as {agent_id:string}|undefined)?.agent_id;
-  }
-
   #resolveRecipients(who: Identity, to: string): string[] {
     const known=this.agents(who.project).map(agent=>agent.agentId);
     const chair=process.env.PROVENANT_CHAIR;
     const parent=process.env.PROVENANT_PARENT;
-    const chairSeat=chair && known.includes(chair) ? chair : known.includes("chair") ? "chair" : this.#firstSeat(who.project);
-    if(to === "chair") to=chairSeat ?? to;
-    else if(["/root","root","parent"].includes(to)) to=parent && known.includes(parent) ? parent : chairSeat ?? to;
+    const chairSeat=chair && known.includes(chair) ? chair : known.includes("chair") ? "chair" : undefined;
+    if (["chair", "/root", "root", "parent"].includes(to)) {
+      const seat = to === "chair" ? chairSeat : parent && known.includes(parent) ? parent : chairSeat;
+      if (!seat) throw new Error(`unbound recipient "${to}"; fix: pass to:<seat> from fabric_whoami{detail:"full"}`);
+      to = seat;
+    }
     if (to === "all") {
       return this.agents(who.project)
         .map((agent) => agent.agentId)

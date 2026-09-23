@@ -1,23 +1,93 @@
 {
-  "lane": "B \u2014 Fabric MCP surface",
-  "source_commit": "f325a618",
-  "scope": {
-    "1_tools_list_budget": "done",
-    "2_twelve_tools_and_controls": "TS complete; producer integration gaps listed below",
-    "3_digest_and_structured_rows": "done; attempt history matches Lane A status fixture",
-    "4_mailbox_and_watch": "done",
-    "5_layout_and_maintenance": "TS complete; producer nested non-Git cwd containment pending",
-    "6_lane_ledger": "done; ahead is null without an upstream"
-  },
-  "tool_budget": {
-    "before_tools": 15,
-    "before_chars": 9077,
-    "before_tokens": 2269.25,
-    "after_tools": 12,
-    "after_chars": 5707,
-    "after_tokens": 1426.75,
-    "reduction_percent": 37.13,
-    "method": "JSON.stringify(tools/list).length / 4"
+  "lane": "B: Fabric MCP surface repair",
+  "source_commit": "f2c96532",
+  "findings": {
+    "opus-1": {
+      "status": "fixed",
+      "change": "Stamp interrupted closure before removing a stopped owner record; retain custody for live unverified processes.",
+      "regressions": [
+        "terminalises a stopped v1 run before removing its owner record",
+        "keeps the owner record until an orphan that ignores SIGTERM is killed",
+        "retains custody when a live owner has no verifiable start identity"
+      ]
+    },
+    "opus-2": {
+      "status": "fixed",
+      "change": "Read only the shared layout fixture; map resolved symlink cwd; treat run_root as checkout root and support agent_run_dir. Delete local layout copy."
+    },
+    "opus-3": {
+      "status": "fixed",
+      "change": "Compute Git ledger asynchronously after selecting returned rows and completing waits; share per-worktree reads; skip terminal brief rows.",
+      "regression": "computes the ledger once per selected worktree and skips terminal brief rows"
+    },
+    "opus-4": {
+      "status": "fixed",
+      "change": "Top-level route/control/timeout fields default each task; task fields win. Model wins over alias with router-authored preflight note retained."
+    },
+    "opus-5": {
+      "status": "fixed",
+      "change": "Owners retain workspace cwd; single/resume use --cwd and batch task cwd is absolute. Prompt files resolve absolutely from workspace. Resume preflights inherited route and prompt, omitting unsupported null controls."
+    },
+    "opus-6": {
+      "status": "fixed",
+      "change": "Unbound chair/parent aliases never fall back to the first-ever seat; require an explicit seat when no binding exists."
+    },
+    "opus-7": {
+      "status": "fixed",
+      "change": "CI mcp-smoke wrapper still executes surface.test.ts; restored registered bin/fabric-mcp launcher, writer argv, GIT_DIR/GIT_WORK_TREE guard, two-seat correlation and owner-bound tasks."
+    },
+    "opus-8": {
+      "status": "fixed",
+      "change": "Brief structured rows omit attempts, evidence and full provenance; full detail retains them."
+    },
+    "opus-9": {
+      "status": "fixed",
+      "change": "Dispatch and cancel acknowledge observed terminal rows, including an owner-rejected resume."
+    },
+    "opus-10": {
+      "status": "fixed",
+      "change": "Preserve owner rejection status/message/fix and staged task identity; terminal digests no longer advise polling."
+    },
+    "opus-11": {
+      "status": "fixed",
+      "change": "Resume verifies owner PID start identity; stale reused PID regression passes."
+    },
+    "opus-12": {
+      "status": "fixed",
+      "change": "UTF-8 pages preserve boundaries; tail:true supplies bounded tails. Too-small codepoint budget is a typed output_bounds rejection."
+    },
+    "luna-1": {
+      "status": "fixed",
+      "change": "Discover cwd-local legacy mcp-* directories alongside shared primary-root runs for status, cancellation, reaping and retention."
+    },
+    "luna-2": {
+      "status": "rejected",
+      "reason": "flag() already splices --interval and its value out of argv. Regression confirms watch <id> and watch <id> --interval 2 both pass without a production change."
+    },
+    "integration-typecheck": {
+      "status": "fixed",
+      "change": "Narrow catalogue model.names with Array.isArray before includes."
+    },
+    "integration-adapter-profiles": {
+      "status": "fixed",
+      "change": "Import Python adapter profiles and assert callable argv builders instead of grepping removed shell arms."
+    },
+    "integration-routing": {
+      "status": "fixed",
+      "change": "Forward aliases/shorthands and unknown models to the router; only invalid prompt fails the real-router batch preflight regression."
+    },
+    "integration-readme": {
+      "status": "fixed",
+      "change": "Restore daemonless SQLite/source-launch phrases and both bin launcher paths."
+    },
+    "repair-review-sol": {
+      "status": "fixed",
+      "change": "Preflight receives both selectors; launch serializes model only for Python CLI/manifest compatibility. Empty model/alias normalise to omitted. Router notes remain visible in status."
+    },
+    "repair-review-luna": {
+      "status": "fixed",
+      "change": "Bind owner run_dir to its discovered directory, preventing forged record paths from redirecting terminalisation writes."
+    }
   },
   "verification": {
     "typecheck": {
@@ -26,9 +96,9 @@
     },
     "typescript_full": {
       "command": "npm --prefix runtime/fabric test",
-      "passed": 125,
+      "passed": 135,
       "failed": 12,
-      "total": 137,
+      "total": 147,
       "environmental_failures": [
         "tests/execution-lifecycle.test.ts > owner records > survives a cold start, so a fresh process can list the run",
         "tests/execution-lifecycle.test.ts > owner records > holds owner cleanup through host shutdown until a resistant provider stops",
@@ -43,104 +113,120 @@
         "tests/execution-pruning.test.ts > run directory pruning > never prunes a run still in flight",
         "tests/execution-pruning.test.ts > run directory pruning > keeps an aged run while its recorded provider session is live"
       ],
-      "evidence": "/bin/ps -o lstart= -p <pid> is denied with operation not permitted; these process identity/cancellation/reaping failures were present before implementation. Chair must rerun outside sandbox."
+      "environment_evidence": "/bin/ps -o lstart= -p $$ returns operation not permitted; the same twelve process-liveness cases were documented before repairs. Rerun these outside sandbox."
     },
     "mcp_smoke": {
       "command": "node runtime/fabric/mcp-smoke.mjs",
       "passed": 5,
       "failed": 0,
-      "providers": "fixture owners only",
-      "checks": [
-        "12 default / 18 opt-in tools",
-        "35% tool-schema reduction",
-        "digest <120 tokens",
-        "linked-worktree single and batch dispatch",
-        "status wait",
-        "cancel",
-        "question/resume",
-        "duplicate resume rejection",
-        "failed resume recovery",
-        "timeout inheritance",
-        "bounded output",
-        "inbox peek/claim/body cap",
-        "terminal notice auto-ack",
-        "stale server source detection",
-        "status with unavailable mailbox"
+      "provider_calls": 0
+    },
+    "python_owned_guards": {
+      "command": "pytest -q tests/test_runtime_architecture.py tests/test_ci_repository_assurance_policy.py",
+      "passed": 43,
+      "failed": 0
+    },
+    "python_routing_dispatch": {
+      "passed": 381,
+      "failed": 2,
+      "failures": [
+        "tests/test_model_route.py::test_snapshot_deep_merges_models_and_drops_malformed_overlay",
+        "tests/test_cf_dispatch.py::test_opencode_arm_runs_with_explicit_model_and_records_variant"
       ]
     },
     "python_full": {
-      "command": "HARNESS_PYTHON=/Users/user/Repos/provenant/.venv/bin/python UV_CACHE_DIR=/tmp/lane-b-uv-cache UV_PROJECT_ENVIRONMENT=/Users/user/Repos/provenant/.venv uv run --no-sync python -m pytest -q tests/",
-      "passed": 1924,
-      "failed": 3,
-      "total": 1927,
+      "command": "UV_CACHE_DIR=/tmp/lane-b-uv-cache UV_PROJECT_ENVIRONMENT=/Users/user/Repos/provenant/.venv uv run --no-sync python -m pytest -q tests/",
+      "passed": 2087,
+      "failed": 6,
+      "skipped": 1,
+      "seconds": 411.85,
       "failures": [
         {
-          "test": "tests/test_ci_repository_assurance_policy.py::test_fabric_workspace_and_ci_share_the_locked_daemonless_check_graph",
-          "resolution": "Removed optional package scripts; focused rerun passes."
+          "test": "tests/test_cf_dispatch.py::test_opencode_arm_runs_with_explicit_model_and_records_variant",
+          "owner": "A/C",
+          "evidence": "Expected --variant, but opencode argv omitted it."
         },
         {
-          "test": "tests/test_quickstart_bootstrap.py::test_documented_fresh_checkout_sequence_produces_runnable_fabric",
-          "resolution": "Linked existing runtime dependencies into local node_modules; focused rerun passes."
+          "test": "tests/test_dispatch_run.py::test_route_failure_is_typed_and_provider_is_not_invoked",
+          "owner": "A",
+          "evidence": "Expected unknown_alias; permissive routing now continues and reports failed."
+        },
+        {
+          "test": "tests/test_dispatch_run.py::test_timeout_records_reaped_exit",
+          "owner": "A/C",
+          "evidence": "Expected gpt-6-luna; route resolved gpt-6-sol."
+        },
+        {
+          "test": "tests/test_dispatch_run.py::test_front_door_preflight_caches_capability_probe_per_adapter",
+          "owner": "A/C",
+          "evidence": "Preflight validated all three tasks without creating the expected capability probe counter."
         },
         {
           "test": "tests/test_harness_contract.py::test_readme_mermaid_parses_with_available_local_renderer",
-          "resolution": "Sandbox-only: Chromium MachPortRendezvousServer bootstrap_check_in Permission denied (1100), independently reproduced with mmdc."
+          "owner": "environment",
+          "evidence": "Direct mmdc reproduction: Chromium bootstrap_check_in MachPortRendezvousServer Permission denied (1100)."
+        },
+        {
+          "test": "tests/test_model_route.py::test_snapshot_deep_merges_models_and_drops_malformed_overlay",
+          "owner": "C fixture environment",
+          "evidence": "Synthetic product lacks .venv/bin/python; targeted rerun with HARNESS_PYTHON=/Users/user/Repos/provenant/.venv/bin/python passed 1/1."
         }
       ]
     },
-    "python_recheck": {
-      "passed": 15,
-      "failed": 0,
-      "selection": [
-        "tests/test_runtime_architecture.py",
-        "tests/test_ci_repository_assurance_policy.py::test_fabric_workspace_and_ci_share_the_locked_daemonless_check_graph",
-        "tests/test_quickstart_bootstrap.py"
-      ]
+    "environment_recovery": "Default uv cache denied; initial uv attempt created an empty local .venv. Moved that run-created directory to /tmp/lane-b-empty-venv and reran with UV_CACHE_DIR=/tmp/lane-b-uv-cache and UV_PROJECT_ENVIRONMENT=/Users/user/Repos/provenant/.venv. Initial contaminated run: 1822 passed, 271 failed, 1 skipped.",
+    "preflight_move": {
+      "reason": "Keep execution.ts below the 1000-line source cap. Move unchanged preflight into execution-input.ts.",
+      "before_passed": 13,
+      "after_passed": 13
     },
-    "diff_check": "passed"
+    "logs": {
+      "native_full": "/tmp/lane-b-vitest-final3.log",
+      "python_full": "/tmp/lane-b-pytest-final.log",
+      "smoke": "/tmp/lane-b-smoke-final.log",
+      "crosslane_rerun": "/tmp/lane-b-python-crosslane.log"
+    }
   },
-  "reviews": {
-    "native_targeted": [
+  "tool_budget": {
+    "before_tools": 15,
+    "before_chars": 9077,
+    "after_tools": 12,
+    "after_chars": 5733,
+    "after_tokens": 1433.25,
+    "reduction_percent": 36.84
+  },
+  "review": {
+    "independent_reviewers": [
       {
-        "model": "gpt-6-luna",
-        "effort": "high",
-        "lens": "mailbox concurrency and safety",
-        "result": "reported fixes applied and regression checked"
+        "route": "codex/gpt-6-sol@high (openai; resolved)",
+        "lens": "execution, status and Python owner contract compatibility",
+        "result": "Bounded rereview clean after selector, empty-model, null-control and rejection repairs."
       },
       {
-        "model": "gpt-6-sol",
-        "effort": "high",
-        "lens": "producer/reader contracts and lifecycle",
-        "result": "reported B defects repaired; producer integration gaps retained below"
+        "route": "codex/gpt-6-luna@high (openai; resolved)",
+        "lens": "filesystem/liveness and regression coverage",
+        "result": "Bounded rereview clean after binding discovered paths and retaining unverified live custody."
       }
     ],
-    "other_primary": "NOT RUN: this lane is constrained to no live providers; native reviewers are OpenAI-family only."
-  },
-  "contracts": {
-    "layout_fixture": "Shared fixture absent in this worktree at start. Copied unchanged from lane-exec-supervisor to runtime/fabric/tests/fixtures/layout-cases.json; tests prefer shared path when present. Symlinked cwd tested separately.",
-    "attempt_fixture": "Local unchanged copy of Lane A fabric.attempt.v1.",
-    "status_fixture": "Local unchanged copy of Lane A fabric.status.v1; attempts is a history array, attempt_count is additive.",
-    "catalogue": "Uses existing catalogueSnapshot(root?, env?) export. Consumes optional model_details names from Lane C without editing catalogue.ts.",
-    "resume_transport": "--run-dir <existing> --resume <run-id> --prompt-file <file> --timeout <inherited seconds>.",
-    "control_transport": "--network true|false, --sandbox value, repeated --add-dir, --fallback false|true|any|JSON; single cwd is the owner process cwd; batch cwd remains in its task manifest."
+    "prior_other_primary": "Supplied Opus 5.5 review rv2-B-opus.md adjudicated item by item above.",
+    "fresh_other_primary": "CROSS-FAMILY-NOT-RUN: Fabric run root is the primary checkout .agent-run, outside this lane sandbox write scope. No live providers called."
   },
   "integration_dependencies": [
     {
       "owner": "Lane A",
-      "issue": "Apply per-task cwd from the batch manifest. Its current batch launcher ignores this field; fixture-only B smoke cannot certify that producer behavior."
+      "issue": "For full requested-route provenance on alias+model calls, accept both flags in dispatch_run.py and both selectors in batch_run.py, forwarding both to the router with model priority. B currently drops alias only for launch compatibility; router-authored note is retained in status.notes, but attempt/RUN_RECEIPT provenance.requested.alias and provenance.notes do not retain this original conflict."
     },
     {
-      "owner": "Lane A",
-      "issue": "For a single non-Git nested cwd, honour the explicitly chosen caller run directory outside nested-cwd/.agent-run. B keeps one caller run root and spawns the owner in the requested cwd; A containment currently derives run_root from the effective cwd."
+      "owner": "A/C",
+      "issue": "Reconcile four Python expectations: OpenCode --variant, unknown_alias rejection now permissive, timeout model luna versus sol, mandatory explicit-model capability probe. Exact failing tests and evidence are in verification.python_full.failures. No edits outside lane B."
     },
     {
-      "owner": "Lane A",
-      "issue": "A projected interrupted row whose raw attempt is still running cannot be resumed by current prepare_resume. B rejects that case with a dispatch-new-run fix; supporting resume requires a producer interruption marker/terminal row."
+      "owner": "C",
+      "issue": "Set HARNESS_PYTHON in synthetic-product snapshot test, whose fixture has no .venv. Explicit-interpreter rerun passes."
     },
     {
       "owner": "Chair",
-      "issue": "Rerun process-group/liveness tests outside sandbox and obtain the required other-primary/distinct-family review before acceptance."
+      "issue": "Rerun process-group/liveness checks outside sandbox and obtain fresh other-primary review before final acceptance."
     }
   ],
-  "authority": "Only Lane B tracked paths changed. No live providers, pushes, PRs or merges."
+  "authority": "Only lane B tracked files changed. Fast-forward to lane/v2-integration explicitly required by repair brief; no other merge, push or PR. Smoke worker supplied patch-only output; chair serially applied all edits."
 }

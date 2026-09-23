@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -107,12 +108,13 @@ describe("adapter registry", () => {
     }
   });
 
-  it("gives every implemented adapter an executing arm in the dispatcher", () => {
-    for (const adapter of DISPATCH_ADAPTERS) {
-      expect(dispatcher, `cf_dispatch.sh has no ${adapter} arm`).toMatch(
-        new RegExp(`^\\s+${adapter}\\)$`, "mu"),
-      );
-    }
+  it("gives every implemented adapter an executable Python profile", () => {
+    const profiles = JSON.parse(execFileSync("python3", ["-c", [
+      "import json, adapters",
+      "print(json.dumps({name: bool(adapters.profile(name).CLI) and callable(adapters.profile(name).argv) for name in adapters.NAMES}))",
+    ].join("\n")], { cwd: join(repositoryRoot, "skills/orchestrate/scripts"), encoding: "utf8" }));
+    expect(Object.keys(profiles).sort()).toEqual([...DISPATCH_ADAPTERS].sort());
+    expect(Object.values(profiles).every(Boolean)).toBe(true);
   });
 });
 
@@ -175,7 +177,7 @@ describe("adapter rejection", () => {
     ], wait_seconds: 0 }, identity, new AbortController().signal,
     { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot, AGENT_FABRIC_INSTANCE_ROOT: repositoryRoot });
     expect(result.status).toBe("rejected");
-    expect((result.errors as Record<string, unknown>[]).map((error) => error.task_id)).toContain("bad-prompt");
+    expect((result.errors as Record<string, unknown>[]).map((error) => error.task_id)).toEqual(["bad-prompt"]);
     expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
   });
 

@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { databasePath, identify } from "./identity.js";
 import { statusRows, fabricOutput } from "./run-registry.js";
-import { reply, serverBuild, mailboxView, adapterView } from "./surface.js";
+import { reply, serverBuild, mailboxView, adapterView, runView } from "./surface.js";
 import { catalogueSnapshot } from "./catalogue.js";
 import {
   cancelActiveExecutions,
@@ -223,6 +223,12 @@ register(
     return { messages: rows.map((row) => mailboxView(row, peek)) };
   },
 );
+function acknowledgeRuns(result: { runs?: Record<string, any>[] }) {
+  for (const row of result.runs ?? []) if (row.state === "terminal") {
+    try { readyStore(1).acknowledgeTerminal(who, row, 1); }
+    catch { /* Mailbox contention must not hide durable run evidence. */ }
+  }
+}
 register(
   "fabric_dispatch",
   "Run one prompt, tasks, or resume a run.",
@@ -243,13 +249,14 @@ register(
       : input.tasks
         ? await dispatchConfiguredBatch({ ...input, wait_seconds: input.wait_seconds ?? 0 }, who, signal)
         : await dispatchConfiguredProvider(input, who, signal);
-    if (result.status === "rejected" || !result.id) return result;
-    const observed = await statusRows(who.cwd, [String(result.id)]);
+    if (!result.id) return result;
+    const observed = await statusRows(who.cwd, [String(result.id)], 0, "all", signal, input.detail);
+    acknowledgeRuns(observed);
     if (observed.runs?.length === 1) {
       const row = observed.runs[0]!;
-      return { ...result, ...row, paths: { ...(result.paths as object), ...row.paths } };
+      return runView({ ...result, ...row, paths: { ...(result.paths as object), ...row.paths } }, input.detail);
     }
-    return observed.runs ? observed : result;
+    return runView(observed.runs ? observed : result, input.detail);
   },
 );
 register(
@@ -262,18 +269,17 @@ register(
     until: z.enum(["any", "all"]).optional(),
     detail,
   },
-  async ({ ids, id, wait_seconds, until }, { signal }) => {
-    const result = await statusRows(who.cwd, ids ?? (id ? [id] : undefined), wait_seconds, until, signal);
-    for (const row of result.runs ?? []) if (row.state === "terminal") {
-        try { readyStore(1).acknowledgeTerminal(who,row,1); }
-        catch { /* Mailbox contention must not hide durable run evidence. */ }
-      }
-    return result;
+  async ({ ids, id, wait_seconds, until, detail }, { signal }) => {
+    const result = await statusRows(who.cwd, ids ?? (id ? [id] : undefined), wait_seconds, until, signal, detail);
+    acknowledgeRuns(result);
+    return runView(result, detail);
   },
 );
-register("fabric_cancel", "Stop a run and its provider group.", { id: z.string(), reason: str }, ({ id, reason }) =>
-  cancelConfiguredRun(id, who, reason),
-);
+register("fabric_cancel", "Stop a run and its provider group.", { id: z.string(), reason: str }, async ({ id, reason }) => {
+  const result = await cancelConfiguredRun(id, who, reason);
+  acknowledgeRuns(result);
+  return runView(result);
+});
 register(
   "fabric_output",
   "Read output; continue at next_offset.",
@@ -281,6 +287,7 @@ register(
     id: z.string(),
     part: z.enum(["result", "stderr", "events", "receipt"]).optional(),
     offset: z.number().int().nonnegative().optional(),
+    tail: z.boolean().optional(),
     max_bytes: z.number().int().min(1).max(20000).optional(),
   },
   (input) => fabricOutput(who.cwd, input),

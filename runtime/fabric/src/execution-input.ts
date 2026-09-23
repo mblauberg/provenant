@@ -1,7 +1,8 @@
 /** Validate the Fabric request and forward routing/control choices to its owner. */
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import type { Identity } from "./identity.js";
+import { withoutGitRedirects, type Identity } from "./identity.js";
+import { execFile } from "node:child_process";
 import type { CatalogueSnapshot } from "./catalogue.js";
 const DEFAULT_TIMEOUT_SECONDS = 3600;
 function canonical(path: string) {
@@ -17,7 +18,7 @@ function inside(root: string, candidate: string) {
 }
 /**
  * Adapters this front door can actually run: each has an executing arm in
- * skills/orchestrate/scripts/cf_dispatch.sh and is marked `"dispatch":
+ * skills/orchestrate/scripts/adapters/*.py and is marked `"dispatch":
  * "implemented"` in the product-owned `dispatch_registry` in
  * config/adapter-compatibility.yaml. Adapters the registry marks dormant or
  * unsupported are absent on purpose, so they are a typed input error here
@@ -65,7 +66,8 @@ export interface BatchTaskInput extends RouteInput {
   timeout_seconds?: number;
 }
 
-export interface BatchInput {
+export interface BatchInput extends RouteInput {
+  timeout_seconds?: number;
   tasks: BatchTaskInput[];
   concurrency?: number;
   wait_seconds?: number;
@@ -82,17 +84,17 @@ export interface NormalisedRoute {
 }
 
 export function normaliseRoute(input: RouteInput, identity: Identity, catalogue: CatalogueSnapshot): NormalisedRoute {
+  input = { ...input, model: input.model || undefined, alias: input.alias || undefined };
   const selector =
     input.model ?? (input.alias && !["flagship", "workhorse", "scout"].includes(input.alias) ? input.alias : undefined);
   const candidates =
     selector === undefined
       ? []
       : catalogue.adapters.filter((entry) => {
-          const details =
-            (entry as typeof entry & { model_details?: Array<{ id?: string; names?: string[] }> }).model_details ?? [];
+          const details = entry.model_details ?? [];
           return (
             entry.models.includes(selector) ||
-            details.some((model) => model.id === selector || model.names?.includes(selector)) ||
+            details.some((model) => model.id === selector || (Array.isArray(model.names) && model.names.includes(selector))) ||
             entry.models.some((model) =>
               model
                 .toLowerCase()
@@ -108,20 +110,6 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
   if (!SUPPORTED_ADAPTERS.has(adapter)) {
     throw new InputError("adapter_invalid", `Pass adapter ${DISPATCH_ADAPTERS.join(", ")}.`);
   }
-  let alias = input.alias;
-  let model = input.model;
-  if (alias !== undefined && !["flagship", "workhorse", "scout"].includes(alias)) {
-    const models = catalogue.adapters.find((entry) => entry.name === adapter)?.models ?? [];
-    const matches = models.filter((name) =>
-      name
-        .toLowerCase()
-        .split(/[^a-z0-9]+/u)
-        .includes(alias!.toLowerCase()),
-    );
-    model ??= matches.length === 1 ? matches[0] : alias;
-    alias = undefined;
-  }
-  if (model !== undefined) alias = undefined;
   const mode = input.mode ?? "read_only";
   if (!ACCESS_MODES.includes(mode)) throw new InputError("mode_invalid", `Pass mode ${ACCESS_MODES.join(" or ")}.`);
   if (mode === "worktree_write" && input.worktree === undefined) {
@@ -132,7 +120,9 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
   }
   return {
     adapter,
-    ...(model === undefined ? { alias: alias ?? "workhorse" } : { model }),
+    ...(input.alias === undefined && input.model === undefined ? { alias: "workhorse" } : {}),
+    ...(input.alias === undefined ? {} : { alias: input.alias }),
+    ...(input.model === undefined ? {} : { model: input.model }),
     ...(input.effort === undefined ? {} : { effort: input.effort }),
     role: "worker",
     access_mode: mode,
@@ -148,7 +138,7 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
 export function routeArguments(route: NormalisedRoute): string[] {
   const args: string[] = [];
   for (const [key, value] of Object.entries(route)) {
-    if (value === undefined || key === "cwd") continue;
+    if (value === undefined || (key === "alias" && route.model !== undefined)) continue;
     if (key === "add_dirs") {
       for (const dir of value as string[]) args.push("--add-dir", dir);
     } else args.push(`--${key.replaceAll("_", "-")}`, typeof value === "string" ? value : JSON.stringify(value));
@@ -196,4 +186,37 @@ export function rejected(error: unknown): Record<string, unknown> {
     error: "preflight_unavailable",
     fix: `Check the harness Python environment, execution owner scripts and workspace permissions: ${detail}`,
   };
+}
+
+export async function preflight(
+  python: string,
+  owner: string,
+  tasks: Record<string, unknown>[],
+  identity: Identity,
+  env: NodeJS.ProcessEnv,
+  signal: AbortSignal,
+): Promise<Record<string, unknown>> {
+  signal.throwIfAborted();
+  const child = execFile(python, [owner, "--preflight-json"], {
+    cwd: identity.cwd,
+    env: withoutGitRedirects(env),
+    signal,
+    killSignal: "SIGKILL",
+    timeout: 50_000,
+    maxBuffer: 1024 * 1024,
+  });
+  const output = new Promise<string>((resolveOutput, rejectOutput) => {
+    let stdout = "";
+    child.stdout!.on("data", (chunk: string) => {
+      stdout += chunk;
+    });
+    child.once("error", rejectOutput);
+    child.once("close", (code) =>
+      code === 0
+        ? resolveOutput(stdout)
+        : rejectOutput(new Error("Preflight unavailable; restore the harness Python environment.")),
+    );
+  });
+  child.stdin!.end(JSON.stringify({ tasks }));
+  return JSON.parse(await output) as Record<string, unknown>;
 }

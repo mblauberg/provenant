@@ -1638,3 +1638,16 @@ it('acknowledges a terminal notice published after status observation', () => {
  store.send(who,'chair','new attempt',{kind:'run_terminal',outputPath:'mcp-one:task-1:3'});
  expect(store.inbox(who,{peek:true})).toMatchObject([{body:'new attempt'}]);
 });
+
+it('rejects unbound chair and parent aliases instead of guessing a stale seat', () => {
+ const store=openStore();announce(store,'old-seat','worker');
+ const saved={chair:process.env.PROVENANT_CHAIR,parent:process.env.PROVENANT_PARENT};
+ delete process.env.PROVENANT_CHAIR;delete process.env.PROVENANT_PARENT;
+ try {
+  for(const to of ['chair','parent','root','/root']) expect(()=>store.send(agent('worker'),to,'question')).toThrow(/pass to:<seat>/u);
+  expect(store.inbox(agent('old-seat'),{peek:true})).toEqual([]);
+ } finally {
+  if(saved.chair!==undefined) process.env.PROVENANT_CHAIR=saved.chair;
+  if(saved.parent!==undefined) process.env.PROVENANT_PARENT=saved.parent;
+ }
+});
