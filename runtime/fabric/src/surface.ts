@@ -29,11 +29,13 @@ export function digest(row: Record<string, any>): string {
   if (row.status) {
     const id = row.run_id ?? row.id ?? row.task_id ?? "?";
     const route = row.provenance?.line;
-    const adapter = row.adapter ?? row.route?.adapter;
-    const model = row.model ?? row.route?.resolved_model;
+    const adapter = row.adapter ?? row.route?.adapter ?? row.provenance?.requested?.adapter;
+    const model = row.model ?? row.route?.resolved_model ?? row.provenance?.resolved_model ?? row.provenance?.requested?.model;
     const effort = row.provenance?.effort_applied ?? row.route?.effort;
     const routeText = adapter && model ? ` ${adapter}/${model}${effort ? `@${effort}` : ""}` : "";
-    return `${row.status} ${id}${routeText}${row.result_path ? ` · result ${row.result_path}` : row.state === "running" ? ` · fabric_status{ids:["${id}"],wait_seconds:55}` : ""}${route ? `\n  ${route}` : ""}`;
+    const resultPath = row.result_path ?? row.paths?.result;
+    const resultText = resultPath ? ` · result ${resultPath}` : row.state === "running" ? ` · fabric_status{ids:["${id}"],wait_seconds:55}` : ` · result pending`;
+    return `${row.status} ${id}${routeText}${resultText}${route ? `\n  ${route}` : ""}`;
   }
   return JSON.stringify(row);
 }
@@ -44,7 +46,9 @@ export function runView(value: Record<string, any>, detail = "brief"): Record<st
   const keys = ["schema", "id", "run_id", "task_id", "batch_id", "run_dir", "state", "status",
     "attempt", "attempt_count", "digest", "paths", "cwd", "worktree", "mode", "applied",
     "warnings", "notes", "question", "fix", "retryable", "reset_at", "retry_after"];
-  return Object.fromEntries(keys.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]));
+  return Object.fromEntries(keys.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]).concat(
+    value.digest === undefined ? [["digest", digest(value)]] : [],
+  ));
 }
 
 export function reply(value: unknown) {

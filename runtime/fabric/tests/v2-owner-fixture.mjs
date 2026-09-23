@@ -10,6 +10,8 @@ if (args.includes("--preflight-json")) {
   const { tasks } = JSON.parse(text);
   const errors = tasks.filter((t) => t.prompt_file && (!isAbsolute(t.prompt_file) || !existsSync(t.prompt_file)))
     .map((t) => ({task_id:t.id,error:"prompt_unavailable",fix:"Pass an existing absolute prompt_file."}));
+  if (tasks.some((t) => t.access_mode === "worktree_write" && !t.worktree))
+    errors.push({task_id:tasks.find((t) => t.access_mode === "worktree_write" && !t.worktree).id,error:"worktree_required",fix:"Pass the registered writer worktree."});
   if (errors.length) { console.log(JSON.stringify({status:"rejected",...errors[0],errors})); process.exit(); }
   if (tasks.some((t) => "network" in t && typeof t.network !== "boolean")) {
     console.log(JSON.stringify({status:"rejected",error:"network_invalid",fix:"Pass network true or false."})); process.exit();
@@ -80,6 +82,7 @@ if (args.includes("--alias") && args.includes("--model")) {
 }
 const prompt = readFileSync(value("--prompt-file"), "utf8");
 writeFileSync(join(dir, "_owner", `${task}-args-${attempt}.json`), JSON.stringify(args));
+writeFileSync(join(dir, "_owner", `${task}-env-${attempt}.json`), JSON.stringify({ chair: process.env.PROVENANT_CHAIR }));
 if (prompt === "reject-before-attempt") {
   console.log(JSON.stringify({schema_version:1,status:"rejected",message:"dispatch a new run",fix:"dispatch a new run"})); process.exit(2);
 }
@@ -96,7 +99,8 @@ const row = {
   state: "running",
   status: null,
   cwd: value("--cwd") ?? process.cwd(),
-  worktree: process.cwd(),
+  mode: args.includes("--access-mode") ? value("--access-mode") : "read_only",
+  worktree: args.includes("--worktree") ? value("--worktree") : null,
   started_at: new Date().toISOString(),
   ended_at: null,
   evidence: { owner_cwd: process.cwd(), prompt_file: value("--prompt-file"), timeout: Number(value("--timeout")) },

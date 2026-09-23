@@ -277,7 +277,7 @@ function startOwner(
     PROVENANT_RUN_TOKEN: runToken,
     PROVENANT_RUN_DIR: runDir,
     PROVENANT_RUN_ID: shortRunId(runDir),
-    PROVENANT_CHAIR: identity.agentId,
+    PROVENANT_CHAIR: env.PROVENANT_CHAIR || identity.agentId,
     PROVENANT_PARENT: identity.agentId,
     PROVENANT_PREFLIGHT_ROUTES: JSON.stringify(
       Object.fromEntries(
