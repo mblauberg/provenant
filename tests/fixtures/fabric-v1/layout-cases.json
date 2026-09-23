@@ -1,0 +1,27 @@
+[
+  {
+    "name": "primary",
+    "cwd": "/repo",
+    "git_common_dir": "/repo/.git",
+    "run_root": "/repo"
+  },
+  {
+    "name": "linked-worktree",
+    "cwd": "/repo/.worktrees/lane",
+    "git_common_dir": "/repo/.git",
+    "run_root": "/repo"
+  },
+  {
+    "name": "non-git",
+    "cwd": "/workspace",
+    "git_common_dir": null,
+    "run_root": "/workspace"
+  },
+  {
+    "name": "symlinked-cwd",
+    "cwd": "/alias/lane",
+    "resolved_cwd": "/repo/.worktrees/lane",
+    "git_common_dir": "/repo/.git",
+    "run_root": "/repo"
+  }
+]

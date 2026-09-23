@@ -40,12 +40,13 @@ Options:
   --reviewer-id ID             Stable worker/reviewer identity for receipt binding.
   --model MODEL                Optional model passed to adapter.
   --effort EFFORT              Optional effort passed to adapter.
-  --timeout-seconds N          Provider deadline in whole seconds, where the CLI
-                               accepts one. Only agy does (--print-timeout); the
-                               claude and codex headless CLIs expose no timeout
-                               flag, so on those arms the calling owner's own
-                               deadline is the only bound.
-  --add-dir PATH               Additional agy read directory; repeatable.
+  --timeout-seconds N          Supervisor wall clock deadline, all adapters.
+  --add-dir PATH               Additional provider directory; repeatable.
+  --plan-only                  Print resolved provider argv and controls as JSON.
+  --sandbox MODE               read-only, workspace-write, or full.
+  --network BOOL               true or false; unsupported controls are warned.
+  --resume-session ID          Resume a retained provider session.
+  --no-preface                 Omit the route attribution preface.
   --access-mode MODE           read_only (default) or worktree_write.
   --worktree PATH              Git worktree root the writer owns exclusively.
                                Required by, and only valid with, worktree_write.
@@ -60,6 +61,9 @@ EOF
 }
 
 TOOL="" MODEL="" EFFORT="" OUT="" PROMPT="" PROMPT_FILE="" CHAIN="" ORCH_FAMILY="" MODEL_ALIAS="" TASK_CLASS="" ROUTE_ROLE="reviewer" RISK_TIER="" MODEL_OVERRIDE_TIER="" REVIEWER_ID="" INTENT="assurance" DOCTOR=0
+PLAN_ONLY=0
+SANDBOX="" NETWORK="" RESUME_SESSION="" PROVIDER_CWD=""
+PREFACE=1
 ALIAS_EXPLICIT=0
 OUT_CREATED=false
 ACTIVE_RUN_TMPDIR=""
@@ -82,6 +86,12 @@ while [ $# -gt 0 ]; do
   case "$1" in
     -h|--help) usage; exit 0;;
     --doctor) DOCTOR=1; shift;;
+    --plan-only) PLAN_ONLY=1; shift;;
+    --cwd) need_value "$@"; PROVIDER_CWD="$2"; shift 2;;
+    --sandbox) need_value "$@"; SANDBOX="$2"; shift 2;;
+    --network) need_value "$@"; NETWORK="$2"; shift 2;;
+    --resume-session) need_value "$@"; RESUME_SESSION="$2"; shift 2;;
+    --no-preface) PREFACE=0; shift;;
     --tool) need_value "$@"; TOOL="$2"; shift 2;;
     --task-class) need_value "$@"; TASK_CLASS="$2"; shift 2;;
     --model) need_value "$@"; MODEL="$2"; shift 2;;
@@ -165,7 +175,7 @@ case "$ACCESS_MODE" in
       echo "--access-mode worktree_write requires --intent ordinary" >&2; exit 2
     fi
     case "$TOOL" in
-      claude|codex|opencode) ;;
+      claude|codex|opencode|cursor|agy|kiro|copilot) ;;
       *) echo "--access-mode worktree_write is unsupported for adapter: ${TOOL:-<chain>}" >&2; exit 2;;
     esac
     if ! command -v git >/dev/null 2>&1; then
@@ -183,165 +193,6 @@ case "$ACCESS_MODE" in
   *) echo "invalid access mode: $ACCESS_MODE" >&2; exit 2;;
 esac
 
-CLAUDE_MODE_FLAGS=(--permission-mode plan --tools "Read,Grep,Glob")
-# A fixed identifier for the provider codex is told to use when a dispatch names
-# an endpoint profile. The profile name is carried as the provider's display
-# name instead, so a profile name containing characters that a TOML dotted path
-# would have to quote cannot reshape the override.
-CODEX_ENDPOINT_PROVIDER_ID="provenant_endpoint"
-CLAUDE_SYSTEM_PROMPT="You are a non-interactive read-only worker. You may use only Read, Grep, and Glob to inspect the requested workspace. Fabric MCP tools are not exposed to this direct invocation. Do not mutate files, use shell commands, call Task/tool/function abstractions, or launch subagents. Return the result the supplied prompt asks for; the caller owns any Fabric correlation."
-# A writer lane has to be able to run its own tests and commit its own work, so
-# the write tools are named on the permission allow-list rather than left to the
-# permission mode. `--permission-mode acceptEdits` accepts edits; `--allowedTools`
-# is what pre-approves Bash in `-p` mode, where a permission prompt is a denial.
-CLAUDE_WRITER_TOOLS="Bash,Edit,Write,MultiEdit,NotebookEdit,Read,Grep,Glob"
-if [ "$ACCESS_MODE" = "worktree_write" ]; then
-  CLAUDE_MODE_FLAGS=(--permission-mode acceptEdits --add-dir "$WORKTREE" --allowedTools "$CLAUDE_WRITER_TOOLS")
-  CLAUDE_SYSTEM_PROMPT="You are a non-interactive worker running inside the Git worktree at $WORKTREE, which you own exclusively for this run. Write, run commands and commit only inside that worktree. Do not touch any other checkout, do not push, and do not create or remove worktrees or branches outside it. Fabric MCP tools are not exposed to this direct invocation, and the caller owns any Fabric correlation. Return the file-backed result requested by the supplied prompt."
-fi
-
-# The provider inherits the writer worktree as its working directory. Only the
-# provider call moves; the dispatcher keeps its own cwd for output custody.
-claude_provider() {
-  if [ -n "$WORKTREE" ]; then
-    ( cd "$WORKTREE" && CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude "$@" <"$PROMPT_TMP" >"$raw" 2>"$diag" )
-  else
-    CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude "$@" <"$PROMPT_TMP" >"$raw" 2>"$diag"
-  fi
-}
-
-# Reusable idle guard for a headless provider that writes incremental output.
-# Python creates a new process group so a timed-out CLI cannot leave children.
-run_with_idle_watchdog() {
-  local idle="$1" raw_path="$2" diag_path="$3" cwd="$4" marker="$5"
-  shift 5
-  python3 - "$idle" "$raw_path" "$diag_path" "$cwd" "$marker" "$@" <<'PY'
-import os, signal, subprocess, sys, time
-idle, raw, diag, cwd, marker, *command = sys.argv[1:]
-try:
-    idle = int(idle)
-    if idle < 1:
-        raise ValueError
-except ValueError:
-    with open(diag, "a") as output:
-        output.write("CF_DISPATCH_IDLE_SECONDS must be a positive integer\n")
-    sys.exit(2)
-with open(raw, "wb") as output, open(diag, "ab") as diagnostic:
-    cancelled = False
-    def cancel(_signum, _frame):
-        global cancelled
-        cancelled = True
-    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-        signal.signal(sig, cancel)
-    child = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output,
-                             stderr=diagnostic, cwd=cwd or None, start_new_session=True)
-    def stop_group():
-        try:
-            os.killpg(child.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        try:
-            child.wait(timeout=1)
-        except subprocess.TimeoutExpired:
-            pass
-        time.sleep(0.1)
-        try:
-            os.killpg(child.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        child.wait()
-    if cancelled:
-        stop_group()
-        sys.exit(143)
-    last_size = (0, 0)
-    last_growth = time.monotonic()
-    while child.poll() is None:
-        time.sleep(0.25)
-        if cancelled:
-            stop_group()
-            sys.exit(143)
-        size = (os.fstat(output.fileno()).st_size,
-                os.fstat(diagnostic.fileno()).st_size)
-        if size != last_size:
-            last_size, last_growth = size, time.monotonic()
-        elif time.monotonic() - last_growth >= idle:
-            with open(marker, "w", encoding="utf-8") as sentinel:
-                sentinel.write("idle_timeout\n")
-            stop_group()
-            diagnostic.write(f"OpenCode idle for {idle}s; try another model\n".encode())
-            sys.exit(124)
-    stop_group()
-    if cancelled:
-        sys.exit(143)
-    sys.exit(child.returncode)
-PY
-}
-
-parse_opencode_events() {
-  python3 - "$raw" "$clean" "$diag" <<'PY'
-import json, sys
-raw, clean, diag = sys.argv[1:]
-parts, errors, tool_errors = [], [], []
-with open(raw, encoding="utf-8", errors="replace") as stream:
-    for line in stream:
-        try:
-            event = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(event, dict):
-            continue
-        if event.get("type") == "text":
-            part = event.get("part", {})
-            if isinstance(part, dict) and isinstance(part.get("text"), str):
-                parts.append(part["text"])
-        elif event.get("type") == "error":
-            error = event.get("error", {})
-            if isinstance(error, dict):
-                data = error.get("data")
-                data = data if isinstance(data, dict) else {}
-                message = data.get("message") or error.get("message") or str(error)
-            else:
-                data = {}
-                message = str(error)
-            try:
-                code = int(data.get("statusCode"))
-            except (ValueError, TypeError):
-                code = None
-            errors.append((code, str(message)))
-        elif event.get("type") == "tool_use":
-            part = event.get("part", {})
-            state = part.get("state", {}) if isinstance(part, dict) else {}
-            if isinstance(state, dict) and state.get("status") == "error":
-                tool_errors.append(str(state.get("error") or "tool failed"))
-with open(clean, "w", encoding="utf-8") as output:
-    output.write("".join(parts))
-if errors:
-    with open(diag, "a", encoding="utf-8") as output:
-        for code, message in errors:
-            output.write(f"OpenCode {code or 'error'}: {message}\n")
-    if any(code in (401, 403, 429) or any(word in message.lower() for word in
-           ("quota", "free tier", "rate limit", "unauthorized", "forbidden")) for code, message in errors):
-        sys.exit(4)
-    sys.exit(5)
-if not parts:
-    if tool_errors:
-        with open(diag, "a", encoding="utf-8") as output:
-            output.write(f"OpenCode tool_use error: {tool_errors[0]}; try another model\n")
-    sys.exit(3)
-PY
-}
-
-# When the caller does not name an alias, derive it from the role rather than
-# defaulting everything to flagship. A bare dispatch is ordinary work and must not
-# silently land on the most expensive model in a family; flagship is for work whose
-# role says it is critical. The flagship roles are the keys of
-# families.*.role_effort_defaults in config/model-routing.json; keep this list in
-# step with that file.
-# An explicit special-model override pins the alias too: every
-# risk_tier_overrides entry in that file
-# declares alias "flagship", and the resolver rejects any other alias with
-# risk_tier_alias_mismatch. Keep both lists in step with the config. The rule only
-# governs the case where the caller named neither an alias nor a model.
 if [ "$ALIAS_EXPLICIT" -eq 0 ] && [ -z "$TASK_CLASS" ]; then
   if [ -n "$MODEL" ] || [ -n "$MODEL_OVERRIDE_TIER" ]; then
     # An explicitly named model has already made the cost decision, so leave the
@@ -472,26 +323,6 @@ then
   [ "$OUT_CREATED" = true ] && rm -f "$OUT"
   exit 2
 fi
-PROMPT_ARG=""
-IFS= read -r -d '' PROMPT_ARG <"$PROMPT_TMP" || true
-PROMPT_BYTES="$(wc -c <"$PROMPT_TMP" | tr -d ' ')"
-# agy, cursor, kiro and copilot have no file-backed prompt input, so the prompt
-# goes in as one argv value. That puts it under the kernel's argument limits, and
-# the binding one is per-string, not total: Linux caps a single argv element at
-# MAX_ARG_STRLEN, 32 pages = 128 KiB, and refuses the exec with E2BIG, while
-# darwin has no per-string cap and allows 1 MiB in total. So a prompt that works
-# on a developer's Mac fails on a Linux runner. Take the smaller limit on both,
-# with room for the flags, and fail closed with a typed status: a brief silently
-# clipped by the kernel would be reviewed as if it were complete.
-ARGV_PROMPT_LIMIT=126976
-argv_prompt_too_large() {
-  local tool="$1" diag_path="$2" prompt_bytes="${3:-$PROMPT_BYTES}"
-  [ "$prompt_bytes" -gt "$ARGV_PROMPT_LIMIT" ] || return 1
-  echo "$tool effective prompt is ${prompt_bytes} bytes, over the 124 KiB single-argument ceiling; pass the material by reference instead" >"$diag_path"
-  return 0
-}
-
-strip_ansi() { sed $'s/\x1b\\[[0-9;?]*[A-Za-z]//g'; }
 json_escape() {
   python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])'
 }
@@ -641,9 +472,6 @@ emit_record() {
 
 ORCH_FAMILY="$(normalise_family "$ORCH_FAMILY")"
 
-# Specific failure signatures only. Do not treat any mention of "quota" as a failure.
-fail_sig='(Authentication required|Please sign in|Please( run)? login|not logged in|not authenticated|Unauthorized|insufficient_quota|quota exceeded|rate limit exceeded|usage limit reached)'
-model_fail_sig='(model[^[:cntrl:]]*(unavailable|not available|not found|unsupported|does not exist)|unknown model|capacity|overloaded)'
 # The single product-root derivation in this script (#754). It mirrors the
 # precedence in scripts/lib/roots.py, which a shell script cannot import: an
 # explicit AGENT_FABRIC_PRODUCT_ROOT wins, because a caller who set it knows
@@ -828,6 +656,7 @@ agy_has_unsafe_arg() {
 
 run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/1
   local tool="$1" model="$2" effort="$3" route_effort_input="$3" tmpdir="$4" raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier route_model_override_tier route_alias route_reason endpoint_profile endpoint_base_url endpoint_token_env endpoint_wire_api agy_status agy_dir agy_prompt_bytes
+  local model_pin="$2"
   model="$(resolve_model "$tool" "$model")"
   raw="$tmpdir/raw"
   diag="$tmpdir/diag"
@@ -836,8 +665,10 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
   : >"$raw"
   : >"$diag"
   : >"$clean"
-  trap "rm -rf -- '$tmpdir'" EXIT
-  trap "rm -rf -- '$tmpdir'; exit 143" INT TERM HUP
+  if [ -n "$CHAIN" ]; then
+    trap "rm -rf -- '$tmpdir'" EXIT
+    trap "rm -rf -- '$tmpdir'; exit 143" INT TERM HUP
+  fi
   family=""
   endpoint=""
   identity=""
@@ -944,318 +775,36 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
         printf '%s\n' "$route_json" >>"$diag"
         rc=1
       else
-        status=""
-        case "$tool" in
-        claude)
-          guarantee="enforced"
-          [ "$ACCESS_MODE" = "worktree_write" ] && guarantee="none"
-          # `run_one` is always invoked in a command-substitution subshell, so the
-          # endpoint credentials below reach the `claude` child and die with it.
-          # The token is read from the named variable here and passed in the
-          # environment, never on a command line and never into a record. Every
-          # `claude_provider` call in both access modes inherits them.
-          if [ -n "$endpoint_base_url" ] && [ -n "$endpoint_token_env" ]; then
-            export ANTHROPIC_BASE_URL="$endpoint_base_url"
-            ANTHROPIC_AUTH_TOKEN="$(printenv "$endpoint_token_env" || true)"
-            export ANTHROPIC_AUTH_TOKEN
-            # Gateways (OpenRouter and Anthropic-compatible endpoints) authenticate
-            # with ANTHROPIC_AUTH_TOKEN. An inherited ANTHROPIC_API_KEY would send
-            # x-api-key and fall back toward Anthropic directly.
-            export ANTHROPIC_API_KEY=""
-          fi
-          if ! require_cmd claude "$diag"; then
-            status="tool_not_found"
-            rc=127
-          else
-            claude_provider -p --bare --disable-slash-commands \
-              --no-session-persistence "${CLAUDE_MODE_FLAGS[@]}" \
-              --system-prompt "$CLAUDE_SYSTEM_PROMPT" \
-              ${model:+--model "$model"} ${effort:+--effort "$effort"}; rc=$?
-          fi
-          if [ "${status:-}" != "tool_not_found" ] && [ "$rc" -ne 0 ] && [ -n "$fallback_model" ] && cat "$raw" "$diag" | grep -Eqi "$model_fail_sig"; then
-            primary_model="$model"
-            : >"$raw"
-            : >"$diag"
-            model="$fallback_model"
-            identity="runtime-provider-fallback"
-            substitution="${substitution:+$substitution; }$primary_model unavailable; used $fallback_model"
-            claude_provider -p --bare --disable-slash-commands \
-              --no-session-persistence "${CLAUDE_MODE_FLAGS[@]}" \
-              --system-prompt "$CLAUDE_SYSTEM_PROMPT" \
-              --model "$model" ${effort:+--effort "$effort"}; rc=$?
-          fi
-          if [ "${status:-}" != "tool_not_found" ] && [ "$rc" -ne 0 ] && cat "$raw" "$diag" | grep -Eqi "$fail_sig"; then
-            if CLAUDE_CODE_DISABLE_WORKFLOWS=1 claude auth status 2>/dev/null | grep -Eq '"loggedIn"[[:space:]]*:[[:space:]]*true'; then
-              : >"$raw"
-              : >"$diag"
-              guarantee="oauth_safe_mode"
-              [ "$ACCESS_MODE" = "worktree_write" ] && guarantee="none"
-              claude_provider -p --safe-mode --no-session-persistence \
-                --disable-slash-commands "${CLAUDE_MODE_FLAGS[@]}" \
-                --system-prompt "$CLAUDE_SYSTEM_PROMPT" \
-                ${model:+--model "$model"} ${effort:+--effort "$effort"}; rc=$?
-            fi
-          fi
-          if [ "${status:-}" != "tool_not_found" ] && [ "$rc" -ne 0 ] && [ -n "$fallback_model" ] && [ "$model" = "$requested_model" ] && cat "$raw" "$diag" | grep -Eqi "$model_fail_sig"; then
-            primary_model="$model"
-            : >"$raw"
-            : >"$diag"
-            model="$fallback_model"
-            identity="runtime-provider-fallback"
-            substitution="${substitution:+$substitution; }$primary_model unavailable; used $fallback_model"
-            if [ "$guarantee" = "oauth_safe_mode" ]; then
-              claude_provider -p --safe-mode --no-session-persistence \
-                --disable-slash-commands "${CLAUDE_MODE_FLAGS[@]}" --system-prompt "$CLAUDE_SYSTEM_PROMPT" \
-                --model "$model" ${effort:+--effort "$effort"}; rc=$?
-            else
-              claude_provider -p --bare --disable-slash-commands \
-                --no-session-persistence "${CLAUDE_MODE_FLAGS[@]}" --system-prompt "$CLAUDE_SYSTEM_PROMPT" \
-                --model "$model" ${effort:+--effort "$effort"}; rc=$?
-            fi
-          fi ;;
-        codex)
-          guarantee="enforced"
-          # `--ignore-user-config` stays on every codex route: a dispatched run
-          # must never inherit the user's own `~/.codex/config.toml`. A named
-          # endpoint profile therefore supplies its provider inline instead, as
-          # `-c` overrides, which codex honours with the flag set. The token is
-          # named, not passed: `env_key` tells codex which variable to read, so
-          # the credential never reaches an argument vector or a record.
-          local -a codex_provider_flags=()
-          if [ -n "$endpoint_base_url" ] && [ -n "$endpoint_token_env" ]; then
-            codex_provider_flags=(
-              -c "model_providers.${CODEX_ENDPOINT_PROVIDER_ID}.name=$endpoint_profile"
-              -c "model_providers.${CODEX_ENDPOINT_PROVIDER_ID}.base_url=$endpoint_base_url"
-              -c "model_providers.${CODEX_ENDPOINT_PROVIDER_ID}.env_key=$endpoint_token_env"
-            )
-            [ -n "$endpoint_wire_api" ] && codex_provider_flags+=(
-              -c "model_providers.${CODEX_ENDPOINT_PROVIDER_ID}.wire_api=$endpoint_wire_api"
-            )
-            codex_provider_flags+=(-c "model_provider=${CODEX_ENDPOINT_PROVIDER_ID}")
-          fi
-          if ! require_cmd codex "$diag"; then
-            status="tool_not_found"
-            rc=127
-          elif [ "$ACCESS_MODE" = "worktree_write" ]; then
-            # A linked worktree keeps its Git metadata outside the worktree root,
-            # so the sandbox needs the common Git directory as a writable root or
-            # the worker cannot commit what it just wrote.
-            guarantee="none"
-            # `--ignore-user-config` also drops the user's own
-            # `[sandbox_workspace_write] network_access`, so the lane's network is
-            # set here. Lanes need it for gh, git push and package installs;
-            # CF_DISPATCH_CODEX_NETWORK=0 turns it off.
-            local -a codex_network_flags=()
-            PROVIDER_NETWORK_JSON=false
-            if [ "${CF_DISPATCH_CODEX_NETWORK-1}" = "1" ]; then
-              codex_network_flags=(-c sandbox_workspace_write.network_access=true)
-              PROVIDER_NETWORK_JSON=true
-            fi
-            codex exec -s workspace-write --cd "$WORKTREE" --ignore-user-config --ignore-rules \
-              --ephemeral -c service_tier="default" \
-              ${WORKTREE_GIT_COMMON:+-c sandbox_workspace_write.writable_roots="[\"$WORKTREE_GIT_COMMON\"]"} \
-              ${codex_network_flags[@]+"${codex_network_flags[@]}"} \
-              ${codex_provider_flags[@]+"${codex_provider_flags[@]}"} \
-              ${model:+-m "$model"} ${effort:+-c model_reasoning_effort="$effort"} \
-              - <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
-          else
-            # The `-s read-only` preset has no network switch. A permissions
-            # profile extending the built-in `:read-only` keeps every filesystem
-            # write denied while allowing outbound network, so a reviewer can
-            # still read issues and PRs with gh. The two cannot be combined:
-            # `-s` overrides the profile. `--skip-git-repo-check` lets a review
-            # run from a workspace root that is not itself a Git repository.
-            local -a codex_read_only_flags=(-s read-only)
-            PROVIDER_NETWORK_JSON=false
-            if [ "${CF_DISPATCH_CODEX_NETWORK-1}" = "1" ]; then
-              codex_read_only_flags=(
-                -c 'default_permissions="provenant-read-only-network"'
-                -c 'permissions.provenant-read-only-network.extends=":read-only"'
-                -c 'permissions.provenant-read-only-network.network.enabled=true'
-              )
-              PROVIDER_NETWORK_JSON=true
-            fi
-            codex exec "${codex_read_only_flags[@]}" --skip-git-repo-check \
-              --ignore-user-config --ignore-rules --ephemeral -c service_tier="default" \
-              ${codex_provider_flags[@]+"${codex_provider_flags[@]}"} ${model:+-m "$model"} \
-              ${effort:+-c model_reasoning_effort="$effort"} \
-              - <"$PROMPT_TMP" >"$raw" 2>"$diag"; rc=$?
-          fi ;;
-        cursor)
-          guarantee="enforced"
-          if ! require_cmd cursor-agent "$diag"; then
-            status="tool_not_found"
-            rc=127
-          elif argv_prompt_too_large cursor "$diag"; then
-            status="prompt_too_large"
-            rc=1
-          else
-            cursor-agent -p --trust --mode ask --sandbox enabled --output-format text \
-              ${model:+--model "$model"} "$PROMPT_ARG" </dev/null >"$raw" 2>"$diag"; rc=$?
-          fi ;;
-        agy)
-          # agy --sandbox does not enforce read-only writes. On agy 1.1.10 a
-          # write probe under these dispatcher flags returned SUCCESS and
-          # created the file; --mode plan did the same, so only the prompt
-          # discourages mutation.
-          guarantee="prompt_only"
-          if ! require_cmd agy "$diag"; then
-            status="tool_not_found"
-            rc=127
-          else
-            local -a agy_cmd
-            agy_cmd=(agy --output-format json --disable-slash-commands)
-            # Ordinary work inherits the operator's Agy permissions. The optional
-            # terminal sandbox never establishes filesystem read-only enforcement.
-            AGY_SANDBOX_JSON=false
-            if [ "$INTENT" = "assurance" ] || [ "${CF_DISPATCH_AGY_SANDBOX-0}" = "1" ]; then
-              agy_cmd+=(--sandbox)
-              AGY_SANDBOX_JSON=true
-            fi
-            # The caller's deadline wins, because it is the one the dispatch
-            # owner will enforce by killing this process group. The environment
-            # override stays as an escape hatch for a direct call that passes no
-            # --timeout-seconds.
-            if [ -n "$TIMEOUT_SECONDS" ]; then
-              agy_cmd+=(--print-timeout "${TIMEOUT_SECONDS}s")
-            elif [ -n "${CF_DISPATCH_AGY_TIMEOUT:-}" ]; then
-              agy_cmd+=(--print-timeout "${CF_DISPATCH_AGY_TIMEOUT}")
-            else
-              agy_cmd+=(--print-timeout 900s)
-            fi
-            [ -n "$model" ] && agy_cmd+=(--model "$model")
-            [ -n "$effort" ] && agy_cmd+=(--effort "$effort")
-            for agy_dir in ${AGY_ADD_DIRS[@]+"${AGY_ADD_DIRS[@]}"}; do
-              [ -n "$agy_dir" ] || continue
-              if [ "${agy_dir#/}" = "$agy_dir" ]; then
-                agy_dir="$(CDPATH= cd -- "$agy_dir" 2>/dev/null && pwd -P)" || {
-                  status="error"
-                  echo "agy add-dir is not a readable directory" >"$diag"
-                  rc=1
-                  break
-                }
-              fi
-              case "$agy_dir" in
-                *--dangerously-skip-permissions*)
-                  status="unsafe_by_default"
-                  echo "agy refused: --dangerously-skip-permissions is not allowed on the read-only route" >"$diag"
-                  rc=1
-                  break
-                  ;;
-              esac
-              agy_cmd+=(--add-dir "$agy_dir")
-            done
-            if [ -z "${status:-}" ]; then
-              # agy has no file-backed prompt input. `--print` requires a value:
-              # with none it exits 2 on "flag needs an argument", and `--print -`
-              # is worse than useless, because agy treats the dash as the literal
-              # prompt, ignores stdin and answers it -- exit 0, plausible prose,
-              # wrong question. So the prompt goes in as one argv value, under
-              # the shared single-argument ceiling.
-              local agy_prompt agy_prompt_bytes
-              printf -v agy_prompt '%s\n%s\n%s\n\n%s\n%s' \
-                "Workspace root: $(pwd -P)" \
-                "Resolve relative paths against this root unless the task names another base; use absolute paths or an explicit cwd in terminal commands." \
-                "Do not modify files or run commands that mutate state." \
-                "Task:" "$PROMPT_ARG"
-              agy_prompt_bytes="$(printf '%s' "$agy_prompt" | wc -c | tr -d ' ')"
-              if argv_prompt_too_large agy "$diag" "$agy_prompt_bytes"; then
-                status="prompt_too_large"
-                rc=1
-              else
-                agy_cmd+=(--print "$agy_prompt")
-                "${agy_cmd[@]}" >"$raw" 2>"$diag"; rc=$?
-              fi
-            fi
-          fi
-          if [ "${status:-}" != "tool_not_found" ] && [ "${status:-}" != "unsafe_by_default" ] \
-            && [ "${status:-}" != "error" ] && [ "${status:-}" != "prompt_too_large" ]; then
-            agy_status="$(python3 "$SCRIPT_DIR/agy_parse.py" "$raw" "$diag" "$clean" "$rc")"
-            status="$agy_status"
-            if [ "$status" != "ok" ] && [ "$rc" -eq 0 ]; then
-              rc=1
-            fi
-          fi
-          ;;
-        kiro)
-          guarantee="none"
-          if [ "${CF_DISPATCH_ENABLE_KIRO:-0}" != "1" ]; then
-            status="unsafe_by_default"
-            echo "kiro disabled: no hard read-only mode verified in current local help" >"$diag"
-            rc=1
-          else
-            guarantee="best_effort"
-            if ! require_cmd kiro-cli "$diag"; then
-              status="tool_not_found"
-              rc=127
-            elif argv_prompt_too_large kiro "$diag"; then
-              status="prompt_too_large"
-              rc=1
-            else
-              kiro-cli chat --no-interactive ${model:+--model "$model"} ${effort:+--effort "$effort"} \
-                "$PROMPT_ARG" </dev/null >"$raw" 2>"$diag"; rc=$?
-            fi
-          fi ;;
-        copilot)
-          guarantee="none"
-          if [ "${CF_DISPATCH_ENABLE_COPILOT:-0}" != "1" ]; then
-            status="unsafe_by_default"
-            echo "copilot disabled: non-interactive mode may require broad tool permissions" >"$diag"
-            rc=1
-          else
-            guarantee="prompt_only"
-            if ! require_cmd copilot "$diag"; then
-              status="tool_not_found"
-              rc=127
-            elif argv_prompt_too_large copilot "$diag"; then
-              status="prompt_too_large"
-              rc=1
-            else
-              copilot -p "$PROMPT_ARG" --mode plan --silent --disable-builtin-mcps \
-                --available-tools='' --disallow-temp-dir ${model:+--model "$model"} ${effort:+--effort "$effort"} \
-                </dev/null >"$raw" 2>"$diag"; rc=$?
-            fi
-          fi ;;
-        opencode)
-          guarantee="best_effort"
-          local opencode_config opencode_parse_rc
-          if [ "$ACCESS_MODE" = "worktree_write" ]; then
-            guarantee="none"
-            opencode_config='{"permission":{"edit":{"*":"allow"},"bash":{"*":"allow"},"external_directory":{"*":"deny"},"webfetch":"allow"}}'
-          else
-            opencode_config='{"permission":{"edit":{"*":"deny"},"bash":{"*":"deny","git status*":"allow","git log*":"allow","git diff*":"allow","git show*":"allow","ls*":"allow","rg *":"allow","grep *":"allow","*--pre*":"deny","*--output*":"deny","*-o *":"deny"},"external_directory":{"*":"allow"},"webfetch":"allow"}}'
-          fi
-          if ! require_cmd opencode "$diag"; then
-            status="tool_not_found"
-            rc=127
-          elif argv_prompt_too_large opencode "$diag"; then
-            status="prompt_too_large"
-            rc=1
-          else
-            local idle_marker="$ACTIVE_RUN_TMPDIR/opencode.idle"
-            local idle_seconds="${CF_DISPATCH_IDLE_SECONDS:-}"
-            if [ -z "$idle_seconds" ]; then
-              if [ "$ACCESS_MODE" = "worktree_write" ]; then idle_seconds=1800; else idle_seconds=600; fi
-            fi
-            OPENCODE_CONFIG_CONTENT="$opencode_config" run_with_idle_watchdog \
-              "$idle_seconds" "$raw" "$diag" "$WORKTREE" "$idle_marker" \
-              opencode run --format json ${WORKTREE:+--dir "$WORKTREE"} \
-              ${model:+--model "$model"} ${effort:+--variant "$effort"} \
-              "$PROMPT_ARG"; rc=$?
-            if [ -f "$idle_marker" ]; then
-              status="idle_timeout"
-              route_reason="OpenCode idle for ${idle_seconds}s; try another model"
-            else
-              parse_opencode_events; opencode_parse_rc=$?
-              case "$opencode_parse_rc" in
-                3) status="empty_output"; rc=1;;
-                4) status="auth_or_quota_error"; rc=1;;
-                5) status="error"; rc=1;;
-              esac
-            fi
-          fi ;;
-        *) emit_record "$tool" "$model" "$effort" "unknown_tool" 1 "" "none" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source"; rm -f "$raw" "$diag"; return 1;;
-        esac
+        local provider_cli="$tool"
+        [ "$tool" = cursor ] && provider_cli=cursor-agent
+        [ "$tool" = kiro ] && provider_cli=kiro-cli
+        if ! require_cmd "$provider_cli" "$diag"; then
+          install_output "$diag" "$OUT" || true
+          emit_record "$tool" "$model" "$effort" "tool_missing" 127 "$OUT" "none" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source" "$substitution" "$requested_model" "$fallback_model"
+          return 1
+        fi
+        local -a supervisor=(python3 "$SCRIPT_DIR/provider_exec.py" --route-file "$tmpdir/route.json"
+          --adapter "$tool" --prompt-file "$PROMPT_TMP" --out "$OUT" --mode "$ACCESS_MODE"
+          --intent "$INTENT" --orchestrator-family "$ORCH_FAMILY" --reviewer-id "$REVIEWER_ID"
+          --risk-tier "$RISK_TIER" --model-override-tier "$MODEL_OVERRIDE_TIER"
+          --requested-model "$model_pin" --requested-effort "$route_effort_input")
+        [ "$PLAN_ONLY" = 1 ] && supervisor+=(--plan-only)
+        [ "$PREFACE" = 0 ] && supervisor+=(--no-preface)
+        [ -n "$WORKTREE" ] && supervisor+=(--worktree "$WORKTREE")
+        [ -n "$PROVIDER_CWD" ] && supervisor+=(--cwd "$PROVIDER_CWD")
+        [ -n "$SANDBOX" ] && supervisor+=(--sandbox "$SANDBOX")
+        [ -n "$NETWORK" ] && supervisor+=(--network "$NETWORK")
+        [ -n "$RESUME_SESSION" ] && supervisor+=(--resume-session "$RESUME_SESSION")
+        [ -n "$TIMEOUT_SECONDS" ] && supervisor+=(--timeout-seconds "$TIMEOUT_SECONDS")
+        for agy_dir in "${AGY_ADD_DIRS[@]:-}"; do
+          [ -n "$agy_dir" ] && supervisor+=(--add-dir "$agy_dir")
+        done
+        if [ -z "$CHAIN" ]; then
+          exec "${supervisor[@]}" --cleanup-dir "$tmpdir" --cleanup-prompt
+        fi
+        "${supervisor[@]}"
+        return $?
+
       fi
     else
       guarantee="none"
@@ -1265,58 +814,9 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
     fi
   fi
 
-  if [ "$tool" != "agy" ] && [ "$tool" != "opencode" ]; then
-    strip_ansi <"$raw" >"$clean"
-  fi
-  cat "$clean" "$diag" >"$combined"
-  if [ -n "${status:-}" ] && [ "$rc" -ne 0 ]; then
-    :
-  elif [ "$rc" -eq 0 ] && ! grep -q '[^[:space:]]' "$clean"; then
-    status="empty_output"
-    rc=1
-    guarantee="none"
-  elif [ "$rc" -ne 0 ] && grep -Eqi "$fail_sig" "$combined"; then
-    status="auth_or_quota_error"
-  elif [ "$rc" -ne 0 ]; then
-    status="error"
-  else
-    status="ok"
-  fi
-  [ "$status" = "tool_not_found" ] && guarantee="none"
-  if [ "$tool" = "opencode" ] && [ "$status" != "ok" ] && [ -z "$route_reason" ]; then
-    case "$status" in
-      auth_or_quota_error) route_reason="OpenCode account or quota rejected this model; check account or try another model";;
-      empty_output) route_reason="OpenCode returned no assistant text; try another model or inspect raw JSONL";;
-      error) route_reason="OpenCode failed; try another model or inspect raw JSONL";;
-    esac
-  fi
-
-  if [ "$tool" = "opencode" ] && [ -s "$raw" ]; then
-    # Keep the complete event stream beside the compact result/diagnostic.
-    install_output "$raw" "$OUT.raw.jsonl" || {
-      status="output_write_error"; rc=1; guarantee="none"
-    }
-  fi
-
-  if [ "$status" = "ok" ]; then
-    if install_output "$clean" "$OUT"; then
-      opath="$OUT"
-    else
-      status="output_write_error"
-      rc=1
-      guarantee="none"
-      opath=""
-    fi
-  else
-    if install_output "$combined" "$OUT"; then
-      opath="$OUT"
-    else
-      status="output_write_error"
-      rc=1
-      guarantee="none"
-      opath=""
-    fi
-  fi
+  cat "$diag" >"$clean"
+  opath=""
+  if install_output "$clean" "$OUT"; then opath="$OUT"; fi
   emit_record "$tool" "$model" "$effort" "$status" "$rc" "$opath" "$guarantee" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source" "$substitution" "$requested_model" "$fallback_model" "$catalog_model" "$model_selection" "$route_risk_tier" "$policy_override" "$route_model_override_tier" "$route_reason"
 }
 
@@ -1343,9 +843,6 @@ if [ -n "$CHAIN" ]; then
 else
   [ -z "$TOOL" ] && { echo "need --tool or --chain" >&2; exit 2; }
   ACTIVE_RUN_TMPDIR="$(make_tmp_dir)" || exit 1
-  rec="$(run_one "$TOOL" "$MODEL" "$EFFORT" "$ACTIVE_RUN_TMPDIR")"; rc=$?
-  rm -rf -- "$ACTIVE_RUN_TMPDIR"
-  ACTIVE_RUN_TMPDIR=""
-  echo "$rec"
-  exit $rc
+  run_one "$TOOL" "$MODEL" "$EFFORT" "$ACTIVE_RUN_TMPDIR"
+  exit $?
 fi

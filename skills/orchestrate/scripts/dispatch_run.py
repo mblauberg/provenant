@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Run one configured provider attempt and retain compact execution evidence.
+"""Own a durable run of provider attempts, including fallback and session resume.
 
-This is deliberately a one-attempt owner.  Provider command construction stays
-with ``cf_dispatch.sh``; this module owns only the regular-file boundary,
-process wait and attempt custody. Provider execution is bounded to 3600 seconds for reads and 10800 for writes
-by default; callers may provide a smaller or larger finite positive timeout.
+Routing stays with cf_dispatch.sh --plan-only; provider_exec runs the provider
+in this process. Legacy receipts remain additive while Fabric v1 rows provide
+live progress, typed terminal states, provenance, and controls.
 """
 
 from __future__ import annotations
@@ -48,6 +47,10 @@ GIT_EVIDENCE_RECORD_TYPE = "provenant-git-evidence"
 CANCEL_MARKER_NAME = "cancel.request"
 
 from _shared.bounded_process import stop_process_group
+from layout import run_root, contains_run
+import provider_exec
+import exec_routing
+from fabric_records import render_digest, write_cooldown, append_index, TERMINAL_STATUSES
 from _shared.custody import (
     OwnedFileError, OwnedLinkError, atomic_write_contained, contained_regular_path,
     ensure_contained_directory, create_contained_directory, open_contained_regular, read_bound_bytes,
@@ -588,7 +591,7 @@ def existing_attempt_number(task_dir: Path) -> int:
 
 ACCESS_MODES = ("read_only", "worktree_write")
 WORKTREE_WRITER_LOCK = "provenant-dispatch-writer.lock"
-WORKTREE_WRITE_ADAPTERS = ("claude", "codex", "opencode")
+WORKTREE_WRITE_ADAPTERS = ("claude", "codex", "opencode", "cursor", "agy", "kiro", "copilot")
 
 
 class WorktreeLeaseError(ValueError):
@@ -717,6 +720,10 @@ def build_command(
             command.extend((flag, value))
     if evidence_dir is not None:
         command.extend(("--add-dir", str(evidence_dir)))
+    for flag, value in (("--cwd",getattr(args,"provider_cwd",None)),("--sandbox", getattr(args,"sandbox",None)),("--network",getattr(args,"network",None)),("--resume-session",getattr(args,"resume_session",None))):
+        if value is not None: command.extend((flag,str(value)))
+    for directory in getattr(args,"add_dirs",[]): command.extend(("--add-dir",str(directory)))
+    if not getattr(args,"preface",True): command.append("--no-preface")
     return command
 
 
@@ -777,14 +784,14 @@ def _copy_git_evidence(
     """Validate and copy a packet in bounded memory while hashing its bytes."""
     try:
         source.relative_to(run_dir)
-        source_relative = source.relative_to(workspace)
+        source_relative = source.relative_to(run_dir)
         destination_relative = destination.relative_to(run_dir)
     except ValueError as exc:
         raise AttemptEvidenceError("Git evidence must be materialised inside the run directory") from exc
     source_fd = destination_fd = -1
     try:
         source_fd, _source_rel, _source_target = open_contained_regular(
-            workspace, source_relative, os.O_RDONLY, label="Git evidence source"
+            run_dir, source_relative, os.O_RDONLY, label="Git evidence source"
         )
         destination_fd, _destination_rel, _destination_target = open_contained_regular(
             run_dir,
@@ -873,9 +880,7 @@ def _record_provider_process(run_dir: Path, process: subprocess.Popen[Any]) -> N
     run rather than to an earlier one in a reused directory. A failure to write
     it costs later reaping, never the dispatch itself.
     """
-    token = os.environ.get("PROVENANT_RUN_TOKEN")
-    if not token:
-        return
+    token = os.environ.get("PROVENANT_RUN_TOKEN") or run_identity(run_dir)
     try:
         started_at = subprocess.run(
             ["/bin/ps", "-o", "lstart=", "-p", str(process.pid)],
@@ -927,7 +932,7 @@ def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path) -> byte
         if sensitive_roots.intersection(parts) or prompt_source.name.casefold() in sensitive_files or config_auth:
             raise PreflightError("credential_or_auth_store_denied", "prompt path is a credential or authentication store")
         try:
-            prompt_bytes = _read_prompt_once(workspace, prompt_source)
+            prompt_bytes = _read_prompt_once(run_dir if prompt_source.is_relative_to(run_dir) else workspace, prompt_source)
         except OwnedLinkError as exc:
             raise PreflightError("prompt_hard_link_denied", str(exc))
         except OwnedFileError as exc:
@@ -957,7 +962,7 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
     errors = []
     routes = []
     try:
-        routing_catalog = json.loads(catalog.read_text())
+        routing_catalog = exec_routing.snapshot() or json.loads(catalog.read_text())
     except (OSError, ValueError):
         routing_catalog = {}
     seen = set()
@@ -971,6 +976,14 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                 if not isinstance(task_id, str) or not TASK_ID_RE.fullmatch(task_id) or task_id in seen:
                     raise PreflightError("invalid_task_id", "Pass unique task ids containing letters, numbers, '.', '_' or '-'.")
                 seen.add(task_id)
+                if task.get("sandbox") not in {None,"read-only","workspace-write","full"}:
+                    raise PreflightError("sandbox_invalid","Pass read-only, workspace-write or full.")
+                if task.get("access_mode","read_only")=="read_only" and task.get("sandbox") not in {None,"read-only"}:
+                    raise PreflightError("sandbox_forbidden","A read-only run requires a read-only sandbox.")
+                if "network" in task and type(task["network"]) is not bool:
+                    raise PreflightError("network_invalid","Pass network true or false.")
+                if any(provider_exec.credential_path(path) for path in task.get("add_dirs",[])):
+                    raise PreflightError("credential_or_auth_store_denied","Additional directories must exclude credential stores.")
                 if (task.get("prompt") is None) == (task.get("prompt_file") is None):
                     raise PreflightError("prompt_required", "Pass exactly one of prompt or prompt_file.")
                 if task.get("prompt_file") is not None:
@@ -1055,11 +1068,96 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
             if errors else {"status": "validated", "routes": routes})
 
 
+def run_identity(run_dir, receipt=None):
+    return os.environ.get("PROVENANT_RUN_ID") or (receipt or {}).get("run_id") or (run_dir.name if run_dir.name.startswith("mcp-") else "mcp-"+run_dir.name.rsplit("-",1)[-1])
+
+
+def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
+    route=plan.get("route",{})
+    model=plan.get("model") or route.get("resolved_model") or args.model or ""
+    effort=plan.get("effort") or ""
+    family=route.get("model_family") or "unknown"
+    label=args.tool+"/"+model+("@"+effort if effort else "")
+    identity="resolved" if model else "unknown"
+    provenance={"requested":{"adapter":args.tool,"alias":args.alias,"model":args.model,"effort":args.effort},
+        "resolved_model":model,"observed_model":None,"observed_source":None,"identity":identity,
+        "provider":route.get("endpoint_provider") or args.tool,"transport":args.tool,"family":family,
+        "effort_requested":args.effort,"effort_applied":effort,"cli_version":route.get("cli_version"),
+        "fallback_from":getattr(args,"fallback_from",None),"notes":[],"line":f"Route: {label} ({family}; {identity})"}
+    return {"schema":"fabric.attempt.v1","run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,
+        "attempt":number,"state":"running","status":None,"mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
+        "worktree":str(args.worktree) if args.worktree else None,"started_at":started_at,"ended_at":None,"last_progress_at":started_at,
+        "pgid":None,"session_id":plan.get("session_id"),"retryable":False,"reset_at":None,"retry_after":None,"fix":None,
+        "evidence":{"exit":None,"signal":None,"signature":None,"excerpt":""},"question":None,
+        "applied":plan.get("applied",{"sandbox":None,"network":None,"add_dirs":[],"guarantee":"prompt_only"}),
+        "warnings":list(plan.get("warnings",[])),"provenance":provenance,
+        "paths":{"result":relative_path(run_dir,attempt_dir/"result.md"),"stderr":relative_path(run_dir,attempt_dir/"stderr.log"),
+                 "events":relative_path(run_dir,attempt_dir/"events.jsonl"),"receipt":f"tasks/{args.task_id}/attempt-{number:03d}/attempt.json"},"digest":""}
+
+
+def publish_contract(run_dir,row):
+    row["digest"]=render_digest(row)
+    path=run_dir/row["paths"]["receipt"]
+    ensure_owned_directory(run_dir,path.parent)
+    write_owned(run_dir,path,json.dumps(row,indent=2)+"\n")
+
+
+def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
+    row=contract_row(args,run_dir,number,attempt_dir,getattr(args,"_last_plan",{}),legacy["started_at"])
+    status=adapter.get("status")
+    if legacy["outcome"] in {"result_invalid_path","result_integrity_error","adapter_receipt_invalid","manifest_write_error","terminal_envelope_invalid"}: status="failed"
+    elif legacy["status"] in {"cancelled","timed_out"}: status=legacy["status"]
+    elif legacy["status"]=="blocked": status="input_required"
+    elif legacy["status"]=="succeeded": status="ok"
+    if status not in TERMINAL_STATUSES: status="failed"
+    for field in ("session_id","retryable","reset_at","retry_after","fix","evidence","applied","warnings","provenance","pgid","last_progress_at"):
+        if field in adapter: row[field]=adapter[field]
+    row.update(state="terminal",status=status,ended_at=legacy["finished_at"],question=adapter.get("question") or (legacy.get("question") or {}).get("prompt"))
+    if not legacy.get("result"): row["paths"]["result"]=None
+    row["legacy_attempt_path"]=legacy["attempt_path"]
+    row["requested_route"]=legacy["requested_route"]
+    return row
+
+
+def prepare_resume(args):
+    paths=sorted((args.run_dir.resolve()/"tasks").glob("*/attempt-*/attempt.json"))
+    rows=[json.loads(path.read_text()) for path in paths]
+    rows=[row for row in rows if row.get("run_id")==args.resume]
+    if not rows: raise ValueError("resume run not found")
+    if len({row["task_id"] for row in rows})!=1: raise ValueError("resume requires a single-task run")
+    previous=max(rows,key=lambda row:row["attempt"])
+    if previous["state"]!="terminal": raise ValueError("resume requires a terminal attempt")
+    route=previous.get("requested_route") or {}
+    requested=previous["provenance"]["requested"]
+    if (args.tool and args.tool!=requested["adapter"]) or (args.model and args.model!=previous["provenance"]["resolved_model"]):
+        raise ValueError("dispatch a new run")
+    args.tool=requested["adapter"];args.model=previous["provenance"]["resolved_model"];args.alias=None;args.task_class=None
+    args.effort=previous["provenance"]["effort_applied"];args.task_id=previous["task_id"]
+    args.access_mode=previous["mode"];args.worktree=Path(previous["worktree"]) if previous.get("worktree") else None
+    args.provider_cwd=Path(previous["cwd"]) if previous["mode"]=="read_only" else None
+    args.sandbox=previous["applied"]["sandbox"];args.network=None if previous["applied"]["network"] is None else str(previous["applied"]["network"]).lower()
+    args.add_dirs=previous["applied"]["add_dirs"];args.resume_session=previous["session_id"]
+    args.fallback="false"
+    if not args.resume_session or args.tool=="copilot":
+        args.resume_session=None
+        tail=""
+        result=previous["paths"].get("result")
+        if result:
+            data=read_bound_bytes(args.run_dir,retained_path(args.run_dir,result),label="resume result")
+            tail=data[-4096:].decode(errors="replace")
+        args.resume_relaunch=(previous.get("question") or "")+"\n"+tail
+    receipt=json.loads(read_bound_bytes(args.run_dir,"RUN_RECEIPT.json",label="RUN_RECEIPT.json"))
+    receipt.update(status="active",closed_at=None)
+    write_owned(args.run_dir,args.run_dir/"RUN_RECEIPT.json",json.dumps(receipt,indent=2)+"\n")
+
+
 def _dispatch(args: argparse.Namespace, custody=None) -> int:
+    args._last_plan={}
+    args._last_row=None
     run_dir = args.run_dir.resolve()
     workspace = Path.cwd().resolve()
-    if run_dir != workspace and workspace not in run_dir.parents:
-        return fail(run_dir, "run_dir_invalid", "run directory must be inside the current workspace")
+    if not contains_run(run_dir, workspace):
+        return fail(run_dir, "run_dir_invalid", "run directory must be inside run_root(cwd)")
     if not run_dir.is_dir():
         return fail(run_dir, "run_custody_missing", f"run directory does not exist: {run_dir}")
     try:
@@ -1225,134 +1323,206 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     provider_temporary = None
     cancelled = False
     old_handlers: dict[int, Any] = {}
-    try:
-        with owned_text_file(run_dir, adapter_path, "w") as adapter_stream, owned_text_file(
-            run_dir, stderr_path, "w"
-        ) as stderr_stream:
-            attempt_cancelled = cancellation_marker_present(run_dir, attempt_dir)
-            batch_cancelled = batch_dir is not None and cancellation_marker_present(run_dir, batch_dir)
-            if attempt_cancelled or batch_cancelled:
-                # The owner still writes the ordinary attempt evidence, but no
-                # provider process is created for a pre-launch request.
-                process_error = "cancelled"
-                observed_exit = True
+    if CF_DISPATCH == Path(__file__).with_name("cf_dispatch.sh"):
+        owner_cancel=[False]
+        def cancel_owner(_signal,_frame): owner_cancel[0]=True
+        old_handlers={sig:signal.getsignal(sig) for sig in (signal.SIGTERM,signal.SIGHUP)}
+        for sig in old_handlers: signal.signal(sig,cancel_owner)
+        try:
+            plan_environment=routing_environment()
+            if git_evidence_requested: plan_environment.pop("CF_DISPATCH_AGY_ADD_DIR",None)
+            planning = subprocess.run([*command,"--plan-only"],cwd=workspace,env=plan_environment,capture_output=True,text=True,timeout=30)
+            try: plan = json.loads(planning.stdout)
+            except ValueError: plan = {"status":"rejected","fix":"route planner returned invalid JSON"}
+            if plan.get("schema") == "fabric.exec-plan.v1":
+                plan.update(timeout_seconds=args.timeout_seconds,run_id=run_identity(run_dir,run_receipt),chair=os.environ.get("PROVENANT_CHAIR") or os.environ.get("AGENT_FABRIC_SEAT", ""),fallback_from=getattr(args,"fallback_from",None))
+                if getattr(args,"resume_relaunch",None):
+                    plan["prompt"] += "\n\nPrevious turn and question:\n"+args.resume_relaunch
+                    plan["argv"] = provider_exec.profile(args.tool).argv(plan)
+                cooling=exec_routing.cooling(args.tool,plan["model"])
+                if cooling:
+                    if args.model:
+                        plan["warnings"].append("explicit model is cooling until "+cooling["cooling_until"])
+                    else:
+                        for candidate in exec_routing.candidates(plan,True):
+                            if exec_routing.cooling(candidate["adapter"],candidate["model"]): continue
+                            alternate=argparse.Namespace(**vars(args))
+                            alternate.tool=candidate["adapter"];alternate.model=candidate["model"];alternate.alias=None;alternate.task_class=None;alternate.effort=candidate.get("effort")
+                            resolved=subprocess.run([*build_command(alternate,prompt_path,result_path,evidence_dir),"--plan-only"],cwd=workspace,env=routing_environment(),capture_output=True,text=True,timeout=30)
+                            try: replacement=json.loads(resolved.stdout)
+                            except ValueError: continue
+                            if replacement.get("schema")!="fabric.exec-plan.v1": continue
+                            replacement.update(run_id=plan["run_id"],chair=plan["chair"])
+                            replacement["warnings"].append("skipped cooling alias candidate "+args.tool+"/"+plan["model"])
+                            plan=replacement;args.tool=candidate["adapter"];break
+                        else:
+                            plan["warnings"].append("all alias candidates cooling")
+                            plan["cooldown_blocked"]=cooling
+                active = contract_row(args,run_dir,attempt_number,attempt_dir,plan,started_at)
+                publish_contract(run_dir,active)
+                def provider_started(child):
+                    nonlocal process
+                    process=child
+                    active["pgid"]=child.pid
+                    _record_provider_process(run_dir,child)
+                    write_owned(run_dir,attempt_dir/"pgid",str(child.pid)+"\n")
+                    publish_contract(run_dir,active)
+                progress_publication=[0.0]
+                def progress(at):
+                    active["last_progress_at"]=at
+                    if time.monotonic()-progress_publication[0]>=1:
+                        publish_contract(run_dir,active)
+                        progress_publication[0]=time.monotonic()
+                def cancellation():
+                    return owner_cancel[0] or cancellation_marker_present(run_dir,attempt_dir) or (batch_dir is not None and cancellation_marker_present(run_dir,batch_dir))
+                adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
+                    on_start=provider_started,on_progress=progress,cancelled=cancellation)
+                if getattr(args,"resume_relaunch",None): adapter_record["provenance"]["notes"].append("resumed_by_relaunch")
+                args._last_plan=plan
             else:
-                cancel_pending = False
+                adapter_record=plan
+                write_owned(run_dir,stderr_path,planning.stderr)
+            write_owned(run_dir,adapter_path,json.dumps(adapter_record)+"\n")
+            exit_code=adapter_record.get("exit")
+            if type(exit_code) is not int: exit_code=1
+            observed_exit=True
+            if adapter_record.get("status")=="cancelled" or adapter_record.get("evidence",{}).get("signature")=="wall_clock":
+                process_error="cancelled" if adapter_record["status"]=="cancelled" else "timeout"
+        except (OSError,ValueError,subprocess.SubprocessError) as exc:
+            process_error=str(exc)
+            if not adapter_path.exists(): write_owned(run_dir,adapter_path,"{}\n")
+            if not stderr_path.exists(): write_owned(run_dir,stderr_path,str(exc))
+        finally:
+            release_worktree_lease(worktree_lease)
+    else:
+        try:
+            with owned_text_file(run_dir, adapter_path, "w") as adapter_stream, owned_text_file(
+                run_dir, stderr_path, "w"
+            ) as stderr_stream:
+                attempt_cancelled = cancellation_marker_present(run_dir, attempt_dir)
+                batch_cancelled = batch_dir is not None and cancellation_marker_present(run_dir, batch_dir)
+                if attempt_cancelled or batch_cancelled:
+                    # The owner still writes the ordinary attempt evidence, but no
+                    # provider process is created for a pre-launch request.
+                    process_error = "cancelled"
+                    observed_exit = True
+                else:
+                    cancel_pending = False
 
-                def cancel_handler(_signum: int, _frame: Any) -> None:
-                    nonlocal cancel_pending
-                    # Popen can have spawned the provider before returning.
-                    # Keep the handler signal-safe: normal control flow
-                    # reconciles the intent and owns process-group cleanup.
-                    cancel_pending = True
+                    def cancel_handler(_signum: int, _frame: Any) -> None:
+                        nonlocal cancel_pending
+                        # Popen can have spawned the provider before returning.
+                        # Keep the handler signal-safe: normal control flow
+                        # reconciles the intent and owns process-group cleanup.
+                        cancel_pending = True
 
-                old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
-                signal.signal(signal.SIGTERM, cancel_handler)
-                signal.signal(signal.SIGHUP, cancel_handler)
-                provider_environment = os.environ.copy()
-                # Owners retain chair custody; provider work must discover its own
-                # seat, state directory and checkout rather than inherit the chair's.
-                for name in ("AGENT_FABRIC_STATE_DIRECTORY", "AGENT_FABRIC_SEAT",
-                             "AGENT_FABRIC_CLIENT_LABEL", "AGENT_FABRIC_LABEL", "AGENT_FABRIC_PRODUCT_ROOT"):
-                    provider_environment.pop(name, None)
-                for name in list(provider_environment):
-                    if name.startswith(("PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")):
-                        provider_environment.pop(name)
-                if os.environ.get("PROVENANT_RUN_TOKEN"):
-                    # cf_dispatch buffers stdout/stderr here until completion.
-                    # Status can observe mtimes without reading provider output.
-                    provider_temporary = tempfile.TemporaryDirectory(prefix="fabric-provider-", ignore_cleanup_errors=True)
-                    provider_environment["TMPDIR"] = provider_temporary.name
-                    atomic_write_contained(run_dir, (attempt_dir / "provider-output.json").relative_to(run_dir),
-                                           (json.dumps({"directory": provider_temporary.name}) + "\n").encode(), label="provider output location")
-                if git_evidence_requested:
-                    provider_environment.pop("CF_DISPATCH_AGY_ADD_DIR", None)
-                process = subprocess.Popen(
-                    command,
-                    cwd=workspace,
-                    stdout=adapter_stream,
-                    stderr=stderr_stream,
-                    env=provider_environment,
-                    start_new_session=True,
-                )
-                _record_provider_process(run_dir, process)
+                    old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
+                    signal.signal(signal.SIGTERM, cancel_handler)
+                    signal.signal(signal.SIGHUP, cancel_handler)
+                    provider_environment = os.environ.copy()
+                    # Owners retain chair custody; provider work must discover its own
+                    # seat, state directory and checkout rather than inherit the chair's.
+                    for name in ("AGENT_FABRIC_STATE_DIRECTORY", "AGENT_FABRIC_SEAT",
+                                 "AGENT_FABRIC_CLIENT_LABEL", "AGENT_FABRIC_LABEL", "AGENT_FABRIC_PRODUCT_ROOT"):
+                        provider_environment.pop(name, None)
+                    for name in list(provider_environment):
+                        if name.startswith(("PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")):
+                            provider_environment.pop(name)
+                    if os.environ.get("PROVENANT_RUN_TOKEN"):
+                        # cf_dispatch buffers stdout/stderr here until completion.
+                        # Status can observe mtimes without reading provider output.
+                        provider_temporary = tempfile.TemporaryDirectory(prefix="fabric-provider-", ignore_cleanup_errors=True)
+                        provider_environment["TMPDIR"] = provider_temporary.name
+                        atomic_write_contained(run_dir, (attempt_dir / "provider-output.json").relative_to(run_dir),
+                                               (json.dumps({"directory": provider_temporary.name}) + "\n").encode(), label="provider output location")
+                    if git_evidence_requested:
+                        provider_environment.pop("CF_DISPATCH_AGY_ADD_DIR", None)
+                    process = subprocess.Popen(
+                        command,
+                        cwd=workspace,
+                        stdout=adapter_stream,
+                        stderr=stderr_stream,
+                        env=provider_environment,
+                        start_new_session=True,
+                    )
+                    _record_provider_process(run_dir, process)
 
-                # A request can arrive after the provider is spawned but
-                # before Popen returns. Reconcile it before entering the
-                # normal wait loop, preserving natural exit at the boundary.
-                marker_seen = cancellation_marker_present(run_dir, attempt_dir)
-                if batch_dir is not None:
-                    marker_seen = marker_seen or cancellation_marker_present(run_dir, batch_dir)
-                if cancel_pending or marker_seen:
-                    exit_code = process.poll()
-                    if exit_code is None:
-                        cancelled = True
-                        stop_process_group(process)
-                        exit_code = process.wait()
-                        process_error = "cancelled"
-                        observed_exit = True
-                try:
-                    if not observed_exit:
-                        deadline = time.monotonic() + args.timeout_seconds
-                    while not observed_exit:
-                        # Poll first so an already-observed natural exit wins a
-                        # marker race.
+                    # A request can arrive after the provider is spawned but
+                    # before Popen returns. Reconcile it before entering the
+                    # normal wait loop, preserving natural exit at the boundary.
+                    marker_seen = cancellation_marker_present(run_dir, attempt_dir)
+                    if batch_dir is not None:
+                        marker_seen = marker_seen or cancellation_marker_present(run_dir, batch_dir)
+                    if cancel_pending or marker_seen:
                         exit_code = process.poll()
-                        if exit_code is not None:
-                            observed_exit = True
-                            break
-                        if cancel_pending:
+                        if exit_code is None:
+                            cancelled = True
                             stop_process_group(process)
                             exit_code = process.wait()
                             process_error = "cancelled"
                             observed_exit = True
-                            break
-                        marker_seen = cancellation_marker_present(run_dir, attempt_dir)
-                        if batch_dir is not None:
-                            marker_seen = marker_seen or cancellation_marker_present(run_dir, batch_dir)
-                        if marker_seen:
-                            # Re-check before stopping to preserve a natural
-                            # exit that became observable at the boundary.
+                    try:
+                        if not observed_exit:
+                            deadline = time.monotonic() + args.timeout_seconds
+                        while not observed_exit:
+                            # Poll first so an already-observed natural exit wins a
+                            # marker race.
                             exit_code = process.poll()
                             if exit_code is not None:
                                 observed_exit = True
                                 break
-                            stop_process_group(process)
-                            exit_code = process.wait()
-                            process_error = "cancelled"
-                            observed_exit = True
-                            break
-                        remaining = deadline - time.monotonic()
-                        if remaining <= 0:
-                            stop_process_group(process)
-                            exit_code = process.wait()
-                            process_error = "timeout"
-                            observed_exit = True
-                            break
-                        try:
-                            exit_code = process.wait(timeout=min(0.1, remaining))
-                            observed_exit = True
-                            break
-                        except subprocess.TimeoutExpired:
-                            continue
-                        except KeyboardInterrupt:
-                            cancelled = True
-                            stop_process_group(process)
-                            exit_code = process.wait()
-                            observed_exit = True
-                            break
-                finally:
-                    # Signal ownership deliberately remains with this
-                    # dispatch owner through evidence publication below.
-                    pass
-                if cancelled:
-                    process_error = "cancelled"
-    except OSError as exc:
-        process_error = str(exc)
-    finally:
-        release_worktree_lease(worktree_lease)
-        if provider_temporary is not None:
-            provider_temporary.cleanup()
+                            if cancel_pending:
+                                stop_process_group(process)
+                                exit_code = process.wait()
+                                process_error = "cancelled"
+                                observed_exit = True
+                                break
+                            marker_seen = cancellation_marker_present(run_dir, attempt_dir)
+                            if batch_dir is not None:
+                                marker_seen = marker_seen or cancellation_marker_present(run_dir, batch_dir)
+                            if marker_seen:
+                                # Re-check before stopping to preserve a natural
+                                # exit that became observable at the boundary.
+                                exit_code = process.poll()
+                                if exit_code is not None:
+                                    observed_exit = True
+                                    break
+                                stop_process_group(process)
+                                exit_code = process.wait()
+                                process_error = "cancelled"
+                                observed_exit = True
+                                break
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                stop_process_group(process)
+                                exit_code = process.wait()
+                                process_error = "timeout"
+                                observed_exit = True
+                                break
+                            try:
+                                exit_code = process.wait(timeout=min(0.1, remaining))
+                                observed_exit = True
+                                break
+                            except subprocess.TimeoutExpired:
+                                continue
+                            except KeyboardInterrupt:
+                                cancelled = True
+                                stop_process_group(process)
+                                exit_code = process.wait()
+                                observed_exit = True
+                                break
+                    finally:
+                        # Signal ownership deliberately remains with this
+                        # dispatch owner through evidence publication below.
+                        pass
+                    if cancelled:
+                        process_error = "cancelled"
+        except OSError as exc:
+            process_error = str(exc)
+        finally:
+            release_worktree_lease(worktree_lease)
+            if provider_temporary is not None:
+                provider_temporary.cleanup()
 
     finished_at = now()
     duration_seconds = round(time.monotonic() - started, 6)
@@ -1416,7 +1586,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     elif result_invalid:
         status = "failed"
         outcome = "result_invalid_path"
-    elif adapter_status == "timeout":
+    elif adapter_status in {"timeout","timed_out"}:
         # The provider reached its own deadline first, which is what the smaller
         # provider timeout is for.
         status = "timed_out"
@@ -1433,6 +1603,10 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     elif terminal_envelope_error:
         status = "failed"
         outcome = "terminal_envelope_invalid"
+    elif adapter_status == "input_required":
+        question={"code":"needs_input","prompt":adapter.get("question") or "Input required"}
+        status="blocked"
+        outcome="question"
     elif question is not None:
         status = "blocked"
         outcome = "question"
@@ -1534,14 +1708,20 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     remove_cancellation_marker(run_dir, attempt_dir)
     for sig, handler in old_handlers.items():
         signal.signal(sig, handler)
-    output_record = {**record, "attempt_digest": attempt_digest}
+    row = terminal_contract(args,run_dir,record,adapter,attempt_number,attempt_dir)
+    for action in (lambda: write_cooldown(row),lambda: append_index(row,run_dir,root=run_root(Path.cwd())/".agent-run")):
+        try: action()
+        except (OSError,ValueError) as exc: row["warnings"].append("terminal index unavailable: "+str(exc))
+    publish_contract(run_dir,row)
+    args._last_row=row
+    output_record = {**record, "attempt_digest": attempt_digest, "fabric":row, "digest":row["digest"]}
     print(json.dumps(output_record, sort_keys=True))
     return 0 if status == "succeeded" and not manifest_error else 1
 
 
 def close_mcp_run(run_dir: Path) -> None:
     """Close execution custody only; this is not a delivery/assurance final gate."""
-    if not os.environ.get("PROVENANT_RUN_TOKEN") or os.environ.get("PROVENANT_RUN_DIR") != str(run_dir):
+    if run_dir.parent.name != "runs" and (not os.environ.get("PROVENANT_RUN_TOKEN") or os.environ.get("PROVENANT_RUN_DIR") != str(run_dir)):
         return
     try:
         attempts = list((run_dir / "dispatch/tasks").glob("*/attempt-*/attempt.json"))
@@ -1560,11 +1740,41 @@ def close_mcp_run(run_dir: Path) -> None:
             statuses.update(task.get("status", "failed") for task in summary.get("tasks", []))
         if not statuses:
             return
+        canonical=[json.loads(path.read_text()) for path in (run_dir/"tasks").glob("*/attempt-*/attempt.json")]
+        if canonical:
+            latest={}
+            for row in canonical:
+                if row["task_id"] not in latest or row["attempt"]>latest[row["task_id"]]["attempt"]: latest[row["task_id"]]=row
+            receipt["attempts"]=sorted(canonical,key=lambda row:(row["task_id"],row["attempt"]))
+            receipt["run_id"]=canonical[0]["run_id"]
+            receipt["resumable"]=any(row.get("status")=="input_required" for row in latest.values())
+            statuses={"succeeded" if row["status"]=="ok" else row["status"] for row in latest.values()}
         receipt.update(status="succeeded" if statuses == {"succeeded"} else "cancelled" if statuses == {"cancelled"} else "failed",
                        closed_at=now(), terminal_reason=None if statuses == {"succeeded"} else "MCP execution attempts are terminal")
         write_owned(run_dir, run_dir / "RUN_RECEIPT.json", json.dumps(receipt, indent=2) + "\n")
     except (OSError, ValueError, OwnedFileError):
         pass
+
+
+def execute_attempt_sequence(args,custody=None):
+    sequence_start=time.monotonic()
+    sequence_budget=args.timeout_seconds
+    result = _dispatch(args, custody)
+    previous=getattr(args,"_last_row",None)
+    plan=getattr(args,"_last_plan",None)
+    if plan and previous and previous["retryable"] and not args.resume:
+        for candidate in exec_routing.candidates(plan,args.fallback):
+            remaining=sequence_budget-(time.monotonic()-sequence_start)
+            if remaining<=0: break
+            args.timeout_seconds=remaining
+            if exec_routing.cooling(candidate["adapter"],candidate["model"]): continue
+            args.fallback_from={"attempt":previous["attempt"],"status":previous["status"],"route":previous["provenance"]["line"].split(" (",1)[0].removeprefix("Route: ")}
+            args.tool=candidate["adapter"];args.model=candidate["model"];args.effort=candidate.get("effort")
+            args.alias=None;args.task_class=None;args.retry_of=f"attempt-{previous['attempt']:03d}"
+            result=_dispatch(args,custody)
+            previous=getattr(args,"_last_row",None)
+            if not previous or not previous["retryable"]: break
+    return result
 
 
 def dispatch(args: argparse.Namespace) -> int:
@@ -1574,18 +1784,24 @@ def dispatch(args: argparse.Namespace) -> int:
     run_dir = args.run_dir.resolve()
     workspace = Path.cwd().resolve()
     if (
-        args.batch_child
-        or (run_dir != workspace and workspace not in run_dir.parents)
+        not contains_run(run_dir, workspace)
         or not run_dir.is_dir()
         or not (run_dir / "MANIFEST.md").is_file()
     ):
         return _dispatch(args)
+    if args.batch_child:
+        return execute_attempt_sequence(args)
     try:
         custody = acquire_run_custody(run_dir)
     except (OSError, OwnedFileError):
         return fail(run_dir, "run_custody_busy", "another dispatch, batch or finalizer owns the run")
     try:
-        result = _dispatch(args, custody)
+        if args.resume:
+            try: prepare_resume(args)
+            except (OSError,ValueError) as exc: return fail(run_dir,"rejected",str(exc))
+        if not args.tool or not any((args.alias,args.task_class,args.model)):
+            return fail(run_dir,"rejected","adapter and alias or model are required")
+        result = execute_attempt_sequence(args,custody)
         close_mcp_run(run_dir)
         return result
     finally:
@@ -1597,18 +1813,18 @@ def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     root.add_argument("--run-dir", type=Path, required=True)
     root.add_argument("--task-id", default="dispatch-001")
-    adapter = root.add_mutually_exclusive_group(required=True)
+    adapter = root.add_mutually_exclusive_group(required=False)
     adapter.add_argument("--adapter", "--tool", dest="tool")
     prompt = root.add_mutually_exclusive_group(required=True)
     prompt.add_argument("--prompt-file", type=Path)
     prompt.add_argument("--prompt-stdin", action="store_true", help="read the prompt bytes from stdin")
     root.add_argument("--intent", choices=("ordinary", "assurance"), default="ordinary")
     root.add_argument("--orchestrator-family")
-    selector = root.add_mutually_exclusive_group(required=True)
+    selector = root.add_mutually_exclusive_group(required=False)
     selector.add_argument("--alias")
     selector.add_argument("--task-class")
     selector.add_argument("--model")
-    root.add_argument("--role", required=True)
+    root.add_argument("--role", default="worker")
     root.add_argument("--risk-tier")
     root.add_argument(
         "--model-override-tier",
@@ -1637,6 +1853,13 @@ def parser() -> argparse.ArgumentParser:
     )
     root.add_argument("--batch-child", action="store_true", help=argparse.SUPPRESS)
     root.add_argument("--batch-id", help=argparse.SUPPRESS)
+    root.add_argument("--cwd",dest="provider_cwd",type=Path)
+    root.add_argument("--resume", help="resume this run id; inherit route and controls")
+    root.add_argument("--sandbox", choices=("read-only","workspace-write","full"))
+    root.add_argument("--network", choices=("true","false"))
+    root.add_argument("--add-dir", dest="add_dirs", action="append", default=[])
+    root.add_argument("--no-preface", dest="preface", action="store_false")
+    root.add_argument("--fallback", default=None, help="false, true, any, or JSON route list")
     return root
 
 

@@ -674,7 +674,7 @@ def test_nonzero_provider_exit_is_recorded_without_substitution(tmp_path: Path) 
     assert result.returncode != 0
     record = json.loads(result.stdout)
     assert record["status"] == "failed"
-    assert record["failure_code"] == "error"
+    assert record["failure_code"] == "failed"
     assert record["process"]["exit_code"] != 0
     assert record["process"]["observed_exit"] is True
     assert record["route"]["substitution"] == ""
@@ -1800,7 +1800,7 @@ def test_provider_reported_timeout_is_typed_rather_than_an_empty_result(tmp_path
     )
     assert result.returncode != 0
     record = json.loads(result.stdout)
-    assert record["route"]["status"] == "timeout"
+    assert record["route"]["status"] == "timed_out"
     assert record["status"] == "timed_out"
     assert record["failure_code"] == "provider_timeout"
     assert record["process"]["observed_exit"] is True
@@ -2012,10 +2012,9 @@ else:
         command = [str(SCRIPT.with_name('batch_run.py')), '--run-dir', str(run_dir), '--manifest', str(manifest)]
     result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert json.loads(capture.read_text()) == {}
+    assert json.loads(capture.read_text()) == {"PROVENANT_RUN_ID": "mcp-provider"}
     assert (tmp_path / 'provider-instance.txt').read_text() == expected_instance
     assert not (tmp_path / 'chair-state').exists()
     scratch = Path((tmp_path / 'provider-tmp.txt').read_text())
-    assert scratch.name.startswith('fabric-provider-')
-    assert not scratch.exists()
+    assert scratch.is_dir()  # Full provider diagnostics now live in the attempt, not a removed tmp directory.
     assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'succeeded'
