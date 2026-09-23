@@ -2637,3 +2637,11 @@ def test_planner_crash_signal_is_not_an_interruption():
     mod = load_dispatch_module()
     crashed = mod.planner_result(subprocess.CompletedProcess([], -11, stdout="", stderr=""))
     assert crashed["status"] == "failed" and "signal 11" in crashed["fix"]
+
+
+def test_provider_exec_failures_are_not_router_refusals():
+    mod = load_dispatch_module()
+    assert mod.route_refusal({"status": "output_write_error", "provenance": {"line": "Route: x"}}, "codex") is None
+    assert mod.route_refusal({"status": "ok"}, "codex") is None
+    assert mod.route_refusal({"schema": "fabric.exec-plan.v1", "status": "odd"}, "codex") is None
+    assert mod.route_refusal({"status": "unknown_alias"}, "codex")["status"] == "rejected"

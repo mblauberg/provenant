@@ -812,6 +812,14 @@ def planner_result(planning):
         return {"status": "rejected", "fix": "route planner returned invalid JSON"}
 
 
+def route_refusal(record, adapter=""):
+    """A planner refusal in the router's vocabulary; provider-exec records carry provenance."""
+    status = record.get("status")
+    if not status or status in TERMINAL_STATUSES or "provenance" in record or record.get("schema") == "fabric.exec-plan.v1":
+        return None
+    return router_failure(str(status), adapter)
+
+
 def router_failure(signature, adapter=""):
     """Fabric's status and fix for a router refusal; the router's own status stays the signature."""
     if signature in PLANNER_MODEL_STATUSES:
@@ -1296,7 +1304,7 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     elif legacy["status"] in {"cancelled","timed_out"}: status=legacy["status"]
     elif legacy["status"]=="blocked": status="input_required"
     elif legacy["status"]=="succeeded": status="ok"
-    refusal=router_failure(str(status),args.tool) if status not in TERMINAL_STATUSES and adapter.get("schema")!="fabric.exec-plan.v1" and status else None
+    refusal=route_refusal(adapter,args.tool)
     if refusal: status=refusal["status"]
     if status not in TERMINAL_STATUSES: status="failed"
     for field in ("session_id","retryable","reset_at","retry_after","fix","evidence","applied","context","warnings","reaped","spared","provenance","pgid","last_progress_at"):
