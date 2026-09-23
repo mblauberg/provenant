@@ -1125,7 +1125,7 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
             fi
             [ -n "$model" ] && agy_cmd+=(--model "$model")
             [ -n "$effort" ] && agy_cmd+=(--effort "$effort")
-            for agy_dir in "${AGY_ADD_DIRS[@]:-}"; do
+            for agy_dir in ${AGY_ADD_DIRS[@]+"${AGY_ADD_DIRS[@]}"}; do
               [ -n "$agy_dir" ] || continue
               if [ "${agy_dir#/}" = "$agy_dir" ]; then
                 agy_dir="$(CDPATH= cd -- "$agy_dir" 2>/dev/null && pwd -P)" || {

@@ -367,19 +367,18 @@ dispatch is the supported expansion path.
   and stderr activity reset the idle timer.
   The result contains assistant text; full events are in `<output>.raw.jsonl`.
   Never pass `--auto` (which auto-approves permissions).
-- **As an interactive client:** register Fabric MCP for OpenCode
-  (`scripts/configure-fabric-mcp.py --platform opencode` or
-  `install-harness --mcp-clients all`). The client keeps label `opencode` and
-  shares the `codex` seat by design. After registration, a new OpenCode session
-  should list `fabric` via `opencode mcp list`.
+- **As an interactive client:** `install-harness --platform opencode` installs
+  skills, explicit instance/product instructions, and Fabric MCP. The client
+  has its own `opencode` seat and label. A new OpenCode session should list
+  `fabric` via `opencode mcp list`.
 - **Subscription / Zen models:** pass the live slug explicitly; discover with
   `opencode models` after login. Paid catalogue
   changes do not require a Provenant alias-table edit.
 
-Instance installs copy `config/model-routing.json` into
-`~/.agents/config/`. After merging activation, re-run `install-harness` (or
-otherwise refresh the instance catalogue) so dispatch sees OpenCode as
-`implemented` and the OpenRouter endpoint profiles.
+Instance installs seed `config/model-routing.json` and a product snapshot into
+`~/.agents/config/` once. Check-install warns about drift; `--strict` makes it
+fail. Run `install-harness --platform all --refresh-routing` to back up and
+merge product changes with instance edits. Refresh lists overwritten conflicts.
 
 ## Output normalisation
 
