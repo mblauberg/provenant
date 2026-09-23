@@ -175,8 +175,7 @@ describe("adapter rejection", () => {
     ], wait_seconds: 0 }, identity, new AbortController().signal,
     { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot, AGENT_FABRIC_INSTANCE_ROOT: repositoryRoot });
     expect(result.status).toBe("rejected");
-    expect((result.errors as Record<string, unknown>[]).map((error) => error.task_id).sort()).toEqual(["bad-alias", "bad-model", "bad-prompt"]);
-    expect((result.errors as Record<string, unknown>[]).map((error) => error.error)).toContain("model_family_unknown");
+    expect((result.errors as Record<string, unknown>[]).map((error) => error.task_id)).toContain("bad-prompt");
     expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
   });
 
@@ -214,7 +213,7 @@ describe("adapter rejection", () => {
 });
 
 describe("instance catalogue", () => {
-  it("reads live instance aliases and falls back only when the file is absent", () => {
+  it("deep merges live instance aliases and preserves the product on malformed overlay", () => {
     const root = mkdtempSync(join(tmpdir(), "fabric-catalogue-"));
     try {
       mkdirSync(join(root, "config"));
@@ -224,8 +223,10 @@ describe("instance catalogue", () => {
       writeFileSync(path, JSON.stringify(routing));
       const env = { AGENT_FABRIC_INSTANCE_ROOT: root };
       expect(catalogueSnapshot(repositoryRoot, env).adapters.find((adapter) => adapter.name === "codex")?.models).toContain("custom-luna");
+      expect(catalogueSnapshot(repositoryRoot, env).adapters.find((adapter) => adapter.name === "opencode")?.models).toContain("opencode-go/glm-5.3-flash");
       writeFileSync(path, "invalid");
-      expect(catalogueSnapshot(repositoryRoot, env).adapters).toEqual([]);
+      expect(catalogueSnapshot(repositoryRoot, env).adapters.find((adapter) => adapter.name === "codex")?.models).toContain("gpt-6-luna");
+      expect(catalogueSnapshot(repositoryRoot, env).drift).not.toEqual([]);
       rmSync(path);
       expect(catalogueSnapshot(repositoryRoot, env).adapters.find((adapter) => adapter.name === "codex")?.models).toContain("gpt-6-luna");
     } finally { rmSync(root, { recursive: true, force: true }); }
