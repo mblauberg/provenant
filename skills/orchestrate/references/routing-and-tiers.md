@@ -1,81 +1,14 @@
-# Routing & tiers
+# Routing and tiers
 
-> `config/model-routing.json` is the dated machine catalogue; `scripts/model-route`
-> is the policy resolver. This file owns human-readable family/role and
-> degradation policy. `HARNESS.md` keeps only the invariant core.
-> `docs/model-dossier.md` owns what each model is *like* (strengths,
-> weaknesses and cost profile) and the standing model preferences. That dossier
-> is advisory and cannot change what is admissible; this file stays the
-> authority on task class, tier, role, effort and degradation. Neither restates
-> the other.
+The dated source is `config/model-routing.json`; `scripts/model-route snapshot --json` merges the product and per-key user overlay. Read the effective catalogue and health through `fabric_adapters`. `docs/model-dossier.md` explains model strengths and cost, without changing admissibility.
 
-For ordinary provider work, use `fabric_dispatch` or `fabric_batch`: pass a
-prompt, adapter, optional `alias` or `model`, and optional `effort`. A unique
-catalogue model token (for example `luna`) is accepted as an alias; broker
-adapters require an explicit model. `fabric_adapters` reads the instance
-catalogue and lists alias models. Input and route failures are synchronous,
-include a one-line fix, and launch no batch tasks. Writes require
-`mode: worktree_write` and a distinct registered worktree. Timeouts default to
-3600 seconds for reads and 10800 for writes. Wait up to 55 seconds, then use
-`fabric_status` with the unique short `id` from the dispatch response; no id
-lists recent runs. Repeated task or batch IDs select the newest run with a note.
-Infrastructure failures return `preflight_unavailable` and a one-line fix.
+For ordinary provider work, use `fabric_dispatch`: one top-level task or `tasks[]` (1–64, concurrency at most 8). Pass `prompt` or `prompt_file`, optional `adapter`, `model` or `alias`, `effort`, `mode`, `worktree`, and per-run controls. A model shorthand such as `luna`, `sol`, `astra` or `opus` resolves to its owner. A non-tier `alias` is treated as a model with a note. An explicit model wins over a conflicting alias with a note. Unknown models pass through when the provider can run them. Unsupported effort moves to the nearest supported value and the receipt records requested and applied values.
 
-Provider launch strips the chair's `AGENT_FABRIC_STATE_DIRECTORY`,
-`AGENT_FABRIC_SEAT`, `AGENT_FABRIC_CLIENT_LABEL`, `AGENT_FABRIC_LABEL` and
-`AGENT_FABRIC_PRODUCT_ROOT`, plus `PROVENANT_RUN_*` and
-`PROVENANT_PREFLIGHT_*` custody variables. Product-catalogue fallback applies
-only to router subprocesses. Dispatch and batch owners keep their own context;
-workers discover their workspace and identity independently.
-Status is read-only, including liveness and silence reporting. Ordinary MCP
-execution custody closes when its attempts become terminal; delivery gates
-remain separate.
+Writes require an owned registered worktree. Only impossible execution or a hard boundary fails preflight: missing prompt, missing CLI, unowned writer worktree, credential-store exposure or write sandbox on a read-only run. Read-only guarantees vary by adapter and appear in the receipt; `best_effort` and `prompt_only` must not be claimed as enforced.
 
-The resolver's default `--adapter-gate fabric` fails closed when the selected
-fabric adapter is disabled or inactive. Runtime Fabric composition separately
-requires current provider identity and interface conformance. A direct CLI
-executor that owns its own safety and activation gates must opt in explicitly
-with `--adapter-gate direct-cli`; this never bypasses explicit denials, adapter
-capability, path/write/resource limits or external-action gates. It does not
-impose family separation on ordinary execution.
+Take the returned run id and call `fabric_status` with `ids: [id]` and `wait_seconds: 55`. `fabric_output` gives bounded live tails. `fabric_cancel` stops the process group. A worker question yields `input_required`; reply with `fabric_dispatch` using `resume: id` and a new prompt. Terminal digests include the ready-to-paste provenance line. Direct CLI is a degraded path under [direct-cli-fallback.md](direct-cli-fallback.md).
 
-Configured workspace execution is family-agnostic: any configured adapter and
-provider family may perform ordinary authorised work when its capability and
-scope permit it. Family separation is recorded and enforced only when an
-assurance claim requires it. Route receipts retain actual provider/model
-lineage so an assurance claim can be checked rather than inferred.
-
-Route every dispatch by **task class, role, evidence surface, safety requirement,
-and capability tier**. Never route by a memorised model name. Discover current
-model IDs and effort modes at runtime (`cli-headless.md`) and retain the route
-receipt.
-
-| Task class | Bound role | Default tier | Default effort | Typical work |
-|---|---|---|---|---|
-| `mechanical` | worker | scout | low | search, extraction, formatting, deterministic checks |
-| `legwork` | worker | workhorse | medium | ordinary implementation, analysis, drafting, source mapping |
-| `critical-review` | critical-review | flagship | high | hard review, adversarial verification, design judgement |
-| `orchestration` | orchestrator | flagship | high | decomposition, adjudication, synthesis |
-
-`scripts/model-route resolve --task-class ...` is authoritative for these
-defaults. An explicit role override may raise effort; an unavailable effort may
-substitute only when the receipt records requested and effective values. Alias
-routing remains a compatibility surface. Chair inheritance is exceptional: it
-must be explicit and recorded, never inferred from an omitted binding.
-Task-class dispatch rejects mismatched roles and requires a fresh, adapter-bound
-runtime snapshot. Codex snapshots verify model availability and supported effort.
-For Agy, the resolver intersects the fresh `agy models` snapshot with the
-configured preferred-family alias candidates; the shell owns no second model
-catalogue. An unprobed explicit Agy route remains `provider-unverified`, while
-an unprobed task-class route fails closed.
-Account-default transport omits the literal model, so receipts retain policy
-identity. Claude's no-tools, no-session subscription canary verifies the effective
-model and fails closed on the CLI's unknown-effort warning, but cannot observe
-effort. Task-class dispatch admits only the probed effort, marked
-`provider-unverified`; any other effort is rejected. The canary also rejects
-caller-authored source labels without scrubbed provenance.
-Canaries cost a little; reuse them only within the router's five-minute freshness
-window.
+Task class selects `flagship`, `workhorse` or `scout` when no explicit model is chosen. The configured catalogue determines candidates; the receipt is authoritative for the applied route. A cooling explicit model still runs with a warning; alias routes skip cooling candidates. Automatic fallback stays within permitted paid non-training routes unless the caller opts into `fallback: "any"` or an explicit list.
 
 ## Tiers (relative, family-agnostic)
 

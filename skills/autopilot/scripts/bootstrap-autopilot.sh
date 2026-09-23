@@ -16,9 +16,9 @@
 # WHAT IT DOES (two phases, same command, idempotent):
 #
 #   Phase A — SCAFFOLD (first run on an empty/new mission dir):
-#     * create the mission directory under .agent-run/<mission-id>/ by
+#     * create the mission directory under .agent-run/runs/<mission-run-dir>/ by
 #       DEFAULT (a session-owned run location, matching how deliver/implement/
-#       orchestrate store their own .agent-run/<id>/ artifacts) — NEVER inside
+#       orchestrate stores its own .agent-run/runs/ artifacts) — NEVER inside
 #       this skill's own directory.
 #     * copy the skill's templates/ into the mission as the working state
 #       files (README.md, GOAL.md, STATE.md, QUEUE.md, HANDOFF.md). If a
@@ -66,7 +66,7 @@ SKILL_TEMPLATES_DIR="$SKILL_DIR/templates"
 # ---- defaults --------------------------------------------------------------
 MISSION_ID=""
 REPO_ROOT_ARG=""         # optional --repo-root override (advanced/testing only);
-                          # the mission dir is ALWAYS <root>/.agent-run/<MISSION_ID> —
+                          # the mission dir is ALWAYS <root>/.agent-run/runs/<mission-run-dir> —
                           # there is no way to point the mission dir anywhere else.
 DOMAIN_ARG=""            # optional domain name; seeds {{DOMAIN}} knob
 FORCE=false              # --force: re-copy templates over existing files (still warns)
@@ -82,7 +82,7 @@ die()  { err "$*"; exit 2; }
 usage() {
   cat <<EOF
 $PROG — scaffold a fresh autopilot mission state directory under
-.agent-run/<mission-id>/, then substitute the domain CONFIG KNOBS.
+.agent-run/runs/<mission-run-dir>/, then substitute the domain CONFIG KNOBS.
 Idempotent and non-clobbering. Never writes inside the skill directory.
 
 USAGE:
@@ -93,7 +93,7 @@ ARGUMENTS:
   MISSION_ID        (required) Short identifier for this mission. Must be a
                      path-safe slug: letters, digits, '.', '_', '-' only; no
                      '/', no leading '.', no '..'. Target directory is ALWAYS
-                     <repo-root>/.agent-run/<MISSION_ID>/ — no flag can point
+                     <repo-root>/.agent-run/runs/<mission-run-dir>/ — no flag can point
                      the mission dir anywhere else.
   DOMAIN             (optional) One-line domain name; seeds the {{DOMAIN}}
                      knob in GOAL.md on first scaffold.
@@ -102,7 +102,7 @@ OPTIONS:
   --id ID           Alternative to the positional MISSION_ID.
   --repo-root PATH  Override the detected repository/session root (advanced
                      use only — mainly for tests). The mission dir is still
-                     always <PATH>/.agent-run/<MISSION_ID>/; this only moves
+                     always <PATH>/.agent-run/runs/<mission-run-dir>/; this only moves
                      where that anchor sits, it cannot escape it.
   --domain TEXT     Alternative to the positional DOMAIN.
   --force           Re-copy templates over existing mission files (still
@@ -113,8 +113,8 @@ OPTIONS:
   -h, --help        Show this help.
 
 TWO-PHASE WORKFLOW (same command, run it twice):
-  1) $PROG my-mission "my domain"        # scaffolds .agent-run/my-mission/
-  2) edit .agent-run/my-mission/GOAL.md  # fill the CONFIG KNOBS block (only
+  1) $PROG my-mission "my domain"        # scaffolds .agent-run/runs/<mission-run-dir>/
+  2) edit .agent-run/runs/<mission-run-dir>/GOAL.md  # fill CONFIG KNOBS (only
                                           #   file you must edit: {{MISSION}},
                                           #   {{LOCKED_CONSTRAINTS}},
                                           #   {{BUILD_CEILING}},
@@ -123,7 +123,7 @@ TWO-PHASE WORKFLOW (same command, run it twice):
                                           #   you left unfilled
 
 WHAT IT CREATES:
-  .agent-run/<MISSION_ID>/
+  .agent-run/runs/<mission-run-dir>/
     README.md   single human entry point
     GOAL.md     human-owned: mission + STATUS:RUN/STOP gate + knobs
     STATE.md    heartbeat / recover-after-compaction anchor (empty)
@@ -131,7 +131,7 @@ WHAT IT CREATES:
     HANDOFF.md  capstone synthesis stub
 
   Nothing is ever written inside this skill's own directory, and nothing is
-  ever written outside <repo-root>/.agent-run/<MISSION_ID>/ — that directory
+  ever written outside <repo-root>/.agent-run/runs/<mission-run-dir>/ — that directory
   is the ONLY write location this script has. The repo root is the enclosing
   git repository's toplevel (matching how skills/session's context_audit.py
   and skills/orchestrate's run_dir_init.sh anchor their own .agent-run/
@@ -188,7 +188,7 @@ done
 [ -n "$MISSION_ID" ] || die "a mission id is required (try --help)"
 
 # ---- validate the mission id as a path-safe slug ---------------------------
-# .agent-run/<mission-id>/ must be the ONLY write location this script has.
+# The mission directory under .agent-run/runs/ is the owned write location.
 # A mission id is concatenated directly into that path, so it must never be
 # able to add a path separator or a traversal segment.
 case "$MISSION_ID" in
@@ -216,14 +216,50 @@ else
   REPO_ROOT="$(pwd -P)"
   warn "no git repo detected: anchoring .agent-run/ to the current directory ($REPO_ROOT)."
 fi
+if COMMON_DIR="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)"; then
+  if [ "$(basename "$COMMON_DIR")" = ".git" ]; then
+    REPO_ROOT="$(cd "$(dirname "$COMMON_DIR")" && pwd -P)"
+  fi
+fi
 
-# ---- build the mission dir under .agent-run/ ONLY ---------------------------
+# ---- build the mission dir under .agent-run/runs/ ONLY ----------------------
 AGENT_RUN_ROOT="$REPO_ROOT/.agent-run"
 [ -L "$AGENT_RUN_ROOT" ] && die "refusing: $AGENT_RUN_ROOT is a symlink"
 [ -e "$AGENT_RUN_ROOT" ] && [ ! -d "$AGENT_RUN_ROOT" ] && die "refusing: $AGENT_RUN_ROOT exists and is not a directory"
-
-MISSION_DIR="$AGENT_RUN_ROOT/$MISSION_ID"
+RUNS_ROOT="$AGENT_RUN_ROOT/runs"
+[ -L "$RUNS_ROOT" ] && die "refusing: $RUNS_ROOT is a symlink"
+[ -e "$RUNS_ROOT" ] && [ ! -d "$RUNS_ROOT" ] && die "refusing: $RUNS_ROOT exists and is not a directory"
+MISSION_SLUG="$(printf '%s' "$MISSION_ID" | tr '[:upper:]' '[:lower:]' | tr '._' '--' | cut -c1-32)"
+MISSION_DIR=""
+# One-release legacy fallback: an existing mission stays at its original path.
+if [ -f "$AGENT_RUN_ROOT/$MISSION_ID/GOAL.md" ]; then
+  MISSION_DIR="$AGENT_RUN_ROOT/$MISSION_ID"
+else
+  for candidate in "$RUNS_ROOT"/*-mission-"$MISSION_SLUG"-??????; do
+    [ -f "$candidate/GOAL.md" ] || continue
+    [ -f "$candidate/.mission-id" ] || continue
+    candidate_id=""
+    IFS= read -r candidate_id < "$candidate/.mission-id" || true
+    [ "$candidate_id" = "$MISSION_ID" ] || continue
+    [ -z "$MISSION_DIR" ] || die "multiple missions match $MISSION_ID; select one by path"
+    MISSION_DIR="$candidate"
+  done
+fi
+if [ -z "$MISSION_DIR" ]; then
+  MISSION_SUFFIX="$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
+  MISSION_DIR="$RUNS_ROOT/$(date -u +%Y%m%d-%H%M)-mission-$MISSION_SLUG-$MISSION_SUFFIX"
+fi
 [ -L "$MISSION_DIR" ] && die "refusing: mission path is a symlink: $MISSION_DIR"
+SCRATCH_ROOT="$AGENT_RUN_ROOT/scratch"
+if [ "$DRY_RUN" != true ]; then
+  mkdir -p "$SCRATCH_ROOT"
+  if git -C "$REPO_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    COMMON_DIR="$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir)"
+    EXCLUDE_FILE="$COMMON_DIR/info/exclude"
+    mkdir -p "$(dirname "$EXCLUDE_FILE")"
+    grep -Fxq '/.agent-run/' "$EXCLUDE_FILE" 2>/dev/null || printf '\n/.agent-run/\n' >> "$EXCLUDE_FILE"
+  fi
+fi
 
 # ---- dry-run executor ------------------------------------------------------
 # Every filesystem mutation routes through these so --dry-run is honoured in
@@ -277,14 +313,17 @@ if [ -d "$MISSION_DIR" ]; then
   MISSION="$(cd "$MISSION_DIR" && pwd -P)"
   # Boundary check: reject any path escape (e.g. a symlink swapped in after
   # the earlier -L check, or an unexpected resolution) — the physically
-  # resolved mission dir must land EXACTLY on <repo-root>/.agent-run/<id>.
+  # resolved mission dir must land EXACTLY on its chosen canonical or legacy path.
   if [ "$MISSION" != "$AGENT_RUN_ROOT/$MISSION_ID" ]; then
-    die "refusing: resolved mission path escaped the .agent-run/ boundary: $MISSION"
+    if [ "$MISSION" != "$MISSION_DIR" ]; then
+      die "refusing: resolved mission path escaped the .agent-run/ boundary: $MISSION"
+    fi
   fi
 else
   # DRY-RUN with nothing created yet: report the path that WOULD be used.
-  MISSION="$AGENT_RUN_ROOT/$MISSION_ID"
+  MISSION="$MISSION_DIR"
 fi
+printf '%s\n' "$MISSION_ID" | do_write "$MISSION/.mission-id"
 
 # Detect whether this is a first scaffold or a re-run (GOAL.md present already).
 RERUN=false
@@ -439,7 +478,7 @@ install_file "README.md"   "README.template.md"   gen_readme
 if [ -n "$DOMAIN_ARG" ] && [ -f "$MISSION/GOAL.md" ] && [ "$DRY_RUN" != true ]; then
   if grep -qE '^[[:space:]]*DOMAIN[[:space:]]*=[[:space:]]*\{\{DOMAIN\}\}[[:space:]]*$' "$MISSION/GOAL.md"; then
     esc_dom="$(printf '%s' "$DOMAIN_ARG" | sed -e 's/[&\\|]/\\&/g')"
-    tmpg="$(mktemp 2>/dev/null || echo "/tmp/bootstrap-autopilot.goal.$$")"
+    tmpg="$(mktemp "$SCRATCH_ROOT/bootstrap-autopilot.goal.XXXXXX")"
     sed -e "s|^\([[:space:]]*DOMAIN[[:space:]]*=[[:space:]]*\){{DOMAIN}}[[:space:]]*\$|\1$esc_dom|" \
       "$MISSION/GOAL.md" > "$tmpg" && cat "$tmpg" > "$MISSION/GOAL.md" && rm -f "$tmpg"
     note "  seeded DOMAIN knob in GOAL.md = $DOMAIN_ARG"
@@ -489,7 +528,7 @@ else
     KNOBS_FILLED=false
   fi
 
-  SED_PROG="$(mktemp 2>/dev/null || echo "/tmp/bootstrap-autopilot.sed.$$")"
+  if [ "$DRY_RUN" = true ]; then SED_PROG=/dev/null; else SED_PROG="$(mktemp "$SCRATCH_ROOT/bootstrap-autopilot.sed.XXXXXX")"; fi
   : > "$SED_PROG"
   printf '%s\n' "$KNOB_PAIRS" | while IFS="$(printf '\t')" read -r k v; do
     [ -n "$k" ] || continue
@@ -528,7 +567,7 @@ else
       if [ "$DRY_RUN" = true ]; then
         note "  [dry-run] would substitute knobs in $t"
       else
-        tmp="$(mktemp 2>/dev/null || echo "/tmp/bootstrap-autopilot.$$.$(basename "$t")")"
+        tmp="$(mktemp "$SCRATCH_ROOT/bootstrap-autopilot.$(basename "$t").XXXXXX")"
         sed -f "$SED_PROG" "$tf" > "$tmp" && cat "$tmp" > "$tf" && rm -f "$tmp"
         note "  substituted knobs in $t"
       fi
@@ -536,13 +575,13 @@ else
   else
     note "  (no filled knobs to substitute yet)"
   fi
-  rm -f "$SED_PROG"
+  [ "$DRY_RUN" = true ] || rm -f "$SED_PROG"
 fi
 
 # ---- placeholder canary: report any {{...}} still left behind ---------------
 note ""
 note "[3/3] scanning for unsubstituted {{...}} placeholders"
-LEFTOVER_FILE="$(mktemp 2>/dev/null || echo "/tmp/bootstrap-autopilot.leftover.$$")"
+if [ "$DRY_RUN" = true ]; then LEFTOVER_FILE=/dev/null; else LEFTOVER_FILE="$(mktemp "$SCRATCH_ROOT/bootstrap-autopilot.leftover.XXXXXX")"; fi
 : > "$LEFTOVER_FILE"
 SCAN_TARGETS="README.md STATE.md HANDOFF.md QUEUE.md"
 for t in $SCAN_TARGETS; do
@@ -599,7 +638,7 @@ note "                   bounded waves + model routing -> orchestrate"
 if [ "$DRY_RUN" = true ]; then
   note "  mode:            DRY-RUN — nothing was changed."
   note "=============================================================="
-  rm -f "$LEFTOVER_FILE"
+  [ "$DRY_RUN" = true ] || rm -f "$LEFTOVER_FILE"
   exit 0
 fi
 

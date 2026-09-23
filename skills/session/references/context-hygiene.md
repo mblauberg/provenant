@@ -125,7 +125,12 @@ current claim -> owner -> evidence in at most three hops.
 
 ## Cleanup and retention
 
-At closure, classify every run artifact:
+At closure, run `provenant clean` to classify run artifacts under
+`.agent-run/runs/`, sessions and scratch. The command prints a dry-run plan and
+requires `--apply --plan <digest>` to remove eligible paths. Legacy flat
+`.agent-run/` and `.work/wf/` paths remain visible for triage.
+
+For durable context, classify every run artifact:
 
 - **graduate** durable conclusions into their existing owner;
 - **retain** the minimal manifest, synthesis, verification and failure receipts;

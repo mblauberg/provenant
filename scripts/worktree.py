@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -493,6 +494,12 @@ def verify_claim(
 
 
 def ensure_shared_root(root: Path) -> Path:
+    helper = Path(__file__).resolve().parent.parent / "skills" / "_shared" / "excludes.py"
+    spec = importlib.util.spec_from_file_location("provenant_excludes", helper)
+    if spec is None or spec.loader is None:
+        raise PolicyError("cannot load repository-local exclude writer")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
     shared = root / ".worktrees"
     if shared.is_symlink():
         raise PolicyError(".worktrees must be a real directory, not a symlink")
@@ -503,14 +510,10 @@ def ensure_shared_root(root: Path) -> Path:
     if not shared.is_dir():
         raise PolicyError(".worktrees is not a directory")
 
-    exclude = common_git_dir(root) / "info" / "exclude"
-    exclude.parent.mkdir(parents=True, exist_ok=True)
-    existing = exclude.read_text(errors="replace").splitlines() if exclude.exists() else []
-    if IGNORE_RULE not in existing:
-        with exclude.open("a") as handle:
-            if exclude.stat().st_size:
-                handle.write("\n")
-            handle.write(IGNORE_RULE + "\n")
+    try:
+        module.write_exclude_rules(common_git_dir(root), IGNORE_RULE, "/.agent-run/", "/.work/")
+    except (OSError, ValueError) as exc:
+        raise PolicyError(f"cannot write repository-local exclude rules: {exc}") from exc
     probe = git(root, "check-ignore", "--no-index", ".worktrees/.probe", check=False)
     if probe.returncode != 0:
         raise PolicyError("failed to protect .worktrees with a repository-local ignore rule")
@@ -520,6 +523,17 @@ def ensure_shared_root(root: Path) -> Path:
 def create(args: argparse.Namespace) -> dict[str, object]:
     if not args.human_authorised:
         raise PolicyError("creating a worktree requires explicit human authorisation")
+    requested_branch = args.existing_branch or args.new_branch
+    if args.name is None:
+        if requested_branch is None:
+            raise PolicyError("detached worktrees require a name")
+        args.name = requested_branch.replace("/", "-")
+    elif requested_branch is not None and args.name != requested_branch.replace("/", "-"):
+        print(
+            f"worktree policy: name {args.name!r} differs from branch-derived "
+            f"{requested_branch.replace('/', '-')!r}; clean may need triage",
+            file=sys.stderr,
+        )
     validate_name(args.name)
     root = primary_root(args.repo)
     shared = ensure_shared_root(root)
@@ -660,7 +674,7 @@ def parser() -> argparse.ArgumentParser:
     sub = result.add_subparsers(dest="command", required=True)
 
     create_parser = sub.add_parser("create")
-    create_parser.add_argument("name")
+    create_parser.add_argument("name", nargs="?", help="defaults to the branch name with / replaced by -")
     create_parser.add_argument("--repo", type=Path, default=Path.cwd())
     create_parser.add_argument("--human-authorised", action="store_true")
     create_parser.add_argument("--branch-authorised", action="store_true")

@@ -37,8 +37,7 @@ project uses them. Do not assume a custom agent exists; discover current tools a
   not assume an entitlement exists.
 - Use Codex native subagents for same-harness fan-out. Do not use `codex exec` as a substitute for
   Codex subagents inside Codex.
-- Use `codex exec -s read-only --ephemeral` as a noninteractive verifier only when the orchestrator is
-  another family.
+- Use `fabric_dispatch` for an external Codex verifier when Fabric is available; direct `codex exec` is the degraded path.
 - Under `-s read-only`, a synthesis written via `apply_patch` is rejected. Analysis and report
   workers use `-o <path>` to persist the final message directly outside the sandbox. Because
   `-o` saves the final message and nothing else, a brief that demotes that message to a
@@ -111,7 +110,7 @@ When that surface is unavailable, record the pending decision in the run
 checkpoint and end the turn. Resume only after the user's answer arrives.
 Subagent status and workflow progress never stand in for user approval.
 
-GPT-5.6 Programmatic Tool Calling is a separate Responses API substrate for
+Responses API Programmatic Tool Calling is a separate Responses API substrate for
 bounded, tool-heavy stages with predictable data flow. It can run generated
 JavaScript in OpenAI's hosted runtime, but it is not Claude workflow JavaScript
 and should not absorb semantic review, approval-sensitive writes or user gates.

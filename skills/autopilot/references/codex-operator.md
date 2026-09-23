@@ -7,7 +7,7 @@ wiring differ. Everything in `operating-loop.md`, `state-contract.md`, and
 `recovery-and-cadence.md` applies unchanged.
 
 **Do not pass Claude workflow JavaScript to Codex.** Codex has no Claude
-`Workflow()` runtime, `/loop`, ScheduleWakeup or Stop hook. An eligible GPT-5.6
+`Workflow()` runtime, `/loop`, ScheduleWakeup or Stop hook. An eligible `gpt-6-astra`
 lead at `ultra` can proactively coordinate native subagents and therefore run
 the same portable workflow graph adaptively; lower efforts use explicit waves.
 The external driver still owns cross-session re-invocation and the STOP gate.
@@ -33,7 +33,7 @@ artifact and reduction contracts; proactive delegation does not widen authority.
 ## The external loop driver
 
 The Codex equivalent of Stop-hook-plus-`/loop`. Run it from the mission root
-(`.agent-run/<mission-id>/`); steer and stop exactly as on Claude Code — edit
+(`.agent-run/runs/<mission-run-dir>/`); steer and stop exactly as on Claude Code — edit
 `GOAL.md` directives, set `STATUS: STOP`.
 
 ```sh

@@ -106,8 +106,10 @@ consolidator exists to take the second and refuse the first.
 
 ## Procedure
 
+When Fabric is available, use `fabric_dispatch` with `adapter: "agy"`; the direct procedure below is a degraded path. Create `.agent-run/scratch/` before writing prompts.
+
 **1. Establish the source.** Either the caller gives a path, or it gives a passage inline. For an
-inline passage, write it verbatim to `${TMPDIR:-/tmp}/style-<slug>-source.md` with the Write tool.
+inline passage, write it verbatim to `.agent-run/scratch/style-<slug>-source.md` with the Write tool.
 Choose a `<slug>` that is unique to this task, because concurrent lanes otherwise collide on
 identical filenames and feed each other the wrong text.
 
@@ -128,8 +130,8 @@ substance constraint, the instruction not to touch the source, and the ledger re
 **3. Dispatch in the FOREGROUND and let the call block.**
 
 ```
-agy --sandbox --model <MODEL> -p "$(cat ${TMPDIR:-/tmp}/style-<slug>-prompt.txt)" \
-  > ${TMPDIR:-/tmp}/style-<slug>-transcript.txt 2>&1
+agy --sandbox --model <MODEL> -p "$(cat .agent-run/scratch/style-<slug>-prompt.txt)" \
+  > .agent-run/scratch/style-<slug>-transcript.txt 2>&1
 ```
 
 Issue every such call as a single Bash call with `timeout: 600000` and **without**
@@ -147,7 +149,7 @@ for a stalled one.
 1. Issue the specialist calls **in parallel**, as separate Bash calls in a single message so they
    run concurrently. Each gets one lens, the instruction to look only through that lens, and
    `Return FINDINGS ONLY, each quoting the exact text it touches. Do NOT write a rewritten
-   version.` Each writes to `${TMPDIR:-/tmp}/style-<slug>-lens-<lens>.md`. **The slug must be
+   version.` Each writes to `.agent-run/scratch/style-<slug>-lens-<lens>.md`. **The slug must be
    unique to the lens as well as the task**, because concurrent calls otherwise overwrite each
    other's output and you will consolidate the wrong findings without noticing.
 2. Wait for all of them. Check each findings file is non-empty before continuing; a lens that
@@ -164,7 +166,7 @@ alone.** The adapter's evaluation test pins that shape. Judge it from the artefa
 file exists, is non-empty, is not a restatement of the prompt, and the source checksum is
 unchanged.
 
-Raw `agy` is correct here, rather than `cf_dispatch.sh` as the sibling reviewer uses. That
+Raw `agy` is the direct fallback here when Fabric is unavailable. That
 dispatcher exists because a denied tool looks like success when you are judging a text answer.
 You are not judging a text answer: you are judging files on disk and a checksum, which catches
 the same failure directly.
@@ -222,13 +224,12 @@ agy models
 That prints the currently available identifiers. On 2026-09-04 they were
 `gemini-3.8-flash-{high,medium,low}`, `gemini-3.7-flash-{high,medium,low}`,
 `gemini-3.6-flash-{high,medium,low}` and
-`gemini-3.1-pro-{high,low}`, with the effort baked into the identifier. A bare
+`gemini-3.1-pro-{high,low}` as accepted IDs, not preferred candidates, with the effort baked into the identifier. A bare
 `gemini-3.8-flash` is valid only when `--effort` is passed alongside it.
 
 Default to `gemini-3.8-flash-high`. Style work is judgement, not lookup, and the flash tier at high
 effort is where Gemini's prose quality actually shows. Drop to `medium` only for short, mechanical
-passages. Use `gemini-3.1-pro-high` when the register carries legal or regulatory risk and the
-consolidating call has to adjudicate conflicting lenses.
+passages. Use `gemini-3.8-flash-high` for legal or regulatory register work and conflicting lenses.
 
 `agy models` also lists non-Gemini models, including Anthropic and GPT-OSS identifiers. **Never
 select one.** The entire purpose of this agent is prose from outside the Claude family, so routing

@@ -32,7 +32,7 @@ non-empty transcript. A report without a transcript path did not dispatch, and t
 Compose the full task for Codex. It has no context beyond what you give it, so restate the
 objective, the repo path, what to read, what to produce and the exact output format. Add:
 `READ-ONLY. Do not edit any file.` Write it with the Write tool to
-`${TMPDIR:-/tmp}/codex-<slug>-prompt.txt`.
+`.agent-run/scratch/codex-<slug>-prompt.txt`.
 
 **`<slug>` must be unique to this dispatch, not derived from the task.** A slug taken from the
 branch or the subject collides whenever two dispatches run at once, and the collision is silent:
@@ -70,10 +70,10 @@ the repository.` in the prompt.
 
 ```
 codex exec -s read-only -C <ABSOLUTE_DIR> \
-  -o ${TMPDIR:-/tmp}/codex-<slug>-report.md -m gpt-6-luna \
+  -o .agent-run/scratch/codex-<slug>-report.md -m gpt-6-luna \
   -c 'service_tier="default"' -c 'model_reasoning_effort="high"' - \
-  < ${TMPDIR:-/tmp}/codex-<slug>-prompt.txt \
-  > ${TMPDIR:-/tmp}/codex-<slug>-transcript.txt 2>&1
+  < .agent-run/scratch/codex-<slug>-prompt.txt \
+  > .agent-run/scratch/codex-<slug>-transcript.txt 2>&1
 ```
 
 `-s read-only` enforces that the run writes nothing, anywhere. It is a write boundary, not a
@@ -103,13 +103,13 @@ in `worker.pid`, its own wrapper in `wrapper.pid`, writes output to the owned
 `run_dir/done`:
 
 ```
-run_dir=${TMPDIR:-/tmp}/codex-<unique-slug>
+run_dir=.agent-run/scratch/codex-<unique-slug>
 "$(provenant root)/skills/orchestrate/scripts/run_worker_detached.sh" \
   --run-dir "$run_dir" -- \
   codex exec -s read-only -C <ABSOLUTE_DIR> \
-    -o ${TMPDIR:-/tmp}/codex-<slug>-report.md -m gpt-6-luna \
+    -o .agent-run/scratch/codex-<slug>-report.md -m gpt-6-luna \
     -c 'service_tier="default"' -c 'model_reasoning_effort="high"' - \
-    < ${TMPDIR:-/tmp}/codex-<slug>-prompt.txt &
+    < .agent-run/scratch/codex-<slug>-prompt.txt &
 WRAPPER_PID=$!
 wait "$WRAPPER_PID"
 STATUS=$?
@@ -202,7 +202,7 @@ reconstruct, infer or guess what the run would have concluded. A fabricated revi
 worse than an honest failure.
 
 **4. Read the report file, not the transcript.** Once Codex has exited, read
-`${TMPDIR:-/tmp}/codex-<slug>-report.md`. That file is bounded and holds the answer.
+`.agent-run/scratch/codex-<slug>-report.md`. That file is bounded and holds the answer.
 
 **Do not read the transcript.** Not directly, not 200 lines of it, not "just to check". It
 contains the full reasoning trace, and reading it charges Claude for thinking that Codex has
@@ -222,13 +222,13 @@ possible without spending the tokens now.
 
 The catalogue in `config/model-routing.json` is the authority, and the names
 below are its openai block as of 2026-09-10. When `provenant` is on the path,
-ask it rather than typing a name. The resolver fails closed without a fresh
+ask it rather than typing a name. Direct CLI fallback needs a fresh
 capability snapshot, so take one first:
 
 ```
-provenant capabilities codex --out ${TMPDIR:-/tmp}/codex-caps.json
+provenant capabilities codex --out .agent-run/scratch/codex-caps.json
 provenant route resolve --adapter codex --role worker --task-class legwork \
-  --capabilities-file ${TMPDIR:-/tmp}/codex-caps.json
+  --capabilities-file .agent-run/scratch/codex-caps.json
 ```
 
 Use `--task-class mechanical`, or `--role critical-review --task-class

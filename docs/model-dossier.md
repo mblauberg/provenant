@@ -299,8 +299,7 @@ chair's job.
 changes.** It is chosen for voice, not for reasoning. Use it to make prose read
 naturally; do not hand it the logic. `gemini-3.8-flash` is the default across
 every Gemini alias: it is cheap, genuinely a different family for cross-family
-review legs, and reachable at `-high`, `-medium` and `-low`. Reserve
-`gemini-3.1-pro-high` for registers carrying legal or regulatory risk.
+review legs, and reachable at `-high`, `-medium` and `-low`. Use `gemini-3.8-flash-high` for registers carrying legal or regulatory risk as well.
 
 **Critical review has no fixed family.** The cross-family obligation is relative
 to whoever chairs the run, so the right second family depends on the first. Do

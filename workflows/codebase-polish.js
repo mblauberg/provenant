@@ -37,7 +37,7 @@
 // before dispatch; when it is null the agent relies on the chain failing over to cursor
 // (which has no git requirement). Fail-over codex -> cursor -> agy (advisory scout) is
 // expressed in --chain; on total failure record CROSS-FAMILY-NOT-RUN. Per the orchestrate
-// skill's cli-headless data-policy doctrine, the slice
+// skill's direct-cli-fallback disclosure guidance, the slice
 // content is disclosed to the external provider, so the host data policy is checked first.
 
 export const meta = {
@@ -251,6 +251,9 @@ const runId = __args.runId || 'codebase-polish-run'
 if (slice === '.') {
   log('⚠️ slice resolved to "." — FULL-REPO sweep (expensive). Pass args.path for a sub-slice. Continuing.')
 }
+// Workflow capsules keep the legacy .work/wf location. The bootstrap agent adds
+// /.work/ to the repository-local Git exclude file; provenant clean treats it
+// as legacy triage until the workflow writer moves to canonical runs/.
 // run dir lives under the WORKSPACE/repo-root .work/ (transient scratch); per-doctrine the
 // SCRIPT cannot touch the FS, so a bootstrap agent resolves the root and creates it. The hint
 // is a RELATIVE suffix only — the agent must anchor it at the resolved root, not blindly at
@@ -277,6 +280,7 @@ const recon = await agent(
     `   from the slice; if the slice is non-git, walk up for a workspace marker (AGENTS.md / CLAUDE.md / .git / package.json) and use that dir. Then anchor the run dir at <root>/${runDirHintSuffix} — do NOT create it blindly under the current cwd (cwd may be a sub-package, which mis-places .work/).`,
     `1. Create the run dir by running: "$(provenant root)/skills/orchestrate/scripts/run_dir_init.sh" "<root>/${runDirHintSuffix}"`,
     '   (it prints the resolved absolute path; if the script is missing, mkdir -p the dir and its findings/ crossfamily/ traces/ patches/ subdirs and a MANIFEST.md). Also ensure a patches/ subdir exists.',
+    '   In a Git repository, ensure /.work/ is present once in <git-common-dir>/info/exclude; do not edit tracked .gitignore.',
     '2. DISCOVER conventions AT RUNTIME — do not assume any project layout:',
     '   - lint/format/typecheck/test commands: read Makefile targets, AGENTS.md / CLAUDE.md validation sections, and package.json scripts. Capture the EXACT narrowest commands.',
     '   - design system: look for a design-system/ dir, design tokens, or a *-design skill. If present, capture its tokens path + one-line rules to honour.',
@@ -407,7 +411,7 @@ const reviewStage = (cand, _orig, _i) => parallel([
     () => agent(
       [
         `Cross-family reviewer for candidate ${cand.id}. Dispatch a DIFFERENT-family model at a DIFFERENT angle (side effects, hidden callers, behaviour drift the Claude reviewer may miss).`,
-        `DATA POLICY (the orchestrate skill's cli-headless data-policy doctrine): cf_dispatch discloses the slice content (${cand.file} excerpt) to an EXTERNAL provider. Before dispatching, confirm the host project's data policy permits disclosing this slice. If disclosure is NOT authorised, do NOT dispatch: set crossFamilyRan=false and notRunReason="CROSS-FAMILY-NOT-RUN: data-policy-withheld", and stop.`,
+        `DATA POLICY (the orchestrate skill's direct-cli-fallback disclosure guidance): cf_dispatch discloses the slice content (${cand.file} excerpt) to an EXTERNAL provider. Before dispatching, confirm the host project's data policy permits disclosing this slice. If disclosure is NOT authorised, do NOT dispatch: set crossFamilyRan=false and notRunReason="CROSS-FAMILY-NOT-RUN: data-policy-withheld", and stop.`,
         `Write the review prompt (problem, file, locator, the proposed fix to scrutinise) to ${runDir}/crossfamily/${cand.id}.prompt.`,
         recon.gitCwd
           ? `cwd: codex (exec -s read-only) refuses non-git dirs, and cf_dispatch does NOT forward any git-skip flag — so FIRST cd "${recon.gitCwd}" (a git dir) before invoking the dispatcher, then run from there.`

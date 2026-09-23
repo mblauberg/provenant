@@ -163,6 +163,6 @@ itself rather than an independent join.
 This contract does not prescribe a topology (single chair, paired-primary, or
 a run-until-STOP lab loop — see `paired-primary.md` and `autopilot`),
 a specific model/tier (`routing-and-tiers.md`), or a specific cross-family
-dispatcher (`cli-headless.md`). It fixes only the stage/gate/recovery shape
+dispatcher (`direct-cli-fallback.md`). It fixes only the stage/gate/recovery shape
 every adapter must realise, so an external consumer can depend on the shape
 without depending on one substrate's syntax.
