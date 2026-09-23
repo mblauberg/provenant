@@ -1269,7 +1269,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     family=route.get("model_family") or "unknown"
     label=args.tool+"/"+model+("@"+effort if effort else "")
     identity="resolved" if model else "unknown"
-    provenance={"requested":{"adapter":args.tool,"alias":"" if args.model else args.alias or "","model":args.model,"effort":args.effort},
+    provenance={"requested":{"adapter":args.tool,"alias":"" if args.model and not getattr(args,"alias_supplied",True) else args.alias or "","model":args.model,"effort":args.effort},
         "resolved_model":model,"observed_model":None,"observed_source":None,"identity":identity,
         "provider":route.get("endpoint_provider") or args.tool,"transport":args.tool,"family":family,
         "effort_requested":args.effort,"effort_applied":effort,"cli_version":route.get("cli_version"),

@@ -227,13 +227,25 @@ def test_batch_preflight_does_not_invent_an_explicit_alias_for_model_routes(tmp_
 def test_explicit_model_receipt_does_not_record_an_implied_alias(tmp_path):
     mod = load_dispatch_module()
     args = SimpleNamespace(
-        tool="opencode", alias="flagship", model="mimo", effort=None,
+        tool="opencode", alias="flagship", model="mimo", alias_supplied=False, effort=None,
         task_id="dispatch-001", access_mode="read_only", worktree=None,
         _phase_timings={}, reviewer_id=None, risk_tier=None,
         model_override_tier=None,
     )
     row = mod.contract_row(args, tmp_path, 1, tmp_path / "attempt", {}, "now")
     assert row["provenance"]["requested"]["alias"] == ""
+
+
+def test_explicit_model_and_alias_are_both_recorded_in_receipt(tmp_path):
+    mod = load_dispatch_module()
+    args = SimpleNamespace(
+        tool="opencode", alias="workhorse", model="gpt-6-luna", alias_supplied=True,
+        effort=None, task_id="dispatch-001", access_mode="read_only", worktree=None,
+        _phase_timings={}, reviewer_id=None, risk_tier=None,
+        model_override_tier=None,
+    )
+    row = mod.contract_row(args, tmp_path, 1, tmp_path / "attempt", {}, "now")
+    assert row["provenance"]["requested"]["alias"] == "workhorse"
 
 
 def test_agy_git_evidence_is_copied_into_attempt_and_bound_to_prompt(tmp_path: Path, monkeypatch) -> None:
