@@ -993,8 +993,7 @@ def resolve_effort(
         capability_source = "runtime-model-catalog"
     elif args.capability_models and model.lower() not in args.capability_models:
         return None, "", "capability_model_unavailable", "runtime-model-catalog"
-    # A model the registry gives no effort control is sent none: warn, don't block.
-    # An endpoint route (transport forced to none below) keeps its explicit refusal.
+    # A model with no effort control is sent none: warn, don't block.
     if args.effort_transport != "none" and _no_effort_control(registered):
         return "", _effort_ignored(requested_effort, model), "", "registry-no-effort-control"
 
@@ -1035,7 +1034,7 @@ def resolve_effort(
         return derived, substitution, "", "model-id" if derived else "model-id-unresolved"
     if args.effort_transport == "none":
         if args.effort:
-            return None, "", "effort_unsupported", "adapter-no-effort-control"
+            return "", _effort_ignored(requested_effort, model), "", "adapter-no-effort-control"
         return "", "adapter does not expose effort control", "", "adapter-no-effort-control"
 
     capability_models = args.capability_models
@@ -1567,7 +1566,9 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     effort, effort_substitution, effort_status, capability_source = resolve_effort(
         args, family, model, family_config, requested_effort, account_default, registered_model
     )
-    if capability_source == "registry-no-effort-control":
+    if capability_source == "registry-no-effort-control" or (
+        capability_source == "adapter-no-effort-control" and args.effort
+    ):
         route_notes.append(effort_substitution)
     if effort_status in {"effort_unsupported", "no_effort_available", "capability_discovery_failed"} and not (
         args.task_class or args.model_override_tier or args.require_distinct

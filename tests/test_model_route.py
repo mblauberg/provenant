@@ -4155,10 +4155,12 @@ def test_endpoint_route_reports_no_effort(monkeypatch, name):
     assert route["effort"] == ""
     assert route["effort_capability_source"] == "adapter-no-effort-control"
 
+    # An explicit effort is ignored with a warning, never sent and never claimed.
     explicit, explicit_route = endpoint_route(monkeypatch, name, "--effort", "high")
-    assert explicit.returncode != 0
-    assert explicit_route["status"] == "effort_unsupported"
+    assert explicit.returncode == 0, explicit.stdout
+    assert explicit_route["status"] == "ok"
     assert explicit_route["effort"] == ""
+    assert f"effort high ignored: {ENDPOINT_MODELS[name]} has no effort control" in explicit_route["notes"]
 
 
 def test_endpoint_route_without_its_token_dispatches_nothing(monkeypatch):
