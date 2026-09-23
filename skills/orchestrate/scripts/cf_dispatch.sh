@@ -690,6 +690,11 @@ resolve_routing() {
   # Pin it to the tree this script actually lives in, so a worktree's config edits
   # are the ones under test.
   product_root="$(resolve_product_root || true)"
+  local instance_root="${AGENT_FABRIC_INSTANCE_ROOT:-${HOME}/.agents}"
+  # Catalogue fallback belongs to the router invocation, never the provider seat.
+  if [ ! -e "$instance_root/config/model-routing.json" ] && [ ! -L "$instance_root/config/model-routing.json" ]; then
+    instance_root="$product_root"
+  fi
 
   route_args=(--adapter "$tool" --role "$role" --lead-family "$lead_family")
   if [ -n "$task_class" ]; then
@@ -710,7 +715,7 @@ resolve_routing() {
   if command -v provenant >/dev/null 2>&1; then
     cmd=(provenant route resolve "${route_args[@]}")
     if [ -n "$product_root" ]; then
-      AGENT_FABRIC_PRODUCT_ROOT="$product_root" "${cmd[@]}" 2>>"$diag_file"
+      AGENT_FABRIC_PRODUCT_ROOT="$product_root" AGENT_FABRIC_INSTANCE_ROOT="$instance_root" "${cmd[@]}" 2>>"$diag_file"
     else
       "${cmd[@]}" 2>>"$diag_file"
     fi
@@ -720,7 +725,7 @@ resolve_routing() {
   # Fall back to scripts/model_route.py under the one resolved product root.
   if [ -n "$product_root" ] && [ -f "$product_root/scripts/model_route.py" ]; then
     cmd=(python3 "$product_root/scripts/model_route.py" "resolve" "${route_args[@]}")
-    AGENT_FABRIC_PRODUCT_ROOT="$product_root" "${cmd[@]}" 2>>"$diag_file"
+    AGENT_FABRIC_PRODUCT_ROOT="$product_root" AGENT_FABRIC_INSTANCE_ROOT="$instance_root" "${cmd[@]}" 2>>"$diag_file"
     return $?
   fi
 

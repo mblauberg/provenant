@@ -36,6 +36,7 @@ sys.path.insert(0, str(SCRIPT_ROOT.parents[1]))
 sys.path.insert(0, str(SCRIPT_ROOT))
 from _shared.bounded_process import stop_process_group
 from dispatch_run import (
+    close_mcp_run,
     ACCESS_MODES,
     ATTEMPT_ID_RE,
     AttemptEvidenceError,
@@ -62,7 +63,7 @@ TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 MAX_TASKS = 64
 MAX_CONCURRENCY = 8
 DEFAULT_CONCURRENCY = 4
-DEFAULT_TIMEOUT_SECONDS = 900.0
+DEFAULT_TIMEOUT_SECONDS = 3600.0
 # A cancellation signal is a request to the dispatch owner first.  The owner
 # must be allowed to stop/reap its provider and publish the attempt receipt
 # before the batch falls back to killing that owner.
@@ -293,7 +294,7 @@ def _load_manifest(
                 f"task {task_id} writer isolation declarations are unsupported; "
                 "use access_mode worktree_write with a worktree"
             )
-        timeout = _finite_timeout(task.get("timeout"))
+        timeout = _finite_timeout(task.get("timeout"), 10800.0 if access_mode == "worktree_write" else DEFAULT_TIMEOUT_SECONDS)
         normalized = dict(task)
         normalized.update({
             "id": task_id, "adapter": adapter, "role": role, "timeout": timeout,
@@ -531,7 +532,7 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
             "dispatch_exit": process_exit, "attempt_path": attempt_path,
             "attempt_digest": record.get("attempt_digest"), "result_path": result_path,
             "requested_route": requested, "route": {
-                field: route[field] for field in ("adapter", "provider_family", "resolved_model", "execution_intent")
+                field: route[field] for field in ("adapter", "alias", "model", "effort", "provider_family", "model_family", "resolved_model", "execution_intent")
                 if isinstance(route.get(field), str)
             }, "question": attempt.get("question", record.get("question")),
         }
@@ -714,7 +715,9 @@ def batch(args: argparse.Namespace) -> int:
             print(json.dumps({"schema_version": 1, "status": "custody_preflight_failed",
                               "message": str(exc)}, sort_keys=True))
             return 2
-        return _execute_batch(args, tasks, run_dir, source_bytes, batch_lock)
+        result = _execute_batch(args, tasks, run_dir, source_bytes, batch_lock)
+        close_mcp_run(run_dir)
+        return result
     finally:
         if old_handlers:
             for sig, handler in old_handlers.items():

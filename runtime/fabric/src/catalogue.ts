@@ -1,16 +1,17 @@
 /**
- * Read-only access to the product-owned adapter catalogue.
+ * Read-only access to the instance routing catalogue and product adapter registry.
  *
  * `dispatch_registry` in config/adapter-compatibility.yaml is the product-owned
  * source for which adapters exist and what the dispatcher does with them;
  * config/model-routing.json carries the user-owned alias/model routing that
- * hangs off those adapters. Both files live in the product checkout; neither
+ * hangs off those adapters. Routing comes from the instance, with a product fallback only when absent; neither
  * read is required to open the store or serve the mailbox tools, so every
  * failure mode here is a typed error on the asking tool call, never a server
  * startup failure (the packed-package smoke runs with no product root at all).
  */
 import { createRequire } from "node:module";
-import { readFileSync } from "node:fs";
+import { lstatSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,6 +25,7 @@ export interface AdapterEntry {
   fixed_model_family: string | null;
   effort_transport: string;
   aliases: Record<string, string[]>;
+  models: string[];
   read_only_guarantee?: string;
   write_modes?: string[];
   disabled_reason?: string;
@@ -49,21 +51,17 @@ function findProductRoot(): string | undefined {
   return undefined;
 }
 
-function safeRead(path: string): string | undefined {
-  try {
-    return readFileSync(path, "utf8");
-  } catch {
-    // Missing or unreadable product files only degrade the discovery tools.
-    return undefined;
+export function catalogueSnapshot(root?: string, env: NodeJS.ProcessEnv = process.env): CatalogueSnapshot {
+  const productRoot = root ?? env.AGENT_FABRIC_PRODUCT_ROOT ?? findProductRoot() ?? packageRoot;
+  const configuredInstance = env.AGENT_FABRIC_INSTANCE_ROOT || join(homedir(), ".agents");
+  const instanceRoot = configuredInstance === "~" ? homedir()
+    : configuredInstance.startsWith("~/") ? join(homedir(), configuredInstance.slice(2)) : configuredInstance;
+  const instancePath = join(instanceRoot, "config", "model-routing.json");
+  let routingPath = instancePath;
+  try { lstatSync(instancePath); }
+  catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") routingPath = join(productRoot, "config", "model-routing.json");
   }
-}
-
-let snapshot: CatalogueSnapshot | undefined;
-
-export function catalogueSnapshot(root?: string): CatalogueSnapshot {
-  if (snapshot !== undefined && root === undefined) return snapshot;
-  const productRoot = root ?? findProductRoot() ?? packageRoot;
-  const routingPath = join(productRoot, "config", "model-routing.json");
   const compatibilityPath = join(productRoot, "config", "adapter-compatibility.yaml");
   const empty: CatalogueSnapshot = { adapters: [], endpoints: {} };
   let routing: any;
@@ -98,7 +96,7 @@ export function catalogueSnapshot(root?: string): CatalogueSnapshot {
       for (const [alias, models] of Object.entries(
         (families[family] as any)?.aliases ?? {},
       )) {
-        aliases[alias] = models as string[];
+        aliases[alias] = [...new Set([...(aliases[alias] ?? []), ...(models as string[])])];
       }
     }
     return {
@@ -113,6 +111,7 @@ export function catalogueSnapshot(root?: string): CatalogueSnapshot {
       fixed_model_family: ((entry as any).fixed_model_family ?? null) as string | null,
       effort_transport: ((entry as any).effort_transport ?? "flag") as string,
       aliases,
+      models: [...new Set(Object.values(aliases).flat())],
       ...(registryEntry?.read_only_guarantee === undefined
         ? {}
         : { read_only_guarantee: registryEntry.read_only_guarantee as string }),
@@ -127,9 +126,8 @@ export function catalogueSnapshot(root?: string): CatalogueSnapshot {
         .map(([profileName]) => profileName),
     };
   });
-  snapshot = {
+  return {
     adapters: adapters.sort((left, right) => left.name.localeCompare(right.name)),
     endpoints: (routing?.endpoints ?? {}) as CatalogueSnapshot["endpoints"],
   };
-  return snapshot;
 }

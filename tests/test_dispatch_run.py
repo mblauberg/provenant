@@ -845,6 +845,7 @@ def test_timeout_records_reaped_exit(tmp_path: Path) -> None:
         """,
     )
     env = os.environ.copy()
+    env["PROVENANT_PREFLIGHT_ROUTES"] = json.dumps({"timeout": {"adapter": "codex", "alias": "workhorse", "resolved_model": "gpt-6-luna", "effort": "high"}})
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "timeout", "--adapter", "codex",
@@ -855,6 +856,8 @@ def test_timeout_records_reaped_exit(tmp_path: Path) -> None:
     record = json.loads(result.stdout)
     assert record["status"] == "timed_out"
     assert record["failure_code"] == "timeout"
+    assert record["route"]["resolved_model"] == "gpt-6-luna"
+    assert record["route"]["effort"] == "high"
     assert record["process"]["observed_exit"] is True
     assert record["process"]["exit_code"] is not None
 
@@ -1877,3 +1880,142 @@ def test_result_missing_past_the_provider_deadline_is_a_timeout_not_a_result_fai
         "result_missing_or_empty", "adapter_receipt_invalid", "terminal_envelope_invalid",
     }
     assert record["process"]["observed_exit"] is True
+
+
+def test_front_door_preflight_rejects_all_invalid_tasks_without_run(tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), '--preflight-json'], cwd=tmp_path,
+        input=json.dumps({'tasks': [
+            {'id': 'missing', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': 'absent.md'},
+            {'id': 'broker', 'adapter': 'opencode', 'alias': 'workhorse', 'prompt': 'hello'},
+        ]}), text=True, capture_output=True,
+        env={**os.environ, 'AGENT_FABRIC_INSTANCE_ROOT': str(ROOT)},
+    )
+    record = json.loads(result.stdout)
+    assert record['status'] == 'rejected'
+    # OpenCode now resolves its catalogue default model, so only the missing prompt is rejected.
+    assert {error['error'] for error in record['errors']} == {'prompt_unavailable'}
+    assert all(error['fix'] for error in record['errors'])
+    assert not (tmp_path / '.agent-run').exists()
+
+
+def test_mcp_owner_closes_receipt(tmp_path, monkeypatch):
+    run_dir = make_run(tmp_path, 'mcp-finished')
+    module = load_dispatch_module()
+    adapter = tmp_path / 'adapter'
+    write_success_adapter(adapter)
+    module.CF_DISPATCH = adapter
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('PROVENANT_RUN_TOKEN', 'fixture-token')
+    monkeypatch.setenv('PROVENANT_RUN_DIR', str(run_dir))
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('hello')
+    args = module.parser().parse_args(['--run-dir', str(run_dir), '--adapter', 'codex',
+        '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker'])
+    assert module.dispatch(args) == 0
+    receipt = json.loads((run_dir / 'RUN_RECEIPT.json').read_text())
+    assert receipt['status'] == 'succeeded'
+    assert receipt['closed_at']
+
+
+def test_mcp_batch_cancelled_before_dispatch_closes_receipt(tmp_path, monkeypatch):
+    run_dir = make_run(tmp_path, 'mcp-cancelled-before-dispatch')
+    module = load_dispatch_module()
+    monkeypatch.setenv('PROVENANT_RUN_TOKEN', 'fixture-token')
+    monkeypatch.setenv('PROVENANT_RUN_DIR', str(run_dir))
+    summary = run_dir / 'dispatch/batches/batch-001/summary.json'
+    summary.parent.mkdir(parents=True)
+    summary.write_text(json.dumps({'status': 'cancelled', 'tasks': [
+        {'task_id': 'never-started', 'status': 'cancelled'}]}))
+    module.close_mcp_run(run_dir)
+    assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'cancelled'
+
+
+@pytest.mark.parametrize(('mode', 'timeout'), [('read_only', 3600), ('worktree_write', 10800)])
+def test_front_door_mode_timeout_defaults(tmp_path, mode, timeout):
+    module = load_dispatch_module()
+    args = module.parser().parse_args(['--run-dir', str(tmp_path), '--adapter', 'codex',
+        '--prompt-stdin', '--alias', 'workhorse', '--role', 'worker', '--access-mode', mode])
+    module.dispatch(args)
+    assert args.timeout_seconds == timeout
+
+
+def test_front_door_preflight_caches_capability_probe_per_adapter(tmp_path, monkeypatch):
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    counter = tmp_path / 'probes'
+    write_executable(bin_dir / 'codex', '''#!/usr/bin/env python3
+import json, os
+from pathlib import Path
+p = Path(os.environ['PROBE_COUNTER'])
+p.write_text(p.read_text() + 'probe\\n' if p.exists() else 'probe\\n')
+print(json.dumps({'models': [{'slug': 'gpt-6-luna', 'supported_reasoning_levels': [{'effort': 'high'}]}]}))
+''')
+    result = subprocess.run([sys.executable, str(SCRIPT), '--preflight-json'], cwd=tmp_path,
+        input=json.dumps({'tasks': [{'id': f't{i}', 'adapter': 'codex', 'model': 'gpt-6-luna',
+            'effort': 'high', 'prompt': 'hello'} for i in range(3)]}), text=True, capture_output=True,
+        env={**os.environ, 'AGENT_FABRIC_INSTANCE_ROOT': str(ROOT), 'PROBE_COUNTER': str(counter),
+             'PATH': str(bin_dir) + os.pathsep + os.environ['PATH']})
+    record = json.loads(result.stdout)
+    assert record['status'] == 'validated', record
+    assert len(record['routes']) == 3
+    assert counter.read_text().splitlines() == ['probe']
+
+
+@pytest.mark.parametrize('owner', ['dispatch', 'batch'])
+@pytest.mark.parametrize('instance', ['configured', 'missing', 'unset'])
+def test_provider_does_not_inherit_chair_fabric_environment(tmp_path, owner, instance):
+    run_dir = make_run(tmp_path, 'isolated-provider')
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('Reply OK')
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    write_executable(bin_dir / 'codex', '''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+if sys.argv[1:3] == ['debug', 'models']:
+    print(json.dumps({'models': [{'slug': 'gpt-6-luna', 'supported_reasoning_levels': [{'effort': 'high'}]}]}))
+else:
+    names = ['AGENT_FABRIC_STATE_DIRECTORY', 'AGENT_FABRIC_SEAT', 'AGENT_FABRIC_CLIENT_LABEL',
+             'AGENT_FABRIC_LABEL', 'AGENT_FABRIC_PRODUCT_ROOT']
+    names += [k for k in os.environ if k.startswith(('PROVENANT_RUN_', 'PROVENANT_PREFLIGHT_'))]
+    Path(os.environ['PROVIDER_ENV_CAPTURE']).write_text(json.dumps({k: os.environ[k] for k in names if k in os.environ}))
+    Path(os.environ['PROVIDER_INSTANCE_CAPTURE']).write_text(os.environ.get('AGENT_FABRIC_INSTANCE_ROOT', ''))
+    Path(os.environ['PROVIDER_TMP_CAPTURE']).write_text(os.environ['TMPDIR'])
+    sys.stdin.read()
+    print('OK')
+''')
+    capture = tmp_path / 'provider-env.json'
+    env = {**os.environ, 'PATH': f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}",
+           'AGENT_FABRIC_INSTANCE_ROOT': str(ROOT), 'AGENT_FABRIC_PRODUCT_ROOT': str(ROOT),
+           'AGENT_FABRIC_STATE_DIRECTORY': str(tmp_path / 'chair-state'),
+           'AGENT_FABRIC_SEAT': 'claude', 'AGENT_FABRIC_CLIENT_LABEL': 'chair-client',
+           'AGENT_FABRIC_LABEL': 'chair-label', 'PROVIDER_ENV_CAPTURE': str(capture),
+           'PROVIDER_TMP_CAPTURE': str(tmp_path / 'provider-tmp.txt'),
+           'PROVENANT_RUN_TOKEN': 'mcp-fixture-token', 'PROVENANT_RUN_DIR': str(run_dir),
+           'PROVENANT_PREFLIGHT_ROUTES': '{}', 'PROVENANT_RUN_PARENT_TOKEN': 'parent-token',
+           'PROVIDER_INSTANCE_CAPTURE': str(tmp_path / 'provider-instance.txt')}
+    if instance != 'configured':
+        env['HOME'] = str(tmp_path / 'home')
+        env['AGENT_FABRIC_INSTANCE_ROOT'] = str(tmp_path / 'missing-instance')
+    if instance == 'unset':
+        env.pop('AGENT_FABRIC_INSTANCE_ROOT', None)
+    expected_instance = env.get('AGENT_FABRIC_INSTANCE_ROOT', '')
+    if owner == 'dispatch':
+        command = [str(SCRIPT), '--run-dir', str(run_dir), '--adapter', 'codex',
+                   '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker']
+    else:
+        manifest = tmp_path / 'tasks.json'
+        manifest.write_text(json.dumps({'schema_version': 1, 'tasks': [
+            {'id': 'isolated', 'adapter': 'codex', 'prompt_file': str(prompt),
+             'alias': 'workhorse', 'role': 'worker'}]}))
+        command = [str(SCRIPT.with_name('batch_run.py')), '--run-dir', str(run_dir), '--manifest', str(manifest)]
+    result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(capture.read_text()) == {}
+    assert (tmp_path / 'provider-instance.txt').read_text() == expected_instance
+    assert not (tmp_path / 'chair-state').exists()
+    scratch = Path((tmp_path / 'provider-tmp.txt').read_text())
+    assert scratch.name.startswith('fabric-provider-')
+    assert not scratch.exists()
+    assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'succeeded'

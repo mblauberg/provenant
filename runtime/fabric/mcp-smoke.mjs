@@ -18,6 +18,7 @@ const command = process.env.AGENT_FABRIC_MCP_COMMAND ?? resolve(import.meta.dirn
 const tsxLoader = process.env.AGENT_FABRIC_TSX_LOADER ??
   createRequire(import.meta.url).resolve("tsx");
 const clients = [];
+const fixtureProcesses = new Set();
 
 const spawnAgent = async (seat, clientLabel, options = {}) => {
   const transport = new StdioClientTransport({
@@ -76,6 +77,10 @@ try {
   const codex = await spawnAgent("codex", "codex-client");
   const agy = await spawnAgent("agy", "agy-client");
 
+  const recent = payload(await claude.callTool({ name: "fabric_status", arguments: {} }));
+  assert.ok(Array.isArray(recent.runs));
+  assert.equal(existsSync(state), false, "status-only MCP use must not create SQLite state");
+
   assert.match(claude.getInstructions() ?? "", /project-scoped mailbox/);
 
   const listed = await claude.listTools();
@@ -88,6 +93,7 @@ try {
     "fabric_inbox",
     "fabric_note",
     "fabric_send",
+    "fabric_status",
     "fabric_task_claim",
     "fabric_task_create",
     "fabric_task_update",
@@ -383,14 +389,13 @@ try {
   )).cwd, realpathSync(workspace));
 
   const runCount = readdirSync(resolve(workspace, ".agent-run")).length;
-  await expectToolError(executor.callTool({
+  assert.equal(payload(await executor.callTool({
     name: "fabric_batch",
     arguments: { tasks: [{ id: "invalid", adapter: "codex" }] },
-  }));
+  })).status, "rejected");
   assert.equal(readdirSync(resolve(workspace, ".agent-run")).length, runCount);
   // Removed assurance selectors are typed input errors, not silently ignored.
-  for (const removed of [{ model: "gpt-fixture" }, { task_class: "review" }, { role: "reviewer" },
-    { effort: "high" }, { orchestrator_family: "openai" }, { risk_tier: "crucial" },
+  for (const removed of [{ task_class: "review" }, { role: "reviewer" }, { orchestrator_family: "openai" }, { risk_tier: "crucial" },
     { model_override_tier: "crucial" }, { reviewer_id: "reviewer-1" }]) {
     await expectToolError(executor.callTool({
       name: "fabric_dispatch",
@@ -401,14 +406,14 @@ try {
       arguments: { tasks: [{ id: "removed", prompt: "removed parameter", adapter: "codex", ...removed }] },
     }));
   }
-  await expectToolError(executor.callTool({
+  assert.equal(payload(await executor.callTool({
     name: "fabric_dispatch",
     arguments: { prompt: "writer without a worktree", mode: "worktree_write" },
-  }));
-  await expectToolError(executor.callTool({
+  })).status, "rejected");
+  assert.equal(payload(await executor.callTool({
     name: "fabric_dispatch",
     arguments: { prompt: "worktree without the writer mode", worktree: workspace },
-  }));
+  })).status, "rejected");
   assert.equal(readdirSync(resolve(workspace, ".agent-run")).length, runCount);
 
   const malformed = payload(await executor.callTool({
@@ -577,9 +582,11 @@ try {
     },
   }));
   assert.equal(signalledRun.status, "running");
+  fixtureProcesses.add(signalledRun.pid);
   const signalledProviderPid = resolve(signalledRun.paths.run_dir, "provider.pid");
   await waitForFile(signalledProviderPid, 10_000);
   const signalledProvider = Number(readFileSync(signalledProviderPid, "utf8").trim());
+  fixtureProcesses.add(signalledProvider);
   const ownerRecordPath = resolve(signalledRun.paths.run_dir, "dispatch-owner.json");
   await waitForFile(ownerRecordPath, 10_000);
   const ownerRecord = JSON.parse(readFileSync(ownerRecordPath, "utf8"));
@@ -888,6 +895,10 @@ try {
   console.log("MCP contract assertions passed for claude, codex and agy client seats");
 } finally {
   await Promise.allSettled(clients.map(async (client) => await client.close()));
+  for (const pid of fixtureProcesses) {
+    try { process.kill(-pid, "SIGKILL"); } catch { /* group already stopped */ }
+    try { process.kill(pid, "SIGKILL"); } catch { /* process already stopped */ }
+  }
   rmSync(state, { recursive: true, force: true });
   rmSync(executionRoot, { recursive: true, force: true });
 }

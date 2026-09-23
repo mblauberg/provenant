@@ -9,6 +9,28 @@
 > authority on task class, tier, role, effort and degradation. Neither restates
 > the other.
 
+For ordinary provider work, use `fabric_dispatch` or `fabric_batch`: pass a
+prompt, adapter, optional `alias` or `model`, and optional `effort`. A unique
+catalogue model token (for example `luna`) is accepted as an alias; broker
+adapters require an explicit model. `fabric_adapters` reads the instance
+catalogue and lists alias models. Input and route failures are synchronous,
+include a one-line fix, and launch no batch tasks. Writes require
+`mode: worktree_write` and a distinct registered worktree. Timeouts default to
+3600 seconds for reads and 10800 for writes. Wait up to 55 seconds, then use
+`fabric_status` with the unique short `id` from the dispatch response; no id
+lists recent runs. Repeated task or batch IDs select the newest run with a note.
+Infrastructure failures return `preflight_unavailable` and a one-line fix.
+
+Provider launch strips the chair's `AGENT_FABRIC_STATE_DIRECTORY`,
+`AGENT_FABRIC_SEAT`, `AGENT_FABRIC_CLIENT_LABEL`, `AGENT_FABRIC_LABEL` and
+`AGENT_FABRIC_PRODUCT_ROOT`, plus `PROVENANT_RUN_*` and
+`PROVENANT_PREFLIGHT_*` custody variables. Product-catalogue fallback applies
+only to router subprocesses. Dispatch and batch owners keep their own context;
+workers discover their workspace and identity independently.
+Status is read-only, including liveness and silence reporting. Ordinary MCP
+execution custody closes when its attempts become terminal; delivery gates
+remain separate.
+
 The resolver's default `--adapter-gate fabric` fails closed when the selected
 fabric adapter is disabled or inactive. Runtime Fabric composition separately
 requires current provider identity and interface conformance. A direct CLI

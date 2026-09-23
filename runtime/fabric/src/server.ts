@@ -4,6 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 
 import { databasePath, identify } from "./identity.js";
+import { fabricStatus } from "./run-registry.js";
 import { catalogueSnapshot } from "./catalogue.js";
 import {
   cancelActiveExecutions,
@@ -19,7 +20,7 @@ import { isSQLiteContention, Store, type Message } from "./store.js";
 const MAX_WAIT_SECONDS = MAX_EXECUTION_WAIT_SECONDS;
 
 /**
- * One MCP process per agent, holding the store open directly.
+ * One MCP process per agent; announce at startup and retry lazily on contention.
  *
  * There is no handshake to fail, so there is no reconnect path, so there is no
  * class of error that reports "the daemon is unavailable" while the daemon is
@@ -39,13 +40,6 @@ const initialiseStore = (busyTimeoutMs = 5000): Store => {
     throw error;
   }
 };
-
-try {
-  initialiseStore();
-} catch {
-  // Keep the transport available. The first tool call retries initialisation,
-  // allowing transient SQLite locks to recover without a background process.
-}
 
 const readyStore = (busyTimeoutMs = 5000): Store => {
   if (store !== undefined) return store;
@@ -208,7 +202,9 @@ const routeInputSchema = {
   // typed schema error here, before any run directory exists.
   adapter: z.enum(DISPATCH_ADAPTERS).optional()
     .describe("provider adapter; defaults to the current Fabric seat"),
-  alias: z.string().min(1).optional().describe("route alias; defaults to workhorse"),
+  alias: z.string().min(1).optional().describe("flagship, workhorse (default), scout, or a unique model name"),
+  model: z.string().min(1).optional().describe("explicit model id; use instead of alias (required for brokers)"),
+  effort: z.string().min(1).optional().describe("low, medium, high, xhigh, max or ultra; router validates model support"),
   mode: z.enum(["read_only", "worktree_write"]).optional()
     .describe("read_only (default), or worktree_write with the worktree the worker owns"),
   worktree: z.string().min(1).optional()
@@ -227,12 +223,8 @@ server.registerTool(
   "fabric_dispatch",
   {
     description:
-      "Start one ordinary configured-provider task: the prompt, the adapter and alias that route " +
-      "it, and the access mode it runs under. Run custody is automatic and full prompt, result and " +
-      "diagnostics stay in named files. read_only is requested access; inspect the adapter receipt for " +
-      "read_only_guarantee (Agy: prompt_only). A worker that must write takes mode " +
-      "worktree_write with a worktree it owns exclusively. The response is compact; set wait_seconds " +
-      "to 0 for immediate start or up to 55 for a terminal result and actual route when it finishes.",
+      "Run a prompt (or workspace prompt_file) on an adapter with optional alias or model, effort, and mode read_only or worktree_write (+worktree). " +
+      "Wait up to 55 seconds, then use fabric_status; full output stays in files and fabric_adapters lists read-only guarantees.",
     inputSchema: z.strictObject({
       prompt: z.string().optional(),
       prompt_file: z.string().min(1).optional(),
@@ -249,10 +241,8 @@ server.registerTool(
   "fabric_batch",
   {
     description:
-      "Start a fixed ordinary batch of 1-64 configured-provider tasks with concurrency capped at 8. " +
-      "Tasks share the dispatch surface: prompt, adapter, alias and access mode. The batch owner keeps " +
-      "partial results and rejects two writer tasks naming one worktree. Full output stays in named " +
-      "files; set wait_seconds to 0 for immediate start or up to 55 to await completion.",
+      "Run 1–64 tasks: each takes prompt or prompt_file, adapter, optional alias or model, effort, and mode read_only or worktree_write (+distinct worktree). " +
+      "All tasks validate before launch; wait up to 55 seconds, then use fabric_status for compact results.",
     inputSchema: z.strictObject({
       tasks: z.array(batchTaskSchema).min(1).max(64),
       concurrency: z.number().int().min(1).max(8).optional(),
@@ -260,6 +250,15 @@ server.registerTool(
     }),
   },
   async (input, { signal }) => reply(await dispatchConfiguredBatch(input, who, signal)),
+);
+
+server.registerTool(
+  "fabric_status",
+  {
+    description: "Pass the id from the dispatch response; task_id, batch_id and run_dir also work (newest match with a note if ambiguous). Omit id for up to 20 workspace runs from the last 24 hours. Wait up to 55 seconds for completion; reports liveness, silence and result path without changing runs.",
+    inputSchema: { id: z.string().min(1).optional(), wait_seconds: z.number().int().min(0).max(55).optional() },
+  },
+  async ({ id, wait_seconds }, { signal }) => reply(await fabricStatus(who.cwd, id, wait_seconds, signal)),
 );
 
 server.registerTool(
@@ -371,6 +370,12 @@ server.registerTool(
       : snapshot);
   },
 );
+
+// Presence is best effort: a lock must not delay the transport or execution tools.
+try { initialiseStore(1); }
+catch (error) {
+  console.error(`fabric: startup presence deferred: ${error instanceof Error ? error.message : String(error)}`);
+}
 
 const transport = new StdioServerTransport();
 process.stdin.once("end", () => { void transport.close(); });
