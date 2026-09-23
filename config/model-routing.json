@@ -466,7 +466,8 @@
             "mimo-free"
           ],
           "plan_cap_usd": 0,
-          "trains_on_prompts": false
+          "trains_on_prompts": true,
+          "warning": "Contributor free tier: prompts may be used for training. Do not send sensitive, private or client data."
         },
         {
           "id": "opencode/nemotron-3-ultra-free",
@@ -474,7 +475,8 @@
             "nemotron-free"
           ],
           "plan_cap_usd": 0,
-          "trains_on_prompts": false
+          "trains_on_prompts": true,
+          "warning": "Contributor free tier: prompts may be used for training. Do not send sensitive, private or client data."
         },
         {
           "id": "opencode/muse-spark-1.3-contributor-free",

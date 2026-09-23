@@ -124,14 +124,11 @@ infers one (`family_source: slug-inferred`); stealth/unknown broker ids stay
 stealth models into alias tables; pick the slug at dispatch time.
 
 OpenCode is an ordinary implemented broker for its catalogue (`opencode/<model>`).
-It defaults to `opencode-go/deepseek-v4.1-flash`; `opencode-go/glm-5.3-flash`,
-`opencode/mimo-v2.6-flash-free` and `opencode/muse-spark-1.3-contributor-free`
-are the other preferred models (Muse may train on prompts: never send it sensitive
-content). Use `opencode models` to discover a live slug when overriding with `--model`.
-OpenCode resolves workspace file reads from the worker's current directory. If
-the prompt names supporting files elsewhere in the workspace, set Fabric's
-read-only `cwd` to a directory that contains them; `prompt_file` supplies the
-task text but does not stage those referenced files.
+Its free models include `mimo-free`, `muse` and `nemotron-free`; they may train
+on prompts during the free period, so do not send sensitive content. Read-only
+runs keep bash declared for Zen but deny every real command. Fabric honours
+read-only `cwd` for OpenCode file access. Use `opencode models` to discover a
+live slug when overriding with `--model`.
 Nested vendor ids attribute as that vendor; unparseable Zen free ids fall back
 to `generic-open` (worker only, not assurance). See
 [ADR 0025](../../../docs/adr/0025-broker-upstream-family-attribution.md).

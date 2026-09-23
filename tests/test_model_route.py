@@ -458,6 +458,11 @@ def test_unregistered_agy_model_passes_explicit_effort_unverified():
 
 
 def test_opencode_training_warning_and_paid_fallback_excludes_free():
+    for model in ("opencode/mimo-v2.6-flash-free", "opencode/nemotron-3-ultra-free"):
+        result, free_route = resolve("--adapter", "opencode", "--model", model, "--role", "worker")
+        assert result.returncode == 0, free_route
+        assert free_route["trains_on_prompts"] is True
+        assert free_route["warnings"]
     result, route = resolve("--adapter", "opencode", "--model",
                             "opencode/muse-spark-1.3-contributor-free", "--role", "worker")
     assert result.returncode == 0, route
