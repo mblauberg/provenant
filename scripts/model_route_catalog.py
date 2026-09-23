@@ -53,13 +53,22 @@ def model_slug_for_family(model: str) -> str:
 
 def infer_family(model: str, catalog: dict[str, Any]) -> str | None:
     """Infer upstream model family from a model id (broker prefixes stripped)."""
+    matches = matching_model_families(model, catalog)
+    return matches[0] if matches else None
+
+
+def matching_model_families(model: str, catalog: dict[str, Any]) -> tuple[str, ...]:
+    """Return distinct catalogue pattern families matching a model id."""
+    matches = []
     for candidate in (model_slug_for_family(model), model.strip().lower()):
         if not candidate:
             continue
         for item in catalog["model_patterns"]:
             if re.search(item["pattern"], candidate):
-                return item["family"]
-    return None
+                family = item["family"]
+                if family not in matches:
+                    matches.append(family)
+    return tuple(matches)
 
 
 def family_is_assurance_eligible(family: str | None, family_source: str = "") -> bool:

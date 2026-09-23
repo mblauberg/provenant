@@ -1666,10 +1666,20 @@ def execute(
     identity = "observed" if observed else "resolved" if plan["model"] else "unknown"
     family = route.get("model_family") or route.get("family") or "unknown"
     if substituted:
-        # Routing attributed the requested model, not the provider's substitution.
-        # Do not certify a different family without model-router evidence for it.
-        family = "unknown"
-        notes.append("observed model family unverified after substitution")
+        try:
+            try:
+                from . import exec_routing
+            except ImportError:
+                import exec_routing
+            observed_families = exec_routing.model_families(observed)
+        except (AttributeError, ImportError, TypeError, ValueError):
+            observed_families = ()
+        if len(observed_families) == 1:
+            family = observed_families[0]
+            notes.append(f"observed family {family} inferred from catalogue")
+        else:
+            family = "unknown"
+            notes.append("observed model family unverified after substitution")
     model = observed or plan["model"]
     line = (
         f"Route: {plan['adapter']}/{model}"
@@ -1724,7 +1734,8 @@ def execute(
         status = "output_identity_invalid" if digest_value else "output_write_error"
         digest_value = ""
     cross = bool(
-        plan.get("orchestrator_family")
+        not substituted
+        and plan.get("orchestrator_family")
         and family not in {"unknown", "generic-open", "open-weight"}
         and family != plan["orchestrator_family"]
     )
@@ -1790,6 +1801,7 @@ def execute(
         "cross_family": cross,
         "certification_eligible": plan["intent"] == "assurance"
         and status == "ok"
+        and not substituted
         and cross
         and plan["mode"] == "read_only"
         and guarantee == "enforced",

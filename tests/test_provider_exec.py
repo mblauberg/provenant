@@ -692,6 +692,58 @@ def test_observed_substitution_cannot_certify_the_resolved_family(tmp_path):
     assert not record["certification_eligible"]
 
 
+def test_catalogued_observed_substitution_records_answering_family_without_certifying(tmp_path):
+    code = """import json
+events = [
+    {"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"},
+    {"type":"assistant","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"DONE"}]}},
+    {"type":"result","result":"DONE","is_error":False,"session_id":"s-1"},
+]
+for event in events:
+    print(json.dumps(event), flush=True)
+"""
+    plan = fixture_plan(
+        tmp_path,
+        code,
+        "claude",
+        intent="assurance",
+        orchestrator_family="openai",
+    )
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["provenance"]["observed_model"] == "claude-sonnet-5"
+    assert record["provenance"]["family"] == "anthropic"
+    assert record["provenance"]["identity"] == "observed"
+    assert "observed family anthropic inferred from catalogue" in record["provenance"]["notes"]
+    assert not record["cross_family"]
+    assert not record["certification_eligible"]
+
+
+def test_ambiguous_catalogued_observed_substitution_keeps_family_unknown(tmp_path):
+    code = """import json
+events = [
+    {"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"},
+    {"type":"assistant","message":{"model":"gpt-claude-model","content":[{"type":"text","text":"DONE"}]}},
+    {"type":"result","result":"DONE","is_error":False,"session_id":"s-1"},
+]
+for event in events:
+    print(json.dumps(event), flush=True)
+"""
+    plan = fixture_plan(
+        tmp_path,
+        code,
+        "claude",
+        intent="assurance",
+        orchestrator_family="openai",
+    )
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["provenance"]["observed_model"] == "gpt-claude-model"
+    assert record["provenance"]["family"] == "unknown"
+    assert not record["cross_family"]
+    assert not record["certification_eligible"]
+
+
 def test_preface_env_and_credential_path_controls(tmp_path):
     plan = fixture_plan(
         tmp_path,

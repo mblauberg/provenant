@@ -99,6 +99,7 @@ if _preferences is None:
 EFFORT_ORDER = _catalog_validation.EFFORT_ORDER
 ALIAS_ORDER = _catalog_validation.ALIAS_ORDER
 infer_family = _catalog_validation.infer_family
+matching_model_families = _catalog_validation.matching_model_families
 model_slug_for_family = _catalog_validation.model_slug_for_family
 family_is_assurance_eligible = _catalog_validation.family_is_assurance_eligible
 attribute_model_family = _catalog_validation.attribute_model_family
