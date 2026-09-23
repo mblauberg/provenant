@@ -135,7 +135,8 @@ const waitForInbox = async (
 
 const detail = z.enum(["brief", "full"]).optional();
 const str = z.string().optional();
-const wait = z.number().int().min(0).max(55).optional();
+const wait = z.unknown().optional();
+const optionalNumber = z.unknown().optional();
 const route = {
   adapter: str,
   alias: str,
@@ -151,13 +152,13 @@ const route = {
     .union([z.boolean(), z.literal("any"), z.array(z.union([z.string(), z.record(z.string(), z.unknown())]))])
     .optional(),
 };
-const task = { prompt: str, prompt_file: str, timeout_seconds: z.number().positive().optional(), ...route };
+const task = { prompt: str, prompt_file: str, timeout_seconds: optionalNumber, ...route };
 const batch = {
   tasks: z
     .array(z.record(z.string(), z.unknown()).pipe(z.strictObject({ id: str, ...task })))
     .min(1)
     .max(64),
-  concurrency: z.number().int().min(1).max(8).optional(),
+  concurrency: optionalNumber,
   wait_seconds: wait,
 };
 // Catch domain errors at the boundary; SDK validation errors retain its protocol error envelope.
@@ -181,6 +182,29 @@ function register(
       };
     }
   });
+}
+function boundedWait(value: unknown): { value?: number; warnings: string[]; error?: Record<string, string> } {
+  if (value === undefined) return { warnings: [] };
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 0)
+    return { warnings: [], error: { status: "rejected", error: "wait_invalid", fix: "Pass wait_seconds from 0 to 55." } };
+  if (value > MAX_WAIT_SECONDS)
+    return { value: MAX_WAIT_SECONDS, warnings: [`! wait_seconds ${value} clamped to ${MAX_WAIT_SECONDS}`] };
+  return { value, warnings: [] };
+}
+function validateDispatchNumbers(input: Record<string, any>): Record<string, string> | undefined {
+  for (const candidate of [input, ...(Array.isArray(input.tasks) ? input.tasks : [])]) {
+    if (candidate.timeout_seconds !== undefined &&
+      (typeof candidate.timeout_seconds !== "number" || !Number.isFinite(candidate.timeout_seconds) || candidate.timeout_seconds <= 0))
+      return { status: "rejected", error: "timeout_invalid", fix: "Pass timeout_seconds as a finite positive number." };
+  }
+  if (input.concurrency !== undefined &&
+    (typeof input.concurrency !== "number" || !Number.isInteger(input.concurrency) || input.concurrency < 1))
+    return { status: "rejected", error: "concurrency_invalid", fix: "Pass concurrency as an integer from 1 to 8." };
+  return undefined;
+}
+function withWarnings<T extends Record<string, any>>(value: T, warnings: string[]): T {
+  if (!warnings.length) return value;
+  return { ...value, warnings: [...(value.warnings ?? []), ...warnings] };
 }
 register("fabric_whoami", "Identify this seat and server.", { detail }, ({ detail }) => ({
   ...who,
@@ -231,7 +255,7 @@ function acknowledgeRuns(result: { runs?: Record<string, any>[] }) {
 }
 register(
   "fabric_dispatch",
-  "Run one prompt, tasks, or resume a run.",
+  "Run one prompt, tasks, or resume a run. wait_seconds above 55 is clamped to 55; invalid numeric values return a typed rejection.",
   {
     ...task,
     task_id: str,
@@ -242,26 +266,36 @@ register(
     detail,
   },
   async (input, { signal }) => {
+    const waitResult = boundedWait(input.wait_seconds);
+    if (waitResult.error) return waitResult.error;
+    const numericError = validateDispatchNumbers(input);
+    if (numericError) return numericError;
     if (input.tasks && (input.prompt || input.prompt_file || input.resume))
       return { status: "rejected", error: "dispatch_conflict", fix: "Pass one prompt, tasks, or resume." };
+    input.wait_seconds = waitResult.value;
+    if (input.concurrency !== undefined && input.concurrency > 8) {
+      const requestedConcurrency = input.concurrency;
+      input.concurrency = 8;
+      waitResult.warnings.push(`! concurrency ${requestedConcurrency} clamped to 8`);
+    }
     const result = input.resume
       ? await resumeConfiguredProvider(input, who, signal)
       : input.tasks
         ? await dispatchConfiguredBatch({ ...input, wait_seconds: input.wait_seconds ?? 0 }, who, signal)
         : await dispatchConfiguredProvider(input, who, signal);
-    if (!result.id) return result;
+    if (!result.id) return withWarnings(result, waitResult.warnings);
     const observed = await statusRows(who.cwd, [String(result.id)], 0, "all", signal, input.detail);
     acknowledgeRuns(observed);
     if (observed.runs?.length === 1) {
       const row = observed.runs[0]!;
-      return runView({ ...result, ...row, paths: { ...(result.paths as object), ...row.paths } }, input.detail);
+      return runView(withWarnings({ ...result, ...row, paths: { ...(result.paths as object), ...row.paths } }, waitResult.warnings), input.detail);
     }
-    return runView(observed.runs ? observed : result, input.detail);
+    return runView(withWarnings(observed.runs ? observed : result, waitResult.warnings), input.detail);
   },
 );
 register(
   "fabric_status",
-  "Read or wait for runs.",
+  "Read or wait for runs. wait_seconds above 55 is clamped to 55; invalid numeric values return a typed rejection.",
   {
     ids: z.array(z.string()).optional(),
     id: str,
@@ -270,9 +304,11 @@ register(
     detail,
   },
   async ({ ids, id, wait_seconds, until, detail }, { signal }) => {
-    const result = await statusRows(who.cwd, ids ?? (id ? [id] : undefined), wait_seconds, until, signal, detail);
+    const waitResult = boundedWait(wait_seconds);
+    if (waitResult.error) return waitResult.error;
+    const result = await statusRows(who.cwd, ids ?? (id ? [id] : undefined), waitResult.value, until, signal, detail);
     acknowledgeRuns(result);
-    return runView(result, detail);
+    return runView(withWarnings(result, waitResult.warnings), detail);
   },
 );
 register("fabric_cancel", "Stop a run and its provider group.", { id: z.string(), reason: str }, async ({ id, reason }) => {
@@ -282,15 +318,24 @@ register("fabric_cancel", "Stop a run and its provider group.", { id: z.string()
 });
 register(
   "fabric_output",
-  "Read output; continue at next_offset.",
+  "Read output; continue at next_offset. max_bytes above 20000 is clamped with a warning; invalid numeric values return a typed rejection.",
   {
     id: z.string(),
     part: z.enum(["result", "stderr", "events", "receipt"]).optional(),
     offset: z.number().int().nonnegative().optional(),
     tail: z.boolean().optional(),
-    max_bytes: z.number().int().min(1).max(20000).optional(),
+    max_bytes: optionalNumber,
   },
-  (input) => fabricOutput(who.cwd, input),
+  async (input) => {
+    if (input.max_bytes !== undefined &&
+      (typeof input.max_bytes !== "number" || !Number.isInteger(input.max_bytes) || input.max_bytes < 1))
+      return { status: "rejected", error: "max_bytes_invalid", fix: "Pass max_bytes as an integer from 1 to 20000." };
+    const requested = input.max_bytes;
+    const result = await fabricOutput(who.cwd, { ...input, max_bytes: requested === undefined ? undefined : Math.min(requested, 20000) });
+    return requested !== undefined && requested > 20000
+      ? withWarnings(result, [`! max_bytes ${requested} clamped to 20000`])
+      : result;
+  },
 );
 register(
   "fabric_acknowledge",

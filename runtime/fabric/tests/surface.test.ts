@@ -19,6 +19,12 @@ it("keeps legacy route and result path in the brief digest", async () => {
   expect(digest(brief)).toContain("result .agent-run/old/result.md");
 });
 
+it("adds numeric clamp warnings to the returned digest", async () => {
+  const { digest } = await import("../src/surface.js");
+  expect(digest({ status: "ok", run_id: "mcp-warning", digest: "ok mcp-warning", warnings: ["! wait_seconds 56 clamped to 55"] }))
+    .toBe("ok mcp-warning\n! wait_seconds 56 clamped to 55");
+});
+
 it("reads adapter cooldowns from the configured state root and explicit override", async () => {
   const { adapterView } = await import("../src/surface.js");
   const root = mkdtempSync(join(tmpdir(), "fabric-cooldowns-"));
@@ -189,6 +195,28 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     );
     const self = await call("whoami");
     expect((self.structuredContent as any)).toMatchObject({ project: projectRoot, cwd: linkedRoot, agentId: "chair-seat" });
+    const waitInvalid = await client.callTool({ name: "fabric_dispatch", arguments: { prompt: "invalid", wait_seconds: -1 } });
+    expect(waitInvalid.isError).not.toBe(true);
+    expect((waitInvalid.content as any[])[0].text).toBe("rejected wait_invalid · fix: Pass wait_seconds from 0 to 55.");
+    for (const value of [1.5, null, "4"]) {
+      const invalid = await client.callTool({ name: "fabric_status", arguments: { ids: [], wait_seconds: value } });
+      expect(invalid.isError).not.toBe(true);
+      expect((invalid.content as any[])[0].text).toBe("rejected wait_invalid · fix: Pass wait_seconds from 0 to 55.");
+    }
+    const badTimeout = await client.callTool({ name: "fabric_dispatch", arguments: { prompt: "invalid", timeout_seconds: 0 } });
+    expect((badTimeout.content as any[])[0].text).toContain("rejected timeout_invalid");
+    const badConcurrency = await client.callTool({
+      name: "fabric_dispatch", arguments: { tasks: [{}], concurrency: 9 },
+    });
+    expect((badConcurrency.content as any[])[0].text).toContain("! concurrency 9 clamped to 8");
+    const invalidConcurrency = await client.callTool({
+      name: "fabric_dispatch", arguments: { tasks: [{}], concurrency: 0 },
+    });
+    expect((invalidConcurrency.content as any[])[0].text).toContain("rejected concurrency_invalid");
+    const waitClamped = await call("dispatch", { prompt: "wait clamp", wait_seconds: 56 });
+    expect((waitClamped.content as any[])[0].text).toContain("! wait_seconds 56 clamped to 55");
+    const statusClamped = await call("status", { id: (waitClamped.structuredContent as any).run_id, wait_seconds: 60 });
+    expect((statusClamped.content as any[])[0].text).toContain("! wait_seconds 60 clamped to 55");
     await peer.connect(
       new StdioClientTransport({
         command: resolve(import.meta.dirname, "../bin/fabric-mcp"),
@@ -335,9 +363,12 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect((rejectedResume.structuredContent as any).attempts).toBeUndefined();
     expect(((await call("inbox")).structuredContent as any).messages).toEqual([]);
     await call("dispatch", {resume:row.run_id,prompt:"main",wait_seconds:5});
-    const output = await call("output", { id: row.run_id, max_bytes: 100 });
-    expect(output.structuredContent).toMatchObject({ next_offset: 100, eof: false });
-    expect((output.content as any[])[0].text).toHaveLength(100);
+    const output = await call("output", { id: row.run_id, max_bytes: 20001 });
+    expect((output.content as any[])[0].text).toContain("! max_bytes 20001 clamped to 20000");
+    expect(output.structuredContent).toMatchObject({ next_offset: 20000, eof: false });
+    expect((output.content as any[])[0].text).toContain(`${"x".repeat(20000)}\n! max_bytes 20001 clamped to 20000`);
+    const badMaxBytes = await client.callTool({ name: "fabric_output", arguments: { id: row.run_id, max_bytes: 0 } });
+    expect((badMaxBytes.content as any[])[0].text).toContain("rejected max_bytes_invalid");
     await call("send", { to: "chair", body: "hello".repeat(1000), kind: "question" });
     const peek = await call("inbox");
     const messages = (peek.structuredContent as any).messages;
@@ -402,7 +433,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     await client.close();
     rmSync(root, { recursive: true, force: true });
   }
-}, 45000);
+}, 70000);
 
 it("reports stale running server sources with a restart fix", async () => {
   const { serverBuild } = await import("../src/surface.js");

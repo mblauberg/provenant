@@ -6,7 +6,7 @@ import type { CatalogueSnapshot } from "./catalogue.js";
 import type { Message } from "./store.js";
 import { databasePath } from "./identity.js";
 
-export function digest(row: Record<string, any>): string {
+function digestBase(row: Record<string, any>): string {
   if (typeof row.digest === "string") return row.digest;
   if (Array.isArray(row.digest)) return row.digest.join("\n");
   if (row.error || row.status === "rejected")
@@ -38,6 +38,11 @@ export function digest(row: Record<string, any>): string {
     return `${row.status} ${id}${routeText}${resultText}${route ? `\n  ${route}` : ""}`;
   }
   return JSON.stringify(row);
+}
+export function digest(row: Record<string, any>): string {
+  const base = digestBase(row);
+  const warnings = Array.isArray(row.warnings) ? row.warnings.join("\n") : "";
+  return warnings ? `${base}${base ? "\n" : ""}${warnings}` : base;
 }
 /** Keep the default structured reply as small as its text digest. */
 export function runView(value: Record<string, any>, detail = "brief"): Record<string, any> {
