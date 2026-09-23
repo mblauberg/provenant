@@ -78,6 +78,8 @@ it("does not repeat warnings the execution digest already carries", async () => 
     warnings: ["resuming a ~620k-token session", "! wait_seconds 56 clamped to 55"],
   };
   expect(digest(row)).toBe("ok mcp-dup claude/opus 3s\n  ! resuming a ~620k-token session\n! wait_seconds 56 clamped to 55");
+  const nested = { status: "ok", run_id: "mcp-sub", digest: "ok mcp-sub\n  ! context note: session near ceiling", warnings: ["context note: session near ceiling", "session near ceiling"] };
+  expect(digest(nested)).toBe("ok mcp-sub\n  ! context note: session near ceiling\nsession near ceiling");
 });
 
 it("leaves per-task context to the digest in brief rows", async () => {

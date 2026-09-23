@@ -57,9 +57,10 @@ function digestBase(row: Record<string, any>): string {
 }
 export function digest(row: Record<string, any>): string {
   const base = digestBase(row);
-  // Python's digest may already carry its warnings; add only the rest.
+  // Python's digest may already carry its warnings as one "  ! a; b" line; add only the rest.
+  const shown = new Set(base.split("\n").filter((line) => line.startsWith("  ! ")).flatMap((line) => line.slice(4).split("; ")));
   const warnings = Array.isArray(row.warnings)
-    ? row.warnings.map(String).filter((item) => !base.includes(item.replace(/^!\s*/u, ""))).join("\n")
+    ? row.warnings.map(String).filter((item) => !shown.has(item.replace(/^!\s*/u, ""))).join("\n")
     : "";
   return warnings ? `${base}${base ? "\n" : ""}${warnings}` : base;
 }
