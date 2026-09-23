@@ -2,6 +2,7 @@
 
 Fabric provides a project mailbox, task ledger and a thin MCP front door to the
 Python orchestration owners. Full provider output stays in run files.
+One SQLite file, no daemon, no setup.
 
 ## Start
 
@@ -10,7 +11,8 @@ provenant fabric whoami
 runtime/fabric/bin/fabric-mcp
 ```
 
-The launchers run TypeScript directly with `tsx`; Node 24.15 or newer within
+`bin/fabric` and `bin/fabric-mcp` run TypeScript directly with `tsx`;
+there is no build to keep in step with the source. Node 24.15 or newer within
 major version 24 is required. `FABRIC_NODE`, `AGENT_FABRIC_TSX_LOADER` and
 `AGENT_FABRIC_PRODUCT_ROOT` select the runtime, loader and product checkout.
 Restart an existing MCP connection after changing source. `fabric_whoami`
@@ -30,7 +32,8 @@ fabric_output{id:"mcp-a81f3c",part:"result",max_bytes:4000}
 ```
 
 Copy the returned `Route:` line for provenance. `content` contains the owner's
-verbatim digest; `structuredContent` contains `fabric.status.v1` rows. A small
+verbatim digest; `structuredContent` contains minimal `fabric.status.v1` rows by
+default. `detail: full` includes attempt history, evidence and provenance. A small
 formatter supports older receipts when no digest exists. Request errors contain
 one line with `fix:`. No provider output is embedded in status responses.
 
@@ -64,21 +67,26 @@ the caller workspace. The Python owner validates provider capabilities and
 applies controls; Fabric does not claim a stronger guarantee than its receipt.
 
 `tasks` contains 1–64 task objects with the same prompt and route fields plus
-optional `id`; `concurrency` is 1–8. Defaults are 55 seconds of waiting for a
-single dispatch and zero for a batch. Timeouts default to 3,600 seconds for
+optional `id`; `concurrency` is 1–8. Top-level route controls and timeout apply
+as defaults, with each task taking precedence. Prompt file paths resolve from
+the caller workspace, including when `cwd` selects a subdirectory. Defaults are
+55 seconds of waiting for a single dispatch and zero for a batch. Timeouts default to 3,600 seconds for
 read-only work and 10,800 seconds for writers. `resume` retains the same run ID,
 route, controls and timeout. Use a new dispatch to change those settings.
 
 Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, and `detail`.
 The wave-1 `id` argument and retained `mcp-*` directories remain readable.
 Without IDs it returns active and last-24-hour runs, capped at 20 rows. Rows
-include the latest attempt, attempt history and count, worktree, branch tip, dirty state and
-ahead count; unavailable Git facts are null. Unpublished batch children remain
-visible until an attempt or terminal batch summary accounts for them.
+include the latest attempt and count. Full detail adds history and the worktree
+ledger: branch tip, dirty state and ahead count; unavailable Git facts are null.
+Ledger reads are shared per worktree within a response and omitted for terminal
+brief rows. Unpublished batch children remain visible until an attempt or
+terminal batch summary accounts for them.
 
 Output defaults to 4,000 bytes and caps each request at 20,000. Continue at
-`next_offset`; `eof` reflects the current file size. Paths must resolve to
-regular files inside the retained run directory. For a batch, select a task ID.
+`next_offset`; pages preserve UTF-8 boundaries and `eof` reflects the current
+file size. Use `tail: true` for a bounded tail, including while a run is active.
+Paths must resolve to regular files inside the retained run directory. For a batch, select a task ID.
 `detail: full` adds adapter profiles or the agent list to discovery responses.
 CLI presence does not prove authentication; `auth?` makes that uncertainty explicit.
 
@@ -97,10 +105,11 @@ acknowledging the delivery. `wait_seconds`, `task_id`, `peek` and
 
 `chair` resolves through `PROVENANT_CHAIR`; `/root`, `root` and `parent` use
 `PROVENANT_PARENT`, then the chair. Only known project seats are selected. An
-unbound caller falls back to the named chair or the first registered seat.
-Owner completion posts `run_terminal` to the dispatching seat. Status observation
-acknowledges notices through the returned terminal attempt, including a notice
-that arrives after the status response.
+unbound caller can use a registered seat named `chair`; otherwise the request
+is rejected with `fix: pass to:<seat>`. Fabric never guesses the first seat.
+Owner completion posts `run_terminal` to the dispatching seat. Observing a
+terminal row through dispatch, cancel or status acknowledges its notices,
+including a notice that arrives after the response.
 
 Registered Git worktrees share one project while retaining their own cwd.
 `AGENT_FABRIC_LABEL` separates seats of one provider. A label remains bound to its
@@ -127,9 +136,11 @@ workspace directory's `.agent-run` otherwise. New runs are stored under
 `runs/YYYYMMDD-HHMM-dispatch|batch-slug-rand6/`; IDs stay `mcp-rand6`.
 Owner stdout, stderr and staging inputs live inside `_owner/`. New run creation
 adds `/.agent-run/`, `/.worktrees/` and `/.work/` to Git's local exclude file when
-writable. Existing `mcp-*` paths remain readable.
+writable. Existing `mcp-*` paths remain readable in both the shared root and
+the caller worktree’s former local `.agent-run` root.
 
-Dispatch-time maintenance scans that shared root. It closes active receipts
+Dispatch-time maintenance scans the shared root and retained local legacy runs.
+It closes active receipts
 older than 48 hours with no observed live owner as `interrupted`. Retention is
 seven days for successful/cancelled runs and fourteen days for failures
 (`AGENT_FABRIC_RUN_RETENTION_HOURS` overrides). Live runs,
@@ -153,11 +164,12 @@ node runtime/fabric/mcp-smoke.mjs
 node runtime/fabric/tests/tool-budget.mjs
 ```
 
-The MCP smoke uses fixture owners only, including a real linked worktree,
-question/resume, duplicate-resume rejection, failed-resume recovery, status,
-cancel, bounded output, mailbox claims and terminal-notice acknowledgement.
-The layout test prefers `tests/fixtures/fabric-v1/layout-cases.json`; its local
-fallback is an unchanged copy from Lane A, with a separate symlinked-cwd test.
+The MCP smoke uses fixture owners through the registered launcher. It covers
+a real linked worktree, writer arguments, inherited Git redirects, question/resume,
+failed-resume recovery, status, cancel, bounded output, two-seat reply correlation,
+owner-bound tasks, mailbox claims and terminal-notice acknowledgement.
+The layout test reads the shared `tests/fixtures/fabric-v1/layout-cases.json`,
+including its symlinked-cwd case.
 
 Before: 15 tools, 9,077 characters, approximately 2,269 tokens (`chars / 4`).
 The default v2 tool-list test enforces at least a 35% reduction. Verification
