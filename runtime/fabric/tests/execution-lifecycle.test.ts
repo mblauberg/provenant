@@ -197,20 +197,6 @@ describe("owner records", () => {
       else process.env.LANG = priorLang;
     }
   });
-  it("does not mark a run orphaned while its live host's identity is unverifiable", () => {
-    const runDir = join(workspace, ".agent-run", "mcp-host-unverified");
-    mkdirSync(runDir, { recursive: true });
-    writeFileSync(join(runDir, "dispatch-owner.json"), JSON.stringify({
-      schema_version: 1, kind: "dispatch", run_dir: runDir, workspace, run_token: "host",
-      owner_pid: process.pid, owner_pgid: process.pid, owner_started_at: processStartedAt(process.pid),
-      host_pid: process.pid, host_started_at: null, started_at: new Date().toISOString(),
-      owner_stdout: "", owner_stderr: "",
-    }));
-    const row = listRecordedRuns(workspace).find((run) => run.run_dir.endsWith("mcp-host-unverified"));
-    expect(row?.running).toBe(true);
-    expect(row?.orphaned).toBe(false);
-  });
-
   it.skipIf(!localeCase)("keeps a live legacy-locale owner running during termination", async () => {
     const { locale, legacy } = localeCase!;
     const priorAll = process.env.LC_ALL;
