@@ -1,0 +1,21 @@
+{
+  "requested": {
+    "adapter": "codex",
+    "alias": "scout",
+    "model": null,
+    "effort": "high"
+  },
+  "resolved_model": "gpt-6-luna",
+  "observed_model": "gpt-6-luna",
+  "observed_source": "codex:rollout.turn_context.model",
+  "identity": "observed",
+  "provider": "openai",
+  "transport": "codex",
+  "family": "openai",
+  "effort_requested": "high",
+  "effort_applied": "high",
+  "cli_version": "fixture",
+  "fallback_from": null,
+  "notes": [],
+  "line": "Route: codex/gpt-6-luna@high (openai; observed)"
+}

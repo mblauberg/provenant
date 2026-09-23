@@ -27,7 +27,7 @@ which review legs load-bear for the current risk and which are advisory.
 ## Capture
 
 Persist the independent provider result verbatim at the declared review path
-under the mission directory (e.g. `.agent-run/<mission-id>/reviews/<id>-<family>.md`),
+under the mission directory (e.g. `.agent-run/runs/<mission-run-dir>/reviews/<id>-<family>.md`),
 plus its Fabric route/result receipt. If the reviewed artifact is itself a
 delegated decision, its `adr`/review sidecar path is whatever the owning
 `implement`/`deliver` lifecycle declares — this skill does not invent a second

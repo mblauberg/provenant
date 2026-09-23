@@ -59,7 +59,8 @@ function toolPayload(result: unknown): unknown {
   const content = (result as { content: Array<{ type: string; text?: string }> }).content;
   const block = content.find((item) => item.type === "text" && item.text !== undefined);
   if (block?.text === undefined) throw new Error("MCP result had no text payload");
-  return JSON.parse(block.text);
+  const payload=JSON.parse(block.text);
+  return payload.messages ?? payload.activity ?? payload;
 }
 
 beforeEach(() => {
@@ -83,6 +84,7 @@ describe("project identity", () => {
     const chair = identify({
       AGENT_FABRIC_SEAT: "codex",
       AGENT_FABRIC_LABEL: "chair",
+        FABRIC_LEGACY_TOOLS: "1",
     }, primary);
     const worker = identify({
       AGENT_FABRIC_SEAT: "codex",
@@ -114,6 +116,7 @@ describe("project identity", () => {
         AGENT_FABRIC_STATE_DIRECTORY: state,
         AGENT_FABRIC_SEAT: "codex",
         AGENT_FABRIC_LABEL: "chair",
+        FABRIC_LEGACY_TOOLS: "1",
         NODE_NO_WARNINGS: "1",
       },
     });
@@ -121,8 +124,8 @@ describe("project identity", () => {
     try {
       await client.connect(transport);
       await client.callTool({
-        name: "fabric_task_create",
-        arguments: { objective: "review the linked-worktree change", task_id: "worktree-review" },
+        name: "fabric_task",
+        arguments: { action:"create", objective: "review the linked-worktree change", task_id: "worktree-review" },
       });
       await client.callTool({
         name: "fabric_team_create",
@@ -159,7 +162,7 @@ describe("project identity", () => {
       expect(replied.status, replied.stderr).toBe(0);
       const chairInbox = toolPayload(await client.callTool({
         name: "fabric_inbox",
-        arguments: {},
+        arguments: {claim:true},
       })) as Array<{ body: string; claimId: string; messageId: string; replyTo: string }>;
       expect(chairInbox).toContainEqual(expect.objectContaining({
         body: "review complete",
@@ -250,4 +253,63 @@ describe("project identity", () => {
       GIT_OBJECT_DIRECTORY: join(separate, "missing-objects"),
     })).toBe(realpathSync(primary));
   });
+});
+
+it('stores linked and symlinked cwd runs in the primary run root', async () => {
+ const identity = await import('../src/identity.js');
+ expect('runRoot' in identity).toBe(true);
+ if (!('runRoot' in identity)) return;
+ const root = identity.runRoot as (cwd:string)=>string;
+ expect(root(linked)).toBe(join(realpathSync(primary),'.agent-run'));
+ expect(root(primary)).toBe(join(realpathSync(primary),'.agent-run'));
+ expect(root(fixture)).toBe(join(realpathSync(fixture),'.agent-run'));
+});
+
+ it('passes the shared layout contract cases and a symlinked cwd', async () => {
+  const {runRoot}=await import('../src/identity.js');
+  const {symlinkSync}=await import('node:fs');
+  const shared=join(import.meta.dirname,'../../../tests/fixtures/fabric-v1/layout-cases.json');
+  const cases=JSON.parse(readFileSync(shared,'utf8'));
+  const alias=join(fixture,'alias');mkdirSync(alias);
+  const substitute=(path:string)=>path.replace('/repo/.worktrees/lane',linked).replace('/repo',primary).replace('/workspace',fixture).replace('/alias',alias);
+  for(const item of cases) {
+   if(item.resolved_cwd) symlinkSync(substitute(item.resolved_cwd),substitute(item.cwd));
+   const expected=item.agent_run_dir ? substitute(item.agent_run_dir) : join(substitute(item.run_root),'.agent-run');
+   expect(runRoot(substitute(item.cwd)),item.name).toBe(join(realpathSync(dirname(expected)),'.agent-run'));
+  }
+ });
+
+it('finds and cancels retained cwd-local legacy runs from a linked worktree', async () => {
+ const {statusRows,findRecordedRun}=await import('../src/run-registry.js');
+ const {cancelConfiguredRun}=await import('../src/execution.js');
+ const dir=join(realpathSync(linked),'.agent-run/mcp-legacy');mkdirSync(dir,{recursive:true});
+ writeFileSync(join(dir,'dispatch-status.json'),JSON.stringify({id:'mcp-legacy',status:'running',started_at:new Date().toISOString()}));
+ writeFileSync(join(dir,'dispatch-owner.json'),JSON.stringify({schema_version:1,kind:'dispatch',run_dir:dir,workspace:linked,run_token:'gone',owner_pid:999991,owner_pgid:999991,owner_started_at:null,host_pid:999992,host_started_at:null,started_at:new Date().toISOString(),owner_stdout:'',owner_stderr:''}));
+ expect(findRecordedRun(linked,'mcp-legacy')?.run_dir).toBe(dir);
+ expect((await statusRows(linked,['mcp-legacy'])).runs?.[0]).toMatchObject({run_dir:dir,status:'interrupted'});
+ const who={project:primary,cwd:linked,provider:'codex',agentId:'worker'};
+ expect((await cancelConfiguredRun('mcp-legacy',who)).runs).toBeDefined();
+});
+
+it('computes the ledger once per selected worktree and skips terminal brief rows', async () => {
+ const {statusRows}=await import('../src/run-registry.js');
+ const {chmodSync,existsSync}=await import('node:fs');
+ const executable=execFileSync('/usr/bin/which',['git'],{encoding:'utf8'}).trim();
+ const bin=join(fixture,'bin'),log=join(fixture,'git-calls');mkdirSync(bin);
+ const quote=(value:string)=>"'"+value.replaceAll("'", "'\"'\"'")+"'";
+ writeFileSync(join(bin,'git'),`#!/bin/sh\nif [ "$1" = '-C' ]; then echo "$2" >> ${quote(log)}; fi\nexec ${quote(executable)} "$@"\n`);chmodSync(join(bin,'git'),0o755);
+ for(const suffix of ['aaaaaa','bbbbbb','cccccc']) {
+  const dir=join(primary,`.agent-run/runs/20260923-1012-dispatch-test-${suffix}`);
+  const path=join(dir,'tasks/task-1/attempt-001');mkdirSync(path,{recursive:true});
+  writeFileSync(join(path,'attempt.json'),JSON.stringify({schema:'fabric.attempt.v1',run_id:`mcp-${suffix}`,task_id:'task-1',attempt:1,state:'terminal',status:'ok',worktree:suffix==='cccccc'?separate:linked,started_at:new Date().toISOString(),paths:{}}));
+ }
+ const old=process.env.PATH;process.env.PATH=`${bin}:${old}`;
+ try {
+  const brief=await statusRows(primary,['mcp-aaaaaa']);
+  expect(brief.runs?.[0]).not.toHaveProperty('branch_tip');
+  expect(existsSync(log)).toBe(false);
+  const full=await statusRows(primary,['mcp-aaaaaa','mcp-bbbbbb'],0,'all',undefined,'full');
+  expect(full.runs?.every(row=>typeof row.branch_tip==='string')).toBe(true);
+  expect(readFileSync(log,'utf8').trim().split('\n')).toEqual([linked,linked]);
+ } finally {if(old===undefined) delete process.env.PATH;else process.env.PATH=old;}
 });

@@ -1,0 +1,129 @@
+{
+  "schema": "fabric.status.v1",
+  "run_id": "mcp-a81f3c",
+  "task_id": "task-1",
+  "attempt": 1,
+  "state": "terminal",
+  "status": "ok",
+  "mode": "read_only",
+  "cwd": "/repo",
+  "worktree": null,
+  "started_at": "2026-09-23T10:12:00Z",
+  "ended_at": "2026-09-23T10:17:12Z",
+  "last_progress_at": "2026-09-23T10:17:12Z",
+  "pgid": 12345,
+  "session_id": "fixture-thread",
+  "retryable": false,
+  "reset_at": null,
+  "retry_after": null,
+  "fix": null,
+  "evidence": {
+    "exit": 0,
+    "signal": null,
+    "signature": null,
+    "excerpt": ""
+  },
+  "question": null,
+  "applied": {
+    "sandbox": "read-only",
+    "network": true,
+    "add_dirs": [],
+    "guarantee": "enforced"
+  },
+  "warnings": [],
+  "provenance": {
+    "requested": {
+      "adapter": "codex",
+      "alias": "scout",
+      "model": null,
+      "effort": "high"
+    },
+    "resolved_model": "gpt-6-luna",
+    "observed_model": "gpt-6-luna",
+    "observed_source": "codex:rollout.turn_context.model",
+    "identity": "observed",
+    "provider": "openai",
+    "transport": "codex",
+    "family": "openai",
+    "effort_requested": "high",
+    "effort_applied": "high",
+    "cli_version": "fixture",
+    "fallback_from": null,
+    "notes": [],
+    "line": "Route: codex/gpt-6-luna@high (openai; observed)"
+  },
+  "paths": {
+    "result": "tasks/task-1/attempt-001/result.md",
+    "stderr": "tasks/task-1/attempt-001/stderr.log",
+    "events": "tasks/task-1/attempt-001/events.jsonl",
+    "receipt": "tasks/task-1/attempt-001/attempt.json"
+  },
+  "digest": "ok mcp-a81f3c codex/gpt-6-luna@high 312s \u00b7 result tasks/task-1/attempt-001/result.md\n  Route: codex/gpt-6-luna@high (openai; observed)",
+  "attempts": [
+    {
+      "schema": "fabric.attempt.v1",
+      "run_id": "mcp-a81f3c",
+      "task_id": "task-1",
+      "attempt": 1,
+      "state": "terminal",
+      "status": "ok",
+      "mode": "read_only",
+      "cwd": "/repo",
+      "worktree": null,
+      "started_at": "2026-09-23T10:12:00Z",
+      "ended_at": "2026-09-23T10:17:12Z",
+      "last_progress_at": "2026-09-23T10:17:12Z",
+      "pgid": 12345,
+      "session_id": "fixture-thread",
+      "retryable": false,
+      "reset_at": null,
+      "retry_after": null,
+      "fix": null,
+      "evidence": {
+        "exit": 0,
+        "signal": null,
+        "signature": null,
+        "excerpt": ""
+      },
+      "question": null,
+      "applied": {
+        "sandbox": "read-only",
+        "network": true,
+        "add_dirs": [],
+        "guarantee": "enforced"
+      },
+      "warnings": [],
+      "provenance": {
+        "requested": {
+          "adapter": "codex",
+          "alias": "scout",
+          "model": null,
+          "effort": "high"
+        },
+        "resolved_model": "gpt-6-luna",
+        "observed_model": "gpt-6-luna",
+        "observed_source": "codex:rollout.turn_context.model",
+        "identity": "observed",
+        "provider": "openai",
+        "transport": "codex",
+        "family": "openai",
+        "effort_requested": "high",
+        "effort_applied": "high",
+        "cli_version": "fixture",
+        "fallback_from": null,
+        "notes": [],
+        "line": "Route: codex/gpt-6-luna@high (openai; observed)"
+      },
+      "paths": {
+        "result": "tasks/task-1/attempt-001/result.md",
+        "stderr": "tasks/task-1/attempt-001/stderr.log",
+        "events": "tasks/task-1/attempt-001/events.jsonl",
+        "receipt": "tasks/task-1/attempt-001/attempt.json"
+      },
+      "digest": "ok mcp-a81f3c codex/gpt-6-luna@high 312s \u00b7 result tasks/task-1/attempt-001/result.md\n  Route: codex/gpt-6-luna@high (openai; observed)"
+    }
+  ],
+  "branch_tip": "0123456789abcdef",
+  "dirty": false,
+  "ahead": 0
+}

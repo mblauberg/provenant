@@ -30,7 +30,7 @@ ASSURANCE_INELIGIBLE_FAMILIES = frozenset({"generic-open", "open-weight"})
 
 # Broker/gateway prefixes stripped before pattern inference so nested vendor
 # slugs (opencode/deepseek-…, openrouter/moonshotai/kimi-…) attribute correctly.
-_BROKER_PREFIXES = ("opencode/", "openrouter/")
+_BROKER_PREFIXES = ("opencode/", "opencode-go/", "openrouter/")
 
 
 def model_slug_for_family(model: str) -> str:

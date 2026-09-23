@@ -600,7 +600,7 @@ def test_same_route_retry_runs_full_provider_free_chain_and_retains_risk_and_pro
         bin_dir / "codex",
         f"""#!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '%s\n' '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
+          printf '%s\n' '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
           exit 0
         fi
         if [ ! -f {provider_count} ]; then
@@ -642,7 +642,8 @@ def test_same_route_retry_runs_full_provider_free_chain_and_retains_risk_and_pro
     assert attempt["requested_route"]["risk_tier"] == "substantial"
     assert attempt["route"]["risk_tier"] == "substantial"
     assert attempt["route"]["model_override_tier"] == ""
-    assert received.read_bytes() == prompt.read_bytes()
+    assert received.read_bytes().endswith(prompt.read_bytes())
+    assert received.read_bytes().startswith(b"You are codex/")
 
 
 def test_retry_reroute_requires_a_complete_new_route(tmp_path: Path) -> None:

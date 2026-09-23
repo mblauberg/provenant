@@ -370,7 +370,7 @@ describe("CLI boundaries", () => {
     }]);
   });
 
-  it("keeps watch live after its initial 200-row window", async () => {
+  it("keeps activity watch live after its initial 200-row window", async () => {
     const seed = openStore();
     const watcher = identify({
       AGENT_FABRIC_SEAT: "codex",
@@ -383,7 +383,7 @@ describe("CLI boundaries", () => {
     const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
     const tsxLoader = createRequire(import.meta.url).resolve("tsx");
     const child = spawn(process.execPath, [
-      "--import", tsxLoader, cliPath, "watch", "--interval", "0.02",
+      "--import", tsxLoader, cliPath, "watch", "--activity", "--interval", "0.02",
     ], {
       cwd: repositoryRoot,
       env: {
@@ -427,6 +427,26 @@ describe("CLI boundaries", () => {
 });
 
 describe("MCP startup boundaries", () => {
+  it("announces a connected seat before any coordination tool is called", async () => {
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["--import", createRequire(import.meta.url).resolve("tsx"),
+        fileURLToPath(new URL("../src/server.ts", import.meta.url))],
+      cwd: repositoryRoot,
+      stderr: "pipe",
+      env: { HOME: process.env.HOME ?? temporaryDirectory, PATH: process.env.PATH ?? "/usr/bin:/bin",
+        AGENT_FABRIC_STATE_DIRECTORY: temporaryDirectory, AGENT_FABRIC_SEAT: "codex",
+        AGENT_FABRIC_LABEL: "connected-seat", NODE_NO_WARNINGS: "1" },
+    });
+    const client = new Client({ name: "presence-regression", version: "1" });
+    try {
+      await client.connect(transport);
+      expect(openStore().agents(agent("observer").project)).toEqual(expect.arrayContaining([
+        expect.objectContaining({ agentId: "connected-seat", provider: "codex" }),
+      ]));
+    } finally { await client.close(); }
+  });
+
   it("closes an active wait when stdin reaches EOF", async () => {
     const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
     const tsxLoader = createRequire(import.meta.url).resolve("tsx");
@@ -466,7 +486,7 @@ describe("MCP startup boundaries", () => {
         jsonrpc: "2.0",
         id: 2,
         method: "tools/call",
-        params: { name: "fabric_inbox", arguments: { wait_seconds: 2 } },
+        params: { name: "fabric_inbox", arguments: { claim: true, wait_seconds: 2 } },
       }),
       "",
     ].join("\n"));
@@ -519,7 +539,7 @@ describe("MCP startup boundaries", () => {
       let settled = false;
       const waiting = client.callTool({
         name: "fabric_inbox",
-        arguments: { wait_seconds: 1, task_id: "wait-task" },
+        arguments: { claim: true, wait_seconds: 1, task_id: "wait-task" },
       }).finally(() => { settled = true; });
 
       await delay(75);
@@ -531,11 +551,11 @@ describe("MCP startup boundaries", () => {
       const result = await waiting;
       expect(result.isError).toBeUndefined();
       const content = result.content as Array<{ type: "text"; text: string }>;
-      expect(JSON.parse(content[0]!.text)).toMatchObject([{
+      expect(JSON.parse(content[0]!.text).messages).toMatchObject([{
         body: "arrived during the MCP wait",
         claimId: expect.any(String),
       }]);
-      const messages = JSON.parse(content[0]!.text) as Message[];
+      const messages = JSON.parse(content[0]!.text).messages as Message[];
       await client.callTool({
         name: "fabric_acknowledge",
         arguments: {
@@ -547,16 +567,16 @@ describe("MCP startup boundaries", () => {
       const timeoutStarted = Date.now();
       const timedOut = await client.callTool({
         name: "fabric_inbox",
-        arguments: { wait_seconds: 1 },
+        arguments: { claim: true, wait_seconds: 1 },
       });
       expect(Date.now() - timeoutStarted).toBeGreaterThanOrEqual(900);
       const timeoutContent = timedOut.content as Array<{ type: "text"; text: string }>;
-      expect(JSON.parse(timeoutContent[0]!.text)).toEqual([]);
+      expect(JSON.parse(timeoutContent[0]!.text).messages).toEqual([]);
 
       const controller = new AbortController();
       const abandoned = client.callTool({
         name: "fabric_inbox",
-        arguments: { wait_seconds: 2 },
+        arguments: { claim: true, wait_seconds: 2 },
       }, undefined, { signal: controller.signal });
       await delay(75);
       controller.abort();
@@ -569,14 +589,14 @@ describe("MCP startup boundaries", () => {
 
       const afterCancellation = await client.callTool({
         name: "fabric_inbox",
-        arguments: {},
+        arguments: { claim: true,},
       });
       const afterCancellationContent = afterCancellation.content as Array<{
         type: "text"; text: string;
       }>;
       const afterCancellationMessages = JSON.parse(
         afterCancellationContent[0]!.text,
-      ) as Message[];
+      ).messages as Message[];
       expect(afterCancellationMessages).toMatchObject([{
         body: "arrived after cancellation",
         claimId: expect.any(String),
@@ -597,7 +617,7 @@ describe("MCP startup boundaries", () => {
       const lockedController = new AbortController();
       const lockedCancellation = client.callTool({
         name: "fabric_inbox",
-        arguments: { wait_seconds: 2 },
+        arguments: { claim: true, wait_seconds: 2 },
       }, undefined, { signal: lockedController.signal });
       const lockedRejection = expect(lockedCancellation).rejects.toThrow();
       await delay(25);
@@ -610,12 +630,12 @@ describe("MCP startup boundaries", () => {
 
       const afterLockedCancellation = await client.callTool({
         name: "fabric_inbox",
-        arguments: {},
+        arguments: { claim: true,},
       });
       const afterLockedContent = afterLockedCancellation.content as Array<{
         type: "text"; text: string;
       }>;
-      const afterLockedMessages = JSON.parse(afterLockedContent[0]!.text) as Message[];
+      const afterLockedMessages = JSON.parse(afterLockedContent[0]!.text).messages as Message[];
       expect(afterLockedMessages).toMatchObject([{
         body: "queued before locked cancellation",
         claimId: expect.any(String),
@@ -634,11 +654,11 @@ describe("MCP startup boundaries", () => {
         const lockedStarted = performance.now();
         const locked = await client.callTool({
           name: "fabric_inbox",
-          arguments: { wait_seconds: 1 },
+          arguments: { claim: true, wait_seconds: 1 },
         }, undefined, { timeout: 2_000 });
         expect(performance.now() - lockedStarted).toBeLessThan(1_400);
         const lockedContent = locked.content as Array<{ type: "text"; text: string }>;
-        expect(JSON.parse(lockedContent[0]!.text)).toEqual([]);
+        expect(JSON.parse(lockedContent[0]!.text).messages).toEqual([]);
       } finally {
         blocker.exec("ROLLBACK");
         blocker.close();
@@ -731,12 +751,12 @@ describe("MCP startup boundaries", () => {
       const boundedStarted = performance.now();
       const bounded = await client.callTool({
         name: "fabric_inbox",
-        arguments: { wait_seconds: 1 },
+        arguments: { claim: true, wait_seconds: 1 },
       });
       expect(performance.now() - boundedStarted).toBeLessThan(1_400);
       expect(bounded.isError).toBeUndefined();
       const boundedContent = bounded.content as Array<{ type: "text"; text: string }>;
-      expect(JSON.parse(boundedContent[0]!.text)).toEqual([]);
+      expect(JSON.parse(boundedContent[0]!.text).messages).toEqual([]);
 
       const locked = await client.callTool({ name: "fabric_whoami", arguments: {} });
       expect(locked.isError).toBe(true);
@@ -747,7 +767,7 @@ describe("MCP startup boundaries", () => {
 
       const peekedPromise = client.callTool({
         name: "fabric_inbox",
-        arguments: { peek: true, wait_seconds: 2 },
+        arguments: { claim: true, peek: true, wait_seconds: 2 },
       });
       await delay(100);
       blocker.exec("COMMIT");
@@ -771,12 +791,12 @@ describe("MCP startup boundaries", () => {
       expect(recovered.isError).toBeUndefined();
       expect(recovered.content).toMatchObject([{
         type: "text",
-        text: expect.stringContaining('"agentId": "lock-recovery"'),
+        text: expect.stringContaining('"agentId":"lock-recovery"'),
       }]);
-      const inbox = await client.callTool({ name: "fabric_inbox", arguments: {} });
+      const inbox = await client.callTool({ name: "fabric_inbox", arguments: { claim: true,} });
       expect(inbox.isError).toBeUndefined();
       const inboxContent = inbox.content as Array<{ type: "text"; text: string }>;
-      const messages = JSON.parse(inboxContent[0]!.text) as Message[];
+      const messages = JSON.parse(inboxContent[0]!.text).messages as Message[];
       expect(messages).toMatchObject([{
         body: "recover claim and acknowledgement",
         claimId: expect.any(String),
@@ -1593,4 +1613,41 @@ describe("multi-process WAL concurrency", () => {
       db.close();
     }
   }, 90_000);
+});
+
+it('routes chair and parent aliases and excludes deliveries older than fourteen days', () => {
+ const store=openStore();announce(store,'chair-seat','worker');
+ const oldChair=process.env.PROVENANT_CHAIR, oldParent=process.env.PROVENANT_PARENT;
+ process.env.PROVENANT_CHAIR='chair-seat';process.env.PROVENANT_PARENT='chair-seat';
+ try {
+  for(const alias of ['chair','/root','root','parent']) expect(store.send(agent('worker'),alias,'question').recipients).toEqual(['chair-seat']);
+  const rows=store.inbox(agent('chair-seat'),{peek:true});expect(rows).toHaveLength(4);
+  const db=new Database(databasePath);db.prepare('UPDATE messages SET created_at = ?').run(Date.now()-15*86400000);db.close();
+  expect(store.inbox(agent('chair-seat'),{peek:true})).toEqual([]);
+ } finally {
+  if(oldChair === undefined) delete process.env.PROVENANT_CHAIR;else process.env.PROVENANT_CHAIR=oldChair;
+  if(oldParent === undefined) delete process.env.PROVENANT_PARENT;else process.env.PROVENANT_PARENT=oldParent;
+ }
+});
+
+it('acknowledges a terminal notice published after status observation', () => {
+ const store=openStore();announce(store,'chair');const who=agent('chair');
+ store.acknowledgeTerminal(who,{run_id:'mcp-one',task_id:'task-1',attempt:2,run_dir:'/fixture'});
+ store.send(who,'chair','done',{kind:'run_terminal',outputPath:'mcp-one:task-1:1'});
+ store.send(who,'chair','done',{kind:'run_terminal',outputPath:'mcp-one:task-1:2'});
+ store.send(who,'chair','new attempt',{kind:'run_terminal',outputPath:'mcp-one:task-1:3'});
+ expect(store.inbox(who,{peek:true})).toMatchObject([{body:'new attempt'}]);
+});
+
+it('rejects unbound chair and parent aliases instead of guessing a stale seat', () => {
+ const store=openStore();announce(store,'old-seat','worker');
+ const saved={chair:process.env.PROVENANT_CHAIR,parent:process.env.PROVENANT_PARENT};
+ delete process.env.PROVENANT_CHAIR;delete process.env.PROVENANT_PARENT;
+ try {
+  for(const to of ['chair','parent','root','/root']) expect(()=>store.send(agent('worker'),to,'question')).toThrow(/pass to:<seat>/u);
+  expect(store.inbox(agent('old-seat'),{peek:true})).toEqual([]);
+ } finally {
+  if(saved.chair!==undefined) process.env.PROVENANT_CHAIR=saved.chair;
+  if(saved.parent!==undefined) process.env.PROVENANT_PARENT=saved.parent;
+ }
 });

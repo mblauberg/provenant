@@ -5,9 +5,13 @@ set -euo pipefail
 
 ROOT=""
 FORCE=0
+KIND="orch" SLUG="run" OWNER_LOGS=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) FORCE=1; shift;;
+    --kind) KIND="$2"; shift 2;;
+    --slug) SLUG="$2"; shift 2;;
+    --owner-logs) OWNER_LOGS=1; shift;;
     -*) echo "unknown arg: $1" >&2; exit 2;;
     *)
       [ -n "$ROOT" ] && { echo "unexpected extra arg: $1" >&2; exit 2; }
@@ -15,11 +19,14 @@ while [ $# -gt 0 ]; do
   esac
 done
 
-ROOT="${ROOT:-./.agent-run/$(date -u +%Y%m%dT%H%M%SZ)}"
+if [ -z "$ROOT" ]; then
+  ROOT="$(python3 "$(dirname "$0")/layout.py" --kind "$KIND" --slug "$SLUG")"
+fi
 if [ -d "$ROOT" ] && [ -n "$(ls -A "$ROOT" 2>/dev/null)" ] && [ "$FORCE" != "1" ]; then
   echo "refusing: $ROOT is non-empty (pass --force to reuse it)" >&2; exit 1
 fi
 mkdir -p "$ROOT"/{findings,crossfamily,traces}
+[ "$OWNER_LOGS" = 0 ] || mkdir -p "$ROOT/_owner"
 CREATED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 if [ ! -e "$ROOT/MANIFEST.md" ] || [ "$FORCE" != "1" ]; then

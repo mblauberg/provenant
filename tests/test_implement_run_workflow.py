@@ -82,3 +82,10 @@ def test_bootstrap_may_raise_the_requested_risk_floor():
     assert result["calls"][0] == "bootstrap"
     assert "checkpoint:understand-dispatch" in result["calls"]
     assert result["stoppedAfterPostBoot"] is True
+
+
+def test_bootstrap_anchors_delivery_run_to_primary_checkout():
+    source = WORKFLOW.read_text()
+    assert "git rev-parse --path-format=absolute --git-common-dir" in source
+    assert "primary checkout" in source
+    assert "approved intent" in source and "primary checkout" in source

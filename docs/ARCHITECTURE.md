@@ -1,5 +1,8 @@
 # Provenant architecture
 
+Fabric v2 run layout, tool contract, provenance and cleanup decisions are
+recorded in [Fabric v2](specs/fabric-v2.md).
+
 ## Purpose
 
 Provenant is an agent harness: a gated delivery lifecycle for coding agents.

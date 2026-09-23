@@ -6,7 +6,7 @@
   / next agent to carry forward." It SYNTHESIZES existing mission artifacts —
   it does NOT introduce new decisions (a handoff that decides is a bug).
   Every claim traces to a source file (relative paths from the mission root,
-  or a delegated .agent-run/<mission-id>/RUN.json receipt).
+  or a delegated .agent-run/runs/<mission-run-dir>/RUN.json receipt).
 
   Until the mission produces artifacts this is a STUB. Closing the mission
   is a finish-blocker unless GOAL + STATE + HANDOFF all agree on the
@@ -22,7 +22,7 @@
 >
 > **Authoritative sources:** `GOAL.md` (mission + `{{LOCKED_CONSTRAINTS}}`) ·
 > `STATE.md` (heartbeat, iteration <N>) · `QUEUE.md` (work items + count
-> summary) · any delegated `.agent-run/<mission-id>/RUN.json` receipt from
+> summary) · any delegated `.agent-run/runs/<mission-run-dir>/RUN.json` receipt from
 > `implement`/`deliver` waves this mission dispatched.
 
 ---
@@ -63,7 +63,7 @@ receipt/spec lives.)*
 
 <Organized by dependency tier or work area. One bullet per load-bearing
 item: `QUEUE.md` id → the call → the one-line why → the delegated receipt
-path (`.agent-run/<mission-id>/RUN.json` or equivalent) if any.>
+path (`.agent-run/runs/<mission-run-dir>/RUN.json` or equivalent) if any.>
 
 ## 3. The open forks = the spike/decision backlog
 

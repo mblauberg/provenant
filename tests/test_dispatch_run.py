@@ -119,7 +119,7 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
         bin_dir / "codex",
         """#!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
         fi
         cat >/dev/null
@@ -496,7 +496,7 @@ def test_ordinary_dispatch_without_lead_family_is_not_certification(tmp_path: Pa
     bin_dir.mkdir()
     write_executable(bin_dir / "codex", """#!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
         fi
         cat >/dev/null
@@ -610,7 +610,7 @@ def test_route_failure_is_typed_and_provider_is_not_invoked(tmp_path: Path) -> N
         f"""
         #!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
+          printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
           exit 0
         fi
         touch {invoked}
@@ -626,6 +626,7 @@ def test_route_failure_is_typed_and_provider_is_not_invoked(tmp_path: Path) -> N
             "--run-dir", str(run_dir), "--task-id", "route-failure",
             "--adapter", "codex", "--prompt-file", str(prompt),
             "--alias", "does-not-exist", "--role", "worker",
+            "--intent", "assurance", "--orchestrator-family", "anthropic",
         ], cwd=tmp_path, env=env, text=True,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
@@ -650,7 +651,7 @@ def test_nonzero_provider_exit_is_recorded_without_substitution(tmp_path: Path) 
         bin_dir / "codex",
         """#!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-sol","supported_reasoning_levels":[{"effort":"high"}]},{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
         fi
         cat >/dev/null
@@ -674,7 +675,7 @@ def test_nonzero_provider_exit_is_recorded_without_substitution(tmp_path: Path) 
     assert result.returncode != 0
     record = json.loads(result.stdout)
     assert record["status"] == "failed"
-    assert record["failure_code"] == "error"
+    assert record["failure_code"] == "failed"
     assert record["process"]["exit_code"] != 0
     assert record["process"]["observed_exit"] is True
     assert record["route"]["substitution"] == ""
@@ -838,23 +839,26 @@ def test_timeout_records_reaped_exit(tmp_path: Path) -> None:
         bin_dir / "codex",
         """#!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
         fi
         sleep 10
         """,
     )
     env = os.environ.copy()
+    env["PROVENANT_PREFLIGHT_ROUTES"] = json.dumps({"timeout": {"adapter": "codex", "alias": "workhorse", "resolved_model": "gpt-6-luna", "effort": "high"}})
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     result = subprocess.run(
         [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "timeout", "--adapter", "codex",
-         "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker", "--timeout", "0.1"],
+         "--prompt-file", str(prompt), "--model", "gpt-6-luna", "--role", "worker", "--timeout", "0.1"],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     assert result.returncode != 0
     record = json.loads(result.stdout)
     assert record["status"] == "timed_out"
     assert record["failure_code"] == "timeout"
+    assert record["route"]["resolved_model"] == "gpt-6-luna"
+    assert record["route"]["effort"] == "high"
     assert record["process"]["observed_exit"] is True
     assert record["process"]["exit_code"] is not None
 
@@ -870,7 +874,7 @@ def test_sigterm_cancels_and_reaps_provider_group(tmp_path: Path) -> None:
         bin_dir / "codex",
         """#!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
         fi
         printf '%s\n' "$$" > "$PROBE_PID_PATH"
@@ -1008,7 +1012,7 @@ def test_external_task_cancel_reaps_only_owned_provider_group(tmp_path: Path) ->
         bin_dir / "codex",
         f"""#!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{{"models":[{{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
+          printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
           exit 0
         fi
         printf '%s' "$$" > "{provider_pid_path}"
@@ -1111,7 +1115,7 @@ def test_attempt_rows_are_accepted_by_existing_finalizer(tmp_path: Path) -> None
     bin_dir.mkdir()
     write_executable(bin_dir / "codex", """#!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-5.6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
         fi
         cat >/dev/null
@@ -1570,19 +1574,46 @@ def make_worktree(root: Path) -> Path:
 
 
 def run_writer_dispatch(
-    tmp_path: Path, run_dir: Path, prompt: Path, *extra: str, task_id: str = "task-1"
+    tmp_path: Path, run_dir: Path, prompt: Path, *extra: str, task_id: str = "task-1",
+    adapter: str = "claude",
 ) -> subprocess.CompletedProcess[str]:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     write_success_adapter(bin_dir / "cf_dispatch_stub.sh")
+    if adapter == "opencode":
+        write_executable(bin_dir / "opencode", """#!/usr/bin/env bash
+            printf '%s\\n' '{"type":"text","part":{"text":"OK"}}'
+        """)
     env = os.environ.copy()
+    env.pop("AGENTS_HOME", None)
+    env["AGENT_FABRIC_INSTANCE_ROOT"] = str(ROOT)
+    env["AGENT_FABRIC_PRODUCT_ROOT"] = str(ROOT)
     env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
     return subprocess.run(
-        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", task_id, "--adapter", "claude",
-         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "workhorse",
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", task_id, "--adapter", adapter,
+         "--prompt-file", str(prompt), "--orchestrator-family", "openai",
+         *([] if adapter == "opencode" else ["--alias", "workhorse"]),
          "--role", "worker", *extra],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
+
+
+def test_opencode_worktree_writer_reaches_adapter_and_attempt(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "opencode-writer")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Make a change\n", encoding="utf-8")
+    worktree = make_worktree(tmp_path)
+    result = run_writer_dispatch(
+        tmp_path, run_dir, prompt, "--access-mode", "worktree_write",
+        "--worktree", str(worktree), "--model", "opencode-go/deepseek-v4.1-flash",
+        adapter="opencode",
+    )
+    assert result.returncode == 0, result.stderr + result.stdout
+    receipt = json.loads(result.stdout)
+    assert receipt["status"] == "succeeded"
+    attempt = json.loads((run_dir / "dispatch/tasks/task-1/attempt-001/attempt.json").read_text())
+    assert attempt["requested_route"]["adapter"] == "opencode"
+    assert attempt["requested_route"]["access_mode"] == "worktree_write"
 
 
 def test_worktree_writer_route_reaches_the_adapter_and_the_attempt_record(tmp_path: Path) -> None:
@@ -1770,7 +1801,7 @@ def test_provider_reported_timeout_is_typed_rather_than_an_empty_result(tmp_path
     )
     assert result.returncode != 0
     record = json.loads(result.stdout)
-    assert record["route"]["status"] == "timeout"
+    assert record["route"]["status"] == "timed_out"
     assert record["status"] == "timed_out"
     assert record["failure_code"] == "provider_timeout"
     assert record["process"]["observed_exit"] is True
@@ -1850,3 +1881,345 @@ def test_result_missing_past_the_provider_deadline_is_a_timeout_not_a_result_fai
         "result_missing_or_empty", "adapter_receipt_invalid", "terminal_envelope_invalid",
     }
     assert record["process"]["observed_exit"] is True
+
+
+def test_front_door_preflight_rejects_all_invalid_tasks_without_run(tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), '--preflight-json'], cwd=tmp_path,
+        input=json.dumps({'tasks': [
+            {'id': 'missing', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': 'absent.md'},
+            {'id': 'broker', 'adapter': 'opencode', 'alias': 'workhorse', 'prompt': 'hello'},
+        ]}), text=True, capture_output=True,
+        env={**os.environ, 'AGENT_FABRIC_INSTANCE_ROOT': str(ROOT)},
+    )
+    record = json.loads(result.stdout)
+    assert record['status'] == 'rejected'
+    # OpenCode now resolves its catalogue default model, so only the missing prompt is rejected.
+    assert {error['error'] for error in record['errors']} == {'prompt_unavailable'}
+    assert all(error['fix'] for error in record['errors'])
+    assert not (tmp_path / '.agent-run').exists()
+
+
+def test_mcp_owner_closes_receipt(tmp_path, monkeypatch, capsys):
+    run_dir = make_run(tmp_path, 'mcp-finished')
+    module = load_dispatch_module()
+    adapter = tmp_path / 'adapter'
+    write_success_adapter(adapter)
+    module.CF_DISPATCH = adapter
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('PROVENANT_RUN_TOKEN', 'fixture-token')
+    monkeypatch.setenv('PROVENANT_RUN_DIR', str(run_dir))
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('hello')
+    args = module.parser().parse_args(['--run-dir', str(run_dir), '--adapter', 'codex',
+        '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker'])
+    assert module.dispatch(args) == 0
+    terminal = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert terminal['schema'] == 'fabric.attempt.v1'
+    assert terminal['status'] == 'ok'
+    assert terminal['provenance']['line'].startswith('Route:')
+    receipt = json.loads((run_dir / 'RUN_RECEIPT.json').read_text())
+    assert receipt['status'] == 'succeeded'
+    assert receipt['closed_at']
+
+
+def test_mcp_batch_cancelled_before_dispatch_closes_receipt(tmp_path, monkeypatch):
+    run_dir = make_run(tmp_path, 'mcp-cancelled-before-dispatch')
+    module = load_dispatch_module()
+    monkeypatch.setenv('PROVENANT_RUN_TOKEN', 'fixture-token')
+    monkeypatch.setenv('PROVENANT_RUN_DIR', str(run_dir))
+    summary = run_dir / 'dispatch/batches/batch-001/summary.json'
+    summary.parent.mkdir(parents=True)
+    summary.write_text(json.dumps({'status': 'cancelled', 'tasks': [
+        {'task_id': 'never-started', 'status': 'cancelled'}]}))
+    module.close_mcp_run(run_dir)
+    assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'cancelled'
+
+
+@pytest.mark.parametrize(('mode', 'timeout'), [('read_only', 3600), ('worktree_write', 10800)])
+def test_front_door_mode_timeout_defaults(tmp_path, mode, timeout):
+    module = load_dispatch_module()
+    args = module.parser().parse_args(['--run-dir', str(tmp_path), '--adapter', 'codex',
+        '--prompt-stdin', '--alias', 'workhorse', '--role', 'worker', '--access-mode', mode])
+    module.dispatch(args)
+    assert args.timeout_seconds == timeout
+
+
+def test_front_door_preflight_reuses_registered_routes_without_capability_probe(tmp_path, monkeypatch):
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    counter = tmp_path / 'probes'
+    write_executable(bin_dir / 'codex', '''#!/usr/bin/env python3
+import json, os
+from pathlib import Path
+p = Path(os.environ['PROBE_COUNTER'])
+p.write_text(p.read_text() + 'probe\\n' if p.exists() else 'probe\\n')
+print(json.dumps({'models': [{'slug': 'gpt-6-luna', 'supported_reasoning_levels': [{'effort': 'high'}]}]}))
+''')
+    result = subprocess.run([sys.executable, str(SCRIPT), '--preflight-json'], cwd=tmp_path,
+        input=json.dumps({'tasks': [{'id': f't{i}', 'adapter': 'codex', 'model': 'gpt-6-luna',
+            'effort': 'high', 'prompt': 'hello'} for i in range(3)]}), text=True, capture_output=True,
+        env={**os.environ, 'AGENT_FABRIC_INSTANCE_ROOT': str(ROOT), 'PROBE_COUNTER': str(counter),
+             'PATH': str(bin_dir) + os.pathsep + os.environ['PATH']})
+    record = json.loads(result.stdout)
+    assert record['status'] == 'validated', record
+    assert len(record['routes']) == 3
+    assert not counter.exists()
+
+
+@pytest.mark.parametrize('owner', ['dispatch', 'batch'])
+@pytest.mark.parametrize('instance', ['configured', 'missing', 'unset'])
+def test_provider_does_not_inherit_chair_fabric_environment(tmp_path, owner, instance):
+    run_dir = make_run(tmp_path, 'isolated-provider')
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('Reply OK')
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir()
+    write_executable(bin_dir / 'codex', '''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+if sys.argv[1:3] == ['debug', 'models']:
+    print(json.dumps({'models': [{'slug': 'gpt-6-luna', 'supported_reasoning_levels': [{'effort': 'high'}]}]}))
+else:
+    names = ['AGENT_FABRIC_STATE_DIRECTORY', 'AGENT_FABRIC_SEAT', 'AGENT_FABRIC_CLIENT_LABEL',
+             'AGENT_FABRIC_LABEL', 'AGENT_FABRIC_PRODUCT_ROOT']
+    names += [k for k in os.environ if k.startswith(('PROVENANT_RUN_', 'PROVENANT_PREFLIGHT_'))]
+    Path(os.environ['PROVIDER_ENV_CAPTURE']).write_text(json.dumps({k: os.environ[k] for k in names if k in os.environ}))
+    Path(os.environ['PROVIDER_INSTANCE_CAPTURE']).write_text(os.environ.get('AGENT_FABRIC_INSTANCE_ROOT', ''))
+    Path(os.environ['PROVIDER_TMP_CAPTURE']).write_text(os.environ['TMPDIR'])
+    sys.stdin.read()
+    print('OK')
+''')
+    capture = tmp_path / 'provider-env.json'
+    env = {**os.environ, 'PATH': f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}",
+           'AGENT_FABRIC_INSTANCE_ROOT': str(ROOT), 'AGENT_FABRIC_PRODUCT_ROOT': str(ROOT),
+           'AGENT_FABRIC_STATE_DIRECTORY': str(tmp_path / 'chair-state'),
+           'AGENT_FABRIC_SEAT': 'claude', 'AGENT_FABRIC_CLIENT_LABEL': 'chair-client',
+           'AGENT_FABRIC_LABEL': 'chair-label', 'PROVIDER_ENV_CAPTURE': str(capture),
+           'PROVIDER_TMP_CAPTURE': str(tmp_path / 'provider-tmp.txt'),
+           'PROVENANT_RUN_TOKEN': 'mcp-fixture-token', 'PROVENANT_RUN_DIR': str(run_dir),
+           'PROVENANT_PREFLIGHT_ROUTES': '{}', 'PROVENANT_RUN_PARENT_TOKEN': 'parent-token',
+           'PROVIDER_INSTANCE_CAPTURE': str(tmp_path / 'provider-instance.txt')}
+    if instance != 'configured':
+        env['HOME'] = str(tmp_path / 'home')
+        env['AGENT_FABRIC_INSTANCE_ROOT'] = str(tmp_path / 'missing-instance')
+    if instance == 'unset':
+        env.pop('AGENT_FABRIC_INSTANCE_ROOT', None)
+    expected_instance = env.get('AGENT_FABRIC_INSTANCE_ROOT', '')
+    if owner == 'dispatch':
+        command = [str(SCRIPT), '--run-dir', str(run_dir), '--adapter', 'codex',
+                   '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker']
+    else:
+        manifest = tmp_path / 'tasks.json'
+        manifest.write_text(json.dumps({'schema_version': 1, 'tasks': [
+            {'id': 'isolated', 'adapter': 'codex', 'prompt_file': str(prompt),
+             'alias': 'workhorse', 'role': 'worker'}]}))
+        command = [str(SCRIPT.with_name('batch_run.py')), '--run-dir', str(run_dir), '--manifest', str(manifest)]
+    result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert json.loads(capture.read_text()) == {"PROVENANT_RUN_ID": "mcp-provider"}
+    assert (tmp_path / 'provider-instance.txt').read_text() == expected_instance
+    assert not (tmp_path / 'chair-state').exists()
+    scratch = Path((tmp_path / 'provider-tmp.txt').read_text())
+    assert scratch.is_dir()  # Full provider diagnostics now live in the attempt, not a removed tmp directory.
+    assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'succeeded'
+
+
+def real_owner_fixture(tmp_path, monkeypatch, code):
+    """Exercise cf_dispatch --plan-only and the production supervisor, no owner stub."""
+    bindir = tmp_path / 'provider-bin'
+    bindir.mkdir()
+    write_executable(bindir / 'claude', '#!/usr/bin/env python3\n' + code)
+    monkeypatch.setenv('PATH', str(bindir) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    monkeypatch.setenv('FABRIC_COOLDOWNS_PATH', str(tmp_path / 'cooldowns.json'))
+    monkeypatch.delenv('PROVENANT_RUN_TOKEN', raising=False)
+    run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())
+    prompt = tmp_path / 'caller-prompt.md'
+    prompt.write_text('hello')
+    command = [sys.executable, str(SCRIPT), '--run-dir', str(run), '--adapter', 'claude',
+               '--model', 'opus', '--prompt-file', str(prompt), '--fallback', 'false']
+    return run, prompt, command
+
+
+def test_close_mcp_run_reads_canonical_single_task_attempts(tmp_path):
+    mod = load_dispatch_module()
+    run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())
+    row = json.loads((ROOT / 'tests/fixtures/fabric-v1/attempt.json').read_text())
+    path = run / 'tasks/task-1/attempt-001/attempt.json'
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(row))
+    mod.close_mcp_run(run)
+    receipt = json.loads((run / 'RUN_RECEIPT.json').read_text())
+    assert receipt['status'] == 'succeeded'
+    assert receipt['attempts'] == [row]
+
+
+def test_close_mcp_run_preserves_input_required_for_resumption(tmp_path):
+    mod = load_dispatch_module()
+    run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())
+    row = json.loads((ROOT / 'tests/fixtures/fabric-v1/attempt.json').read_text())
+    row.update(status='input_required', question='Which branch?')
+    path = run / 'tasks/task-1/attempt-001/attempt.json'
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(row))
+    mod.close_mcp_run(run)
+    receipt = json.loads((run / 'RUN_RECEIPT.json').read_text())
+    assert receipt['status'] == 'input_required'
+    assert receipt['resumable'] is True
+
+
+def test_close_mcp_run_includes_batch_tasks_without_canonical_attempts(tmp_path):
+    mod = load_dispatch_module()
+    run = Path(subprocess.check_output([str(INIT), '--kind', 'batch'], cwd=tmp_path, text=True).strip())
+    row = json.loads((ROOT / 'tests/fixtures/fabric-v1/attempt.json').read_text())
+    path = run / 'tasks/finished/attempt-001/attempt.json'
+    path.parent.mkdir(parents=True)
+    row['task_id'] = 'finished'
+    path.write_text(json.dumps(row))
+    summary = run / 'dispatch/batches/batch-001/summary.json'
+    summary.parent.mkdir(parents=True)
+    summary.write_text(json.dumps({'status': 'completed', 'tasks': [
+        {'task_id': 'finished', 'status': 'succeeded'},
+        {'task_id': 'busy', 'status': 'worktree_busy'},
+    ]}))
+    mod.close_mcp_run(run)
+    assert json.loads((run / 'RUN_RECEIPT.json').read_text())['status'] == 'failed'
+
+
+@pytest.mark.parametrize('stop', ['marker', 'SIGTERM', 'timeout'])
+def test_real_dispatcher_stops_group_releases_writer_lease_and_closes_receipt(tmp_path, monkeypatch, stop):
+    code = '''import json, os, subprocess, sys, time
+from pathlib import Path
+sys.stdin.read()
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+Path('provider-pids').write_text(json.dumps([os.getpid(), child.pid]))
+print(json.dumps({'type':'system','session_id':'cancel-session','model':'opus'}), flush=True)
+time.sleep(30)
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path)
+    command += ['--access-mode', 'worktree_write', '--worktree', str(worktree), '--timeout', '1' if stop == 'timeout' else '15']
+    process = subprocess.Popen(command, cwd=tmp_path, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        deadline = time.monotonic() + 10
+        while not (worktree / 'provider-pids').exists() and time.monotonic() < deadline and process.poll() is None:
+            time.sleep(.02)
+        assert (worktree / 'provider-pids').exists()
+        mod = load_dispatch_module()
+        with pytest.raises(mod.WorktreeLeaseError):
+            mod.acquire_worktree_lease(worktree)
+        if stop == 'SIGTERM':
+            process.send_signal(signal.SIGTERM)
+        elif stop == 'marker':
+            mod.create_cancellation_marker(run, run / 'dispatch/tasks/dispatch-001/attempt-001')
+        stdout, stderr = process.communicate(timeout=10)
+        row = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
+        assert row['status'] == ('timed_out' if stop == 'timeout' else 'cancelled'), stdout + stderr
+        assert row['evidence']['exit'] is not None
+        pids = json.loads((worktree / 'provider-pids').read_text())
+        for pid in pids:
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+        lease = mod.acquire_worktree_lease(worktree)
+        mod.release_worktree_lease(lease)
+        receipt = json.loads((run / 'RUN_RECEIPT.json').read_text())
+        assert receipt['status'] == ('failed' if stop == 'timeout' else 'cancelled')
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.communicate(timeout=10)
+
+
+def test_real_dispatcher_restores_signal_handlers(tmp_path, monkeypatch):
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, 'import sys,json\nsys.stdin.read()\nprint(json.dumps({"type":"result","result":"DONE"}))\n')
+    monkeypatch.chdir(tmp_path)
+    mod = load_dispatch_module()
+    handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    assert mod.dispatch(mod.parser().parse_args(command[2:])) == 0
+    assert {sig: signal.getsignal(sig) for sig in handlers} == handlers
+
+
+@pytest.mark.parametrize('previous_status', ['interrupted', 'timed_out', 'cancelled', 'stalled'])
+def test_interrupted_attempt_resumes_from_nested_cwd_with_absolute_caller_prompt(tmp_path, monkeypatch, previous_status):
+    code = '''import sys,json,os
+prompt = sys.stdin.read()
+if '--resume' in sys.argv:
+ print('No conversation found with session ID', file=sys.stderr)
+ sys.exit(1)
+print(json.dumps({"type":"result","result":os.getcwd()}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    nested = tmp_path / 'src'
+    nested.mkdir()
+    first = subprocess.run([*command, '--cwd', str(nested), '--no-preface'], cwd=tmp_path, capture_output=True, text=True)
+    assert first.returncode == 0, first.stdout + first.stderr
+    path = run / 'tasks/dispatch-001/attempt-001/attempt.json'
+    row = json.loads(path.read_text())
+    # Model the B-owner recovery contract: terminal interrupted canonical row,
+    # before the owner could publish its legacy terminal evidence.
+    row.update(status=previous_status, state='terminal')
+    path.write_text(json.dumps(row))
+    if previous_status == 'interrupted':
+        legacy_path = run / row['legacy_attempt_path']
+        legacy_path.unlink()
+        legacy_path.with_name('attempt.sha256').unlink()
+        (run / row['paths']['result']).unlink()
+    receipt = json.loads((run / 'RUN_RECEIPT.json').read_text())
+    receipt['status'] = 'interrupted'
+    (run / 'RUN_RECEIPT.json').write_text(json.dumps(receipt))
+    resumed = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', row['run_id'],
+                              '--prompt-file', str(prompt), '--cwd', str(nested)],
+                             cwd=nested, capture_output=True, text=True)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    second = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
+    assert second['status'] == 'ok'
+    assert second['cwd'] == str(nested)
+    assert second['requested_route']['preface'] is False
+    assert second['requested_route']['intent'] == row['requested_route']['intent']
+    assert 'resumed_by_relaunch' in second['provenance']['notes']
+    assert 'resume: relaunched' in second['warnings']
+
+
+def test_claude_resume_relaunches_when_saved_session_is_missing(tmp_path, monkeypatch):
+    code = '''import json,sys
+prompt = sys.stdin.read()
+if '--resume' in sys.argv:
+ print('No conversation found with session ID', file=sys.stderr)
+ sys.exit(1)
+print(json.dumps({'type':'system','subtype':'init','session_id':'saved-session','model':'opus'}))
+print(json.dumps({'type':'result','result':'DONE'}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    first = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
+    assert first.returncode == 0, first.stdout + first.stderr
+    previous = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
+    assert previous['session_id'] == 'saved-session'
+    resumed = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', previous['run_id'],
+                              '--prompt-file', str(prompt)], cwd=tmp_path, capture_output=True, text=True)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    row = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
+    assert row['status'] == 'ok'
+    assert 'resumed_by_relaunch' in row['provenance']['notes']
+    assert 'resume: relaunched' in row['warnings']
+
+
+def test_incomplete_writer_without_claude_session_returns_typed_fix(tmp_path):
+    mod = load_dispatch_module()
+    run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())
+    row = json.loads((ROOT / 'tests/fixtures/fabric-v1/attempt.json').read_text())
+    row.update(run_id=run.name, status='timed_out', mode='worktree_write', cwd=str(tmp_path),
+               worktree=str(tmp_path), session_id='generated-but-unobserved')
+    row['provenance']['requested']['adapter'] = 'claude'
+    path = run / 'tasks/task-1/attempt-001/attempt.json'
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(row))
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('continue')
+    result = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', row['run_id'],
+                             '--prompt-file', str(prompt)], cwd=tmp_path, capture_output=True, text=True)
+    assert result.returncode != 0
+    response = json.loads(result.stdout)
+    assert response['status'] == 'rejected'
+    assert 'review worktree' in response['message'].lower()

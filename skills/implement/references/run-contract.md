@@ -2,7 +2,7 @@
 
 `implement` executes the `software` profile inside the single canonical
 `delivery-run` receipt. Use the complete `init` command in `deliver` with
-profile `software` to create `.agent-run/<id>/RUN.json`, then use the delivery
+profile `software` to create `.agent-run/runs/<run-dir>/RUN.json`, then use the delivery
 validator. There is no separate implementation receipt format.
 
 The approved scope supplies acceptance criteria, risk and authority. Record
@@ -20,7 +20,7 @@ Validate from the project root:
 
 ```sh
 "$(provenant root)/skills/deliver/scripts/validate_delivery.py" \
-  .agent-run/<id>/RUN.json --workspace-root "$PWD" --verify-hashes \
+  .agent-run/runs/<run-dir>/RUN.json --workspace-root "$PWD" --verify-hashes \
   --product-root "<product-root>"
 ```
 
@@ -29,7 +29,7 @@ explicit `--product-root` takes precedence.
 
 ## Receipt portability
 
-The exact `.agent-run/<id>/` receipt and its raw operational artifacts stay
+The exact `.agent-run/runs/<run-dir>/` receipt and its raw operational artifacts stay
 local, ignored and validator-readable. Never force-track them, even when a
 programme requires per-lane receipts. Project the durable tested-tree facts,
 review verdicts, artifact identities and pending gates into tracked project
@@ -52,11 +52,11 @@ run is not a reason to skip terminalising the inner one.
 ## Post-merge continuity
 
 For a pull-request delivery, retain the complete ignored run directory until
-the merge commit and its `ci-status` check exist. Copy that directory into the
-synced primary checkout before pruning the implementation worktree and its
-merged branch ([post-merge pruning](../../../docs/worktrees.md#post-merge-pruning)
-— retention wins, so copy first, prune second), then run
-`scripts/bind_merged_delivery.py` there with the pre-existing typed exact-head
+the merge commit and its `ci-status` check exist. New runs are anchored at the
+primary checkout, so the directory survives implementation-worktree pruning
+([post-merge pruning](../../../docs/worktrees.md#post-merge-pruning)). Legacy
+worktree-local runs require a deliberate one-time copy before pruning. Run
+`scripts/bind_merged_delivery.py` from the primary checkout with the pre-existing typed exact-head
 review artifacts. The binder reads PR and `ci-status` truth through the
 authenticated GitHub API, holds an exclusive receipt lock, refuses to run once
 human acceptance is recorded, and adds:

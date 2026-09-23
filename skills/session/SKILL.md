@@ -56,6 +56,8 @@ compaction, revalidate generation, expiry and ownership before reuse.
    manifest-classified ephemeral files after proving no live pointer needs them.
    Never delete unknown, pre-existing or user-owned untracked files. Revalidate
    time-sensitive memory against its owning source or mark it stale.
+   Run `provenant clean` for a dry-run retention plan; apply only its current
+   digest when cleanup is authorised.
 3. **Handoff version control:** run project checks; report the exact diff.
    Commit only with user/project authority; never commit another actor's state.
 4. **Signal:** capture only a compact friction pointer in the handoff/state when

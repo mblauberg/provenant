@@ -3,10 +3,14 @@
 Status: current
 Applies to: `scripts/configure-fabric-mcp.py` and `runtime/fabric/bin/fabric-mcp`
 
-`install-harness --platform all` registers the Fabric MCP server for the two
-primary clients (Claude Code and Codex) by default. Add
-`--mcp-clients all` when the six supported client registries should be
-configured. `scripts/configure-fabric-mcp.py --platform all` also configures
+`install-harness --platform all` registers Fabric MCP for Claude Code and Codex,
+plus OpenCode, Agy, Cursor and Kiro when their home directories are present.
+It also projects skills into each present client home, and installs an explicit
+bootstrap and HARNESS link for OpenCode and Agy. Add `--mcp-clients all` to
+configure all six registries even when the optional clients are absent.
+The shipped `agents/*.md` use Claude Code's agent format and are installed only
+there.
+`scripts/configure-fabric-mcp.py --platform all` also configures
 all six directly; it does the registry writing and can be run on its own to
 add a client, check the registrations or repair one.
 
@@ -61,17 +65,37 @@ adapter compatibility.
 | Kiro | `~/.kiro/settings/mcp.json` |
 | OpenCode | `~/.config/opencode/opencode.jsonc` |
 
-Claude Code and Codex take the `claude` and `codex` seats. Cursor, Kiro and
-OpenCode share the `codex` seat by design while keeping their own client label, so their
-messages are addressed separately without inventing a provider identity: they
-are brokers that front whichever model the operator selects, so they have no
-family of their own to record.
+Each client has its own seat (`claude`, `codex`, `cursor`, `agy`, `kiro`, or
+`opencode`) and therefore its own default inbox. A seat does not establish the
+model family chosen by a broker.
 
 Agy holds its own `agy` seat so its client records remain addressable. The seat
 is routing metadata, not proof that a Gemini or Google model ran. For a
 cross-family review, count the model family only from the exact provider/model
 fields in the direct-dispatch receipt; a non-Google model selected through Agy
 is not a qualifying Gemini leg.
+
+OpenCode's `instructions[]` includes the instance `AGENTS.md` and the product
+`HARNESS.md`. The installer preserves unrelated entries, requires a string
+array, and rebinds a prior product path recorded by the instance's
+product-root pointer when the checkout moves. Standalone MCP configuration
+uses the pointer for the current product path when `--agents-home` is omitted.
+Re-run `install-harness` after
+relocation so the literal OpenCode paths and pointer agree.
+OpenCode JSONC with comments is read safely. If adding Fabric would require a
+rewrite that discards those comments, the installer leaves the file intact and
+prints the exact `instructions` and `mcp.fabric` entries to add manually.
+With `--platform all`, a detected client's configuration conflict produces a
+per-client skip warning; explicitly named clients still fail.
+
+`config/model-routing.json` remains instance-owned. Install and validation name
+product catalogue differences by key; run `install-harness --platform all
+--refresh-routing` to back up the instance file to `model-routing.json.bak-<date>`
+and apply product sections while retaining instance-only adapters, endpoints,
+and extra alias models. On an older install without a merge base, the refresh
+lists retained keys that may be retired product keys, lists each product value
+that won, and writes the product catalogue as the new base. A fused checkout
+does not write a merge base during refresh.
 
     scripts/configure-fabric-mcp.py --platform all
     scripts/configure-fabric-mcp.py --platform codex

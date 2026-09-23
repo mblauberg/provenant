@@ -94,14 +94,16 @@ Object.defineProperty(process.versions, "node", { value: "26.0.0" });
   client = new Client({ name: "package-install-smoke", version: "1" });
   await client.connect(transport);
   const tools = await client.listTools();
-  assert.equal(tools.tools.length, 14);
+  assert.equal(tools.tools.length, 12);
   assert.ok(tools.tools.some((tool) => tool.name === "fabric_whoami"));
   assert.ok(tools.tools.some((tool) => tool.name === "fabric_adapters"));
   assert.ok(tools.tools.some((tool) => tool.name === "fabric_dispatch"));
-  assert.ok(tools.tools.some((tool) => tool.name === "fabric_batch"));
+  assert.ok(tools.tools.some((tool) => tool.name === "fabric_status"));
+  // Legacy tools appear only with FABRIC_LEGACY_TOOLS=1.
+  assert.ok(!tools.tools.some((tool) => tool.name === "fabric_batch"));
   const identity = await client.callTool({ name: "fabric_whoami", arguments: {} });
   assert.equal(identity.isError, undefined, JSON.stringify(identity));
-  assert.match(identity.content[0].text, /"provider": "package-smoke"/);
+  assert.match(identity.content[0].text, /"provider":\s*"package-smoke"/);
   assert.doesNotMatch(stderr, /tsx loader not found|ERR_MODULE_NOT_FOUND/);
 
   console.log("Packed package CLI and MCP launcher assertions passed");

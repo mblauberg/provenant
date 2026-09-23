@@ -8,6 +8,14 @@ const value = (flag) => {
   return index < 0 ? undefined : process.argv[index + 1];
 };
 
+if (process.argv.includes("--preflight-json")) {
+  let input = "";
+  for await (const chunk of process.stdin) input += chunk;
+  const tasks = JSON.parse(input).tasks;
+  process.stdout.write(JSON.stringify({ status: "validated", routes: tasks }));
+  process.exit(0);
+}
+
 const owner = process.env.PROVENANT_FIXTURE_OWNER ?? basename(process.argv[1]);
 const waitForRelease = (runDir, callback) => {
   const readyPath = join(runDir, "delayed-ready");
@@ -26,6 +34,7 @@ const waitForRelease = (runDir, callback) => {
 
 if (owner === "run_dir_init.sh") {
   const runDir = process.argv[2];
+  if (process.argv.includes("--owner-logs")) mkdirSync(join(runDir, "_owner"));
   mkdirSync(join(runDir, "findings"), { recursive: true });
   mkdirSync(join(runDir, "crossfamily"), { recursive: true });
   mkdirSync(join(runDir, "traces"), { recursive: true });

@@ -98,7 +98,10 @@ def main(arguments: list[str]) -> int:
     except ValueError as exc:
         print(f"provenant: {exc}", file=sys.stderr)
         return 3
-    if not arguments and "AGENT_FABRIC_SEAT" in os.environ:
+    if arguments and arguments[0] == "clean":
+        target = product_root / "scripts/clean.py"
+        delegated_arguments = arguments[1:]
+    elif not arguments and "AGENT_FABRIC_SEAT" in os.environ:
         target = product_root / FABRIC_MCP
         delegated_arguments: list[str] = []
     else:
