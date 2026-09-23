@@ -1881,9 +1881,15 @@ def execute(
             family = "unknown"
             notes.append("observed model family unverified after substitution")
     model = observed or plan["model"]
+    # Applied effort is what was sent; with none sent, only a provider-reported
+    # value may fill it (Codex writes one to its rollout), never a guessed default.
+    effort, effort_source = plan["effort"], None
+    if not effort and plan["adapter"] == "codex":
+        effort = context_usage.codex_rollout_effort(session, environment) or ""
+        effort_source = "codex:rollout.turn_context" if effort else None
     line = (
         f"Route: {plan['adapter']}/{model}"
-        + ("@" + plan["effort"] if plan["effort"] else "")
+        + ("@" + effort if effort else "")
         + f" ({family}; {identity})"
     )
     provenance = {
@@ -1902,7 +1908,8 @@ def execute(
         "transport": plan["adapter"],
         "family": family,
         "effort_requested": plan.get("requested_effort"),
-        "effort_applied": plan["effort"],
+        "effort_applied": effort,
+        "effort_observed_source": effort_source,
         "cli_version": route.get("cli_version"),
         "fallback_from": plan.get("fallback_from"),
         "notes": notes,

@@ -419,11 +419,11 @@ def test_compatibility_drift_rejection_names_a_fix(tmp_path):
 
 
 @pytest.mark.parametrize("arguments,model,effort", [
-    (["--adapter", "codex", "--alias", "luna"], "gpt-6-luna", "default"),
+    (["--adapter", "codex", "--alias", "luna"], "gpt-6-luna", ""),
     (["--adapter", "agy", "--alias", "flash", "--effort", "xhigh"], "gemini-3.8-flash-high", "high"),
-    (["--adapter", "cursor", "--alias", "grok"], "grok-4.7", "default"),
-    (["--adapter", "opencode", "--alias", "glm"], "opencode-go/glm-5.3-flash", "default"),
-    (["--model", "gpt-5.6-luna"], "gpt-6-luna", "default"),
+    (["--adapter", "cursor", "--alias", "grok"], "grok-4.7", ""),
+    (["--adapter", "opencode", "--alias", "glm"], "opencode-go/glm-5.3-flash", ""),
+    (["--model", "gpt-5.6-luna"], "gpt-6-luna", ""),
 ])
 def test_ordinary_registry_routes_names_and_nearest_effort(arguments, model, effort):
     result, route = resolve(*arguments, "--role", "worker")
