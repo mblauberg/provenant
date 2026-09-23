@@ -157,13 +157,13 @@ describe("adapter rejection", () => {
     )).resolves.toMatchObject({ status: "rejected", fix: expect.stringMatching(/agy, claude, codex, copilot, cursor, kiro, opencode/u) });
   });
 
-  it("rejects an alias the live adapter catalogue does not allow before launch", async () => {
+  it("passes unknown model aliases to the owner, respecting cancellation", async () => {
     await expect(dispatchConfiguredProvider(
       { adapter: "codex", alias: "missing-model", prompt: "hello" },
       identity,
       AbortSignal.abort(),
       { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot },
-    )).resolves.toMatchObject({ status: "rejected", error: "unknown_alias", fix: expect.stringContaining("gpt-6-luna") });
+    )).rejects.toThrow(/aborted/u);
     expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
   });
 

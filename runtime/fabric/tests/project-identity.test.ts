@@ -59,7 +59,8 @@ function toolPayload(result: unknown): unknown {
   const content = (result as { content: Array<{ type: string; text?: string }> }).content;
   const block = content.find((item) => item.type === "text" && item.text !== undefined);
   if (block?.text === undefined) throw new Error("MCP result had no text payload");
-  return JSON.parse(block.text);
+  const payload=JSON.parse(block.text);
+  return payload.messages ?? payload.activity ?? payload;
 }
 
 beforeEach(() => {
@@ -83,6 +84,7 @@ describe("project identity", () => {
     const chair = identify({
       AGENT_FABRIC_SEAT: "codex",
       AGENT_FABRIC_LABEL: "chair",
+        FABRIC_LEGACY_TOOLS: "1",
     }, primary);
     const worker = identify({
       AGENT_FABRIC_SEAT: "codex",
@@ -114,6 +116,7 @@ describe("project identity", () => {
         AGENT_FABRIC_STATE_DIRECTORY: state,
         AGENT_FABRIC_SEAT: "codex",
         AGENT_FABRIC_LABEL: "chair",
+        FABRIC_LEGACY_TOOLS: "1",
         NODE_NO_WARNINGS: "1",
       },
     });
@@ -121,8 +124,8 @@ describe("project identity", () => {
     try {
       await client.connect(transport);
       await client.callTool({
-        name: "fabric_task_create",
-        arguments: { objective: "review the linked-worktree change", task_id: "worktree-review" },
+        name: "fabric_task",
+        arguments: { action:"create", objective: "review the linked-worktree change", task_id: "worktree-review" },
       });
       await client.callTool({
         name: "fabric_team_create",
@@ -159,7 +162,7 @@ describe("project identity", () => {
       expect(replied.status, replied.stderr).toBe(0);
       const chairInbox = toolPayload(await client.callTool({
         name: "fabric_inbox",
-        arguments: {},
+        arguments: {claim:true},
       })) as Array<{ body: string; claimId: string; messageId: string; replyTo: string }>;
       expect(chairInbox).toContainEqual(expect.objectContaining({
         body: "review complete",
@@ -251,3 +254,24 @@ describe("project identity", () => {
     })).toBe(realpathSync(primary));
   });
 });
+
+it('stores linked and symlinked cwd runs in the primary run root', async () => {
+ const identity = await import('../src/identity.js');
+ expect('runRoot' in identity).toBe(true);
+ if (!('runRoot' in identity)) return;
+ const root = identity.runRoot as (cwd:string)=>string;
+ expect(root(linked)).toBe(join(realpathSync(primary),'.agent-run'));
+ expect(root(primary)).toBe(join(realpathSync(primary),'.agent-run'));
+ expect(root(fixture)).toBe(join(realpathSync(fixture),'.agent-run'));
+});
+
+ it('passes the shared layout contract cases and a symlinked cwd', async () => {
+  const {runRoot}=await import('../src/identity.js');
+  const {symlinkSync}=await import('node:fs');
+  const shared=join(import.meta.dirname,'../../../tests/fixtures/fabric-v1/layout-cases.json');
+  let cases;try {cases=JSON.parse(readFileSync(shared,'utf8'));}catch {cases=JSON.parse(readFileSync(join(import.meta.dirname,'fixtures/layout-cases.json'),'utf8'));}
+  const substitute=(path:string)=>path.replace('/repo/.worktrees/lane',linked).replace('/repo',primary).replace('/workspace',fixture);
+  for(const item of cases) expect(runRoot(substitute(item.cwd)),item.name).toBe(join(realpathSync(dirname(substitute(item.run_root))),'.agent-run'));
+  const alias=join(fixture,'alias');symlinkSync(linked,alias);
+  expect(runRoot(alias)).toBe(runRoot(linked));
+ });
