@@ -660,6 +660,124 @@ def test_owner_promoted_at_signal_is_not_reported_as_reaped(tmp_path, monkeypatc
     assert ("pid", owner.pid) not in signals
 
 
+@pytest.mark.parametrize("failure", ["env_error", "partial_record", "record_removed"])
+def test_verified_owner_stays_spared_through_transient_validation_loss(tmp_path, monkeypatch, failure):
+    module = supervisor()
+    root_pid = os.getpid() + 100000
+    owner_pid = root_pid + 1
+    root = module._ProcessRow(root_pid, os.getpid(), root_pid, str(int(time.time())), "provider")
+    owner = module._ProcessRow(owner_pid, root_pid, owner_pid, str(int(time.time())), "owner")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(),
+                                             str(int(time.time())), "test"),
+            root_pid: root, owner_pid: owner}
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, owner, "inner-token")
+    lost = []
+    signals = []
+    process = type("Process", (), {"pid": root_pid, "poll": lambda self: None,
+                                   "wait": lambda self, timeout: None})()
+
+    def environment(pid):
+        if pid != owner_pid:
+            return ()
+        if lost and failure == "env_error":
+            raise RuntimeError("environment unavailable")
+        return [b"PROVENANT_RUN_TOKEN=inner-token",
+                ("PROVENANT_RUN_DIR=" + str(run_dir)).encode()]
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: rows)
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: None)
+        patch.setattr(module, "_process_environment", environment)
+        patch.setattr(module.os, "killpg", lambda pgid, _signal: signals.append(("group", pgid)))
+        patch.setattr(module.os, "kill", lambda pid, _signal: signals.append(("pid", pid)))
+        tracker = module._Descendants(process, "fixture")
+        tracker.sample()
+        assert owner.identity in tracker.spared
+        original_sample = tracker.sample
+
+        def lose_after_first_stop_sample(*args, **kwargs):
+            snapshot = original_sample(*args, **kwargs)
+            if not lost:
+                lost.append(True)
+                if failure == "partial_record":
+                    (run_dir / "dispatch-owner.json").write_text("{}")
+                elif failure == "record_removed":
+                    (run_dir / "dispatch-owner.json").unlink()
+            return snapshot
+
+        patch.setattr(tracker, "sample", lose_after_first_stop_sample)
+        reaped = tracker.stop(root_grace=0.1, descendant_grace=0.02)
+    assert reaped == []
+    assert owner.identity in tracker.spared_at_stop
+    assert ("group", owner_pid) not in signals
+    assert ("pid", owner_pid) not in signals
+
+
+def test_verified_owner_identity_does_not_spare_reused_pid(tmp_path, monkeypatch):
+    module = supervisor()
+    root = module._ProcessRow(501, os.getpid(), 501, str(int(time.time())), "provider")
+    owner = module._ProcessRow(502, 501, 502, str(int(time.time())), "owner")
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, owner, "inner-token")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(),
+                                             str(int(time.time())), "test"),
+            501: root, 502: owner}
+    process = type("Process", (), {"pid": 501, "poll": lambda self: None})()
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: rows)
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: None)
+        patch.setattr(module, "_process_environment", lambda pid: [
+            b"PROVENANT_RUN_TOKEN=inner-token",
+            ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+        ] if pid == 502 else ())
+        tracker = module._Descendants(process, "fixture")
+        tracker.sample()
+        assert owner.identity in tracker.spared
+        start_delta = os.sysconf("SC_CLK_TCK") * 5 if sys.platform.startswith("linux") else 5
+        replacement = module._ProcessRow(502, 501, 502,
+                                         str(int(owner.started) + start_delta), "replacement")
+        rows[502] = replacement
+        tracker.sample()
+    assert replacement.identity in tracker.tracked
+    assert replacement.identity not in tracker.spared
+
+
+def test_provider_exit_with_open_pipe_stops_once_and_keeps_reaped(tmp_path, monkeypatch):
+    module = supervisor()
+    child_pid = tmp_path / "pipe-holder.pid"
+    code = f"""import pathlib,subprocess,sys
+child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(.7)'],
+    start_new_session=True, stdin=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))
+print('DONE', flush=True)
+"""
+    calls = []
+    first_reaped = [{"pid": 424242, "command": "fixture-child"}]
+
+    def fake_stop(self, *args, **kwargs):
+        calls.append(kwargs)
+        return first_reaped if len(calls) == 1 else []
+
+    monkeypatch.setattr(module._Descendants, "stop", fake_stop)
+    try:
+        record = module.execute(fixture_plan(tmp_path, code), tmp_path / "result.md")
+        assert len(calls) == 1
+        assert record["reaped"] == first_reaped
+    finally:
+        if child_pid.exists():
+            pid = int(child_pid.read_text())
+            try:
+                os.killpg(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            if sys.platform.startswith("linux"):
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    pass
+
+
 def test_token_without_owner_record_is_not_nested_owner(tmp_path, monkeypatch):
     module = supervisor()
     row = module._ProcessRow(502, 501, 502, str(int(time.time())), "sleep")
@@ -688,9 +806,54 @@ def test_owner_validation_error_cannot_prevent_root_group_kill(monkeypatch):
     assert 501 in groups
 
 
+def test_forged_same_group_owner_cannot_suppress_provider_kill(tmp_path, monkeypatch):
+    module = supervisor()
+    root_pid = os.getpid() + 100000
+    child_pid = root_pid + 1
+    root = module._ProcessRow(root_pid, os.getpid(), root_pid, str(int(time.time())), "provider")
+    child = module._ProcessRow(child_pid, root_pid, root_pid, str(int(time.time())), "forged")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(),
+                                             str(int(time.time())), "test"),
+            root_pid: root, child_pid: child}
+    run_dir = tmp_path / "forged-run"
+    _write_fake_owner_record(module, run_dir, child, "forged-token")
+    signals = []
+    process = type("Process", (), {"pid": root_pid, "poll": lambda self: None})()
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_process_snapshot", lambda: rows)
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: None)
+        patch.setattr(module, "_process_environment", lambda pid: [
+            b"PROVENANT_RUN_TOKEN=forged-token",
+            ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+        ] if pid == child_pid else ())
+        patch.setattr(module.os, "killpg", lambda pgid, _signal: signals.append(pgid))
+        patch.setattr(module.os, "kill", lambda *_args: None)
+        tracker = module._Descendants(process, "fixture")
+        tracker.sample()
+        tracker.signal(signal.SIGTERM)
+    assert root_pid in signals
+    assert child.identity not in tracker.spared
+
+
+def test_owner_without_observed_parent_is_not_spared(tmp_path, monkeypatch):
+    module = supervisor()
+    row = module._ProcessRow(502, 999, 502, str(int(time.time())), "claimed-owner")
+    run_dir = tmp_path / "forged-run"
+    _write_fake_owner_record(module, run_dir, row, "forged-token")
+    monkeypatch.setattr(module, "_process_environment", lambda _pid: [
+        b"PROVENANT_RUN_TOKEN=forged-token",
+        ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+    ])
+    process = type("Process", (), {"pid": 501, "poll": lambda self: None})()
+    tracker = module._Descendants(process, "fixture")
+    tracker.tracked[row.identity] = row
+    tracker._refresh_spared({row.pid: row})
+    assert row.identity not in tracker.spared
+
+
 @pytest.mark.parametrize("field,value", [
     ("owner_pid", 999999), ("owner_started_at", "old process"),
-    ("run_token", "wrong token"),
+    ("owner_started_at", None), ("run_token", "wrong token"),
 ])
 def test_nested_owner_record_must_match_live_identity(tmp_path, monkeypatch, field, value):
     module = supervisor()
@@ -706,6 +869,37 @@ def test_nested_owner_record_must_match_live_identity(tmp_path, monkeypatch, fie
         ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
     ])
     assert not module._is_nested_fabric_owner(row)
+
+
+def test_nested_owner_accepts_legacy_inherited_locale_start(tmp_path, monkeypatch):
+    available = subprocess.run(["locale", "-a"], capture_output=True, text=True).stdout
+    if "en_AU.UTF-8" not in available:
+        pytest.skip("en_AU.UTF-8 unavailable")
+    module = supervisor()
+    row = module._ProcessRow(502, 501, 502, str(int(time.time())), "owner")
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, row, "inner-token")
+    path = run_dir / "dispatch-owner.json"
+    record = json.loads(path.read_text())
+    weekday, month, day, clock, year = record["owner_started_at"].split()
+    legacy = f"{weekday} {day} {month} {clock} {year}"
+    record["owner_started_at"] = legacy
+    path.write_text(json.dumps(record))
+    monkeypatch.setenv("LC_ALL", "en_AU.UTF-8")
+    monkeypatch.setenv("LANG", "en_AU.UTF-8")
+    monkeypatch.setattr(module, "_process_environment", lambda _pid: [
+        b"PROVENANT_RUN_TOKEN=inner-token",
+        ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+    ])
+    calls = []
+
+    def locale_ps(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return subprocess.CompletedProcess(argv, 0, stdout=legacy)
+
+    monkeypatch.setattr(module.subprocess, "run", locale_ps)
+    assert module._is_nested_fabric_owner(row)
+    assert calls and calls[0][1].get("env", {}).get("LC_ALL") != "C"
 
 
 @pytest.mark.parametrize("stop", ["normal", "cancelled"])

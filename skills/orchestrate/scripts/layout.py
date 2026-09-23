@@ -149,9 +149,15 @@ def reap_orphans(cwd=None, at=None):
                             capture_output=True,
                             text=True,
                             timeout=2,
+                            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
                         )
                         if not started or observed.stdout.strip() != started:
-                            continue
+                            inherited = subprocess.run(
+                                ["/bin/ps", "-o", "lstart=", "-p", str(pgid)],
+                                capture_output=True, text=True, timeout=2,
+                            )
+                            if not started or inherited.stdout.strip() != started:
+                                continue
                         os.killpg(pgid, signal.SIGTERM)
                         time.sleep(0.1)
                         try:

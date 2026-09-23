@@ -1026,6 +1026,7 @@ def _record_provider_process(run_dir: Path, process: subprocess.Popen[Any]) -> N
         started_at = subprocess.run(
             ["/bin/ps", "-o", "lstart=", "-p", str(process.pid)],
             capture_output=True, text=True, timeout=5, check=False,
+            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
         ).stdout.strip()
         record = {
             "schema_version": 1,

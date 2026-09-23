@@ -20,6 +20,23 @@ def cleaner():
     return module
 
 
+def test_pid_alive_accepts_legacy_locale_start_after_canonical_check(monkeypatch):
+    module = cleaner()
+    calls = []
+    monkeypatch.setattr(module.os, "kill", lambda _pid, _signal: None)
+
+    def fake_command(*argv, **kwargs):
+        canonical = kwargs.get("env", {}).get("LC_ALL") == "C"
+        calls.append("C" if canonical else "inherited")
+        return subprocess.CompletedProcess(argv, 0,
+                                           stdout="Wed Sep 23 17:17:42 2026" if canonical
+                                           else "Wed 23 Sep 17:17:42 2026")
+
+    monkeypatch.setattr(module, "_command", fake_command)
+    assert module._pid_alive(12345, "Wed 23 Sep 17:17:42 2026")
+    assert calls == ["C", "inherited"]
+
+
 def repo(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
     root.mkdir()

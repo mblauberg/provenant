@@ -860,6 +860,17 @@ def _recorded_start_time(row):
     return time.strftime("%a %b %e %H:%M:%S %Y", time.localtime(epoch))
 
 
+def _inherited_ps_start_time(pid):
+    try:
+        result = subprocess.run(
+            ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+        return result.stdout.strip() if result.returncode == 0 else None
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
 def _is_nested_fabric_owner(row):
     try:
         values = {}
@@ -878,14 +889,20 @@ def _is_nested_fabric_owner(row):
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 65536:
             return False
         record = json.loads(path.read_text())
+        started_at = record.get("owner_started_at")
         return (
             record.get("schema_version") == 1
             and record.get("kind") in {"dispatch", "batch"}
             and Path(record.get("run_dir", "")).resolve() == run_dir.resolve()
             and record.get("run_token") == os.fsdecode(token)
             and record.get("owner_pid") == row.pid
-            and record.get("owner_pgid") == row.pgid
-            and record.get("owner_started_at") == _recorded_start_time(row)
+            and row.pgid == row.pid
+            and record.get("owner_pgid") == row.pid
+            and isinstance(started_at, str) and bool(started_at)
+            and (
+                started_at == _recorded_start_time(row)
+                or started_at == _inherited_ps_start_time(row.pid)
+            )
         )
     except Exception:
         return False
@@ -907,6 +924,7 @@ class _Descendants:
         self.root = None
         self.tracked = {}
         self.spared = {}
+        self.verified_owners = set()
         self.parents = {}
         self.spared_at_stop = set()
         self.snapshot_unavailable = False
@@ -968,11 +986,24 @@ class _Descendants:
 
     def _refresh_spared(self, rows):
         observed = {**self.tracked, **self.spared}
-        spared = set()
+        spared = {
+            identity for identity in self.verified_owners
+            if (row := rows.get(identity[0])) is not None
+            and row.identity == identity and not row.zombie
+        }
+        own_groups = {self.process.pid, os.getpgrp()}
         for identity in observed:
+            if identity in self.verified_owners:
+                continue
             row = rows.get(identity[0])
-            if row is not None and row.identity == identity and not row.zombie:
+            parent = self.parents.get(identity)
+            if (row is not None and row.identity == identity and not row.zombie
+                    and row.pgid not in own_groups
+                    and parent is not None
+                    and (parent == self.root or parent in observed)
+                    and parent not in self.spared):
                 if _is_nested_fabric_owner(row):
+                    self.verified_owners.add(identity)
                     spared.add(identity)
         changed = True
         while changed:
@@ -1010,7 +1041,10 @@ class _Descendants:
             identity: row for identity, row in live.items()
             if identity not in skip and (only is None or identity in only)
         }
-        spared_groups = {row.pgid for row in self.live_spared(rows).values()}
+        spared_groups = {
+            row.pgid for row in self.live_spared(rows).values()
+            if row.pgid not in {self.process.pid, os.getpgrp()}
+        }
         if not root_group:
             live.pop(self.root, None)
         groups = {
@@ -1019,7 +1053,7 @@ class _Descendants:
             and row.pgid not in spared_groups
             and (root_group or row.pgid != self.process.pid)
         }
-        if root_group and self.process.pid not in spared_groups:
+        if root_group:
             groups.add(self.process.pid)  # The original group may outlive its leader.
         signalled_groups = set()
         for pgid in groups:
@@ -1560,8 +1594,8 @@ def execute(
                 exited = process.poll() is not None
                 if exited and not selector.get_map():
                     break
-                if exited:
-                    reaped = descendants.stop(normal=True)  # descendants may hold output pipes
+                if exited and not stopped:
+                    reaped.extend(descendants.stop(normal=True))  # descendants may hold output pipes
                     stopped = True
                 if cancel_signal or (cancelled and cancelled()):
                     forced = "cancelled"
@@ -1619,10 +1653,10 @@ def execute(
         if process:
             if descendants and not stopped:
                 exited_at_stop = process.poll() is not None
-                reaped = descendants.stop(
+                reaped.extend(descendants.stop(
                     normal=exited_at_stop,
                     terminal_grace=terminal_grace_break and not exited_at_stop,
-                )
+                ))
             # Drain final bytes after the group exits, without an unbounded communicate.
             for key in list(selector.get_map().values()):
                 while True:

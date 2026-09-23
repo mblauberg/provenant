@@ -78,6 +78,7 @@ const startProvider = ({ ignoreTerm = false, detached = false } = {}) => {
   try {
     providerStartedAt = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(provider.pid)], {
       encoding: "utf8",
+      env: { ...process.env, LC_ALL: "C", LANG: "C" },
     }).trim();
   } catch (error) {
     provider.kill("SIGKILL");
