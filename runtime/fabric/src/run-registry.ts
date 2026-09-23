@@ -218,7 +218,7 @@ export function listRecordedRuns(workspace: string): RecordedRun[] {
     const running = processMatches(record.owner_pid, record.owner_started_at);
     const provider = readProviderRecord(runDir, record.run_token);
     const providerRunning = provider !== null && processMatches(provider.provider_pid, provider.provider_started_at);
-    const hostAlive = processMatches(record.host_pid, record.host_started_at);
+    const hostAlive = observedAlive(record.host_pid, record.host_started_at); // orphaning needs evidence of death
     runs.push({
       ...record,
       run_id: shortRunId(runDir),
