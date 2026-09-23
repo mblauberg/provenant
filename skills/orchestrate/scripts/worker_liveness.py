@@ -12,6 +12,8 @@ import shlex
 import subprocess
 import sys
 from typing import Iterable
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import process_info
 
 
 # Canonical advisory rule. This label never triggers process control.
@@ -204,24 +206,10 @@ def worker_cwd(process: Process) -> str:
 
 def live_processes() -> Iterable[Process]:
     try:
-        result = subprocess.run(
-            ["ps", "-axo", "pid=,ppid=,etime=,time=,command="],
-            capture_output=True, text=True, check=False,
-        )
+        processes = [Process(row.pid, row.ppid, row.elapsed, row.cpu, row.command)
+                     for row in process_info.processes()]
     except OSError as error:
         raise RuntimeError(f"cannot inspect processes: {error}") from error
-    if result.returncode:
-        raise RuntimeError(result.stderr.strip() or "ps failed")
-    processes: list[Process] = []
-    for line in result.stdout.splitlines():
-        fields = line.strip().split(None, 4)
-        if len(fields) != 5:
-            continue
-        pid_text, ppid_text, elapsed, cpu, command = fields
-        try:
-            processes.append(Process(int(pid_text), int(ppid_text), elapsed, cpu, command))
-        except ValueError:
-            continue
 
     by_pid = {process.pid: process for process in processes}
     candidates = [

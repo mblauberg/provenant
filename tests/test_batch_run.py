@@ -102,7 +102,7 @@ def fake_dispatch(path: Path) -> None:
                 with counter.with_name('lock').open('w') as lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
                     write_counter(active, max(0, int(active.read_text()) - 1))
-        requested_status = values.get('status', 'succeeded')
+        requested_status = values.get('status', 'ok')
         status = 'failed' if requested_status == 'empty' else requested_status
         outcome = 'result_missing_or_empty' if requested_status == 'empty' else status
         exit_code = {'false': False, 'float': 0.0}.get(values.get('process_exit'), 0)
@@ -116,7 +116,7 @@ def fake_dispatch(path: Path) -> None:
         adapter_path = attempt_dir / 'adapter-receipt.json'
         result = None
         result_path = attempt_dir / 'result.md'
-        if status == 'succeeded' and values.get('missing_result') != '1':
+        if status == 'ok' and values.get('missing_result') != '1':
             result_path.write_text('OK\\n', encoding='utf-8')
             result = {'path': str(result_path.relative_to(ns.run_dir)),
                       'digest': 'sha256:' + hashlib.sha256(result_path.read_bytes()).hexdigest()}
@@ -167,7 +167,7 @@ def fake_dispatch(path: Path) -> None:
         if question is not None:
             record['question'] = question
         print(json.dumps(record))
-        raise SystemExit(0 if status == 'succeeded' else 1)
+        raise SystemExit(0 if status == 'ok' else 1)
     """)
 
 
@@ -226,9 +226,9 @@ def test_current_routing_fixture_runs_real_dispatch_and_retains_partial_batch(tm
     state_dir.mkdir()
     monkeypatch.setenv('CURRENT_ROUTING_FIXTURE_STATE', str(state_dir))
     task_specs = (
-        ('openai-one', 'openai', 'succeeded'),
-        ('openai-two', 'openai', 'succeeded'),
-        ('anthropic-one', 'anthropic', 'succeeded'),
+        ('openai-one', 'openai', 'ok'),
+        ('openai-two', 'openai', 'ok'),
+        ('anthropic-one', 'anthropic', 'ok'),
         ('intentional-failure', 'openai', 'failed'),
     )
     prompts = {}
@@ -257,11 +257,11 @@ def test_current_routing_fixture_runs_real_dispatch_and_retains_partial_batch(tm
     assert {by_id['openai-one']['route']['provider_family'],
             by_id['openai-two']['route']['provider_family']} == {'openai'}
     assert {item['route']['provider_family'] for item in summary['tasks']
-            if item['status'] == 'succeeded'} == {'openai', 'anthropic'}
+            if item['status'] == 'ok'} == {'openai', 'anthropic'}
     assert by_id['intentional-failure']['status'] == 'failed'
     assert by_id['intentional-failure']['attempt_path']
     assert {item['task_id'] for item in summary['reducer_inputs']} == set(prompts)
-    assert {item['status'] for item in summary['reducer_inputs']} == {'succeeded', 'failed'}
+    assert {item['status'] for item in summary['reducer_inputs']} == {'ok', 'failed'}
     assert int((state_dir / 'maximum').read_text()) == 2
     for task_id, family, _status in task_specs[:3]:
         attempt = json.loads((run_dir / by_id[task_id]['attempt_path']).read_text())
@@ -436,7 +436,7 @@ def test_real_dispatch_children_defer_manifest_race_and_preserve_route_identity(
 
     assert module.batch(args(module, run_dir, manifest, 4)) == 0, attempt_diagnostics(run_dir)
     summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
-    assert {entry['status'] for entry in summary['tasks']} == {'succeeded'}
+    assert {entry['status'] for entry in summary['tasks']} == {'ok'}
     assert all(entry['route']['provider_family'] for entry in summary['tasks'])
     lines = (run_dir / 'MANIFEST.md').read_text(encoding='utf-8').splitlines()
     assert sum('dispatch-' + f'task-{i}' in line for i in range(8) for line in lines) >= 8
@@ -473,7 +473,7 @@ def test_late_batch_cancel_does_not_override_natural_all_terminal_completion(tmp
     assert module.batch(args(module, run_dir, manifest, 1)) == 0
     summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
     assert summary['status'] == 'completed'
-    assert summary['tasks'][0]['status'] == 'succeeded'
+    assert summary['tasks'][0]['status'] == 'ok'
 
 
 def test_retained_non_success_attempt_allows_partial_route_and_question(tmp_path, monkeypatch):
@@ -791,14 +791,14 @@ def test_batch_continues_after_mixed_success_failure_empty_and_timeout(tmp_path,
     counter.write_text('0')
     monkeypatch.setenv('BATCH_COUNTER', str(counter))
     manifest = task_manifest(tmp_path, [
-        task(tmp_path, 'ok', status='succeeded'), task(tmp_path, 'bad', status='failed'),
+        task(tmp_path, 'ok', status='ok'), task(tmp_path, 'bad', status='failed'),
         task(tmp_path, 'empty', status='empty'), task(tmp_path, 'slow', status='timed_out'),
     ])
 
     assert module.batch(args(module, run_dir, manifest, 2)) == 1
     summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
     assert {entry['task_id']: entry['status'] for entry in summary['tasks']} == {
-        'ok': 'succeeded', 'bad': 'failed', 'empty': 'failed', 'slow': 'timed_out',
+        'ok': 'ok', 'bad': 'failed', 'empty': 'failed', 'slow': 'timed_out',
     }
     assert next(entry for entry in summary['tasks'] if entry['task_id'] == 'empty')['outcome'] == 'result_missing_or_empty'
 

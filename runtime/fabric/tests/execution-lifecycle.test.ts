@@ -12,6 +12,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
+import { psOutput } from "../src/ps.mjs";
 import {
   listRecordedRuns,
   fabricStatus,
@@ -168,14 +169,10 @@ describe("owner records", () => {
     try {
       const locales = execFileSync("locale", ["-a"], { encoding: "utf8" });
       const args = ["-o", "lstart=", "-p", String(process.pid)];
-      const canonical = execFileSync("/bin/ps", args, {
-        encoding: "utf8", env: { ...process.env, LC_ALL: "C", LANG: "C" },
-      }).trim();
+      const canonical = psOutput(args, { ...process.env, LC_ALL: "C", LANG: "C" }).trim();
       for (const locale of ["en_AU.UTF-8", "de_DE.UTF-8"]) {
         if (!locales.includes(locale)) continue;
-        const legacy = execFileSync("/bin/ps", args, {
-          encoding: "utf8", env: { ...process.env, LC_ALL: locale, LANG: locale },
-        }).trim();
+        const legacy = psOutput(args, { ...process.env, LC_ALL: locale, LANG: locale }).trim();
         if (legacy !== canonical) return { locale, legacy, canonical };
       }
     } catch { /* ps or a differing locale is unavailable */ }
@@ -237,7 +234,7 @@ describe("owner records", () => {
       { adapter: "codex", prompt: "ordinary run", wait_seconds: 5 },
       identity, new AbortController().signal, ownerEnvironment,
     );
-    expect(result.status, JSON.stringify(result)).toBe("succeeded");
+    expect(result.status, JSON.stringify(result)).toBe("ok");
     const runDir = String((result.paths as Record<string, string>).run_dir);
     expect(existsSync(join(runDir, "RUN_RECEIPT.json"))).toBe(true);
     expect(existsSync(join(runDir, "_owner", "stdout.jsonl"))).toBe(true);
@@ -251,7 +248,7 @@ describe("owner records", () => {
       { adapter: "codex", prompt: "ordinary run", wait_seconds: 5 },
       { ...identity, project: upper, cwd: upper }, new AbortController().signal, ownerEnvironment,
     );
-    expect(result.status, JSON.stringify(result)).toBe("succeeded");
+    expect(result.status, JSON.stringify(result)).toBe("ok");
     expect(String((result.paths as Record<string, string>).run_dir).split("/").at(-1))
       .toMatch(/^\d{8}-\d{4}-dispatch-myworkspace-[A-Za-z0-9]{6}$/u);
   });
@@ -308,7 +305,7 @@ describe("owner records", () => {
       new AbortController().signal,
       ownerEnvironment,
     );
-    expect(done.status).toBe("succeeded");
+    expect(done.status).toBe("ok");
     const runDir = String((done.paths as Record<string, string>).run_dir);
     expect(existsSync(join(runDir, OWNER_RECORD_NAME))).toBe(false);
   }, 40_000);
@@ -365,9 +362,7 @@ describe("owner records", () => {
     };
     expect(providerRecord.run_token).toBe(ownerRecord.run_token);
     expect(processStartedAt(providerPid)).toBe(providerRecord.provider_started_at);
-    expect(Number(execFileSync("/bin/ps", ["-o", "pgid=", "-p", String(providerPid)], {
-      encoding: "utf8",
-    }).trim())).toBe(providerPid);
+    expect(Number(psOutput(["-o", "pgid=", "-p", String(providerPid)]).trim())).toBe(providerPid);
     writeFileSync(join(runDir, "exit-owner.release"), "exit\n");
     await waitFor(() => !alive(Number(started.pid)), "the owner never exited");
     await delay(200);
@@ -704,7 +699,7 @@ describe("orphan reaping", () => {
       new AbortController().signal,
       ownerEnvironment,
     );
-    expect(next.status).toBe("succeeded");
+    expect(next.status).toBe("ok");
     await waitFor(() => !alive(providerPid), "an ordinary dispatch did not reap the orphan");
   }, 40_000);
 
@@ -722,13 +717,44 @@ describe("orphan reaping", () => {
 });
 
 describe("compact status", () => {
+  it("reads a retained succeeded owner attempt as ok", async () => {
+    const { compactBatch, compactDispatch } = await import("../src/owner-output.js");
+    const runDir = join(workspace, ".agent-run", "mcp-legacy-output");
+    const attemptDir = join(runDir, "dispatch", "tasks", "legacy", "attempt-001");
+    mkdirSync(attemptDir, { recursive: true });
+    const attemptPath = join(attemptDir, "attempt.json");
+    const resultPath = join(attemptDir, "result.md");
+    const stderrPath = join(attemptDir, "stderr.log");
+    writeFileSync(resultPath, "result\n");
+    writeFileSync(stderrPath, "");
+    const record = {
+      schema_version: 1, record_type: "dispatch-attempt", status: "succeeded",
+      outcome: "ok", task_id: "legacy", attempt_id: "attempt-001",
+      attempt_path: "dispatch/tasks/legacy/attempt-001/attempt.json",
+      result: { path: "dispatch/tasks/legacy/attempt-001/result.md" },
+      stderr: { path: "dispatch/tasks/legacy/attempt-001/stderr.log" },
+      route: { adapter: "codex", provider_family: "openai", resolved_model: "fixture", execution_intent: "ordinary" },
+    };
+    writeFileSync(attemptPath, JSON.stringify(record));
+    const stdoutPath = join(runDir, "legacy-output.jsonl");
+    writeFileSync(stdoutPath, `${JSON.stringify(record)}\n`);
+
+    expect(compactDispatch({ runDir, stdoutPath, stderrPath }, { exitCode: 0, signal: null }))
+      .toMatchObject({ status: "ok", task_id: "legacy" });
+    writeFileSync(stdoutPath, JSON.stringify({ ...record, schema: "fabric.attempt.v1", run_id: "mcp-legacy-output" }));
+    expect(compactDispatch({ runDir, stdoutPath, stderrPath }, { exitCode: 0, signal: null }))
+      .toMatchObject({ status: "ok", attempts: [{ status: "ok" }] });
+    writeFileSync(stdoutPath, JSON.stringify({ schema: "fabric.batch.v1", runs: [{ status: "succeeded" }] }));
+    expect(compactBatch({ runDir, stdoutPath, stderrPath }, { exitCode: 0, signal: null }))
+      .toMatchObject({ status: "ok", runs: [{ status: "ok" }] });
+  });
   it("selects the newest directory when repeated ids have equal start timestamps", async () => {
     const started = new Date().toISOString();
     for (const name of ["mcp-older", "mcp-younger"]) {
       const dir = join(workspace, ".agent-run", name);
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "dispatch-status.json"), JSON.stringify({ id: name, task_id: "same-task",
-        status: "succeeded", started_at: started }));
+        status: "ok", started_at: started }));
       await delay(20);
     }
     expect(await fabricStatus(workspace, "same-task")).toMatchObject({ id: "mcp-younger",
@@ -740,7 +766,7 @@ describe("compact status", () => {
       const dir = join(workspace, ".agent-run", name);
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "dispatch-status.json"), JSON.stringify({ id: name, task_id: task,
-        status: "succeeded", started_at: new Date(Date.now() - age).toISOString() }));
+        status: "ok", started_at: new Date(Date.now() - age).toISOString() }));
     }
     expect(await fabricStatus(workspace, "mcp-original")).toMatchObject({
       id: "mcp-original", run_dir: realpathSync(join(workspace, ".agent-run", "mcp-original")),
@@ -775,13 +801,13 @@ describe("compact status", () => {
     mkdirSync(attemptDir, { recursive: true });
     writeFileSync(join(dir, "dispatch-status.json"), JSON.stringify({ id: "partial", kind: "batch",
       status: "running", task_ids: ["done", "missing"], started_at: new Date().toISOString() }));
-    writeFileSync(join(attemptDir, "attempt.json"), JSON.stringify({ task_id: "done", status: "succeeded" }));
+    writeFileSync(join(attemptDir, "attempt.json"), JSON.stringify({ task_id: "done", status: "ok" }));
     expect(await fabricStatus(workspace, "partial")).toMatchObject({ status: "interrupted" });
-    expect(await fabricStatus(workspace, "done")).toMatchObject({ id: "done", status: "succeeded" });
+    expect(await fabricStatus(workspace, "done")).toMatchObject({ id: "done", status: "ok" });
     const summaryDir = join(dir, "dispatch", "batches", "partial");
     mkdirSync(summaryDir, { recursive: true });
     writeFileSync(join(summaryDir, "summary.json"), JSON.stringify({ status: "cancelled", batch_id: "partial",
-      tasks: [{ task_id: "done", status: "succeeded" }, { task_id: "missing", status: "cancelled" }] }));
+      tasks: [{ task_id: "done", status: "ok" }, { task_id: "missing", status: "cancelled" }] }));
     expect(await fabricStatus(workspace, "partial")).toMatchObject({ status: "cancelled",
       result_path: realpathSync(join(summaryDir, "summary.json")) });
   });
@@ -805,17 +831,17 @@ describe("front door model selection", () => {
     for (const name of ["luna", "sol", "astra"]) {
       const done = await dispatchConfiguredProvider({ adapter: "codex", alias: name, prompt: "ordinary run", wait_seconds: 5 },
         identity, new AbortController().signal, { ...ownerEnvironment, AGENT_FABRIC_INSTANCE_ROOT: product });
-      expect(done).toMatchObject({ status: "succeeded", route: { resolved_model: name } });
+      expect(done).toMatchObject({ status: "ok", route: { resolved_model: name } });
     }
   });
   it("treats an empty model as omitted and keeps the alias", async () => {
     const done = await dispatchConfiguredProvider({adapter:"codex",alias:"scout",model:"",prompt:"ordinary run",wait_seconds:5}, identity, new AbortController().signal, ownerEnvironment);
-    expect(done).toMatchObject({status:"succeeded",route:{resolved_model:"scout"}});
+    expect(done).toMatchObject({status:"ok",route:{resolved_model:"scout"}});
   });
   it("passes an explicit model and effort without an alias", async () => {
     const done = await dispatchConfiguredProvider({ adapter: "codex", model: "gpt-6-luna", effort: "medium", prompt: "ordinary run", wait_seconds: 5 },
       identity, new AbortController().signal, ownerEnvironment);
-    expect(done).toMatchObject({ status: "succeeded", route: { resolved_model: "gpt-6-luna" } });
+    expect(done).toMatchObject({ status: "ok", route: { resolved_model: "gpt-6-luna" } });
   });
   it("rejects empty retained batch results per task", async () => {
     const done = await dispatchConfiguredBatch({ tasks: [{ adapter: "codex", prompt: "empty batch" }], wait_seconds: 5 },
@@ -852,13 +878,13 @@ describe("status liveness", () => {
     writeFileSync(statusPath, JSON.stringify({ id: "race", status: "running" }));
     const probe = vi.spyOn(process, "kill").mockImplementationOnce(() => {
       writeFileSync(join(attemptDir, "result.md"), "done");
-      writeFileSync(join(attemptDir, "attempt.json"), JSON.stringify({ task_id: "race", status: "succeeded",
+      writeFileSync(join(attemptDir, "attempt.json"), JSON.stringify({ task_id: "race", status: "ok",
         result: { path: "dispatch/tasks/race/attempt-001/result.md" } }));
-      writeFileSync(statusPath, JSON.stringify({ id: "race", status: "succeeded" }));
+      writeFileSync(statusPath, JSON.stringify({ id: "race", status: "ok" }));
       throw new Error("ESRCH: owner exited");
     });
     try {
-      expect(await fabricStatus(workspace, "race", 1)).toMatchObject({ status: "succeeded",
+      expect(await fabricStatus(workspace, "race", 1)).toMatchObject({ status: "ok",
         result_path: realpathSync(join(attemptDir, "result.md")) });
     } finally { probe.mockRestore(); }
   });
@@ -903,12 +929,12 @@ describe("status liveness", () => {
     writeFileSync(statusPath, JSON.stringify({ id: "batch-001", status: "running", started_at: started }));
     worker.once("exit", () => {
       writeFileSync(join(taskDir, "result.md"), "answer");
-      writeFileSync(join(taskDir, "attempt.json"), JSON.stringify({ task_id: "child", status: "succeeded",
+      writeFileSync(join(taskDir, "attempt.json"), JSON.stringify({ task_id: "child", status: "ok",
         route: { adapter: "claude", resolved_model: "opus" }, result: { path: "dispatch/tasks/child/attempt-001/result.md" } }));
       writeFileSync(statusPath, JSON.stringify({ id: "batch-001", status: "completed", started_at: started }));
     });
     expect(await fabricStatus(workspace, "batch-001", 2)).toMatchObject({ status: "completed" });
-    expect(await fabricStatus(workspace, "child")).toMatchObject({ id: "child", status: "succeeded", model: "opus" });
+    expect(await fabricStatus(workspace, "child")).toMatchObject({ id: "child", status: "ok", model: "opus" });
   });
 });
 
@@ -980,6 +1006,24 @@ it('reads v1 attempts verbatim from the shared run root with ledger fields', asy
  expect(status.provenance).toEqual(row.provenance);
 });
 
+it('reads a retained succeeded registry attempt as ok', async () => {
+ const runDir = join(workspace,'.agent-run/mcp-legacy-registry');
+ const attemptDir = join(runDir,'dispatch/tasks/old/attempt-001');
+ mkdirSync(attemptDir,{recursive:true});
+ writeFileSync(join(runDir,'dispatch-status.json'),JSON.stringify({id:'mcp-legacy-registry',status:'succeeded'}));
+ writeFileSync(join(attemptDir,'attempt.json'),JSON.stringify({task_id:'old',status:'succeeded'}));
+ expect(await fabricStatus(workspace,'old')).toMatchObject({id:'old',status:'ok'});
+ const v1Dir = join(workspace,'.agent-run/runs/20260923-1012-dispatch-legacy-c81f3c');
+ const v1Attempt = join(v1Dir,'tasks/task-1/attempt-001');
+ mkdirSync(v1Attempt,{recursive:true});
+ const row = JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
+ row.run_id='mcp-c81f3c';row.status='succeeded';
+ writeFileSync(join(v1Attempt,'attempt.json'),JSON.stringify(row));
+ const {statusRows}=await import('../src/run-registry.js');
+ const v1Status = await statusRows(workspace,[row.run_id],0,'all',undefined,'full');
+ expect(v1Status.runs?.[0]).toMatchObject({status:'ok',attempts:[{status:'ok'}]});
+});
+
 it('places logs and staging files inside a named run directory', async () => {
  const result = await dispatchConfiguredProvider({prompt:'fixture',wait_seconds:5},identity,new AbortController().signal,ownerEnvironment);
  const paths=result.paths as Record<string,string>;
@@ -994,6 +1038,18 @@ it.each([[[]], [['--interval','2']]])('watch prints a terminal state once and ex
  expect(fabricCli(['watch','mcp-watch',...options])).toMatch(/^failed mcp-watch/mu);
 });
 
+it('lists a batch in manifest order whatever the directory or clock order', async () => {
+ const dir=join(workspace,'.agent-run/runs/20260923-1012-batch-fixture-d81f3c');
+ const row=JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
+ for (const task of ['task-10','task-1']) {
+  const path=join(dir,`tasks/${task}/attempt-001`);mkdirSync(path,{recursive:true});
+  writeFileSync(join(path,'attempt.json'),JSON.stringify({...row,task_id:task}));
+ }
+ writeFileSync(join(dir,'dispatch-status.json'),JSON.stringify({id:row.run_id,batch_id:'batch-002',status:'running',task_ids:['task-1','task-2','task-10'],started_at:new Date().toISOString()}));
+ const status=await fabricStatus(workspace,row.run_id);
+ expect(status.runs.map((entry:any)=>entry.task_id)).toEqual(['task-1','task-2','task-10']);
+});
+
 it('keeps unpublished batch tasks visible and honours receipt interruption', async () => {
  const dir=join(workspace,'.agent-run/runs/20260923-1012-batch-fixture-a81f3c');
  const path=join(dir,'tasks/task-1/attempt-001');mkdirSync(path,{recursive:true});
@@ -1001,7 +1057,7 @@ it('keeps unpublished batch tasks visible and honours receipt interruption', asy
  writeFileSync(join(path,'attempt.json'),JSON.stringify(row));
  writeFileSync(join(dir,'dispatch-status.json'),JSON.stringify({id:row.run_id,batch_id:'batch-001',status:'running',task_ids:['task-1','task-2'],started_at:new Date().toISOString()}));
  const status=await fabricStatus(workspace,row.run_id);
- expect(status.runs).toHaveLength(2);expect(status.runs[1]).toMatchObject({task_id:'task-2',state:'queued'});
+ expect(status.runs).toHaveLength(2);expect(status.runs.find((entry: any) => entry.task_id === 'task-2')).toMatchObject({task_id:'task-2',state:'queued'});
  row.state='running';row.status=null;writeFileSync(join(path,'attempt.json'),JSON.stringify(row));
  writeFileSync(join(dir,'RUN_RECEIPT.json'),JSON.stringify({status:'interrupted'}));
  const interrupted=await fabricStatus(workspace,row.run_id);
@@ -1026,7 +1082,7 @@ it('bounds output slices, rejects escaped output, and waits for all requested ta
 it('selects the catalogue owner for a model-only request from another seat', async () => {
  mkdirSync(join(product,'config'));copyFileSync(join(repositoryRoot,'config/model-routing.json'),join(product,'config/model-routing.json'));
  const result=await dispatchConfiguredProvider({model:'gpt-6-luna',prompt:'fixture',wait_seconds:5},{...identity,provider:'claude'},new AbortController().signal,{...ownerEnvironment,AGENT_FABRIC_INSTANCE_ROOT:product});
- expect(result).toMatchObject({status:'succeeded',route:{adapter:'codex',resolved_model:'gpt-6-luna'}});
+ expect(result).toMatchObject({status:'ok',route:{adapter:'codex',resolved_model:'gpt-6-luna'}});
 });
 
 it('keeps non-Git cwd dispatches in the caller run root', async () => {
@@ -1034,7 +1090,7 @@ it('keeps non-Git cwd dispatches in the caller run root', async () => {
  const result=await dispatchConfiguredProvider({cwd:nested,prompt:'fixture',wait_seconds:5},identity,new AbortController().signal,ownerEnvironment);
  const path=(result.paths as Record<string,string>).run_dir!;
  expect(path).toContain(join(workspace,'.agent-run/runs').replace('/var/folders/','/private/var/folders/'));
- expect(await fabricStatus(workspace,String(result.id))).toMatchObject({status:'succeeded'});
+ expect(await fabricStatus(workspace,String(result.id))).toMatchObject({status:'ok'});
 });
 
 it('terminalises a stopped v1 run before removing its owner record', async () => {

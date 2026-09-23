@@ -6,8 +6,6 @@ from __future__ import annotations
 import argparse
 from collections import deque
 import ctypes
-import ctypes.util
-from functools import lru_cache
 import json
 import math
 import os
@@ -28,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from adapters import profile
 from output_custody import install, verify, CustodyError
 import context_usage
+import process_info
 
 
 def now():
@@ -150,7 +149,8 @@ def build_plan(
     effort = route.get("effort_applied", route.get("effort")) or ""
     if effort == "default":
         effort = ""
-    if effort and config.EFFORT_FLAG is None:
+    # A model id that carries the effort (cursor grok-4.7-high) sends it without a flag.
+    if effort and config.EFFORT_FLAG is None and not model.casefold().endswith("-" + effort.casefold()):
         warnings.append(f"{adapter} does not expose effort control; requested {effort}")
         effort = ""
     route_label = adapter + "/" + model + ("@" + effort if effort else "")
@@ -678,123 +678,10 @@ class BoundedCapture:
         self.file.close()
 
 
-@dataclass(frozen=True)
-class _ProcessRow:
-    pid: int
-    ppid: int
-    pgid: int
-    started: str
-    command: str
-    zombie: bool = False
-
-    @property
-    def identity(self):
-        return self.pid, self.started
-
-
-class _DarwinBsdInfo(ctypes.Structure):
-    _fields_ = [
-        ("flags", ctypes.c_uint32), ("status", ctypes.c_uint32),
-        ("xstatus", ctypes.c_uint32), ("pid", ctypes.c_uint32),
-        ("ppid", ctypes.c_uint32), ("uid", ctypes.c_uint32),
-        ("gid", ctypes.c_uint32), ("ruid", ctypes.c_uint32),
-        ("rgid", ctypes.c_uint32), ("svuid", ctypes.c_uint32),
-        ("svgid", ctypes.c_uint32), ("reserved", ctypes.c_uint32),
-        ("comm", ctypes.c_char * 16), ("name", ctypes.c_char * 32),
-        ("nfiles", ctypes.c_uint32), ("pgid", ctypes.c_uint32),
-        ("pjobc", ctypes.c_uint32), ("tdev", ctypes.c_uint32),
-        ("tpgid", ctypes.c_uint32), ("nice", ctypes.c_int32),
-        ("start_sec", ctypes.c_uint64), ("start_usec", ctypes.c_uint64),
-    ]
-
-
-@lru_cache(maxsize=1)
-def _darwin_libproc():
-    library = ctypes.util.find_library("proc")
-    if not library:
-        return None
-    try:
-        libproc = ctypes.CDLL(library, use_errno=True)
-    except OSError:
-        return None
-    libproc.proc_listallpids.argtypes = (ctypes.c_void_p, ctypes.c_int)
-    libproc.proc_listallpids.restype = ctypes.c_int
-    libproc.proc_pidinfo.argtypes = (
-        ctypes.c_int, ctypes.c_int, ctypes.c_uint64, ctypes.c_void_p, ctypes.c_int,
-    )
-    libproc.proc_pidinfo.restype = ctypes.c_int
-    return libproc
-
-
-def _linux_process_row(pid, proc_root=Path("/proc")):
-    stat = (proc_root / str(pid) / "stat").read_bytes().decode(errors="replace")
-    end = stat.rfind(") ")
-    if end < 0:
-        return None
-    fields = stat[end + 2:].split()
-    if len(fields) < 20:
-        return None
-    return _ProcessRow(
-        pid, int(fields[1]), int(fields[2]), fields[19],
-        stat[stat.find("(") + 1:end], fields[0] == "Z",
-    )
-
-
-def _linux_tree_snapshot(root_pid, known_pids, proc_root=Path("/proc")):
-    """Walk task children from the direct provider and previously seen children."""
-    rows = {}
-    queue = deque([root_pid, *known_pids])
-    visited = set()
-    while queue:
-        pid = queue.popleft()
-        if pid in visited:
-            continue
-        visited.add(pid)
-        try:
-            row = _linux_process_row(pid, proc_root)
-        except OSError:
-            continue
-        if row is None:
-            continue
-        rows[pid] = row
-        task = proc_root / str(pid) / "task"
-        try:
-            threads = list(task.iterdir())
-        except OSError:
-            return None  # Kernel lacks task/children; use the full census.
-        for thread in threads:
-            try:
-                children = (thread / "children").read_text()
-            except OSError:
-                return None
-            queue.extend(int(child) for child in children.split())
-    return rows
-
-
-def _darwin_process_row(libproc, pid):
-    info = _DarwinBsdInfo()
-    if libproc.proc_pidinfo(pid, 3, 0, ctypes.byref(info), ctypes.sizeof(info)) != ctypes.sizeof(info):
-        return None
-    return _ProcessRow(
-        pid, info.ppid, info.pgid,
-        f"{info.start_sec}.{info.start_usec:06d}",
-        info.name.split(b"\0", 1)[0].decode(errors="replace")
-        or info.comm.split(b"\0", 1)[0].decode(errors="replace"),
-        info.status == 5,
-    )
-
-
-def _probe_process_row(pid):
-    """One pid's row, or None when it cannot be read."""
-    try:
-        if sys.platform == "darwin":
-            libproc = _darwin_libproc()
-            return _darwin_process_row(libproc, pid) if libproc is not None else None
-        if sys.platform.startswith("linux"):
-            return _linux_process_row(pid)
-    except Exception:
-        return None
-    return None
+from process_info import (
+    _ProcessRow, _DarwinBsdInfo, _darwin_libproc, _linux_process_row,
+    _linux_tree_snapshot, _darwin_process_row, _probe_process_row,
+)
 
 
 def _process_snapshot():
@@ -881,12 +768,7 @@ def _has_attempt_marker(pid, marker):
     return ("PROVENANT_ATTEMPT_MARKER=" + marker).encode() in _process_environment(pid)
 
 
-@lru_cache(maxsize=1)
-def _linux_boot_time():
-    for line in Path("/proc/stat").read_text().splitlines():
-        if line.startswith("btime "):
-            return int(line.split()[1])
-    raise ValueError("Linux boot time unavailable")
+_linux_boot_time = process_info._linux_boot_time
 
 
 def _recorded_start_time(row):
@@ -897,10 +779,12 @@ def _recorded_start_time(row):
         epoch = _linux_boot_time() + int(row.started) / os.sysconf("SC_CLK_TCK")
     else:
         return None
-    return time.strftime("%a %b %e %H:%M:%S %Y", time.localtime(epoch))
+    return process_info._lstart(epoch)
 
 
 def _ps_start_time(pid, *, canonical):
+    if canonical and (observed := process_info.process(pid)) is not None:
+        return observed.lstart
     try:
         result = subprocess.run(
             ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
@@ -1345,19 +1229,10 @@ class WorkspaceProgress:
 
 def _cpu_stamp(pgid):
     try:
-        rows = subprocess.run(
-            ["/bin/ps", "-axo", "pgid=,time="],
-            capture_output=True,
-            text=True,
-            timeout=0.5,
-        ).stdout
-        return tuple(
-            line.split(None, 1)[1]
-            for line in rows.splitlines()
-            if len(line.split(None, 1)) == 2 and line.split(None, 1)[0] == str(pgid)
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ()
+        return tuple(row.cpu for row in sorted(process_info.processes(), key=lambda row: row.pid)
+                     if row.pgid == pgid)
+    except (OSError, ValueError):
+        return None
 
 
 def _same_model(adapter, resolved, observed):
@@ -1455,6 +1330,10 @@ def execute(
     events_path = Path(events_path or output_path.parent / "events.jsonl")
     stderr_path = Path(stderr_path or output_path.parent / "stderr.log")
     environment = dict(os.environ if env is None else env)
+    if (plan["adapter"] == "codex" and sys.platform == "darwin"
+            and plan["applied"]["sandbox"] != "full"):
+        shim_dir = str(Path(__file__).resolve().parent / "bin")
+        environment["PATH"] = shim_dir + os.pathsep + environment.get("PATH", os.defpath)
     for key in list(environment):
         if key.startswith(
             ("GIT_", "PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")
@@ -1720,7 +1599,7 @@ def execute(
                 covered_idle = idle if workspace is None else max(
                     0, (workspace.completed_pass_started_at or last_progress) - last_progress
                 )
-                if covered_idle >= plan["idle_seconds"]:
+                if cpu is not None and covered_idle >= plan["idle_seconds"]:
                     forced = "stalled"
                     break
                 if idle >= plan["idle_seconds"] / 2 and not warned:
@@ -1881,9 +1760,15 @@ def execute(
             family = "unknown"
             notes.append("observed model family unverified after substitution")
     model = observed or plan["model"]
+    # Applied effort is what was sent; with none sent, only a provider-reported
+    # value may fill it (Codex writes one to its rollout), never a guessed default.
+    effort, effort_source = plan["effort"], None
+    if not effort and plan["adapter"] == "codex":
+        effort = context_usage.codex_rollout_effort(session, environment) or ""
+        effort_source = "codex:rollout.turn_context" if effort else None
     line = (
         f"Route: {plan['adapter']}/{model}"
-        + ("@" + plan["effort"] if plan["effort"] else "")
+        + ("@" + effort if effort else "")
         + f" ({family}; {identity})"
     )
     provenance = {
@@ -1902,7 +1787,8 @@ def execute(
         "transport": plan["adapter"],
         "family": family,
         "effort_requested": plan.get("requested_effort"),
-        "effort_applied": plan["effort"],
+        "effort_applied": effort,
+        "effort_observed_source": effort_source,
         "cli_version": route.get("cli_version"),
         "fallback_from": plan.get("fallback_from"),
         "notes": notes,

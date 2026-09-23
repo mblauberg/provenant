@@ -66,6 +66,11 @@ owned, registered worktree. `cwd` selects an existing read-only directory inside
 the caller workspace. The Python owner validates provider capabilities and
 applies controls; Fabric does not claim a stronger guarantee than its receipt.
 
+On macOS, a Codex `read-only` or `workspace-write` provider gets a bundled `ps`
+shim on PATH because seatbelt blocks the setuid `/bin/ps`. Process identity reads
+use libproc and preserve the recorded C-locale start time. Fabric falls back to
+the PATH command when `/bin/ps` cannot execute; unreadable PIDs stay unverifiable.
+
 `tasks` contains 1–64 task objects with the same prompt and route fields plus
 optional `id`; `concurrency` is 1–8. Top-level route controls and timeout apply
 as defaults, with each task taking precedence. Prompt file paths resolve from
@@ -87,8 +92,10 @@ Without IDs it returns active and last-24-hour runs, capped at 20 rows. Rows
 include the latest attempt and count. Full detail adds history and the worktree
 ledger: branch tip, dirty state and ahead count; unavailable Git facts are null.
 Ledger reads are shared per worktree within a response and omitted for terminal
-brief rows. Unpublished batch children remain visible until an attempt or
-terminal batch summary accounts for them.
+brief rows. New successful attempt, batch task and run statuses are `ok`.
+Status and output readers accept `succeeded` in older retained files.
+Unpublished batch children remain visible until an attempt or terminal batch
+summary accounts for them.
 
 Output defaults to 4,000 bytes and caps each request at 20,000. Continue at
 `next_offset`; pages preserve UTF-8 boundaries and `eof` reflects the current

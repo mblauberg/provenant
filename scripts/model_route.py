@@ -312,6 +312,15 @@ def _registered_match(adapter: str, requested: str, catalog: dict[str, Any]) -> 
     return chosen, notes
 
 
+def _no_effort_control(entry: dict[str, Any] | None) -> bool:
+    """A registered model without an effort list takes none, whatever its adapter's transport."""
+    return isinstance(entry, dict) and (entry.get("effort_transport") == "none" or not entry.get("efforts"))
+
+
+def _effort_ignored(effort: str, model: str) -> str:
+    return f"effort {effort} ignored: {model} has no effort control"
+
+
 def _owner_adapter(requested: str, catalog: dict[str, Any]) -> str:
     token = requested.casefold()
     if token.startswith(("opencode/", "opencode-go/", "openrouter/")):
@@ -700,7 +709,8 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         unverified_effort = True
         notes.append(f"{effort} effort passed through to {model}; provider support unverified")
     elif requested_effort:
-        notes.append(f"{model} does not expose effort control; ran at default")
+        # Nothing reaches the provider, so nothing is claimed: applied stays empty.
+        notes.append(_effort_ignored(requested_effort, model))
     if registered and registered.get("effort_transport") == "model-suffix" and effort != "default":
         model += registered.get("suffix", {}).get(effort, "")
     training_model = bool((registered or {}).get("trains_on_prompts")) or "muse-spark-" in model
@@ -731,10 +741,12 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                  "endpoint_provider": adapter.get("endpoint_provider", adapter_name), "provider": provider,
                  "adapter_enabled": True, "compatibility_adapter": compatibility["compatibility_adapter"] if compatibility else "",
                  "model_selection": "alias" if not explicit else "explicit",
-                 "requested_effort": args.effort or "", "effort": effort if effort != "default" else "", "effort_applied": effort,
+                 "requested_effort": args.effort or "", "effort": effort if effort != "default" else "",
+                 "effort_applied": effort if effort != "default" else "",
                  "effort_note": next((note for note in notes if "effort" in note or "unsupported" in note), ""),
                  "effort_source": "explicit" if args.effort else "model-default" if (registered or {}).get("default_effort") else "adapter-default",
-                 "effort_capability_source": "registry" if supported else "provider-unverified" if unverified_effort else "adapter-no-effort-control",
+                 "effort_capability_source": "registry" if supported else "provider-unverified" if unverified_effort
+                 else "registry-no-effort-control" if registered else "adapter-no-effort-control",
                  "effort_substitution": next((note for note in notes if "unsupported" in note or "effort control" in note), ""),
                  "substitution": "", "fallback_model": "",
                  "notes": notes, "warnings": warnings, "fallback_candidates": fallback,
@@ -965,6 +977,7 @@ def resolve_effort(
     family_config: dict[str, Any],
     requested_effort: str,
     account_default: bool,
+    registered: dict[str, Any] | None = None,
 ) -> tuple[str | None, str, str, str]:
     """Return effective effort, substitution, failure status, capability source."""
     openai_codex = args.adapter == "codex" and family == "openai"
@@ -980,6 +993,9 @@ def resolve_effort(
         capability_source = "runtime-model-catalog"
     elif args.capability_models and model.lower() not in args.capability_models:
         return None, "", "capability_model_unavailable", "runtime-model-catalog"
+    # A model with no effort control is sent none: warn, don't block.
+    if args.effort_transport != "none" and _no_effort_control(registered):
+        return "", _effort_ignored(requested_effort, model), "", "registry-no-effort-control"
 
     ultra_eligible = (
         openai_codex
@@ -1003,6 +1019,23 @@ def resolve_effort(
         fallback_source = capability_source if supported is not None else "policy"
         return fallback, f"ultra unavailable (route is not ultra-eligible); used {fallback}", "", fallback_source
 
+    # A registered model whose id carries the effort (cursor grok-4.7-high) is not
+    # an adapter-wide model-id route: its catalogue lists the efforts it takes.
+    if (args.effort_transport == "model-id" and registered
+            and registered.get("effort_transport") == "model-suffix" and requested_effort):
+        carried = next((level for level, suffix in registered.get("suffix", {}).items()
+                        if model.casefold() == (registered["id"] + suffix).casefold()), None)
+        if carried and not args.effort:
+            requested_effort = carried  # the id names its effort; only an explicit effort overrides it
+        offered = [value.lower() for value in registered.get("efforts", []) if value.lower() in EFFORT_ORDER]
+        if requested_effort in offered:
+            return requested_effort, "", "", "registry-model-suffix"
+        if offered:
+            rank = EFFORT_ORDER.get(requested_effort, EFFORT_ORDER["medium"])
+            used = max((value for value in offered if EFFORT_ORDER[value] <= rank),
+                       key=lambda value: EFFORT_ORDER[value], default=min(offered, key=lambda value: EFFORT_ORDER[value]))
+            return used, f"{requested_effort} unsupported by {model}; ran at {used}", "", "registry-model-suffix"
+
     if args.effort_transport == "model-id":
         normalized_model = re.sub(r"(?:^|[-_])extra[-_]high(?=$|[-_])", "-xhigh", model.lower())
         matches = re.findall(r"(?:^|[-_])(low|medium|high|xhigh|max|ultra)(?=$|[-_])", normalized_model)
@@ -1018,7 +1051,7 @@ def resolve_effort(
         return derived, substitution, "", "model-id" if derived else "model-id-unresolved"
     if args.effort_transport == "none":
         if args.effort:
-            return None, "", "effort_unsupported", "adapter-no-effort-control"
+            return "", _effort_ignored(requested_effort, model), "", "adapter-no-effort-control"
         return "", "adapter does not expose effort control", "", "adapter-no-effort-control"
 
     capability_models = args.capability_models
@@ -1546,9 +1579,14 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             1,
         )
 
+    registered_model, _ = _registered_match(args.adapter, model, catalog)
     effort, effort_substitution, effort_status, capability_source = resolve_effort(
-        args, family, model, family_config, requested_effort, account_default
+        args, family, model, family_config, requested_effort, account_default, registered_model
     )
+    if capability_source == "registry-no-effort-control" or (
+        capability_source == "adapter-no-effort-control" and args.effort
+    ):
+        route_notes.append(effort_substitution)
     if effort_status in {"effort_unsupported", "no_effort_available", "capability_discovery_failed"} and not (
         args.task_class or args.model_override_tier or args.require_distinct
     ):
@@ -1567,6 +1605,11 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             effort_status = ""
     if not effort_status and getattr(args, "raw_effort", None):
         effort_substitution = f"{args.raw_effort} unknown; ran at {effort or 'default'}"
+    # The effort reaches a suffix model only through its id, so the id must carry it.
+    suffix_model = args.effort_transport == "model-id" and (registered_model or {}).get("effort_transport") == "model-suffix"
+    suffix = (registered_model.get("suffix", {}) if suffix_model else {}).get(effort or "", "")
+    if not effort_status and suffix:
+        model = registered_model["id"] + suffix  # replaces any suffix the request carried
     # A Claude snapshot cannot evidence the effective effort, but its existence
     # does evidence that the CLI accepted the requested value: the canary fails
     # closed on the unknown-effort warning. Paired with runtime-verified model
@@ -1597,7 +1640,8 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
 
     if args.task_class and (
         (not account_default and identity_source != "runtime-capability+catalog")
-        or (capability_source != "runtime-model-catalog" and not claude_effort_unverified)
+        or (capability_source not in {"runtime-model-catalog", "registry-no-effort-control"}
+            and not claude_effort_unverified)
     ):
         return emit_route(
             {

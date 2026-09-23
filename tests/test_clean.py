@@ -25,14 +25,17 @@ def test_pid_alive_accepts_legacy_locale_start_after_canonical_check(monkeypatch
     calls = []
     monkeypatch.setattr(module.os, "kill", lambda _pid, _signal: None)
 
-    def fake_command(*argv, **kwargs):
-        canonical = kwargs.get("env", {}).get("LC_ALL") == "C"
-        calls.append("C" if canonical else "inherited")
-        return subprocess.CompletedProcess(argv, 0,
-                                           stdout="Wed Sep 23 17:17:42 2026" if canonical
-                                           else "Wed 23 Sep 17:17:42 2026")
+    def fake_start(pid):
+        calls.append("C")
+        return "Wed Sep 23 17:17:42 2026"
 
-    monkeypatch.setattr(module, "_command", fake_command)
+    def fake_legacy(pid, *, canonical):
+        assert not canonical
+        calls.append("inherited")
+        return "Wed 23 Sep 17:17:42 2026"
+
+    monkeypatch.setattr(module.process_info, "start_time", fake_start)
+    monkeypatch.setattr(module.process_info, "_ps_start_time", fake_legacy)
     assert module._pid_alive(12345, "Wed 23 Sep 17:17:42 2026")
     assert calls == ["C", "inherited"]
 
@@ -62,6 +65,9 @@ def test_classifies_new_legacy_and_unknown_without_deleting(tmp_path):
     completed = runs / "20260801-1200-dispatch-task-a1b2c3"
     completed.mkdir(parents=True)
     (completed / "RUN_RECEIPT.json").write_text(json.dumps({"status": "succeeded", "closed_at": "2026-08-01T12:00:00Z"}))
+    current = runs / "20260801-1200-dispatch-current-b2c3d4"
+    current.mkdir(parents=True)
+    (current / "RUN_RECEIPT.json").write_text(json.dumps({"status": "ok", "closed_at": "2026-08-01T12:00:00Z"}))
     legacy = root / ".agent-run" / "mcp-abc123"
     legacy.mkdir()
     (legacy / "RUN_RECEIPT.json").write_text(json.dumps({"status": "failed", "closed_at": "2026-08-01T12:00:00Z"}))
@@ -70,6 +76,7 @@ def test_classifies_new_legacy_and_unknown_without_deleting(tmp_path):
     unknown = root / ".agent-run" / "someone-notes"
     unknown.mkdir()
     old(completed)
+    old(current)
     old(legacy)
     old(sibling)
     old(unknown)
@@ -77,10 +84,23 @@ def test_classifies_new_legacy_and_unknown_without_deleting(tmp_path):
     plan = cleaner().plan(root, pr_bodies=[])
     rows = {row["path"]: row for row in plan["rows"]}
     assert rows[".agent-run/runs/20260801-1200-dispatch-task-a1b2c3"]["verdict"] == "delete"
+    assert rows[".agent-run/runs/20260801-1200-dispatch-current-b2c3d4"]["verdict"] == "delete"
     assert rows[".agent-run/mcp-abc123"]["verdict"] == "delete"
     assert rows[".agent-run/mcp-abc123-owner.stderr.log"]["verdict"] == "delete"
     assert rows[".agent-run/someone-notes"]["verdict"].startswith("triage:")
     assert completed.exists() and legacy.exists() and sibling.exists() and unknown.exists()
+
+
+def test_legacy_succeeded_receipt_uses_success_retention(tmp_path):
+    root = repo(tmp_path)
+    run = root / ".agent-run" / "runs" / "20260801-1200-dispatch-legacy-a1b2c3"
+    run.mkdir(parents=True)
+    (run / "RUN_RECEIPT.json").write_text(json.dumps({"status": "succeeded", "closed_at": "2026-08-01T12:00:00Z"}))
+    old(run, days=5)
+
+    plan = cleaner().plan(root, pr_bodies=[])
+    row = next(item for item in plan["rows"] if item["path"].endswith("dispatch-legacy-a1b2c3"))
+    assert row["verdict"] == "keep:retention-7d"
 
 
 def test_git_repo_without_github_remote_can_clean_runs(tmp_path):

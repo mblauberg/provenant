@@ -410,7 +410,7 @@ def test_finalizer_atomic_receipt_interruption_preserves_old_bytes_and_retries(t
     assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "active"
     monkeypatch.setattr(custody.os, "write", real_write)
     assert finalizer.main([str(run), "--status", "succeeded"]) == 0
-    assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "succeeded"
+    assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "ok"
 
 
 def test_finalizer_prune_symlink_swap_fails_closed(tmp_path: Path, monkeypatch) -> None:

@@ -419,11 +419,11 @@ def test_compatibility_drift_rejection_names_a_fix(tmp_path):
 
 
 @pytest.mark.parametrize("arguments,model,effort", [
-    (["--adapter", "codex", "--alias", "luna"], "gpt-6-luna", "default"),
+    (["--adapter", "codex", "--alias", "luna"], "gpt-6-luna", ""),
     (["--adapter", "agy", "--alias", "flash", "--effort", "xhigh"], "gemini-3.8-flash-high", "high"),
-    (["--adapter", "cursor", "--alias", "grok"], "grok-4.7", "default"),
-    (["--adapter", "opencode", "--alias", "glm"], "opencode-go/glm-5.3-flash", "default"),
-    (["--model", "gpt-5.6-luna"], "gpt-6-luna", "default"),
+    (["--adapter", "cursor", "--alias", "grok"], "grok-4.7", ""),
+    (["--adapter", "opencode", "--alias", "glm"], "opencode-go/glm-5.3-flash", ""),
+    (["--model", "gpt-5.6-luna"], "gpt-6-luna", ""),
 ])
 def test_ordinary_registry_routes_names_and_nearest_effort(arguments, model, effort):
     result, route = resolve(*arguments, "--role", "worker")
@@ -4155,10 +4155,12 @@ def test_endpoint_route_reports_no_effort(monkeypatch, name):
     assert route["effort"] == ""
     assert route["effort_capability_source"] == "adapter-no-effort-control"
 
+    # An explicit effort is ignored with a warning, never sent and never claimed.
     explicit, explicit_route = endpoint_route(monkeypatch, name, "--effort", "high")
-    assert explicit.returncode != 0
-    assert explicit_route["status"] == "effort_unsupported"
+    assert explicit.returncode == 0, explicit.stdout
+    assert explicit_route["status"] == "ok"
     assert explicit_route["effort"] == ""
+    assert f"effort high ignored: {ENDPOINT_MODELS[name]} has no effort control" in explicit_route["notes"]
 
 
 def test_endpoint_route_without_its_token_dispatches_nothing(monkeypatch):

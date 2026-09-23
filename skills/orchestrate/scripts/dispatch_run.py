@@ -37,6 +37,7 @@ from typing import Any
 SKILLS_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(SKILLS_ROOT))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import process_info
 CF_DISPATCH = Path(__file__).with_name("cf_dispatch.sh")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
@@ -60,7 +61,7 @@ from _shared.custody import (
     ensure_contained_directory, create_contained_directory, open_contained_regular, read_bound_bytes,
     read_contained_regular, unlink_contained_regular,
 )
-from attempt_evidence import AttemptEvidenceError as SharedAttemptEvidenceError, successful_adapter_error, validate_successful_attempt
+from attempt_evidence import AttemptEvidenceError as SharedAttemptEvidenceError, canonical_success_status, is_success_status, successful_adapter_error, validate_successful_attempt
 
 class AttemptEvidenceError(ValueError):
     """A retained attempt cannot be reconciled without inventing evidence."""
@@ -559,7 +560,7 @@ def reconcile_manifest(run_dir: Path, custody=None) -> None:
                     f"attempt evidence digest does not match {attempt_path}: "
                     + ", ".join(mismatched_digests)
                 )
-            if record.get("status") == "succeeded":
+            if is_success_status(record.get("status")):
                 try:
                     _adapter_rel, _adapter_path, adapter_bytes = read_contained_regular(
                         run_dir, expected["adapter"], label="adapter receipt"
@@ -1062,11 +1063,7 @@ def _record_provider_process(run_dir: Path, process: subprocess.Popen[Any]) -> N
     """
     token = os.environ.get("PROVENANT_RUN_TOKEN") or run_identity(run_dir)
     try:
-        started_at = subprocess.run(
-            ["/bin/ps", "-o", "lstart=", "-p", str(process.pid)],
-            capture_output=True, text=True, timeout=5, check=False,
-            env={**os.environ, "LC_ALL": "C", "LANG": "C"},
-        ).stdout.strip()
+        started_at = process_info.start_time(process.pid)
         record = {
             "schema_version": 1,
             "run_token": token,
@@ -1303,7 +1300,6 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     if legacy["outcome"] in {"result_invalid_path","result_integrity_error","adapter_receipt_invalid","manifest_write_error","terminal_envelope_invalid"}: status="failed"
     elif legacy["status"] in {"cancelled","timed_out"}: status=legacy["status"]
     elif legacy["status"]=="blocked": status="input_required"
-    elif legacy["status"]=="succeeded": status="ok"
     refusal=route_refusal(adapter,args.tool)
     if refusal: status=refusal["status"]
     if status not in TERMINAL_STATUSES: status="failed"
@@ -1360,7 +1356,8 @@ def prepare_resume(args):
     if (args.tool and args.tool!=requested["adapter"]) or (args.model and args.model!=previous["provenance"]["resolved_model"]):
         raise ValueError("dispatch a new run")
     args.tool=requested["adapter"];args.model=previous["provenance"]["resolved_model"];args.alias=None;args.task_class=None
-    args.effort=previous["provenance"]["effort_applied"];args.task_id=previous["task_id"]
+    # An effort the provider only reported was never sent, so resume does not send it.
+    args.effort=None if previous["provenance"].get("effort_observed_source") else previous["provenance"]["effort_applied"];args.task_id=previous["task_id"]
     args.access_mode=previous["mode"];args.worktree=Path(previous["worktree"]) if previous.get("worktree") else None
     args.provider_cwd=Path(previous["cwd"]) if previous["mode"]=="read_only" else None
     args.sandbox=previous["applied"]["sandbox"];args.network=None if previous["applied"]["network"] is None else str(previous["applied"]["network"]).lower()
@@ -1930,7 +1927,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         status = "blocked"
         outcome = "question"
     elif exit_code == 0 and adapter_status == "ok" and result_nonempty:
-        status = "succeeded"
+        status = "ok"
         outcome = "ok"
     elif exit_code == 0 and adapter_status == "ok":
         status = "failed"
@@ -1967,7 +1964,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         },
         "outcome": outcome,
         "failure_code": (
-            None if status == "succeeded" else (question["code"] if question is not None else outcome)
+            None if status == "ok" else (question["code"] if question is not None else outcome)
         ),
         "status": status,
         "started_at": started_at,
@@ -2040,7 +2037,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     # Batch children retain the legacy record for the batch evidence validator.
     # The MCP front door consumes the canonical attempt as its terminal row.
     print(json.dumps(row if os.environ.get("PROVENANT_RUN_TOKEN") and not args.batch_child else output_record, sort_keys=True))
-    return 0 if status == "succeeded" and not manifest_error else 1
+    return 0 if status == "ok" and not manifest_error else 1
 
 
 def close_mcp_run(run_dir: Path) -> None:
@@ -2054,32 +2051,33 @@ def close_mcp_run(run_dir: Path) -> None:
         receipt = json.loads(read_bound_bytes(run_dir, "RUN_RECEIPT.json", label="RUN_RECEIPT.json"))
         if receipt.get("status") != "active":
             return
-        statuses_by_task = {record["task_id"]: record["status"] for record in records}
+        statuses_by_task = {record["task_id"]: canonical_success_status(record["status"]) for record in records}
         for summary_path in (run_dir / "dispatch/batches").glob("*/summary.json"):
             summary = json.loads(read_bound_bytes(run_dir, summary_path.relative_to(run_dir), label="summary.json"))
             if summary.get("status") not in {"completed", "failed", "cancelled"}:
                 return
-            statuses_by_task.update({task["task_id"]: task.get("status", "failed") for task in summary.get("tasks", [])})
+            statuses_by_task.update({task["task_id"]: canonical_success_status(task.get("status", "failed")) for task in summary.get("tasks", [])})
         canonical = [json.loads(read_bound_bytes(run_dir, path.relative_to(run_dir), label="attempt.json"))
                      for path in (run_dir / "tasks").glob("*/attempt-*/attempt.json")]
         if canonical:
             latest={}
             for row in canonical:
                 if row["task_id"] not in latest or row["attempt"]>latest[row["task_id"]]["attempt"]: latest[row["task_id"]]=row
-            if any(row.get("state") != "terminal" or row.get("status") not in TERMINAL_STATUSES for row in latest.values()):
+            if any(row.get("state") != "terminal" or canonical_success_status(row.get("status")) not in TERMINAL_STATUSES for row in latest.values()):
                 return
-            receipt["attempts"]=sorted(canonical,key=lambda row:(row["task_id"],row["attempt"]))
+            receipt["attempts"]=sorted(({**row, "status": canonical_success_status(row["status"])} for row in canonical),
+                                       key=lambda row:(row["task_id"],row["attempt"]))
             receipt["run_id"]=canonical[0]["run_id"]
             receipt["resumable"]=any(row.get("status")=="input_required" for row in latest.values())
-            statuses_by_task.update({task_id: "succeeded" if row["status"]=="ok" else row["status"]
+            statuses_by_task.update({task_id: canonical_success_status(row["status"])
                                      for task_id, row in latest.items()})
-        elif any(record.get("status") not in {"succeeded", "failed", "blocked", "timed_out", "cancelled"} for record in records):
+        elif any(canonical_success_status(record.get("status")) not in {"ok", "failed", "blocked", "timed_out", "cancelled"} for record in records):
             return
         statuses = set(statuses_by_task.values())
         if not statuses:
             return
-        receipt.update(status="succeeded" if statuses == {"succeeded"} else "cancelled" if statuses == {"cancelled"} else "input_required" if receipt.get("resumable") else "failed",
-                       closed_at=now(), terminal_reason=None if statuses == {"succeeded"} else "MCP execution attempts are terminal")
+        receipt.update(status="ok" if statuses == {"ok"} else "cancelled" if statuses == {"cancelled"} else "input_required" if receipt.get("resumable") else "failed",
+                       closed_at=now(), terminal_reason=None if statuses == {"ok"} else "MCP execution attempts are terminal")
         write_owned(run_dir, run_dir / "RUN_RECEIPT.json", json.dumps(receipt, indent=2) + "\n")
     except (OSError, ValueError, OwnedFileError):
         pass

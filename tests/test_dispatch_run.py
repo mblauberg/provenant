@@ -115,7 +115,7 @@ def test_terminal_attempt_carries_nested_owner_spared_count(tmp_path: Path) -> N
                            task_id="task-1", access_mode="read_only", worktree=None,
                            _last_plan={})
     legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
-              "outcome": "succeeded", "status": "succeeded", "result": "result.md",
+              "outcome": "ok", "status": "ok", "result": "result.md",
               "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
     row = module.terminal_contract(args, tmp_path, legacy,
                                    {"status": "ok", "spared": 2}, 1,
@@ -171,7 +171,7 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
 
     assert result.returncode == 0, result.stderr + result.stdout
     receipt = json.loads(result.stdout)
-    assert receipt["status"] == "succeeded"
+    assert receipt["status"] == "ok"
     attempt = run_dir / "dispatch" / "tasks" / "task-1" / "attempt-001" / "attempt.json"
     assert attempt.exists()
     record = json.loads(attempt.read_text(encoding="utf-8"))
@@ -374,9 +374,9 @@ def test_valid_worker_question_envelope_is_retained_as_blocked_attempt(tmp_path:
 @pytest.mark.parametrize(
     ("result", "status", "outcome"),
     [
-        ("Do you agree?\n", "succeeded", "ok"),
-        ("```json\n{\"schema_version\":1,\"record_type\":\"provenant-worker-terminal\",\"classification\":\"question\",\"question\":{\"code\":\"needs_input\",\"prompt\":\"x\"}}\n```\n", "succeeded", "ok"),
-        ('{"record_type":"other","question":"quoted?"}\n', "succeeded", "ok"),
+        ("Do you agree?\n", "ok", "ok"),
+        ("```json\n{\"schema_version\":1,\"record_type\":\"provenant-worker-terminal\",\"classification\":\"question\",\"question\":{\"code\":\"needs_input\",\"prompt\":\"x\"}}\n```\n", "ok", "ok"),
+        ('{"record_type":"other","question":"quoted?"}\n', "ok", "ok"),
         ('{"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"x"},"extra":true}\n', "failed", "terminal_envelope_invalid"),
         ('{"schema_version":1,"record_type":"provenant-worker-terminal","classification":"complete","question":{"code":"needs_input","prompt":"x"}}\n', "failed", "terminal_envelope_invalid"),
         ('{"schema_version":1,"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"x","extra":true}}\n', "failed", "terminal_envelope_invalid"),
@@ -404,11 +404,11 @@ def test_worker_question_detection_is_exact_and_fail_closed(
     ])
     monkeypatch.chdir(tmp_path)
 
-    assert module.dispatch(args) == (0 if status == "succeeded" else 1)
+    assert module.dispatch(args) == (0 if status == "ok" else 1)
     attempt = json.loads((run_dir / "dispatch/tasks/case/attempt-001/attempt.json").read_text())
     assert attempt["status"] == status
     assert attempt["outcome"] == outcome
-    if status == "succeeded":
+    if status == "ok":
         assert "question" not in attempt
 
 
@@ -990,7 +990,7 @@ def test_late_signal_after_provider_exit_preserves_attempt_publication(tmp_path:
 
     assert result.returncode == 0, result.stderr + result.stdout
     record = json.loads(result.stdout)
-    assert record["status"] == "succeeded"
+    assert record["status"] == "ok"
     assert record["process"]["observed_exit"] is True
     assert (run_dir / "dispatch/tasks/late/attempt-001/attempt.json").is_file()
 
@@ -1154,7 +1154,7 @@ def test_stale_marker_on_prior_attempt_does_not_cancel_next_attempt(tmp_path: Pa
 
     assert module.dispatch(args) == 0
     next_record = json.loads((run_dir / "dispatch/tasks/stale/attempt-002/attempt.json").read_text())
-    assert next_record["status"] == "succeeded"
+    assert next_record["status"] == "ok"
 
 
 def test_attempt_rows_are_accepted_by_existing_finalizer(tmp_path: Path) -> None:
@@ -1660,7 +1660,7 @@ def test_opencode_worktree_writer_reaches_adapter_and_attempt(tmp_path: Path) ->
     )
     assert result.returncode == 0, result.stderr + result.stdout
     receipt = json.loads(result.stdout)
-    assert receipt["status"] == "succeeded"
+    assert receipt["status"] == "ok"
     attempt = json.loads((run_dir / "dispatch/tasks/task-1/attempt-001/attempt.json").read_text())
     assert attempt["requested_route"]["adapter"] == "opencode"
     assert attempt["requested_route"]["access_mode"] == "worktree_write"
@@ -1969,7 +1969,7 @@ def test_mcp_owner_closes_receipt(tmp_path, monkeypatch, capsys):
     assert terminal['status'] == 'ok'
     assert terminal['provenance']['line'].startswith('Route:')
     receipt = json.loads((run_dir / 'RUN_RECEIPT.json').read_text())
-    assert receipt['status'] == 'succeeded'
+    assert receipt['status'] == 'ok'
     assert receipt['closed_at']
 
 
@@ -2074,7 +2074,7 @@ else:
     assert not (tmp_path / 'chair-state').exists()
     scratch = Path((tmp_path / 'provider-tmp.txt').read_text())
     assert scratch.is_dir()  # Full provider diagnostics now live in the attempt, not a removed tmp directory.
-    assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'succeeded'
+    assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'ok'
 
 
 def real_owner_fixture(tmp_path, monkeypatch, code):
@@ -2132,17 +2132,18 @@ def isolate_fabric_plan_env(monkeypatch):
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
 
 
-def test_close_mcp_run_reads_canonical_single_task_attempts(tmp_path):
+def test_close_mcp_run_reads_legacy_successful_canonical_attempt(tmp_path):
     mod = load_dispatch_module()
     run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())
     row = json.loads((ROOT / 'tests/fixtures/fabric-v1/attempt.json').read_text())
+    row['status'] = 'succeeded'
     path = run / 'tasks/task-1/attempt-001/attempt.json'
     path.parent.mkdir(parents=True)
     path.write_text(json.dumps(row))
     mod.close_mcp_run(run)
     receipt = json.loads((run / 'RUN_RECEIPT.json').read_text())
-    assert receipt['status'] == 'succeeded'
-    assert receipt['attempts'] == [row]
+    assert receipt['status'] == 'ok'
+    assert receipt['attempts'] == [{**row, 'status': 'ok'}]
 
 
 def test_close_mcp_run_preserves_input_required_for_resumption(tmp_path):
@@ -2170,7 +2171,7 @@ def test_close_mcp_run_includes_batch_tasks_without_canonical_attempts(tmp_path)
     summary = run / 'dispatch/batches/batch-001/summary.json'
     summary.parent.mkdir(parents=True)
     summary.write_text(json.dumps({'status': 'completed', 'tasks': [
-        {'task_id': 'finished', 'status': 'succeeded'},
+        {'task_id': 'finished', 'status': 'ok'},
         {'task_id': 'busy', 'status': 'worktree_busy'},
     ]}))
     mod.close_mcp_run(run)

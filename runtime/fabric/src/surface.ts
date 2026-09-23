@@ -6,13 +6,17 @@ import type { CatalogueSnapshot } from "./catalogue.js";
 import type { Message } from "./store.js";
 import { databasePath } from "./identity.js";
 
+/** Only the effort a provider received; an empty applied effort never borrows the requested one. */
+function appliedEffort(row: Record<string, any>): string | undefined {
+  return row.provenance ? row.provenance.effort_applied || undefined : row.route?.effort;
+}
 function digestBase(row: Record<string, any>): string {
   if (row.state === "running" || row.status === "running") {
     const id = row.run_id ?? row.id ?? row.task_id ?? "?";
     const route = row.provenance?.line;
     const adapter = row.adapter ?? row.route?.adapter ?? row.provenance?.requested?.adapter;
     const model = row.model ?? row.route?.resolved_model ?? row.provenance?.resolved_model ?? row.provenance?.requested?.model;
-    const effort = row.provenance?.effort_applied ?? row.route?.effort;
+    const effort = appliedEffort(row);
     const routeText = typeof route === "string"
       ? route.replace(/^Route:\s*/u, "")
       : adapter && model ? `${adapter}/${model}${effort ? `@${effort}` : ""}` : "";
@@ -44,7 +48,7 @@ function digestBase(row: Record<string, any>): string {
     const route = row.provenance?.line;
     const adapter = row.adapter ?? row.route?.adapter ?? row.provenance?.requested?.adapter;
     const model = row.model ?? row.route?.resolved_model ?? row.provenance?.resolved_model ?? row.provenance?.requested?.model;
-    const effort = row.provenance?.effort_applied ?? row.route?.effort;
+    const effort = appliedEffort(row);
     const routeText = adapter && model
       ? ` ${adapter}/${model}${effort ? `@${effort}` : ""}`
       : typeof route === "string" ? ` ${route.replace(/^Route:\s*/u, "")}` : "";

@@ -19,6 +19,11 @@ import { fabricStatus, processMatches, readOwnerRecord, statusRows } from "./run
 /** The whole injected handoff text, prefix and result tail together. */
 export const HANDOFF_BYTES = 8000;
 
+/** The effort a run sent; one the provider only reported was never sent, so it is not re-sent. */
+function sentEffort(previous: Record<string, any>): string | undefined {
+  return previous.provenance?.effort_observed_source ? undefined : previous.provenance?.effort_applied || undefined;
+}
+
 /** One task row: a run id with task_id for a batch, or a task's own id. */
 async function targetTask(cwd: string, id: string, taskId: string | undefined, verb: string) {
   const result = await statusRows(cwd, [id]);
@@ -100,7 +105,7 @@ export async function resumeConfiguredProvider(
     const checked = await preflight(python, owner, [{
       id: taskId, adapter: requested.adapter ?? previous.adapter ?? identity.provider,
       model: previous.provenance?.resolved_model ?? requested.model,
-      effort: previous.provenance?.effort_applied,
+      effort: sentEffort(previous),
       access_mode: previous.mode ?? "read_only", worktree: previous.worktree ?? undefined,
       cwd: previous.mode === "worktree_write" ? undefined : executionIdentity.cwd,
       ...Object.fromEntries(Object.entries(previous.applied ?? {}).filter(([key, value]) =>
@@ -252,9 +257,7 @@ export async function handoffDispatch(
         ? {
             adapter: requested.adapter,
             model: previous.provenance?.resolved_model || requested.model || undefined,
-            ...(rest.effort === undefined && previous.provenance?.effort_applied
-              ? { effort: previous.provenance.effort_applied }
-              : {}),
+            ...(rest.effort === undefined && sentEffort(previous) ? { effort: sentEffort(previous) } : {}),
           }
         : {}),
       ...(writer ? { mode: "worktree_write" as const, worktree: previous.worktree } : {}),

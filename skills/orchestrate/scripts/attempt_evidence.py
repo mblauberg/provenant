@@ -17,6 +17,15 @@ class AttemptEvidenceError(ValueError):
     """A retained successful attempt cannot support a success claim."""
 
 
+def canonical_success_status(status: Any) -> Any:
+    # Drop the legacy alias once pre-upgrade succeeded receipts are no longer retained.
+    return "ok" if status == "succeeded" else status
+
+
+def is_success_status(status: Any) -> bool:
+    return canonical_success_status(status) == "ok"
+
+
 def digest_bytes(value: bytes) -> str:
     return f"sha256:{hashlib.sha256(value).hexdigest()}"
 
@@ -56,7 +65,7 @@ def validate_successful_attempt(
     run_dir: Path, record: dict[str, Any], payloads: dict[str, bytes]
 ) -> None:
     """Validate terminal process, retained result, and adapter agreement once."""
-    if record.get("status") != "succeeded":
+    if not is_success_status(record.get("status")):
         raise AttemptEvidenceError("successful attempt status is invalid")
     process = record.get("process")
     if not isinstance(process, dict) or process.get("observed_exit") is not True:

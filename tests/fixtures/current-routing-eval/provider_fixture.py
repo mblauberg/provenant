@@ -39,7 +39,7 @@ values = dict(
     if "=" in line
 )
 family = values["fixture_family"]
-status = values.get("fixture_status", "succeeded")
+status = values.get("fixture_status", "ok")
 state = Path(os.environ["CURRENT_ROUTING_FIXTURE_STATE"])
 _counter(state, 1)
 try:
@@ -54,7 +54,7 @@ finally:
     _counter(state, -1)
 
 output_digest = ""
-if status == "succeeded":
+if status == "ok":
     args.out.write_text("deterministic fixture result\n", encoding="utf-8")
     output_digest = "sha256:" + hashlib.sha256(args.out.read_bytes()).hexdigest()
 
@@ -67,9 +67,9 @@ record = {
     "model_family": family,
     "endpoint_provider": f"fixture-{family}",
     "identity_source": "deterministic-fixture",
-    "status": "ok" if status == "succeeded" else "error",
-    "exit": 0 if status == "succeeded" else 1,
-    "output_path": str(args.out) if status == "succeeded" else "",
+    "status": "ok" if status == "ok" else "error",
+    "exit": 0 if status == "ok" else 1,
+    "output_path": str(args.out) if status == "ok" else "",
     "output_digest": output_digest,
     "read_only_guarantee": "fixture",
     "cross_family": False,

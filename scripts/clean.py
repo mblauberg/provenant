@@ -16,6 +16,17 @@ import subprocess
 import sys
 from typing import Any
 
+import importlib.util
+
+# Loaded by file: this script may run by path with nothing on sys.path (#755).
+_PROCESS_INFO = Path(__file__).resolve().parents[1] / "skills/orchestrate/scripts/process_info.py"
+_process_info_spec = importlib.util.spec_from_file_location("provenant_process_info", _PROCESS_INFO)
+if _process_info_spec is None or _process_info_spec.loader is None:  # pragma: no cover - defensive
+    raise ModuleNotFoundError(f"process inspection is missing: {_PROCESS_INFO}")
+process_info = importlib.util.module_from_spec(_process_info_spec)
+sys.modules[_process_info_spec.name] = process_info  # dataclasses resolve their module here
+_process_info_spec.loader.exec_module(process_info)
+
 
 RUN_NAME = re.compile(r"^\d{8}-\d{4}-(dispatch|batch|orch|delivery|mission|review|wf)-[A-Za-z0-9-]+-[A-Za-z0-9]{6}$")
 LEGACY_ORCH = re.compile(r"^\d{8}(?:[-T]\d{4,6})?(?:[-_].*)?$")
@@ -108,10 +119,9 @@ def _pid_alive(pid: Any, started_at: Any) -> bool:
     if not isinstance(started_at, str) or not started_at:
         return True
     try:
-        args = ("/bin/ps", "-o", "lstart=", "-p", str(pid))
-        observed = _command(*args, env={**os.environ, "LC_ALL": "C", "LANG": "C"}).stdout.strip()
+        observed = process_info.start_time(pid)
         if observed and observed != started_at:
-            observed = _command(*args).stdout.strip()
+            observed = process_info._ps_start_time(pid, canonical=False)
     except (OSError, subprocess.TimeoutExpired):
         return True
     return not observed or observed == started_at
@@ -258,6 +268,7 @@ def _run_verdict(path: Path, kind: str, age: float, refs: str | None, pr_unknown
         if _activity_age(path, now) > 2:
             return "abandon"
         return "keep:active"
+    # Drop succeeded when pre-upgrade run receipts are no longer retained.
     elif status in {"succeeded", "ok", "cancelled", "canceled", "complete", "completed"}:
         retention = 7
     else:

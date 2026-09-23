@@ -84,7 +84,7 @@ def test_attempt_records_observed_context_and_enforced_ceiling(tmp_path, monkeyp
     assert row["applied"]["context_ceiling"] == "enforced"
     assert row["applied"]["context_ceiling_tokens"] == 150000
     assert follows(argv_calls(log)[0], "--autocompact", "150000")
-    assert row["digest"].splitlines()[1] == "  Route: claude/claude-sonnet-5@high (anthropic; observed) · ctx 8k/1M"
+    assert row["digest"].splitlines()[1] == "  Route: claude/claude-sonnet-5 (anthropic; observed) · ctx 8k/1M"
 
 
 def test_plan_mode_haiku_ceiling_stays_below_the_requested_window(tmp_path, monkeypatch):

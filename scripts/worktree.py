@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import selectors
+import shutil
 import stat
 import subprocess
 import sys
@@ -49,6 +50,16 @@ SENSITIVE_ENVIRONMENT_KEYS = (
     "NPM_CONFIG_PROXY",
     "NPM_CONFIG_HTTP_PROXY",
     "NPM_CONFIG_HTTPS_PROXY",
+)
+GIT_REDIRECT_ENVIRONMENT_KEYS = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_CEILING_DIRECTORIES",
+    "GIT_DISCOVERY_ACROSS_FILESYSTEM",
 )
 
 
@@ -343,6 +354,86 @@ def common_git_dir(root: Path) -> Path:
     return (root / path).resolve() if not path.is_absolute() else path.resolve()
 
 
+def node_modules_preflight_passes(root: Path) -> bool:
+    preflight = root / "scripts" / "node-workspace-preflight.mjs"
+    if not preflight.is_file():
+        return False
+    environment = os.environ.copy()
+    for key in GIT_REDIRECT_ENVIRONMENT_KEYS:
+        environment.pop(key, None)
+    try:
+        result = subprocess.run(
+            ["node", str(preflight)], cwd=root, env=environment,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, check=False,
+        )
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def cow_clone(source: Path, target: Path) -> None:
+    # cp into an existing directory or link nests the copy inside it, or writes
+    # through the link into another checkout.
+    if target.exists() or target.is_symlink():
+        raise OSError(f"clone target already exists: {target}")
+    if sys.platform == "darwin":
+        command = ["cp", "-cR", str(source), str(target)]
+    elif sys.platform.startswith("linux"):
+        command = ["cp", "-a", "--reflink=always", str(source), str(target)]
+    else:
+        raise OSError(f"copy-on-write clone is unsupported on {sys.platform}")
+    result = subprocess.run(
+        command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, text=True, check=False,
+    )
+    if result.returncode != 0:
+        reason = result.stderr.strip() or f"{command[0]} exited {result.returncode}"
+        raise OSError(reason)
+
+
+def provision_created_node_modules(
+    primary: Path,
+    worktree: Path,
+    *,
+    disabled: bool,
+) -> tuple[str, str | None]:
+    if disabled:
+        return "disabled", "disabled by --no-node-modules"
+    source = primary / "node_modules"
+    if source.is_symlink():
+        return "skipped", "primary node_modules is a symlink"
+    if not source.is_dir():
+        return "skipped", "primary node_modules is missing"
+    if not node_modules_preflight_passes(primary):
+        return "skipped", "primary node_modules fails node-workspace-preflight"
+    primary_lock = primary / "package-lock.json"
+    worktree_lock = worktree / "package-lock.json"
+    if not primary_lock.is_file() or not worktree_lock.is_file():
+        return "skipped", "package-lock.json is missing"
+    if primary_lock.read_bytes() != worktree_lock.read_bytes():
+        return "skipped", "package-lock.json differs from primary"
+
+    cloned: list[Path] = []
+    sources = [source, *sorted((primary / "runtime").glob("*/node_modules"))]
+    try:
+        for source_dir in sources:
+            if source_dir.is_symlink() or not source_dir.is_dir():
+                continue
+            target_dir = worktree / source_dir.relative_to(primary)
+            target_dir.parent.mkdir(parents=True, exist_ok=True)
+            cloned.append(target_dir)
+            cow_clone(source_dir, target_dir)
+    except OSError as exc:
+        for path in reversed(cloned):
+            if path.is_symlink():
+                path.unlink()
+            elif path.is_dir():
+                shutil.rmtree(path)
+        return "skipped", f"copy-on-write clone unavailable: {exc}"
+    return "cloned", None
+
+
 def ignored_path_is_generated(path: str) -> bool:
     normalized = path.rstrip("/")
     return (
@@ -551,6 +642,9 @@ def create(args: argparse.Namespace) -> dict[str, object]:
             raise PolicyError("creating a branch requires separate explicit human authorisation")
         command.extend(["-b", args.new_branch, str(target), args.start_point])
     git(root, *command)
+    node_modules, node_modules_reason = provision_created_node_modules(
+        root, target, disabled=args.no_node_modules,
+    )
     head_revision = git(target, "rev-parse", "HEAD").stdout.strip()
     branch_result = git(target, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
     if branch_result.returncode not in {0, 1}:
@@ -565,6 +659,8 @@ def create(args: argparse.Namespace) -> dict[str, object]:
         "head_revision": head_revision,
         "branch": branch,
         "detached": branch is None,
+        "node_modules": node_modules,
+        "node_modules_reason": node_modules_reason,
     }
 
 
@@ -678,6 +774,7 @@ def parser() -> argparse.ArgumentParser:
     create_parser.add_argument("--repo", type=Path, default=Path.cwd())
     create_parser.add_argument("--human-authorised", action="store_true")
     create_parser.add_argument("--branch-authorised", action="store_true")
+    create_parser.add_argument("--no-node-modules", action="store_true")
     mode = create_parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--detach", metavar="REV")
     mode.add_argument("--existing-branch", metavar="BRANCH")

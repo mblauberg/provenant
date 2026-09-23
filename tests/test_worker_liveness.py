@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -237,14 +238,14 @@ def test_output_baselines_are_bound_to_the_owned_pid(monkeypatch, tmp_path):
 
 
 def test_live_processes_collapses_codex_exec_wrapper_and_child(monkeypatch):
-    ps_output = """\
- 7813     1 32:35 0:00.00 /bin/zsh -lc codex exec --cd /repo/.worktrees/impl-421 task
- 7816  7813 32:35 0:20.16 /opt/homebrew/bin/codex exec --cd /repo/.worktrees/impl-421 task
-"""
     monkeypatch.setattr(
-        worker_liveness.subprocess,
-        "run",
-        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, ps_output, ""),
+        worker_liveness.process_info, "processes",
+        lambda: [
+            SimpleNamespace(pid=7813, ppid=1, elapsed="32:35", cpu="0:00.00",
+                            command="/bin/zsh -lc codex exec --cd /repo/.worktrees/impl-421 task"),
+            SimpleNamespace(pid=7816, ppid=7813, elapsed="32:35", cpu="0:20.16",
+                            command="/opt/homebrew/bin/codex exec --cd /repo/.worktrees/impl-421 task"),
+        ],
     )
 
     processes = list(worker_liveness.live_processes())
@@ -252,6 +253,13 @@ def test_live_processes_collapses_codex_exec_wrapper_and_child(monkeypatch):
     assert len(processes) == 1
     assert processes[0].pid == 7816
     assert processes[0].cpu == "0:20.16"
+
+
+def test_live_processes_rejects_unavailable_census(monkeypatch):
+    monkeypatch.setattr(worker_liveness.process_info, "processes",
+                        lambda: (_ for _ in ()).throw(OSError("seatbelt")))
+    with pytest.raises(RuntimeError, match="cannot inspect processes"):
+        list(worker_liveness.live_processes())
 
 
 def test_collect_uses_codex_cd_target_instead_of_launch_cwd(monkeypatch, tmp_path):

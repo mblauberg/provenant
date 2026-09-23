@@ -15,8 +15,10 @@
  * pretend otherwise.
  */
 import { runRoot, withoutGitRedirects } from "./identity.js";
+import { canonicalSuccessStatus, isSuccessStatus } from "./success-status.js";
 export { runRoot } from "./identity.js";
-import { execFileSync, execFile } from "node:child_process";
+import { execFile } from "node:child_process";
+import { psOutput } from "./ps.mjs";
 import {
   existsSync,
   renameSync,
@@ -92,14 +94,10 @@ export interface TerminationOutcome {
 function readProcessStartedAt(pid: number, canonical: boolean): string | null {
   if (!Number.isInteger(pid) || pid <= 1) return null;
   try {
-    const output = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(pid)], {
-      encoding: "utf8",
-      timeout: 5_000,
-      stdio: ["ignore", "pipe", "ignore"],
-      env: canonical ? { ...process.env, LC_ALL: "C", LANG: "C" } : process.env,
-    });
+    const output = psOutput(["-o", "lstart=", "-p", String(pid)],
+      canonical ? { ...process.env, LC_ALL: "C", LANG: "C" } : process.env);
     const value = output.trim();
-    return value.length === 0 ? null : value;
+    return /\d{4}$/u.test(value) ? value : null; // the shim prints ? for an unreadable pid: unknown, not a time
   } catch {
     return null;
   }
@@ -436,7 +434,7 @@ export function pruneDispatchRuns(workspace: string, env: NodeJS.ProcessEnv): st
       const receipt = readJson(join(runDir, "RUN_RECEIPT.json"));
       if (receipt?.status === "active") continue;
       if (receipt?.status === "input_required" || receipt?.resumable === true) continue;
-      const successful = ["ok", "succeeded", "cancelled"].includes(String(receipt?.status));
+      const successful = isSuccessStatus(receipt?.status) || receipt?.status === "cancelled";
       const failed = [
         "failed",
         "partial",
@@ -633,7 +631,7 @@ async function legacyStatus(
         const terminal =
           attempts.length > 0 &&
           attempts.every((attempt) =>
-            ["succeeded", "failed", "blocked", "timed_out", "cancelled"].includes(String(attempt.status)),
+            ["ok", "failed", "blocked", "timed_out", "cancelled"].includes(String(canonicalSuccessStatus(attempt.status))),
           ) &&
           (batchId === undefined ||
             (Array.isArray(status?.task_ids) &&
@@ -650,6 +648,7 @@ async function legacyStatus(
         }
         if (alive) state = "running";
         if (selectedTask !== undefined) state = String(selectedTask.status);
+        state = String(canonicalSuccessStatus(state));
         // Owner logs are siblings created by the front door, never arbitrary receipt paths.
         outputPaths.push(`${runDir}-owner.stdout.jsonl`, `${runDir}-owner.stderr.log`);
         const newest = Math.max(started, newestMtimeMs(outputPaths));
@@ -698,11 +697,9 @@ async function legacyStatus(
     await new Promise((done) => setTimeout(done, Math.min(250, deadline - Date.now())));
   }
 }
-
 export interface StatusResult extends Record<string, unknown> {
   runs?: Record<string, any>[];
 }
-
 async function ledger(worktree: unknown): Promise<Record<string, unknown>> {
   const empty = { worktree: worktree ?? null, branch_tip: null, dirty: null, ahead: null };
   if (typeof worktree !== "string") return empty;
@@ -726,7 +723,6 @@ async function ledger(worktree: unknown): Promise<Record<string, unknown>> {
     return empty;
   }
 }
-
 function v1Rows(runDir: string): Record<string, any>[] {
   const grouped = new Map<string, Record<string, any>[]>();
   for (const tree of ["tasks", "dispatch/tasks"]) {
@@ -803,7 +799,7 @@ function v1Rows(runDir: string): Record<string, any>[] {
         run_dir: runDir,
         task_id: row.task_id,
         attempt: metadata!.next_attempt,
-        attempts,
+        attempts: attempts.map((attempt) => ({ ...attempt, status: canonicalSuccessStatus(attempt.status) })),
         attempt_count: attempts.length,
         state: interrupted ? "terminal" : "queued",
         status,
@@ -815,14 +811,14 @@ function v1Rows(runDir: string): Record<string, any>[] {
     }
     return {
       ...effective,
+      status: canonicalSuccessStatus(effective.status),
       ...(notes.length ? { notes } : {}),
       schema: "fabric.status.v1",
       id: row.run_id,
       run_dir: runDir,
-      attempts,
+      attempts: attempts.map((attempt) => ({ ...attempt, status: canonicalSuccessStatus(attempt.status) })),
       attempt_count: attempts.length,
       ...(metadata?.batch_id ? { batch_id: metadata.batch_id } : {}),
-
       result_path: typeof row.paths?.result === "string" ? resolve(runDir, row.paths.result) : null,
     };
   });
@@ -845,13 +841,15 @@ function v1Rows(runDir: string): Record<string, any>[] {
         attempts: [],
         attempt_count: 0,
         state: terminal ? "terminal" : "queued",
-        status: terminal ? (terminalTask?.status ?? "interrupted") : null,
+        status: terminal ? canonicalSuccessStatus(terminalTask?.status ?? "interrupted") : null,
         started_at: metadata.started_at,
         paths: {},
-        digest: `${terminal ? (terminalTask?.status ?? "interrupted") : "queued"} ${id}`,
+        digest: `${terminal ? canonicalSuccessStatus(terminalTask?.status ?? "interrupted") : "queued"} ${id}`,
       });
     }
-  return rows;
+  const order = Array.isArray(metadata?.task_ids) ? metadata.task_ids.map(String) : []; // manifest order, else task-2 before task-10
+  const rank = (row: Record<string, any>) => { const at = order.indexOf(String(row.task_id)); return at < 0 ? order.length : at; };
+  return rows.sort((a, b) => rank(a) - rank(b) || String(a.task_id).localeCompare(String(b.task_id), "en", { numeric: true }));
 }
 
 /** v1 is authoritative; the old reader remains isolated for wave-1 receipts. */
@@ -896,8 +894,8 @@ export async function statusRows(
         const exact = v1.filter((row) => [row.run_id, row.run_dir, basename(row.run_dir)].includes(id));
         const matches = exact.length ? exact : v1.filter((row) => [row.batch_id, row.task_id, row.id].includes(id));
         if (matches.length) {
-          matches.sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at));
-          rows.push(...matches.filter((row) => row.run_dir === matches[0]!.run_dir));
+          const newest = matches.reduce((best, row) => (Date.parse(row.started_at) > Date.parse(best.started_at) ? row : best)); // tasks keep batch order
+          rows.push(...matches.filter((row) => row.run_dir === newest.run_dir));
         } else {
           const legacy = await legacyStatus(workspace, id);
           if (legacy.error) return legacy;

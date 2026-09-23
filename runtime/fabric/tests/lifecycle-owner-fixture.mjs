@@ -2,7 +2,8 @@
 // A dispatch owner that behaves like the real one where run lifecycle is
 // concerned: it spawns a provider child in its own process group, records both
 // pids in the run directory, and stays alive until something signals it.
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
+import { psOutput } from "../src/ps.mjs";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, join, relative } from "node:path";
 
@@ -76,10 +77,8 @@ const startProvider = ({ ignoreTerm = false, detached = false } = {}) => {
   writeFileSync(join(runDir, "provider.pid"), `${provider.pid}\n`);
   let providerStartedAt;
   try {
-    providerStartedAt = execFileSync("/bin/ps", ["-o", "lstart=", "-p", String(provider.pid)], {
-      encoding: "utf8",
-      env: { ...process.env, LC_ALL: "C", LANG: "C" },
-    }).trim();
+    providerStartedAt = psOutput(["-o", "lstart=", "-p", String(provider.pid)],
+      { ...process.env, LC_ALL: "C", LANG: "C" }).trim();
   } catch (error) {
     provider.kill("SIGKILL");
     throw error;
@@ -160,7 +159,7 @@ if (owner === "dispatch_run.py") {
     const record = {
       schema_version: 1,
       record_type: "dispatch-attempt",
-      status: "succeeded",
+      status: "ok",
       outcome: "ok",
       task_id: taskId,
       attempt_id: "attempt-001",
@@ -193,7 +192,7 @@ if (owner === "dispatch_run.py") {
     const record = {
       schema_version: 1,
       record_type: "dispatch-attempt",
-      status: "succeeded",
+      status: "ok",
       outcome: "ok",
       task_id: taskId,
       attempt_id: "attempt-001",
@@ -226,8 +225,8 @@ if (owner === "dispatch_run.py") {
     const summary = join(runDir, "summary.json");
     writeFileSync(summary, "{}");
     process.stdout.write(JSON.stringify({ schema_version: 1, record_type: "dispatch-batch", status: "completed",
-      batch_id: "batch-001", task_count: 1, concurrency: 1, counts: { succeeded: 1 }, summary_path: "summary.json",
-      tasks: [{ task_id: taskId, status: "succeeded", outcome: "ok", attempt_path: relative(runDir, join(dir, "attempt.json")),
+      batch_id: "batch-001", task_count: 1, concurrency: 1, counts: { ok: 1 }, summary_path: "summary.json",
+      tasks: [{ task_id: taskId, status: "ok", outcome: "ok", attempt_path: relative(runDir, join(dir, "attempt.json")),
         result_path: relative(runDir, join(dir, "result.md")), route: { adapter: "codex", provider_family: "openai", resolved_model: "luna", execution_intent: "ordinary" } }] }) + "\n");
     process.exit(0);
   } else {
