@@ -877,17 +877,76 @@ time.sleep(30)
     assert (tmp_path / 'flushed').read_text() == 'saved'
 
 
-def test_writer_progress_includes_files_after_ten_thousand(tmp_path):
+def test_writer_progress_probe_is_bounded_and_reaches_late_files(tmp_path):
     mod = supervisor()
     directory = tmp_path / 'source'
     directory.mkdir()
-    for number in range(10001):
+    for number in range(60000):
         (directory / str(number)).touch()
-    before = mod._workspace_stamp(tmp_path)
-    # Modify the last entry in the same traversal order used by the watchdog.
+    scanner = mod.WorkspaceProgress(tmp_path)
+    while not scanner.initial_pass_complete:
+        scanner.probe()
+        assert scanner.last_visited <= 2000
     last = list(os.walk(directory))[0][2][-1]
     (directory / last).write_text('changed')
-    assert mod._workspace_stamp(tmp_path) != before
+    for _ in range(300):
+        changed = scanner.probe()
+        assert scanner.last_visited <= 2000
+        if changed:
+            break
+    assert changed
+
+
+def test_writer_progress_sees_preserved_mtime_copy_during_initial_scan(tmp_path):
+    mod = supervisor()
+    directory = tmp_path / 'source'
+    directory.mkdir()
+    scanner = mod.WorkspaceProgress(tmp_path)
+    copied = directory / 'copied.txt'
+    copied.write_text('new file')
+    os.utime(copied, (1, 1))
+    assert scanner.probe()
+
+
+def test_writer_progress_sees_preserved_mtime_copy_at_root(tmp_path):
+    mod = supervisor()
+    scanner = mod.WorkspaceProgress(tmp_path)
+    copied = tmp_path / 'copied.txt'
+    copied.write_text('new file')
+    os.utime(copied, (1, 1))
+    assert scanner.probe()
+
+
+def test_writer_progress_tracks_deletion_without_counting_excluded_paths(tmp_path):
+    mod = supervisor()
+    directory = tmp_path / 'source'
+    directory.mkdir()
+    source = directory / 'source.txt'
+    source.write_text('content')
+    ignored = tmp_path / '.git'
+    ignored.mkdir()
+    metadata = ignored / 'metadata'
+    metadata.write_text('before')
+    output = tmp_path / 'events.jsonl'
+    output.write_text('before')
+    scanner = mod.WorkspaceProgress(tmp_path, {output})
+    assert not scanner.probe()
+    output.write_text('after')
+    metadata.write_text('after')
+    assert not scanner.probe()
+    source.unlink()
+    assert scanner.probe()
+    (directory / 'added.txt').write_text('new')
+    assert scanner.probe()
+
+
+def test_writer_progress_ignores_new_excluded_and_ignored_paths(tmp_path):
+    mod = supervisor()
+    output = tmp_path / 'events.jsonl'
+    scanner = mod.WorkspaceProgress(tmp_path, {output})
+    output.write_text('event')
+    (tmp_path / 'node_modules').mkdir()
+    assert not scanner.probe()
 
 
 def test_stream_rollover_preserves_unclassified_structured_failure(tmp_path, monkeypatch):

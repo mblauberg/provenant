@@ -673,35 +673,81 @@ def _stop_group(process, grace=2.0):
         pass
 
 
-def _workspace_stamp(cwd, excluded=()):
-    modified, size, count = 0, 0, 0
-    for root, dirs, files in os.walk(cwd):
-        dirs[:] = [
-            d
-            for d in dirs
-            if d
-            not in {
-                ".git",
-                ".agent-run",
-                ".worktrees",
-                "node_modules",
-                ".venv",
-                "__pycache__",
-            }
-            and not Path(root, d).is_symlink()
-        ]
-        for name in files:
-            path = Path(root, name)
-            if path in excluded:
-                continue
+class WorkspaceProgress:
+    """Rotate a bounded filesystem scan across writer watchdog samples."""
+
+    IGNORED = {".git", ".agent-run", ".worktrees", "node_modules", ".venv", "__pycache__"}
+
+    def __init__(self, cwd, excluded=()):
+        self.cwd = Path(cwd)
+        self.excluded = set(excluded)
+        self.started_wall_ns = time.time_ns()
+        self.known = {}
+        self.initial_pass_complete = False
+        self.completed_pass_started_at = None
+        self.last_visited = 0
+        self._stack = []
+        self._seen = set()
+        self._pass_started_at = None
+
+    def _start_pass(self):
+        self._seen = set()
+        self._pass_started_at = time.monotonic()
+        try:
+            self._stack = [os.scandir(self.cwd)]
+        except OSError:
+            self._stack = []
+
+    def probe(self):
+        deadline = time.monotonic() + 0.025
+        self.last_visited = 0
+        if not self._stack:
+            self._start_pass()
+        changed = False
+        while self._stack and self.last_visited < 2000 and time.monotonic() < deadline:
             try:
-                metadata = path.lstat()
-                modified += metadata.st_mtime_ns
-                size += metadata.st_size
+                entry = next(self._stack[-1])
+            except StopIteration:
+                self._stack.pop().close()
+                continue
+            except OSError:
+                self._stack.pop().close()
+                continue
+            self.last_visited += 1
+            path = Path(entry.path)
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    if entry.name not in self.IGNORED:
+                        self._stack.append(os.scandir(entry.path))
+                    continue
+                if path in self.excluded:
+                    continue
+                metadata = entry.stat(follow_symlinks=False)
             except OSError:
                 continue
-            count += 1
-    return modified, size, count
+            signature = (metadata.st_mtime_ns, metadata.st_size)
+            previous = self.known.get(path)
+            if previous is not None and previous != signature:
+                changed = True
+            elif previous is None and (self.initial_pass_complete or metadata.st_mtime_ns > self.started_wall_ns
+                                       or metadata.st_ctime_ns > self.started_wall_ns):
+                changed = True
+            self.known[path] = signature
+            self._seen.add(path)
+        if not self._stack:
+            if self.initial_pass_complete:
+                missing = self.known.keys() - self._seen
+                if missing:
+                    changed = True
+                    for path in missing:
+                        del self.known[path]
+            self.initial_pass_complete = True
+            self.completed_pass_started_at = self._pass_started_at
+        return changed
+
+    def close(self):
+        while self._stack:
+            self._stack.pop().close()
 
 
 def _cpu_stamp(pgid):
@@ -820,6 +866,7 @@ def execute(
         if key.startswith(
             ("GIT_", "PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")
         ) or key in {
+            "PROVENANT_FABRIC_PHASES",
             "AGENT_FABRIC_STATE_DIRECTORY",
             "AGENT_FABRIC_SEAT",
             "AGENT_FABRIC_CLIENT_LABEL",
@@ -948,6 +995,7 @@ def execute(
         for sig in old_handlers:
             signal.signal(sig, handle_signal)
     input_file = None
+    workspace = None
     selector = selectors.DefaultSelector()
     try:
         if plan["stdin_policy"] == "prompt":
@@ -998,8 +1046,8 @@ def execute(
             excluded = {
                 path.resolve() for path in (output_path, events_path, stderr_path)
             }
-            stamp = (
-                _workspace_stamp(plan["cwd"], excluded)
+            workspace = (
+                WorkspaceProgress(plan["cwd"], excluded)
                 if plan["mode"] == "worktree_write"
                 else None
             )
@@ -1040,21 +1088,21 @@ def execute(
                     break
                 if current >= next_sample:
                     next_sample = current + 1
-                    new_stamp = (
-                        _workspace_stamp(plan["cwd"], excluded)
-                        if plan["mode"] == "worktree_write"
-                        else None
-                    )
+                    changed = workspace.probe() if workspace is not None else False
                     new_cpu = _cpu_stamp(process.pid)
-                    if new_stamp != stamp or (cpu and new_cpu and new_cpu != cpu):
+                    if changed or (cpu and new_cpu and new_cpu != cpu):
                         last_progress = current
                         last_progress_at = now()
                         warned = False
                         if on_progress:
                             on_progress(last_progress_at)
-                    stamp, cpu = new_stamp, new_cpu
+                    cpu = new_cpu
                 idle = current - last_progress
-                if idle >= plan["idle_seconds"]:
+                scan_covered_idle = workspace is None or (
+                    workspace.completed_pass_started_at is not None
+                    and workspace.completed_pass_started_at >= last_progress
+                )
+                if idle >= plan["idle_seconds"] and scan_covered_idle:
                     forced = "stalled"
                     break
                 if idle >= plan["idle_seconds"] / 2 and not warned:
@@ -1077,6 +1125,8 @@ def execute(
         forced = "failed"
         diagnostics.write(str(exc).encode())
     finally:
+        if workspace is not None:
+            workspace.close()
         if process:
             _stop_group(process)
             # Drain final bytes after the group exits, without an unbounded communicate.
