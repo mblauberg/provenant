@@ -748,7 +748,7 @@ def _process_snapshot():
     try:
         return _process_snapshot_unchecked()
     except Exception:
-        return {}
+        return None
 
 
 def _process_snapshot_unchecked():
@@ -946,6 +946,9 @@ class _Descendants:
             targeted = rows is not None
         if rows is None:
             rows = _process_snapshot()
+        if rows is None:
+            self.snapshot_unavailable = True
+            return {}
         if ((targeted and self.process.poll() is None and self.process.pid not in rows)
                 or (not targeted and os.getpid() not in rows)):
             self.snapshot_unavailable = True
@@ -1034,9 +1037,12 @@ class _Descendants:
         try:
             rows = _process_snapshot()
         except Exception:
-            rows = {}
+            rows = None
+        if rows is None:
             self.snapshot_unavailable = True
-        self._refresh_spared(rows)  # A fork observed before exec may now be a recorded owner.
+            rows = {}
+        else:
+            self._refresh_spared(rows)  # A fork observed before exec may now be a recorded owner.
         live = self.live(rows)
         live = {
             identity: row for identity, row in live.items()

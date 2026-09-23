@@ -370,6 +370,28 @@ def test_snapshot_exception_still_kills_provider_and_records_attempt(tmp_path, m
                 pass
 
 
+def test_internal_census_failure_warns_and_kills_provider(tmp_path, monkeypatch):
+    module = supervisor()
+    pid_path = tmp_path / "provider.pid"
+    code = f"import os,pathlib,time; pathlib.Path({str(pid_path)!r}).write_text(str(os.getpid())); time.sleep(60)"
+    monkeypatch.setattr(module, "_process_snapshot_unchecked",
+                        lambda: (_ for _ in ()).throw(RuntimeError("census failed")))
+    try:
+        record = module.execute(
+            fixture_plan(tmp_path, code, timeout_seconds=8), tmp_path / "result.md",
+            cancelled=lambda: pid_path.exists(),
+        )
+        assert record["status"] == "cancelled"
+        assert any("census unavailable" in warning for warning in record["warnings"])
+        assert not _live_process(int(pid_path.read_text()))
+    finally:
+        if pid_path.exists():
+            try:
+                os.killpg(int(pid_path.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
 def test_linux_snapshot_replaces_non_utf8_process_names(tmp_path, monkeypatch):
     module = supervisor()
     process_dir = tmp_path / "123"
@@ -711,6 +733,50 @@ def test_verified_owner_stays_spared_through_transient_validation_loss(tmp_path,
     assert owner.identity in tracker.spared_at_stop
     assert ("group", owner_pid) not in signals
     assert ("pid", owner_pid) not in signals
+
+
+def test_unavailable_census_preserves_verified_owner_and_root_kill(tmp_path, monkeypatch):
+    module = supervisor()
+    root_pid = os.getpid() + 100000
+    owner = module._ProcessRow(root_pid + 1, root_pid, root_pid + 1,
+                               str(int(time.time())), "nested owner")
+    root = module._ProcessRow(root_pid, os.getpid(), root_pid,
+                              str(int(time.time())), "provider")
+    rows = {os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(),
+                                             str(int(time.time())), "test"),
+            root_pid: root, owner.pid: owner}
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, owner, "inner-token")
+    signals = []
+    available = [True]
+    process = type("Process", (), {"pid": root_pid,
+                                   "poll": lambda self: None if available[0] else 0,
+                                   "wait": lambda self, timeout: None})()
+
+    def census():
+        if available[0]:
+            return rows
+        raise RuntimeError("census failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_linux_tree_snapshot", lambda *_args, **_kwargs: None)
+        patch.setattr(module, "_process_snapshot_unchecked", census)
+        patch.setattr(module, "_process_environment", lambda pid: [
+            b"PROVENANT_RUN_TOKEN=inner-token",
+            ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+        ] if pid == owner.pid else ())
+        patch.setattr(module.os, "killpg", lambda pgid, _signal: signals.append(pgid))
+        patch.setattr(module.os, "kill", lambda *_args: None)
+        tracker = module._Descendants(process, "fixture")
+        tracker.sample()
+        assert owner.identity in tracker.spared
+        available[0] = False
+        assert module._process_snapshot() is None
+        tracker.stop(root_grace=0.02, descendant_grace=0.01)
+    assert tracker.snapshot_unavailable
+    assert owner.identity in tracker.spared_at_stop
+    assert owner.pgid not in signals
+    assert root_pid in signals
 
 
 def test_verified_owner_identity_does_not_spare_reused_pid(tmp_path, monkeypatch):
