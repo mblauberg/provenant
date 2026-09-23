@@ -40,6 +40,10 @@ class RegistrationError(ValueError):
     pass
 
 
+class RegistrationManualEditError(RegistrationError):
+    pass
+
+
 class RegistrationConflictError(RegistrationError):
     pass
 
@@ -262,7 +266,7 @@ def opencode_update(
     if has_comments:
         instructions = json.dumps(value.get("instructions", []), separators=(",", ":"))
         fabric = json.dumps(entry, separators=(",", ":"))
-        raise RegistrationError(
+        raise RegistrationManualEditError(
             "OpenCode JSONC comments must be preserved; add by hand "
             f"instructions={instructions} and mcp.fabric={fabric} in {path}"
         )
@@ -809,6 +813,9 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     return 4
             return 0
+    except RegistrationManualEditError as exc:
+        print(f"warning: {exc}", file=sys.stderr)
+        return 3
     except (OSError, RegistrationError) as exc:
         print(f"conflicting: {exc}", file=sys.stderr)
         return 3

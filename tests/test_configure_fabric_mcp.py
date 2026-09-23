@@ -524,6 +524,7 @@ def test_opencode_commented_jsonc_fails_closed_without_rewriting(tmp_path: Path)
     result = run_configure(tmp_path, "--platform", "opencode")
 
     assert result.returncode == 3
+    assert "warning: OpenCode JSONC comments must be preserved" in result.stderr
     assert "mcp.fabric" in result.stderr
     assert config.read_text() == original
 
