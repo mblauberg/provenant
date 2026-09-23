@@ -104,9 +104,15 @@ def render_digest(row):
         result = str(Path(row["run_dir"]) / result)
     detail = " · result " + result if result else ""
     if status not in {"ok", "partial"}:
+        excerpt = row.get("evidence", {}).get("excerpt") or ""
+        excerpt_line = next(
+            (" ".join(line.split())[:120] for line in excerpt.splitlines() if line.strip()),
+            "",
+        ) if isinstance(excerpt, str) else ""
         detail = " · " + (
             row.get("fix")
             or row.get("evidence", {}).get("signature")
+            or excerpt_line
             or "inspect stderr"
         )
         if row.get("reset_at"):

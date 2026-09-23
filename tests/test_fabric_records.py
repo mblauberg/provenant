@@ -141,6 +141,26 @@ def test_digest_surfaces_warnings_once_without_blocking():
     assert text.endswith("\n  ! ultra unknown; ran at medium")
 
 
+def test_digest_uses_first_meaningful_excerpt_line_when_fix_and_signature_are_empty():
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status="failed", fix=None)
+    row["evidence"].update(
+        signature=None,
+        excerpt="\n  error: invalid model selection\nsecond line is not the digest",
+    )
+    text = records().render_digest(row)
+    assert "· error: invalid model selection" in text
+    assert "second line is not the digest" not in text
+
+
+def test_digest_bounds_excerpt_fallback_to_one_line():
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status="failed", fix=None)
+    row["evidence"].update(signature=None, excerpt="x" * 140 + "\nsecond line")
+    detail = records().render_digest(row).split(" · ", 1)[1].split("\n", 1)[0]
+    assert detail == "x" * 120
+
+
 def test_agy_quota_cools_only_the_exhausted_model(tmp_path):
     """Antigravity meters each hosted model pool separately (2026-09-23: Claude
     Sonnet 4.6 hit "Individual quota reached" while Gemini answered in the same
