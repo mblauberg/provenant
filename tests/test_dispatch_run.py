@@ -2594,3 +2594,11 @@ def test_incomplete_writer_without_claude_session_returns_typed_fix(tmp_path):
     response = json.loads(result.stdout)
     assert response['status'] == 'rejected'
     assert 'review worktree' in response['message'].lower()
+
+
+def test_planner_stopped_by_signal_is_interrupted_not_rejected():
+    mod = load_dispatch_module()
+    stopped = subprocess.CompletedProcess([], -15, stdout="", stderr="Terminated: 15")
+    assert mod.planner_result(stopped)["status"] == "interrupted"
+    broken = subprocess.CompletedProcess([], 0, stdout="not json", stderr="")
+    assert mod.planner_result(broken) == {"status": "rejected", "fix": "route planner returned invalid JSON"}

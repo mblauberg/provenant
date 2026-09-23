@@ -794,6 +794,16 @@ def parse_fast_route_json(raw: str) -> dict:
     return route
 
 
+def planner_result(planning):
+    """The route plan, or a typed failure; a planner stopped by a signal was interrupted."""
+    try:
+        return json.loads(planning.stdout)
+    except ValueError:
+        if planning.returncode < 0:
+            return {"status": "interrupted", "fix": f"route planning stopped by signal {-planning.returncode}; retry"}
+        return {"status": "rejected", "fix": "route planner returned invalid JSON"}
+
+
 def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path):
     """Plan a simple explicit route in the owner process using the same router and supervisor."""
     if (not args.model or args.tool not in {"claude", "codex"}
@@ -1571,8 +1581,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             if fast_plan is None:
                 planning = subprocess.run([*command,"--plan-only"],cwd=workspace,env=plan_environment,capture_output=True,text=True,timeout=30)
             args._phase_timings["route_plan"] = round((time.monotonic() - plan_started) * 1000, 3)
-            try: plan = fast_plan if fast_plan is not None else json.loads(planning.stdout)
-            except ValueError: plan = {"status":"rejected","fix":"route planner returned invalid JSON"}
+            plan = fast_plan if fast_plan is not None else planner_result(planning)
             if plan.get("schema") == "fabric.exec-plan.v1":
                 plan.update(timeout_seconds=args.timeout_seconds,run_id=run_identity(run_dir,run_receipt),chair=os.environ.get("PROVENANT_CHAIR") or os.environ.get("AGENT_FABRIC_SEAT", ""),fallback_from=getattr(args,"fallback_from",None))
                 if hasattr(args,"resume_relaunch"):
