@@ -72,11 +72,15 @@ def clone_dependencies(primary: Path, worktree: Path) -> bool:
             target = worktree / source.relative_to(primary)
             if target.exists():
                 # Aside under .agent-run (ignored, generated), so an interrupted run leaves no residue.
+                # A linked .agent-run would carry the tree out of the worktree: remove it instead.
                 parking = worktree / ".agent-run"
-                parking.mkdir(exist_ok=True)
-                aside = parking / f"{'-'.join(target.relative_to(worktree).parts)}.stale-{os.getpid()}"
-                target.rename(aside)
-                stale.append((target, aside))
+                if parking.is_symlink():
+                    shutil.rmtree(target)
+                else:
+                    parking.mkdir(exist_ok=True)
+                    aside = parking / f"{'-'.join(target.relative_to(worktree).parts)}.stale-{os.getpid()}"
+                    target.rename(aside)
+                    stale.append((target, aside))
             target.parent.mkdir(parents=True, exist_ok=True)
             cloned.append(target)
             cow_clone(source, target)

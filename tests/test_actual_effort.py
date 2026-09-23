@@ -265,3 +265,13 @@ def test_a_suffix_model_carries_the_effort_it_records_with_an_alias(extra, model
     route = resolve("--adapter", "cursor", "--model", "grok-4.7", "--role", "worker", *extra)
     assert route["resolved_model"] == model
     assert route["effort_applied"] == effort
+
+
+@pytest.mark.parametrize(("model", "extra", "resolved", "effort"), [
+    ("grok-4.7-high", ("--effort", "medium"), "grok-4.7-medium", "medium"),
+    ("grok-4.7-low", (), "grok-4.7-low", "low"),
+])
+def test_a_suffixed_id_is_never_suffixed_twice(model, extra, resolved, effort):
+    route = resolve("--adapter", "cursor", "--alias", "flagship", "--model", model, "--role", "worker", *extra)
+    assert route["resolved_model"] == resolved
+    assert route["effort_applied"] == effort

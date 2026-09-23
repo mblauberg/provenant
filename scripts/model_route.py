@@ -1023,6 +1023,10 @@ def resolve_effort(
     # an adapter-wide model-id route: its catalogue lists the efforts it takes.
     if (args.effort_transport == "model-id" and registered
             and registered.get("effort_transport") == "model-suffix" and requested_effort):
+        carried = next((level for level, suffix in registered.get("suffix", {}).items()
+                        if model.casefold() == (registered["id"] + suffix).casefold()), None)
+        if carried and not args.effort:
+            requested_effort = carried  # the id names its effort; only an explicit effort overrides it
         offered = [value.lower() for value in registered.get("efforts", []) if value.lower() in EFFORT_ORDER]
         if requested_effort in offered:
             return requested_effort, "", "", "registry-model-suffix"
@@ -1604,8 +1608,8 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     # The effort reaches a suffix model only through its id, so the id must carry it.
     suffix_model = args.effort_transport == "model-id" and (registered_model or {}).get("effort_transport") == "model-suffix"
     suffix = (registered_model.get("suffix", {}) if suffix_model else {}).get(effort or "", "")
-    if not effort_status and suffix and not model.endswith(suffix):
-        model += suffix
+    if not effort_status and suffix:
+        model = registered_model["id"] + suffix  # replaces any suffix the request carried
     # A Claude snapshot cannot evidence the effective effort, but its existence
     # does evidence that the CLI accepted the requested value: the canary fails
     # closed on the unknown-effort warning. Paired with runtime-verified model

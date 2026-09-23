@@ -181,3 +181,18 @@ def test_a_hook_git_dir_does_not_make_a_worktree_look_like_the_primary(tmp_path)
 
     assert result.returncode == 0, result.stderr
     assert (worktree / "node_modules" / "fake-dep" / "package.json").is_file()
+
+
+def test_a_linked_agent_run_never_carries_a_stale_tree_out_of_the_worktree(tmp_path):
+    primary, worktree = linked_project(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (worktree / ".agent-run").symlink_to(elsewhere)
+    stale = worktree / "node_modules" / "old-dep"
+    stale.mkdir(parents=True)
+
+    result = run_provision(worktree, tmp_path, "raise SystemExit(99)\n")
+
+    assert result.returncode == 0, result.stderr
+    assert (worktree / "node_modules" / "fake-dep" / "package.json").is_file()
+    assert list(elsewhere.iterdir()) == []
