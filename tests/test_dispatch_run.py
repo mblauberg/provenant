@@ -123,6 +123,35 @@ def test_terminal_attempt_carries_nested_owner_spared_count(tmp_path: Path) -> N
     assert row["spared"] == 2
 
 
+def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
+    module = load_dispatch_module()
+    run_dir = make_run(tmp_path, "resume-root")
+    attempt_dir = run_dir / "tasks/task-1/attempt-001"
+    attempt_dir.mkdir(parents=True)
+    workspace = tmp_path / "recorded-workspace"
+    workspace.mkdir()
+    previous = {
+        "run_id": "resume-me", "task_id": "task-1", "attempt": 1, "state": "terminal",
+        "status": "ok", "mode": "read_only", "cwd": str(workspace / "src"), "worktree": None,
+        "workspace": {"root": str(workspace)}, "session_id": "saved-session",
+        "provenance": {"requested": {"adapter": "codex"}, "resolved_model": "fixture", "effort_applied": ""},
+        "applied": {"sandbox": "read-only", "network": None, "add_dirs": []},
+        "paths": {"events": None}, "requested_route": {},
+    }
+    (attempt_dir / "attempt.json").write_text(json.dumps(previous), encoding="utf-8")
+    args = SimpleNamespace(
+        run_dir=run_dir, resume="resume-me", task_id=None, tool=None, model=None, effort=None,
+        access_mode=None, worktree=None, provider_cwd=None, sandbox=None, network=None,
+        add_dirs=[], resume_session=None, fallback=None, context_ceiling=None,
+        intent="ordinary", orchestrator_family="", role="worker", risk_tier="",
+        model_override_tier="", reviewer_id="", preface=True,
+    )
+
+    module.prepare_resume(args)
+
+    assert args.workspace_root == workspace
+
+
 def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path, "one")
     receipt_before = (run_dir / "RUN_RECEIPT.json").read_bytes()
@@ -2654,6 +2683,7 @@ print(json.dumps({"type":"result","result":os.getcwd()}))
     second = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
     assert second['status'] == 'ok'
     assert second['cwd'] == str(nested)
+    assert second['workspace']['root'] == row['workspace']['root']
     assert second['requested_route']['preface'] is False
     assert second['requested_route']['intent'] == row['requested_route']['intent']
     assert 'resumed_by_relaunch' in second['provenance']['notes']

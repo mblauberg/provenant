@@ -45,6 +45,7 @@ CONFINED_STATE = {
     },
 }
 EXTRA_DENIED_READS = (".claude/projects", ".codex/sessions")
+_DARWIN_USER_DIRS_CACHE = None
 
 
 def now():
@@ -121,23 +122,33 @@ def _sbpl_string(path):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-@functools.lru_cache(maxsize=None)
 def _darwin_user_dirs():
+    global _DARWIN_USER_DIRS_CACHE
+    if _DARWIN_USER_DIRS_CACHE is not None:
+        return _DARWIN_USER_DIRS_CACHE
     found = []
     for name in ("DARWIN_USER_TEMP_DIR", "DARWIN_USER_CACHE_DIR"):
         try:
-            value = subprocess.run(["getconf", name], capture_output=True, text=True, timeout=5).stdout.strip()
+            result = subprocess.run(["/usr/bin/getconf", name], capture_output=True, text=True, timeout=5)
         except (OSError, subprocess.SubprocessError):
             continue
+        if result.returncode != 0:
+            continue
+        value = result.stdout.strip()
         if value:
             found.append(Path(value))
+    if found:
+        _DARWIN_USER_DIRS_CACHE = tuple(found)
     return tuple(found)
 
 
 def _sbpl_filter(path):
     text = str(path)
     if text.endswith("*"):
-        return '(regex #"^' + re.escape(str(Path(text[:-1]).resolve())).replace('"', '\\"') + '")'
+        pattern = text[:-1]
+        regex_metacharacters = set(r'.^$*+?()[]{}|\\"')
+        pattern = "".join("\\" + char if char in regex_metacharacters else char for char in pattern)
+        return '(regex #"^' + pattern + '[^/]*$")'
     return "(subpath " + _sbpl_string(path) + ")"
 
 
@@ -153,16 +164,17 @@ def os_confinement_profile(plan):
     root = Path(plan.get("workspace_root") or plan["cwd"]).expanduser().resolve()
     home = Path.home().resolve()
     state = CONFINED_STATE.get(plan.get("adapter"), {})
+    add_dirs = [Path(path) for path in plan.get("applied", {}).get("add_dirs", [])]
     return (
         "(version 1)\n(allow default)\n"
         + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
         + _sbpl_rule("deny", "file-write*", [home, Path("/private/tmp"), Path("/private/var/folders")])
         + _sbpl_rule("allow", "file-read-data file-write*", list(_darwin_user_dirs()))
+        + _sbpl_rule("deny", "file-read-data file-write*", [root, *add_dirs, *(home / path for path in EXTRA_DENIED_READS)])
         + _sbpl_rule("allow", "file-read-data file-write*", [home / path for path in state.get("read_write", ())])
         + _sbpl_rule("allow", "file-read-data", [home / path for path in state.get("read", ())])
-        + _sbpl_rule("deny", "file-read-data file-write*", [root, *(home / path for path in EXTRA_DENIED_READS)])
         + _sbpl_rule("allow", "file-read-data", [
-            Path(plan["cwd"]), *(Path(path) for path in plan.get("applied", {}).get("add_dirs", []))
+            Path(plan["cwd"]), *add_dirs
         ])
     )
 
@@ -205,8 +217,10 @@ def build_plan(
     selected_cwd = Path(worktree or cwd or Path.cwd()).expanduser().resolve()
     if not selected_cwd.is_dir():
         raise ValueError("cwd must be a readable directory")
-    cwd = str(selected_cwd)
     workspace_root = str(Path(workspace_root or Path.cwd()).expanduser().resolve())
+    if not selected_cwd.is_relative_to(Path(workspace_root)):
+        raise ValueError("cwd must be inside the workspace")
+    cwd = str(selected_cwd)
     sandbox = sandbox or (
         "workspace-write" if mode == "worktree_write" else "read-only"
     )
@@ -2095,17 +2109,17 @@ def main():
     args = parser().parse_args()
     writer_lease = None
     try:
-        if args.cwd and not args.cwd.expanduser().resolve().is_relative_to(
-            Path.cwd().resolve()
-        ):
-            raise ValueError("cwd must be inside the current workspace")
+        workspace_root = Path(args.workspace_root or Path.cwd()).expanduser().resolve()
+        selected_cwd = Path(args.worktree or args.cwd or Path.cwd()).expanduser().resolve()
+        if not selected_cwd.is_relative_to(workspace_root):
+            raise ValueError("cwd must be inside the workspace")
         plan = build_plan(
             args.adapter,
             json.loads(args.route_file.read_text()),
             args.prompt_file.read_text(),
             mode=args.mode,
             cwd=args.cwd,
-            workspace_root=args.workspace_root,
+            workspace_root=workspace_root,
             worktree=args.worktree,
             sandbox=args.sandbox,
             network=None if args.network is None else args.network == "true",

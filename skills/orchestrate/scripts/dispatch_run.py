@@ -1360,6 +1360,7 @@ def prepare_resume(args):
     args.effort=None if previous["provenance"].get("effort_observed_source") else previous["provenance"]["effort_applied"];args.task_id=previous["task_id"]
     args.access_mode=previous["mode"];args.worktree=Path(previous["worktree"]) if previous.get("worktree") else None
     args.provider_cwd=Path(previous["cwd"]) if previous["mode"]=="read_only" else None
+    args.workspace_root=Path((previous.get("workspace") or {}).get("root") or Path.cwd()).expanduser().resolve()
     args.sandbox=previous["applied"]["sandbox"];args.network=None if previous["applied"]["network"] is None else str(previous["applied"]["network"]).lower()
     args.add_dirs=previous["applied"]["add_dirs"];args.resume_session=previous["session_id"]
     args.fallback="false"
@@ -1425,7 +1426,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     )
     args._phase_timings.update(measured)
     run_dir = args.run_dir.resolve()
-    workspace = Path.cwd().resolve()
+    workspace = Path(getattr(args, "workspace_root", None) or Path.cwd()).expanduser().resolve()
     provider_cwd = Path(args.provider_cwd).expanduser().resolve() if args.provider_cwd else workspace
     workspace_observation = workspace_identity(workspace, provider_cwd)
     if not contains_run(run_dir, workspace):
