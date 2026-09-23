@@ -683,6 +683,10 @@ def test_route_failure_is_typed_and_provider_is_not_invoked(tmp_path: Path) -> N
     assert record["route"]["status"] == "unknown_alias"
     assert not invoked.exists()
     assert record["process"]["observed_exit"] is True
+    contract = json.loads((run_dir / "tasks/route-failure/attempt-001/attempt.json").read_text())
+    assert contract["status"] == "rejected"
+    assert contract["evidence"]["signature"] == "unknown_alias"
+    assert "unknown_alias" in contract["fix"] and "inspect stderr" not in contract["digest"]
 
 
 def test_nonzero_provider_exit_is_recorded_without_substitution(tmp_path: Path) -> None:
@@ -2606,10 +2610,30 @@ def test_planner_stopped_by_signal_is_interrupted_not_rejected():
 
 def test_planner_capability_statuses_become_typed_failures_with_fixes():
     mod = load_dispatch_module()
-    unknown = subprocess.CompletedProcess([], 0, stdout=json.dumps({"status": "capability_model_unavailable"}), stderr="")
-    row = mod.planner_result(unknown, "codex")
+    row = mod.router_failure("capability_model_unavailable", "codex")
     assert row["status"] == "model_unavailable"
     assert row["fix"].startswith("choose a registered model:") and "gpt-6-luna" in row["fix"]
     assert row["evidence"]["signature"] == "capability_model_unavailable"
-    discovery = subprocess.CompletedProcess([], 0, stdout=json.dumps({"status": "capability_discovery_failed"}), stderr="")
-    assert mod.planner_result(discovery, "codex")["status"] == "failed"
+    assert mod.router_failure("capability_discovery_failed", "codex")["status"] == "failed"
+
+
+@pytest.mark.parametrize("status,expected", [
+    ("no_candidate_available", "model_unavailable"),
+    ("alias_unavailable", "model_unavailable"),
+    ("capability_snapshot_stale", "failed"),
+    ("probe_cache_busy", "failed"),
+    ("effort_unsupported", "rejected"),
+    ("same_family_forbidden", "rejected"),
+    ("some_future_router_status", "rejected"),
+])
+def test_every_router_status_reaches_the_caller_typed_with_a_fix(status, expected):
+    mod = load_dispatch_module()
+    row = mod.router_failure(status, "codex")
+    assert row["status"] == expected
+    assert row["fix"] and row["evidence"]["signature"] == status
+
+
+def test_planner_crash_signal_is_not_an_interruption():
+    mod = load_dispatch_module()
+    crashed = mod.planner_result(subprocess.CompletedProcess([], -11, stdout="", stderr=""))
+    assert crashed["status"] == "failed" and "signal 11" in crashed["fix"]

@@ -794,24 +794,35 @@ def parse_fast_route_json(raw: str) -> dict:
     return route
 
 
-def planner_result(planning, adapter=""):
-    """The route plan, or a typed failure; a planner stopped by a signal was interrupted."""
+PLANNER_MODEL_STATUSES = {"capability_model_unavailable", "no_candidate_available", "alias_unavailable",
+                          "adapter_default_model_invalid", "model_required_for_broker"}
+PLANNER_TRANSIENT_STATUSES = {"capability_discovery_failed", "capability_snapshot_untrusted",
+                              "capability_snapshot_stale", "probe_unavailable", "probe_cache_busy"}
+
+
+def planner_result(planning):
+    """The route plan, or a typed failure when the planner produced none."""
     try:
-        plan = json.loads(planning.stdout)
+        return json.loads(planning.stdout)
     except ValueError:
-        if planning.returncode < 0:
+        if planning.returncode in (-signal.SIGTERM, -signal.SIGINT, -signal.SIGHUP):
             return {"status": "interrupted", "fix": f"route planning stopped by signal {-planning.returncode}; retry"}
+        if planning.returncode < 0:
+            return {"status": "failed", "fix": f"route planner crashed (signal {-planning.returncode}); inspect stderr"}
         return {"status": "rejected", "fix": "route planner returned invalid JSON"}
-    # The runtime capability check speaks the router's vocabulary; answer in Fabric's.
-    signature = plan.get("status") if isinstance(plan, dict) and plan.get("schema") != "fabric.exec-plan.v1" else None
-    if signature == "capability_model_unavailable":
+
+
+def router_failure(signature, adapter=""):
+    """Fabric's status and fix for a router refusal; the router's own status stays the signature."""
+    if signature in PLANNER_MODEL_STATUSES:
+        status = "model_unavailable"
         fix = provider_exec._model_unavailable_fix({"adapter": adapter, "route": {"identity_source": "passed-through"}})
-        return {**plan, "status": "model_unavailable", "fix": plan.get("fix") or fix,
-                "evidence": {"exit": None, "signal": None, "signature": signature, "excerpt": ""}}
-    if signature == "capability_discovery_failed":
-        return {**plan, "status": "failed", "fix": plan.get("fix") or "provider model discovery failed; check the provider CLI login and retry",
-                "evidence": {"exit": None, "signal": None, "signature": signature, "excerpt": ""}}
-    return plan
+    elif signature in PLANNER_TRANSIENT_STATUSES:
+        status, fix = "failed", f"provider capability check failed ({signature}); check the provider CLI login and retry"
+    else:
+        status, fix = "rejected", f"route planner refused the route ({signature}); change the requested route"
+    return {"status": status, "error": signature, "fix": fix,
+            "evidence": {"exit": None, "signal": None, "signature": signature, "excerpt": ""}}
 
 
 def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path):
@@ -1285,9 +1296,13 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     elif legacy["status"] in {"cancelled","timed_out"}: status=legacy["status"]
     elif legacy["status"]=="blocked": status="input_required"
     elif legacy["status"]=="succeeded": status="ok"
+    refusal=router_failure(str(status),args.tool) if status not in TERMINAL_STATUSES and adapter.get("schema")!="fabric.exec-plan.v1" and status else None
+    if refusal: status=refusal["status"]
     if status not in TERMINAL_STATUSES: status="failed"
     for field in ("session_id","retryable","reset_at","retry_after","fix","evidence","applied","context","warnings","reaped","spared","provenance","pgid","last_progress_at"):
         if field in adapter: row[field]=adapter[field]
+    if refusal:
+        row["fix"]=adapter.get("fix") or adapter.get("reason") or refusal["fix"];row["evidence"]=refusal["evidence"];row["error"]=refusal["error"]
     row.update(state="terminal",status=status,ended_at=legacy["finished_at"],question=adapter.get("question") or (legacy.get("question") or {}).get("prompt"))
     if not legacy.get("result"): row["paths"]["result"]=None
     row["legacy_attempt_path"]=legacy["attempt_path"]
@@ -1591,7 +1606,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             if fast_plan is None:
                 planning = subprocess.run([*command,"--plan-only"],cwd=workspace,env=plan_environment,capture_output=True,text=True,timeout=30)
             args._phase_timings["route_plan"] = round((time.monotonic() - plan_started) * 1000, 3)
-            plan = fast_plan if fast_plan is not None else planner_result(planning, args.tool)
+            plan = fast_plan if fast_plan is not None else planner_result(planning)
             if plan.get("schema") == "fabric.exec-plan.v1":
                 plan.update(timeout_seconds=args.timeout_seconds,run_id=run_identity(run_dir,run_receipt),chair=os.environ.get("PROVENANT_CHAIR") or os.environ.get("AGENT_FABRIC_SEAT", ""),fallback_from=getattr(args,"fallback_from",None))
                 if hasattr(args,"resume_relaunch"):
