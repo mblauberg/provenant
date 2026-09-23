@@ -70,6 +70,8 @@ def supervisor():
         ("rate limit exceeded; HTTP 429", "rate_limited"),
         ("Login expired; not logged in", "auth_required"),
         ("model not found", "model_unavailable"),
+        ('error: invalid model selection (--model "gemini-3.8-pro" --effort "high"): --effort is not supported for model "gemini-3.8-pro"', "model_unavailable"),
+        ("invalid model selection; quota exceeded", "usage_limited"),
         ("permission denied", "permission_blocked"),
     ],
 )
@@ -91,6 +93,15 @@ def test_provider_golden(fixture):
         )
         for key, value in case["expected"].items():
             assert result[key] == value
+
+
+def test_unregistered_model_failure_fix_names_adapter_models(tmp_path):
+    plan = fixture_plan(tmp_path, 'import sys; print("model not found", file=sys.stderr); sys.exit(1)', "agy")
+    plan["requested_model"] = "gemini-3.8-pro"
+    plan["route"]["identity_source"] = "passed-through"
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "model_unavailable"
+    assert record["fix"] == "choose a registered model: gemini-3.8-flash"
 
 
 def test_structured_result_and_question_take_precedence_over_prose():
@@ -1152,6 +1163,8 @@ def test_claude_plan_isolates_settings_and_mcp(tmp_path, monkeypatch, api_key):
     plan = supervisor().build_plan('claude', {'resolved_model': 'opus'}, 'hello', cwd=tmp_path)
     assert ('--bare' if api_key else '--safe-mode') in plan['argv']
     assert '--strict-mcp-config' in plan['argv']
+    assert plan['argv'][plan['argv'].index('--permission-mode') + 1] == 'default'
+    assert plan['argv'][plan['argv'].index('--tools') + 1] == 'Read,Grep,Glob'
     assert 'fixture-key' not in ' '.join(plan['argv'])
 
 @pytest.mark.parametrize('adapter', ['claude', 'codex', 'opencode'])
