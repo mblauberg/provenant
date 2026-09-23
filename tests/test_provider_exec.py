@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -1297,14 +1298,58 @@ def test_writer_progress_probe_is_bounded_and_reaches_late_files(tmp_path):
     while not scanner.initial_pass_complete:
         scanner.probe()
         assert scanner.last_visited <= 2000
+    first_pass = scanner.completed_pass_started_at
     last = list(os.walk(directory))[0][2][-1]
     (directory / last).write_text('changed')
-    for _ in range(300):
+    # A slow host may need many probes; one full later pass is the real bound.
+    for _ in range(60001):
         changed = scanner.probe()
         assert scanner.last_visited <= 2000
-        if changed:
+        if changed or scanner.completed_pass_started_at != first_pass:
             break
     assert changed
+
+
+def test_writer_progress_uses_string_keys_for_large_tree_memory(tmp_path):
+    mod = supervisor()
+    (tmp_path / 'source.txt').touch()
+    scanner = mod.WorkspaceProgress(tmp_path)
+    scanner.probe()
+    assert scanner.known and all(type(key) is str for key in scanner.known)
+    assert scanner._seen and all(type(key) is str for key in scanner._seen)
+
+
+def test_writer_progress_advances_when_probe_budget_expires_immediately(tmp_path, monkeypatch):
+    mod = supervisor()
+    for number in range(10):
+        (tmp_path / str(number)).touch()
+    ticks = iter(number * 0.1 for number in range(10000))
+    monkeypatch.setattr(mod, 'time', SimpleNamespace(time_ns=time.time_ns,
+                                                     monotonic=lambda: next(ticks)))
+    scanner = mod.WorkspaceProgress(tmp_path)
+    for _ in range(10):
+        scanner.probe()
+        if scanner.initial_pass_complete:
+            break
+    assert scanner.initial_pass_complete
+
+
+def test_writer_progress_tolerates_coarse_creation_clock(tmp_path, monkeypatch):
+    mod = supervisor()
+    monkeypatch.setattr(mod, 'time', SimpleNamespace(time_ns=lambda: time.time_ns() + 10_000_000,
+                                                     monotonic=time.monotonic))
+    scanner = mod.WorkspaceProgress(tmp_path)
+    copied = tmp_path / 'copied.txt'
+    copied.write_text('new file')
+    os.utime(copied, (1, 1))
+    assert scanner.probe()
+
+
+def test_writer_stall_waits_for_full_idle_interval_scan(tmp_path):
+    plan = fixture_plan(tmp_path, 'import time; time.sleep(30)',
+                        mode='worktree_write', idle_seconds=1.2, timeout_seconds=1.6)
+    record = supervisor().execute(plan, tmp_path / 'result.md')
+    assert record['status'] == 'timed_out'
 
 
 def test_writer_progress_sees_preserved_mtime_copy_during_initial_scan(tmp_path):

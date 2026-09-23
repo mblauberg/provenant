@@ -1060,8 +1060,8 @@ class WorkspaceProgress:
 
     def __init__(self, cwd, excluded=()):
         self.cwd = Path(cwd)
-        self.excluded = set(excluded)
-        self.started_wall_ns = time.time_ns()
+        self.excluded = {os.fspath(path) for path in excluded}
+        self.started_wall_ns = time.time_ns() - 20_000_000
         self.known = {}
         self.initial_pass_complete = False
         self.completed_pass_started_at = None
@@ -1084,7 +1084,8 @@ class WorkspaceProgress:
         if not self._stack:
             self._start_pass()
         changed = False
-        while self._stack and self.last_visited < 2000 and time.monotonic() < deadline:
+        while (self._stack and self.last_visited < 2000
+               and (self.last_visited < 32 or time.monotonic() < deadline)):
             try:
                 entry = next(self._stack[-1])
             except StopIteration:
@@ -1094,7 +1095,7 @@ class WorkspaceProgress:
                 self._stack.pop().close()
                 continue
             self.last_visited += 1
-            path = Path(entry.path)
+            path = entry.path
             try:
                 if entry.is_dir(follow_symlinks=False):
                     if entry.name not in self.IGNORED:
@@ -1109,8 +1110,10 @@ class WorkspaceProgress:
             previous = self.known.get(path)
             if previous is not None and previous != signature:
                 changed = True
-            elif previous is None and (self.initial_pass_complete or metadata.st_mtime_ns > self.started_wall_ns
-                                       or metadata.st_ctime_ns > self.started_wall_ns):
+            elif previous is None and (self.initial_pass_complete
+                                       or metadata.st_mtime_ns > self.started_wall_ns + 20_000_000
+                                       or (metadata.st_mtime_ns < self.started_wall_ns
+                                           and metadata.st_ctime_ns > self.started_wall_ns)):
                 changed = True
             self.known[path] = signature
             self._seen.add(path)
@@ -1493,11 +1496,10 @@ def execute(
                             on_progress(last_progress_at)
                     cpu = new_cpu
                 idle = current - last_progress
-                scan_covered_idle = workspace is None or (
-                    workspace.completed_pass_started_at is not None
-                    and workspace.completed_pass_started_at >= last_progress
+                covered_idle = idle if workspace is None else max(
+                    0, (workspace.completed_pass_started_at or last_progress) - last_progress
                 )
-                if idle >= plan["idle_seconds"] and scan_covered_idle:
+                if covered_idle >= plan["idle_seconds"]:
                     forced = "stalled"
                     break
                 if idle >= plan["idle_seconds"] / 2 and not warned:

@@ -750,18 +750,60 @@ def build_command(
     return command
 
 
+FAST_PLAN_SHELL_ENV_READS = {
+    "CF_DISPATCH_IDLE_SECONDS", "CF_DISPATCH_AGY_ADD_DIR", "CF_DISPATCH_ENABLE_KIRO",
+    "CF_DISPATCH_ENABLE_COPILOT", "CF_DISPATCH_CURSOR_MODEL", "CF_DISPATCH_KIRO_MODEL",
+    "CF_DISPATCH_COPILOT_MODEL", "CF_DISPATCH_OPENCODE_MODEL", "CF_DISPATCH_ENDPOINT",
+    "CF_DISPATCH_CODEX_NETWORK", "CF_DISPATCH_AGY_SANDBOX",
+}
+FAST_PLAN_ROUTE_REQUIRED = (
+    "resolved_model", "model_family", "endpoint_provider", "identity_source",
+)
+FAST_PLAN_ROUTE_FIELDS = (
+    "status", "resolved_model", "model_family", "endpoint_provider",
+    "identity_source", "requested_effort", "effort", "effort_source",
+    "effort_capability_source", "effort_substitution", "substitution",
+    "fallback_model", "catalog_model", "model_selection",
+    "model_override_tier", "policy_override", "alias", "reason",
+    "endpoint_profile", "endpoint_base_url", "endpoint_token_env", "endpoint_wire_api",
+)
+
+
+def parse_fast_route_json(raw: str) -> dict:
+    """Apply the shell planner's parse_route_json field contract before fast planning."""
+    def reject_duplicate_members(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"duplicate route member: {key}")
+            value[key] = item
+        return value
+
+    route = json.loads(raw, object_pairs_hook=reject_duplicate_members)
+    if not isinstance(route, dict):
+        raise ValueError("route must be a JSON object")
+    if route.get("status") == "ok":
+        for key in FAST_PLAN_ROUTE_REQUIRED:
+            value = route.get(key)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"successful route requires non-empty {key}")
+    for key in FAST_PLAN_ROUTE_FIELDS:
+        value = route.get(key, "")
+        if value is not None and (not isinstance(value, str) or "\0" in value):
+            raise ValueError(f"route field {key} must be a NUL-free string")
+    return route
+
+
 def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path):
     """Plan a simple explicit route in the owner process using the same router and supervisor."""
-    idle = os.environ.get("CF_DISPATCH_IDLE_SECONDS", "")
     if (not args.model or args.tool not in {"claude", "codex"}
-            or (idle and (not re.fullmatch(r"[0-9]+", idle) or int(idle) == 0))
+            or any(str(value).startswith("-") for value in (args.model, args.effort, args.role) if value)
+            or any(value for key, value in os.environ.items() if key.startswith("CF_DISPATCH_"))
             or args.access_mode != "read_only"
-            or args.task_class or args.alias or args.resume or args.worktree
+            or args.task_class or args.alias or args.resume or getattr(args, "resume_session", None) or args.worktree
             or args.provider_cwd or args.sandbox or args.network is not None or args.add_dirs
             or args.git_evidence or args.model_override_tier or args.orchestrator_family
-            or args.intent != "ordinary" or args.fallback not in (None, False, "false")
-            or os.environ.get("CF_DISPATCH_ENDPOINT")
-            or os.environ.get("CF_DISPATCH_CODEX_NETWORK", "1") not in {"0", "1"}):
+            or args.intent != "ordinary" or args.fallback not in (None, False, "false")):
         return None
     executable = {"cursor": "cursor-agent", "kiro": "kiro-cli"}.get(args.tool, args.tool)
     if not shutil.which(executable):
@@ -772,8 +814,8 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
     if not path.is_file():
         return None
     try:
-        prompt_bytes = prompt_path.read_bytes()
-        if not prompt_bytes or b"\0" in prompt_bytes:
+        prompt = prompt_path.read_text(encoding="utf-8")
+        if not prompt or "\0" in prompt:
             return None
         context_spec = importlib.util.spec_from_file_location("fabric_fast_worktree", product / "scripts/worktree.py")
         context_module = importlib.util.module_from_spec(context_spec)
@@ -793,7 +835,7 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
             with redirect_stdout(io.StringIO()) as output:
                 spec.loader.exec_module(module)
                 argv = ["resolve", "--adapter", args.tool, "--role", args.role,
-                        "--lead-family", "", "--alias", "flagship", "--model", args.model]
+                        "--lead-family", "", "--alias", "flagship", f"--model={args.model}"]
                 if args.effort:
                     argv += ["--effort", args.effort]
                 if args.fallback is not None:
@@ -807,11 +849,11 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
                     os.environ[key] = value
         if code != 0:
             return None
-        route = json.loads(output.getvalue())
+        route = parse_fast_route_json(output.getvalue())
         if route.get("status") != "ok":
             return None
         plan = provider_exec.build_plan(
-            args.tool, route, prompt_bytes.decode("utf-8"),
+            args.tool, route, prompt,
             cwd=workspace, mode=args.access_mode, timeout_seconds=provider_timeout_seconds(args.timeout_seconds),
             intent=args.intent, preface=args.preface, requested_model=args.model,
             requested_effort=args.effort or "", run_id=os.environ.get("PROVENANT_RUN_ID", ""),
@@ -821,7 +863,7 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
         )
         plan["output_path"] = str(result_path.absolute())
         return plan
-    except (OSError, ValueError, TypeError, AttributeError, KeyError):
+    except (Exception, SystemExit):
         return None
 
 
@@ -1321,7 +1363,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     args._last_row=None
     owner_started_ms = None
     try:
-        incoming = json.loads(os.environ.get("PROVENANT_FABRIC_PHASES", "{}"))
+        incoming = ({} if getattr(args, "retry_of", None) or getattr(args, "fallback_from", None)
+                    else json.loads(os.environ.get("PROVENANT_FABRIC_PHASES", "{}")))
         owner_started_ms = incoming.get("owner_started_at_ms")
         measured = {key: round(float(value), 3) for key, value in incoming.items()
                     if key in {"validate", "run_dir_init", "snapshot"}
@@ -1937,6 +1980,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     for action in (lambda: write_cooldown(row),lambda: append_index(row,run_dir,root=run_workspace(run_dir, Path.cwd())/".agent-run")):
         try: action()
         except (OSError,ValueError) as exc: row["warnings"].append("terminal index unavailable: "+str(exc))
+    publish_contract(run_dir,row)
+    # Include the first durable terminal publication; rewrite only its timing.
     row["timing"]["phases"]["finalize"] = round((time.monotonic() - finalize_started) * 1000, 3)
     publish_contract(run_dir,row)
     args._last_row=row
