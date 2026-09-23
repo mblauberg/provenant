@@ -901,9 +901,6 @@ def test_nested_owner_record_must_match_live_identity(tmp_path, monkeypatch, fie
 
 
 def test_nested_owner_accepts_legacy_inherited_locale_start(tmp_path, monkeypatch):
-    available = subprocess.run(["locale", "-a"], capture_output=True, text=True).stdout
-    if "en_AU.UTF-8" not in available:
-        pytest.skip("en_AU.UTF-8 unavailable")
     module = supervisor()
     row = module._ProcessRow(502, 501, 502, str(int(time.time())), "owner")
     run_dir = tmp_path / "nested-run"
@@ -924,11 +921,34 @@ def test_nested_owner_accepts_legacy_inherited_locale_start(tmp_path, monkeypatc
 
     def locale_ps(argv, **kwargs):
         calls.append((argv, kwargs))
-        return subprocess.CompletedProcess(argv, 0, stdout=legacy)
+        output = record["owner_started_at"] if kwargs.get("env", {}).get("LC_ALL") != "C" else module._recorded_start_time(row)
+        return subprocess.CompletedProcess(argv, 0, stdout=output)
 
     monkeypatch.setattr(module.subprocess, "run", locale_ps)
     assert module._is_nested_fabric_owner(row)
-    assert calls and calls[0][1].get("env", {}).get("LC_ALL") != "C"
+    assert [call[1].get("env", {}).get("LC_ALL") for call in calls] == ["C", "en_AU.UTF-8"]
+
+
+def test_nested_owner_accepts_canonical_ps_when_computed_start_differs(tmp_path, monkeypatch):
+    module = supervisor()
+    row = module._ProcessRow(502, 501, 502, str(int(time.time())), "owner")
+    run_dir = tmp_path / "nested-run"
+    _write_fake_owner_record(module, run_dir, row, "inner-token")
+    canonical = json.loads((run_dir / "dispatch-owner.json").read_text())["owner_started_at"]
+    monkeypatch.setattr(module, "_recorded_start_time", lambda _row: "rounded differently")
+    monkeypatch.setattr(module, "_process_environment", lambda _pid: [
+        b"PROVENANT_RUN_TOKEN=inner-token",
+        ("PROVENANT_RUN_DIR=" + str(run_dir)).encode(),
+    ])
+    calls = []
+
+    def canonical_ps(argv, **kwargs):
+        calls.append(kwargs.get("env", {}).get("LC_ALL"))
+        return subprocess.CompletedProcess(argv, 0, stdout=canonical if calls[-1] == "C" else "other locale")
+
+    monkeypatch.setattr(module.subprocess, "run", canonical_ps)
+    assert module._is_nested_fabric_owner(row)
+    assert calls == ["C"]
 
 
 @pytest.mark.parametrize("stop", ["normal", "cancelled"])

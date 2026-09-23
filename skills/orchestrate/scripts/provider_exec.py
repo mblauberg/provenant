@@ -857,11 +857,12 @@ def _recorded_start_time(row):
     return time.strftime("%a %b %e %H:%M:%S %Y", time.localtime(epoch))
 
 
-def _inherited_ps_start_time(pid):
+def _ps_start_time(pid, *, canonical):
     try:
         result = subprocess.run(
             ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
             capture_output=True, text=True, timeout=2, check=False,
+            env={**os.environ, **({"LC_ALL": "C", "LANG": "C"} if canonical else {})},
         )
         return result.stdout.strip() if result.returncode == 0 else None
     except (OSError, subprocess.SubprocessError):
@@ -898,7 +899,8 @@ def _is_nested_fabric_owner(row):
             and isinstance(started_at, str) and bool(started_at)
             and (
                 started_at == _recorded_start_time(row)
-                or started_at == _inherited_ps_start_time(row.pid)
+                or started_at == _ps_start_time(row.pid, canonical=True)
+                or started_at == _ps_start_time(row.pid, canonical=False)
             )
         )
     except Exception:
