@@ -57,11 +57,14 @@ function digestBase(row: Record<string, any>): string {
 }
 export function digest(row: Record<string, any>): string {
   const base = digestBase(row);
-  // Python's digest may already carry its warnings as one "  ! a; b" line; add only the rest.
-  const shown = new Set(base.split("\n").filter((line) => line.startsWith("  ! ")).flatMap((line) => line.slice(4).split("; ")));
-  const warnings = Array.isArray(row.warnings)
-    ? row.warnings.map(String).filter((item) => !shown.has(item.replace(/^!\s*/u, ""))).join("\n")
-    : "";
+  // Python renders its warnings as one "  ! " + "; ".join(unique)[:200] line; skip the ones
+  // fewest that render to that line; a warning truncated out of it is shown again, never dropped.
+  const all = Array.isArray(row.warnings) ? [...new Set(row.warnings.filter(Boolean).map(String))] : [];
+  const line = base.split("\n").find((text) => text.startsWith("  ! "))?.slice(4);
+  let covered = 0;
+  for (let count = 1; line !== undefined && count <= all.length && covered === 0; count++)
+    if (all.slice(0, count).join("; ").slice(0, 200) === line) covered = count;
+  const warnings = all.slice(covered).join("\n");
   return warnings ? `${base}${base ? "\n" : ""}${warnings}` : base;
 }
 /** Keep the default structured reply as small as its text digest. */

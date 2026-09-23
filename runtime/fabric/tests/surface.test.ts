@@ -80,6 +80,11 @@ it("does not repeat warnings the execution digest already carries", async () => 
   expect(digest(row)).toBe("ok mcp-dup claude/opus 3s\n  ! resuming a ~620k-token session\n! wait_seconds 56 clamped to 55");
   const nested = { status: "ok", run_id: "mcp-sub", digest: "ok mcp-sub\n  ! context note: session near ceiling", warnings: ["context note: session near ceiling", "session near ceiling"] };
   expect(digest(nested)).toBe("ok mcp-sub\n  ! context note: session near ceiling\nsession near ceiling");
+  // A warning that itself contains "; ", truncated with its neighbour at 200 characters.
+  const note = "gemini-3.8-pro is not in the agy registry (registered: gemini-3.8-flash, claude-opus-4-6-thinking, claude-sonnet-4-6; closest: gemini-3.8-flash); passed through as given";
+  const truncated = { status: "model_unavailable", run_id: "mcp-agy", digest: `model_unavailable mcp-agy\n  ! ${[note, "agy read_only guarantee=prompt_only"].join("; ").slice(0, 200)}`,
+    warnings: [note, "agy read_only guarantee=prompt_only", "! wait_seconds 56 clamped to 55"] };
+  expect(digest(truncated).split("\n")).toEqual([truncated.digest.split("\n")[0], truncated.digest.split("\n")[1], "! wait_seconds 56 clamped to 55"]);
 });
 
 it("leaves per-task context to the digest in brief rows", async () => {
