@@ -204,7 +204,9 @@ def write_cooldown(row, *, path=None, at=None):
     adapter = prov["requested"]["adapter"]
     model = registered_model(adapter, prov["resolved_model"] or "*", warnings=row.setdefault("warnings", []))
     excerpt = row.get("evidence", {}).get("excerpt", "")
-    if row["status"] == "usage_limited" and re.search(
+    # Antigravity meters each hosted model pool separately; its quota message
+    # names one pool, so it never cools the whole adapter.
+    if adapter != "agy" and row["status"] == "usage_limited" and re.search(
         r"(?:usage|session|weekly|account|plan) limit|individual quota reached|insufficient_quota", excerpt, re.I
     ):
         model = "*"

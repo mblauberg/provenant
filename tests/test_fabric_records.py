@@ -139,3 +139,23 @@ def test_digest_surfaces_warnings_once_without_blocking():
     text = records().render_digest(row)
     assert text.startswith("ok ")
     assert text.endswith("\n  ! ultra unknown; ran at medium")
+
+
+def test_agy_quota_cools_only_the_exhausted_model(tmp_path):
+    """Antigravity meters each hosted model pool separately (2026-09-23: Claude
+    Sonnet 4.6 hit "Individual quota reached" while Gemini answered in the same
+    batch), so its quota message must not cool the whole adapter."""
+    path = tmp_path / "cooldowns.json"
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status="usage_limited", reset_at="2026-09-25T00:22:25Z", retry_after=None)
+    row["provenance"]["requested"]["adapter"] = "agy"
+    row["provenance"]["resolved_model"] = "claude-sonnet-4-6"
+    row["evidence"] = {"signature": "usage_limited", "excerpt": "provider error: Individual quota reached. Resets in 41h56m11s."}
+    at = datetime(2026, 9, 23, tzinfo=UTC)
+    records().write_cooldown(row, path=path, at=at)
+    assert set(json.loads(path.read_text())["cooldowns"]) == {"agy/claude-sonnet-4-6"}
+    row["provenance"]["requested"]["adapter"] = "claude"
+    row["provenance"]["resolved_model"] = "opus"
+    row["evidence"]["excerpt"] = "You've hit your session limit"
+    records().write_cooldown(row, path=path, at=at)
+    assert "claude/*" in json.loads(path.read_text())["cooldowns"]
