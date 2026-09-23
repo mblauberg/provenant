@@ -303,7 +303,8 @@ def process(pid):
             rss = int(fields[21]) * os.sysconf("SC_PAGE_SIZE") // 1024
             try:
                 argv = Path(f"/proc/{pid}/cmdline").read_bytes().strip(b"\0")
-                command = shlex.join(os.fsdecode(arg) for arg in argv.split(b"\0")) or row.command
+                # A kernel thread has an empty cmdline; shlex.join([""]) would be the truthy "''".
+                command = shlex.join(os.fsdecode(arg) for arg in argv.split(b"\0")) if argv else row.command
             except OSError:
                 command = row.command
             stat = fields[0]

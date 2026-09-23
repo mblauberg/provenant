@@ -9,12 +9,20 @@ import shutil
 import subprocess
 import sys
 
-from worktree import cow_clone, node_modules_preflight_passes
+from worktree import GIT_REDIRECT_ENVIRONMENT_KEYS, cow_clone, node_modules_preflight_passes
+
+
+def discovery_environment() -> dict[str, str]:
+    """A hook's GIT_DIR would point discovery at the primary; find this checkout from cwd."""
+    environment = os.environ.copy()
+    for key in GIT_REDIRECT_ENVIRONMENT_KEYS:
+        environment.pop(key, None)
+    return environment
 
 
 def checkout_root() -> Path:
     result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"], check=True,
+        ["git", "rev-parse", "--show-toplevel"], check=True, env=discovery_environment(),
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, text=True,
     )
     return Path(result.stdout.strip()).resolve()
@@ -22,7 +30,7 @@ def checkout_root() -> Path:
 
 def primary_checkout(root: Path) -> Path:
     result = subprocess.run(
-        ["git", "worktree", "list", "--porcelain"], cwd=root, check=True,
+        ["git", "worktree", "list", "--porcelain"], cwd=root, check=True, env=discovery_environment(),
         stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, text=True,
     )
     first = result.stdout.splitlines()[0]
@@ -63,7 +71,10 @@ def clone_dependencies(primary: Path, worktree: Path) -> bool:
                 continue
             target = worktree / source.relative_to(primary)
             if target.exists():
-                aside = target.with_name(f"{target.name}.stale-{os.getpid()}")
+                # Aside under .agent-run (ignored, generated), so an interrupted run leaves no residue.
+                parking = worktree / ".agent-run"
+                parking.mkdir(exist_ok=True)
+                aside = parking / f"{'-'.join(target.relative_to(worktree).parts)}.stale-{os.getpid()}"
                 target.rename(aside)
                 stale.append((target, aside))
             target.parent.mkdir(parents=True, exist_ok=True)

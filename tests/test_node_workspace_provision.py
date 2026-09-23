@@ -47,7 +47,7 @@ def linked_project(tmp_path):
     return primary, worktree
 
 
-def run_provision(worktree, tmp_path, npm_body):
+def run_provision(worktree, tmp_path, npm_body, **extra_environment):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     npm = bin_dir / "npm"
@@ -55,6 +55,7 @@ def run_provision(worktree, tmp_path, npm_body):
     npm.chmod(0o755)
     environment = os.environ.copy()
     environment["PATH"] = str(bin_dir) + os.pathsep + environment["PATH"]
+    environment.update(extra_environment)
     return subprocess.run(
         [sys.executable, str(PROVISION)], cwd=worktree, env=environment,
         text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
@@ -162,6 +163,7 @@ def test_stale_worktree_dependencies_are_replaced_not_nested(tmp_path):
     assert not (worktree / "node_modules" / "node_modules").exists()
     assert not (worktree / "node_modules" / "old-dep").exists()
     assert not list(worktree.glob("node_modules.stale-*"))
+    assert not list(worktree.glob(".agent-run/*.stale-*"))
 
 
 def test_outside_a_git_checkout_provisioning_steps_aside(tmp_path):
@@ -171,3 +173,11 @@ def test_outside_a_git_checkout_provisioning_steps_aside(tmp_path):
 
     assert result.returncode == 0
     assert "skipped" in result.stderr
+
+
+def test_a_hook_git_dir_does_not_make_a_worktree_look_like_the_primary(tmp_path):
+    primary, worktree = linked_project(tmp_path)
+    result = run_provision(worktree, tmp_path, "raise SystemExit(99)\n", GIT_DIR=str(primary / ".git"), GIT_WORK_TREE=str(primary))
+
+    assert result.returncode == 0, result.stderr
+    assert (worktree / "node_modules" / "fake-dep" / "package.json").is_file()
