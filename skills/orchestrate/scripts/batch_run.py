@@ -698,11 +698,11 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
                 row = json.loads(read_bound_bytes(run_dir, attempts[-1].relative_to(run_dir), label="canonical attempt"))
                 if row.get("schema") != "fabric.attempt.v1":
                     break
-                canonical.append(row)
+                canonical.append({**row, "batch_id": batch_id})
         except (OSError, ValueError, OwnedFileError):
             canonical = []
         if len(canonical) == len(tasks):
-            output = {"schema": "fabric.status.v1", "run_id": run_dir.name,
+            output = {"schema": "fabric.status.v1", "run_id": canonical[0]["run_id"],
                       "batch_id": batch_id, "runs": canonical}
     print(json.dumps(output, sort_keys=True))
     return 1 if (status != "completed" or index_error or any(item["status"] != "succeeded" for item in ordered)) else 0

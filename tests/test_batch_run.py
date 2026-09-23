@@ -1188,6 +1188,7 @@ print(json.dumps({'type':'result','result':os.getcwd()}))
     terminal = json.loads(result.stdout.splitlines()[-1])
     assert terminal['schema'] == 'fabric.status.v1'
     assert [row['status'] for row in terminal['runs']] == ['ok', 'ok']
+    assert {row['batch_id'] for row in terminal['runs']} == {'batch-001'}
     assert all(row['provenance']['line'].startswith('Route:') for row in terminal['runs'])
     for task in tasks:
         row = json.loads((run / 'tasks' / task['id'] / 'attempt-001/attempt.json').read_text())
