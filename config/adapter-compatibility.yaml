@@ -182,8 +182,7 @@ adapters:
     official_source_url: "https://docs.github.com/en/copilot/how-tos/use-copilot-cli"
 
   kiro-acp:
-    enabled: false
-    disabled_reason: "Provider execution is dormant until one bounded ordinary Kiro invocation and safety boundary are verified."
+    enabled: true
     delivery_stage: 4
     implementation:
       kind: native-cli
@@ -298,7 +297,8 @@ dispatch_registry:
     dispatch: unsupported
   kiro:
     dispatch: implemented
-    read_only_guarantee: none
+    read_only_guarantee: prompt_only
+    write_modes: [worktree_write]
   opencode:
     dispatch: implemented
     read_only_guarantee: best_effort

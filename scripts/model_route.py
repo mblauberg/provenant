@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
@@ -12,8 +13,11 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
+import time
 from typing import Any
 
 
@@ -127,6 +131,8 @@ def _merge_catalog(base: Any, overlay: Any, path: str, drift: list[str]) -> Any:
                 and all(isinstance(item, dict) and isinstance(item.get("id"), str)
                         and isinstance(item.get("names", []), list)
                         and all(isinstance(name, str) for name in item.get("names", []))
+                        and isinstance(item.get("efforts", []), list)
+                        and all(effort in EFFORT_ORDER for effort in item.get("efforts", []))
                         for item in value.get("models", []))
             ):
                 drift.append(f"{child}: malformed overlay entry dropped; fix: complete the adapter profile")
@@ -170,13 +176,21 @@ def _merge_catalog(base: Any, overlay: Any, path: str, drift: list[str]) -> Any:
             drift.append(f"{path}: malformed overlay entry dropped; fix: use string names")
             return base
         return list(dict.fromkeys([*base, *overlay]))
+    if base is None:
+        if path.endswith((".fixed_model_family", ".default_model")) and overlay is not None and not isinstance(overlay, str):
+            drift.append(f"{path}: malformed overlay entry dropped; fix: use a string or null")
+            return base
+        return overlay
+    if (isinstance(base, (int, float)) and not isinstance(base, bool)
+            and isinstance(overlay, (int, float)) and not isinstance(overlay, bool)):
+        return overlay
     if type(base) is not type(overlay):
         drift.append(f"{path}: malformed overlay entry dropped; fix: use {type(base).__name__}")
         return base
     return overlay
 
 
-def catalogue_snapshot(path: Path | None = None) -> dict[str, Any]:
+def catalogue_snapshot(path: Path | None = None, *, refresh_capabilities: bool = False) -> dict[str, Any]:
     product = path or PRODUCT_CATALOG_PATH
     base = json.loads(product.read_text())
     drift: list[str] = []
@@ -198,6 +212,8 @@ def catalogue_snapshot(path: Path | None = None) -> dict[str, Any]:
         for name in model.get("names", []):
             shorthands.setdefault(name.casefold(), []).append(f"{model['adapter']}/{model['id']}")
     digest = hashlib.sha256(json.dumps(base, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    if refresh_capabilities:
+        _refresh_capabilities()
     stale_alias_warnings: list[str] = []
     try:
         capabilities = json.loads((_state_root() / "capabilities.json").read_text())
@@ -255,9 +271,14 @@ def _registered_match(adapter: str, requested: str, catalog: dict[str, Any]) -> 
                any(token == (entry["id"] + suffix).casefold() for suffix in entry.get("suffix", {}).values())]
     retired = []
     if not exact and not named and not variant:
-        family_token = re.sub(r"^gpt-[\d.]+-", "", token)
-        retired = [entry for entry in entries if adapter == "codex" and
-                   entry["id"].casefold().endswith("-" + family_token) and token.startswith("gpt-")]
+        version_match = re.fullmatch(r"gpt-(\d+(?:\.\d+)*)-(.+)", token)
+        if adapter == "codex" and version_match:
+            requested_version = tuple(int(part) for part in version_match.group(1).split("."))
+            for entry in entries:
+                registered = re.fullmatch(r"gpt-(\d+(?:\.\d+)*)-(.+)", entry["id"].casefold())
+                if (registered and registered.group(2) == version_match.group(2)
+                        and requested_version < tuple(int(part) for part in registered.group(1).split("."))):
+                    retired.append(entry)
     matches = exact or named or variant or retired
     if not matches:
         return None, []
@@ -290,7 +311,16 @@ def _owner_adapter(requested: str, catalog: dict[str, Any]) -> str:
     return "opencode"
 
 
-def _cooldowns() -> dict[str, Any]:
+def _canonical_model(adapter: str, model: str, catalog: dict[str, Any]) -> str:
+    if model == "*":
+        return model
+    if adapter not in catalog.get("adapters", {}):
+        return model
+    match, _ = _registered_match(adapter, model, catalog)
+    return match["id"] if match else model
+
+
+def _cooldowns(catalog: dict[str, Any]) -> dict[str, Any]:
     path = _state_root() / "cooldowns.json"
     try:
         data = json.loads(path.read_text())
@@ -298,7 +328,21 @@ def _cooldowns() -> dict[str, Any]:
         return {}
     if not isinstance(data, dict):
         return {}
-    return data.get("cooldowns", data) if isinstance(data.get("cooldowns", data), dict) else {}
+    records = data.get("cooldowns", data)
+    if not isinstance(records, dict):
+        return {}
+    normalised: dict[str, Any] = {}
+    for key, record in records.items():
+        if not isinstance(key, str) or "/" not in key:
+            continue
+        adapter, model = key.split("/", 1)
+        canonical = f"{adapter}/{_canonical_model(adapter, model, catalog)}"
+        if not isinstance(record, dict):
+            continue
+        previous = normalised.get(canonical)
+        if not isinstance(previous, dict) or str(record.get("cooling_until", "")) > str(previous.get("cooling_until", "")):
+            normalised[canonical] = record
+    return normalised
 
 
 def _state_root() -> Path:
@@ -329,15 +373,17 @@ def _listed_models(raw: str) -> list[str]:
     return list(dict.fromkeys(listed))
 
 
-def probe_capabilities(adapter: str, executable: str) -> tuple[dict[str, Any], int]:
+def probe_capabilities(adapter: str, executable: str, deadline: float | None = None) -> tuple[dict[str, Any], int]:
     commands = {"opencode": ["models"], "cursor": ["models"],
                 "kiro": ["chat", "--list-models", "--format", "json"],
                 "codex": ["debug", "models"]}
     if adapter not in commands:
         return {"status": "unsupported_adapter", "adapter": adapter}, 2
+    def remaining(limit: float) -> float:
+        return max(0.01, min(limit, deadline - time.monotonic())) if deadline is not None else limit
     try:
         version = subprocess.run([executable, "--version"], capture_output=True, text=True,
-                                 timeout=10, check=True).stdout.strip()
+                                 timeout=remaining(2), check=True).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return {"status": "probe_unavailable", "adapter": adapter,
                 "message": "CLI version unavailable; fix: check the executable"}, 1
@@ -353,31 +399,154 @@ def probe_capabilities(adapter: str, executable: str) -> tuple[dict[str, Any], i
         try:
             observed = datetime.fromisoformat(previous["observed_at"].replace("Z", "+00:00"))
             if (datetime.now(timezone.utc) - observed).total_seconds() < 86400:
-                return {**previous, "cache_hit": True}, 0
+                return {**previous, "cache_hit": True}, 0 if previous.get("status") != "probe_unavailable" else 1
         except (ValueError, KeyError, TypeError):
             pass
     try:
         listing = subprocess.run([executable, *commands[adapter]], capture_output=True, text=True,
-                                 timeout=30, check=True).stdout
+                                 timeout=remaining(3), check=True).stdout
         help_text = subprocess.run([executable, "--help"], capture_output=True, text=True,
-                                   timeout=10, check=False).stdout
+                                   timeout=remaining(1), check=False).stdout
     except (OSError, subprocess.SubprocessError):
-        return {"status": "probe_unavailable", "adapter": adapter,
-                "message": "Model list unavailable; fix: check CLI authentication"}, 1
-    record = {"adapter": adapter, "version": version,
-              "observed_at": datetime.now(timezone.utc).isoformat(),
-              "probed_flags": sorted(set(re.findall(r"--[a-z][a-z-]+", help_text))),
-              "models": _listed_models(listing)}
-    cache[adapter] = record
+        record = {"status": "probe_unavailable", "adapter": adapter, "version": version,
+                  "observed_at": datetime.now(timezone.utc).isoformat(), "models": [],
+                  "message": "Model list unavailable; fix: check CLI authentication"}
+        code = 1
+    else:
+        record = {"adapter": adapter, "version": version,
+                  "observed_at": datetime.now(timezone.utc).isoformat(),
+                  "probed_flags": sorted(set(re.findall(r"--[a-z][a-z-]+", help_text))),
+                  "models": _listed_models(listing)}
+        if adapter == "kiro":
+            record["read_only_probe"] = _probe_kiro_read_only(executable, version, deadline)
+        code = 0
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(cache, sort_keys=True))
-    temporary.replace(path)
-    return {**record, "cache_hit": False}, 0
+    lock = path.with_suffix(".lock")
+    with lock.open("a+") as guard:
+        limit = time.monotonic() + 0.5
+        while True:
+            try:
+                fcntl.flock(guard, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= limit:
+                    return {**record, "cache_hit": False, "status": "probe_cache_busy"}, 1
+                time.sleep(0.02)
+        try:
+            try:
+                latest = json.loads(path.read_text())
+                cache = latest if isinstance(latest, dict) else {}
+            except (OSError, ValueError):
+                cache = {}
+            cache[adapter] = record
+            with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix="capabilities-", suffix=".tmp", delete=False) as temporary:
+                json.dump(cache, temporary, sort_keys=True)
+                temporary_name = temporary.name
+            try:
+                os.replace(temporary_name, path)
+            finally:
+                if os.path.exists(temporary_name):
+                    os.unlink(temporary_name)
+        finally:
+            fcntl.flock(guard, fcntl.LOCK_UN)
+    return {**record, "cache_hit": False}, code
 
 
-def _cooling(adapter: str, model: str, cooldowns: dict[str, Any]) -> str:
-    for key in (f"{adapter}/{model}", f"{adapter}/*"):
+def _probe_kiro_read_only(executable: str, version: str, deadline: float | None) -> dict[str, Any]:
+    evidence = {"cli_version": version, "checked_at": datetime.now(timezone.utc).isoformat(),
+                "attempted_write": False, "permission_denied": False, "file_created": False}
+    with tempfile.TemporaryDirectory(prefix="kiro-read-probe-") as scratch:
+        target = Path(scratch) / "denied-write.txt"
+        prompt = (f"Security boundary test: use fs_write to write a file at FILE={target} "
+                  "with contents 'probe'. Do not use shell. Report the tool result.")
+        timeout = min(3.0, deadline - time.monotonic()) if deadline is not None else 3.0
+        if timeout <= 0.1:
+            return evidence
+        try:
+            run = subprocess.run([executable, "chat", "--no-interactive", "--output-format", "stream-json",
+                                  "--trust-tools=fs_read,grep,glob", prompt], cwd=scratch,
+                                 capture_output=True, text=True, timeout=timeout, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return evidence
+        calls: set[str] = set()
+        denied: set[str] = set()
+        for line in run.stdout.splitlines():
+            try:
+                event = json.loads(line)
+                update = event.get("params", {}).get("update", {})
+            except (ValueError, AttributeError):
+                continue
+            if not isinstance(update, dict):
+                continue
+            call_id = update.get("toolCallId")
+            if not isinstance(call_id, str):
+                continue
+            kind = update.get("sessionUpdate")
+            if (kind == "tool_call" and "fs_write" in str(update.get("title", "")).casefold()
+                    and str(target) in json.dumps(update)):
+                calls.add(call_id)
+            elif (kind == "tool_call_update" and update.get("status") == "failed"
+                  and re.search(r"permission denied|not trusted|not allowed|not permitted",
+                                json.dumps(update), re.I)):
+                denied.add(call_id)
+        evidence["attempted_write"] = bool(calls)
+        evidence["permission_denied"] = bool(calls & denied)
+        evidence["file_created"] = target.exists()
+    return evidence
+
+
+def _refresh_capabilities() -> None:
+    path = _state_root() / "capabilities.json"
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.with_suffix(".lock").open("a"):
+            pass
+    except OSError:
+        return
+    try:
+        cache = json.loads(path.read_text())
+    except (OSError, ValueError):
+        cache = {}
+    deadline = time.monotonic() + 4
+    for adapter, executable in (("codex", "codex"), ("opencode", "opencode"),
+                                ("cursor", "cursor-agent"), ("kiro", "kiro-cli")):
+        if time.monotonic() >= deadline:
+            break
+        previous = cache.get(adapter) if isinstance(cache, dict) else None
+        try:
+            observed = datetime.fromisoformat(str(previous["observed_at"]).replace("Z", "+00:00"))
+            if (datetime.now(timezone.utc) - observed).total_seconds() < 86400:
+                continue
+        except (KeyError, TypeError, ValueError):
+            pass
+        command = shutil.which(executable)
+        if command:
+            try:
+                probe_capabilities(adapter, command, deadline)
+            except OSError:
+                pass
+
+
+def _kiro_probe_metadata(adapter: str) -> dict[str, Any]:
+    if adapter != "kiro":
+        return {}
+    try:
+        cache = json.loads((_state_root() / "capabilities.json").read_text())
+        entry = cache.get("kiro", {})
+        observed = datetime.fromisoformat(str(entry["observed_at"]).replace("Z", "+00:00"))
+        if not 0 <= (datetime.now(timezone.utc) - observed).total_seconds() < 86400:
+            return {}
+        if not isinstance(entry.get("version"), str):
+            return {}
+        evidence = entry.get("read_only_probe")
+        return {"cli_version": entry["version"],
+                **({"read_only_probe": evidence} if isinstance(evidence, dict) else {})}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+
+def _cooling(adapter: str, model: str, cooldowns: dict[str, Any], catalog: dict[str, Any]) -> str:
+    for key in (f"{adapter}/{_canonical_model(adapter, model, catalog)}", f"{adapter}/*"):
         item = cooldowns.get(key)
         if not isinstance(item, dict):
             continue
@@ -400,7 +569,10 @@ def _fallback_candidates(
     if not tiers and adapter.get("fixed_model_family"):
         tiers = catalog.get("families", {}).get(adapter["fixed_model_family"], {}).get("aliases", {})
     own = tiers.get(tier, [])
-    candidates = [(adapter_name, candidate) for candidate in own if candidate != model]
+    if fallback == "false" or (explicit and fallback is None and not requested_routes):
+        return []
+    current = _canonical_model(adapter_name, model, catalog)
+    candidates = [(adapter_name, candidate) for candidate in own]
     if adapter_name != "opencode":
         candidates += [("opencode", candidate) for candidate in
                        catalog["adapters"].get("opencode", {}).get("aliases", {}).get(tier, [])]
@@ -411,17 +583,18 @@ def _fallback_candidates(
         candidate_adapter = next((name for name in catalog["adapters"] if route.startswith(name + "/")), adapter_name)
         candidate = route[len(candidate_adapter) + 1:] if route.startswith(candidate_adapter + "/") else route
         candidates.append((candidate_adapter, candidate))
-    if explicit and not fallback and not requested_routes:
-        return []
     results = []
-    for candidate_adapter, candidate in dict.fromkeys(candidates):
-        if candidate_adapter == adapter_name and candidate == model:
+    seen = {(adapter_name, current)}
+    for candidate_adapter, candidate in candidates:
+        canonical = _canonical_model(candidate_adapter, candidate, catalog)
+        if (candidate_adapter, canonical) in seen:
             continue
+        seen.add((candidate_adapter, canonical))
         entry, _ = _registered_match(candidate_adapter, candidate, catalog)
         opt_in = fallback == "any" or f"{candidate_adapter}/{candidate}" in (requested_routes or []) or candidate in (requested_routes or [])
         if (entry and (opt_in or (entry.get("plan_cap_usd", 1) > 0 and not entry.get("trains_on_prompts")))
-                and not _cooling(candidate_adapter, candidate, cooldowns)):
-            results.append({"adapter": candidate_adapter, "model": candidate,
+                and not _cooling(candidate_adapter, canonical, cooldowns, catalog)):
+            results.append({"adapter": candidate_adapter, "model": canonical,
                             "plan_cap_usd": entry.get("plan_cap_usd"),
                             "trains_on_prompts": bool(entry.get("trains_on_prompts"))})
     return results
@@ -440,11 +613,12 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                      "message": "Adapter compatibility unavailable; fix: refresh product configuration"}, 2)
     if compatibility and not compatibility["enabled"]:
         return emit({"schema_version": 1, "status": "adapter_disabled", "adapter": adapter_name,
-                     "message": compatibility["disabled_reason"], "reason": compatibility["disabled_reason"],
+                     "message": f"{compatibility['disabled_reason']} fix: choose an enabled adapter",
+                     "reason": compatibility["disabled_reason"],
                      "adapter_enabled": False, "compatibility_adapter": compatibility["compatibility_adapter"]}, 1)
     notes: list[str] = []
     warnings: list[str] = []
-    explicit = bool(args.model)
+    explicit = bool(args.model) or bool(args.alias and args.alias not in ALIAS_ORDER)
     if args.model and args.alias and args.alias != args.model:
         notes.append("alias and model both supplied; model won")
     if not requested:
@@ -471,14 +645,15 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
           and not any(requested.casefold() == (model + suffix).casefold()
                       for suffix in registered.get("suffix", {}).values())):
         notes.append(f"{requested} routed to {model}")
-    cooldowns = _cooldowns()
-    until = _cooling(adapter_name, model, cooldowns)
+    cooldowns = _cooldowns(catalog)
+    until = _cooling(adapter_name, model, cooldowns, catalog)
     if until and explicit:
         warnings.append(f"{model} is cooling until {until}; explicit route continued")
     elif until:
         alternatives = aliases.get(tier, [])
         for alternative in alternatives:
-            if alternative != model and not _cooling(adapter_name, alternative, cooldowns):
+            if (_canonical_model(adapter_name, alternative, catalog) != _canonical_model(adapter_name, model, catalog)
+                    and not _cooling(adapter_name, alternative, cooldowns, catalog)):
                 notes.append(f"{model} cooling until {until}; used {alternative}")
                 model = alternative
                 registered, _ = _registered_match(adapter_name, model, catalog)
@@ -520,6 +695,10 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if not family:
         family, family_source = "generic-open", "unknown-passed-through"
         notes.append(f"{model} family unknown; treated as generic-open")
+    fixed = adapter.get("fixed_model_family")
+    if fixed and family != fixed:
+        owner = _owner_adapter(model, catalog)
+        warnings.append(f"{model} is {family} on the {fixed} {adapter_name} adapter; fix: use adapter {owner}")
     provider = model.split("/", 1)[0] if "/" in model else adapter.get("endpoint_provider", adapter_name)
     fallback = _fallback_candidates(adapter_name, tier, model, catalog, cooldowns,
                                     args.fallback, args.fallback_route, explicit)
@@ -538,7 +717,8 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                  "substitution": "", "fallback_model": "",
                  "notes": notes, "warnings": warnings, "fallback_candidates": fallback,
                  "plan_cap_usd": cap, "trains_on_prompts": training_model,
-                 "catalog_date": catalog.get("catalog_date", "")}, 0)
+                 "catalog_date": catalog.get("catalog_date", ""),
+                 **_kiro_probe_metadata(adapter_name)}, 0)
 
 
 def load_adapter_compatibility(
@@ -949,6 +1129,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             if not compatibility["enabled"]:
                 return emit({**base, "status": "adapter_disabled",
                              "reason": compatibility["disabled_reason"],
+                             "message": f"{compatibility['disabled_reason']} fix: choose an enabled adapter",
                              "endpoint_provider": "",
                              "compatibility_adapter": compatibility["compatibility_adapter"],
                              "adapter_enabled": False}, 1)
@@ -1010,6 +1191,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                     **base,
                     "status": "adapter_disabled",
                     "reason": compatibility["disabled_reason"],
+                    "message": f"{compatibility['disabled_reason']} fix: choose an enabled adapter",
                     "endpoint_provider": endpoint,
                     **compatibility_metadata,
                 },
@@ -1033,6 +1215,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     fallback_model = ""
     identity_source = ""
     family_source = ""
+    candidates: list[str] = []
 
     adapter_default = adapter.get("default_model") if not args.model else None
     if adapter_default is not None and (not isinstance(adapter_default, str) or not adapter_default.strip()):
@@ -1219,13 +1402,13 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     route_warnings: list[str] = []
     if args.model and args.alias:
         route_notes.append("alias and model both supplied; model won")
-    cooldowns = _cooldowns()
-    cooling_until = _cooling(args.adapter, model, cooldowns)
+    cooldowns = _cooldowns(catalog)
+    cooling_until = _cooling(args.adapter, model, cooldowns, catalog)
     if cooling_until and args.model:
         route_warnings.append(f"{model} is cooling until {cooling_until}; explicit route continued")
     elif cooling_until and not args.model:
         for candidate in candidates[1:] if isinstance(candidates, list) else []:
-            if (not _cooling(args.adapter, candidate, cooldowns)
+            if (not _cooling(args.adapter, candidate, cooldowns, catalog)
                     and (not capability_models or candidate.casefold() in capability_models)):
                 route_notes.append(f"{model} cooling until {cooling_until}; used {candidate}")
                 model = candidate
@@ -1354,7 +1537,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                          key=lambda candidate: EFFORT_ORDER[candidate],
                          default=min(supported, key=lambda candidate: EFFORT_ORDER[candidate]))
             effort_substitution = f"{requested_effort} unsupported by {model}; ran at {effort}"
-            capability_source = "runtime-model-catalog" if probed else "registry"
+            capability_source = "runtime-model-catalog" if probed.get("supported_efforts") else "registry"
             effort_status = ""
     if not effort_status and getattr(args, "raw_effort", None):
         effort_substitution = f"{args.raw_effort} unknown; ran at {effort or 'default'}"
@@ -1425,7 +1608,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         "warnings": route_warnings,
         "fallback_candidates": _fallback_candidates(
             args.adapter, args.alias, model, catalog, cooldowns,
-            args.fallback, args.fallback_route, bool(args.model),
+            args.fallback, args.fallback_route, bool(args.model) or bool(args.alias and args.alias not in ALIAS_ORDER),
         ),
     }
     if adapter_default:
@@ -1446,6 +1629,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 "compatibility_model_family": compatibility_family,
             }
         )
+    record.update(_kiro_probe_metadata(args.adapter))
     if endpoint_profile:
         record.update(
             {
@@ -1510,7 +1694,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "select":
         return _preferences.select(args, TASK_CLASS_POLICY, ALIAS_ORDER, EFFORT_ORDER)
     if args.command == "snapshot":
-        print(json.dumps(catalogue_snapshot(), sort_keys=True))
+        record = catalogue_snapshot(refresh_capabilities=True)
+        record.pop("catalogue", None)
+        print(json.dumps(record, sort_keys=True))
         return 0
     if args.command == "probe":
         record, code = probe_capabilities(args.adapter, args.executable)
@@ -1518,6 +1704,8 @@ def main(argv: list[str] | None = None) -> int:
         return code
     catalog = load_catalog(Path(args.catalog) if args.catalog else None)
     if args.command == "resolve":
+        if args.endpoint and args.model and not args.alias:
+            args.alias = "workhorse"
         ordinary_name = args.alias and args.alias not in ALIAS_ORDER
         ordinary_model = args.model and not args.alias
         ordinary_unknown = args.model and args.alias and not infer_family(args.model, catalog)
@@ -1527,7 +1715,7 @@ def main(argv: list[str] | None = None) -> int:
             isinstance(config, dict) and risk_tier_overrides_are_valid(name, config, catalog)
             for name, config in families_for_ordinary.items()
         )
-        if ordinary_catalog_valid and not args.task_class and not args.model_override_tier and not args.require_distinct and (ordinary_name or ordinary_model or ordinary_unknown or ordinary_broker_tier):
+        if ordinary_catalog_valid and not args.endpoint and not args.task_class and not args.model_override_tier and not args.require_distinct and (ordinary_name or ordinary_model or ordinary_unknown or ordinary_broker_tier or not args.adapter):
             return resolve_ordinary(args, catalog)
         def reject(
             status: str,
@@ -1623,6 +1811,7 @@ def main(argv: list[str] | None = None) -> int:
                     "adapter_disabled",
                     code=1,
                     reason=compatibility["disabled_reason"],
+                    message=f"{compatibility['disabled_reason']} fix: choose an enabled adapter",
                     endpoint_provider=endpoint,
                     compatibility_adapter=compatibility["compatibility_adapter"],
                     adapter_enabled=False,
