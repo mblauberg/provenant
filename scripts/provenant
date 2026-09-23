@@ -80,7 +80,7 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|root|route|capabilities|worktree|check|fabric|dispatch|batch|run> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|capabilities|worktree|check|gate|fabric|dispatch|batch|run> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
@@ -95,6 +95,8 @@ Thin front door; each command delegates to its existing owner:
                  skills/orchestrate/scripts/capabilities.py ...
   worktree ...   scripts/worktree ...
   check ...      scripts/check-harness ...
+  gate           scripts/gate (the MAINTAINING.md verification list with
+                 per-step pass/fail output)
   fabric ...     runtime/fabric/bin/fabric ...
   dispatch ...   skills/orchestrate/scripts/dispatch_run.py ...
   batch ...      skills/orchestrate/scripts/batch_run.py ...
@@ -309,6 +311,7 @@ def main(arguments: list[str]) -> int:
         "capabilities": "skills/orchestrate/scripts/capabilities.py",
         "worktree": "scripts/worktree",
         "check": "scripts/check-harness",
+        "gate": "scripts/gate",
         "fabric": FABRIC_CLI,
         "dispatch": "skills/orchestrate/scripts/dispatch_run.py",
         "batch": "skills/orchestrate/scripts/batch_run.py",
