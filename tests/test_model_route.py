@@ -236,6 +236,10 @@ def test_cooling_alias_skips_candidate_but_explicit_model_warns(tmp_path):
     assert result.returncode == 0
     assert alias["resolved_model"] == "opencode-go/kimi-k2.7-code"
     assert any("cooling" in note for note in alias["notes"])
+    result, shorthand = routed("--adapter", "opencode", "--alias", "glm")
+    assert result.returncode == 0
+    assert shorthand["resolved_model"] == "opencode-go/kimi-k2.7-code"
+    assert any("cooling" in note for note in shorthand["notes"])
     result, explicit = routed("--adapter", "opencode", "--model", "glm")
     assert result.returncode == 0
     assert explicit["resolved_model"] == "opencode-go/glm-5.3-flash"

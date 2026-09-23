@@ -444,7 +444,7 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                      "adapter_enabled": False, "compatibility_adapter": compatibility["compatibility_adapter"]}, 1)
     notes: list[str] = []
     warnings: list[str] = []
-    explicit = bool(requested)
+    explicit = bool(args.model)
     if args.model and args.alias and args.alias != args.model:
         notes.append("alias and model both supplied; model won")
     if not requested:
@@ -459,6 +459,12 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     registered, match_notes = _registered_match(adapter_name, requested, catalog)
     notes.extend(match_notes)
     model = registered["id"] if registered else requested
+    aliases = adapter.get("aliases", {})
+    if not aliases and adapter.get("fixed_model_family"):
+        aliases = catalog.get("families", {}).get(adapter["fixed_model_family"], {}).get("aliases", {})
+    tier = args.alias if args.alias in ALIAS_ORDER else next(
+        (name for name, candidates in aliases.items() if model in candidates), "workhorse"
+    )
     if registered is None:
         notes.append(f"{requested} is not in the {adapter_name} registry; passed through as given")
     elif (explicit and model.casefold() != requested.casefold() and not match_notes
@@ -470,7 +476,7 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if until and explicit:
         warnings.append(f"{model} is cooling until {until}; explicit route continued")
     elif until:
-        alternatives = adapter.get("aliases", {}).get(args.alias or "workhorse", [])
+        alternatives = aliases.get(tier, [])
         for alternative in alternatives:
             if alternative != model and not _cooling(adapter_name, alternative, cooldowns):
                 notes.append(f"{model} cooling until {until}; used {alternative}")
@@ -510,7 +516,6 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         family, family_source = "generic-open", "unknown-passed-through"
         notes.append(f"{model} family unknown; treated as generic-open")
     provider = model.split("/", 1)[0] if "/" in model else adapter.get("endpoint_provider", adapter_name)
-    tier = args.alias if args.alias in ALIAS_ORDER else "workhorse"
     fallback = _fallback_candidates(adapter_name, tier, model, catalog, cooldowns,
                                     args.fallback, args.fallback_route, explicit)
     return emit({"schema_version": 1, "status": "ok", "adapter": adapter_name,
