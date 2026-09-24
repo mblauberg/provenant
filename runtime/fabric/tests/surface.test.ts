@@ -138,6 +138,18 @@ it("shows the requested route and pending result before the first attempt", asyn
   expect(digest(brief)).toContain("result pending");
 });
 
+it("keeps the memory wait reason in brief status", async () => {
+  const { digest, runView } = await import("../src/surface.js");
+  for (const reason of [
+    "waiting for memory: 7.9% available (1.26 GB), floor 10% for worktree_write; 4m of 30m",
+    "memory probe failed: unavailable; holding; 4m of 30m",
+  ]) {
+    const row = { state: "queued", run_id: "mcp-memory", reason };
+    expect(runView(row)).toMatchObject({ state: "queued", reason, digest: `queued mcp-memory · ${reason}` });
+    expect(digest(row)).toContain(reason);
+  }
+});
+
 it("keeps a running brief digest on one line with its run id, route and result path", async () => {
   const { digest } = await import("../src/surface.js");
   const text = digest({

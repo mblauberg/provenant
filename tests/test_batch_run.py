@@ -221,6 +221,11 @@ def test_fixed_batch_caps_eight_tasks_and_produces_reducer_inputs(tmp_path, monk
 def test_current_routing_fixture_runs_real_dispatch_and_retains_partial_batch(tmp_path, monkeypatch):
     """The current seam proves batch custody, route identity, and reduction inputs without a provider."""
     monkeypatch.chdir(tmp_path)
+    policy_dir = tmp_path / '.agents'
+    policy_dir.mkdir()
+    (policy_dir / 'fabric-policy.json').write_text(
+        json.dumps({'memory_floor_percent': {'read_only': 0}}), encoding='utf-8'
+    )
     run_dir = make_run(tmp_path, 'current-routing-fixture')
     state_dir = tmp_path / 'fixture-state'
     state_dir.mkdir()
@@ -613,6 +618,63 @@ def test_real_dispatch_timeout_retains_typed_non_success_attempt(tmp_path, monke
     assert result['status'] == 'timed_out'
     assert result['outcome'] in {'timeout', 'batch_timeout'}
     assert (run_dir / 'dispatch/tasks/slow/attempt-001/attempt.json').is_file()
+
+
+def test_parent_watchdog_stops_hung_child(tmp_path, monkeypatch):
+    child = tmp_path / 'hung-child'
+    write_executable(child, '#!/usr/bin/env python3\nimport time\ntime.sleep(10)\n')
+    module = load_module()
+    module.DISPATCH_RUN = child
+    monkeypatch.setattr(module, 'DISPATCH_WATCHDOG_GRACE_SECONDS', 0.05)
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('hello\n')
+    started = time.monotonic()
+    row = module._run_task({'id': 'hung', 'prompt_file': str(prompt), 'adapter': 'codex',
+                            'model': 'gpt-6-luna', 'role': 'worker', 'timeout': 0.1}, tmp_path, tmp_path)
+    assert row['status'] == 'timed_out' and row['outcome'] == 'batch_timeout'
+    assert time.monotonic() - started < 7
+
+
+def test_parent_watchdog_ignores_prior_attempt_wait(tmp_path, monkeypatch):
+    old = tmp_path / 'tasks/hung/attempt-001/attempt.json'
+    old.parent.mkdir(parents=True)
+    old.write_text(json.dumps({'state': 'terminal', 'timing': {'queued_seconds': 100}}))
+    child = tmp_path / 'hung-child'
+    write_executable(child, '#!/usr/bin/env python3\nimport time\ntime.sleep(1)\n')
+    module = load_module()
+    module.DISPATCH_RUN = child
+    monkeypatch.setattr(module, 'DISPATCH_WATCHDOG_GRACE_SECONDS', 0.05)
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('hello\n')
+    row = module._run_task({'id': 'hung', 'prompt_file': str(prompt), 'adapter': 'codex',
+                            'model': 'gpt-6-luna', 'role': 'worker', 'timeout': 0.1}, tmp_path, tmp_path)
+    assert row['status'] == 'timed_out' and row['outcome'] == 'batch_timeout'
+
+
+def test_parent_watchdog_excludes_published_memory_wait(tmp_path, monkeypatch):
+    child = tmp_path / 'queued-child'
+    write_executable(child, '''#!/usr/bin/env python3
+import json, pathlib, sys, time
+args = sys.argv
+run_dir = pathlib.Path(args[args.index('--run-dir') + 1])
+task_id = args[args.index('--task-id') + 1]
+path = run_dir / 'tasks' / task_id / 'attempt-001' / 'attempt.json'
+path.parent.mkdir(parents=True)
+path.write_text(json.dumps({'state': 'queued', 'timing': {'queued_since': time.monotonic(), 'queued_seconds': 0}}))
+time.sleep(0.3)
+path.write_text(json.dumps({'state': 'running', 'timing': {'queued_seconds': 0.3}}))
+time.sleep(1)
+''')
+    module = load_module()
+    module.DISPATCH_RUN = child
+    monkeypatch.setattr(module, 'DISPATCH_WATCHDOG_GRACE_SECONDS', 0.05)
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('hello\n')
+    row = module._run_task({'id': 'queued', 'prompt_file': str(prompt), 'adapter': 'codex',
+                            'model': 'gpt-6-luna', 'role': 'worker', 'timeout': 0.1}, tmp_path, tmp_path)
+    assert row['status'] == 'timed_out' and row['outcome'] == 'batch_timeout'
+    state = json.loads((tmp_path / 'tasks/queued/attempt-001/attempt.json').read_text())
+    assert state['state'] == 'running'
 
 
 def test_real_dispatch_cancellation_reaps_provider_process(tmp_path, monkeypatch):

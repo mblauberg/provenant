@@ -77,6 +77,8 @@ def render_digest(row):
             + f' · reply: fabric_dispatch{{resume:"{run_id}",prompt:"…"}}'
         )
     if state != "terminal":
+        if state == "queued":
+            return f"queued {run_id} {route} · {row.get('reason') or 'waiting to start'}"
         fallback = prov.get("fallback_from")
         if fallback:
             previous = fallback.get("route", "")
