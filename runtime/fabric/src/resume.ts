@@ -50,7 +50,7 @@ export async function resumeConfiguredProvider(
       (input.wait_seconds ?? 55) > 55
     )
       throw new InputError("wait_invalid", "Pass wait_seconds from 0 to 55.");
-    const allowed = ["resume", "task_id", "context_ceiling", "timeout_seconds", "prompt", "prompt_file", "wait_seconds", "detail"];
+    const allowed = ["resume", "task_id", "context_ceiling", "timeout_seconds", "prompt", "prompt_file", "wait_seconds", "detail", "allow_secrets"];
     const changed = Object.keys(input).filter((key) => !allowed.includes(key));
     if (changed.length)
       throw new InputError("resume_route_change", `Resume keeps the route, mode and controls; drop ${changed.join(", ")} or dispatch a new run.`);
@@ -111,6 +111,7 @@ export async function resumeConfiguredProvider(
       ...Object.fromEntries(Object.entries(previous.applied ?? {}).filter(([key, value]) =>
         ["sandbox", "network", "add_dirs"].includes(key) && value !== null)),
       ...(input.prompt === undefined ? { prompt_file: path } : { prompt: input.prompt }),
+      allow_secrets: input.allow_secrets ?? false,
     }], identity, env, signal);
     if (checked.status === "rejected") return { status: "rejected", error: checked.error, fix: checked.fix };
     if (input.prompt !== undefined) writeFileSync(path, input.prompt, { mode: 0o600, flag: "wx" });
@@ -135,6 +136,7 @@ export async function resumeConfiguredProvider(
         "--timeout",
         String(timeout),
         ...(input.context_ceiling === undefined ? [] : ["--context-ceiling", String(input.context_ceiling)]),
+        ...(input.allow_secrets === true ? ["--allow-secrets"] : []),
         ...(previous.mode === "worktree_write" ? [] : ["--cwd", executionIdentity.cwd]),
       ],
       identity,

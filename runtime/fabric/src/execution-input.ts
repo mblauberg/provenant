@@ -47,6 +47,7 @@ export interface RouteInput {
   network?: boolean;
   sandbox?: string;
   add_dirs?: string[];
+  allow_secrets?: boolean;
   fallback?: boolean | "any" | Array<string | Record<string, unknown>>;
   context_ceiling?: number;
 }
@@ -84,6 +85,7 @@ export interface NormalisedRoute {
   access_mode: AccessMode;
   worktree?: string;
   context_ceiling?: number;
+  allow_secrets?: boolean;
 }
 
 export function normaliseRoute(input: RouteInput, identity: Identity, catalogue: CatalogueSnapshot): NormalisedRoute {
@@ -131,7 +133,7 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
     access_mode: mode,
     ...(input.worktree === undefined ? {} : { worktree: input.worktree }),
     ...Object.fromEntries(
-      ["cwd", "network", "sandbox", "add_dirs", "fallback", "context_ceiling"]
+      ["cwd", "network", "sandbox", "add_dirs", "fallback", "context_ceiling", "allow_secrets"]
         .filter((key) => input[key as keyof RouteInput] !== undefined)
         .map((key) => [key, input[key as keyof RouteInput]]),
     ),
@@ -144,6 +146,8 @@ export function routeArguments(route: NormalisedRoute): string[] {
     if (value === undefined || (key === "alias" && route.model !== undefined)) continue;
     if (key === "add_dirs") {
       for (const dir of value as string[]) args.push("--add-dir", dir);
+    } else if (key === "allow_secrets") {
+      if (value === true) args.push("--allow-secrets");
     } else args.push(`--${key.replaceAll("_", "-")}`, typeof value === "string" ? value : JSON.stringify(value));
   }
   return args;

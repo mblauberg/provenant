@@ -148,6 +148,7 @@ const route = {
   network: z.boolean().optional(),
   sandbox: z.enum(["read-only", "workspace-write", "full"]).optional(),
   add_dirs: z.array(z.string()).optional(),
+  allow_secrets: z.boolean().optional(),
   fallback: z
     .union([z.boolean(), z.literal("any"), z.array(z.union([z.string(), z.record(z.string(), z.unknown())]))])
     .optional(),
