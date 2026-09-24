@@ -42,11 +42,13 @@ slice of one, so the link lives in the pull request instead, one
 vocabulary either: no batch, wave, round or lane code, and no model or agent
 name.
 
-The worktree directory is the branch with every `/` replaced by `-`; a
-writer's task id defaults to that same string.
+The standing harness envelope pre-authorises creating branches and worktrees
+and removing clean worktrees; no extra authority is needed. Dirty worktrees
+are refused, and unmerged branches are kept. The worktree directory is the branch
+with every `/` replaced by `-`; a writer's task id defaults to that same string.
 
 ```sh
-scripts/worktree create --human-authorised --branch-authorised \
+scripts/worktree create \
   --new-branch <type>/<area>-<slug>
 ```
 

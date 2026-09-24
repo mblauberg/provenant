@@ -437,7 +437,7 @@ def test_worktree_scratch_does_not_count_as_a_run(tmp_path):
     proposal = module.plan(root, pr_bodies=[])
     row = next(row for row in proposal["rows"] if row["path"] == ".worktrees/lane-done")
     assert row["verdict"] == "delete"
-    assert module.apply(root, proposal["plan_sha256"], pr_bodies=[], human_authorised=True) == [".worktrees/lane-done"]
+    assert module.apply(root, proposal["plan_sha256"], pr_bodies=[]) == [".worktrees/lane-done"]
 
 
 def test_missing_gh_warns_and_git_proven_worktree_can_expire(tmp_path, monkeypatch):
@@ -522,7 +522,7 @@ def test_clean_output_hides_internal_identity_and_summarises_kept_rows(tmp_path)
     assert active.name not in text_result.stdout
 
 
-def test_worktree_apply_requires_explicit_authority_attestation(tmp_path):
+def test_worktree_apply_uses_plan_digest_and_removes_clean_merged_worktree(tmp_path):
     root = repo(tmp_path)
     target = root / ".worktrees" / "lane-done"
     target.parent.mkdir()
@@ -534,15 +534,33 @@ def test_worktree_apply_requires_explicit_authority_attestation(tmp_path):
     module = cleaner()
     proposal = module.plan(root, pr_bodies=[])
     assert next(row for row in proposal["rows"] if row["path"] == ".worktrees/lane-done")["verdict"] == "delete"
-    try:
-        module.apply(root, proposal["plan_sha256"], pr_bodies=[])
-    except module.CleanError as exc:
-        assert "human-authorised" in str(exc)
-    else:
-        raise AssertionError("worktree removal was authorised by the cleaner itself")
-    assert target.exists()
-    assert module.apply(root, proposal["plan_sha256"], pr_bodies=[], human_authorised=True) == [".worktrees/lane-done"]
+    assert module.apply(root, proposal["plan_sha256"], pr_bodies=[]) == [".worktrees/lane-done"]
     assert not target.exists()
+    assert subprocess.run(["git", "-C", str(root), "show-ref", "--verify", "--quiet",
+                           "refs/heads/lane/done"]).returncode != 0
+
+
+def test_worktree_apply_reports_branch_kept_when_primary_is_not_integration(tmp_path, capsys):
+    root = repo(tmp_path)
+    target = root / ".worktrees" / "lane-done"
+    target.parent.mkdir()
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", "lane/done", str(target)], check=True)
+    (target / "work.txt").write_text("done\n")
+    subprocess.run(["git", "-C", str(target), "add", "work.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "work"], check=True)
+    subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", "merge lane", "lane/done"], check=True)
+    subprocess.run(["git", "-C", str(root), "branch", "topic-check"], check=True)
+    subprocess.run(["git", "-C", str(root), "switch", "topic-check"], check=True,
+                   text=True, capture_output=True)
+
+    module = cleaner()
+    proposal = module.plan(root, pr_bodies=[])
+    assert next(row for row in proposal["rows"] if row["path"] == ".worktrees/lane-done")["verdict"] == "delete"
+    assert module.apply(root, proposal["plan_sha256"], pr_bodies=[]) == [".worktrees/lane-done"]
+    assert not target.exists()
+    assert subprocess.run(["git", "-C", str(root), "show-ref", "--verify", "--quiet",
+                           "refs/heads/lane/done"]).returncode == 0
+    assert "kept branch lane/done" in capsys.readouterr().err
 
 
 def test_prune_merged_removes_only_clean_ancestry_proven_worktrees(tmp_path):
@@ -581,7 +599,7 @@ def test_prune_merged_removes_only_clean_ancestry_proven_worktrees(tmp_path):
     assert targets["dirty"].exists() and targets["pending"].exists()
     assert scratch.read_text() == "preserve\n"
     assert run.exists()
-    assert subprocess.run(["git", "-C", str(root), "show-ref", "--verify", "--quiet", "refs/heads/lane/done"], check=False).returncode == 0
+    assert subprocess.run(["git", "-C", str(root), "show-ref", "--verify", "--quiet", "refs/heads/lane/done"], check=False).returncode != 0
 
 
 def test_prune_merged_since_removes_only_branches_brought_in_by_merge(tmp_path):
@@ -860,7 +878,7 @@ def test_prune_merged_plan_fails_closed_if_integration_branch_disappears(tmp_pat
     subprocess.run(["git", "-C", str(root), "branch", "-M", "feature"], check=True)
 
     try:
-        module._apply_plan(proposal, proposal["plan_sha256"], human_authorised=True)
+        module._apply_plan(proposal, proposal["plan_sha256"])
     except module.CleanError as exc:
         assert "integration branch" in str(exc)
     else:

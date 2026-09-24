@@ -569,11 +569,9 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
     return result
 
 
-def _apply_plan(current: dict[str, Any], approved_plan: str, *, human_authorised: bool) -> list[str]:
+def _apply_plan(current: dict[str, Any], approved_plan: str) -> list[str]:
     if approved_plan != current["plan_sha256"]:
         raise CleanError("approved plan digest does not match the current cleanup plan")
-    if not human_authorised and any(row["kind"] == "worktree" and row["verdict"] == "delete" for row in current["rows"]):
-        raise CleanError("worktree removal requires --human-authorised; or exclude worktrees from this plan")
     root = Path(current["root"])
     if "integration_ref" in current:
         integration_ref = _integration_ref(root, required=True)
@@ -616,11 +614,13 @@ def _apply_plan(current: dict[str, Any], approved_plan: str, *, human_authorised
             continue
         if row["kind"] == "worktree":
             command = [sys.executable, str(Path(__file__).with_name("worktree.py")), "remove", path.name,
-                       "--repo", str(root), "--human-authorised"]
+                       "--repo", str(root)]
             result = subprocess.run(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     timeout=120, check=False)
             if result.returncode != 0:
                 raise CleanError(f"worktree removal failed for {path}: {result.stderr.strip()}")
+            if result.stderr:
+                print(result.stderr, end="", file=sys.stderr)
         elif path.is_dir():
             shutil.rmtree(path)
         else:
@@ -631,10 +631,10 @@ def _apply_plan(current: dict[str, Any], approved_plan: str, *, human_authorised
 
 def apply(repo: Path, approved_plan: str, *, include: frozenset[str] = DEFAULT_INCLUDE,
           older_than: float | None = None, pr_bodies: list[str] | None = None,
-          human_authorised: bool = False, prune_merged: bool = False) -> list[str]:
+          prune_merged: bool = False) -> list[str]:
     current = plan(repo, include=include, older_than=older_than, pr_bodies=pr_bodies,
                    prune_merged=prune_merged)
-    return _apply_plan(current, approved_plan, human_authorised=human_authorised)
+    return _apply_plan(current, approved_plan)
 
 
 def _duration(value: str) -> float:
@@ -651,7 +651,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--older-than", type=_duration)
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--plan")
-    parser.add_argument("--human-authorised", action="store_true", help="attest authority to remove merged worktrees")
     parser.add_argument("--prune-merged", action="store_true", help="remove clean ancestry-proven merged worktrees")
     selector = parser.add_mutually_exclusive_group()
     selector.add_argument("--branch", action="append", default=[], metavar="NAME")
@@ -661,7 +660,7 @@ def main(argv: list[str] | None = None) -> int:
     include = frozenset(part.strip() for part in args.include.split(",") if part.strip())
     if args.apply != bool(args.plan):
         parser.error("--apply and --plan sha256:<digest> are required together")
-    if args.prune_merged and (args.apply or args.human_authorised or args.older_than is not None
+    if args.prune_merged and (args.apply or args.older_than is not None
                               or args.include != "runs,scratch,worktrees"):
         parser.error("--prune-merged accepts only --repo, --json, and a merge selector")
     if args.prune_merged and not (args.branch or args.merged_since):
@@ -674,14 +673,13 @@ def main(argv: list[str] | None = None) -> int:
             worktrees = frozenset({"worktrees"})
             proposal = plan(args.repo, include=worktrees, prune_merged=True,
                             branches=tuple(args.branch), merged_since=args.merged_since)
-            removed = _apply_plan(proposal, proposal["plan_sha256"], human_authorised=True)
+            removed = _apply_plan(proposal, proposal["plan_sha256"])
             report = {"removed": removed, "skipped": [
                 {"path": row["path"], "reason": row["verdict"]}
                 for row in proposal["rows"] if row["kind"] == "worktree" and row["verdict"] != "delete"
             ]}
         elif args.apply:
-            removed = apply(args.repo, args.plan, include=include, older_than=args.older_than,
-                            human_authorised=args.human_authorised)
+            removed = apply(args.repo, args.plan, include=include, older_than=args.older_than)
             report = {"removed": removed, "count": len(removed)}
         else:
             report = plan(args.repo, include=include, older_than=args.older_than)

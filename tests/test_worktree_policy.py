@@ -28,13 +28,12 @@ def init_repo(path: Path) -> str:
     return subprocess.check_output(["git", "-C", str(path), "rev-parse", "HEAD"], text=True).strip()
 
 
-def test_authorised_detached_worktree_uses_shared_project_directory(tmp_path, capsys):
+def test_detached_worktree_uses_shared_project_directory(tmp_path, capsys):
     repo = tmp_path / "project"
     head = init_repo(repo)
 
     assert worktree_policy.main([
         "create", "review-one", "--repo", str(repo), "--detach", head,
-        "--human-authorised",
     ]) == 0
 
     receipt = json.loads(capsys.readouterr().out)
@@ -67,7 +66,7 @@ def test_create_cow_clones_root_and_workspace_node_modules(tmp_path, capsys, mon
     monkeypatch.setattr(worktree_policy, "cow_clone", lambda source, target: shutil.copytree(source, target))
 
     assert worktree_policy.main([
-        "create", "cloned", "--repo", str(repo), "--detach", head, "--human-authorised",
+        "create", "cloned", "--repo", str(repo), "--detach", head,
     ]) == 0
 
     receipt = json.loads(capsys.readouterr().out)
@@ -76,7 +75,7 @@ def test_create_cow_clones_root_and_workspace_node_modules(tmp_path, capsys, mon
     assert worktree_policy.worktree_residue(worktree) == []
     assert (worktree / "node_modules" / "fake" / "package.json").read_text() == "root\n"
     assert (worktree / "runtime" / "fabric" / "node_modules" / "nested" / "pkg").read_text() == "ws\n"
-    assert worktree_policy.main(["remove", "cloned", "--repo", str(repo), "--human-authorised"]) == 0
+    assert worktree_policy.main(["remove", "cloned", "--repo", str(repo)]) == 0
     assert json.loads(capsys.readouterr().out)["status"] == "removed"
     assert not worktree.exists()
 
@@ -133,7 +132,7 @@ def test_create_reports_node_modules_skip_reasons(tmp_path, capsys, monkeypatch,
                 (worktree / "package-lock.json").write_text("other lock\n")
             return result
         monkeypatch.setattr(worktree_policy, "git", git_after_add)
-    command = ["create", case, "--repo", str(repo), "--detach", head, "--human-authorised"]
+    command = ["create", case, "--repo", str(repo), "--detach", head]
     if case == "disabled":
         command.append("--no-node-modules")
 
@@ -158,7 +157,7 @@ def test_creation_from_linked_checkout_still_anchors_primary_root(tmp_path, caps
     subprocess.run(["git", "-C", str(repo), "worktree", "add", "--detach", str(first), head], check=True)
 
     assert worktree_policy.main([
-        "create", "second", "--repo", str(first), "--detach", head, "--human-authorised",
+        "create", "second", "--repo", str(first), "--detach", head,
     ]) == 0
 
     receipt = json.loads(capsys.readouterr().out)
@@ -198,7 +197,6 @@ def test_copied_linked_checkout_cannot_mutate_its_source_repository(tmp_path, ca
     before = source_state()
     assert worktree_policy.main([
         "create", "leak", "--repo", str(copied), "--detach", head,
-        "--human-authorised",
     ]) == 2
     assert "copied checkout" in capsys.readouterr().err
     assert source_state() == before
@@ -211,7 +209,6 @@ def test_copied_linked_checkout_cannot_mutate_its_source_repository(tmp_path, ca
     before = source_state()
     assert worktree_policy.main([
         "create", "leak", "--repo", str(copied), "--detach", head,
-        "--human-authorised",
     ]) == 2
     assert "symlinked .git" in capsys.readouterr().err
     assert source_state() == before
@@ -228,7 +225,6 @@ def test_copied_linked_checkout_cannot_mutate_its_source_repository(tmp_path, ca
     before = source_state()
     assert worktree_policy.main([
         "create", "leak", "--repo", str(copied), "--detach", head,
-        "--human-authorised",
     ]) == 2
     assert "invalid linked-worktree back-pointer" in capsys.readouterr().err
     assert source_state() == before
@@ -238,7 +234,6 @@ def test_copied_linked_checkout_cannot_mutate_its_source_repository(tmp_path, ca
     before = source_state()
     assert worktree_policy.main([
         "create", "leak", "--repo", str(copied), "--detach", head,
-        "--human-authorised",
     ]) == 2
     assert "invalid linked-worktree back-pointer" in capsys.readouterr().err
     assert source_state() == before
@@ -266,25 +261,21 @@ def test_validate_context_does_not_treat_invalid_git_metadata_as_non_git(
     assert "invalid Git metadata" in capsys.readouterr().err
 
 
-def test_creation_requires_authority_and_rejects_unsafe_names(tmp_path, capsys):
+def test_creation_rejects_unsafe_names_without_authorisation_flags(tmp_path, capsys):
     repo = tmp_path / "project"
     head = init_repo(repo)
-    assert worktree_policy.main(["create", "plain", "--repo", str(repo), "--detach", head]) == 2
-    assert "explicit human authorisation" in capsys.readouterr().err
     assert worktree_policy.main([
-        "create", "../escape", "--repo", str(repo), "--detach", head, "--human-authorised",
+        "create", "../escape", "--repo", str(repo), "--detach", head,
     ]) == 2
     assert "safe filename" in capsys.readouterr().err
     assert not (tmp_path / "escape").exists()
 
 
-def test_new_branch_requires_separate_branch_authority(tmp_path, capsys):
+def test_new_branch_creation_needs_no_attestation_flags(tmp_path, capsys):
     repo = tmp_path / "project"
     init_repo(repo)
-    args = ["create", "feature", "--repo", str(repo), "--new-branch", "feature/test", "--human-authorised"]
-    assert worktree_policy.main(args) == 2
-    assert "branch requires separate" in capsys.readouterr().err
-    assert worktree_policy.main(args + ["--branch-authorised"]) == 0
+    args = ["create", "feature", "--repo", str(repo), "--new-branch", "feature/test"]
+    assert worktree_policy.main(args) == 0
     receipt = json.loads(capsys.readouterr().out)
     branch = subprocess.check_output(
         ["git", "-C", str(repo / ".worktrees" / "feature"), "branch", "--show-current"], text=True,
@@ -299,7 +290,6 @@ def test_branch_name_defaults_to_safe_worktree_name_and_warns_on_override(tmp_pa
     init_repo(repo)
     assert worktree_policy.main([
         "create", "--repo", str(repo), "--new-branch", "lane/docs-clean",
-        "--human-authorised", "--branch-authorised",
     ]) == 0
     receipt = json.loads(capsys.readouterr().out)
     assert receipt["name"] == "lane-docs-clean"
@@ -307,7 +297,6 @@ def test_branch_name_defaults_to_safe_worktree_name_and_warns_on_override(tmp_pa
 
     assert worktree_policy.main([
         "create", "custom", "--repo", str(repo), "--new-branch", "lane/other",
-        "--human-authorised", "--branch-authorised",
     ]) == 0
     assert "differs from branch-derived" in capsys.readouterr().err
 
@@ -317,7 +306,7 @@ def test_ignore_rule_is_repository_local_and_idempotent(tmp_path, capsys):
     head = init_repo(repo)
     for name in ("one", "two"):
         assert worktree_policy.main([
-            "create", name, "--repo", str(repo), "--detach", head, "--human-authorised",
+            "create", name, "--repo", str(repo), "--detach", head,
         ]) == 0
         capsys.readouterr()
     exclude = repo / ".git" / "info" / "exclude"
@@ -332,7 +321,7 @@ def test_check_reports_only_direct_project_local_registered_worktrees(tmp_path, 
     repo = tmp_path / "project"
     head = init_repo(repo)
     assert worktree_policy.main([
-        "create", "valid", "--repo", str(repo), "--detach", head, "--human-authorised",
+        "create", "valid", "--repo", str(repo), "--detach", head,
     ]) == 0
     capsys.readouterr()
 
@@ -356,7 +345,7 @@ def test_symlinked_or_tracked_shared_root_is_rejected(tmp_path, capsys):
     elsewhere.mkdir()
     (repo / ".worktrees").symlink_to(elsewhere, target_is_directory=True)
     assert worktree_policy.main([
-        "create", "one", "--repo", str(repo), "--detach", head, "--human-authorised",
+        "create", "one", "--repo", str(repo), "--detach", head,
     ]) == 2
     assert "not a symlink" in capsys.readouterr().err
 
@@ -366,30 +355,132 @@ def test_symlinked_or_tracked_shared_root_is_rejected(tmp_path, capsys):
     subprocess.run(["git", "-C", str(repo), "add", "-f", ".worktrees/notice.txt"], check=True)
     subprocess.run(["git", "-C", str(repo), "commit", "-qm", "track reserved root"], check=True)
     assert worktree_policy.main([
-        "create", "two", "--repo", str(repo), "--detach", "HEAD", "--human-authorised",
+        "create", "two", "--repo", str(repo), "--detach", "HEAD",
     ]) == 2
     assert "tracked paths" in capsys.readouterr().err
 
 
-def test_remove_refuses_dirty_worktree_and_never_deletes_branch(tmp_path, capsys):
+def test_remove_refuses_dirty_worktree_and_keeps_unmerged_branch(tmp_path, capsys):
     repo = tmp_path / "project"
-    head = init_repo(repo)
+    init_repo(repo)
     assert worktree_policy.main([
-        "create", "clean", "--repo", str(repo), "--detach", head, "--human-authorised",
+        "create", "clean", "--repo", str(repo), "--new-branch", "feature/unmerged",
     ]) == 0
     capsys.readouterr()
     target = repo / ".worktrees" / "clean"
+    (target / "unmerged.txt").write_text("unmerged\n")
+    subprocess.run(["git", "-C", str(target), "add", "unmerged.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "unmerged"], check=True)
     (target / "untracked.txt").write_text("preserve\n")
     assert worktree_policy.main([
-        "remove", "clean", "--repo", str(repo), "--human-authorised",
+        "remove", "clean", "--repo", str(repo),
     ]) == 2
     assert "worktree is dirty" in capsys.readouterr().err
     assert target.is_dir()
     (target / "untracked.txt").unlink()
     assert worktree_policy.main([
-        "remove", "clean", "--repo", str(repo), "--human-authorised",
+        "remove", "clean", "--repo", str(repo),
     ]) == 0
     assert not target.exists()
+    assert subprocess.run(["git", "-C", str(repo), "show-ref", "--verify", "--quiet",
+                           "refs/heads/feature/unmerged"]).returncode == 0
+    assert "because it is unmerged" in capsys.readouterr().err
+
+
+def test_remove_deletes_merged_branch(tmp_path, capsys):
+    repo = tmp_path / "project"
+    init_repo(repo)
+    assert worktree_policy.main([
+        "create", "done", "--repo", str(repo), "--new-branch", "feature/done",
+    ]) == 0
+    capsys.readouterr()
+    target = repo / ".worktrees" / "done"
+    (target / "done.txt").write_text("done\n")
+    subprocess.run(["git", "-C", str(target), "add", "done.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "done"], check=True)
+    subprocess.run(["git", "-C", str(repo), "merge", "--no-ff", "-qm", "merge done",
+                    "feature/done"], check=True)
+
+    assert worktree_policy.main(["remove", "done", "--repo", str(repo)]) == 0
+    assert not target.exists()
+    assert subprocess.run(["git", "-C", str(repo), "show-ref", "--verify", "--quiet",
+                           "refs/heads/feature/done"]).returncode != 0
+
+
+def test_remove_keeps_branch_merged_only_into_upstream(tmp_path, capsys):
+    repo = tmp_path / "project"
+    init_repo(repo)
+    branch = "feature/upstream-only"
+    assert worktree_policy.main([
+        "create", "upstream-only", "--repo", str(repo), "--new-branch", branch,
+    ]) == 0
+    capsys.readouterr()
+    target = repo / ".worktrees" / "upstream-only"
+    (target / "work.txt").write_text("work\n")
+    subprocess.run(["git", "-C", str(target), "add", "work.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "work"], check=True)
+    tip = subprocess.check_output(["git", "-C", str(target), "rev-parse", "HEAD"], text=True).strip()
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", str(tmp_path / "origin.git")], check=True)
+    subprocess.run(["git", "-C", str(repo), "update-ref", f"refs/remotes/origin/{branch}", tip], check=True)
+    subprocess.run(["git", "-C", str(repo), "branch", f"--set-upstream-to=origin/{branch}", branch],
+                   check=True, text=True, capture_output=True)
+
+    assert worktree_policy.main(["remove", "upstream-only", "--repo", str(repo)]) == 0
+    assert not target.exists()
+    assert subprocess.run(["git", "-C", str(repo), "show-ref", "--verify", "--quiet",
+                           f"refs/heads/{branch}"]).returncode == 0
+    assert "because it is unmerged" in capsys.readouterr().err
+
+
+def test_remove_keeps_branch_merged_only_into_primary_topic_branch(tmp_path, capsys):
+    repo = tmp_path / "project"
+    init_repo(repo)
+    branch = "feature/work"
+    assert worktree_policy.main([
+        "create", "work", "--repo", str(repo), "--new-branch", branch,
+    ]) == 0
+    capsys.readouterr()
+    target = repo / ".worktrees" / "work"
+    (target / "work.txt").write_text("work\n")
+    subprocess.run(["git", "-C", str(target), "add", "work.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "work"], check=True)
+    subprocess.run(["git", "-C", str(repo), "branch", "topic-check", branch], check=True)
+    subprocess.run(["git", "-C", str(repo), "switch", "topic-check"], check=True,
+                   text=True, capture_output=True)
+
+    assert worktree_policy.main(["remove", "work", "--repo", str(repo)]) == 0
+    assert not target.exists()
+    assert subprocess.run(["git", "-C", str(repo), "show-ref", "--verify", "--quiet",
+                           f"refs/heads/{branch}"]).returncode == 0
+    assert "because it is unmerged" in capsys.readouterr().err
+
+
+def test_remove_does_not_confuse_tag_with_local_branch(tmp_path, capsys):
+    repo = tmp_path / "project"
+    init_repo(repo)
+    branch = "feature/ambiguous"
+    assert worktree_policy.main([
+        "create", "ambiguous", "--repo", str(repo), "--new-branch", branch,
+    ]) == 0
+    capsys.readouterr()
+    target = repo / ".worktrees" / "ambiguous"
+    (target / "work.txt").write_text("work\n")
+    subprocess.run(["git", "-C", str(target), "add", "work.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "work"], check=True)
+    subprocess.run(["git", "-C", str(repo), "tag", branch, "HEAD"], check=True)
+    tip = subprocess.check_output(["git", "-C", str(target), "rev-parse", "HEAD"], text=True).strip()
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", str(tmp_path / "origin.git")], check=True)
+    subprocess.run(["git", "-C", str(repo), "update-ref", f"refs/remotes/origin/{branch}", tip], check=True)
+    subprocess.run(["git", "-C", str(repo), "branch", f"--set-upstream-to=origin/{branch}", branch],
+                   check=True, text=True, capture_output=True)
+
+    assert worktree_policy.main(["remove", "ambiguous", "--repo", str(repo)]) == 0
+    assert not target.exists()
+    assert subprocess.run(["git", "-C", str(repo), "show-ref", "--verify", "--quiet",
+                           f"refs/heads/{branch}"]).returncode == 0
+    assert "because it is unmerged" in capsys.readouterr().err
+
+
 
 
 def _implementation_worktree(tmp_path, capsys):
@@ -397,7 +488,6 @@ def _implementation_worktree(tmp_path, capsys):
     base = init_repo(repo)
     assert worktree_policy.main([
         "create", "implementation", "--repo", str(repo), "--detach", base,
-        "--human-authorised",
     ]) == 0
     capsys.readouterr()
     return repo, base, repo / ".worktrees" / "implementation"
