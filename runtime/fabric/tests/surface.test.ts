@@ -306,7 +306,7 @@ it.each([false, true])("exposes the default tools within budget (legacy=%s)", as
       ]) expect(names.has(`fabric_${name}`)).toBe(true);
     for (const name of ["batch", "team_create", "task_create", "task_claim", "task_update", "tasks"])
       expect(names.has(`fabric_${name}`)).toBe(legacy);
-    if (!legacy) expect(JSON.stringify(result).length).toBeLessThanOrEqual(16000);
+    if (!legacy) expect(JSON.stringify(result).length).toBeLessThanOrEqual(8000);
     const invalid = await client.callTool({
       name: "fabric_inbox",
       arguments: { ids: Array.from({ length: 101 }, (_, i) => String(i)) },
