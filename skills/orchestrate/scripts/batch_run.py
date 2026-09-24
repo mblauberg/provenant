@@ -574,19 +574,13 @@ def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str,
         dispatch_task = {**task, "prompt_file": str(temporary_prompt), "_batch_id": batch_dir.name}
     process: subprocess.Popen[str] | None = None
     started = time.monotonic()
-    timed_out = False
     try:
         process = subprocess.Popen(_command(dispatch_task, run_dir), cwd=Path.cwd(), text=True,
                                    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                    start_new_session=True)
         with _state_lock:
             _active_processes[task_id] = process
-        try:
-            stdout, stderr = process.communicate(timeout=task["timeout"] + 5.0)
-        except subprocess.TimeoutExpired:
-            stop_process_group(process)
-            stdout, stderr = process.communicate()
-            timed_out = True
+        stdout, stderr = process.communicate()
     except (OSError, subprocess.SubprocessError) as exc:
         return {"task_id": task_id, "status": "failed", "outcome": "dispatch_spawn_error",
                 "message": str(exc)}
@@ -600,9 +594,6 @@ def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str,
     if record is None:
         if _cancel_requested:
             return {"task_id": task_id, "status": "cancelled", "outcome": "batch_cancelled",
-                    "dispatch_exit": process.returncode, "stderr": stderr[-1000:]}
-        if timed_out:
-            return {"task_id": task_id, "status": "timed_out", "outcome": "batch_timeout",
                     "dispatch_exit": process.returncode, "stderr": stderr[-1000:]}
         return {"task_id": task_id, "status": "failed", "outcome": "dispatch_output_invalid",
                 "dispatch_exit": process.returncode, "stderr": stderr[-1000:]}

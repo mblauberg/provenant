@@ -96,6 +96,13 @@ and the terminal Route line shows it as `ctx 212k/1M`. See
 [`docs/specs/fabric-v2.md`](../../docs/specs/fabric-v2.md#session-context).
 
 Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, and `detail`.
+New attempts wait when available host memory is below 1024 MB. Set
+`FABRIC_MEMORY_FLOOR_MB` to another non-negative MB value; `0` disables admission.
+Queued time does not use the execution timeout. `fabric_status` and `fabric status`
+show `queued` with a current reason such as `waiting for memory: 812 MB available,
+floor 1024 MB`. Cancellation works while waiting. A failed memory probe admits
+the attempt and records a warning.
+
 The wave-1 `id` argument and retained `mcp-*` directories remain readable.
 Without IDs it returns active and last-24-hour runs, capped at 20 rows. Rows
 include the latest attempt and count. Full detail adds history and the worktree

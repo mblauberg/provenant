@@ -53,6 +53,7 @@ CANCEL_MARKER_NAME = "cancel.request"
 from _shared.bounded_process import stop_process_group
 from layout import run_workspace, run_root, contains_run
 import provider_exec
+import memory_admission
 import exec_routing
 import context_usage
 from fabric_records import render_digest, write_cooldown, append_index, TERMINAL_STATUSES
@@ -1306,6 +1307,7 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     if status not in TERMINAL_STATUSES: status="failed"
     for field in ("session_id","retryable","reset_at","retry_after","fix","evidence","applied","context","warnings","reaped","spared","provenance","pgid","last_progress_at"):
         if field in adapter: row[field]=adapter[field]
+    row["warnings"] = list(dict.fromkeys([*row["warnings"], *getattr(args, "_memory_warnings", [])]))
     if refusal:
         row["fix"]=adapter.get("fix") or adapter.get("reason") or refusal["fix"];row["evidence"]=refusal["evidence"];row["error"]=refusal["error"]
     row.update(state="terminal",status=status,ended_at=legacy["finished_at"],question=adapter.get("question") or (legacy.get("question") or {}).get("prompt"))
@@ -1597,6 +1599,28 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     provider_temporary = None
     cancelled = False
     old_handlers: dict[int, Any] = {}
+    def admit_attempt(active, cancelled_now):
+        nonlocal started, started_at
+        waiting_since = time.monotonic()
+        def waiting(reason):
+            active["state"] = "queued"
+            active["reason"] = reason
+            publish_contract(run_dir, active)
+        def warning(message):
+            active["warnings"].append(message)
+            args._memory_warnings = getattr(args, "_memory_warnings", []) + [message]
+        admitted = memory_admission.admit(waiting, cancelled_now, warning)
+        queued_seconds = time.monotonic() - waiting_since
+        args._queued_seconds = getattr(args, "_queued_seconds", 0.0) + queued_seconds
+        started = time.monotonic()
+        started_at = now()
+        if admitted:
+            active["state"] = "running"
+            active.pop("reason", None)
+            active["started_at"] = started_at
+            active["last_progress_at"] = started_at
+            publish_contract(run_dir, active)
+        return admitted
     if CF_DISPATCH == Path(__file__).with_name("cf_dispatch.sh"):
         owner_cancel=[False]
         def cancel_owner(_signal,_frame): owner_cancel[0]=True
@@ -1650,7 +1674,6 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     if args.resume_warning: plan["warnings"].insert(0,args.resume_warning)
                 active = contract_row(args,run_dir,attempt_number,attempt_dir,plan,started_at)
                 active["requested_route"] = requested_route
-                publish_contract(run_dir,active)
                 spawn_started = time.monotonic()
                 provider_started_at = [None]
                 def provider_started(child):
@@ -1670,8 +1693,16 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         progress_publication[0]=time.monotonic()
                 def cancellation():
                     return owner_cancel[0] or cancellation_marker_present(run_dir,attempt_dir) or (batch_dir is not None and cancellation_marker_present(run_dir,batch_dir))
-                adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
-                    on_start=provider_started,on_progress=progress,cancelled=cancellation)
+                admitted = admit_attempt(active, cancellation)
+                spawn_started = time.monotonic()
+                if not admitted:
+                    plan["warnings"] = active["warnings"]
+                    process_error = "cancelled"
+                    adapter_record = {"status": "cancelled", "exit": 1, "warnings": active["warnings"]}
+                else:
+                    plan["warnings"] = active["warnings"]
+                    adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
+                        on_start=provider_started,on_progress=progress,cancelled=cancellation)
                 args._phase_timings["provider"] = round((time.monotonic() - (provider_started_at[0] or spawn_started)) * 1000, 3)
                 if (args.resume and args.tool=="claude" and plan.get("resume_session")
                     and adapter_record.get("status")=="failed"
@@ -1738,6 +1769,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
                     signal.signal(signal.SIGTERM, cancel_handler)
                     signal.signal(signal.SIGHUP, cancel_handler)
+                    active = contract_row(args, run_dir, attempt_number, attempt_dir, {}, started_at)
+                    active["requested_route"] = requested_route
+                    if not admit_attempt(active, lambda: cancel_pending or cancellation_marker_present(run_dir, attempt_dir)
+                                         or (batch_dir is not None and cancellation_marker_present(run_dir, batch_dir))):
+                        process_error = "cancelled"
+                        observed_exit = True
+                        raise InterruptedError("memory wait cancelled")
                     provider_environment = os.environ.copy()
                     # Owners retain chair custody; provider work must discover its own
                     # seat, state directory and checkout rather than inherit the chair's.
@@ -1837,6 +1875,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         pass
                     if cancelled:
                         process_error = "cancelled"
+        except InterruptedError:
+            pass
         except OSError as exc:
             process_error = str(exc)
         finally:
@@ -2100,7 +2140,7 @@ def execute_attempt_sequence(args,custody=None):
     plan=getattr(args,"_last_plan",None)
     if plan and previous and previous["retryable"] and not args.resume:
         for candidate in exec_routing.candidates(plan,args.fallback):
-            remaining=sequence_budget-(time.monotonic()-sequence_start)
+            remaining=sequence_budget-(time.monotonic()-sequence_start-getattr(args,"_queued_seconds",0.0))
             if remaining<=0: break
             args.timeout_seconds=remaining
             if exec_routing.cooling(candidate["adapter"],candidate["model"]): continue

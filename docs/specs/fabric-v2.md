@@ -21,6 +21,8 @@ A worker question yields `input_required`; `fabric_dispatch` with `resume` appen
 
 A run has `queued`, `running` and attempt-terminal states. Terminal statuses are `ok`, `partial`, `failed`, `usage_limited`, `rate_limited`, `auth_required`, `model_unavailable`, `permission_blocked`, `stalled`, `timed_out`, `cancelled`, `interrupted`, `rejected`, `tool_missing`, and `input_required`. Structured provider events take precedence over text signatures. Fallback creates another attempt under the same run id. Alias routes default to fallback through allowed paid non-training routes; an explicit model defaults to no fallback. Free or prompt-training routes require explicit opt-in.
 
+Before each new attempt starts its provider, the owner checks available host memory: free, inactive and speculative pages from macOS `vm_stat` using its reported page size, or Linux `MemAvailable`. Below the `FABRIC_MEMORY_FLOOR_MB` floor (default 1024 MB; `0` disables), the attempt remains `queued` and is checked every 15 seconds. `fabric_status` and `fabric status` show the reason and current numbers, for example `waiting for memory: 812 MB available, floor 1024 MB`. Queued time does not count against execution timeout; cancellation remains available. Failed probes admit with a warning. Admission only affects new attempts and does not stop running providers.
+
 ## Session context
 
 Many routes have 1M-token windows, so resuming a large session can cost far more than starting fresh. Fabric measures each attempt's context, caps it where the provider allows, and warns rather than blocks.

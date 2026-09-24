@@ -138,6 +138,15 @@ it("shows the requested route and pending result before the first attempt", asyn
   expect(digest(brief)).toContain("result pending");
 });
 
+it("keeps the memory wait reason in brief status", async () => {
+  const { digest, runView } = await import("../src/surface.js");
+  const reason = "waiting for memory: 812 MB available, floor 1024 MB";
+  const row = { state: "queued", run_id: "mcp-memory", reason,
+    digest: `queued mcp-memory codex/gpt-6-sol · ${reason}` };
+  expect(runView(row)).toMatchObject({ state: "queued", reason, digest: row.digest });
+  expect(digest(row)).toContain(reason);
+});
+
 it("keeps a running brief digest on one line with its run id, route and result path", async () => {
   const { digest } = await import("../src/surface.js");
   const text = digest({
