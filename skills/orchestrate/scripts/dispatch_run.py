@@ -1319,12 +1319,13 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     family=route.get("model_family") or "unknown"
     label=args.tool+"/"+model+("@"+effort if effort else "")
     identity="resolved" if model else "unknown"
-    provenance={"requested":{"adapter":args.tool,"alias":"" if args.model and not getattr(args,"alias_supplied",True) else args.alias or "","model":args.model,"effort":args.effort,"task_class":getattr(args,"task_class",None) or ""},
+    task_class = getattr(args, "task_class", None) or ""
+    provenance={"requested":{"adapter":args.tool,"alias":"" if args.model and not getattr(args,"alias_supplied",True) else args.alias or "","model":args.model,"effort":args.effort,"task_class":task_class},
         "resolved_model":model,"observed_model":None,"observed_source":None,"identity":identity,
         "provider":route.get("endpoint_provider") or args.tool,"transport":args.tool,"family":family,
         "effort_requested":args.effort,"effort_applied":effort,"cli_version":route.get("cli_version"),
         "fallback_from":getattr(args,"fallback_from",None),"notes":[],"line":f"Route: {label} ({family}; {identity})"}
-    return {"schema":"fabric.attempt.v1","run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":getattr(args,"task_class",None) or "",
+    return {"schema":"fabric.attempt.v1","run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
         "attempt":number,"state":"running","status":None,"mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
         "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
         "worktree":str(args.worktree) if args.worktree else None,"started_at":started_at,"ended_at":None,"last_progress_at":started_at,
