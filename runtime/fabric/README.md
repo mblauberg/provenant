@@ -20,8 +20,10 @@ reports `server_version`, `build_stale` and a restart fix when needed.
 `install-harness --platform all` registers Fabric for detected client homes;
 each client has its own seat and inbox, and a detected client with conflicting
 instructions is skipped and reported. `check-provenant-install.py` warns about
-routing drift (`--strict` fails); `install-harness --refresh-routing` merges
-product catalogue changes into the instance copy and lists conflicts.
+routing drift (`--strict` fails); `install-harness` refreshes the instance
+catalogue whenever a product snapshot exists, preserving three-way instance
+overrides. Without a snapshot it skips and prints a hint; `--refresh-routing`
+forces a refresh.
 
 ## MCP quickstart
 
@@ -41,6 +43,15 @@ warning when exactly one name is close and its version numbers match. Anything
 else is rejected with the closest valid choices. Relative `cwd` and `worktree` paths resolve from
 the caller directory.
 No provider output is embedded in status responses.
+
+Without an MCP connection, `provenant fabric dispatch --adapter A --model M
+--effort E --mode read_only|worktree_write --prompt-file F [--wait]` uses the
+same dispatcher. Add `--worktree P`, `--cwd P` or `--id ID` as needed. Use
+`--tasks F` for a JSON object with `tasks[]` and shared route fields. It prints
+the Fabric run id and status; detached owners remain discoverable after the CLI
+or MCP host exits.
+Batch owners are detached session leaders and survive MCP-host restart; a fresh
+`dispatch list` and `status <run-dir>` resolve them from their run records.
 
 Fourteen tools are registered by default:
 

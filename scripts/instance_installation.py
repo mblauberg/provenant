@@ -16,8 +16,10 @@ machine-local and ignored.
 Seeded files are the third owner in that ADR. The product ships a template; the
 installer copies it into the instance root only when nothing is there, and never
 again. The routing catalogue is the one exception: seeding records a product
-snapshot, and an explicit refresh backs up and three-way merges the catalogue.
-Other seeded files have no hash-drift check or three-way merge.
+snapshot, then installs refresh it whenever that base exists. The refresh backs
+up and merges while retaining instance values; `--refresh-routing` forces it
+when no base exists. Other seeded files have no hash-drift check or three-way
+merge.
 """
 
 from __future__ import annotations
@@ -441,9 +443,10 @@ def refresh_routing(product_root: Path, instance_root: Path) -> dict[str, Any]:
                 "updated_from_product": [], "retained": []}
     base = _routing_base(instance_root)
     result, conflicts = _routing_result(product, installed, base)
-    updated_from_product, retained = (
-        _routing_no_base_changes(product, installed) if base is None else ([], [])
-    )
+    if base is None:
+        updated_from_product, retained = _routing_no_base_changes(product, installed)
+    else:
+        updated_from_product, retained = [], []
     schema_change = (
         (base.get("schema_version") if base is not None else installed.get("schema_version"))
         != product.get("schema_version")

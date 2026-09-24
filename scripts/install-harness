@@ -440,9 +440,11 @@ esac
 # resolved once, above, on the contract #529 established.
 run_stdlib "$PRODUCT_ROOT/scripts/instance_installation.py" seed \
   --product-root "$PRODUCT_ROOT" --instance-root "$instance_root" --no-pointer --summary
-if [[ "$REFRESH_ROUTING" == 1 ]]; then
+if [[ "$REFRESH_ROUTING" == 1 || -f "$instance_root/config/.model-routing.base.json" ]]; then
   run_stdlib "$PRODUCT_ROOT/scripts/instance_installation.py" refresh-routing \
     --product-root "$PRODUCT_ROOT" --instance-root "$instance_root" --summary
+else
+  echo "routing refresh skipped: no product snapshot; run install-harness --platform all --refresh-routing"
 fi
 
 install_primary() {

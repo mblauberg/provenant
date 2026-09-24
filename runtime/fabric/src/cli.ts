@@ -11,7 +11,11 @@
  */
 import { digest } from "./surface.js";
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { databasePath, identify, withoutGitRedirects } from "./identity.js";
+import { dispatchConfiguredBatch, dispatchConfiguredProvider, type BatchInput, type DispatchInput } from "./execution.js";
+import type { RouteInput } from "./execution-input.js";
 import {
   statusRows, fabricStatus, findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
 } from "./run-registry.js";
@@ -50,6 +54,8 @@ const USAGE = `fabric <command>
                               read-only guarantee, endpoint profiles
   dispatch list [--json]      configured-provider runs recorded in this workspace
   dispatch kill <run> [--json]  stop one recorded run and the group it leads
+  dispatch --adapter A --model M --effort E --mode MODE --prompt-file F [--wait]
+  dispatch --tasks F          run a JSON task manifest
 
 Identity comes from the working directory and AGENT_FABRIC_LABEL (or
 landing-push --label for that command). Registered
@@ -92,6 +98,15 @@ try {
   process.exit(2);
 }
 const who = identify(landingLabel === undefined ? process.env : { ...process.env, AGENT_FABRIC_LABEL: landingLabel });
+const executionIdentity = () => {
+  const store = new Store(databasePath());
+  try {
+    store.announce(who);
+    return { ...who, registeredProjects: store.projects() };
+  } finally {
+    store.close();
+  }
+};
 if (command === "lanes") {
   const rest = argv.slice(1).filter((value) => value !== "--json");
   if (rest.length > 1 || rest.some((value) => value.startsWith("--"))) {
@@ -171,8 +186,76 @@ if (command === "dispatch") {
     await new Promise<void>((resolveWrite) => process.stdout.write(`${output}\n`, "utf8", () => resolveWrite()));
     process.exit(outcome.signalled && outcome.reason !== "still running" ? 0 : 1);
   }
-  console.error(`fabric: usage: fabric dispatch <list|kill> ...`);
-  process.exit(2);
+  try {
+    const options = subcommand?.startsWith("--") ? rest : rest.slice(1);
+    const values = new Map<string, string>();
+    const switches = new Set<string>();
+    const allowed = new Set(["--adapter", "--alias", "--model", "--effort", "--mode", "--worktree", "--cwd", "--prompt-file", "--id", "--tasks"]);
+    for (let index = 0; index < options.length; index += 1) {
+      const option = options[index]!;
+      if (option === "--wait") {
+        if (switches.has(option)) throw new Error(`${option} may be passed once`);
+        switches.add(option);
+        continue;
+      }
+      if (!option.startsWith("--")) throw new Error(`unexpected argument: ${option}`);
+      if (!allowed.has(option)) throw new Error(`unknown option ${option}; choose ${[...allowed].join(", ")} or --wait`);
+      const value = options[++index];
+      if (value === undefined || value.startsWith("--")) throw new Error(`${option} requires a value`);
+      if (values.has(option)) throw new Error(`${option} may be passed once`);
+      values.set(option, value);
+    }
+    const read = (name: string): string | undefined => values.get(`--${name}`);
+    if (subcommand !== undefined && !subcommand.startsWith("--"))
+      throw new Error(`unknown dispatch subcommand: ${subcommand}`);
+    const route: RouteInput = {
+      ...(read("adapter") === undefined ? {} : { adapter: read("adapter") }),
+      ...(read("alias") === undefined ? {} : { alias: read("alias") }),
+      ...(read("model") === undefined ? {} : { model: read("model") }),
+      ...(read("effort") === undefined ? {} : { effort: read("effort") }),
+      ...(read("mode") === undefined ? {} : { mode: read("mode") as RouteInput["mode"] }),
+      ...(read("worktree") === undefined ? {} : { worktree: read("worktree") }),
+      ...(read("cwd") === undefined ? {} : { cwd: read("cwd") }),
+    };
+    const tasksFile = read("tasks");
+    let result: Record<string, unknown>;
+    if (tasksFile !== undefined) {
+      if (["prompt-file", "id"].some((key) => read(key) !== undefined))
+        throw new Error("--tasks cannot be combined with prompt or id flags");
+      const document = JSON.parse(readFileSync(resolve(who.cwd, tasksFile), "utf8")) as unknown;
+      const batch = (Array.isArray(document) ? { tasks: document } : document) as BatchInput;
+      if (!Array.isArray(batch.tasks)) throw new Error("--tasks file must contain a tasks array");
+      result = await dispatchConfiguredBatch({ ...route, ...batch, wait_seconds: switches.has("--wait") ? 55 : 0 }, executionIdentity(), new AbortController().signal);
+    } else {
+      const input: DispatchInput = {
+        ...route,
+        prompt_file: read("prompt-file"),
+        wait_seconds: switches.has("--wait") ? 55 : 0,
+        ...(read("id") === undefined ? {} : { task_id: read("id") }),
+        ...(read("worktree") === undefined ? {} : { worktree: read("worktree") }),
+        ...(read("cwd") === undefined ? {} : { cwd: read("cwd") }),
+      };
+      result = await dispatchConfiguredProvider(input, executionIdentity(), new AbortController().signal);
+    }
+    console.log(String(result.id ?? "unassigned"));
+    const taskRows = Array.isArray(result.tasks)
+      ? result.tasks.filter((item): item is Record<string, unknown> =>
+        item !== null && typeof item === "object" && (item as Record<string, unknown>).status === "rejected")
+      : [];
+    const rejectedDetails = result.status === "rejected"
+      ? ` error: ${String(result.error ?? "rejected").replace(/\s+/gu, " ")} fix: ${String(result.fix ?? "Check the input and try again.").replace(/\s+/gu, " ")}`
+      : "";
+    const rejectedTaskDetails = taskRows.length > 0
+      ? ` tasks: ${taskRows.map((error) =>
+        `${String(error.task_id ?? "task")}: ${String(error.error ?? "rejected")} (${String(error.fix ?? "check input")})`)
+        .join("; ").replace(/\s+/gu, " ")}`
+      : "";
+    console.log(`status: ${String(result.status ?? "unknown")}${rejectedDetails}${rejectedTaskDetails}`);
+    process.exit(result.status === "rejected" ? 1 : 0);
+  } catch (error) {
+    console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(2);
+  }
 }
 if (command === "adapters") {
   const unknown = argv.slice(1).filter((argument) => argument !== "--json");
