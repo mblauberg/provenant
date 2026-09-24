@@ -10,7 +10,8 @@
  *   fabric watch [--interval 2]
  */
 import { digest } from "./surface.js";
-import { databasePath, identify } from "./identity.js";
+import { execFileSync } from "node:child_process";
+import { databasePath, identify, withoutGitRedirects } from "./identity.js";
 import {
   statusRows, fabricStatus, findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
 } from "./run-registry.js";
@@ -33,6 +34,8 @@ const USAGE = `fabric <command>
   tasks [state]               list tasks, optionally filtered by state
   task <objective...>         open a task
   claim <task-id>             atomically claim an open, unowned task
+  lanes                       active work claims and landing lease
+  landing-push <session> <generation> <branch>  verify lease and remote SHA, then push HEAD
   done <task-id>              close a task
   activity [--after-seq N]    list activity, optionally after a cursor
            [--limit N]
@@ -52,7 +55,7 @@ const argv = process.argv.slice(2);
 const command = argv[0] ?? "whoami";
 const commands = new Set([
   "whoami", "send", "inbox", "ack", "note", "tasks", "task", "claim", "done",
-  "activity", "watch", "status", "doctor", "dispatch", "adapters",
+  "activity", "watch", "status", "doctor", "dispatch", "adapters", "lanes", "landing-push",
 ]);
 
 if (command === "--help" || command === "-h" || command === "help") {
@@ -221,6 +224,32 @@ try {
     if (argv.length !== 1) throw new Error("usage: fabric whoami");
     show({ ...who, database: databasePath(), agents: store.agents(who.project) });
     break;
+
+  case "lanes":
+    if (argv.length !== 1) throw new Error("usage: fabric lanes");
+    show({ work_claims: store.workClaims(who.project), landing_lease: store.landingLease(who.project) });
+    break;
+
+  case "landing-push": {
+    const session = argv[1], generation = Number(argv[2]), branch = argv[3];
+    if (argv.length !== 4 || !session || !Number.isSafeInteger(generation) || generation < 1 ||
+      !branch || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(branch) || branch.includes("..") || branch.endsWith("/"))
+      throw new Error("usage: fabric landing-push <session> <generation> <branch>");
+    const lease = store.landingLease(who.project);
+    if (!lease) throw new Error("stale landing lease");
+    store.verifyLanding(who, session, generation, lease.expectedSha);
+    const gitOptions = { cwd: who.cwd, env: withoutGitRedirects(process.env) };
+    const remote = execFileSync("git", ["ls-remote", "--heads", "origin", `refs/heads/${branch}`],
+      { ...gitOptions, encoding: "utf8" }).trim().split(/\s+/u)[0];
+    if (remote !== lease.expectedSha) throw new Error("remote integration SHA changed; acquire a new landing lease");
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { ...gitOptions, encoding: "utf8" }).trim();
+    execFileSync("git", ["merge-base", "--is-ancestor", remote, head], gitOptions);
+    store.withLandingPush(who, session, generation, remote, () =>
+      execFileSync("git", ["push", `--force-with-lease=refs/heads/${branch}:${remote}`,
+        "origin", `${head}:refs/heads/${branch}`], { ...gitOptions, stdio: "inherit", timeout: 120_000 }));
+    show({ pushed: branch, previous_sha: remote, generation });
+    break;
+  }
 
   case "send": {
     // Strip the flags first so whatever is left is the recipient and the body.

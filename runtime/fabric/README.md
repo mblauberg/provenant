@@ -155,6 +155,26 @@ CLI presence does not prove authentication; `auth?` makes that uncertainty expli
 
 ## Mailbox and identity
 
+### Work claims and landing
+
+`fabric_work_claim` acquires an issue or repository-relative path set for one
+chair session. Conflicting live issue claims and overlapping path prefixes are
+refused. Pass a distinct, stable `session_id` for each chair, even when two
+Claude Code sessions use the same Fabric seat. The returned `id` and fencing
+`generation` are required to renew or release; expired claims lapse. Active
+claims appear in `fabric_lanes`, `fabric_status` and `fabric lanes`.
+
+`fabric_landing_lease` separately acquires one repository-wide landing lease
+with the expected remote integration SHA. It has a holder, expiry, generation,
+verify and release operations. An expired lease can be taken over; the prior
+holder and new generation are recorded in activity. Before pushing, run
+`fabric landing-push <session-id> <generation> <branch>` from the landing
+checkout. It checks the remote SHA and live lease immediately before a normal
+fast-forward Git push, then releases the lease on success. A push is limited to
+two minutes and its persisted hold lasts another thirty seconds for stale
+recovery without blocking other Fabric writes. Renew or release an aborted
+lease through `fabric_landing_lease` as appropriate.
+
 `fabric_inbox` defaults to a non-claiming peek of ten headers: ID, sender, kind
 and an 80-character preview. `ids:[...]` claims up to 100 selected messages;
 `claim:true` claims available messages up to `limit`. Bodies are capped at

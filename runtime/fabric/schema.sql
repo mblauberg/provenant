@@ -110,3 +110,25 @@ CREATE TABLE IF NOT EXISTS activity (
 );
 
 CREATE INDEX IF NOT EXISTS activity_by_project ON activity(project, seq);
+
+CREATE TABLE IF NOT EXISTS work_claims (
+  generation INTEGER PRIMARY KEY AUTOINCREMENT,
+  id TEXT NOT NULL UNIQUE,
+  project TEXT NOT NULL,
+  holder TEXT NOT NULL,
+  issue TEXT,
+  paths TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  released_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS work_claims_active ON work_claims(project, expires_at, released_at);
+
+CREATE TABLE IF NOT EXISTS landing_leases (
+  project TEXT PRIMARY KEY,
+  holder TEXT NOT NULL,
+  generation INTEGER NOT NULL,
+  expected_sha TEXT NOT NULL,
+  expires_at INTEGER NOT NULL,
+  pushing_until INTEGER,
+  released_at INTEGER
+);

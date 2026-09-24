@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { databasePath, identify } from "./identity.js";
 import { statusRows, fabricOutput } from "./run-registry.js";
-import { reply, serverBuild, mailboxView, adapterView, runView } from "./surface.js";
+import { reply, digest, serverBuild, mailboxView, adapterView, runView } from "./surface.js";
 import { catalogueSnapshot } from "./catalogue.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
 import {
@@ -316,9 +316,48 @@ register(
     if (waitResult.error) return waitResult.error;
     const result = await statusRows(who.cwd, ids ?? (id ? [id] : undefined), waitResult.value, until, signal, detail);
     acknowledgeRuns(result);
-    return runView(withWarnings(result, waitResult.warnings), detail);
+    const view = runView(withWarnings(result, waitResult.warnings), detail);
+    const workClaims = readyStore().workClaims(who.project), landingLease = readyStore().landingLease(who.project);
+    const ownership = [
+      ...workClaims.map((claim) => `claim ${claim.issue ?? claim.paths.join(",")} ${claim.holder} g${claim.generation}`),
+      ...(landingLease ? [`landing ${landingLease.holder} g${landingLease.generation} ${landingLease.expectedSha}`] : []),
+    ];
+    return { ...view, work_claims: workClaims, landing_lease: landingLease,
+      ...(ownership.length ? { digest: `${digest(view)}\n${ownership.join("\n")}` } : {}) };
   },
 );
+register("fabric_lanes", "Read active project work claims and landing lease.", {}, () => ({
+  work_claims: readyStore().workClaims(who.project), landing_lease: readyStore().landingLease(who.project),
+}));
+register("fabric_work_claim", "Acquire, renew or release an issue or path claim with fencing.", {
+  action: z.enum(["acquire", "renew", "release"]), session_id: z.string().min(1),
+  issue: str, paths: z.array(z.string()).optional(), id: str,
+  generation: z.number().int().positive().optional(), seconds: z.number().int().min(1).max(3600).optional(),
+}, ({ action, session_id, issue, paths, id, generation, seconds }) => {
+  if (action === "acquire") return readyStore().acquireWork(who, session_id, { issue, paths }, seconds ?? 900);
+  if (!id || generation === undefined) throw new Error("id and generation are required");
+  if (action === "renew") return readyStore().renewWork(who, session_id, id, generation, seconds ?? 900);
+  readyStore().releaseWork(who, session_id, id, generation);
+  return { released: id, generation };
+});
+register("fabric_landing_lease", "Acquire, renew, verify or release the repository landing lease.", {
+  action: z.enum(["acquire", "renew", "verify", "release"]), session_id: z.string().min(1),
+  expected_sha: str, generation: z.number().int().positive().optional(),
+  seconds: z.number().int().min(1).max(3600).optional(),
+}, ({ action, session_id, expected_sha, generation, seconds }) => {
+  if (action === "acquire") {
+    if (!expected_sha) throw new Error("expected_sha is required");
+    return readyStore().acquireLanding(who, session_id, expected_sha, seconds ?? 300);
+  }
+  if (generation === undefined) throw new Error("generation is required");
+  if (action === "renew") return readyStore().renewLanding(who, session_id, generation, seconds ?? 300);
+  if (action === "verify") {
+    if (!expected_sha) throw new Error("expected_sha is required");
+    return readyStore().verifyLanding(who, session_id, generation, expected_sha);
+  }
+  readyStore().releaseLanding(who, session_id, generation);
+  return { released: generation };
+});
 register("fabric_cancel", "Stop a run and its provider group.", { id: z.string(), reason: str }, async ({ id, reason }) => {
   const result = await cancelConfiguredRun(id, who, reason);
   acknowledgeRuns(result);
