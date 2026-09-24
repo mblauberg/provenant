@@ -294,6 +294,7 @@ it.each([false, true])("exposes the default tools within budget (legacy=%s)", as
         "dispatch",
         "events",
         "inbox",
+        "landing_lease",
         "note",
         "output",
         "runs",
@@ -301,12 +302,13 @@ it.each([false, true])("exposes the default tools within budget (legacy=%s)", as
         "status",
         "task",
         "whoami",
+        "work_claim",
         ...(legacy ? ["batch", "team_create", "task_create", "task_claim", "task_update", "tasks"] : []),
       ]
         .map((n) => "fabric_" + n)
         .sort(),
     );
-    if (!legacy) expect(JSON.stringify(result).length).toBeLessThanOrEqual(7000);
+    if (!legacy) expect(JSON.stringify(result).length).toBeLessThanOrEqual(8000);
     const invalid = await client.callTool({
       name: "fabric_inbox",
       arguments: { ids: Array.from({ length: 101 }, (_, i) => String(i)) },

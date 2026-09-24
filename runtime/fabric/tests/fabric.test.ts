@@ -182,13 +182,11 @@ describe("work ownership", () => {
         action: "acquire", session_id: "claude-session-one", expected_sha: "a".repeat(40), seconds: 60,
       } });
       expect(lease.isError).not.toBe(true);
-      const lanes = await client.callTool({ name: "fabric_lanes", arguments: {} });
-      expect(lanes.structuredContent).toMatchObject({
+      const status = await client.callTool({ name: "fabric_status", arguments: { detail: "full" } });
+      expect(status.structuredContent).toMatchObject({
         work_claims: [{ holder: "chair-one/claude-session-one", issue: "869" }],
         landing_lease: { holder: "chair-one/claude-session-one", expectedSha: "a".repeat(40) },
       });
-      const status = await client.callTool({ name: "fabric_status", arguments: { detail: "full" } });
-      expect(status.structuredContent).toMatchObject({ work_claims: [{ issue: "869" }] });
       const brief = await client.callTool({ name: "fabric_status", arguments: {} });
       expect(brief.content).toMatchObject([{ text: expect.stringContaining("claim 869 chair-one/claude-session-one") }]);
       const push = runCli(["landing-push", "other-session", "1", "main"]);

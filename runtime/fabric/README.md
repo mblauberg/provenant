@@ -261,7 +261,7 @@ conflicting live claim. Pass a distinct, stable `session_id` without `/` for
 each chair, even when two sessions use the same Fabric seat. The returned `id`
 and `generation` identify renew, verify and release operations; expired claims
 lapse. `#869` and `869` share an issue key, and path claims compare without case.
-Active claims appear in `fabric_lanes`, `fabric work-claims` and `fabric_status` when
+Active claims appear in `fabric work-claims` and `fabric_status` when
 full detail is requested or ownership is present.
 
 `fabric_landing_lease` separately acquires one repository-wide landing lease

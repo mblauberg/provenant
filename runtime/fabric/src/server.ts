@@ -349,8 +349,16 @@ register(
     const result = await statusRows(who.cwd, ids ?? (id ? [id] : undefined), waitResult.value, until, signal, detail);
     acknowledgeRuns(result);
     const view = runView(withWarnings(result, waitResult.warnings), detail);
-    const ownershipStore = readyStore();
-    const workClaims = ownershipStore.workClaims(who.project), landingLease = ownershipStore.landingLease(who.project);
+    // Claims are an addendum; run status must stay readable when the store cannot open.
+    let workClaims: ReturnType<Store["workClaims"]> = [];
+    let landingLease: ReturnType<Store["landingLease"]> | undefined;
+    try {
+      const ownershipStore = readyStore();
+      workClaims = ownershipStore.workClaims(who.project);
+      landingLease = ownershipStore.landingLease(who.project);
+    } catch {
+      // Fall through with no ownership rows.
+    }
     const ownership = [
       ...workClaims.map((claim) => `claim ${claim.issue ?? claim.paths.join(",")} ${claim.holder} g${claim.generation}`),
       ...(landingLease ? [`landing ${landingLease.holder} g${landingLease.generation} ${landingLease.expectedSha}`] : []),
@@ -360,10 +368,6 @@ register(
       ...(ownership.length ? { digest: `${digest(view)}\n${ownership.join("\n")}` } : {}) };
   },
 );
-register("fabric_lanes", "Read active project work claims and landing lease.", {}, () => {
-  const laneStore = readyStore();
-  return { work_claims: laneStore.workClaims(who.project), landing_lease: laneStore.landingLease(who.project) };
-});
 register("fabric_work_claim", "Acquire, renew, verify or release an advisory issue or path claim.", {
   action: z.enum(["acquire", "renew", "verify", "release"]), session_id: z.string().min(1),
   issue: str, paths: z.array(z.string()).optional(), id: str,
