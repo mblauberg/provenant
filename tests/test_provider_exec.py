@@ -121,11 +121,81 @@ def protected_repo(tmp_path):
     repo = tmp_path / "repo"
     repo.mkdir()
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
-    (repo / "config").mkdir()
-    (repo / "config/fabric-policy.json").write_text('{"protected_paths":["private/"]}')
+    (repo / ".agents").mkdir()
+    (repo / ".agents/fabric-policy.json").write_text('{"protected_paths":["private/"]}')
     (repo / "private").mkdir()
     (repo / "safe").mkdir()
     return repo
+
+
+def test_workspace_root_policy_resolves_outside_git(monkeypatch, tmp_path):
+    mod = supervisor()
+    workspace = tmp_path / "workspace"
+    (workspace / ".agents").mkdir(parents=True)
+    (workspace / ".agents/fabric-policy.json").write_text('{"protected_paths":["secret/"]}')
+    (workspace / "secret").mkdir()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = mod.build_plan("opencode", {"trains_on_prompts": True}, "hello",
+                          cwd=workspace, workspace_root=workspace)
+    assert plan["protected_paths"] == [str(workspace / "secret")]
+    with pytest.raises(ValueError, match="protected path"):
+        mod.build_plan("opencode", {"trains_on_prompts": True}, "hello",
+                       cwd=workspace / "secret", workspace_root=workspace)
+
+
+@pytest.mark.parametrize("declaration", ["{", "{}", '{"protected_paths":"secret/"}',
+                                           '{"protected_paths":["../secret/"]}'])
+def test_invalid_workspace_policy_refuses_training_route(tmp_path, declaration):
+    mod = supervisor()
+    (tmp_path / ".agents").mkdir()
+    (tmp_path / ".agents/fabric-policy.json").write_text(declaration)
+    with pytest.raises(ValueError, match="invalid protected path policy"):
+        mod.build_plan("opencode", {"trains_on_prompts": True}, "hello",
+                       cwd=tmp_path, workspace_root=tmp_path)
+
+
+def test_writer_discovers_worktree_policy_outside_workspace(monkeypatch, tmp_path):
+    mod = supervisor()
+    repo = protected_repo(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = mod.build_plan("opencode", {"trains_on_prompts": True}, "hello",
+                          workspace_root=workspace, mode="worktree_write", worktree=repo)
+    assert plan["protected_paths"] == [str(repo / "private")]
+
+
+def test_non_git_workspace_discovers_child_repo_policy_and_linked_worktree(monkeypatch, tmp_path):
+    mod = supervisor()
+    workspace = tmp_path / "workspace"
+    repo = workspace / "app"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test", "-c",
+                    "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "initial"], check=True)
+    linked = repo / ".worktrees/linked"
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "linked", str(linked)], check=True)
+    (repo / ".agents").mkdir()
+    (repo / ".agents/fabric-policy.json").write_text('{"protected_paths":["secret/"]}')
+    for root in (repo, linked):
+        (root / "secret").mkdir()
+        (root / "secret/prompt.md").write_text("sensitive")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = mod.build_plan("opencode", {"trains_on_prompts": True}, "hello",
+                          cwd=workspace, workspace_root=workspace)
+    profile = mod.os_confinement_profile(plan)
+    deny = next(line for line in profile.splitlines() if line.startswith("(deny file-read* "))
+    for root in (repo, linked):
+        assert f'(subpath "{root / "secret"}")' in deny
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    for root in (repo, linked):
+        task = {"id": "one", "adapter": "opencode", "model": "opencode/mimo-v2.6-flash-free",
+                "prompt_file": str(root / "secret/prompt.md"), "cwd": str(workspace)}
+        result = importlib.import_module("skills.orchestrate.scripts.dispatch_run").preflight_tasks([task])
+        assert result["status"] == "rejected"
+        assert "secret" in result["fix"] and "non-training route" in result["fix"]
 
 
 def test_protected_profile_covers_registered_worktrees_and_non_training_route(monkeypatch, tmp_path):
@@ -170,7 +240,7 @@ def test_protected_preflight_refuses_training_inputs(monkeypatch, tmp_path, fiel
     elif field == "add_dirs":
         task[field] = [str(repo / "private")]
     else:
-        task[field] = str(repo)
+        task[field] = str(repo / "private")
     result = importlib.import_module("skills.orchestrate.scripts.dispatch_run").preflight_tasks([task])
     assert result["status"] == "rejected"
     assert "private" in result["fix"] and "non-training route" in result["fix"]

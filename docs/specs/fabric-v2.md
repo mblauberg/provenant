@@ -65,11 +65,15 @@ Project `CLAUDE.md` keeps both `@AGENTS.md` and `@HARNESS.md`. `scripts/install-
 
 ## Routing and authority
 
-`config/fabric-policy.json` declares repository-relative `protected_paths` for
+`.agents/fabric-policy.json` declares `protected_paths` relative to the
+directory containing `.agents/`; Fabric discovers it at the workspace root and
+the Git toplevels of workspace, cwd and worktree, plus immediate child
+repository toplevels of a non-Git workspace, and mirrors repository paths into
 every registered worktree. Routes resolve `trains_on_prompts` from the model,
 then the adapter; an unresolved value counts as training. A training route is
-rejected when its prompt file, additional directory or cwd overlaps a protected
-path, or when OS read confinement is unavailable. Its `sandbox-exec` profile
+rejected when its prompt file or additional directory overlaps a protected
+path, its cwd lies inside one, or OS read confinement is unavailable. Its
+`sandbox-exec` profile
 denies reads of those paths in every registered worktree. Non-training routes
 are unaffected. Codex writer confinement is supplied by `-s workspace-write`
 (or `-c sandbox_mode="workspace-write"` on resume),

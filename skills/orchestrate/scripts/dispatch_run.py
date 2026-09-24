@@ -1245,6 +1245,7 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                     raise PreflightError(code, fixes.get(code, fix))
                 protected = provider_exec.check_protected_inputs(
                     route, workspace, worktree if mode == "worktree_write" else task.get("cwd") or workspace,
+                    worktree=worktree if mode == "worktree_write" else None,
                     prompt_file=task.get("prompt_file"), add_dirs=task.get("add_dirs", []))
                 if protected and (adapter == "codex" or not provider_exec._sandbox_exec_path()):
                     raise ValueError("protected paths require sandbox-exec read confinement; fix: use a non-training route")

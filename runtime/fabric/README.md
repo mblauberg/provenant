@@ -80,11 +80,14 @@ on resume), with `-c sandbox_workspace_write.writable_roots=<add_dirs>` and
 is unavailable, a writer receipt warns that writes are unconfined.
 The receipt records `applied.confinement` as `sandbox-exec`, `provider-native` or `none`;
 `workspace.cwd` is the provider cwd and `workspace.root` is the caller workspace.
-Projects declare protected repository-relative files or directories in
-`config/fabric-policy.json`. A route marked as training, or lacking a resolved
-training flag, cannot receive a prompt file, additional directory or cwd that
-overlaps one. Its sandbox denies reads of protected paths in every registered
-worktree; without usable `sandbox-exec`, dispatch is rejected. Non-training
+Projects declare protected paths in `.agents/fabric-policy.json`, relative to
+the directory holding `.agents/`. Fabric checks the workspace root and the Git
+toplevels of the workspace, cwd and worktree; for a non-Git workspace, it also
+checks immediate child repository toplevels and mirrors repository paths into
+their registered worktrees. A route marked as training, or lacking a resolved
+training flag, cannot receive a prompt file or additional directory that
+overlaps one, or a cwd inside one. Its sandbox denies reads of protected paths
+in every registered worktree; without usable `sandbox-exec`, dispatch is rejected. Non-training
 routes keep their usual access.
 
 On macOS, a Codex `read-only` or `workspace-write` provider gets a bundled `ps`

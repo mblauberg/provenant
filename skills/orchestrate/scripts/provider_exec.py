@@ -159,43 +159,67 @@ def _sbpl_rule(action, operations, paths):
     return f"({action} {operations} " + " ".join(_sbpl_filter(path) for path in paths) + ")\n" if paths else ""
 
 
-def protected_paths(workspace_root):
-    root = subprocess.run(["git", "-C", str(workspace_root), "rev-parse", "--show-toplevel"],
-                          capture_output=True, text=True, timeout=5)
-    if root.returncode != 0:
-        return []
-    repo = Path(root.stdout.strip()).resolve()
-    declaration = repo / "config/fabric-policy.json"
-    if not declaration.is_file():
-        return []
-    try:
-        paths = json.loads(declaration.read_text())["protected_paths"]
-        if not isinstance(paths, list) or any(not isinstance(p, str) or not p or
-                                             Path(p).is_absolute() or ".." in Path(p).parts or
-                                             any(char in p for char in "*?[]") for p in paths):
-            raise ValueError("invalid protected paths")
-    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
-        raise ValueError(f"invalid protected path policy: {declaration}") from exc
-    listing = subprocess.run(["git", "-C", str(repo), "worktree", "list", "--porcelain"],
-                             capture_output=True, text=True, timeout=5)
-    if listing.returncode != 0:
-        raise ValueError("cannot list worktrees for protected path policy")
-    roots = [Path(line[9:]).resolve() for line in listing.stdout.splitlines() if line.startswith("worktree ")]
-    return [root / relative for root in roots for relative in paths]
+def _git_toplevel(path):
+    result = subprocess.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+                            capture_output=True, text=True, timeout=5)
+    return Path(result.stdout.strip()).resolve() if result.returncode == 0 and result.stdout.strip() else None
 
 
-def check_protected_inputs(route, workspace_root, cwd, *, prompt_file=None, add_dirs=()):
+def protected_paths(workspace_root, cwd=None, worktree=None):
+    workspace = Path(workspace_root).expanduser().resolve()
+    owners = [workspace]
+    roots = [_git_toplevel(path) for path in (workspace, cwd, worktree) if path is not None]
+    if roots[0] is None:
+        for child in sorted(workspace.iterdir()):
+            if child.is_dir() and _git_toplevel(child) == child.resolve():
+                roots.append(child.resolve())
+    owners.extend(root for root in roots if root is not None and root not in owners)
+    protected = []
+    worktrees = {}
+    for owner in owners:
+        declaration = owner / ".agents/fabric-policy.json"
+        if not declaration.is_file():
+            continue
+        try:
+            paths = json.loads(declaration.read_text())["protected_paths"]
+            if not isinstance(paths, list) or any(not isinstance(p, str) or not p or
+                                                 Path(p).is_absolute() or ".." in Path(p).parts or
+                                                 any(char in p for char in "*?[]") for p in paths):
+                raise ValueError("invalid protected paths")
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"invalid protected path policy: {declaration}") from exc
+        for relative in paths:
+            resolved = (owner / relative).resolve()
+            existing = resolved
+            while not existing.is_dir() and existing != existing.parent:
+                existing = existing.parent
+            repo = _git_toplevel(existing)
+            if repo is None or not resolved.is_relative_to(repo):
+                protected.append(resolved)
+                continue
+            if repo not in worktrees:
+                listing = subprocess.run(["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+                                         capture_output=True, text=True, timeout=5)
+                if listing.returncode != 0:
+                    raise ValueError("cannot list worktrees for protected path policy")
+                worktrees[repo] = [Path(line[9:]).resolve() for line in listing.stdout.splitlines()
+                                   if line.startswith("worktree ")]
+            protected.extend(root / resolved.relative_to(repo) for root in worktrees[repo])
+    return list(dict.fromkeys(protected))
+
+
+def check_protected_inputs(route, workspace_root, cwd, *, worktree=None, prompt_file=None, add_dirs=()):
     if route.get("trains_on_prompts") is False:
         return []
-    paths = protected_paths(workspace_root)
+    paths = protected_paths(workspace_root, cwd, worktree)
     if not paths:
         return []
-    for candidate in (prompt_file, cwd, *add_dirs):
+    for candidate, reject_parent in ((prompt_file, True), (cwd, False), *((path, True) for path in add_dirs)):
         if candidate is None:
             continue
         item = Path(candidate).expanduser().resolve()
         for protected in paths:
-            if item.is_relative_to(protected) or protected.is_relative_to(item):
+            if item.is_relative_to(protected) or (reject_parent and protected.is_relative_to(item)):
                 raise ValueError(f"protected path {protected}; fix: use a non-training route")
     return paths
 
@@ -285,7 +309,7 @@ def build_plan(
         raise ValueError("cwd must be inside the workspace")
     workspace_root = str(Path(workspace_root or selected_cwd).expanduser().resolve())
     cwd = str(selected_cwd)
-    guarded = check_protected_inputs(route, workspace_root, cwd,
+    guarded = check_protected_inputs(route, workspace_root, cwd, worktree=worktree,
                                      prompt_file=prompt_file, add_dirs=add_dirs)
     sandbox = sandbox or (
         "workspace-write" if mode == "worktree_write" else "read-only"
@@ -2194,7 +2218,7 @@ def main():
         if not args.worktree and not selected_cwd.is_relative_to(workspace_root):
             raise ValueError("cwd must be inside the workspace")
         route = json.loads(args.route_file.read_text())
-        check_protected_inputs(route, workspace_root, selected_cwd,
+        check_protected_inputs(route, workspace_root, selected_cwd, worktree=args.worktree,
                                prompt_file=args.prompt_file, add_dirs=args.add_dir)
         plan = build_plan(
             args.adapter,
