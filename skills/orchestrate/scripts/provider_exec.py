@@ -155,8 +155,9 @@ def _sbpl_filter(path):
     return "(subpath " + _sbpl_string(path) + ")"
 
 
-def _sbpl_rule(action, operations, paths):
-    return f"({action} {operations} " + " ".join(_sbpl_filter(path) for path in paths) + ")\n" if paths else ""
+def _sbpl_rule(action, operations, paths, *, literal=False):
+    filters = (('(literal ' + _sbpl_string(path) + ')') if literal else _sbpl_filter(path) for path in paths)
+    return f"({action} {operations} " + " ".join(filters) + ")\n" if paths else ""
 
 
 def _git_toplevel(path):
@@ -235,17 +236,32 @@ def os_confinement_profile(plan):
     add_dirs = [Path(path) for path in plan.get("applied", {}).get("add_dirs", [])]
     if plan.get("mode") == "worktree_write":
         cwd = Path(plan["cwd"])
-        git_dirs = []
+        git_dirs = {}
         for flag in ("--absolute-git-dir", "--git-common-dir"):
             result = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", flag],
                                     capture_output=True, text=True, timeout=5)
             if result.returncode == 0 and result.stdout.strip():
-                git_dirs.append(Path(result.stdout.strip()))
-        allowed = [cwd, *git_dirs, Path(plan["run_dir"]), Path(os.environ.get("TMPDIR", tempfile.gettempdir())),
+                git_dirs[flag] = Path(result.stdout.strip()).resolve()
+        private = git_dirs.get("--absolute-git-dir")
+        common = git_dirs.get("--git-common-dir")
+        allowed = [cwd, Path(plan["run_dir"]), Path(os.environ.get("TMPDIR", tempfile.gettempdir())),
                    Path("/private/tmp"), *_darwin_user_dirs(), Path("/dev"),
-                   *(home / path for path in state.get("read_write", ()))]
+                   *(home / path for path in state.get("read_write", ())),
+                   home / ".cache", home / "Library/Caches"]
+        git_allowed = []
+        if private is not None and private != common:
+            git_allowed.append(private)
+        if common is not None:
+            git_allowed.extend(common / path for path in ("objects", "refs", "logs"))
+        literal_files = ([common / path for path in ("packed-refs", "packed-refs.lock")]
+                         if common is not None else [])
+        if plan.get("adapter") == "claude":
+            literal_files.extend(home / path for path in (".claude.json", ".claude.json.backup"))
         return ("(version 1)\n(allow default)\n(deny file-write*)\n"
                 + _sbpl_rule("allow", "file-write*", allowed)
+                + _sbpl_rule("deny", "file-write*", [common] if common is not None else [])
+                + _sbpl_rule("allow", "file-write*", git_allowed)
+                + _sbpl_rule("allow", "file-write*", literal_files, literal=True)
                 + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", [])))
     return (
         "(version 1)\n(allow default)\n"

@@ -95,11 +95,43 @@ def test_writer_confinement_allows_only_owned_paths(monkeypatch, tmp_path):
             "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
     profile = mod.os_confinement_profile(plan)
     assert "(deny file-write*)" in profile
-    for path in (worktree, attempt, private, common):
+    assert f'(deny file-write* (subpath "{common}"))' in profile
+    allow = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-write* "))
+    for path in (worktree, attempt, private):
+        assert f'(subpath "{path}")' in allow
+    assert f'(subpath "{common}")' not in allow
+    for path in (common / "objects", common / "refs", common / "logs"):
         assert f'(subpath "{path}")' in profile
+    for path in (common / "packed-refs", common / "packed-refs.lock"):
+        assert f'(literal "{path}")' in profile
+    for path in (common / "config", common / "hooks", common / "HEAD", common / "index"):
+        assert f'(subpath "{path}")' not in profile
+        assert f'(literal "{path}")' not in profile
+    for path in (Path.home() / ".cache", Path.home() / "Library/Caches"):
+        assert f'(subpath "{path}")' in profile
+    for path in (Path.home() / ".claude.json", Path.home() / ".claude.json.backup"):
+        assert f'(literal "{path}")' in profile
     assert f'(subpath "{tmp_path}")' not in profile
     assert '(subpath "/dev")' in profile
     assert "(deny file-read-data" not in profile
+
+
+def test_writer_denies_primary_checkout_git_metadata(monkeypatch, tmp_path):
+    mod = supervisor()
+    common = tmp_path / ".git"
+    common.mkdir()
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=str(common)))
+    monkeypatch.setattr(mod, "_darwin_user_dirs", lambda: ())
+    profile = mod.os_confinement_profile({
+        "adapter": "claude", "mode": "worktree_write", "cwd": str(tmp_path),
+        "workspace_root": str(tmp_path), "run_dir": str(tmp_path / "run"), "applied": {},
+    })
+    lines = profile.splitlines()
+    denied = lines.index(f'(deny file-write* (subpath "{common}"))')
+    assert denied > next(i for i, line in enumerate(lines) if line.startswith("(allow file-write* "))
+    assert not any(f'(subpath "{common}")' in line for line in lines if line.startswith("(allow file-write* "))
+    assert f'(subpath "{common / "objects"}")' in profile
+    assert f'(literal "{common / "packed-refs"}")' in profile
 
 
 def test_writer_confinement_selection_and_degraded_warning(monkeypatch, tmp_path):
@@ -115,6 +147,18 @@ def test_writer_confinement_selection_and_degraded_warning(monkeypatch, tmp_path
     degraded = mod.build_plan("claude", {}, "hello", cwd=tmp_path, mode="worktree_write")
     assert degraded["applied"]["confinement"] == "none"
     assert any("worktree_write writes are unconfined" in item for item in degraded["warnings"])
+
+
+@pytest.mark.parametrize("adapter", ["agy", "opencode", "claude", "cursor", "kiro"])
+def test_wrapped_writer_allows_common_provider_caches(monkeypatch, tmp_path, adapter):
+    mod = supervisor()
+    monkeypatch.setattr(mod, "_darwin_user_dirs", lambda: ())
+    profile = mod.os_confinement_profile({
+        "adapter": adapter, "mode": "worktree_write", "cwd": str(tmp_path),
+        "workspace_root": str(tmp_path), "run_dir": str(tmp_path / "run"), "applied": {},
+    })
+    for path in (Path.home() / ".cache", Path.home() / "Library/Caches"):
+        assert f'(subpath "{path}")' in profile
 
 
 def protected_repo(tmp_path):

@@ -73,8 +73,9 @@ sandbox, where macOS refuses a nested one, the run proceeds unconfined with a
 warning. Codex, Claude and Cursor read-only runs restrict writes, not reads, so
 a `cwd` below the root carries the warning "cwd is not a read boundary".
 Writer runs on macOS use `sandbox-exec` to restrict writes to their worktree,
-Git metadata, attempt files, temporary directories, device nodes and provider
-state. Codex uses `-s workspace-write` (or `-c sandbox_mode="workspace-write"`
+per-worktree Git metadata, common Git objects, refs, logs and packed refs,
+attempt files, temporary directories, device nodes and provider state. Codex
+uses `-s workspace-write` (or `-c sandbox_mode="workspace-write"`
 on resume), with `-c sandbox_workspace_write.writable_roots=<add_dirs>` and
 `--cd <worktree>` on a fresh run. If OS confinement
 is unavailable, a writer receipt warns that writes are unconfined.
