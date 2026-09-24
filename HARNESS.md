@@ -65,8 +65,10 @@ Prefer per-dispatch controls. Editing global provider configuration (for example
 `~/.codex/config.toml`) requires explicit authority for that path and action.
 Run artifacts live under `.agent-run/`; `provenant clean` classifies retention.
 Durable knowledge belongs in project state, specs, ADRs and runbooks; harness-private memory
-holds only cross-project preferences. Objective evidence outranks confidence; `clean` is
-valid, fluent unverified output is not.
+holds only cross-project preferences. Once a memory file's content is promoted to its
+owning project doc or skill, delete the memory file and its `MEMORY.md` entry; do not leave a
+pointer stub. Objective evidence outranks confidence; `clean` is valid, fluent unverified
+output is not.
 
 A user correction names a class, not an instance: sweep every artefact in scope for the same
 defect and report what the sweep found.
