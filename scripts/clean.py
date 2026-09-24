@@ -337,7 +337,7 @@ def _worktree_verdict(root: Path, path: Path, open_heads: set[str],
     if dirty.stdout:
         return "triage:merged-dirty" if _merged(root, branch) else "keep:dirty"
     if _merged(root, branch):
-        base = "refs/heads/main" if _command("git", "show-ref", "--verify", "--quiet", "refs/heads/main", cwd=root).returncode == 0 else "HEAD"
+        base = _integration_ref(root)
         if _command("git", "rev-parse", branch, cwd=root).stdout.strip() == _command("git", "rev-parse", base, cwd=root).stdout.strip():
             return "keep:branch-at-base"
         # Query all process cwd paths once; +D recursively stats the worktree
@@ -355,9 +355,22 @@ def _worktree_verdict(root: Path, path: Path, open_heads: set[str],
     return "keep:unmerged"
 
 
+def _integration_ref(root: Path) -> str:
+    remote_head = _command("git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD", cwd=root)
+    if remote_head.returncode == 0 and remote_head.stdout.strip().startswith("origin/"):
+        candidate = "refs/heads/" + remote_head.stdout.strip()[len("origin/"):]
+        if _command("git", "show-ref", "--verify", "--quiet", candidate, cwd=root).returncode == 0:
+            return candidate
+    return "refs/heads/main" if _command("git", "show-ref", "--verify", "--quiet", "refs/heads/main", cwd=root).returncode == 0 else "HEAD"
+
+
+def _merged_by_ancestry(root: Path, branch: str) -> bool:
+    return _command("git", "merge-base", "--is-ancestor", branch, _integration_ref(root), cwd=root).returncode == 0
+
+
 def _merged(root: Path, branch: str) -> bool:
-    base = "refs/heads/main" if _command("git", "show-ref", "--verify", "--quiet", "refs/heads/main", cwd=root).returncode == 0 else "HEAD"
-    if _command("git", "merge-base", "--is-ancestor", branch, base, cwd=root).returncode == 0:
+    base = _integration_ref(root)
+    if _merged_by_ancestry(root, branch):
         return True
     # Squash proof needs both a merged PR and an empty scoped tree diff.
     try:
@@ -380,11 +393,14 @@ def _merged(root: Path, branch: str) -> bool:
 
 
 def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: float | None = None,
-         pr_bodies: list[str] | None = None, now: datetime | None = None) -> dict[str, Any]:
+         pr_bodies: list[str] | None = None, now: datetime | None = None,
+         prune_merged: bool = False) -> dict[str, Any]:
     root = primary_root(repo)
     now = now or datetime.now(timezone.utc)
     if not include <= KINDS:
         raise CleanError("unknown include class")
+    if prune_merged and (include != frozenset({"worktrees"}) or older_than is not None):
+        raise CleanError("--prune-merged only supports worktrees without a retention override")
     if pr_bodies is None:
         pr_bodies, open_heads = _open_prs(root)
     else:
@@ -467,6 +483,10 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
                 verdict = "triage:unregistered"
             else:
                 verdict = _worktree_verdict(root, path, open_heads, registered)
+            if prune_merged and verdict == "delete":
+                branch = _command("git", "symbolic-ref", "--quiet", "--short", "HEAD", cwd=path).stdout.strip()
+                if not _merged_by_ancestry(root, branch):
+                    verdict = "keep:squash-proof-unavailable"
             if "worktrees" not in include and verdict == "delete":
                 verdict = "keep:excluded"
             elif verdict == "delete" and older_than is not None and _age(path, now) < older_than:
@@ -497,8 +517,9 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
 
 def apply(repo: Path, approved_plan: str, *, include: frozenset[str] = DEFAULT_INCLUDE,
           older_than: float | None = None, pr_bodies: list[str] | None = None,
-          human_authorised: bool = False) -> list[str]:
-    current = plan(repo, include=include, older_than=older_than, pr_bodies=pr_bodies)
+          human_authorised: bool = False, prune_merged: bool = False) -> list[str]:
+    current = plan(repo, include=include, older_than=older_than, pr_bodies=pr_bodies,
+                   prune_merged=prune_merged)
     if approved_plan != current["plan_sha256"]:
         raise CleanError("approved plan digest does not match the current cleanup plan")
     if not human_authorised and any(row["kind"] == "worktree" and row["verdict"] == "delete" for row in current["rows"]):
@@ -553,13 +574,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--plan")
     parser.add_argument("--human-authorised", action="store_true", help="attest authority to remove merged worktrees")
+    parser.add_argument("--prune-merged", action="store_true", help="remove clean ancestry-proven merged worktrees")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     include = frozenset(part.strip() for part in args.include.split(",") if part.strip())
     if args.apply != bool(args.plan):
         parser.error("--apply and --plan sha256:<digest> are required together")
+    if args.prune_merged and (args.apply or args.human_authorised or args.older_than is not None
+                              or args.include != "runs,scratch,worktrees"):
+        parser.error("--prune-merged accepts only --repo and --json")
     try:
-        if args.apply:
+        if args.prune_merged:
+            worktrees = frozenset({"worktrees"})
+            proposal = plan(args.repo, include=worktrees, prune_merged=True)
+            removed = apply(args.repo, proposal["plan_sha256"], include=worktrees,
+                            human_authorised=True, prune_merged=True)
+            report = {"removed": removed, "skipped": [
+                {"path": row["path"], "reason": row["verdict"]}
+                for row in proposal["rows"] if row["kind"] == "worktree" and row["verdict"] != "delete"
+            ]}
+        elif args.apply:
             removed = apply(args.repo, args.plan, include=include, older_than=args.older_than,
                             human_authorised=args.human_authorised)
             report = {"removed": removed, "count": len(removed)}
@@ -570,8 +604,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.json:
         public = {**report, "rows": [{key: value for key, value in row.items() if key != "_identity"}
-                                     for row in report["rows"]]} if not args.apply else report
+                                     for row in report["rows"]]} if not (args.apply or args.prune_merged) else report
         print(json.dumps(public, indent=2, sort_keys=True))
+    elif args.prune_merged:
+        for path in report["removed"]:
+            print(f"removed {path}")
+        for row in report["skipped"]:
+            print(f"skipped {row['path']}: {row['reason']}")
     elif args.apply:
         print(f"removed {report['count']} paths")
         for path in report["removed"]:

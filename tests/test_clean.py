@@ -11,6 +11,7 @@ import subprocess
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "clean.py"
+HOOK = SCRIPT.parent / "hooks" / "post-merge"
 
 
 def cleaner():
@@ -523,6 +524,145 @@ def test_worktree_apply_requires_explicit_authority_attestation(tmp_path):
     assert target.exists()
     assert module.apply(root, proposal["plan_sha256"], pr_bodies=[], human_authorised=True) == [".worktrees/lane-done"]
     assert not target.exists()
+
+
+def test_prune_merged_removes_only_clean_ancestry_proven_worktrees(tmp_path):
+    root = repo(tmp_path)
+    subprocess.run(["git", "-C", str(root), "branch", "-M", "main"], check=True)
+    targets = {}
+    for name in ("done", "dirty", "pending"):
+        target = root / ".worktrees" / f"lane-{name}"
+        target.parent.mkdir(exist_ok=True)
+        subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", f"lane/{name}", str(target)], check=True)
+        (target / f"{name}.txt").write_text(f"{name}\n")
+        subprocess.run(["git", "-C", str(target), "add", f"{name}.txt"], check=True)
+        subprocess.run(["git", "-C", str(target), "commit", "-qm", name], check=True)
+        targets[name] = target
+    for name in ("done", "dirty"):
+        subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", f"merge {name}", f"lane/{name}"], check=True)
+    (targets["dirty"] / "untracked.txt").write_text("preserve\n")
+    scratch = root / ".agent-run" / "scratch" / "old.txt"
+    scratch.parent.mkdir(parents=True)
+    scratch.write_text("preserve\n")
+    old(scratch, 2)
+    run = root / ".agent-run" / "runs" / "20260801-1200-dispatch-expired-a1b2c3"
+    run.mkdir(parents=True)
+    (run / "RUN_RECEIPT.json").write_text('{"status":"ok"}\n')
+    old(run)
+
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--repo", str(root)],
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert "removed .worktrees/lane-done" in result.stdout
+    assert "skipped .worktrees/lane-dirty: triage:merged-dirty" in result.stdout
+    assert "skipped .worktrees/lane-pending: keep:unmerged" in result.stdout
+    assert not targets["done"].exists()
+    assert targets["dirty"].exists() and targets["pending"].exists()
+    assert scratch.read_text() == "preserve\n"
+    assert run.exists()
+    assert subprocess.run(["git", "-C", str(root), "show-ref", "--verify", "--quiet", "refs/heads/lane/done"], check=False).returncode == 0
+
+
+def test_post_merge_hook_skips_other_branches(tmp_path):
+    root = repo(tmp_path)
+    subprocess.run(["git", "-C", str(root), "branch", "-M", "main"], check=True)
+    subprocess.run(["git", "-C", str(root), "switch", "-q", "-c", "feature"], check=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "called"
+    stub = bin_dir / "provenant"
+    stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" > "{marker}"\nexit 1\n')
+    stub.chmod(0o755)
+    environment = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+    result = subprocess.run([str(HOOK)], cwd=root, env=environment,
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0
+    assert not marker.exists()
+
+    linked = tmp_path / "linked"
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", str(linked), "main"], check=True)
+    linked_result = subprocess.run([str(HOOK)], cwd=linked, env=environment,
+                                   text=True, capture_output=True, check=False)
+    assert linked_result.returncode == 0
+    assert not marker.exists()
+
+
+def test_post_merge_hook_calls_clean_and_never_fails_merge(tmp_path):
+    root = repo(tmp_path)
+    subprocess.run(["git", "-C", str(root), "branch", "-M", "main"], check=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "called"
+    env_marker = tmp_path / "git-env"
+    stub = bin_dir / "provenant"
+    stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" > "{marker}"\n'
+                    f'printf "%s|%s\\n" "${{GIT_DIR-unset}}" "${{GIT_WORK_TREE-unset}}" > "{env_marker}"\nexit 1\n')
+    stub.chmod(0o755)
+    environment = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}",
+                   "GIT_DIR": str(root / ".git"), "GIT_WORK_TREE": str(root)}
+
+    result = subprocess.run([str(HOOK)], cwd=root, env=environment,
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0
+    assert marker.read_text() == f"clean --prune-merged --repo {root}\n"
+    assert env_marker.read_text() == "unset|unset\n"
+    assert "cleanup failed" in result.stderr
+
+
+def test_prune_merged_uses_origin_default_branch(tmp_path):
+    root = repo(tmp_path)
+    subprocess.run(["git", "-C", str(root), "branch", "-M", "main"], check=True)
+    subprocess.run(["git", "-C", str(root), "switch", "-q", "-c", "develop"], check=True)
+    subprocess.run(["git", "-C", str(root), "remote", "add", "origin", "https://example.invalid/repo.git"], check=True)
+    subprocess.run(["git", "-C", str(root), "update-ref", "refs/remotes/origin/develop", "HEAD"], check=True)
+    subprocess.run(["git", "-C", str(root), "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/develop"], check=True)
+    target = root / ".worktrees" / "lane-dev"
+    target.parent.mkdir()
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", "lane/dev", str(target)], check=True)
+    (target / "dev.txt").write_text("done\n")
+    subprocess.run(["git", "-C", str(target), "add", "dev.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "done"], check=True)
+    subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", "merge dev", "lane/dev"], check=True)
+
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--repo", str(root)],
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert "removed .worktrees/lane-dev" in result.stdout
+    assert not target.exists()
+
+
+def test_prune_merged_reports_unproven_squash_candidate(tmp_path):
+    root = repo(tmp_path)
+    subprocess.run(["git", "-C", str(root), "branch", "-M", "main"], check=True)
+    target = root / ".worktrees" / "lane-squashed"
+    target.parent.mkdir()
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", "lane/squashed", str(target)], check=True)
+    (target / "work.txt").write_text("work\n")
+    subprocess.run(["git", "-C", str(target), "add", "work.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "work"], check=True)
+    subprocess.run(["git", "-C", str(root), "merge", "--squash", "lane/squashed"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(root), "commit", "-qm", "squash"], check=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    gh = bin_dir / "gh"
+    gh.write_text('#!/bin/sh\nif [ "$2" = "list" ]; then\n'
+                  '  if [ "$4" = "open" ]; then echo "[]"; else echo \'[{"number":42,"state":"MERGED"}]\'; fi\n'
+                  'else echo \'{"files":[{"path":"work.txt"}]}\'; fi\n')
+    gh.chmod(0o755)
+    environment = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--repo", str(root)],
+                            env=environment, text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert "skipped .worktrees/lane-squashed: keep:squash-proof-unavailable" in result.stdout
+    assert target.exists()
 
 
 def test_squash_merge_proof_uses_pr_changed_paths(tmp_path, monkeypatch):
