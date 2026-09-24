@@ -105,7 +105,7 @@ def test_check_reports_invalid_provider_config_without_a_traceback(tmp_path: Pat
     result = run_check(tmp_path)
 
     assert result.returncode == 0
-    assert "provider opencode present=yes skills=missing agents=unsupported mcp=missing" in result.stdout
+    assert "provider opencode present=yes skills=missing mcp=missing" in result.stdout
     assert "Traceback" not in result.stderr
 
 
@@ -123,7 +123,7 @@ def test_check_accepts_commented_opencode_jsonc_registration(tmp_path: Path) -> 
     result = run_check(tmp_path)
 
     assert result.returncode == 0, result.stderr
-    assert "provider opencode present=yes skills=ok agents=unsupported mcp=ok" in result.stdout
+    assert "provider opencode present=yes skills=ok mcp=ok" in result.stdout
 
 
 def test_check_does_not_detect_agy_from_gemini_directory_alone(tmp_path: Path) -> None:
@@ -153,7 +153,7 @@ def test_check_uses_the_installer_mcp_config_override(tmp_path: Path) -> None:
     result = run_check(tmp_path, CURSOR_MCP_CONFIG=str(config))
 
     assert result.returncode == 0, result.stderr
-    assert "provider cursor present=yes skills=ok agents=unsupported mcp=ok" in result.stdout
+    assert "provider cursor present=yes skills=ok mcp=ok" in result.stdout
 
 
 def test_check_rejects_installed_stub_drift(tmp_path: Path) -> None:

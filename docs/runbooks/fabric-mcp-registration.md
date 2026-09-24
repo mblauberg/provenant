@@ -8,8 +8,6 @@ plus OpenCode, Agy, Cursor and Kiro when their home directories are present.
 It also projects skills into each present client home, and installs an explicit
 bootstrap and HARNESS link for OpenCode and Agy. Add `--mcp-clients all` to
 configure all six registries even when the optional clients are absent.
-The shipped `agents/*.md` use Claude Code's agent format and are installed only
-there.
 `scripts/configure-fabric-mcp.py --platform all` also configures
 all six directly; it does the registry writing and can be run on its own to
 add a client, check the registrations or repair one.

@@ -101,7 +101,7 @@ installs. Pass `--mcp-clients all` to either one to register all six clients
 instead.
 
 With `--platform all`, installation links skills into both primary clients and
-installs the Claude subagents and workflows. Both clients also receive the
+installs Claude workflows. Both clients also receive the
 instance-owned skills in `<instance-root>/custom-skills/`; `scripts/instance_installation.py validate`
 reports how many it will project. A custom skill whose name matches a product
 skill fails the install rather than shadowing it. If a client still exposes the
@@ -111,6 +111,8 @@ only that primary. Every install also writes a managed copy of the thin
 `provenant` command in
 `${PROVENANT_BIN_DIR:-$HOME/.local/bin}`; it warns when that directory is not
 on `PATH`, and never edits shell startup files. During an upgrade, the installer
+also retires prior managed Claude custom-agent links recorded by the old
+installation receipt, while preserving changed or unrecorded files. It
 replaces only the legacy link that exactly names
 `<instance-root>/scripts/provenant`, including a dangling link. It preserves
 other files and links as user-owned. If the installer exits
@@ -135,11 +137,6 @@ whether `uv` is on `PATH`.
 To move the product checkout while retaining a small instance root, follow the
 [split-product relocation runbook](docs/runbooks/split-product-relocation.md).
 
-The Claude subagent links have a separate
-`.agent-harness-agents-installation.json` receipt beside `~/.claude/agents/`.
-Re-running the installer repairs recorded links, while unmanaged files remain
-untouched.
-
 `provenant fabric whoami` creates the project-local Fabric identity and shared
 SQLite bus on first use. There is no daemon, trust record, initial provisioning or
 warm/build step. `provenant check` runs the harness policy gate from the registered
@@ -154,7 +151,7 @@ operator to run `npm ci`; it never installs or borrows another checkout's tree.
 ```text
 <PRODUCT_ROOT>/                product checkout
   HARNESS.md                      product constitution
-  runtime/  agents/  skills/  workflows/
+  runtime/  skills/  workflows/
   scripts/  config/
           |
           | scripts/install-harness
@@ -165,7 +162,6 @@ operator to run `npm ci`; it never installs or borrows another checkout's tree.
   .agent-fabric/product-root.json machine-local product pointer
 
 ~/.claude/skills/                 managed links
-~/.claude/agents/                 managed Claude subagent links
 ~/.codex/skills/                  managed links
 ~/.claude/workflows/              managed links
 ~/.local/bin/provenant            managed command

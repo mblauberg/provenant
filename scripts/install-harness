@@ -296,7 +296,6 @@ preflight_primary() {
   select_primary "$primary"
   preflight_directory_target "$platform_home/skills" "$PRODUCT_ROOT/skills"
   if [[ "$PLATFORM" == "claude" ]]; then
-    preflight_directory_target "$platform_home/agents" "$PRODUCT_ROOT/agents"
     preflight_directory_target "$platform_home/workflows" "$PRODUCT_ROOT/workflows"
   fi
   if [[ ! -L "$platform_home/skills" ]]; then
@@ -308,13 +307,8 @@ preflight_primary() {
   run_stdlib "$PRODUCT_ROOT/scripts/instance_installation.py" validate \
     --product-root "$PRODUCT_ROOT" --instance-root "$instance_root" >/dev/null || return $?
   if [[ "$PLATFORM" == "claude" ]]; then
-    if [[ ! -L "$platform_home/agents" ]]; then
-      run_stdlib "$PRODUCT_ROOT/scripts/manage_installation.py" plan \
-        --surface agents \
-        --source "$PRODUCT_ROOT/agents" \
-        --target "$platform_home/agents" \
-        --summary >/dev/null || return $?
-    fi
+    run_stdlib "$PRODUCT_ROOT/scripts/manage_installation.py" preflight-retirement \
+      --target "$platform_home/skills" --summary >/dev/null || return $?
     if [[ ! -L "$platform_home/workflows" ]]; then
       run_stdlib "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows" --preflight || return $?
     fi
@@ -459,7 +453,6 @@ install_primary() {
     --custom-source "$instance_root/custom-skills" || return $?
   if [[ "$PLATFORM" == "claude" ]]; then
     run_stdlib "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows" || return $?
-    "$PRODUCT_ROOT/scripts/install-agents" --target "$platform_home/agents" || return $?
   fi
   if [[ "$PLATFORM" == "codex" ]]; then
     run_stdlib "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" \
