@@ -584,6 +584,18 @@ def verify_claim(
     }
 
 
+def clean_policy():
+    """Load the cleanup policy only when a branch drop needs it."""
+    script = Path(__file__).resolve().with_name("clean.py")
+    spec = importlib.util.spec_from_file_location("provenant_clean", script)
+    if spec is None or spec.loader is None:
+        raise PolicyError(f"cleanup policy is missing: {script}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def ensure_shared_root(root: Path) -> Path:
     helper = Path(__file__).resolve().parent.parent / "skills" / "_shared" / "excludes.py"
     spec = importlib.util.spec_from_file_location("provenant_excludes", helper)
@@ -612,8 +624,6 @@ def ensure_shared_root(root: Path) -> Path:
 
 
 def create(args: argparse.Namespace) -> dict[str, object]:
-    if not args.human_authorised:
-        raise PolicyError("creating a worktree requires explicit human authorisation")
     requested_branch = args.existing_branch or args.new_branch
     if args.name is None:
         if requested_branch is None:
@@ -638,8 +648,6 @@ def create(args: argparse.Namespace) -> dict[str, object]:
     elif args.existing_branch is not None:
         command.extend([str(target), args.existing_branch])
     else:
-        if not args.branch_authorised:
-            raise PolicyError("creating a branch requires separate explicit human authorisation")
         command.extend(["-b", args.new_branch, str(target), args.start_point])
     git(root, *command)
     node_modules, node_modules_reason = provision_created_node_modules(
@@ -665,8 +673,6 @@ def create(args: argparse.Namespace) -> dict[str, object]:
 
 
 def remove(args: argparse.Namespace) -> dict[str, object]:
-    if not args.human_authorised:
-        raise PolicyError("removing a worktree requires explicit human authorisation")
     validate_name(args.name)
     root = primary_root(args.repo)
     shared = root / ".worktrees"
@@ -683,7 +689,30 @@ def remove(args: argparse.Namespace) -> dict[str, object]:
     dirty = git(target, "status", "--porcelain=v1", "--untracked-files=all").stdout
     if dirty:
         raise PolicyError("worktree is dirty; preserve or hand off its changes before removal")
+    branch_result = git(target, "symbolic-ref", "--quiet", "HEAD", check=False)
+    if branch_result.returncode not in {0, 1}:
+        raise PolicyError(branch_result.stderr.strip() or "cannot determine worktree branch identity")
+    branch_ref = branch_result.stdout.strip() if branch_result.returncode == 0 else None
+    if branch_ref is not None and not branch_ref.startswith("refs/heads/"):
+        raise PolicyError(f"unexpected worktree branch identity: {branch_ref}")
+    branch = branch_ref.removeprefix("refs/heads/") if branch_ref is not None else None
+    branch_merged = False
+    if branch is not None:
+        clean = clean_policy()
+        integration_ref = clean._integration_ref(root)
+        if integration_ref != "HEAD" and not clean._branch_at_integration_tip(root, branch, integration_ref):
+            merged = git(root, "merge-base", "--is-ancestor", branch_ref, integration_ref,
+                         check=False)
+            if merged.returncode not in {0, 1}:
+                raise PolicyError(merged.stderr.strip() or f"cannot determine whether branch {branch} is merged")
+            branch_merged = merged.returncode == 0
     git(root, "worktree", "remove", str(target))
+    if branch is not None and branch_merged:
+        deleted = git(root, "branch", "-d", "--", branch, check=False)
+        if deleted.returncode != 0:
+            print(f"kept branch {branch}: not proven merged into {integration_ref}", file=sys.stderr)
+    elif branch is not None:
+        print(f"kept branch {branch}: not proven merged into {integration_ref}", file=sys.stderr)
     return {"status": "removed", "name": args.name, "primary_root": str(root)}
 
 
@@ -772,8 +801,6 @@ def parser() -> argparse.ArgumentParser:
     create_parser = sub.add_parser("create")
     create_parser.add_argument("name", nargs="?", help="defaults to the branch name with / replaced by -")
     create_parser.add_argument("--repo", type=Path, default=Path.cwd())
-    create_parser.add_argument("--human-authorised", action="store_true")
-    create_parser.add_argument("--branch-authorised", action="store_true")
     create_parser.add_argument("--no-node-modules", action="store_true")
     mode = create_parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--detach", metavar="REV")
@@ -812,7 +839,6 @@ def parser() -> argparse.ArgumentParser:
     remove_parser = sub.add_parser("remove")
     remove_parser.add_argument("name")
     remove_parser.add_argument("--repo", type=Path, default=Path.cwd())
-    remove_parser.add_argument("--human-authorised", action="store_true")
     remove_parser.set_defaults(handler=remove)
     return result
 

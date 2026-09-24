@@ -1,10 +1,10 @@
 # Shared worktree policy
 
-The project constitution (`HARNESS.md`) is a standing user-approved envelope:
-creating linked worktrees for implementation work needs no per-instance
-approval. That authority still does not imply authority to delete a branch,
-force-remove state or let agents write overlapping scopes, and each of those
-remains separately gated. Merge authority is repo-based; see the repository's
+The project constitution (`HARNESS.md`) pre-authorises implementation branches
+and linked worktrees. Creating branches or worktrees and removing clean ones
+needs no extra authority. Dirty worktrees are refused and unmerged branches
+are kept; force removal and deleting an unmerged branch remain separately
+gated. Merge authority is repo-based; see the repository's
 workflow runbook (for this repo, `docs/runbooks/github-workflow.md`).
 
 ## Canonical location
@@ -26,21 +26,24 @@ instruction may make a one-run location exception.
 
 ## Helper
 
-Use the checked helper after authorisation. `--human-authorised` and
-`--branch-authorised` are caller attestations; the helper does not record
-whether authority came from a direct instruction or an active approved
-envelope:
+Use the checked helper. It validates names and repository context, and refuses
+unsafe or dirty removals. Removing a clean worktree needs no extra authority.
+For an attached branch, it checks ancestry against the primary checkout's
+local integration branch before `git branch -d`; the primary checkout must
+be on that branch. Otherwise it keeps the branch and reports that. This
+prevents a topic branch or configured upstream from counting as a merge into
+the project branch.
 
 ```sh
-scripts/worktree create NAME --human-authorised --detach REV
-scripts/worktree create --human-authorised --new-branch BRANCH \
-  --branch-authorised --start-point REV
-scripts/worktree create --human-authorised --existing-branch BRANCH
+scripts/worktree create NAME --detach REV
+scripts/worktree create --new-branch BRANCH \
+  --start-point REV
+scripts/worktree create --existing-branch BRANCH
 scripts/worktree list
 scripts/worktree check
 scripts/worktree validate-context
 scripts/worktree verify-claim
-scripts/worktree remove NAME --human-authorised
+scripts/worktree remove NAME
 ```
 
 `validate-context` rejects invalid linked-worktree metadata before a lane
@@ -86,9 +89,9 @@ preflight message; they never install automatically.
 
 Run `provenant clean` from the project for a dry-run classification and plan
 digest. It protects dirty, unmerged, open-PR and active worktrees; `--apply
---plan <digest> --human-authorised` delegates eligible removal to `scripts/worktree remove`
-after merge proof. The flag records the caller's attestation of human authority;
-it does not verify who approved removal. Run artifacts and retention are described in
+--plan <digest>` delegates eligible removal to `scripts/worktree remove`
+after merge proof. The digest gate remains; clean merged worktrees need no
+additional authority to remove. Run artifacts and retention are described in
 [Fabric v2](specs/fabric-v2.md).
 
 - One stage owner writes a worktree at a time. Sibling agents use separate
@@ -115,7 +118,7 @@ it does not verify who approved removal. Run artifacts and retention are describ
   the installed command, because a clean tree is not evidence that anything
   outside the tree still works.
 - Before removal, confirm a clean status, no live agent/pane and no unconsumed
-  handoff. Use `scripts/worktree remove NAME --human-authorised`, never raw
+  handoff. Use `scripts/worktree remove NAME`, never raw
   `git worktree remove` and never filesystem deletion: the helper runs the
   safety checks that removal depends on.
 - Force removal of a dirty worktree, and deletion of an unmerged branch, require
@@ -190,13 +193,13 @@ gh pr view <n> --json state,headRefName,baseRefName
 git -C <primary-root> diff <integration-branch> <merged-branch> -- <paths the branch touched>
 ```
 
-Only after the applicable proof passes, prune that branch's artefacts. Use
-`-d` after a merge commit, or `-D` only after the squash content proof:
+Only after the applicable proof passes, prune that branch's artefacts. The
+helper removes the clean worktree and uses `git branch -d` only when the
+branch is merged into the checked-out integration branch. Force deleting an
+unmerged branch remains separately gated:
 
 ```sh
-scripts/worktree remove <name> --repo <primary-root> --human-authorised
-git -C <primary-root> branch -d <merged-branch>  # merge commit
-# git -C <primary-root> branch -D <merged-branch>  # squash merge only
+scripts/worktree remove <name> --repo <primary-root>
 git -C <primary-root> worktree prune
 git -C <primary-root> remote prune origin
 ```

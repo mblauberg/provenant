@@ -97,12 +97,13 @@ Name the branch `<type>/<area>-<slug>` per
 [`setup-repo`](../../skills/setup-repo/SKILL.md)'s branch naming doctrine,
 for example `fix/repo-runbook-mechanics`; no issue number in the branch, since
 one branch may cover several issues or a slice. The worktree directory is the
-branch with `/` replaced by `-`, as `scripts/worktree` already defaults. Its
-authorisation flags attest that the standing `HARNESS.md` envelope or a direct
-user instruction covers the operation:
+branch with `/` replaced by `-`, as `scripts/worktree` already defaults. The
+standing `HARNESS.md` envelope covers branch and worktree creation without
+extra authority. Removing a clean worktree also needs no extra authority;
+dirty worktrees are refused and unmerged branches are kept.
 
 ```sh
-scripts/worktree create --human-authorised --branch-authorised \
+scripts/worktree create \
   --new-branch fix/repo-runbook-mechanics --start-point main
 ```
 
@@ -112,7 +113,7 @@ To also record the issue-to-branch link on GitHub, create the branch with
 ```sh
 gh issue develop 148 --name fix/repo-runbook-mechanics --base main
 git fetch origin
-scripts/worktree create --human-authorised \
+scripts/worktree create \
   --existing-branch fix/repo-runbook-mechanics
 ```
 
