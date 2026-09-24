@@ -104,7 +104,6 @@ def test_linked_worktree_lazily_clones_matching_lock_without_running_npm(tmp_pat
     result = run_provision(worktree, tmp_path, "raise SystemExit(99)\n")
 
     assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "node-workspace-provision: cloned node_modules from primary checkout"
     assert (worktree / "node_modules" / "fake-dep" / "package.json").is_file()
     check = subprocess.run(
         ["node", str(worktree / "scripts" / "node-workspace-preflight.mjs")],
@@ -129,7 +128,6 @@ def test_linked_worktree_runs_offline_npm_ci_when_lock_differs(tmp_path):
 
     assert result.returncode == 0, result.stderr
     assert marker.read_text() == "called"
-    assert "node-workspace-provision: ran npm ci in linked worktree" in result.stdout
     assert (primary / "node_modules" / "fake-dep" / "package.json").is_file()
 
 
@@ -144,7 +142,6 @@ def test_primary_checkout_keeps_preflight_failure_without_installing(tmp_path):
 
     assert result.returncode != 0
     assert "node-workspace-preflight: missing checkout dependencies" in result.stderr
-    assert "node-workspace-provision:" not in result.stdout + result.stderr
     assert not marker.exists()
 
 

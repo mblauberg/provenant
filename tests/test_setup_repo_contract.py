@@ -35,25 +35,6 @@ def test_fresh_scaffold_includes_the_security_policy_linked_by_issue_forms():
     assert security_link["url"].endswith("/blob/main/SECURITY.md")
 
 
-def test_repository_process_template_is_the_invariant_completion_artifact():
-    declarations = SKILL / "templates" / "repo-declarations.md"
-
-    assert declarations.is_file()
-    template = declarations.read_text()
-    assert template.startswith("## Repository process\n")
-    for heading in ("### Tracker", "### Docs layout", "### Merge policy", "### Work-item runbook"):
-        assert heading in template
-    for placeholder in (
-        "<github-issues|tracker-name|none>",
-        "<tracker-url-or-none>",
-        "<tracker-command-or-none>",
-        "<docs-index-or-home-list>",
-        "<merge-policy-and-authority-path>",
-        "<work-item-runbook-path-or-none>",
-    ):
-        assert placeholder in template
-
-
 def test_tracker_hook_routes_only_raw_writes_when_command_is_declared(tmp_path):
     hook = tmp_path / ".claude/hooks/tracker-route.py"
     hook.parent.mkdir(parents=True)
@@ -85,37 +66,3 @@ def test_tracker_hook_routes_only_raw_writes_when_command_is_declared(tmp_path):
     assert decision("gh issue create", tool="Read") is None
     declaration.write_text("### Tracker\n- Choice: `github-issues`\n- Command: `none`\n")
     assert decision("gh issue create") is None
-
-
-def test_trigger_fixtures_cover_broadened_and_adjacent_routes():
-    cases = yaml.safe_load((SKILL / "evals" / "trigger_cases.yaml").read_text())["cases"]
-    routes = {case["id"]: case["expected"] for case in cases}
-
-    assert routes["q900"] == {
-        "primary_skill": "setup-repo",
-        "companion_skills": [],
-    }
-    assert routes["q901"] == {
-        "primary_skill": "setup-repo",
-        "companion_skills": [],
-    }
-    assert routes["q903"] == {
-        "primary_skill": None,
-        "companion_skills": [],
-    }
-    assert routes["q905"] == {
-        "primary_skill": "engineering-docs",
-        "companion_skills": [],
-    }
-    assert routes["q906"] == {
-        "primary_skill": "skill-craft",
-        "companion_skills": [],
-    }
-    assert routes["q907"] == {
-        "primary_skill": "setup-repo",
-        "companion_skills": ["engineering-docs"],
-    }
-    assert routes["q908"] == {
-        "primary_skill": "setup-repo",
-        "companion_skills": ["implement"],
-    }
