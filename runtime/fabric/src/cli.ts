@@ -10,11 +10,13 @@
  *   fabric watch [--interval 2]
  */
 import { digest } from "./surface.js";
-import { databasePath, identify } from "./identity.js";
+import { execFileSync } from "node:child_process";
+import { databasePath, identify, withoutGitRedirects } from "./identity.js";
 import {
   statusRows, fabricStatus, findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
 } from "./run-registry.js";
 import { inspectDatabase, Store } from "./store.js";
+import { readEvents, readRuns } from "./run-reader.js";
 
 const USAGE = `fabric <command>
 
@@ -25,6 +27,7 @@ const USAGE = `fabric <command>
        [--task-id <id>]       link an existing Fabric task
        [--output-path <path>]  opaque output or run path metadata
   inbox [--peek]              claim unacknowledged messages; --peek does not claim
+        [--digest]            bounded unread counts and summaries
         [--limit N]           return at most N deliveries (default 20)
         [--claim-seconds N]   claim lifetime, 1 to 3600 seconds (default 300)
         [--task-id <id>]       return only deliveries linked to this task
@@ -33,10 +36,14 @@ const USAGE = `fabric <command>
   tasks [state]               list tasks, optionally filtered by state
   task <objective...>         open a task
   claim <task-id>             atomically claim an open, unowned task
+  work-claims                 active work claims and landing lease
+  landing-push <session> <generation> <branch> [--label <seat>]  verify lease and remote SHA, then push HEAD
   done <task-id>              close a task
   activity [--after-seq N]    list activity, optionally after a cursor
            [--limit N]
   watch [ids…] [--interval N] print run state changes; exit when all terminal
+  lanes [--json] [id]         versioned run reader, root-relative paths
+  events [--follow] [--until-idle]  JSON lines; follow stays open unless idle exit is requested
   status [id] [--wait-seconds N]  run status by task, batch or run directory; no id: store summary
   doctor [--json]             read-only schema and integrity diagnostics
   adapters [--json]           configured providers: dispatch state, aliases,
@@ -44,7 +51,8 @@ const USAGE = `fabric <command>
   dispatch list [--json]      configured-provider runs recorded in this workspace
   dispatch kill <run> [--json]  stop one recorded run and the group it leads
 
-Identity comes from the working directory and AGENT_FABRIC_LABEL. Registered
+Identity comes from the working directory and AGENT_FABRIC_LABEL (or
+landing-push --label for that command). Registered
 worktrees share one repository project while retaining their own cwd. There is
 nothing to install, trust or provision.`;
 
@@ -52,7 +60,8 @@ const argv = process.argv.slice(2);
 const command = argv[0] ?? "whoami";
 const commands = new Set([
   "whoami", "send", "inbox", "ack", "note", "tasks", "task", "claim", "done",
-  "activity", "watch", "status", "doctor", "dispatch", "adapters",
+  "activity", "watch", "status", "doctor", "dispatch", "adapters", "lanes", "events",
+  "work-claims", "landing-push",
 ]);
 
 if (command === "--help" || command === "-h" || command === "help") {
@@ -75,7 +84,24 @@ const flag = (name: string): string | undefined => {
   argv.splice(at, 2);
   return value;
 };
-const who = identify();
+let landingLabel: string | undefined;
+try {
+  landingLabel = command === "landing-push" ? flag("label") : undefined;
+} catch (error) {
+  console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(2);
+}
+const who = identify(landingLabel === undefined ? process.env : { ...process.env, AGENT_FABRIC_LABEL: landingLabel });
+if (command === "lanes") {
+  const rest = argv.slice(1).filter((value) => value !== "--json");
+  if (rest.length > 1 || rest.some((value) => value.startsWith("--"))) {
+    console.error("fabric: usage: fabric lanes [--json] [id]");
+    process.exit(2);
+  }
+  const result = await readRuns(who.cwd, rest.length ? rest : undefined);
+  console.log(JSON.stringify(result, null, 2));
+  process.exit(result.status === "ok" ? 0 : 1);
+}
 if (command === "status") {
   try {
     const wait = flag("wait-seconds");
@@ -215,12 +241,39 @@ const printActivity = (rows: ReturnType<Store["activity"]>): void => {
 
 try {
   store = new Store(databasePath());
-  store.announce(who);
+  if (command !== "landing-push") store.announce(who);
   switch (command) {
   case "whoami":
     if (argv.length !== 1) throw new Error("usage: fabric whoami");
     show({ ...who, database: databasePath(), agents: store.agents(who.project) });
     break;
+
+  case "work-claims":
+    if (argv.length !== 1) throw new Error("usage: fabric work-claims");
+    show({ work_claims: store.workClaims(who.project), landing_lease: store.landingLease(who.project) });
+    break;
+
+  case "landing-push": {
+    const session = argv[1], generation = Number(argv[2]), branch = argv[3];
+    if (argv.length !== 4 || !session || !Number.isSafeInteger(generation) || generation < 1 ||
+      !branch || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(branch) || branch.includes("..") || branch.endsWith("/"))
+      throw new Error("usage: fabric landing-push <session> <generation> <branch> [--label <seat>]");
+    const lease = store.landingLease(who.project);
+    if (!lease) throw new Error("stale landing lease");
+    store.verifyLanding(who, session, generation, lease.expectedSha);
+    const gitOptions = { cwd: who.cwd, env: withoutGitRedirects(process.env) };
+    const remote = execFileSync("git", ["ls-remote", "--heads", "origin", `refs/heads/${branch}`],
+      { ...gitOptions, encoding: "utf8" }).trim().split(/\s+/u)[0];
+    if (remote !== lease.expectedSha) throw new Error("remote integration SHA changed; acquire a new landing lease");
+    const head = execFileSync("git", ["rev-parse", "HEAD"], { ...gitOptions, encoding: "utf8" }).trim();
+    execFileSync("git", ["merge-base", "--is-ancestor", remote, head], gitOptions);
+    const pushed = store.withLandingPush(who, session, generation, remote, () =>
+      execFileSync("git", ["push", `--force-with-lease=refs/heads/${branch}:${remote}`,
+        "origin", `${head}:refs/heads/${branch}`], { ...gitOptions, stdio: "inherit", timeout: 120_000 }));
+    show({ pushed: branch, previous_sha: remote, generation,
+      ...(pushed.releaseWarning ? { release_warning: pushed.releaseWarning } : {}) });
+    break;
+  }
 
   case "send": {
     // Strip the flags first so whatever is left is the recipient and the body.
@@ -238,6 +291,14 @@ try {
   }
 
   case "inbox": {
+    const digestAt = argv.indexOf("--digest");
+    if (digestAt !== -1) {
+      argv.splice(digestAt, 1);
+      const taskId = flag("task-id");
+      if (argv.length !== 1) throw new Error("usage: fabric inbox --digest [--task-id <id>]");
+      show(store.inboxDigest(who, taskId));
+      break;
+    }
     const limitText = flag("limit");
     const limit = limitText === undefined ? 20 : Number(limitText);
     if (!Number.isSafeInteger(limit) || limit <= 0) {
@@ -348,6 +409,30 @@ try {
       if(result.runs.every(row=>row.state === "terminal")) break;
       await sleep(interval*1000);
     }
+    break;
+  }
+
+  case "events": {
+    const followAt = argv.indexOf("--follow");
+    const follow = followAt !== -1;
+    if (follow) argv.splice(followAt, 1);
+    const idleAt = argv.indexOf("--until-idle");
+    const untilIdle = idleAt !== -1;
+    if (untilIdle) argv.splice(idleAt, 1);
+    if (argv.length !== 1 || (untilIdle && !follow)) throw new Error("usage: fabric events [--follow [--until-idle]]");
+    let cursor: string | undefined;
+    do {
+      const snapshot = await readEvents(who.cwd, cursor, store.inbox(who, { peek: true, limit: 100 }));
+      if (snapshot.status !== "ok") throw new Error(String(snapshot.error));
+      cursor = snapshot.cursor;
+      for (const event of snapshot.events) console.log(JSON.stringify(event));
+      if (untilIdle && snapshot.events.length === 0) {
+        const runs = await readRuns(who.cwd);
+        if (runs.status !== "ok") throw new Error(String(runs.error));
+        if (runs.runs.every((run) => run.state === "terminal" || run.state === "input_required")) break;
+      }
+      if (follow) await sleep(250);
+    } while (follow);
     break;
   }
 

@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { databasePath, identify } from "./identity.js";
 import { statusRows, fabricOutput } from "./run-registry.js";
-import { reply, serverBuild, mailboxView, adapterView, runView } from "./surface.js";
+import { reply, digest, serverBuild, mailboxView, adapterView, runView } from "./surface.js";
 import { catalogueSnapshot } from "./catalogue.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
 import {
@@ -17,6 +17,7 @@ import {
   terminateActiveExecutionGroups,
 } from "./execution.js";
 import { isSQLiteContention, Store, type Message } from "./store.js";
+import { readEvents, readRuns } from "./run-reader.js";
 
 // Leave margin under the MCP SDK's 60-second default request timeout.
 const MAX_WAIT_SECONDS = MAX_EXECUTION_WAIT_SECONDS;
@@ -233,8 +234,13 @@ register(
     claim: z.boolean().optional(),
     limit: z.number().int().min(1).max(100).optional(),
     wait_seconds: wait,
+    digest: z.boolean().optional(),
   },
-  async ({ ids, claim, peek: explicitPeek, task_id, claim_seconds, limit, wait_seconds }, { signal }) => {
+  async ({ ids, claim, peek: explicitPeek, task_id, claim_seconds, limit, wait_seconds, digest }, { signal }) => {
+    if (digest) {
+      if (ids !== undefined || claim === true) return { status: "rejected", error: "digest_conflict", fix: "Fetch message bodies by id in a separate inbox call." };
+      return readyStore().inboxDigest(who, task_id);
+    }
     const peek = explicitPeek ?? (ids === undefined && claim !== true);
     const rows = await waitForInbox(
       {
@@ -248,6 +254,32 @@ register(
       signal,
     );
     return { messages: rows.map((row) => mailboxView(row, peek)) };
+  },
+);
+register(
+  "fabric_runs",
+  "Versioned, bounded run and lane reader with root-relative paths.",
+  { ids: z.array(z.string()).max(20).optional(), wait_seconds: wait },
+  async ({ ids, wait_seconds }, { signal }) => {
+    const bounded = boundedWait(wait_seconds);
+    if (bounded.error) return bounded.error;
+    return readRuns(who.cwd, ids, bounded.value, signal);
+  },
+);
+register(
+  "fabric_events",
+  "Read task terminal/input_required and inbox events; pass cursor to wait for new events.",
+  { cursor: z.string().max(8192).optional(), wait_seconds: wait },
+  async ({ cursor, wait_seconds }, { signal }) => {
+    const bounded = boundedWait(wait_seconds);
+    if (bounded.error) return bounded.error;
+    const deadline = Date.now() + (bounded.value ?? 0) * 1000;
+    for (;;) {
+      signal.throwIfAborted();
+      const result = await readEvents(who.cwd, cursor, readyStore().inbox(who, { peek: true, limit: 100 }));
+      if (result.status !== "ok" || result.events.length || Date.now() >= deadline) return result;
+      await delay(Math.min(250, deadline - Date.now()), undefined, { signal });
+    }
   },
 );
 function acknowledgeRuns(result: { runs?: Record<string, any>[] }) {
@@ -316,9 +348,56 @@ register(
     if (waitResult.error) return waitResult.error;
     const result = await statusRows(who.cwd, ids ?? (id ? [id] : undefined), waitResult.value, until, signal, detail);
     acknowledgeRuns(result);
-    return runView(withWarnings(result, waitResult.warnings), detail);
+    const view = runView(withWarnings(result, waitResult.warnings), detail);
+    // Claims are an addendum; run status must stay readable when the store cannot open.
+    let workClaims: ReturnType<Store["workClaims"]> = [];
+    let landingLease: ReturnType<Store["landingLease"]> | undefined;
+    try {
+      const ownershipStore = readyStore();
+      workClaims = ownershipStore.workClaims(who.project);
+      landingLease = ownershipStore.landingLease(who.project);
+    } catch {
+      // Fall through with no ownership rows.
+    }
+    const ownership = [
+      ...workClaims.map((claim) => `claim ${claim.issue ?? claim.paths.join(",")} ${claim.holder} g${claim.generation}`),
+      ...(landingLease ? [`landing ${landingLease.holder} g${landingLease.generation} ${landingLease.expectedSha}`] : []),
+    ];
+    return { ...view,
+      ...(detail === "full" || ownership.length ? { work_claims: workClaims, landing_lease: landingLease } : {}),
+      ...(ownership.length ? { digest: `${digest(view)}\n${ownership.join("\n")}` } : {}) };
   },
 );
+register("fabric_work_claim", "Acquire, renew, verify or release an advisory issue or path claim.", {
+  action: z.enum(["acquire", "renew", "verify", "release"]), session_id: z.string().min(1),
+  issue: str, paths: z.array(z.string()).optional(), id: str,
+  generation: z.number().int().positive().optional(), seconds: z.number().int().min(1).max(3600).optional(),
+}, ({ action, session_id, issue, paths, id, generation, seconds }) => {
+  if (action === "acquire") return readyStore().acquireWork(who, session_id, { issue, paths }, seconds ?? 900);
+  if (!id || generation === undefined) throw new Error("id and generation are required");
+  if (action === "renew") return readyStore().renewWork(who, session_id, id, generation, seconds ?? 900);
+  if (action === "verify") return readyStore().verifyWork(who, session_id, id, generation);
+  readyStore().releaseWork(who, session_id, id, generation);
+  return { released: id, generation };
+});
+register("fabric_landing_lease", "Acquire, renew, verify or release the repository landing lease.", {
+  action: z.enum(["acquire", "renew", "verify", "release"]), session_id: z.string().min(1),
+  expected_sha: str, generation: z.number().int().positive().optional(),
+  seconds: z.number().int().min(1).max(3600).optional(),
+}, ({ action, session_id, expected_sha, generation, seconds }) => {
+  if (action === "acquire") {
+    if (!expected_sha) throw new Error("expected_sha is required");
+    return readyStore().acquireLanding(who, session_id, expected_sha, seconds ?? 300);
+  }
+  if (generation === undefined) throw new Error("generation is required");
+  if (action === "renew") return readyStore().renewLanding(who, session_id, generation, seconds ?? 300);
+  if (action === "verify") {
+    if (!expected_sha) throw new Error("expected_sha is required");
+    return readyStore().verifyLanding(who, session_id, generation, expected_sha);
+  }
+  readyStore().releaseLanding(who, session_id, generation);
+  return { released: generation };
+});
 register("fabric_cancel", "Stop a run and its provider group.", { id: z.string(), reason: str }, async ({ id, reason }) => {
   const result = await cancelConfiguredRun(id, who, reason);
   acknowledgeRuns(result);

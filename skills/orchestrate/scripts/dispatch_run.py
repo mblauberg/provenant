@@ -57,7 +57,7 @@ import memory_admission
 import secret_scan
 import exec_routing
 import context_usage
-from fabric_records import render_digest, write_cooldown, append_index, TERMINAL_STATUSES
+from fabric_records import render_digest, write_cooldown, write_route_health, append_index, TERMINAL_STATUSES
 from _shared.custody import (
     OwnedFileError, OwnedLinkError, atomic_write_contained, contained_regular_path,
     ensure_contained_directory, create_contained_directory, open_contained_regular, read_bound_bytes,
@@ -1189,6 +1189,8 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                         [str(workspace / Path(item).expanduser()) for item in task.get("add_dirs") or []])
                 except (OSError, subprocess.SubprocessError) as exc:
                     raise PreflightError("secret_scan_unavailable", "Make dispatch inputs readable for the secret scan.") from exc
+                if scan.budget_exceeded and not task.get("allow_secrets", False):
+                    raise PreflightError("secret_scan_budget_exceeded", scan.fix())
                 if scan.findings and not task.get("allow_secrets", False):
                     raise PreflightError("secret_detected", scan.fix())
                 adapter = task["adapter"]
@@ -1303,12 +1305,13 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     family=route.get("model_family") or "unknown"
     label=args.tool+"/"+model+("@"+effort if effort else "")
     identity="resolved" if model else "unknown"
-    provenance={"requested":{"adapter":args.tool,"alias":"" if args.model and not getattr(args,"alias_supplied",True) else args.alias or "","model":args.model,"effort":args.effort},
+    task_class = getattr(args, "task_class", None) or ""
+    provenance={"requested":{"adapter":args.tool,"alias":"" if args.model and not getattr(args,"alias_supplied",True) else args.alias or "","model":args.model,"effort":args.effort,"task_class":task_class},
         "resolved_model":model,"observed_model":None,"observed_source":None,"identity":identity,
         "provider":route.get("endpoint_provider") or args.tool,"transport":args.tool,"family":family,
         "effort_requested":args.effort,"effort_applied":effort,"cli_version":route.get("cli_version"),
         "fallback_from":getattr(args,"fallback_from",None),"notes":[],"line":f"Route: {label} ({family}; {identity})"}
-    return {"schema":"fabric.attempt.v1","run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,
+    return {"schema":"fabric.attempt.v1","run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
         "attempt":number,"state":"running","status":None,"mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
         "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
         "worktree":str(args.worktree) if args.worktree else None,"started_at":started_at,"ended_at":None,"last_progress_at":started_at,
@@ -1545,6 +1548,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             prompt_bytes or b"", str(args.prompt_file) if args.prompt_file else "<prompt>", args.add_dirs)
     except (OSError, subprocess.SubprocessError):
         return fail(run_dir, "secret_scan_unavailable", "Make dispatch inputs readable for the secret scan.")
+    if secret_scan_result.budget_exceeded and not getattr(args, "allow_secrets", False):
+        print(json.dumps({"status": "rejected", "error": "secret_scan_budget_exceeded", "fix": secret_scan_result.fix()}))
+        return 2
     if secret_scan_result.findings and not getattr(args, "allow_secrets", False):
         print(json.dumps({"status": "rejected", "error": "secret_detected", "fix": secret_scan_result.fix()}))
         return 2
@@ -2198,7 +2204,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     for sig, handler in old_handlers.items():
         signal.signal(sig, handler)
     row = terminal_contract(args,run_dir,record,adapter,attempt_number,attempt_dir)
-    for action in (lambda: write_cooldown(row),lambda: append_index(row,run_dir,root=run_workspace(run_dir, Path.cwd())/".agent-run")):
+    for action in (lambda: write_cooldown(row),lambda: write_route_health(row),lambda: append_index(row,run_dir,root=run_workspace(run_dir, Path.cwd())/".agent-run")):
         try: action()
         except (OSError,ValueError) as exc: row["warnings"].append("terminal index unavailable: "+str(exc))
     publish_contract(run_dir,row)

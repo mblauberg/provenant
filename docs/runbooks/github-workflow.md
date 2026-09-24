@@ -88,30 +88,32 @@ helper contract in [`docs/worktrees.md`](../worktrees.md)) is harness doctrine
 and applies wherever the harness is loaded.
 
 The loop below takes an accepted issue from `Ready` to `Done`. The examples use
-issue `148`; substitute the live issue number and a short kebab-case slug.
+issue `148`; substitute the live issue number, area and a short kebab-case
+slug.
 
 ### Branch and worktree
 
-Name the branch `issue-N-slug`, for example `issue-148-runbook-mechanics`.
-Create the linked branch, then a worktree on it. `gh issue develop` records the
-issue-to-branch link on GitHub; the helper enforces the shared-worktree
-contract, and its authorisation flags attest that the standing `HARNESS.md`
-envelope or a direct user instruction covers the operation:
+Name the branch `<type>/<area>-<slug>` per
+[`setup-repo`](../../skills/setup-repo/SKILL.md)'s branch naming doctrine,
+for example `fix/repo-runbook-mechanics`; no issue number in the branch, since
+one branch may cover several issues or a slice. The worktree directory is the
+branch with `/` replaced by `-`, as `scripts/worktree` already defaults. Its
+authorisation flags attest that the standing `HARNESS.md` envelope or a direct
+user instruction covers the operation:
 
 ```sh
-gh issue develop 148 --name issue-148-runbook-mechanics --base main
-git fetch origin
-scripts/worktree create impl-148 --human-authorised \
-  --existing-branch issue-148-runbook-mechanics
+scripts/worktree create --human-authorised --branch-authorised \
+  --new-branch fix/repo-runbook-mechanics --start-point main
 ```
 
-When the GitHub-side branch link is not needed, create the branch and worktree
-in one step:
+To also record the issue-to-branch link on GitHub, create the branch with
+`gh issue develop` first, then point the helper at it:
 
 ```sh
-scripts/worktree create impl-148 --human-authorised \
-  --new-branch issue-148-runbook-mechanics --branch-authorised \
-  --start-point main
+gh issue develop 148 --name fix/repo-runbook-mechanics --base main
+git fetch origin
+scripts/worktree create --human-authorised \
+  --existing-branch fix/repo-runbook-mechanics
 ```
 
 Then set the issue to `In progress` (commands under
@@ -119,12 +121,12 @@ Then set the issue to `In progress` (commands under
 
 ### Commit and push
 
-Reference the issue from every commit body with `Refs #N`. Never put a closing
-keyword in a commit message; the pull request owns issue closure. Push with an
-upstream so `gh pr create` finds the branch:
+Reference each covered issue from a commit body with `Refs #N`. Never put a
+closing keyword in a commit message; the pull request owns issue closure. Push
+with an upstream so `gh pr create` finds the branch:
 
 ```sh
-git push -u origin issue-148-runbook-mechanics
+git push -u origin fix/repo-runbook-mechanics
 ```
 
 ### Pull request

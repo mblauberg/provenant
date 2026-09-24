@@ -12,13 +12,15 @@ wake, in this order:
 1. **Reconcile.** Read the session state file (`session` owns it and the
    `.agent-run/` layout: one `STATE.md` per chair under `sessions/<session-id>/`),
    then live evidence:
-   run states, native subagents, worktrees (dirty, ahead, merged), open pull
+   `provenant lanes --json`, native subagents, worktrees (dirty, ahead, merged), open pull
    requests, free memory. Evidence wins; correct the state file.
 2. **Land** what is ready under the repository's merge workflow, then prune.
 3. **Review** finished lanes; adjudicate returned reviews.
 4. **Refill** from the frontier up to the resource budget.
 5. **Tracker:** make issues and the board match what started and landed, when
-   tracker writes are authorised.
+   tracker writes are authorised — following `tracker`'s filing, linking and
+   hygiene rules rather than restating them here; hand steady-state upkeep to
+   its steward mode instead of doing it inline.
 6. **Checkpoint** the state file, then arm the wait.
 
 Keep a wake short. Anything longer than a few commands goes to a lane.
@@ -48,26 +50,32 @@ work.
 
 Start every lane id and native subagent description with a role prefix so
 status lines and receipts group them: `tool-`, `skill-`, `ui-`, `api-`, `db-`,
-`fix-`, `rev-`, `land-`, `scope-`. Projects may add prefixes. Follow it with the
-issue number where one exists and a short slug: `fix-1234-ledger-rounding`.
+`fix-`, `rev-`, `land-`, `scope-`. Projects may add prefixes. Follow it with a
+short slug, and the issue number where one helps a human scan the status line:
+`fix-1234-ledger-rounding`. A lane id is a status-line label, not a branch
+name. When the lane owns a registered worktree, name its branch and worktree
+per `setup-repo`'s branch naming doctrine instead — no issue number, no lane
+code — independently of this lane id.
 
 ## Waiting
 
-The chair never loops `fabric_status` calls. After dispatch it arms one wait:
+The chair never loops `fabric_status` calls. After dispatch it arms one subscriber:
 
 - Where the harness notifies when a background command exits (Claude Code's
-  background Bash), run `fabric watch <ids>` there and continue useful work.
-  Where the harness offers a timer, also set one fallback wake of at least 20
-  minutes in case the notifier dies.
-- Elsewhere, block on `fabric watch <ids>` within the tool's largest timeout
-  and re-arm it if the timeout expires.
+  Monitor), run `provenant events --follow` once per session and continue useful
+  work. Re-arm it only when it exits. Also set one fallback wake of at least
+  20 minutes in case the notifier dies.
+- Elsewhere, call `fabric_events` with its returned cursor and the largest
+  supported wait, or block on `provenant events --follow` in the foreground.
 
-`fabric watch` polls locally and prints only state changes, so the wait costs
-no model tokens. It has no timeout of its own.
+The event follower reads locally and prints only new terminal, input-required
+and inbox events. It has no timeout of its own. Reconcile with `provenant lanes
+--json` after a disconnect; the cursor covers only retained recent events.
 
 A dispatching sub-agent still blocks in the foreground on its own worker; see
-[worker-liveness.md](worker-liveness.md). Run `fabric watch` from the directory
-whose Fabric identity dispatched the runs, or it cannot find them.
+[worker-liveness.md](worker-liveness.md). Run the subscriber from the directory
+whose Fabric identity dispatched the runs, or it cannot find them. Start inbox
+triage with `fabric_inbox{digest:true}`; fetch selected bodies by message ID.
 
 ## Token hygiene
 

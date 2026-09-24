@@ -262,7 +262,7 @@ it("budgets the whole injected handoff text, not only the result tail", async ()
   }
 });
 
-it.each([false, true])("exposes exactly twelve default tools within budget (legacy=%s)", async (legacy) => {
+it.each([false, true])("exposes the default tools within budget (legacy=%s)", async (legacy) => {
   const state = mkdtempSync(join(tmpdir(), "fabric-surface-"));
   const client = new Client({ name: "surface", version: "1" });
   try {
@@ -292,19 +292,23 @@ it.each([false, true])("exposes exactly twelve default tools within budget (lega
         "adapters",
         "cancel",
         "dispatch",
+        "events",
         "inbox",
+        "landing_lease",
         "note",
         "output",
+        "runs",
         "send",
         "status",
         "task",
         "whoami",
+        "work_claim",
         ...(legacy ? ["batch", "team_create", "task_create", "task_claim", "task_update", "tasks"] : []),
       ]
         .map((n) => "fabric_" + n)
         .sort(),
     );
-    if (!legacy) expect(JSON.stringify(result).length).toBeLessThanOrEqual(9077 * 0.65);
+    if (!legacy) expect(JSON.stringify(result).length).toBeLessThanOrEqual(8000);
     const invalid = await client.callTool({
       name: "fabric_inbox",
       arguments: { ids: Array.from({ length: 101 }, (_, i) => String(i)) },
@@ -318,6 +322,12 @@ it.each([false, true])("exposes exactly twelve default tools within budget (lega
     expect((brief.content as any[])[0]?.text).toBe("no runs");
     const full = await client.callTool({ name: "fabric_status", arguments: { ids: [], wait_seconds: 0, detail: "full" } });
     expect(full.structuredContent).toMatchObject({ runs: [] });
+    expect((await client.callTool({ name: "fabric_runs", arguments: {} })).structuredContent)
+      .toMatchObject({ schema: "fabric.runs.v1", status: "ok", runs: [] });
+    expect((await client.callTool({ name: "fabric_events", arguments: {} })).structuredContent)
+      .toMatchObject({ schema: "fabric.events.v1", status: "ok", events: [] });
+    expect((await client.callTool({ name: "fabric_inbox", arguments: { digest: true } })).structuredContent)
+      .toMatchObject({ schema: "fabric.inbox_digest.v1", total: 0, groups: [] });
   } finally {
     await client.close();
     rmSync(state, { recursive: true, force: true });

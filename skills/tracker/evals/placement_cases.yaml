@@ -1,0 +1,27 @@
+schema_version: 1
+target_skill: tracker
+# Acceptance fixture (#872): a duplicate, a standalone bug and an epic
+# placement, each with the evidence and decision the filing branch requires.
+# See tests/test_tracker_placement_cases.py for the structural contract.
+cases:
+  - id: placement-duplicate
+    scenario: "A new report describes the same crash already tracked by an open issue with matching stack trace and repro steps."
+    searches_run:
+      - "gh issue list --search \"crash null pointer parse_config\""
+      - "gh issue list --search \"path:src/config/parser.py\""
+    decision: duplicate
+    action: "Close the new report as duplicate-of the canonical issue; add any new repro detail as a comment there instead of on the closed report."
+  - id: placement-standalone-bug
+    scenario: "A one-off off-by-one bug in a date formatter, unrelated to any open epic's stated Done when."
+    searches_run:
+      - "gh issue list --search \"date formatter off by one\""
+      - "gh issue list --search \"path:src/format/date.py\""
+    decision: new-standalone
+    action: "File the bug with no parent; a bug needs an epic only when it is genuinely a slice of that epic's Done when, and this one is not."
+  - id: placement-epic
+    scenario: "A new issue proposes retry logic that is explicitly one of the three slices named in an open epic's Done when."
+    searches_run:
+      - "gh issue list --search \"retry logic outbound webhook\""
+      - "gh sub-issue list <epic-number>"
+    decision: new-under-epic
+    action: "File the issue as a sub-issue of the named epic; record on the new issue why it belongs there (the specific Done when clause it satisfies)."

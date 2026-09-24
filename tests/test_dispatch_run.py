@@ -169,7 +169,7 @@ def test_secret_scan_skips_deleted_tracked_files(tmp_path):
     ]
 
 
-def test_secret_scan_add_dirs_includes_ignored_regular_files_and_warns_on_budgets(tmp_path, monkeypatch):
+def test_secret_scan_add_dirs_includes_ignored_regular_files_and_marks_budget_exceeded(tmp_path, monkeypatch):
     scan = load_secret_scan_module()
     subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
     (tmp_path / '.gitignore').write_text('ignored.txt\n.env\n')
@@ -184,14 +184,16 @@ def test_secret_scan_add_dirs_includes_ignored_regular_files_and_warns_on_budget
     }
     monkeypatch.setattr(scan, 'MAX_FILES', 1)
     limited = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
-    assert limited.warnings == ['secret scan directory budget reached']
+    assert limited.budget_exceeded
+    assert limited.warnings == ['secret scan budget reached']
     monkeypatch.setattr(scan, 'MAX_FILES', 2000)
     monkeypatch.setattr(scan, 'MAX_TOTAL_BYTES', 1)
     limited = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
-    assert limited.warnings == ['secret scan directory budget reached']
+    assert limited.budget_exceeded
+    assert limited.warnings == ['secret scan budget reached']
 
 
-def test_secret_scan_skips_binary_oversized_and_untracked_system_dirs(tmp_path):
+def test_secret_scan_skips_binary_and_untracked_system_dirs_but_refuses_oversized_files(tmp_path):
     scan = load_secret_scan_module()
     secret = b'AKIA' + b'A' * 16
     (tmp_path / 'binary.dat').write_bytes(b'\0' + secret)
@@ -200,7 +202,9 @@ def test_secret_scan_skips_binary_oversized_and_untracked_system_dirs(tmp_path):
         directory = tmp_path / name
         directory.mkdir()
         (directory / 'secret.txt').write_bytes(secret)
-    assert scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)]).findings == []
+    result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
+    assert result.findings == []
+    assert result.budget_exceeded
 
 
 def test_secret_scan_skips_git_metadata_file(tmp_path):
@@ -2107,7 +2111,8 @@ def test_read_only_route_is_the_default_and_refuses_a_worktree(tmp_path: Path) -
     assert json.loads(result.stdout)["status"] == "worktree_not_applicable"
 
 
-def test_concurrent_writer_on_one_worktree_is_rejected(tmp_path: Path) -> None:
+@pytest.mark.parametrize("adapter", ["claude", "agy"])
+def test_concurrent_writer_on_one_worktree_is_rejected(tmp_path: Path, adapter: str) -> None:
     run_dir = make_run(tmp_path, "one-writer")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Reply exactly OK\n", encoding="utf-8")
@@ -2119,7 +2124,8 @@ def test_concurrent_writer_on_one_worktree_is_rejected(tmp_path: Path) -> None:
         with pytest.raises(module.WorktreeLeaseError, match="another writer"):
             module.acquire_worktree_lease(worktree)
         result = run_writer_dispatch(
-            tmp_path, run_dir, prompt, "--access-mode", "worktree_write", "--worktree", str(worktree)
+            tmp_path, run_dir, prompt, "--access-mode", "worktree_write", "--worktree", str(worktree),
+            adapter=adapter,
         )
         assert result.returncode != 0
         assert json.loads(result.stdout)["status"] == "worktree_busy"
@@ -2374,6 +2380,43 @@ def test_preflight_secret_in_add_dirs_rejects_and_override_accepts(tmp_path, mon
     assert module.preflight_tasks([{**task, 'allow_secrets': True}])['status'] == 'validated'
 
 
+def test_preflight_and_dispatch_refuse_scan_budget_overrun_unless_overridden(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    scan = load_secret_scan_module()
+    monkeypatch.setattr(scan, 'MAX_FILES', 0)
+    directory = tmp_path / 'shared'
+    directory.mkdir()
+    (directory / 'source.txt').write_text('ordinary content')
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse',
+            'prompt': 'review shared files', 'add_dirs': [str(directory)]}
+    module = load_dispatch_module()
+
+    rejected = module.preflight_tasks([task])
+    assert rejected['status'] == 'rejected'
+    assert rejected['error'] == 'secret_scan_budget_exceeded'
+    assert 'Narrow the prompt or additional directories' in rejected['fix']
+    assert module.preflight_tasks([{**task, 'allow_secrets': True}])['status'] == 'validated'
+
+    run_dir = make_run(tmp_path, 'scan-budget')
+    adapter = tmp_path / 'adapter'
+    write_success_adapter(adapter)
+    module.CF_DISPATCH = adapter
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('review shared files')
+    args = module.parser().parse_args(['--run-dir', str(run_dir), '--adapter', 'codex',
+        '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker',
+        '--add-dir', str(directory)])
+    assert module.dispatch(args) == 2
+    refused = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert refused['status'] == 'rejected'
+    assert refused['error'] == 'secret_scan_budget_exceeded'
+    assert 'allow_secrets: true and explain why in the prompt' in refused['fix']
+
+    args.allow_secrets = True
+    assert module.dispatch(args) == 0
+
+
 def test_direct_dispatch_rejects_before_prompt_staging_and_override_records_finding(tmp_path, monkeypatch, capsys):
     run_dir = make_run(tmp_path, 'secret-direct')
     module = load_dispatch_module()
@@ -2560,6 +2603,12 @@ print(json.dumps({{'type': 'result', 'result': 'DONE', 'is_error': False}}), flu
         assert row["status"] == "ok"
         assert any(item["pid"] == pid for item in row["reaped"])
         assert "! reaped 1 leftover process(es)" in row["digest"]
+        route_health = json.loads(Path(os.environ["AGENT_FABRIC_ROUTE_HEALTH_PATH"]).read_text())
+        assert any(
+            route.get("task_class") == "ordinary"
+            and route.get("recent", [{}])[0].get("status") == "ok"
+            for route in route_health["routes"].values()
+        )
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
     finally:

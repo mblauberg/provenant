@@ -1,6 +1,6 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
-  chmodSync, existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync,
+  chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import Database from "better-sqlite3";
@@ -13,7 +13,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { identify } from "../src/identity.js";
+import { identify, withoutGitRedirects } from "../src/identity.js";
 import { inspectDatabase, Store, type Message } from "../src/store.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -55,15 +55,194 @@ function announce(store: Store, ...ids: string[]): void {
   for (const id of ids) store.announce(agent(id));
 }
 
+describe("work ownership", () => {
+  it("rejects overlapping issue and path claims across stores and fences an expired holder", () => {
+    const first = openStore(), second = openStore();
+    const alice = agent("alice"), bob = agent("bob");
+    announce(first, "alice", "bob");
+    const claim = first.acquireWork(alice, "session-a", { issue: "#869", paths: ["Runtime/Fabric"] }, 1);
+    expect(claim).toMatchObject({ issue: "869", paths: ["runtime/fabric"] });
+    expect(first.verifyWork(alice, "session-a", claim.id, claim.generation)).toMatchObject({ id: claim.id });
+    expect(() => second.acquireWork(bob, "session-b", { issue: "869" }, 60)).toThrow(/claimed/);
+    expect(() => second.acquireWork(alice, "another-session", { issue: "869" }, 60)).toThrow(/claimed/);
+    expect(() => second.acquireWork(bob, "session-b", { paths: ["runtime/fabric/src"] }, 60)).toThrow(/claimed/);
+    expect(() => second.acquireWork(bob, "session-b", { paths: ["RUNTIME/FABRIC/SRC"] }, 60)).toThrow(/claimed/);
+    expect(second.workClaims(bob.project)).toMatchObject([{ holder: "alice/session-a", issue: "869" }]);
+    const replacement = second.acquireWork(bob, "session-b", { paths: ["runtime/fabric/src"] }, 60, claim.expiresAtMs);
+    expect(replacement.generation).toBeGreaterThan(claim.generation);
+    expect(() => first.renewWork(alice, "session-a", claim.id, claim.generation, 60, claim.expiresAtMs)).toThrow(/stale/);
+    expect(() => first.verifyWork(alice, "session-a", claim.id, claim.generation, claim.expiresAtMs)).toThrow(/stale/);
+    expect(() => first.releaseWork(alice, "session-a", claim.id, claim.generation, claim.expiresAtMs)).toThrow(/stale/);
+  });
+
+  it("keeps sessions on one seat separate for work and landing", () => {
+    const store = openStore(), sameSeat = agent("alice"), sha = "a".repeat(40);
+    announce(store, "alice");
+    const claim = store.acquireWork(sameSeat, "session-a", { issue: "869" }, 60);
+    const lease = store.acquireLanding(sameSeat, "session-a", sha, 60);
+    expect(() => store.acquireWork(sameSeat, "bad/session", { issue: "870" }, 60)).toThrow(/must not contain/);
+    expect(() => store.renewWork(sameSeat, "session-b", claim.id, claim.generation, 60)).toThrow(/stale/);
+    expect(() => store.verifyWork(sameSeat, "session-b", claim.id, claim.generation)).toThrow(/stale/);
+    expect(() => store.releaseWork(sameSeat, "session-b", claim.id, claim.generation)).toThrow(/stale/);
+    expect(() => store.withLandingPush(sameSeat, "session-b", lease.generation, sha, () => {})).toThrow(/stale/);
+    expect(() => store.releaseLanding(sameSeat, "session-b", lease.generation)).toThrow(/stale/);
+  });
+
+  it("serialises landing, records stale takeover, and fences verify and release", () => {
+    const first = openStore(), second = openStore();
+    const alice = agent("alice"), bob = agent("bob");
+    announce(first, "alice", "bob");
+    const sha = "a".repeat(40);
+    const lease = first.acquireLanding(alice, "session-a", sha, 1);
+    expect(() => second.acquireLanding(bob, "session-b", sha, 60)).toThrow(/held/);
+    expect(first.verifyLanding(alice, "session-a", lease.generation, sha)).toMatchObject({ holder: "alice/session-a" });
+    const takeover = second.acquireLanding(bob, "session-b", sha, 60, lease.expiresAtMs);
+    expect(takeover.generation).toBeGreaterThan(lease.generation);
+    expect(takeover.takenOverFrom).toBe("alice/session-a");
+    expect(() => first.verifyLanding(alice, "session-a", lease.generation, sha, lease.expiresAtMs)).toThrow(/stale/);
+    expect(() => first.releaseLanding(alice, "session-a", lease.generation)).toThrow(/stale/);
+    expect(() => second.verifyLanding(bob, "session-b", takeover.generation, "b".repeat(40))).toThrow(/SHA/);
+    const renewed = second.renewLanding(bob, "session-b", takeover.generation, 60, takeover.expiresAtMs - 1);
+    expect(renewed.expiresAtMs).toBeGreaterThan(takeover.expiresAtMs);
+    expect(() => first.renewLanding(alice, "session-a", lease.generation, 60)).toThrow(/stale/);
+    let pushed = false;
+    second.withLandingPush(bob, "session-b", takeover.generation, sha, () => {
+      first.note(alice, "concurrent Fabric write");
+      expect(() => first.acquireLanding(alice, "session-c", sha, 60, renewed.expiresAtMs)).toThrow(/held/);
+      expect(() => first.releaseLanding(bob, "session-b", takeover.generation)).toThrow(/stale/);
+      expect(() => first.withLandingPush(bob, "session-b", takeover.generation, sha, () => {})).toThrow(/in progress/);
+      pushed = true;
+    });
+    expect(pushed).toBe(true);
+    expect(second.landingLease(bob.project)).toBeNull();
+    expect(second.activity(bob.project).some((entry) => entry.kind === "landing_takeover")).toBe(true);
+  });
+
+  it("expires a crashed pusher's hold and records takeover", () => {
+    const first = openStore(), second = openStore();
+    const alice = agent("alice"), bob = agent("bob"), sha = "a".repeat(40);
+    announce(first, "alice", "bob");
+    const lease = first.acquireLanding(alice, "session-a", sha, 1);
+    const db = new Database(databasePath);
+    try {
+      db.prepare("UPDATE landing_leases SET pushing_until = ? WHERE project = ?")
+        .run(lease.expiresAtMs + 150_000, alice.project);
+      expect(() => first.releaseLanding(alice, "session-a", lease.generation)).toThrow(/stale/);
+      expect(() => second.acquireLanding(bob, "session-b", sha, 60, lease.expiresAtMs + 1)).toThrow(/held/);
+      db.prepare("UPDATE landing_leases SET pushing_until = ? WHERE project = ?")
+        .run(lease.expiresAtMs - 1, alice.project);
+      const takeover = second.acquireLanding(bob, "session-b", sha, 60, lease.expiresAtMs + 1);
+      expect(takeover).toMatchObject({ takenOverFrom: "alice/session-a", generation: lease.generation + 1 });
+    } finally { db.close(); }
+  });
+
+  it("reports a completed push when lease release fails", () => {
+    const store = openStore(), who = agent("alice"), sha = "a".repeat(40);
+    announce(store, "alice");
+    const lease = store.acquireLanding(who, "session-a", sha, 60);
+    const db = new Database(databasePath);
+    try {
+      const outcome = store.withLandingPush(who, "session-a", lease.generation, sha, () => {
+        db.exec(`CREATE TRIGGER fail_release BEFORE UPDATE OF released_at ON landing_leases
+          BEGIN SELECT RAISE(ABORT, 'release blocked'); END`);
+        return "pushed";
+      });
+      expect(outcome).toMatchObject({ result: "pushed", releaseWarning: expect.stringContaining("release blocked") });
+      expect(store.landingLease(who.project)).not.toBeNull();
+    } finally { db.close(); }
+  });
+
+  it("exposes claims and landing through MCP and refuses a push without a lease", async () => {
+    const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
+    const tsxLoader = createRequire(import.meta.url).resolve("tsx");
+    const transport = new StdioClientTransport({
+      command: process.execPath,
+      args: ["--import", tsxLoader, serverPath],
+      cwd: repositoryRoot,
+      env: { ...process.env, AGENT_FABRIC_STATE_DIRECTORY: temporaryDirectory,
+        AGENT_FABRIC_SEAT: "claude", AGENT_FABRIC_LABEL: "chair-one", NODE_NO_WARNINGS: "1" },
+    });
+    const client = new Client({ name: "work-ownership-test", version: "1" });
+    try {
+      await client.connect(transport);
+      const emptyStatus = await client.callTool({ name: "fabric_status", arguments: {} });
+      expect(emptyStatus.isError).not.toBe(true);
+      expect(JSON.stringify(emptyStatus)).not.toContain('"work_claims"');
+      expect(JSON.stringify(emptyStatus)).not.toContain('"landing_lease"');
+      const claim = await client.callTool({ name: "fabric_work_claim", arguments: {
+        action: "acquire", session_id: "claude-session-one", issue: "869", seconds: 60,
+      } });
+      expect(claim.isError).not.toBe(true);
+      const claimRecord = claim.structuredContent as { id: string; generation: number };
+      const verified = await client.callTool({ name: "fabric_work_claim", arguments: {
+        action: "verify", session_id: "claude-session-one", id: claimRecord.id, generation: claimRecord.generation,
+      } });
+      expect(verified.structuredContent).toMatchObject({ id: claimRecord.id });
+      const lease = await client.callTool({ name: "fabric_landing_lease", arguments: {
+        action: "acquire", session_id: "claude-session-one", expected_sha: "a".repeat(40), seconds: 60,
+      } });
+      expect(lease.isError).not.toBe(true);
+      const status = await client.callTool({ name: "fabric_status", arguments: { detail: "full" } });
+      expect(status.structuredContent).toMatchObject({
+        work_claims: [{ holder: "chair-one/claude-session-one", issue: "869" }],
+        landing_lease: { holder: "chair-one/claude-session-one", expectedSha: "a".repeat(40) },
+      });
+      const brief = await client.callTool({ name: "fabric_status", arguments: {} });
+      expect(brief.content).toMatchObject([{ text: expect.stringContaining("claim 869 chair-one/claude-session-one") }]);
+      const push = runCli(["landing-push", "other-session", "1", "main"]);
+      expect(push.status).toBe(1);
+      expect(push.stderr).toContain("stale landing lease");
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  });
+
+  it("pushes the leased head from the cwd repository despite Git redirects", () => {
+    const work = join(temporaryDirectory, "landing-work"), bare = join(temporaryDirectory, "landing-remote.git");
+    mkdirSync(work);
+    const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
+    git(work, "init", "-b", "main");
+    git(work, "config", "user.name", "Fabric Test");
+    git(work, "config", "user.email", "fabric-test@example.invalid");
+    writeFileSync(join(work, "claim.txt"), "first\n");
+    git(work, "add", "claim.txt");
+    git(work, "commit", "-m", "first");
+    git(temporaryDirectory, "init", "--bare", "-b", "main", bare);
+    git(work, "remote", "add", "origin", bare);
+    git(work, "push", "origin", "HEAD:refs/heads/main");
+    const base = git(work, "rev-parse", "HEAD");
+    writeFileSync(join(work, "claim.txt"), "second\n");
+    git(work, "commit", "-am", "second");
+    const head = git(work, "rev-parse", "HEAD");
+    const store = openStore();
+    const who = identify({ AGENT_FABRIC_SEAT: "codex", AGENT_FABRIC_LABEL: "cli-reviewer" }, work);
+    store.announce(who);
+    const lease = store.acquireLanding(who, "landing-session", base, 60);
+    const pushed = runCli(["landing-push", "landing-session", String(lease.generation), "main", "--label", "cli-reviewer"],
+      temporaryDirectory, { GIT_DIR: bare, AGENT_FABRIC_SEAT: "agent", AGENT_FABRIC_LABEL: "other-seat", GIT_NAMESPACE: "shadow" }, work);
+    expect(pushed.status, pushed.stderr).toBe(0);
+    expect(git(bare, "rev-parse", "refs/heads/main")).toBe(head);
+    expect(store.landingLease(who.project)).toBeNull();
+  });
+
+  it("removes Git configuration redirects from landing commands", () => {
+    const env = withoutGitRedirects({ GIT_CONFIG_PARAMETERS: "'url.bad.pushInsteadOf=origin'",
+      GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "url.bad.pushInsteadOf", GIT_CONFIG_VALUE_0: "origin",
+      GIT_CONFIG_GLOBAL: "/tmp/bogus", GIT_NAMESPACE: "shadow" });
+    expect(Object.keys(env).filter((key) => key.startsWith("GIT_"))).toEqual([]);
+  });
+});
+
 function runCli(
   args: string[],
   stateDirectory = temporaryDirectory,
   identityEnv: Record<string, string> = {},
+  cwd = repositoryRoot,
 ) {
   const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
   const tsxLoader = createRequire(import.meta.url).resolve("tsx");
   return spawnSync(process.execPath, ["--import", tsxLoader, cliPath, ...args], {
-    cwd: repositoryRoot,
+    cwd,
     encoding: "utf8",
     env: {
       ...process.env,
@@ -82,6 +261,40 @@ function statSnapshot(path: string) {
 }
 
 describe("CLI boundaries", () => {
+  it("summarises unread messages by task and sender within a bounded digest", () => {
+    const store = openStore();
+    announce(store, "chair", "worker");
+    for (let index = 0; index < 30; index += 1) {
+      store.send(agent("worker"), "chair", `update ${index} ${"x".repeat(2000)}`);
+    }
+    const task = store.createTask(agent("worker"), "Review the result");
+    store.send(agent("worker"), "chair", "Task update", { taskId: task.taskId });
+    const digest = store.inboxDigest(agent("chair"));
+    expect(digest.total).toBe(31);
+    expect(digest.groups).toHaveLength(2);
+    expect(digest.groups[0]).toMatchObject({ from: "worker", taskId: null, count: 30 });
+    expect(digest.groups[1]).toMatchObject({ from: "worker", taskId: task.taskId, count: 1 });
+    expect(JSON.stringify(digest).length).toBeLessThan(3000);
+    expect(store.inbox(agent("chair"), { ids: [store.inbox(agent("chair"), { peek: true, limit: 1 })[0]!.messageId] })).toHaveLength(1);
+  });
+  it("accepts a task-filtered digest and pairs its sample ID with its summary", () => {
+    const store = openStore();
+    announce(store, "chair", "worker");
+    const task = store.createTask(agent("worker"), "Review a task");
+    const ids = [0, 1].map(() => store.send(agent("worker"), "chair", "placeholder", { taskId: task.taskId }).messageId).sort();
+    const db = new Database(databasePath);
+    db.prepare("UPDATE messages SET body = ? WHERE message_id = ?").run("Zebra update", ids[0]);
+    db.prepare("UPDATE messages SET body = ? WHERE message_id = ?").run("Apple update", ids[1]);
+    db.close();
+    store.send(agent("worker"), "chair", "Unrelated update");
+    const result = runCli(["inbox", "--digest", "--task-id", task.taskId], temporaryDirectory,
+      { AGENT_FABRIC_SEAT: "chair", AGENT_FABRIC_LABEL: "chair" });
+    expect(result.status, result.stderr).toBe(0);
+    const digest = JSON.parse(result.stdout);
+    expect(digest.total).toBe(2);
+    expect(digest.groups).toHaveLength(1);
+    expect(digest.groups[0]).toMatchObject({ sampleId: ids[0], summary: "Zebra update" });
+  });
   it("rejects an unknown command before creating or announcing", () => {
     const stateDirectory = join(temporaryDirectory, "unknown-command-state");
     const result = runCli(["frobnicate"], stateDirectory);

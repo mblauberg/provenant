@@ -37,12 +37,14 @@ default. `detail: full` includes attempt history, evidence and provenance. A sma
 formatter supports older receipts when no digest exists. Request errors contain
 one line with `fix:`. No provider output is embedded in status responses.
 
-Exactly twelve tools are registered by default:
+Fourteen tools are registered by default:
 
 | Tool | Purpose |
 | --- | --- |
 | `fabric_dispatch` | One prompt, `tasks[]`, `resume` or `handoff` |
 | `fabric_status` | Read run/task/batch IDs; bounded wait for `any` or `all` |
+| `fabric_runs` | Versioned run and lane list with root-relative paths |
+| `fabric_events` | Cursor-based terminal, input-required and inbox events |
 | `fabric_cancel` | Cancel the owner and provider group |
 | `fabric_output` | Bounded result, stderr, events or receipt slice |
 | `fabric_adapters` | Compact catalogue, CLI availability and guarantees |
@@ -65,8 +67,9 @@ Dispatch accepts exactly one of `prompt` and `prompt_file`. Route controls are
 the prompt and eligible files under `add_dirs` for common live credential shapes.
 A finding rejects with `error: secret_detected` and a location in `fix`; set
 `allow_secrets: true` explicitly to proceed. The attempt records the override
-and finding names. Directory scanning stops at 2,000 files or 20 MB and records
-a warning. Writers use `mode: worktree_write` and an
+and finding names. If scanning `add_dirs` exceeds 2,000 files or 20 MB, dispatch
+rejects with `error: secret_scan_budget_exceeded`; narrow the inputs or explicitly
+set `allow_secrets: true` and explain why in the prompt. Writers use `mode: worktree_write` and an
 owned, registered linked worktree. The primary checkout is refused; create a linked
 worktree. `cwd` selects an existing read-only directory inside
 the caller workspace. The Python owner validates provider capabilities and
@@ -79,22 +82,30 @@ paths. Codex read-only uses its native read-only sandbox.
 Inside another sandbox, where macOS refuses a nested one, the attempt records
 an explicit unconfined-write warning. A `cwd` below the root may also warn that
 it is not a read boundary.
-Writer runs on macOS use `sandbox-exec` to restrict writes to their worktree,
+Wrapped writer runs on macOS (agy, Claude, Cursor, OpenCode and Kiro) use
+`sandbox-exec` to restrict writes to their worktree, declared `add_dirs`,
 per-worktree Git metadata, common Git objects, refs, logs and packed refs,
-attempt files, device nodes and provider state; `add_dirs` stay read-only.
+attempt files, device nodes and provider state. Where protected-path policy
+applies, its read and write denies still take precedence inside an `add_dir`.
 Each attempt sets `TMPDIR`, `TMP`, `TEMP` and `XDG_CACHE_HOME` to private `tmp`
 and `cache` directories under its run directory. Shared temp and general user
 caches are not writable. Codex
 uses `-s workspace-write` (or `-c sandbox_mode="workspace-write"`
 on resume), with `-c sandbox_workspace_write.writable_roots=<add_dirs>` and
-`--cd <worktree>` on a fresh run. If OS confinement
-is unavailable, a writer receipt warns that writes are unconfined. Set the host
-environment variable `PROVENANT_NO_OS_CONFINEMENT=1` to opt out for new attempts;
-the receipt warns about the missing boundary. Protected-path dispatches to
-training routes still refuse without OS read confinement.
+`--cd <worktree>` on a fresh run. If OS confinement is unavailable, agy write
+dispatch is refused; other wrapped writer receipts warn that writes are
+unconfined. Setting `PROVENANT_NO_OS_CONFINEMENT=1` has the same effect on new
+wrapped attempts.
+Protected-path dispatches to training routes still refuse without OS read
+confinement.
 The receipt records `applied.confinement` as `sandbox-exec`, `provider-native` or `none`;
-`applied.write_boundary` records the effective writable paths or native sandbox;
+`applied.write_boundary` records the effective writable paths, including
+declared `add_dirs` for confined writers, or the native sandbox;
 `workspace.cwd` is the provider cwd and `workspace.root` is the caller workspace.
+Read-only macOS launches can read `~/.gitconfig` and
+`$XDG_CONFIG_HOME/git/config` (default `~/.config/git/config`) so `git status`
+works. Other home-directory reads remain denied apart from provider state and
+sign-in files listed by the adapter profile.
 Projects declare protected paths in `.agents/fabric-policy.json`, relative to
 the directory holding `.agents/`. Fabric checks the workspace root and the Git
 toplevels of the workspace, cwd and worktree; for a non-Git workspace, it also
@@ -133,6 +144,24 @@ Queued time does not use the execution timeout, but `FABRIC_MEMORY_WAIT_SECONDS`
 limits each wait (default 1800); expiry fails the attempt as `memory_unavailable`.
 Owners serialise admission through a per-user host lock in `$XDG_STATE_HOME/provenant/admission.lock`
 (default `~/.local/state/provenant/admission.lock`) and hold it for up to 20 seconds after provider start; lock creation failure admits with a warning, while probe failure holds and retries until the wait expires. `fabric_status` and `fabric status` show the available percentage, floor and wait budget and allow cancellation.
+
+### Live provider sandbox smoke
+
+The live check is opt-in and makes real provider calls. On macOS with
+`sandbox-exec`, run:
+
+```sh
+python3 runtime/fabric/live-sandbox-smoke.py --execute
+```
+
+It dispatches one short `read_only` and one `worktree_write` task for each
+installed writer adapter among Codex, Claude, Kiro and OpenCode. Each task
+probes a declared protected file and a write target outside its boundary. The
+command exits nonzero if a probe fails and prints JSON containing each adapter,
+mode, resolved `Route:` line, confinement, warnings and result. It creates its
+Git fixtures and run artifacts in a temporary directory, which is removed when
+the command exits. Do not add this command to the default test run. Record the
+first run's JSON results in the pull request.
 An invalid floor records a failed attempt with a fix. The parent keeps a
 watchdog for child owners and excludes their published queued time.
 
@@ -145,6 +174,30 @@ brief rows. New successful attempt, batch task and run statuses are `ok`.
 Status and output readers accept `succeeded` in older retained files.
 Unpublished batch children remain visible until an attempt or terminal batch
 summary accounts for them.
+
+`provenant lanes --json` and `fabric_runs` expose `fabric.runs.v1`. The response
+has `status: ok|unknown` and `runs`; read failure is `unknown` with an `error`,
+never an apparently empty successful list. The default list covers active and
+recent runs (at most 20 task rows); an ID reads that run or task. Each row has
+`id`, `run_id`, `task_id`, `run_path`, `state`, `status`, `route`, `model`,
+`started_at`, `last_progress_at`, `pgid`, `pgid_alive`, `result_path`,
+`receipt_path`, `writer`, `worktree` and `attempt`. Paths are relative to the
+project's `.agent-run` root. Missing facts are `null`; `pgid_alive: null` means
+the process identity cannot be verified. Both `tasks/<id>/attempt-NNN/` and
+`dispatch/tasks/<id>/attempt-NNN/` receipts are read internally. Fabric's status
+and output readers use the same underlying receipt scanner; consumers should
+use the versioned response instead of opening receipt files themselves. The
+response reserves an optional `claims` field for the work-claims reader.
+
+`provenant events --follow` prints one JSON line per new terminal or
+`input_required` attempt and per unread inbox message, and stays open until
+stopped. Add `--until-idle` to exit once no run is active and a poll finds no
+new events; this lets a background monitor wake a chair and finish. `fabric_events` returns
+`fabric.events.v1` with `events` and an opaque `cursor`; pass that cursor back
+with `wait_seconds` (0–55) to wait for changes. Run one follower per session;
+restart it only after exit. The stream is a bounded recent view of retained
+attempts and the active inbox, so a chair should reconcile with `fabric_runs`
+after a long disconnect. Arm a fallback wake of at least 20 minutes.
 
 Output defaults to 4,000 bytes and caps each request at 20,000. Continue at
 `next_offset`; pages preserve UTF-8 boundaries and `eof` reflects the current
@@ -160,6 +213,12 @@ and an 80-character preview. `ids:[...]` claims up to 100 selected messages;
 `claim:true` claims available messages up to `limit`. Bodies are capped at
 4 KiB each, with `body_path` for the full text. Deliveries older than fourteen
 days stay in storage but are excluded from the active inbox.
+
+`fabric_inbox{digest:true}` and `fabric inbox --digest` return
+`fabric.inbox_digest.v1`: unread `total`, up to 20 `groups` by sender and task,
+and `truncated`. Each group has a count, an 80-character one-line summary and a
+sample message ID. Fetch a full body by calling `fabric_inbox` with `ids:[id]`;
+the digest neither claims nor acknowledges deliveries.
 
 A claim lasts five minutes by default. Acknowledge only after processing the
 message; expired claims redeliver. Claim tokens prevent another reader from
@@ -191,6 +250,33 @@ fabric watch --activity --interval 2 # activity stream
 fabric status <run-id> --wait-seconds 55
 fabric adapters --json
 ```
+
+### Work claims and landing
+
+`fabric_work_claim` records an advisory issue or repository-relative path claim
+for one chair session. Conflicting live issue claims and overlapping path
+prefixes are refused on acquisition; dispatch does not enforce claims. Acquire
+and verify a claim before dispatch or landing, and do not dispatch against a
+conflicting live claim. Pass a distinct, stable `session_id` without `/` for
+each chair, even when two sessions use the same Fabric seat. The returned `id`
+and `generation` identify renew, verify and release operations; expired claims
+lapse. `#869` and `869` share an issue key, and path claims compare without case.
+Active claims appear in `fabric work-claims` and `fabric_status` when
+full detail is requested or ownership is present.
+
+`fabric_landing_lease` separately acquires one repository-wide landing lease
+with the expected remote integration SHA. It has a holder, expiry, generation,
+verify and release operations. An expired lease can be taken over; the prior
+holder and new generation are recorded in activity. Before pushing, run
+`fabric landing-push <session-id> <generation> <branch> --label <seat>` from the
+landing checkout, using the same label as the MCP lease holder. Alternatively,
+export that label as `AGENT_FABRIC_LABEL` in the shell. The command checks the
+remote SHA and live lease, confirms the remote commit is an ancestor of HEAD,
+then pushes with `--force-with-lease` and releases the lease on success. The
+command waits at most two minutes for Git; its persisted hold lasts another
+thirty seconds. A push orphaned by a crash is fenced by the remote SHA, not by
+the hold. If the push succeeds but release fails, it reports `pushed` with a
+`release_warning`. Renew or release an aborted lease as appropriate.
 
 ## Run storage and boundaries
 
