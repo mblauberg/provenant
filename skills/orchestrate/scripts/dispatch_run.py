@@ -366,7 +366,8 @@ def worker_question_envelope(result_path: Path, expected_digest: str) -> dict[st
 
 
 def fail(run_dir: Path | None, status: str, message: str, error: str | None = None) -> int:
-    record = {"schema_version": 1, "status": status, "message": message, **({"error": error} if error else {})}
+    record = {"schema_version": 1, "status": status, "message": message,
+              "error": error or status}
     print(json.dumps(record, sort_keys=True))
     return 2
 
@@ -1158,6 +1159,37 @@ def routing_environment() -> dict[str, str]:
     return env
 
 
+EFFORT_RANK = {"low": 0, "medium": 1, "high": 2, "xhigh": 3, "max": 4, "ultra": 5}
+
+
+def effort_retry_plan(plan: dict[str, Any], adapter_record: dict[str, Any]) -> dict[str, Any] | None:
+    """Retry a provider-rejected effort only when route capabilities prove a lower option."""
+    evidence = adapter_record.get("evidence") if isinstance(adapter_record.get("evidence"), dict) else {}
+    rejection = str(adapter_record.get("reason") or evidence.get("excerpt") or "")
+    if (adapter_record.get("error") != "invalid_input"
+            or not re.search(r"effort.{0,50}(?:not supported|unsupported)", rejection, re.I)):
+        return None
+    route = plan.get("route") if isinstance(plan.get("route"), dict) else {}
+    supported = route.get("supported_efforts")
+    current = plan.get("effort")
+    if (not isinstance(supported, list) or current not in EFFORT_RANK
+            or any(value not in EFFORT_RANK for value in supported)):
+        return None
+    lower = [value for value in supported if EFFORT_RANK[value] < EFFORT_RANK[current]]
+    if not lower:
+        return None
+    effort = max(lower, key=EFFORT_RANK.__getitem__)
+    warning = f"adapter rejected {current} effort; retrying at {effort}"
+    retry = dict(plan)
+    retry_route = dict(route, effort=effort, effort_applied=effort,
+                       effort_substitution=warning)
+    retry["route"] = retry_route
+    retry["effort"] = effort
+    retry["warnings"] = [*plan.get("warnings", []), warning]
+    retry["argv"] = provider_exec.profile(plan["adapter"]).argv(retry)
+    return retry
+
+
 def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = None) -> dict[str, Any]:
     """Use the dispatcher router before creating custody or launching any task."""
     workspace = Path(workspace_root or Path.cwd()).resolve()
@@ -1223,7 +1255,7 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                 elif task.get("worktree"):
                     raise PreflightError("worktree_not_applicable", "Pass mode worktree_write with worktree, or omit worktree.")
                 command = [sys.executable, str(product / "scripts/model_route.py"), "resolve",
-                           "--catalog", str(catalog), "--adapter", adapter,
+                           "--adapter", adapter,
                            "--role", task.get("role") or "worker"]
                 if task.get("task_class"):
                     command.extend(("--task-class", task["task_class"]))
@@ -1702,6 +1734,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         waiting_since = time.monotonic()
         def waiting(reason):
             active["state"] = "queued"
+            active["queue_reason"] = "memory"
             active["reason"] = reason
             active["timing"]["queued_since"] = waiting_since
             active["timing"]["queued_seconds"] = getattr(args, "_queued_seconds", 0.0)
@@ -1725,6 +1758,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         started_at = now()
         if memory_lease is not None:
             active["state"] = "running"
+            active.pop("queue_reason", None)
             active.pop("reason", None)
             active["started_at"] = started_at
             active["last_progress_at"] = started_at
@@ -1829,6 +1863,18 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     plan["warnings"] = active["warnings"]
                     adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
                         on_start=provider_started,on_progress=progress,cancelled=cancellation)
+                    retry_plan = effort_retry_plan(plan, adapter_record)
+                    if retry_plan is not None and not cancellation():
+                        plan = retry_plan
+                        active["provenance"]["effort_applied"] = plan["effort"]
+                        active["warnings"].append(plan["warnings"][-1])
+                        publish_contract(run_dir, active)
+                        provider_started_at[0] = None
+                        adapter_record = provider_exec.execute(
+                            plan, result_path, events_path=attempt_dir / "events.jsonl",
+                            stderr_path=stderr_path, on_start=provider_started,
+                            on_progress=progress, cancelled=cancellation,
+                        )
                 relaunch_skipped = False
                 args._phase_timings["provider"] = round((time.monotonic() - (provider_started_at[0] or spawn_started)) * 1000, 3)
                 if (args.resume and args.tool=="claude" and plan.get("resume_session")

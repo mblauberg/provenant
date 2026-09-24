@@ -169,7 +169,7 @@ def test_secret_scan_skips_deleted_tracked_files(tmp_path):
     ]
 
 
-def test_secret_scan_add_dirs_includes_ignored_regular_files_and_marks_budget_exceeded(tmp_path, monkeypatch):
+def test_secret_scan_skips_ignored_regular_files_and_marks_budget_exceeded(tmp_path, monkeypatch):
     scan = load_secret_scan_module()
     subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
     (tmp_path / '.gitignore').write_text('ignored.txt\n.env\n')
@@ -178,9 +178,9 @@ def test_secret_scan_add_dirs_includes_ignored_regular_files_and_marks_budget_ex
     (tmp_path / 'tracked.txt').write_text('AKIA' + 'B' * 16)
     (tmp_path / 'extra.txt').write_text('ghp_' + 'a' * 30)
     result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
-    assert {finding.name for finding in result.findings} == {'AWS access key ID', 'GitHub token', 'Stripe live key'}
+    assert {finding.name for finding in result.findings} == {'AWS access key ID', 'GitHub token'}
     assert {Path(finding.path).name for finding in result.findings} == {
-        'ignored.txt', '.env', 'tracked.txt', 'extra.txt'
+        'tracked.txt', 'extra.txt'
     }
     monkeypatch.setattr(scan, 'MAX_FILES', 1)
     limited = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
@@ -205,6 +205,32 @@ def test_secret_scan_skips_binary_and_untracked_system_dirs_but_refuses_oversize
     result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
     assert result.findings == []
     assert result.budget_exceeded
+
+
+def test_secret_scan_budget_skips_vendored_build_and_large_binary_before_counting(tmp_path, monkeypatch):
+    scan = load_secret_scan_module()
+    for dirname in ("node_modules", ".venv", "dist", "build", "coverage", ".agent-run"):
+        target = tmp_path / dirname
+        target.mkdir()
+        (target / "ignored.txt").write_text("ordinary")
+    (tmp_path / "large.bin").write_bytes(b"\0" + b"x" * (scan.MAX_FILE_BYTES + 1))
+    (tmp_path / "source.txt").write_text("ordinary")
+    monkeypatch.setattr(scan, "MAX_FILES", 1)
+    result = scan.scan_inputs(b"hello", "<prompt>", [str(tmp_path)])
+    assert not result.budget_exceeded
+    assert result.findings == []
+
+
+def test_secret_scan_budget_fix_names_offending_directory(tmp_path, monkeypatch):
+    scan = load_secret_scan_module()
+    directory = tmp_path / "wide-tree"
+    directory.mkdir()
+    (directory / "one.txt").write_text("one")
+    monkeypatch.setattr(scan, "MAX_FILES", 0)
+    result = scan.scan_inputs(b"hello", "<prompt>", [str(directory)])
+    assert result.budget_exceeded
+    assert str(directory) in result.fix()
+    assert "narrower" in result.fix()
 
 
 def test_secret_scan_skips_git_metadata_file(tmp_path):
@@ -2418,7 +2444,7 @@ def test_preflight_and_dispatch_refuse_scan_budget_overrun_unless_overridden(tmp
     rejected = module.preflight_tasks([task])
     assert rejected['status'] == 'rejected'
     assert rejected['error'] == 'secret_scan_budget_exceeded'
-    assert 'Narrow the prompt or additional directories' in rejected['fix']
+    assert str(directory) in rejected['fix'] and 'narrower path' in rejected['fix']
     assert module.preflight_tasks([{**task, 'allow_secrets': True}])['status'] == 'validated'
 
     run_dir = make_run(tmp_path, 'scan-budget')
@@ -2438,6 +2464,49 @@ def test_preflight_and_dispatch_refuse_scan_budget_overrun_unless_overridden(tmp
 
     args.allow_secrets = True
     assert module.dispatch(args) == 0
+
+
+def test_stale_instance_routing_uses_fresh_product_and_warns(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    instance = tmp_path / 'instance'
+    (instance / 'config').mkdir(parents=True)
+    (instance / 'config/model-routing.json').write_text(
+        json.dumps({'catalog_date': '2000-01-01', 'adapters': {},
+                    'families': {'anthropic': {'aliases': {'workhorse': ['claude-stale']}}}}))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(instance))
+    monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
+    module = load_dispatch_module()
+
+    result = module.preflight_tasks([{
+        'id': 'fresh-route', 'adapter': 'claude', 'alias': 'workhorse', 'prompt': 'review this',
+    }])
+
+    assert result['status'] == 'validated'
+    assert result['routes'][0]['resolved_model'] == 'opus'
+    warning = result['routes'][0]['warnings'][-1]
+    assert 'resolved against the fresh product snapshot' in warning
+    assert 'scripts/install-harness --platform all --refresh-routing' in warning
+
+
+def test_effort_rejection_retries_once_at_nearest_lower_capability(tmp_path):
+    module = load_dispatch_module()
+    plan = module.provider_exec.build_plan(
+        'codex', {'resolved_model': 'fixture', 'effort': 'high', 'effort_applied': 'high',
+                  'supported_efforts': ['low', 'medium', 'high']},
+        'hello', cwd=tmp_path, workspace_root=tmp_path,
+    )
+    rejected = {
+        'error': 'invalid_input', 'status': 'rejected',
+        'reason': '--effort is not supported for model fixture',
+        'evidence': {'excerpt': '--effort is not supported for model fixture'},
+    }
+
+    retry = module.effort_retry_plan(plan, rejected)
+
+    assert retry['effort'] == retry['route']['effort_applied'] == 'medium'
+    assert retry['warnings'][-1] == 'adapter rejected high effort; retrying at medium'
+    assert module.effort_retry_plan(
+        plan, {**rejected, 'error': 'model_unavailable'}) is None
 
 
 def test_direct_dispatch_rejects_before_prompt_staging_and_override_records_finding(tmp_path, monkeypatch, capsys):
