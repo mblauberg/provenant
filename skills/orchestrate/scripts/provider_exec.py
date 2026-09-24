@@ -426,13 +426,13 @@ def build_plan(
     attempt_dir = Path(run_dir or cwd).expanduser().resolve()
     if confinement == "sandbox-exec":
         writable_paths = [str(attempt_dir), *(str(Path.home() / path) for path in
-                           CONFINED_STATE.get(adapter, {}).get("read_write", ()))]
+                           CONFINED_STATE.get(adapter, {}).get("read_write", ())), "/dev"]
         if mode == "worktree_write":
             git_paths = ([str(git_private), *(str(git_common / path) for path in
                            ("objects", "refs", "logs", "packed-refs", "packed-refs.lock"))]
                          if git_private is not None else [])
-            writable_paths = [cwd, *(path for path in directories if Path(path) != git_common),
-                              *writable_paths, "/dev", *git_paths]
+            # Mirrors os_confinement_profile: add_dirs stay read-only for wrapped writers.
+            writable_paths = [cwd, *writable_paths, *git_paths]
         write_boundary = {"kind": "sandbox-exec", "writable_paths": writable_paths}
     elif confinement == "provider-native":
         write_boundary = {"kind": "provider-native", "sandbox": sandbox}

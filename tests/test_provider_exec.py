@@ -203,10 +203,14 @@ def test_writer_discovers_worktree_policy_outside_workspace(monkeypatch, tmp_pat
                     "user.email=test@example.invalid", "commit", "-q", "-m", "initial"], check=True)
     linked = tmp_path / "linked"
     subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "linked", str(linked)], check=True)
+    extra = tmp_path / "extra"
+    extra.mkdir()
     plan = mod.build_plan("opencode", {"trains_on_prompts": True}, "hello",
-                          workspace_root=workspace, mode="worktree_write", worktree=linked)
+                          workspace_root=workspace, mode="worktree_write", worktree=linked,
+                          add_dirs=[str(extra)])
     assert str(repo / "private") in plan["protected_paths"]
     boundary = plan["applied"]["write_boundary"]
+    assert str(extra) not in boundary["writable_paths"]
     assert str(repo / ".git/config") not in boundary["writable_paths"]
     assert str(repo / ".git/objects") in boundary["writable_paths"]
 
