@@ -12,7 +12,7 @@ wake, in this order:
 1. **Reconcile.** Read the session state file (`session` owns it and the
    `.agent-run/` layout: one `STATE.md` per chair under `sessions/<session-id>/`),
    then live evidence:
-   `provenant lanes --json`, native subagents, worktrees (dirty, ahead, merged), open pull
+   `provenant lanes`, native subagents, worktrees (dirty, ahead, merged), open pull
    requests, free memory. Evidence wins; correct the state file.
 2. **Land** what is ready under the repository's merge workflow, then prune.
 3. **Review** finished lanes; adjudicate returned reviews.
@@ -59,23 +59,16 @@ code — independently of this lane id.
 
 ## Waiting
 
-The chair never loops `fabric_status` calls. After dispatch it arms one subscriber:
-
-- Where the harness notifies when a background command exits (Claude Code's
-  Monitor), run `provenant events --follow` once per session and continue useful
-  work. Re-arm it only when it exits. Also set one fallback wake of at least
-  20 minutes in case the notifier dies.
-- Elsewhere, call `fabric_events` with its returned cursor and the largest
-  supported wait, or block on `provenant events --follow` in the foreground.
-
-The event follower reads locally and prints only new terminal, input-required
-and inbox events. It has no timeout of its own. Reconcile with `provenant lanes
---json` after a disconnect; the cursor covers only retained recent events.
+After dispatch, keep one `provenant lanes --wait` running in the background.
+When it exits, read the printed lanes, act, and re-arm it. `provenant lanes` is
+the source of truth after compaction or restart. Use `provenant events --follow`
+only for foreground streaming; it replays retained events without a cursor and
+does not exit on its own.
 
 A dispatching sub-agent still blocks in the foreground on its own worker; see
-[worker-liveness.md](worker-liveness.md). Run the subscriber from the directory
-whose Fabric identity dispatched the runs, or it cannot find them. Start inbox
-triage with `fabric_inbox{digest:true}`; fetch selected bodies by message ID.
+[worker-liveness.md](worker-liveness.md). Registered worktrees share the
+project, so the waiter works from any cwd in that project. Start inbox triage
+with `fabric_inbox{digest:true}`; fetch selected bodies by message ID.
 
 ## Token hygiene
 

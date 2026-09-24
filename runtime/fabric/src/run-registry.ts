@@ -861,9 +861,12 @@ export async function statusRows(
   signal?: AbortSignal,
   detail: "brief" | "full" = "brief",
   includeLedger = true,
+  limit: number | null = 20,
 ): Promise<StatusResult> {
   if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 55)
     return { status: "rejected", error: "wait_invalid", fix: "Pass wait_seconds from 0 to 55." };
+  if (limit !== null && (!Number.isSafeInteger(limit) || limit < 0))
+    return { status: "rejected", error: "limit_invalid", fix: "Pass a non-negative row limit or null." };
   const deadline = Date.now() + waitSeconds * 1000;
   for (;;) {
     signal?.throwIfAborted();
@@ -914,9 +917,10 @@ export async function statusRows(
         ...((legacy.runs ?? []) as Record<string, any>[]).filter((row) => !v1Dirs.has(row.run_dir)).map(wrap),
       ]
         .filter((row) => row.state !== "terminal" || Date.parse(row.ended_at ?? row.started_at) > Date.now() - 86400000)
-        .sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at))
-        .slice(0, 20);
+        .sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at));
     }
+    const omitted = ids?.length || limit === null ? 0 : Math.max(0, rows.length - limit);
+    if (limit !== null && !ids?.length) rows = rows.slice(0, limit);
     const done =
       until === "any" ? rows.some((row) => row.state === "terminal") : rows.every((row) => row.state === "terminal");
     if (done || !rows.length || Date.now() >= deadline) {
@@ -927,7 +931,7 @@ export async function statusRows(
         if (!cache.has(row.worktree)) cache.set(row.worktree, ledger(row.worktree));
         return { ...row, ...await cache.get(row.worktree) };
       }));
-      return { schema: "fabric.status.v1", runs: enriched };
+      return { schema: "fabric.status.v1", runs: enriched, ...(omitted ? { omitted } : {}) };
     }
     await new Promise((done) => setTimeout(done, Math.min(100, deadline - Date.now())));
   }

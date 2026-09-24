@@ -745,6 +745,32 @@ def test_history_scan_reproduces_the_removed_parser_hits(tmp_path):
     ) == RANGE_ORACLE
 
 
+def test_publication_range_scans_only_blobs_added_after_the_base(tmp_path):
+    repository, _script, _initial = publication_repository(tmp_path)
+    (repository / "inherited-fixture.txt").write_text(
+        "ghp_" + "abcdefghijklmnopqrstuvwxyz123456\n"
+    )
+    git_at(repository, "add", "inherited-fixture.txt")
+    git_at(repository, "commit", "-q", "-m", "add inherited fixture")
+    base = git_at(repository, "rev-parse", "HEAD")
+
+    (repository / "notes.txt").write_text("unrelated safe change\n")
+    git_at(repository, "add", "notes.txt")
+    git_at(repository, "commit", "-q", "-m", "unrelated change")
+    untouched_head = git_at(repository, "rev-parse", "HEAD")
+    assert publication_range_errors(base, untouched_head, repository) == []
+
+    (repository / "new-fixture.txt").write_text(
+        "ghp_" + "abcdefghijklmnopqrstuvwxyz123457\n"
+    )
+    git_at(repository, "add", "new-fixture.txt")
+    git_at(repository, "commit", "-q", "-m", "add flagged blob")
+    flagged_head = git_at(repository, "rev-parse", "HEAD")
+    assert "publication range contains a possible GitHub token" in publication_range_errors(
+        base, flagged_head, repository,
+    )
+
+
 def test_history_scans_annotated_tag_messages(tmp_path):
     repository = tmp_path / "fixture"
     repository.mkdir()
@@ -761,8 +787,8 @@ def test_history_scans_annotated_tag_messages(tmp_path):
     )
 
 
-def test_git_grep_prefilter_is_a_superset_of_every_registry_pattern():
-    """The prefilter may over-match, but it must never lose a registry hit."""
+def test_blob_scanner_reports_every_registry_finding(tmp_path):
+    repository, _script, _base = publication_repository(tmp_path)
     samples = {
         "personal absolute home path": b"see /" + b"Users/someone/notes",
         "possible private key": b"-----BEGIN " + b"OPENSSH PRIVATE KEY-----",
@@ -772,9 +798,14 @@ def test_git_grep_prefilter_is_a_superset_of_every_registry_pattern():
         "possible AWS access key": b"AKIA" + b"E" * 16,
     }
     assert set(samples) == set(release_check.FINDING_PATTERNS)
+    blobs = {}
     for label, sample in samples.items():
-        assert release_check.classify(sample) >= {label}, label
-        widened = re.compile(
-            release_check.grep_pattern(release_check.FINDING_PATTERNS[label]).encode()
+        result = subprocess.run(
+            ["git", "hash-object", "-w", "--stdin"], cwd=repository,
+            input=sample, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
         )
-        assert widened.search(sample), label
+        assert result.returncode == 0, result.stderr.decode()
+        blobs[result.stdout.decode().strip()] = label
+    findings = release_check.blob_findings(tuple(blobs), repository)
+    for object_id, label in blobs.items():
+        assert findings[object_id] >= {label}
