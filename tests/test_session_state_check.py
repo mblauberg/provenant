@@ -21,6 +21,15 @@ def run_check(cwd: Path, *args: str, input_text: str | None = None) -> subproces
     )
 
 
+def tag(path: Path, session_id: str) -> Path:
+    path.write_text(path.read_text(encoding="utf-8") + f"\nChair session: {session_id}\n", encoding="utf-8")
+    return path
+
+
+def hook_json(cwd: Path, session_id: str = "sess-1") -> str:
+    return json.dumps({"cwd": str(cwd), "session_id": session_id})
+
+
 def write_state(path: Path, *, actions: int = 1, missing: str = "") -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     headings = [
@@ -118,18 +127,59 @@ def test_stale_file_reports_problem_and_fix(tmp_path):
 
 
 def test_discovery_skips_sessions_untouched_for_a_day(tmp_path):
-    live = write_state(tmp_path / ".agent-run" / "sessions" / "live" / "STATE.md", missing="Links")
-    finished = write_state(tmp_path / ".agent-run" / "sessions" / "finished" / "STATE.md", missing="Links")
+    tag(write_state(tmp_path / ".agent-run" / "sessions" / "live" / "STATE.md", missing="Links"), "sess-1")
+    finished = tag(write_state(tmp_path / ".agent-run" / "sessions" / "finished" / "STATE.md", missing="Links"), "sess-1")
     old = finished.stat().st_mtime - 25 * 60 * 60
     os.utime(finished, (old, old))
 
-    result = run_check(tmp_path)
+    result = run_check(tmp_path, "--hook", input_text=hook_json(tmp_path))
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == [
+        "Checkpoint check: state_check: .agent-run/sessions/live/STATE.md: missing level-2 heading 'Links'; add the required heading"
+    ]
+
+
+def test_hook_checks_only_the_state_naming_its_session(tmp_path):
+    tag(write_state(tmp_path / ".agent-run" / "sessions" / "mine" / "STATE.md", missing="Links"), "sess-1")
+    tag(write_state(tmp_path / ".agent-run" / "sessions" / "theirs" / "STATE.md", missing="Links"), "sess-2")
+
+    result = run_check(tmp_path, "--hook", input_text=hook_json(tmp_path, "sess-1"))
+
+    assert result.returncode == 0
+    assert result.stdout.splitlines() == [
+        "Checkpoint check: state_check: .agent-run/sessions/mine/STATE.md: missing level-2 heading 'Links'; add the required heading"
+    ]
+
+
+def test_unidentified_session_is_silent(tmp_path):
+    write_state(tmp_path / ".agent-run" / "sessions" / "chair" / "STATE.md", missing="Links")
+
+    assert run_check(tmp_path).stdout == ""
+    assert run_check(tmp_path, "--hook", input_text=json.dumps({"cwd": str(tmp_path)})).stdout == ""
+
+
+def test_environment_names_the_state_file(tmp_path):
+    state = write_state(tmp_path / ".agent-run" / "sessions" / "chair" / "STATE.md", missing="Links")
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT)], cwd=tmp_path, text=True, capture_output=True, check=False,
+        env={**os.environ, "PROVENANT_SESSION_STATE": str(state)},
+    )
 
     assert result.returncode == 1
-    assert result.stdout.splitlines() == [
-        "state_check: .agent-run/sessions/live/STATE.md: missing level-2 heading 'Links'; add the required heading"
-    ]
-    assert live.exists()
+    assert "missing level-2 heading 'Links'" in result.stdout
+
+
+def test_hook_config_registers_this_script():
+    result = run_check(ROOT, "--hook-config")
+
+    config = json.loads(result.stdout)
+    hook = config["hooks"]["PreCompact"][0]["hooks"][0]
+    assert result.returncode == 0
+    assert hook["type"] == "command"
+    assert hook["command"] == f'python3 "{SCRIPT.resolve()}" --hook'
+    assert hook["timeout"] == 5
 
 
 def test_no_discovered_state_files_is_silent_success(tmp_path):
@@ -141,11 +191,11 @@ def test_no_discovered_state_files_is_silent_success(tmp_path):
 
 def test_hook_uses_stdin_cwd_and_never_fails_compaction(tmp_path):
     project = tmp_path / "hook-project"
-    state = write_state(project / ".agent-run" / "sessions" / "chair" / "STATE.md", missing="Links")
+    state = tag(write_state(project / ".agent-run" / "sessions" / "chair" / "STATE.md", missing="Links"), "sess-1")
     other = tmp_path / "other"
     other.mkdir()
 
-    result = run_check(other, "--hook", input_text=json.dumps({"cwd": str(project)}))
+    result = run_check(other, "--hook", input_text=hook_json(project))
 
     assert result.returncode == 0
     assert result.stdout.splitlines() == [
@@ -156,7 +206,10 @@ def test_hook_uses_stdin_cwd_and_never_fails_compaction(tmp_path):
 def test_hook_ignores_malformed_stdin_and_uses_process_cwd(tmp_path):
     state = write_state(tmp_path / ".agent-run" / "sessions" / "chair" / "STATE.md", missing="Links")
 
-    result = run_check(tmp_path, "--hook", input_text="not JSON")
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--hook"], cwd=tmp_path, input="not JSON", text=True,
+        capture_output=True, check=False, env={**os.environ, "PROVENANT_SESSION_STATE": str(state)},
+    )
 
     assert result.returncode == 0
     assert result.stdout.splitlines() == [
@@ -178,15 +231,15 @@ def test_nested_bullets_do_not_count_as_separate_next_actions(tmp_path):
 
 
 def test_discovery_walks_up_from_a_nested_checkout(tmp_path):
-    write_state(tmp_path / ".agent-run" / "sessions" / "chair" / "STATE.md", missing="Links")
+    tag(write_state(tmp_path / ".agent-run" / "sessions" / "chair" / "STATE.md", missing="Links"), "sess-1")
     nested = tmp_path / "app" / ".worktrees" / "lane"
     nested.mkdir(parents=True)
 
-    result = run_check(nested)
+    result = run_check(nested, "--hook", input_text=hook_json(nested))
 
-    assert result.returncode == 1
+    assert result.returncode == 0
     assert result.stdout.splitlines() == [
-        "state_check: .agent-run/sessions/chair/STATE.md: missing level-2 heading 'Links'; add the required heading"
+        "Checkpoint check: state_check: .agent-run/sessions/chair/STATE.md: missing level-2 heading 'Links'; add the required heading"
     ]
 
 
@@ -195,7 +248,7 @@ def test_hook_skips_a_dangling_state_link(tmp_path):
     sessions.mkdir(parents=True)
     (sessions / "STATE.md").symlink_to(tmp_path / "missing.md")
 
-    result = run_check(tmp_path, "--hook", input_text=json.dumps({"cwd": str(tmp_path)}))
+    result = run_check(tmp_path, "--hook", input_text=hook_json(tmp_path))
 
     assert result.returncode == 0
     assert result.stdout == ""

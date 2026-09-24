@@ -2,6 +2,8 @@
 
 <Goal. Authority source and limits.>
 
+Chair session: <host session id>
+
 ## Stage and blockers
 
 <Current stage; blockers or none.>

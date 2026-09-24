@@ -39,19 +39,40 @@ def project_root(cwd: Path) -> Path:
     return cwd
 
 
-def hook_cwd(cwd: Path) -> Path:
+STATE_ENV = "PROVENANT_SESSION_STATE"
+
+
+def hook_input(cwd: Path) -> tuple[Path, str]:
+    """Working directory and host session id from PreCompact hook JSON, if any."""
     if sys.stdin.isatty():
-        return cwd
+        return cwd, ""
     try:
         payload = json.loads(sys.stdin.read())
-    except (OSError, json.JSONDecodeError):
-        return cwd
-    if isinstance(payload, dict) and isinstance(payload.get("cwd"), str) and payload["cwd"]:
+    except (OSError, ValueError):
+        return cwd, ""
+    if not isinstance(payload, dict):
+        return cwd, ""
+    if isinstance(payload.get("cwd"), str) and payload["cwd"]:
         candidate = Path(payload["cwd"])
-        if not candidate.is_absolute():
-            candidate = cwd / candidate
-        return candidate.resolve()
-    return cwd
+        cwd = (candidate if candidate.is_absolute() else cwd / candidate).resolve()
+    session_id = payload.get("session_id")
+    return cwd, session_id if isinstance(session_id, str) else ""
+
+
+def names_session(path: Path, session_id: str) -> bool:
+    try:
+        return session_id in path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def hook_config() -> str:
+    script = Path(__file__).resolve()
+    command = f'python3 "{script}" --hook'
+    return json.dumps(
+        {"hooks": {"PreCompact": [{"hooks": [{"type": "command", "command": command, "timeout": 5}]}]}},
+        indent=2,
+    )
 
 
 def recently_modified(path: Path, now: float) -> bool:
@@ -130,20 +151,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("paths", nargs="*", type=Path, help="state files to check")
     parser.add_argument("--max-age-minutes", type=float, default=30)
     parser.add_argument("--hook", action="store_true", help="run as a non-blocking PreCompact hook")
+    parser.add_argument("--hook-config", action="store_true",
+                        help="print the Claude Code settings fragment that registers the hook")
     args = parser.parse_args(argv)
+    if args.hook_config:
+        print(hook_config())
+        return 0
 
     cwd = Path.cwd().resolve()
+    session_id = ""
     if args.hook:
-        cwd = hook_cwd(cwd)
+        cwd, session_id = hook_input(cwd)
     root = project_root(cwd)
-    paths = [path if path.is_absolute() else cwd / path for path in args.paths]
     now = time.time()
-    if not paths:
+    # Several chairs can share a project, so check only a state file this session
+    # identifies: explicit paths, then the environment, then the host session id.
+    paths = [path if path.is_absolute() else cwd / path for path in args.paths]
+    if not paths and os.environ.get(STATE_ENV):
+        named = Path(os.environ[STATE_ENV]).expanduser()
+        paths = [named if named.is_absolute() else cwd / named]
+    if not paths and session_id:
         # A session untouched for a day is finished, not a live chair to warn about.
         paths = [
             path
             for path in sorted((root / ".agent-run" / "sessions").glob("*/STATE.md"))
-            if recently_modified(path, now)
+            if recently_modified(path, now) and names_session(path, session_id)
         ]
 
     findings = []

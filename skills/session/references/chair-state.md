@@ -11,7 +11,8 @@ name the session. Start from [the template](../templates/STATE.template.md).
 Keep it at or under 6 KB, with these level-2 sections:
 
 - **Goal and authority:** the goal in one or two lines; the authority source,
-  its limits and expiry; links to the owner directions in force.
+  its limits and expiry; links to the owner directions in force; the line
+  `Chair session: <host session id>` so checks can tell chairs apart.
 - **Stage and blockers:** current stage; each blocker with its owner.
 - **Active lanes:** a table `id | route | worktree | issue | state | since`,
   one row per live lane or native subagent. Remove a row when its work lands or
@@ -35,14 +36,15 @@ replacing it: a handoff is still written when the session ends or passes the
 work to another owner. Then check it:
 
 ```sh
-python3 "<installed-session-skill>/scripts/state_check.py"
+python3 "<installed-session-skill>/scripts/state_check.py" .agent-run/sessions/<session>/STATE.md
 ```
 
-With no arguments it finds `.agent-run/sessions/*/STATE.md` files modified in
-the last day in the nearest directory at or above the working directory that
-has them, and reports size, missing sections, the top-level next-action count and staleness
-(over 30 minutes), exiting non-zero on a problem. Outside such projects it
-prints nothing.
+It reports size, missing sections, the top-level next-action count and
+staleness (over 30 minutes), exiting non-zero on a problem. Several chairs can
+share one project, so without a path it checks only a state file this session
+identifies: the `PROVENANT_SESSION_STATE` environment variable, or, in hook
+mode, recent state files that name the host session id. Otherwise it prints
+nothing.
 
 ## Compaction
 
@@ -61,26 +63,13 @@ directions in force, open decisions and the next actions. Drop tool output,
 file contents, diffs, images and resolved threads; they are on disk.
 ```
 
-Claude Code can run the check automatically before every compaction. The
-owner registers it in `~/.claude/settings.json`; it always exits 0, so it
-warns without blocking compaction:
+Claude Code can run the check automatically before every compaction. Print the
+settings fragment with the installed script path, then merge it into
+`~/.claude/settings.json`; the hook always exits 0, so it warns without
+blocking compaction:
 
-```json
-{
-  "hooks": {
-    "PreCompact": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "python3 \"$HOME/.claude/skills/session/scripts/state_check.py\" --hook",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
-  }
-}
+```sh
+python3 "<installed-session-skill>/scripts/state_check.py" --hook-config
 ```
 
 Hosts without a pre-compaction hook run the check as part of the checkpoint
