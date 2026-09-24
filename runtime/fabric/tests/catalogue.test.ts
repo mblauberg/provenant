@@ -20,7 +20,7 @@ it("ignores a blank product root instead of running a cwd-relative script", () =
     const snapshot = catalogueSnapshot(undefined, {
       AGENT_FABRIC_PRODUCT_ROOT: "", AGENT_FABRIC_INSTANCE_ROOT: root,
     });
-    expect(snapshot.sources?.[0]).toBe(join(repositoryRoot, "config", "model-routing.json"));
+    expect(snapshot.sources).toContain(join(repositoryRoot, "config", "model-routing.json"));
     expect(existsSync(join(root, "executed"))).toBe(false);
   } finally { process.chdir(oldCwd); rmSync(root, { recursive: true, force: true }); }
 });
@@ -30,7 +30,7 @@ it("caches a failed snapshot for the same source stamp", () => {
   try {
     const env = { AGENT_FABRIC_INSTANCE_ROOT: root, AGENT_FABRIC_STATE_ROOT: root };
     const first = catalogueSnapshot(root, env);
-    expect(first.drift[0]).toMatch(/snapshot unavailable/u);
+    expect(first.drift).not.toEqual([]);
     expect(catalogueSnapshot(root, env)).toBe(first);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });

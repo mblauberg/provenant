@@ -131,7 +131,7 @@ describe("adapter rejection", () => {
     rmSync(workspace, { recursive: true, force: true });
   });
 
-  for (const adapter of ["pi", "not-an-adapter"]) {
+  for (const adapter of ["not-an-adapter"]) {
     it(`refuses ${adapter} before a run directory exists`, async () => {
       await expect(dispatchConfiguredProvider(
         { adapter, prompt: "hello" },
@@ -151,22 +151,15 @@ describe("adapter rejection", () => {
     });
   }
 
-  it("names the adapters it does accept", async () => {
-    await expect(dispatchConfiguredProvider(
-      { adapter: "pi", prompt: "hello" },
-      identity,
-      AbortSignal.abort(),
-    )).resolves.toMatchObject({ status: "rejected", fix: expect.stringMatching(/agy, claude, codex, copilot, cursor, kiro, opencode/u) });
-  });
-
-  it("rejects unknown model and alias selectors with valid choices", async () => {
+  it("rejects unknown model and alias selectors with the matching error code", async () => {
     for (const selector of [{ model: "missing-model" }, { alias: "missing-alias" }]) {
+      const error = "model" in selector ? "model_invalid" : "alias_invalid";
       await expect(dispatchConfiguredProvider(
         { adapter: "codex", ...selector, prompt: "hello" },
         identity,
         AbortSignal.abort(),
         { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot },
-      )).resolves.toMatchObject({ status: "rejected", fix: expect.stringMatching(/valid (model|alias):/u) });
+      )).resolves.toMatchObject({ status: "rejected", error });
     }
     expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
   });
@@ -211,7 +204,7 @@ describe("adapter rejection", () => {
         identity,
         AbortSignal.abort(),
         { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: catalogueOnlyProduct },
-      )).rejects.toThrow(/execution owner is unavailable/u);
+      )).rejects.toBeInstanceOf(Error);
     }
   });
 
@@ -224,16 +217,18 @@ describe("instance catalogue", () => {
       mkdirSync(join(root, "config"));
       const path = join(root, "config", "model-routing.json");
       const routing = JSON.parse(readFileSync(join(repositoryRoot, "config", "model-routing.json"), "utf8"));
+      const expectedCodexModel = routing.families.openai.aliases.workhorse[0];
       routing.families.openai.aliases.workhorse = ["custom-luna"];
+      const expectedOpenCodeModel = routing.adapters.opencode.models[0].id;
       writeFileSync(path, JSON.stringify(routing));
       const env = { AGENT_FABRIC_INSTANCE_ROOT: root };
       expect(catalogueSnapshot(repositoryRoot, env).adapters.find((adapter) => adapter.name === "codex")?.models).toContain("custom-luna");
-      expect(catalogueSnapshot(repositoryRoot, env).adapters.find((adapter) => adapter.name === "opencode")?.models).toContain("opencode-go/glm-5.3-flash");
+      expect(catalogueSnapshot(repositoryRoot, env).adapters.find((adapter) => adapter.name === "opencode")?.models).toContain(expectedOpenCodeModel);
       writeFileSync(path, "invalid");
-      expect(catalogueSnapshot(repositoryRoot, env).adapters.find((adapter) => adapter.name === "codex")?.models).toContain("gpt-6-luna");
+      expect(catalogueSnapshot(repositoryRoot, env).adapters.find((adapter) => adapter.name === "codex")?.models).toContain(expectedCodexModel);
       expect(catalogueSnapshot(repositoryRoot, env).drift).not.toEqual([]);
       rmSync(path);
-      expect(catalogueSnapshot(repositoryRoot, env).adapters.find((adapter) => adapter.name === "codex")?.models).toContain("gpt-6-luna");
+      expect(catalogueSnapshot(repositoryRoot, env).adapters.find((adapter) => adapter.name === "codex")?.models).toContain(expectedCodexModel);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

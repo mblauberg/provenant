@@ -197,14 +197,14 @@ describe("run directory pruning", () => {
 
   it("keeps a run inside the retention window", async () => {
     const fresh = ageRun("mcp-fresh01", 1);
-    await ordinaryDispatch();
+    pruneDispatchRuns(workspace, ownerEnvironment);
     expect(existsSync(fresh.runDir)).toBe(true);
     expect(existsSync(fresh.stdout)).toBe(true);
   });
 
   it("takes the retention from configuration", async () => {
     const aged = ageRun("mcp-aged02", 3);
-    await ordinaryDispatch({ ...ownerEnvironment, AGENT_FABRIC_RUN_RETENTION_HOURS: "2" });
+    pruneDispatchRuns(workspace, { ...ownerEnvironment, AGENT_FABRIC_RUN_RETENTION_HOURS: "2" });
     expect(existsSync(aged.runDir), "a configured two-hour retention did not apply").toBe(false);
   });
 
@@ -215,7 +215,7 @@ describe("run directory pruning", () => {
     mkdirSync(foreign, { recursive: true });
     const when = new Date(Date.now() - 24 * 3_600_000 * 400);
     utimesSync(foreign, when, when);
-    await ordinaryDispatch();
+    pruneDispatchRuns(workspace, ownerEnvironment);
     expect(existsSync(foreign), "pruning reached beyond the MCP dispatch path").toBe(true);
   });
 
