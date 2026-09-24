@@ -120,6 +120,31 @@ def test_cooldown_path_uses_state_root_between_override_and_default(tmp_path, mo
     assert records().cooldown_path() == override
 
 
+def test_route_health_tracks_recent_outcomes_and_expires_stale_cooldowns(tmp_path, monkeypatch):
+    module = records()
+    monkeypatch.setenv("AGENT_FABRIC_ROUTE_HEALTH_PATH", str(tmp_path / "health.json"))
+    monkeypatch.setenv("FABRIC_COOLDOWNS_PATH", str(tmp_path / "cooldowns.json"))
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status="failed", task_class="review", run_id="run-1")
+    row["provenance"]["requested"]["adapter"] = "codex"
+    row["provenance"]["resolved_model"] = "gpt-6-sol"
+    module.write_route_health(row, at=datetime(2026, 9, 23, tzinfo=UTC))
+    row.update(status="ok", run_id="run-2")
+    module.write_route_health(row, at=datetime(2026, 9, 24, tzinfo=UTC))
+    row.update(status="rate_limited", run_id="run-3")
+    module.write_route_health(row, at=datetime(2026, 9, 24, 1, tzinfo=UTC))
+    cooldowns = tmp_path / "cooldowns.json"
+    cooldowns.write_text(json.dumps({"schema": "fabric.cooldowns.v1", "cooldowns": {
+        "codex/gpt-6-sol": {"cooling_until": "2026-09-23T01:00:00Z", "status": "rate_limited"},
+    }}))
+    health = module.read_route_health(at=datetime(2026, 9, 24, 1, tzinfo=UTC))
+    item = health["codex|gpt-6-sol|review"]
+    assert [entry["status"] for entry in item["recent"]] == ["rate_limited", "ok", "failed"]
+    assert item["recent_failures"] == 1
+    assert item["rate_limits"] == 1
+    assert item["cooling_until"] == ""
+
+
 def test_malformed_catalogue_keeps_cooldown_identity_and_warns(tmp_path, monkeypatch):
     from skills.orchestrate.scripts import exec_routing
     monkeypatch.setattr(exec_routing, 'snapshot', lambda: {'adapters': {'codex': {'models': [{}]}}})

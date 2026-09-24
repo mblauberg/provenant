@@ -8,22 +8,186 @@
     "mechanical": {
       "alias": "scout",
       "effort": "low",
-      "role": "worker"
+      "role": "worker",
+      "models": {
+        "codex": [
+          "gpt-6-luna"
+        ],
+        "claude": [
+          "sonnet"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
     },
     "legwork": {
       "alias": "workhorse",
       "effort": "medium",
-      "role": "worker"
+      "role": "worker",
+      "models": {
+        "codex": [
+          "gpt-6-sol"
+        ],
+        "claude": [
+          "sonnet"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
     },
     "critical-review": {
       "alias": "flagship",
       "effort": "high",
-      "role": "critical-review"
+      "role": "critical-review",
+      "models": {
+        "codex": [
+          "gpt-6-astra"
+        ],
+        "claude": [
+          "claude-opus-5-5"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
     },
     "orchestration": {
       "alias": "flagship",
       "effort": "high",
-      "role": "orchestrator"
+      "role": "orchestrator",
+      "models": {
+        "codex": [
+          "gpt-6-astra"
+        ],
+        "claude": [
+          "claude-opus-5-5"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
+    },
+    "implementation": {
+      "alias": "workhorse",
+      "effort": "high",
+      "role": "worker",
+      "models": {
+        "codex": [
+          "gpt-6-sol",
+          "gpt-6-luna"
+        ],
+        "claude": [
+          "sonnet",
+          "claude-opus-5-5"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
+    },
+    "ui-taste": {
+      "alias": "flagship",
+      "effort": "high",
+      "role": "worker",
+      "models": {
+        "codex": [
+          "gpt-6-astra"
+        ],
+        "claude": [
+          "claude-opus-5-5",
+          "sonnet"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
+    },
+    "screenshots": {
+      "alias": "workhorse",
+      "effort": "high",
+      "role": "worker",
+      "models": {
+        "codex": [
+          "gpt-6-sol"
+        ],
+        "claude": [
+          "sonnet"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
+    },
+    "review": {
+      "alias": "flagship",
+      "effort": "high",
+      "role": "reviewer",
+      "models": {
+        "codex": [
+          "gpt-6-astra",
+          "gpt-6-sol"
+        ],
+        "claude": [
+          "claude-opus-5-5",
+          "sonnet"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
+    },
+    "second-opinion": {
+      "alias": "flagship",
+      "effort": "high",
+      "role": "reviewer",
+      "models": {
+        "codex": [
+          "gpt-6-sol",
+          "gpt-6-astra"
+        ],
+        "claude": [
+          "sonnet",
+          "claude-opus-5-5"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
+    },
+    "research": {
+      "alias": "workhorse",
+      "effort": "medium",
+      "role": "worker",
+      "models": {
+        "codex": [
+          "gpt-6-sol",
+          "gpt-6-luna"
+        ],
+        "claude": [
+          "sonnet"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
+    },
+    "bulk": {
+      "alias": "scout",
+      "effort": "low",
+      "role": "worker",
+      "models": {
+        "codex": [
+          "gpt-6-luna"
+        ],
+        "claude": [
+          "sonnet"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
     }
   },
   "families": {

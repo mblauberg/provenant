@@ -8,8 +8,8 @@ This file does not add paths. It fails collection loudly if the declared roots
 are missing, so a suite that quietly reverts to per-file path repair is caught
 here rather than by a confusing `ModuleNotFoundError` in one test.
 
-It also points Fabric's cooldown store at a per-test file, so no test reads or
-writes the host's live cooldowns.
+It also points Fabric's cooldown and route health stores at per-test files, so
+no test reads or writes the host's live route state.
 """
 
 from __future__ import annotations
@@ -35,8 +35,9 @@ def pytest_configure(config) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _isolated_cooldowns(tmp_path_factory, monkeypatch):
+def _isolated_route_state(tmp_path_factory, monkeypatch):
     monkeypatch.setenv("FABRIC_COOLDOWNS_PATH", str(tmp_path_factory.mktemp("cooldowns") / "cooldowns.json"))
+    monkeypatch.setenv("AGENT_FABRIC_ROUTE_HEALTH_PATH", str(tmp_path_factory.mktemp("route-health") / "route-health.json"))
 
 
 @pytest.fixture(autouse=True)
