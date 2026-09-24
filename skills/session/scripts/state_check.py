@@ -61,9 +61,11 @@ def hook_input(cwd: Path) -> tuple[Path, str]:
 
 def names_session(path: Path, session_id: str) -> bool:
     try:
-        return session_id in path.read_text(encoding="utf-8", errors="replace")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return False
+    line = re.compile(rf"^Chair session:[ \t]*{re.escape(session_id)}[ \t]*$", re.M)
+    return line.search(text) is not None
 
 
 def hook_config() -> str:

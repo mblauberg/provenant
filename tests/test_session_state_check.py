@@ -155,8 +155,38 @@ def test_hook_checks_only_the_state_naming_its_session(tmp_path):
 def test_unidentified_session_is_silent(tmp_path):
     write_state(tmp_path / ".agent-run" / "sessions" / "chair" / "STATE.md", missing="Links")
 
-    assert run_check(tmp_path).stdout == ""
-    assert run_check(tmp_path, "--hook", input_text=json.dumps({"cwd": str(tmp_path)})).stdout == ""
+    for result in (
+        run_check(tmp_path),
+        run_check(tmp_path, "--hook", input_text=json.dumps({"cwd": str(tmp_path)})),
+        run_check(tmp_path, "--hook", input_text=hook_json(tmp_path, "unmatched")),
+    ):
+        assert result.returncode == 0
+        assert result.stdout == ""
+
+
+def test_session_id_must_match_the_chair_session_line_exactly(tmp_path):
+    tag(write_state(tmp_path / ".agent-run" / "sessions" / "ten" / "STATE.md", missing="Links"), "sess-10")
+    other = write_state(tmp_path / ".agent-run" / "sessions" / "notes" / "STATE.md", missing="Links")
+    other.write_text(other.read_text(encoding="utf-8") + "\nSee sess-1 for context.\n", encoding="utf-8")
+
+    result = run_check(tmp_path, "--hook", input_text=hook_json(tmp_path, "sess-1"))
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+
+
+def test_explicit_path_overrides_environment(tmp_path):
+    named = write_state(tmp_path / "named.md", missing="Links")
+    env_state = write_state(tmp_path / "env.md", missing="Queue")
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), str(named)], cwd=tmp_path, text=True, capture_output=True,
+        check=False, env={**os.environ, "PROVENANT_SESSION_STATE": str(env_state)},
+    )
+
+    assert result.returncode == 1
+    assert "missing level-2 heading 'Links'" in result.stdout
+    assert "Queue" not in result.stdout
 
 
 def test_environment_names_the_state_file(tmp_path):
