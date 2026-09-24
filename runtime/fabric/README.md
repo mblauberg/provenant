@@ -35,9 +35,10 @@ Copy the returned `Route:` line for provenance. `content` contains the owner's
 verbatim digest; `structuredContent` contains minimal `fabric.status.v1` rows by
 default. `detail: full` includes attempt history, evidence and provenance. A small
 formatter supports older receipts when no digest exists. Request errors contain
-one line with `fix:`. Recognised field, mode and unique model near-misses are
-corrected with one `warning:` line; unknown or ambiguous values name valid
-choices. Relative `cwd` and `worktree` paths resolve from the caller directory.
+one line with `fix:`. Recognised field names and mode synonyms are corrected;
+model names accept case and punctuation variants, while unknown model and alias
+selectors name valid choices. Relative `cwd` and `worktree` paths resolve from
+the caller directory.
 No provider output is embedded in status responses.
 
 Fourteen tools are registered by default:

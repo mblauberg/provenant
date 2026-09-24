@@ -591,9 +591,15 @@ async function dispatchConfiguredProviderUnchecked(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<Record<string, unknown>> {
   const workspaceIdentity = identity;
+  const root = productRoot(env);
+  const snapshotStarted = performance.now(), catalogue = catalogueSnapshot(root, env);
+  const initialRoute = normaliseRoute(input, identity, catalogue);
+  input = { ...input, mode: initialRoute.access_mode };
   const providerIdentity = workingIdentity(input, identity);
   input = { ...input, ...(input.cwd === undefined ? {} : { cwd: providerIdentity.cwd }),
     ...(input.prompt_file === undefined ? {} : { prompt_file: resolve(identity.cwd, input.prompt_file) }) };
+  const route = normaliseRoute(input, identity, catalogue);
+  route.warnings = [...new Set([...(initialRoute.warnings ?? []), ...(route.warnings ?? [])])];
   validatePrompt(input.prompt, input.prompt_file);
   if (
     !Number.isInteger(input.wait_seconds ?? DEFAULT_WAIT_SECONDS) ||
@@ -603,8 +609,6 @@ async function dispatchConfiguredProviderUnchecked(
     throw new InputError("wait_invalid", "Pass wait_seconds from 0 to 55.");
   }
   const callStarted = Date.now(), validateStarted = performance.now();
-  const root = productRoot(env);
-  const snapshotStarted = performance.now(), route = normaliseRoute(input, identity, catalogueSnapshot(root, env));
   const snapshotMs = performance.now() - snapshotStarted;
   const timeout = timeoutSeconds(input.timeout_seconds, input.mode);
   const taskId = input.task_id ?? `task-${randomUUID().slice(0, 8)}`;
@@ -701,14 +705,18 @@ function normaliseTask(
   identity: Identity,
   catalogue: CatalogueSnapshot,
 ): Record<string, unknown> {
+  const initialRoute = normaliseRoute(task, identity, catalogue);
+  task = { ...task, mode: initialRoute.access_mode };
   validatePrompt(task.prompt, task.prompt_file);
   const providerIdentity = workingIdentity(task, identity);
   task = { ...task, ...(task.cwd === undefined ? {} : { cwd: providerIdentity.cwd }) };
+  const route = normaliseRoute(task, identity, catalogue);
+  route.warnings = [...new Set([...(initialRoute.warnings ?? []), ...(route.warnings ?? [])])];
   return {
     id: task.id ?? `task-${index + 1}`,
     ...(task.prompt === undefined ? { prompt_file: resolve(identity.cwd, task.prompt_file!) } : { prompt: task.prompt }),
     timeout: timeoutSeconds(task.timeout_seconds, task.mode),
-    ...normaliseRoute(task, identity, catalogue),
+    ...route,
   };
 }
 

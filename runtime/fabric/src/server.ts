@@ -18,6 +18,7 @@ import {
 } from "./execution.js";
 import { isSQLiteContention, Store, type Message } from "./store.js";
 import { readEvents, readRuns } from "./run-reader.js";
+import { canonicalMode, editDistance, ACCESS_MODES } from "./execution-input.js";
 
 // Leave margin under the MCP SDK's 60-second default request timeout.
 const MAX_WAIT_SECONDS = MAX_EXECUTION_WAIT_SECONDS;
@@ -137,6 +138,9 @@ const waitForInbox = async (
 
 const detail = z.enum(["brief", "full"]).optional();
 const str = z.string().optional();
+const ids = (maximum?: number) => z.union([
+  maximum === undefined ? z.array(z.string()) : z.array(z.string()).max(maximum), z.string(),
+]).transform((value) => typeof value === "string" ? [value] : value).optional();
 const wait = z.unknown().optional();
 const optionalNumber = z.unknown().optional();
 const route = {
@@ -144,7 +148,7 @@ const route = {
   alias: str,
   model: str,
   effort: str,
-  mode: z.string().optional(),
+  mode: z.enum(ACCESS_MODES).optional(),
   worktree: str,
   cwd: str,
   network: z.boolean().optional(),
@@ -156,13 +160,14 @@ const route = {
     .optional(),
 };
 const task = { prompt: str, prompt_file: str, timeout_seconds: optionalNumber, ...route };
+const taskFields = { id: str, ...task };
 const batch = {
-  tasks: z.array(z.unknown()).min(1).max(64),
+  tasks: z.array(z.object(taskFields).catchall(z.unknown()).meta({ additionalProperties: false })).min(1).max(64),
   concurrency: optionalNumber,
   wait_seconds: wait,
 };
 const INPUT_SYNONYMS: Record<string, string> = {
-  tail_lines: "tail", lines: "tail", prompt_path: "prompt_file", file: "prompt_file",
+  prompt_path: "prompt_file", file: "prompt_file",
   dir: "cwd", path: "cwd", task: "task_id",
 };
 const inputKey = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/gu, "");
@@ -174,56 +179,28 @@ function normaliseInputKeys(name: string, input: Record<string, any>, fields: st
     const canonical = fields.find((field) => inputKey(field) === inputKey(key));
     const synonym = Object.entries(aliases).find(([alias]) => inputKey(alias) === inputKey(key))?.[1];
     let target = canonical ?? synonym;
-    if (target === "ids" && typeof value === "string") {
-      target = key;
-      result.ids = [value];
-      warnings.push("corrected ids string to a one-item list");
-      continue;
-    }
     if (!target || !fields.includes(target)) {
-      const distance = (left: string, right: string) => {
-        const row = Array.from({ length: right.length + 1 }, (_, index) => index);
-        for (let i = 1; i <= left.length; i++) {
-          let diagonal = row[0]!; row[0] = i;
-          for (let j = 1; j <= right.length; j++) {
-            const above = row[j]!;
-            row[j] = Math.min(row[j]! + 1, row[j - 1]! + 1, diagonal + (left[i - 1] === right[j - 1] ? 0 : 1));
-            diagonal = above;
-          }
-        }
-        return row[right.length]!;
-      };
-      const matches = fields.map((field) => ({ field, score: distance(inputKey(key), inputKey(field)) }))
+      const matches = fields.map((field) => ({ field, score: editDistance(inputKey(key), inputKey(field)) }))
         .sort((a, b) => a.score - b.score);
       const closest = matches.filter((match) => match.score === matches[0]?.score && match.score <= 3).map((match) => match.field);
       throw { status: "rejected", error: "argument_unknown", fix: `Unknown ${name} field ${key}; closest valid field${closest.length === 1 ? "" : "s"}: ${closest.join(", ") || fields.join(", ")}.` };
     }
     if (Object.hasOwn(result, target))
       throw { status: "rejected", error: "argument_ambiguous", fix: `Pass only one of the fields that map to ${target}.` };
-    result[target] = target === "tail" && typeof value === "number" ? value > 0 : value;
+    result[target] = target === "mode" && typeof value === "string" ? canonicalMode(value) : value;
     if (target !== key) warnings.push(`corrected ${key} to ${target}`);
   }
-  if (name === "fabric_dispatch" || name === "fabric_batch") {
-    if (Array.isArray(result.tasks)) result.tasks = result.tasks.map((item: unknown, index: number) => {
-      if (!item || typeof item !== "object" || Array.isArray(item)) return {
-        id: `task-${index + 1}`,
-        _fabric_error: { status: "rejected", error: "invalid_input", fix: "Pass each task as an object." },
-      };
+  if ((name === "fabric_dispatch" || name === "fabric_batch") && Array.isArray(result.tasks))
+    result.tasks = result.tasks.map((item: unknown, index: number) => {
+      if (!item || typeof item !== "object" || Array.isArray(item))
+        return { id: `task-${index + 1}`, prompt: "", prompt_file: "" };
       const rawTask = item as Record<string, any>;
-      const requestedTaskId = rawTask.id ?? rawTask.task_id ?? rawTask.task;
-      const taskId = typeof requestedTaskId === "string" ? requestedTaskId : `task-${index + 1}`;
-      try {
-        const normalized = normaliseInputKeys(name, rawTask, ["id", ...Object.keys({ ...task })], true);
-        warnings.push(...normalized.warnings);
-        const parsed = z.strictObject({ id: str, ...task }).safeParse(normalized.value);
-        return parsed.success ? parsed.data : { id: taskId, _fabric_error: {
-          status: "rejected", error: "invalid_input", fix: parsed.error.issues[0]?.message ?? "Check this task's fields.",
-        } };
-      } catch (error) {
-        return { id: taskId, _fabric_error: error as Record<string, unknown> };
+      try { return normaliseInputKeys(name, rawTask, ["id", ...Object.keys(task)], true).value; }
+      catch {
+        const id = rawTask.id ?? rawTask.task_id ?? rawTask.task;
+        return { id: typeof id === "string" ? id : `task-${index + 1}`, prompt: "", prompt_file: "" };
       }
     });
-  }
   return { value: result, warnings };
 }
 // Catch domain errors at the boundary; SDK validation errors retain its protocol error envelope.
@@ -233,14 +210,26 @@ function register(
   schema: z.ZodRawShape,
   handler: (input: any, extra: any) => unknown | Promise<unknown>,
 ) {
-  server.registerTool(name, { description, inputSchema: z.object(schema).catchall(z.unknown()) }, async (rawInput, extra) => {
+  const accepted = { ...schema };
+  if (Object.hasOwn(accepted, "mode")) accepted.mode = z.string().optional().meta({ enum: ACCESS_MODES });
+  if (name === "fabric_dispatch" || name === "fabric_batch") {
+    const acceptedTask = { id: str, ...task, mode: z.string().optional().meta({ enum: ACCESS_MODES }) };
+    const acceptedTasks = z.array(z.object(acceptedTask).catchall(z.unknown()).meta({ additionalProperties: false }))
+      .min(1).max(64);
+    accepted.tasks = name === "fabric_batch" ? acceptedTasks : acceptedTasks.optional();
+  }
+  const inputSchema = z.object(accepted).catchall(z.unknown()).meta({ additionalProperties: false });
+  server.registerTool(name, { description, inputSchema }, async (rawInput, extra) => {
     const includeStructuredContent =
       !["fabric_dispatch", "fabric_status"].includes(name) || rawInput.detail === "full";
     try {
       let corrected;
       try { corrected = normaliseInputKeys(name, rawInput, Object.keys(schema)); }
       catch (error) { return reply(error as Record<string, unknown>, includeStructuredContent); }
-      const parsed = z.strictObject(schema).safeParse(corrected.value);
+      const strictFields = { ...schema };
+      if (name === "fabric_dispatch") strictFields.tasks = z.array(z.strictObject(taskFields)).min(1).max(64).optional();
+      if (name === "fabric_batch") strictFields.tasks = z.array(z.strictObject(taskFields)).min(1).max(64);
+      const parsed = z.strictObject(strictFields).safeParse(corrected.value);
       if (!parsed.success) return reply({ status: "rejected", error: "invalid_input", fix: parsed.error.issues[0]?.message ?? "Check the supplied fields." }, includeStructuredContent);
       const input = parsed.data as any;
       const result = await handler(input, extra) as Record<string, any>;
@@ -301,7 +290,7 @@ register(
     peek: z.boolean().optional(),
     task_id: str,
     claim_seconds: z.number().int().min(1).max(3600).optional(),
-    ids: z.union([z.array(z.string()).max(100), z.string()]).optional(),
+    ids: ids(100),
     claim: z.boolean().optional(),
     limit: z.number().int().min(1).max(100).optional(),
     wait_seconds: wait,
@@ -330,7 +319,7 @@ register(
 register(
   "fabric_runs",
   "Versioned, bounded run and lane reader with root-relative paths.",
-  { ids: z.union([z.array(z.string()).max(20), z.string()]).optional(), wait_seconds: wait },
+  { ids: ids(20), wait_seconds: wait },
   async ({ ids, wait_seconds }, { signal }) => {
     const bounded = boundedWait(wait_seconds);
     if (bounded.error) return bounded.error;
@@ -413,7 +402,7 @@ register(
   "fabric_status",
   "Read or wait for runs. wait_seconds above 55 is clamped to 55; invalid numeric values return a typed rejection.",
   {
-    ids: z.union([z.array(z.string()), z.string()]).optional(),
+    ids: ids(),
     id: str,
     wait_seconds: wait,
     until: z.enum(["any", "all"]).optional(),

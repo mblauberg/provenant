@@ -93,9 +93,12 @@ const MODE_SYNONYMS: Record<string, AccessMode> = {
   write: "worktree_write", worktree: "worktree_write", rw: "worktree_write",
   read: "read_only", ro: "read_only",
 };
+export function canonicalMode(value: string | undefined): string | undefined {
+  return value === undefined ? undefined : MODE_SYNONYMS[value] ?? value;
+}
 const routeKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/gu, "");
 
-function editDistance(left: string, right: string): number {
+export function editDistance(left: string, right: string): number {
   const row = Array.from({ length: right.length + 1 }, (_, index) => index);
   for (let i = 1; i <= left.length; i++) {
     let diagonal = row[0]!;
@@ -109,27 +112,52 @@ function editDistance(left: string, right: string): number {
   return row[right.length]!;
 }
 
-function correctSelector(selector: string | undefined, catalogue: CatalogueSnapshot, adapter?: string):
+function correctSelector(selector: string | undefined, catalogue: CatalogueSnapshot, adapter?: string, field = "model"):
   { value?: string; warning?: string } {
   if (!selector) return {};
-  const all = catalogue.adapters.filter((entry) => adapter === undefined || entry.name === adapter)
-    .flatMap((entry) => [...entry.models, ...Object.keys(entry.aliases ?? {}), ...Object.values(entry.aliases ?? {}).flat(),
-      ...(entry.model_details ?? []).flatMap((model) => [model.id, ...(Array.isArray(model.names) ? model.names : [])])]
-      .filter((item): item is string => typeof item === "string"));
-  const unique = [...new Set(all)];
-  const selectorKeys = [routeKey(selector), routeKey(selector.split("/").at(-1) ?? selector)];
-  const comparable = (item: string) => [routeKey(item), routeKey(item.split("/").at(-1) ?? item)];
-  const exact = unique.filter((item) => comparable(item).some((key) => selectorKeys.includes(key)));
-  if (exact.length === 1 && exact[0] !== selector)
-    return { value: exact[0], warning: `corrected model ${selector} to ${exact[0]}` };
-  if (exact.length > 1) throw new InputError("model_ambiguous", `Choose one of: ${exact.join(", ")}.`);
-  const candidates = unique.map((item) => ({ item, distance: Math.min(...comparable(item).flatMap((key) => selectorKeys.map((selectorKey) => editDistance(selectorKey, key)))) }))
-    .filter(({ item, distance }) => distance > 0 && distance <= (Math.min(...selectorKeys.map((key) => key.length)) < 8 ? 1 : 2))
-    .sort((a, b) => a.distance - b.distance);
-  if (!candidates.length) return {};
-  const closest = candidates.filter((candidate) => candidate.distance === candidates[0]!.distance).map(({ item }) => item);
-  if (closest.length > 1) throw new InputError("model_ambiguous", `Choose one of: ${closest.join(", ")}.`);
-  return { value: closest[0], warning: `corrected model ${selector} to ${closest[0]}` };
+  const entries = catalogue.adapters.filter((entry) => adapter === undefined || entry.name === adapter);
+  const choices = [...new Set(entries.flatMap((entry) => [
+    ...entry.models,
+    ...Object.keys(entry.aliases ?? {}),
+    ...Object.values(entry.aliases ?? {}).flat(),
+    ...(entry.model_details ?? []).flatMap((model) => [model.id, ...(Array.isArray(model.names) ? model.names : [])]),
+  ]).filter((item): item is string => typeof item === "string"))];
+  const key = routeKey(selector);
+  const matches = new Map<string, string>();
+  for (const entry of entries) {
+    const modelId = (value: string) => (entry.model_details ?? []).find((item) =>
+      item.id === value || (Array.isArray(item.names) && item.names.some((name) => typeof name === "string" && routeKey(name) === routeKey(value))))?.id ?? value;
+    for (const id of entry.models) if (routeKey(id) === key) {
+      const resolved = modelId(id);
+      matches.set(resolved, resolved);
+    }
+    for (const model of entry.model_details ?? []) {
+      if (typeof model.id !== "string") continue;
+      if (routeKey(model.id) === key) matches.set(model.id, model.id);
+      for (const name of Array.isArray(model.names) ? model.names : [])
+        if (typeof name === "string" && routeKey(name) === key) matches.set(model.id, model.id);
+    }
+    for (const [alias, values] of Object.entries(entry.aliases ?? {})) {
+      if (routeKey(alias) !== key) continue;
+      for (const value of values) {
+        const resolved = modelId(value);
+        matches.set(resolved, resolved);
+      }
+    }
+    for (const value of Object.values(entry.aliases ?? {}).flat()) {
+      if (routeKey(value) !== key) continue;
+      const resolved = modelId(value);
+      matches.set(resolved, resolved);
+    }
+  }
+  if (matches.size === 1) {
+    const value = [...matches.values()][0]!;
+    return value === selector ? {} : { value, warning: `corrected ${field} ${selector} to ${value}` };
+  }
+  if (matches.size > 1) throw new InputError(`${field}_ambiguous`, `Choose one of: ${[...matches.values()].join(", ")}.`);
+  const closest = choices.map((item) => ({ item, score: editDistance(key, routeKey(item)) }))
+    .sort((left, right) => left.score - right.score).slice(0, 3).map(({ item }) => item);
+  throw new InputError(`${field}_invalid`, `Choose a valid ${field}: ${closest.join(", ") || choices.join(", ")}.`);
 }
 
 export function normaliseRoute(input: RouteInput, identity: Identity, catalogue: CatalogueSnapshot): NormalisedRoute {
@@ -137,12 +165,20 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
   const warnings: string[] = [];
   let selector =
     input.model ?? (input.alias && !["flagship", "workhorse", "scout"].includes(input.alias) ? input.alias : undefined);
-  const corrected = correctSelector(selector, catalogue, input.adapter);
+  const roleAlias = input.model === undefined && input.alias !== undefined
+    ? ["flagship", "workhorse", "scout"].find((alias) => routeKey(alias) === routeKey(input.alias!))
+    : undefined;
+  if (roleAlias !== undefined) input.alias = roleAlias;
+  const isRoleAlias = roleAlias !== undefined;
+  const corrected = isRoleAlias ? {} : correctSelector(selector, catalogue, input.adapter, input.model === undefined ? "alias" : "model");
   if (corrected.warning) warnings.push(corrected.warning);
   selector = corrected.value ?? selector;
   if (corrected.value !== undefined) {
     if (input.model !== undefined) input.model = corrected.value;
-    else if (input.alias !== undefined) input.alias = corrected.value;
+    else if (input.alias !== undefined) {
+      input.model = corrected.value;
+      input.alias = undefined;
+    }
   }
   const candidates =
     selector === undefined
@@ -169,7 +205,7 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
     throw new InputError("adapter_invalid", `Pass adapter ${DISPATCH_ADAPTERS.join(", ")}.`);
   }
   const requestedMode = input.mode ?? "read_only";
-  const mode = (MODE_SYNONYMS[requestedMode] ?? requestedMode) as AccessMode;
+  const mode = canonicalMode(requestedMode) as AccessMode;
   if (mode !== requestedMode) warnings.push(`corrected mode ${requestedMode} to ${mode}`);
   if (!ACCESS_MODES.includes(mode)) throw new InputError("mode_invalid", `Pass mode ${ACCESS_MODES.join(" or ")}.`);
   if (mode === "worktree_write" && input.worktree === undefined) {
@@ -217,7 +253,7 @@ export function validatePrompt(prompt: string | undefined, promptFile: string | 
 }
 
 export function timeoutSeconds(value: number | undefined, mode?: RouteInput["mode"]): number {
-  const timeout = value ?? (["worktree_write", "write", "worktree", "rw"].includes(mode ?? "") ? 10800 : DEFAULT_TIMEOUT_SECONDS);
+  const timeout = value ?? (mode === "worktree_write" ? 10800 : DEFAULT_TIMEOUT_SECONDS);
   if (!Number.isFinite(timeout) || timeout <= 0)
     throw new InputError("invalid_input", "timeout_seconds must be finite and positive");
   return timeout;
@@ -225,7 +261,7 @@ export function timeoutSeconds(value: number | undefined, mode?: RouteInput["mod
 
 export function workingIdentity(input: RouteInput, identity: Identity, projectRoots: string[] = identity.registeredProjects ?? [identity.project]): Identity {
   if (input.cwd === undefined) return identity;
-  if (["worktree_write", "write", "worktree", "rw"].includes(input.mode ?? ""))
+  if (input.mode === "worktree_write")
     throw new InputError("cwd_not_applicable", "Use worktree for writers; cwd is a read-only directory.");
   const cwd = canonical(resolve(identity.cwd, input.cwd));
   let directory = false;

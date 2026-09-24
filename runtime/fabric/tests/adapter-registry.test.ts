@@ -159,13 +159,15 @@ describe("adapter rejection", () => {
     )).resolves.toMatchObject({ status: "rejected", fix: expect.stringMatching(/agy, claude, codex, copilot, cursor, kiro, opencode/u) });
   });
 
-  it("passes unknown model aliases to the owner, respecting cancellation", async () => {
-    await expect(dispatchConfiguredProvider(
-      { adapter: "codex", alias: "missing-model", prompt: "hello" },
-      identity,
-      AbortSignal.abort(),
-      { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot },
-    )).rejects.toThrow(/aborted/u);
+  it("rejects unknown model and alias selectors with valid choices", async () => {
+    for (const selector of [{ model: "missing-model" }, { alias: "missing-alias" }]) {
+      await expect(dispatchConfiguredProvider(
+        { adapter: "codex", ...selector, prompt: "hello" },
+        identity,
+        AbortSignal.abort(),
+        { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot },
+      )).resolves.toMatchObject({ status: "rejected", fix: expect.stringMatching(/valid (model|alias):/u) });
+    }
     expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
   });
 

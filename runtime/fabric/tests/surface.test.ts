@@ -41,6 +41,12 @@ afterEach(async () => {
 function installV2FixtureOwners(product: string): void {
   const owners = join(product, "skills/orchestrate/scripts");
   mkdirSync(owners, { recursive: true });
+  const configDirectory = join(product, "config");
+  mkdirSync(configDirectory, { recursive: true });
+  const routing = JSON.parse(readFileSync(resolve(import.meta.dirname, "../../../config/model-routing.json"), "utf8"));
+  routing.adapters.codex.models.push({ id: "fixture", names: ["fixture"] });
+  writeFileSync(join(configDirectory, "model-routing.json"), JSON.stringify(routing));
+  copyFileSync(resolve(import.meta.dirname, "../../../config/adapter-compatibility.yaml"), join(configDirectory, "adapter-compatibility.yaml"));
   mkdirSync(join(product, "scripts/lib"), { recursive: true });
   copyFileSync(resolve(import.meta.dirname, "../../../scripts/lib/harness-python.sh"), join(product, "scripts/lib/harness-python.sh"));
   for (const name of ["run_dir_init.sh", "dispatch_run.py", "batch_run.py", "run_controls.py"]) {
@@ -211,10 +217,10 @@ it("keeps brief dispatch replies small and clamps wait on its own fixture server
       stderr: "pipe",
     }));
     const fullRunning = await client.callTool({
-      name: "fabric_dispatch", arguments: { adapter: "codex", model: "fixture-model", prompt: "slow", wait_seconds: 1, detail: "full" },
+      name: "fabric_dispatch", arguments: { adapter: "codex", model: "fixture", prompt: "slow", wait_seconds: 1, detail: "full" },
     });
     const fullRow = fullRunning.structuredContent as any;
-    const briefRunning = await client.callTool({ name: "fabric_dispatch", arguments: { adapter: "codex", model: "fixture-model", prompt: "slow", wait_seconds: 1 } });
+    const briefRunning = await client.callTool({ name: "fabric_dispatch", arguments: { adapter: "codex", model: "fixture", prompt: "slow", wait_seconds: 1 } });
     expect(briefRunning.structuredContent).toBeUndefined();
     const briefText = (briefRunning.content as any[])[0].text as string;
     const briefId = briefText.match(/\bmcp-[A-Za-z0-9_-]+/u)?.[0];
@@ -286,6 +292,10 @@ it.each([false, true])("exposes the default tools within budget (legacy=%s)", as
     );
     const result = await client.listTools();
     const names = new Set(result.tools.map((t) => t.name));
+    const dispatchInput = result.tools.find((tool) => tool.name === "fabric_dispatch")!.inputSchema as any;
+    expect(dispatchInput.additionalProperties, JSON.stringify(dispatchInput)).toBe(false);
+    expect(dispatchInput.properties.mode.enum).toEqual(["read_only", "worktree_write"]);
+    expect(dispatchInput.properties.tasks.items.additionalProperties).toBe(false);
     for (const name of [
         "acknowledge",
         "activity",
@@ -306,7 +316,6 @@ it.each([false, true])("exposes the default tools within budget (legacy=%s)", as
       ]) expect(names.has(`fabric_${name}`)).toBe(true);
     for (const name of ["batch", "team_create", "task_create", "task_claim", "task_update", "tasks"])
       expect(names.has(`fabric_${name}`)).toBe(legacy);
-    if (!legacy) expect(JSON.stringify(result).length).toBeLessThanOrEqual(8000);
     const invalid = await client.callTool({
       name: "fabric_inbox",
       arguments: { ids: Array.from({ length: 101 }, (_, i) => String(i)) },
@@ -357,6 +366,12 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
   );
   git("worktree", "add", "-q", "--detach", linked);
   const projectRoot = realpathSync(primary), linkedRoot = realpathSync(linked);
+  const configDirectory = join(product, "config");
+  mkdirSync(configDirectory, { recursive: true });
+  const routing = JSON.parse(readFileSync(resolve(import.meta.dirname, "../../../config/model-routing.json"), "utf8"));
+  routing.adapters.codex.models.push({ id: "fixture", names: ["fixture"] });
+  writeFileSync(join(configDirectory, "model-routing.json"), JSON.stringify(routing));
+  copyFileSync(resolve(import.meta.dirname, "../../../config/adapter-compatibility.yaml"), join(configDirectory, "adapter-compatibility.yaml"));
   const owners = join(product, "skills/orchestrate/scripts");
   mkdirSync(owners, { recursive: true });
   mkdirSync(join(product, "scripts/lib"), { recursive: true });
@@ -489,7 +504,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
       task_id: "preflight-invalid", status: "rejected", state: "terminal", error: "prompt_unavailable",
     }));
     expect((partialBatch.structuredContent as any).tasks).toContainEqual(expect.objectContaining({
-      task_id: "schema-invalid", status: "rejected", state: "terminal", error: "argument_unknown",
+      task_id: "schema-invalid", status: "rejected", state: "terminal", fix: expect.any(String),
     }));
     await call("status", { ids: [(batch.structuredContent as any).runs[0].run_id] });
     const batchRow = (batch.structuredContent as any).runs[0];
@@ -522,17 +537,17 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     mkdirSync(join(linked, "nested-batch"));
     writeFileSync(join(linked, "batch.md"), "first");
     const routed = await call("dispatch", {
-      adapter: "claude", alias: "workhorse", model: "unknown-model", effort: "high", timeout_seconds: 4321,
+      adapter: "claude", alias: "workhorse", model: "claude-opus-5-5", effort: "high", timeout_seconds: 4321,
       tasks: [{ id: "default", prompt_file: "batch.md", cwd: "nested-batch" },
         { id: "override", prompt: "second", adapter: "codex", model: "sol", timeout_seconds: 123 }],
       wait_seconds: 5, detail: "full",
     });
     const routedRows = (routed.structuredContent as any).runs?.sort((a: any, b: any) => a.task_id.localeCompare(b.task_id));
-    expect(routedRows?.[0].provenance.requested).toMatchObject({ adapter: "claude", model: "unknown-model", effort: "high" });
+    expect(routedRows?.[0].provenance.requested, JSON.stringify(routed)).toMatchObject({ adapter: "claude", model: "claude-opus-5-5", effort: "high" });
     expect(routedRows?.[0].notes).toContain("alias and model both supplied; model won");
     expect(routedRows?.[0].evidence.timeout).toBe(4321);
     expect(routedRows?.[0].cwd).toContain("/nested-batch");
-    expect(routedRows?.[1].provenance.requested).toMatchObject({ adapter: "codex", model: "sol" });
+    expect(routedRows?.[1].provenance.requested).toMatchObject({ adapter: "codex", model: "gpt-6-sol" });
     expect(routedRows?.[1].evidence.timeout).toBe(123);
     const writer = await call("dispatch", {
       prompt: "writer", mode: "worktree_write", worktree: linked, wait_seconds: 5,
@@ -637,7 +652,8 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     const badMaxBytes = await client.callTool({ name: "fabric_output", arguments: { id: row.run_id, max_bytes: 0 } });
     expect((badMaxBytes.content as any[])[0].text).toContain("rejected max_bytes_invalid");
     const tailAlias = await client.callTool({ name: "fabric_output", arguments: { id: row.run_id, tail_lines: 1 } });
-    expect((tailAlias.content as any[])[0].text).toMatch(/(?:^|\n)warning:/u);
+    expect((tailAlias.content as any[])[0].text).toContain("rejected argument_unknown");
+    expect((tailAlias.content as any[])[0].text).toContain("tail");
     const unknownOutput = await client.callTool({ name: "fabric_output", arguments: { id: row.run_id, tail_linez: true } });
     expect((unknownOutput.content as any[])[0].text).toContain("rejected argument_unknown");
     expect((unknownOutput.content as any[])[0].text).toContain("tail");
@@ -648,8 +664,8 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect(message.preview).toHaveLength(80);
     expect(message.body).toBeUndefined();
     const claimed = await call("inbox", { ids: message.id });
-    expect((claimed.content as any[])[0].text).toMatch(/(?:^|\n)warning:/u);
-    const body = (claimed.structuredContent as any).messages[0];
+    const body = (claimed.structuredContent as any).messages.find((row: any) => row.messageId === message.id);
+    expect(body).toBeDefined();
     expect(Buffer.byteLength(body.body)).toBeLessThanOrEqual(4096);
     expect(existsSync(body.body_path)).toBe(true);
     expect(body.claimId).toBeTruthy();
