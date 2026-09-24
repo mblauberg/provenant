@@ -98,10 +98,10 @@ and the terminal Route line shows it as `ctx 212k/1M`. See
 Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, and `detail`.
 New attempts wait when available host memory is below 1024 MB. Set
 `FABRIC_MEMORY_FLOOR_MB` to another non-negative MB value; `0` disables admission.
-Queued time does not use the execution timeout. `fabric_status` and `fabric status`
-show `queued` with a current reason such as `waiting for memory: 812 MB available,
-floor 1024 MB`. Cancellation works while waiting. A failed memory probe admits
-the attempt and records a warning.
+Queued time does not use the execution timeout, but `FABRIC_MEMORY_WAIT_SECONDS`
+limits each wait (default 1800); expiry fails the attempt as `memory_unavailable`.
+Owners serialise admission through a per-user host lock in `$XDG_STATE_HOME/provenant/admission.lock`
+(default `~/.local/state/provenant/admission.lock`) and hold it for up to 20 seconds after provider start; lock creation or probe failure admits with a warning, while `fabric_status` and `fabric status` show current memory, elapsed and remaining wait and allow cancellation.
 An invalid floor records a failed attempt with a fix. The parent keeps a
 watchdog for child owners and excludes their published queued time.
 
