@@ -99,8 +99,9 @@ def test_writer_confinement_allows_only_owned_paths(monkeypatch, tmp_path):
     assert "(deny file-write*)" in profile
     assert f'(deny file-write* (subpath "{common}"))' in profile
     allow = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-write* "))
-    for path in (worktree, attempt, private, add_dir):
+    for path in (worktree, attempt, private, Path("/dev")):
         assert f'(subpath "{path}")' in allow
+    assert f'(subpath "{add_dir}")' not in allow
     assert f'(subpath "{common}")' not in allow
     for path in (common / "objects", common / "refs", common / "logs"):
         assert f'(subpath "{path}")' in profile
@@ -448,6 +449,7 @@ def test_read_only_profile_denies_writes_outside_attempt_and_provider_state(monk
     allow = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-write* "))
     assert f'(subpath "{attempt}")' in allow
     assert f'(subpath "{home / "state"}")' in allow
+    assert '(subpath "/dev")' in allow
     for path in (workspace, add_dir, home, tmp_path / "T", Path("/private/tmp")):
         assert f'(subpath "{path}")' not in allow
 

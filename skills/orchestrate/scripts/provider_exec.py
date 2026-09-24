@@ -227,7 +227,8 @@ def os_confinement_profile(plan):
                 git_dirs[flag] = Path(result.stdout.strip()).resolve()
         private = git_dirs.get("--absolute-git-dir")
         common = git_dirs.get("--git-common-dir")
-        allowed = [cwd, run_dir, *add_dirs, *state_writes, Path("/dev")]
+        # add_dirs are read inputs, never write targets.
+        allowed = [cwd, run_dir, *state_writes, Path("/dev")]
         git_allowed = []
         if private is not None and private != common:
             git_allowed.append(private)
@@ -243,7 +244,7 @@ def os_confinement_profile(plan):
                 + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", [])))
     return (
         "(version 1)\n(allow default)\n(deny file-write*)\n"
-        + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), *state_writes])
+        + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), *state_writes, Path("/dev")])
         + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
         + _sbpl_rule("deny", "file-read-data", [root, *add_dirs, *(home / path for path in EXTRA_DENIED_READS)])
         + _sbpl_rule("allow", "file-read-data", [*([run_dir] if run_dir else []), *state_writes])
