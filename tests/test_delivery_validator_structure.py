@@ -1,5 +1,5 @@
+import ast
 from pathlib import Path
-import re
 
 import pytest
 
@@ -17,10 +17,15 @@ def test_submodules_take_shared_imports_through_the_common_module(module: Path) 
     """`delivery_validation_common` owns the load of `_shared`. A submodule
     importing `_shared` directly only works when some sibling has already
     established it, so the import order becomes load-bearing and silent."""
-    source = module.read_text()
+    tree = ast.parse(module.read_text())
     if module.name == "delivery_validation_common.py":
         return
-    offending = re.findall(r"^from _shared[.\w]* import .*$", source, flags=re.MULTILINE)
+    offending = [
+        node.module for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        and node.module is not None
+        and node.module == "_shared"
+    ]
     assert not offending, (
         f"{module.name} imports _shared directly: {offending}. "
         "Re-export it through delivery_validation_common instead."

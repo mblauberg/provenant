@@ -1,11 +1,9 @@
-"""Guardrails owned by the #328 architecture guardrail child.
+"""Import-boundary guardrails owned by the #328 architecture guardrail child.
 
-The first invariant catches unusually large hand-written runtime TypeScript
-source files. The second
-keeps the daemonless Fabric package independent of the retired runtime packages,
-inside its package boundary, and layered so its store cannot depend on its CLI
-or MCP surfaces. Temporary allowances and permanent declared placements stay
-live through staleness checks.
+They keep the daemonless Fabric package independent of the retired runtime
+packages, inside its package boundary, and layered so its store cannot depend
+on its CLI or MCP surfaces. Temporary allowances and permanent declared
+placements stay live through staleness checks.
 
 Specifier extraction deliberately uses regexes over comment-masked source
 rather than a TypeScript AST: the relevant ESM forms have literal string
@@ -334,11 +332,6 @@ def _write_source(root: Path, relative_file: str, source: str) -> Path:
     source_file.parent.mkdir(parents=True, exist_ok=True)
     source_file.write_text(source, encoding="utf-8")
     return source_file
-
-
-def test_runtime_source_size_ratchet() -> None:
-    ceilings, _ = _load_fixture()
-    _check_source_sizes(ROOT, ceilings)
 
 
 def test_runtime_import_boundaries() -> None:

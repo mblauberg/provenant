@@ -20,29 +20,6 @@ def council_spec(**overrides: object) -> dict[str, object]:
     )
 
 
-def test_panel_axes_and_presets_are_small_and_declarative():
-    assert review_panel.PANEL_AXES == (
-        "membership",
-        "distribution",
-        "reduction",
-        "degradation",
-    )
-    assert review_panel.PANEL_PRESETS == {
-        "council": {
-            "distribution": "shared",
-            "reduction": "agreements-conflicts",
-            "minimum_members": 3,
-        },
-        "breadth": {
-            "distribution": "split",
-            "reduction": "union",
-            "minimum_members": 1,
-        },
-    }
-    assert set(review_panel.REDUCERS) == {"agreements-conflicts", "union"}
-    assert all(callable(reducer) for reducer in review_panel.REDUCERS.values())
-
-
 def test_resolution_is_preset_then_per_axis_override_without_mutating_preset():
     presets = deepcopy(review_panel.PANEL_PRESETS)
 

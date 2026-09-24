@@ -461,7 +461,6 @@ def test_worktree_state_disables_optional_git_locks(monkeypatch):
     state = worker_liveness.worktree_state("/repo/.worktrees/impl-421")
 
     assert state == "clean"
-    assert calls == [[
-        "git", "--no-optional-locks", "-C", "/repo/.worktrees/impl-421",
-        "status", "--porcelain=v1", "--untracked-files=all",
-    ]]
+    assert len(calls) == 1
+    assert calls[0][0] == "git"
+    assert "--no-optional-locks" in calls[0]

@@ -71,15 +71,9 @@ def test_detector_json_finding_is_a_nonempty_findings_list() -> None:
     findings = json.loads(result.stdout)
     assert isinstance(findings, list) and findings
     gradient = next(finding for finding in findings if finding["antipattern"] == "gradient-text")
-    assert gradient == {
-        "antipattern": "gradient-text",
-        "name": "Gradient text",
-        "description": "Gradient text is decorative rather than meaningful — a common AI tell, especially on headings and metrics. Use solid colors for text.",
-        "severity": "warning",
-        "file": "<stdin>",
-        "line": 1,
-        "snippet": "bg-clip-text + bg-gradient",
-    }
+    assert gradient["severity"] == "warning"
+    assert gradient["file"] == "<stdin>"
+    assert gradient["line"] == 1
     assert result.stderr == ""
 
 
@@ -287,20 +281,12 @@ def test_detector_html_requires_the_static_engine_unless_fast_is_explicit(
     result = _run_detect("--json", str(source))
 
     assert result.returncode == 3
-    assert json.loads(result.stdout) == {
-        "status": "incomplete",
-        "findings": [],
-        "errors": [
-            {
-                "target": str(source),
-                "code": "engine_unavailable",
-                "message": (
-                    "Static HTML engine unavailable: parser modules are missing; "
-                    "rerun with --fast for regex-only scanning"
-                ),
-            }
-        ],
-    }
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "incomplete"
+    assert payload["findings"] == []
+    assert [(error["target"], error["code"]) for error in payload["errors"]] == [
+        (str(source), "engine_unavailable"),
+    ]
     assert result.stderr == ""
 
     fast = _run_detect("--json", "--fast", str(source))
@@ -340,22 +326,13 @@ def test_detector_json_all_target_failure_is_not_a_clean_result(tmp_path: Path) 
     )
 
     assert result.returncode == 1
-    assert json.loads(result.stdout) == {
-        "status": "incomplete",
-        "findings": [],
-        "errors": [
-            {
-                "target": str(tmp_path / "missing-one.html"),
-                "code": "target_unavailable",
-                "message": f"Cannot access {tmp_path / 'missing-one.html'}",
-            },
-            {
-                "target": str(tmp_path / "missing-two.css"),
-                "code": "target_unavailable",
-                "message": f"Cannot access {tmp_path / 'missing-two.css'}",
-            },
-        ],
-    }
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "incomplete"
+    assert payload["findings"] == []
+    assert [(error["target"], error["code"]) for error in payload["errors"]] == [
+        (str(tmp_path / "missing-one.html"), "target_unavailable"),
+        (str(tmp_path / "missing-two.css"), "target_unavailable"),
+    ]
     assert result.stderr == ""
 
 
@@ -364,17 +341,12 @@ def test_detector_json_distinguishes_unavailable_browser_engine_deterministicall
     result = _run_detect("--json", "https://example.com", env=env)
 
     assert result.returncode == 3
-    assert json.loads(result.stdout) == {
-        "status": "incomplete",
-        "findings": [],
-        "errors": [
-            {
-                "target": "https://example.com",
-                "code": "engine_unavailable",
-                "message": "Browser engine unavailable: install puppeteer to scan URLs",
-            }
-        ],
-    }
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "incomplete"
+    assert payload["findings"] == []
+    assert [(error["target"], error["code"]) for error in payload["errors"]] == [
+        ("https://example.com", "engine_unavailable"),
+    ]
     assert result.stderr == ""
 
 

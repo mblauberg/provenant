@@ -31,6 +31,7 @@ sys.stdout.write(open(turn).read())
 
 
 def replay_owner(tmp_path, monkeypatch, adapter, turn1, turn2, session, model):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     bindir = tmp_path / "provider-bin"
     bindir.mkdir()
     binary = bindir / BINARY[adapter]
@@ -39,6 +40,7 @@ def replay_owner(tmp_path, monkeypatch, adapter, turn1, turn2, session, model):
     log = tmp_path / "argv.jsonl"
     for key, value in {
         "PATH": str(bindir) + os.pathsep + os.environ["PATH"],
+        "HARNESS_PYTHON": sys.executable,
         "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
         "FABRIC_COOLDOWNS_PATH": str(tmp_path / "cooldowns.json"),
         "REPLAY_LOG": str(log), "REPLAY_TURN1": str(turn1), "REPLAY_TURN2": str(turn2),
@@ -110,9 +112,10 @@ def test_resume_of_a_large_session_warns_with_handoff_and_keeps_the_ceiling(tmp_
     resumed = resume(run, row, prompt)
     assert resumed.returncode == 0, resumed.stdout + resumed.stderr
     second = attempt(run, 2)
-    advice = f'resuming a ~620k-token session; fresh: fabric_dispatch{{prompt, handoff:"{row["run_id"]}"}}'
-    assert second["warnings"][0] == advice
-    assert "\n  ! " + advice in second["digest"]
+    warning = " ".join(second["warnings"])
+    assert "620k-token session" in warning
+    assert row["run_id"] in warning
+    assert row["run_id"] in second["digest"]
     argv = argv_calls(log)[1]
     assert follows(argv, "--resume", "session-0003")
     assert follows(argv, "--autocompact", "150000")

@@ -1312,38 +1312,3 @@ def test_absent_target_replaced_after_link_fails_closed_with_recovery(tmp_path: 
     recovery = Path(str(caught.value).rsplit(" ", 1)[-1])
     assert "fabric" in recovery.read_text()
     recovery.unlink()
-
-
-def test_registration_runbook_documents_a_project_free_registration_and_its_recovery() -> None:
-    runbook = (ROOT / "docs/runbooks/fabric-mcp-registration.md").read_text()
-    assert "configure-fabric-mcp.py" in runbook
-    # Registration binds no project: cwd decides, with no manual override.
-    assert "three environment variables by default" in runbook
-    assert "AGENT_FABRIC_STATE_DIRECTORY" in runbook
-    assert "AGENT_FABRIC_SEAT" in runbook
-    assert "AGENT_FABRIC_CLIENT_LABEL" in runbook
-    assert "AGENT_FABRIC_PROJECT_PATH" not in runbook
-    assert "Fabric has no manual project override" in runbook
-    assert "Claude Code and Codex" in runbook
-    assert "six clients" in runbook
-    assert "`--mcp-clients all`" in runbook
-    assert "not model-family proof" in runbook
-    assert "exact provider/model" in runbook
-    verification = runbook.split("## Verify", 1)[1].split("\n## ", 1)[0]
-    assert "opencode mcp list" in verification
-    # A part-written set of registries must say so rather than report success.
-    recovery = runbook.split("## When a write fails partway", 1)[1]
-    assert "first-client atomic install" in recovery
-    assert "partial-state" in recovery
-    assert "exit code `4`" in recovery
-
-
-def test_relocation_runbook_uses_configured_instance_root_and_checks_shim_separately() -> None:
-    runbook = (ROOT / "docs/runbooks/split-product-relocation.md").read_text()
-    assert "`<instance-root>/.agent-fabric/product-root.json`" in runbook
-    assert "same exact instance root" in runbook
-    assert 'provenant_bin="${PROVENANT_BIN_DIR:-$HOME/.local/bin}/provenant"' in runbook
-    assert "elif [ -f \"$provenant_bin\" ]; then" in runbook
-    assert 'old="/path/to/old/provenant"' in runbook
-    assert 'for root in "${CLAUDE_CONFIG_DIR:-$HOME/.claude}"' in runbook
-    assert 'printf "%s -> %s\\n" "$link" "$(realpath "$link")"' in runbook

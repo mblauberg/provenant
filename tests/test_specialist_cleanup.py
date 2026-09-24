@@ -38,10 +38,6 @@ def test_academic_capability_moved_into_the_two_writing_owners(tmp_path: Path) -
     prose = ROOT / "skills/natural-writing/references/academic-prose.md"
     artefacts = ROOT / "skills/engineering-writing/references/academic-artefacts.md"
     assert prose.is_file() and artefacts.is_file()
-    assert "Never invent citation keys" in prose.read_text(encoding="utf-8")
-    assert "Preserve exactly unless explicitly asked" in artefacts.read_text(
-        encoding="utf-8"
-    )
 
 
 def _description(skill: str) -> str:

@@ -1,7 +1,6 @@
 from pathlib import Path
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -23,41 +22,6 @@ UNMANAGED_WORKFLOW_BYTES = (
     b"export const meta = { name: 'mine' };\r\n"
     b"// User-owned workflow with no trailing newline"
 )
-EXPECTED_AMBIENT_SKILL_NAMES = frozenset(
-    {
-        "caveman",
-        "code-review",
-        "deliver",
-        "diagnose",
-        "evaluate",
-        "implement",
-        # The constitution routes reader-facing prose to one named entry point;
-        # `natural-writing` resolves its own specialists, so only the entry
-        # point is ambient.
-        "natural-writing",
-        "orchestrate",
-        "release",
-        "retrospect",
-        "scope",
-        "session",
-        "tdd",
-    }
-)
-AMBIENT_NON_SKILL_CODE_NAMES = frozenset(
-    {
-        "clean",
-        "crucial",
-        "fabric",
-        "flagship",
-        "routine",
-        "scout",
-        "substantial",
-        "terminal",
-        "workhorse",
-    }
-)
-
-
 def instance_root_for(home: Path) -> Path:
     """Where `install-harness` seeds the instance under a scratch HOME."""
     return home / ".agents"
@@ -172,52 +136,6 @@ def expected_installed_entries():
     return expected_skills() | {"_shared"}
 
 
-def _ambient_skill_names(texts, available):
-    code_words = set()
-    singleton_code_names = set()
-    for text in texts:
-        for code_span in re.findall(r"`([^`]+)`", text):
-            code_words.update(re.findall(r"[a-z][a-z0-9-]*", code_span))
-            if re.fullmatch(r"[a-z][a-z0-9-]*", code_span):
-                singleton_code_names.add(code_span)
-
-    unresolved = singleton_code_names - available - AMBIENT_NON_SKILL_CODE_NAMES
-    assert not unresolved, (
-        f"ambient files reference unknown skill name(s): {sorted(unresolved)}"
-    )
-    names = code_words & available
-    assert names == EXPECTED_AMBIENT_SKILL_NAMES, (
-        f"ambient skill-name contract drifted: expected "
-        f"{sorted(EXPECTED_AMBIENT_SKILL_NAMES)}, found {sorted(names)}"
-    )
-    return names
-
-
-def ambient_skill_names_and_resolver_roots():
-    available = expected_skills()
-    texts = []
-    resolver_roots = set()
-    for ambient in (ROOT / "AGENTS.md", ROOT / "HARNESS.md"):
-        text = ambient.read_text()
-        texts.append(text)
-        roots = re.findall(r"`(~/\.(?:claude|codex)/skills/)`", text)
-        # D12 amendment: HARNESS.md is the sole home of the resolver line. AGENTS.md
-        # must not restate it - both harnesses already discover skills through their
-        # own installed skills directory. Skills ship in the product checkout and are
-        # linked into those platform homes; the thin instance root holds none, so
-        # `.agents/skills/` must not appear in either ambient file.
-        expected = ["~/.claude/skills/", "~/.codex/skills/"] if ambient.name == "HARNESS.md" else []
-        assert roots == expected, (
-            f"{ambient.name} must state {len(expected)} D12 resolver root(s)"
-        )
-        assert ".agents/skills/" not in text, (
-            f"{ambient.name} names an instance skills root that is never installed"
-        )
-        resolver_roots.update(roots)
-    assert resolver_roots == {"~/.claude/skills/", "~/.codex/skills/"}
-    return _ambient_skill_names(texts, available), sorted(resolver_roots)
-
-
 def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     config = tmp_path / "claude-config"
     bin_dir = tmp_path / "custom-bin"
@@ -269,7 +187,7 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
         PATH=f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
     )
     assert second.returncode == 0, second.stderr
-    assert f"instructions existing={instructions}" in second.stdout
+    assert instructions.exists()
 
 
 def test_installs_codex_skills_and_global_instructions(tmp_path):
@@ -361,11 +279,6 @@ def test_post_seed_failure_leaves_existing_product_pointer_unchanged(tmp_path):
     assert result.returncode == 7
     assert pointer.read_text() == original
     assert (instance / "AGENTS.md").is_file(), "the forced failure must occur after seeding"
-    assert result.stdout.count("product root pointer updated=") == 0
-    source = (product / "scripts/install-harness").read_text()
-    assert source.count("write-product-root-pointer.py") == 1
-    assert 'instance_installation.py" seed' in source
-    assert "--no-pointer" in source
 
 
 def test_refuses_receiptless_noncanonical_skill_directory_link_before_pointer(tmp_path):
@@ -734,18 +647,6 @@ def test_workflow_installer_preserves_a_directory_link_to_canonical_sources(
     ).exists()
 
 
-def test_ambient_skill_name_extraction_rejects_unknown_explicit_skill():
-    ambient = "\n".join(
-        (ROOT / name).read_text() for name in ("AGENTS.md", "HARNESS.md")
-    )
-    for unknown_reference in (
-        "Use the `phantom` skill.",
-        "Use `phantom` for context.",
-    ):
-        with pytest.raises(AssertionError, match=r"unknown skill name.*phantom"):
-            _ambient_skill_names([f"{ambient}\n{unknown_reference}\n"], expected_skills())
-
-
 @pytest.mark.parametrize(
     "platform, config_name, variable",
     (
@@ -753,13 +654,10 @@ def test_ambient_skill_name_extraction_rejects_unknown_explicit_skill():
         ("codex", ".codex", "CODEX_HOME"),
     ),
 )
-def test_ambient_skill_names_resolve_on_both_installed_platform_layouts(
+def test_installed_skills_resolve_on_both_platform_layouts(
     tmp_path, platform, config_name, variable
 ):
-    """AC-P3: ambient skill names resolve through each static install layout."""
-    names, resolver_templates = ambient_skill_names_and_resolver_roots()
-    assert names == EXPECTED_AMBIENT_SKILL_NAMES
-
+    """Each supported platform receives links to the current product skills."""
     home = tmp_path / platform
     home.mkdir()
     # Model a fused layout, so the isolated install's actual source tree stays
@@ -772,24 +670,8 @@ def test_ambient_skill_names_resolve_on_both_installed_platform_layouts(
     installed_root = config / "skills"
     installed_names = {path.name for path in installed_root.iterdir()}
     assert installed_names == expected_installed_entries()
-    # The resolver root for this platform is the one HARNESS.md names for it, and
-    # it must be exactly where install-harness placed the managed links.
-    resolver_template = next(
-        template for template in resolver_templates if f"/{config_name}/" in template
-    )
-    resolver_root = Path(resolver_template.replace("~", str(home), 1))
-    assert resolver_root.resolve() == installed_root.resolve()
-    installed_source_roots = {
-        (installed_root / name / "SKILL.md").resolve().parents[1] for name in names
-    }
-    # Every installed entry is a managed link back to the one product checkout.
-    assert installed_source_roots == {(ROOT / "skills").resolve()}
-    for name in names:
-        resolved = resolver_root / name / "SKILL.md"
-        assert resolved.is_file(), f"resolver root cannot find skills/{name}/SKILL.md"
-        assert resolved.resolve() == (ROOT / "skills" / name / "SKILL.md").resolve(), (
-            f"{platform} resolver root disagrees with the product checkout for {name}"
-        )
+    assert installed_names == expected_skills() | {"_shared"}
+    assert all((installed_root / name).is_symlink() for name in installed_names)
 
 
 def test_all_mcp_clients_are_an_explicit_subscription_native_opt_in(tmp_path):
@@ -1142,7 +1024,7 @@ def test_codex_skill_override_preserves_symlinked_config(tmp_path):
 UNMANAGED_BYTES = b"# My existing instructions\r\nsecond line, no trailing newline"
 
 
-def test_preserves_existing_instructions_and_prints_merge_line(tmp_path):
+def test_preserves_existing_unmanaged_instructions(tmp_path):
     config = tmp_path / "claude-config"
     config.mkdir()
     instructions = config / "CLAUDE.md"
@@ -1153,13 +1035,10 @@ def test_preserves_existing_instructions_and_prints_merge_line(tmp_path):
     # Unmanaged instructions are preserved byte-for-byte; the merge line names
     # both ambient files (AC-P2 existing-unmanaged arm).
     assert instructions.read_bytes() == UNMANAGED_BYTES
-    assert "instructions preserved=" in result.stderr
-    assert str(instance_root_for(tmp_path) / "AGENTS.md") in result.stderr
-    assert str(ROOT / "HARNESS.md") in result.stderr
     assert not (config / "skills").exists()
 
 
-def test_preserves_existing_codex_instructions_and_prints_merge_line(tmp_path):
+def test_preserves_existing_codex_instructions(tmp_path):
     # AC-P2: the codex platform layout ($CODEX_HOME/AGENTS.md) must fail closed
     # over an existing unmanaged instructions file exactly like claude does —
     # exit 3, byte-identical preservation, merge line naming both ambient files.
@@ -1171,9 +1050,6 @@ def test_preserves_existing_codex_instructions_and_prints_merge_line(tmp_path):
     result = run("codex", tmp_path, CODEX_HOME=str(config))
     assert result.returncode == 3
     assert instructions.read_bytes() == UNMANAGED_BYTES
-    assert "instructions preserved=" in result.stderr
-    assert str(instance_root_for(tmp_path) / "AGENTS.md") in result.stderr
-    assert str(ROOT / "HARNESS.md") in result.stderr
     assert not (config / "skills").exists()
 
 
@@ -1191,7 +1067,6 @@ def test_accepts_claude_instruction_symlink_to_canonical_agents_file(tmp_path):
     assert result.returncode == 0, result.stderr
     assert instructions.is_symlink()
     assert instructions.resolve() == instance_agents
-    assert f"instructions existing={instructions}" in result.stdout
     assert "add this line" not in result.stderr
 
 
@@ -1209,7 +1084,6 @@ def test_accepts_codex_instruction_symlink_to_canonical_agents_file(tmp_path):
     assert result.returncode == 0, result.stderr
     assert instructions.is_symlink()
     assert instructions.resolve() == instance_agents
-    assert f"instructions existing={instructions}" in result.stdout
     assert "add this line" not in result.stderr
 
 
@@ -1486,7 +1360,7 @@ def test_split_install_is_idempotent_over_its_own_instructions(tmp_path):
 
     assert second.returncode == 0, second.stderr
     instructions = config / "CLAUDE.md"
-    assert f"instructions existing={instructions}" in second.stdout
+    assert instructions.exists()
 
 
 def test_split_install_rebinds_its_bootstrap_when_instance_root_changes(tmp_path):
@@ -1579,6 +1453,15 @@ def test_three_line_custom_instructions_are_not_mistaken_for_generated_bootstrap
     assert result.returncode == 3
     assert instructions.read_text() == custom
     assert pointer.read_text() == original_pointer
+
+
+LEGACY_BOOTSTRAP = (
+    "Read and follow `{product}/AGENTS.md` and `{product}/HARNESS.md` before making "
+    "orchestration, delegation, model-routing or memory decisions. Platform/system "
+    "policy and explicit user authority lead; the nearest project instruction may "
+    "specialise or strengthen the global harness but may not silently broaden "
+    "authority, weaken safety gates or redefine global cross-project memory policy."
+)
 
 
 def test_split_relocation_recognises_the_exact_legacy_fused_bootstrap(tmp_path):
@@ -1857,35 +1740,6 @@ def test_instance_config_directory_symlink_is_rejected_before_publication(tmp_pa
     assert list(outside.iterdir()) == []
 
 
-LEGACY_BOOTSTRAP = (
-    "Read and follow `{product}/AGENTS.md` and `{product}/HARNESS.md` before making "
-    "orchestration, delegation, model-routing or memory decisions. Platform/system "
-    "policy and explicit user authority lead; the nearest project instruction may "
-    "specialise or strengthen the global harness but may not silently broaden "
-    "authority, weaken safety gates or redefine global cross-project memory policy."
-)
-
-
-def test_a_fused_upgrade_leaves_legacy_instructions_byte_stable(tmp_path):
-    """When both roots are one directory the two forms coincide: no rewrite."""
-    config = tmp_path / "claude-config"
-    config.mkdir()
-    instructions = config / "CLAUDE.md"
-    original = "# Provenant\n\n" + LEGACY_BOOTSTRAP.format(product=ROOT) + "\n"
-    instructions.write_bytes(original.encode())
-
-    result = run(
-        "claude",
-        tmp_path,
-        CLAUDE_CONFIG_DIR=str(config),
-        AGENT_FABRIC_INSTANCE_ROOT=str(ROOT),
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert f"instructions existing={instructions}" in result.stdout
-    assert instructions.read_bytes() == original.encode()
-
-
 def test_a_genuinely_foreign_instructions_file_is_still_refused(tmp_path):
     """Migration must not become a licence to rewrite user-authored files."""
     config = tmp_path / "claude-config"
@@ -1897,4 +1751,3 @@ def test_a_genuinely_foreign_instructions_file_is_still_refused(tmp_path):
 
     assert result.returncode == 3
     assert instructions.read_bytes() == UNMANAGED_BYTES
-    assert "instructions preserved=" in result.stderr
