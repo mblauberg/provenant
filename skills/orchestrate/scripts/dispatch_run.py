@@ -1309,11 +1309,11 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
         if field in adapter: row[field]=adapter[field]
     row["warnings"] = list(dict.fromkeys([*row["warnings"], *getattr(args, "_memory_warnings", [])]))
     row["timing"]["queued_seconds"] = getattr(args, "_queued_seconds", 0.0)
-    if legacy.get("process_error", "").startswith("FABRIC_MEMORY_FLOOR_MB"):
-        row["fix"] = "Set FABRIC_MEMORY_FLOOR_MB to a non-negative integer."
+    if legacy.get("process_error", "").startswith("Set .agents/fabric-policy.json memory_floor_percent"):
+        row["fix"] = legacy["process_error"]
     if legacy["outcome"] == "memory_unavailable":
         row["error"] = "memory_unavailable"
-        row["fix"] = "memory_unavailable: free memory or raise/disable FABRIC_MEMORY_FLOOR_MB."
+        row["fix"] = "memory_unavailable: free memory or lower the mode's memory_floor_percent in .agents/fabric-policy.json."
     if refusal:
         row["fix"]=adapter.get("fix") or adapter.get("reason") or refusal["fix"];row["evidence"]=refusal["evidence"];row["error"]=refusal["error"]
     row.update(state="terminal",status=status,ended_at=legacy["finished_at"],question=adapter.get("question") or (legacy.get("question") or {}).get("prompt"))
@@ -1621,7 +1621,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             args._memory_warnings = getattr(args, "_memory_warnings", []) + [message]
         try:
             memory_lease = memory_admission.admit(waiting, cancelled_now, warning,
-                                                   waited_seconds=admission_queued_seconds)
+                                                   waited_seconds=admission_queued_seconds,
+                                                   workspace_root=workspace, mode=args.access_mode)
         except memory_admission.MemoryUnavailableError as exc:
             process_error = exc.code
             memory_lease = None

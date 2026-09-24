@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import fcntl
+import json
 import math
 import re
 import subprocess
@@ -66,25 +67,42 @@ def parse_meminfo(text: str) -> int:
     return int(match.group(1)) // 1024
 
 
-def available_mb() -> int:
+def available_memory_mb() -> tuple[int, int]:
     if sys.platform == "darwin":
         output = subprocess.run(["/usr/bin/vm_stat"], capture_output=True, text=True,
                                 timeout=5, check=True)
-        return parse_vm_stat(output.stdout)
+        total = subprocess.run(["/usr/sbin/sysctl", "-n", "hw.memsize"],
+                               capture_output=True, text=True, timeout=5, check=True)
+        return parse_vm_stat(output.stdout), int(total.stdout.strip()) // (1024 * 1024)
     if sys.platform.startswith("linux"):
-        return parse_meminfo(Path("/proc/meminfo").read_text(encoding="ascii"))
+        meminfo = Path("/proc/meminfo").read_text(encoding="ascii")
+        total = re.search(r"^MemTotal:\s*(\d+)\s+kB\s*$", meminfo, re.M)
+        if total is None:
+            raise ValueError("MemTotal missing")
+        return parse_meminfo(meminfo), int(total.group(1)) // 1024
     raise OSError(f"memory probe unsupported on {sys.platform}")
 
 
-def floor_mb() -> int:
-    raw = os.environ.get("FABRIC_MEMORY_FLOOR_MB", "1024")
+def floor_percent(workspace_root: Path, mode: str) -> int | float:
+    defaults = {"worktree_write": 10, "read_only": 5}
+    path = workspace_root / ".agents/fabric-policy.json"
     try:
-        floor = int(raw)
-        if floor < 0:
-            raise ValueError
-    except ValueError as exc:
-        raise ValueError("FABRIC_MEMORY_FLOOR_MB must be a non-negative integer") from exc
-    return floor
+        policy = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return defaults[mode]
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise ValueError("Set .agents/fabric-policy.json memory_floor_percent to numbers from 0 to 100.") from exc
+    floors = policy.get("memory_floor_percent", {}) if isinstance(policy, dict) else None
+    if not isinstance(floors, dict) or any(
+        key not in defaults or type(value) not in (int, float) or not math.isfinite(value)
+        or not 0 <= value <= 100 for key, value in floors.items()
+    ):
+        raise ValueError("Set .agents/fabric-policy.json memory_floor_percent to numbers from 0 to 100.")
+    return floors.get(mode, defaults[mode])
+
+
+def _duration(seconds: float) -> str:
+    return f"{int(seconds // 60)}m" if seconds >= 60 else f"{int(seconds)}s"
 
 
 def wait_seconds() -> float:
@@ -117,14 +135,18 @@ def _lock_file(on_warning: Callable[[str], None]) -> int | None:
 
 def admit(
     on_wait: Callable[[str], None], cancelled: Callable[[], bool],
-    on_warning: Callable[[str], None], probe: Callable[[], int] = available_mb,
+    on_warning: Callable[[str], None], probe: Callable[[], tuple[int, int]] | None = None,
     pause: Callable[[float], None] = time.sleep,
     waited_seconds: float = 0.0,
+    workspace_root: Path | None = None,
+    mode: str = "read_only",
 ) -> AdmissionLease | None:
     """Reserve host admission until the caller starts or ends the attempt."""
-    floor = floor_mb()
+    floor = floor_percent(workspace_root or Path.cwd(), mode)
+    probe = probe or available_memory_mb
     started = time.monotonic()
-    deadline = started + max(0.0, wait_seconds() - waited_seconds)
+    budget = wait_seconds()
+    deadline = started + max(0.0, budget - waited_seconds)
     waited_below_floor = False
     last_lock_report = 0.0
     while True:
@@ -164,17 +186,30 @@ def admit(
             os.close(fd)
             raise MemoryUnavailableError("memory admission wait expired")
         try:
-            available = probe()
-        except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            on_warning(f"memory probe failed: {exc}")
+            available, total = probe()
+            if total <= 0 or available < 0:
+                raise ValueError("invalid memory reading")
+        except (OSError, ValueError, TypeError, subprocess.SubprocessError) as exc:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
-            return AdmissionLease()
+            waited_below_floor = True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise MemoryUnavailableError("memory admission wait expired") from exc
+            elapsed = waited_seconds + time.monotonic() - started
+            on_wait(f"memory probe failed: {exc}; holding; {_duration(elapsed)} of {_duration(budget)}")
+            poll_end = min(deadline, time.monotonic() + POLL_SECONDS)
+            while time.monotonic() < poll_end:
+                if cancelled():
+                    return None
+                pause(min(0.1, poll_end - time.monotonic()))
+            continue
         if (waited_below_floor or contended or waited_seconds > 0) and time.monotonic() >= deadline:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
             raise MemoryUnavailableError("memory admission wait expired")
-        if available >= floor:
+        percent = available / total * 100
+        if percent >= floor:
             return AdmissionLease(fd)
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
@@ -182,8 +217,9 @@ def admit(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise MemoryUnavailableError("memory admission wait expired")
-        on_wait(f"waiting for memory: {available} MB available, floor {floor} MB; "
-                f"{waited_seconds + time.monotonic() - started:.1f}s elapsed, {remaining:.1f}s remaining")
+        elapsed = waited_seconds + time.monotonic() - started
+        on_wait(f"waiting for memory: {percent:.1f}% available ({available / 1024:.2f} GB), "
+                f"floor {floor:g}% for {mode}; {_duration(elapsed)} of {_duration(budget)}")
         poll_end = min(deadline, time.monotonic() + POLL_SECONDS)
         while time.monotonic() < poll_end:
             if cancelled():

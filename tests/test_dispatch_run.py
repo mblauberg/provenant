@@ -223,7 +223,7 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-@pytest.mark.parametrize("floor", ["invalid", "-1"])
+@pytest.mark.parametrize("floor", ['"invalid"', "-1", "101"])
 def test_invalid_memory_floor_retains_failed_attempt_with_fix(tmp_path, monkeypatch, legacy, floor):
     run_dir = make_run(tmp_path, f"bad-floor-{legacy}-{floor}")
     prompt = tmp_path / "prompt.md"
@@ -238,7 +238,9 @@ fi
 exit 99
 ''')
     monkeypatch.setenv("PATH", f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
-    monkeypatch.setenv("FABRIC_MEMORY_FLOOR_MB", floor)
+    policy = tmp_path / ".agents/fabric-policy.json"
+    policy.parent.mkdir()
+    policy.write_text('{"memory_floor_percent":{"read_only":' + floor + '}}')
     monkeypatch.chdir(tmp_path)
     module = load_dispatch_module()
     if legacy:
@@ -253,8 +255,8 @@ exit 99
     attempt = json.loads((run_dir / "dispatch/tasks/bad-floor/attempt-001/attempt.json").read_text())
     state = json.loads((run_dir / "tasks/bad-floor/attempt-001/attempt.json").read_text())
     assert attempt["status"] == state["status"] == "failed"
-    assert state["fix"] == "Set FABRIC_MEMORY_FLOOR_MB to a non-negative integer."
-    assert "FABRIC_MEMORY_FLOOR_MB" in attempt["process_error"]
+    assert state["fix"] == "Set .agents/fabric-policy.json memory_floor_percent to numbers from 0 to 100."
+    assert "memory_floor_percent" in attempt["process_error"]
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -273,10 +275,10 @@ exit 99
 ''')
     monkeypatch.setenv("PATH", f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    monkeypatch.setenv("FABRIC_MEMORY_FLOOR_MB", "999999")
+    module = load_dispatch_module()
+    monkeypatch.setattr(module.memory_admission, "available_memory_mb", lambda: (640, 16384))
     monkeypatch.setenv("FABRIC_MEMORY_WAIT_SECONDS", "0")
     monkeypatch.chdir(tmp_path)
-    module = load_dispatch_module()
     if legacy:
         adapter = tmp_path / "adapter"
         write_success_adapter(adapter)
@@ -290,7 +292,7 @@ exit 99
     state = json.loads((run_dir / "tasks/memory-expiry/attempt-001/attempt.json").read_text())
     assert attempt["status"] == state["status"] == "failed"
     assert attempt["outcome"] == state["error"] == "memory_unavailable"
-    assert "free memory or raise/disable FABRIC_MEMORY_FLOOR_MB" in state["fix"]
+    assert "lower the mode's memory_floor_percent" in state["fix"]
     assert "memory_unavailable" in state["digest"]
 
 
