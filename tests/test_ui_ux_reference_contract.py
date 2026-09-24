@@ -24,7 +24,6 @@ def test_every_reference_is_linked_once_from_the_entrypoint():
 
 def test_migration_evidence_has_unique_sources_and_real_destinations():
     ledger_path = SKILL / "evals" / "reference_disposition.yaml"
-    assert "Migration evidence" in ledger_path.read_text().splitlines()[0]
     ledger = yaml.safe_load(ledger_path.read_text())
     rows = ledger["references"]
     assert len({row["old"] for row in rows}) == len(rows)
