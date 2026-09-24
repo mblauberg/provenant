@@ -518,6 +518,31 @@ export class Store {
     }
   }
 
+  /** Read-only triage: count every active delivery, return at most twenty short groups. */
+  inboxDigest(who: Identity, taskId?: string) {
+    const since = Date.now() - 14 * 86400000;
+    const predicate = `FROM deliveries d JOIN messages m ON m.message_id = d.message_id
+      WHERE d.project = ? AND d.recipient_id = ? AND d.read_at IS NULL
+        AND m.created_at >= ? AND (? IS NULL OR m.task_id = ?)`;
+    const args = [who.project, who.agentId, since, taskId ?? null, taskId ?? null];
+    const total = (this.#db.prepare(`SELECT count(*) AS count ${predicate}`).get(...args) as { count: number }).count;
+    const rows = this.#db.prepare(`WITH ranked AS (
+        SELECT m.sender_id AS sender, m.task_id AS task_id, m.message_id AS sample_id,
+          substr(replace(replace(m.body, char(10), ' '), char(13), ' '), 1, 80) AS summary,
+          count(*) OVER (PARTITION BY m.sender_id, m.task_id) AS count,
+          row_number() OVER (PARTITION BY m.sender_id, m.task_id ORDER BY m.message_id) AS rank
+        ${predicate}
+      ) SELECT sender, task_id, count, sample_id, summary FROM ranked WHERE rank = 1
+      ORDER BY count DESC, sender, task_id LIMIT 21`).all(...args) as Array<{
+        sender: string; task_id: string | null; count: number; sample_id: string; summary: string;
+      }>;
+    return {
+      schema: "fabric.inbox_digest.v1", total, truncated: rows.length > 20,
+      groups: rows.slice(0, 20).map((row) => ({ from: row.sender, taskId: row.task_id,
+        count: row.count, sampleId: row.sample_id, summary: row.summary })),
+    };
+  }
+
   /** Status observation consumes only this seat's matching terminal notices. */
   acknowledgeTerminal(who:Identity,row:Record<string,any>,busyTimeoutMs=5000):void {
     const prefix=`${row.run_id}:${row.task_id}:`, attempt=Number(row.attempt ?? row.attempt_count);

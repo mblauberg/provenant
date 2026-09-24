@@ -80,7 +80,7 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|root|route|capabilities|worktree|clean|check|gate|fabric|dispatch|batch|run> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|capabilities|worktree|clean|check|gate|fabric|lanes|events|dispatch|batch|run> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
@@ -99,6 +99,8 @@ Thin front door; each command delegates to its existing owner:
   gate           scripts/gate (the MAINTAINING.md verification list with
                  per-step pass/fail output)
   fabric ...     runtime/fabric/bin/fabric ...
+  lanes --json   versioned Fabric run reader
+  events --follow [--until-idle]  Fabric task and inbox event stream
   dispatch ...   skills/orchestrate/scripts/dispatch_run.py ...
   batch ...      skills/orchestrate/scripts/batch_run.py ...
   run ...        skills/orchestrate/scripts/run_controls.py ...
@@ -289,6 +291,9 @@ def main(arguments: list[str]) -> int:
         return 2
 
     command, *command_arguments = arguments
+    if command in {"lanes", "events"}:
+        command_arguments = [command, *command_arguments]
+        command = "fabric"
     if command in {"help", "-h", "--help"}:
         if command_arguments:
             usage()

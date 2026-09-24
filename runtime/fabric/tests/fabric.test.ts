@@ -263,6 +263,40 @@ function statSnapshot(path: string) {
 }
 
 describe("CLI boundaries", () => {
+  it("summarises unread messages by task and sender within a bounded digest", () => {
+    const store = openStore();
+    announce(store, "chair", "worker");
+    for (let index = 0; index < 30; index += 1) {
+      store.send(agent("worker"), "chair", `update ${index} ${"x".repeat(2000)}`);
+    }
+    const task = store.createTask(agent("worker"), "Review the result");
+    store.send(agent("worker"), "chair", "Task update", { taskId: task.taskId });
+    const digest = store.inboxDigest(agent("chair"));
+    expect(digest.total).toBe(31);
+    expect(digest.groups).toHaveLength(2);
+    expect(digest.groups[0]).toMatchObject({ from: "worker", taskId: null, count: 30 });
+    expect(digest.groups[1]).toMatchObject({ from: "worker", taskId: task.taskId, count: 1 });
+    expect(JSON.stringify(digest).length).toBeLessThan(3000);
+    expect(store.inbox(agent("chair"), { ids: [store.inbox(agent("chair"), { peek: true, limit: 1 })[0]!.messageId] })).toHaveLength(1);
+  });
+  it("accepts a task-filtered digest and pairs its sample ID with its summary", () => {
+    const store = openStore();
+    announce(store, "chair", "worker");
+    const task = store.createTask(agent("worker"), "Review a task");
+    const ids = [0, 1].map(() => store.send(agent("worker"), "chair", "placeholder", { taskId: task.taskId }).messageId).sort();
+    const db = new Database(databasePath);
+    db.prepare("UPDATE messages SET body = ? WHERE message_id = ?").run("Zebra update", ids[0]);
+    db.prepare("UPDATE messages SET body = ? WHERE message_id = ?").run("Apple update", ids[1]);
+    db.close();
+    store.send(agent("worker"), "chair", "Unrelated update");
+    const result = runCli(["inbox", "--digest", "--task-id", task.taskId], temporaryDirectory,
+      { AGENT_FABRIC_SEAT: "chair", AGENT_FABRIC_LABEL: "chair" });
+    expect(result.status, result.stderr).toBe(0);
+    const digest = JSON.parse(result.stdout);
+    expect(digest.total).toBe(2);
+    expect(digest.groups).toHaveLength(1);
+    expect(digest.groups[0]).toMatchObject({ sampleId: ids[0], summary: "Zebra update" });
+  });
   it("rejects an unknown command before creating or announcing", () => {
     const stateDirectory = join(temporaryDirectory, "unknown-command-state");
     const result = runCli(["frobnicate"], stateDirectory);

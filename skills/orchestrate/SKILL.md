@@ -14,8 +14,8 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
    issue or repository-relative path set with a stable unique `session_id`;
    renew it while work continues and release it when finished. Do not dispatch
    against a conflicting live claim; dispatch does not enforce claims.
-4. Wait without polling: a chair runs `fabric watch <ids>` ([chair-loop.md](references/chair-loop.md)); a dispatching sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
-5. Inspect the terminal row with `fabric_status` and copy its `Route:` provenance line.
+4. Wait without polling: a chair runs one `provenant events --follow` subscriber ([chair-loop.md](references/chair-loop.md)); a dispatching sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
+5. Reconcile lanes with `provenant lanes --json`, then inspect the terminal row with `fabric_status` and copy its `Route:` provenance line.
 6. For a question, call `fabric_dispatch` with `resume: id` and the answer in `prompt`.
 7. Use `fabric_cancel` with `id` to stop; use `fabric_output` with `id` and `part` for a bounded tail.
 

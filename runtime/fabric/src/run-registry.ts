@@ -860,6 +860,7 @@ export async function statusRows(
   until: "any" | "all" = "all",
   signal?: AbortSignal,
   detail: "brief" | "full" = "brief",
+  includeLedger = true,
 ): Promise<StatusResult> {
   if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 55)
     return { status: "rejected", error: "wait_invalid", fix: "Pass wait_seconds from 0 to 55." };
@@ -921,6 +922,7 @@ export async function statusRows(
     if (done || !rows.length || Date.now() >= deadline) {
       const cache = new Map<unknown, Promise<Record<string, unknown>>>();
       const enriched = await Promise.all(rows.map(async (row) => {
+        if (!includeLedger) return row;
         if (row.state === "terminal" && detail !== "full") return row;
         if (!cache.has(row.worktree)) cache.set(row.worktree, ledger(row.worktree));
         return { ...row, ...await cache.get(row.worktree) };
