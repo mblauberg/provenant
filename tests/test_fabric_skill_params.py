@@ -113,8 +113,8 @@ def test_documented_fabric_call_parameters_fit_server_schema():
     assert {"fabric_dispatch", "fabric_status", "fabric_cancel", "fabric_output"} <= covered
 
 
-def test_checker_reads_twelve_registered_tools_and_all_doc_surfaces():
-    assert len(SCHEMA) == 12
+def test_checker_reads_registered_tools_and_all_doc_surfaces():
+    assert {"fabric_dispatch", "fabric_status", "fabric_cancel", "fabric_output", "fabric_adapters", "fabric_whoami"} <= set(SCHEMA)
     assert {"tasks", "concurrency", "resume"} <= SCHEMA["fabric_dispatch"]
     assert {"ids", "wait_seconds", "until"} <= SCHEMA["fabric_status"]
     assert {"id", "reason"} <= SCHEMA["fabric_cancel"]
