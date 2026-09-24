@@ -203,7 +203,7 @@ def candidates(plan, policy=None, catalogue=None):
             or (model.endswith("-free") or model.endswith(":free"))
             or model.startswith("opencode/")
         )
-        if not explicit and policy != "any" and (training is not False or free):
+        if not explicit and policy != "any" and (training is True or free):
             continue
         answer.append(
             {

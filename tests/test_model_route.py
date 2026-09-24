@@ -38,6 +38,10 @@ def test_fallback_inherits_adapter_training_flag_without_false_default():
     candidates = module._fallback_candidates("fixture", "workhorse", "primary", catalog, {})
     assert len(candidates) == 1
     assert candidates[0]["trains_on_prompts"] is False
+    del catalog["adapters"]["fixture"]["trains_on_prompts"]
+    candidates = module._fallback_candidates("fixture", "workhorse", "primary", catalog, {})
+    assert len(candidates) == 1
+    assert candidates[0]["trains_on_prompts"] is None
 CRUCIAL_RISK_OVERRIDE = CATALOG["families"]["anthropic"]["risk_tier_overrides"]["crucial"]
 RISK_OVERRIDE_MODEL = CRUCIAL_RISK_OVERRIDE["models"][0]
 NON_OCCUPANT_MODELS = tuple(
