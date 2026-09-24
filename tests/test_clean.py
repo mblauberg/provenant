@@ -540,7 +540,7 @@ def test_worktree_apply_uses_plan_digest_and_removes_clean_merged_worktree(tmp_p
                            "refs/heads/lane/done"]).returncode != 0
 
 
-def test_worktree_apply_reports_branch_kept_when_primary_is_not_integration(tmp_path, capsys):
+def test_worktree_apply_removes_merged_branch_when_primary_is_not_integration(tmp_path, capsys):
     root = repo(tmp_path)
     target = root / ".worktrees" / "lane-done"
     target.parent.mkdir()
@@ -559,8 +559,19 @@ def test_worktree_apply_reports_branch_kept_when_primary_is_not_integration(tmp_
     assert module.apply(root, proposal["plan_sha256"], pr_bodies=[]) == [".worktrees/lane-done"]
     assert not target.exists()
     assert subprocess.run(["git", "-C", str(root), "show-ref", "--verify", "--quiet",
-                           "refs/heads/lane/done"]).returncode == 0
-    assert "kept branch lane/done" in capsys.readouterr().err
+                           "refs/heads/lane/done"]).returncode != 0
+
+
+def test_worktree_apply_keeps_branch_at_integration_tip(tmp_path):
+    root = repo(tmp_path)
+    target = root / ".worktrees" / "lane-base"
+    target.parent.mkdir()
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", "lane/base", str(target)], check=True)
+    module = cleaner()
+    proposal = module.plan(root, pr_bodies=[])
+    assert next(row for row in proposal["rows"] if row["path"] == ".worktrees/lane-base")["verdict"] == "keep:branch-at-base"
+    assert module.apply(root, proposal["plan_sha256"], pr_bodies=[]) == []
+    assert target.exists()
 
 
 def test_prune_merged_removes_only_clean_ancestry_proven_worktrees(tmp_path):

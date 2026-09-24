@@ -340,7 +340,7 @@ def _worktree_verdict(root: Path, path: Path, open_heads: set[str],
         return "triage:merged-dirty" if merged else "keep:dirty"
     if merged:
         base = integration_ref or _integration_ref(root)
-        if _command("git", "rev-parse", branch, cwd=root).stdout.strip() == _command("git", "rev-parse", base, cwd=root).stdout.strip():
+        if _branch_at_integration_tip(root, branch, base):
             return "keep:branch-at-base"
         # Query all process cwd paths once; +D recursively stats the worktree
         # and can time out on node_modules before finding a live process.
@@ -375,6 +375,11 @@ def _integration_ref(root: Path, *, required: bool = False) -> str:
 def _merged_by_ancestry(root: Path, branch: str, integration_ref: str | None = None) -> bool:
     return _command("git", "merge-base", "--is-ancestor", f"refs/heads/{branch}",
                     integration_ref or _integration_ref(root), cwd=root).returncode == 0
+
+
+def _branch_at_integration_tip(root: Path, branch: str, integration_ref: str) -> bool:
+    return (_command("git", "rev-parse", f"refs/heads/{branch}", cwd=root).stdout.strip()
+            == _command("git", "rev-parse", integration_ref, cwd=root).stdout.strip())
 
 
 def _merged(root: Path, branch: str) -> bool:

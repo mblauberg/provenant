@@ -25,6 +25,13 @@ MAX_DIAGNOSTIC_BYTES = 8192
 AUTHENTICATED_URL = re.compile(r"(?i)(https?://)([^/\s:@]*(?::[^@\s/]*)?@)")
 PARTIAL_CREDENTIAL_URL = re.compile(r"(?i)(https?://)([^/\s:@]*:[^/\s@]*)(?=[/\s]|$)")
 PARTIAL_AUTHENTICATED_URL = re.compile(r"(?i)(https?://)[^/\s]*$")
+_CLEAN_SCRIPT = Path(__file__).resolve().with_name("clean.py")
+_clean_spec = importlib.util.spec_from_file_location("provenant_clean", _CLEAN_SCRIPT)
+if _clean_spec is None or _clean_spec.loader is None:  # pragma: no cover - defensive
+    raise ModuleNotFoundError(f"cleanup policy is missing: {_CLEAN_SCRIPT}")
+_clean_module = importlib.util.module_from_spec(_clean_spec)
+sys.modules[_clean_spec.name] = _clean_module
+_clean_spec.loader.exec_module(_clean_module)
 PORCELAIN_FLAG_FIELDS = {"bare", "detached"}
 PORCELAIN_REQUIRED_VALUE_FIELDS = {"worktree", "HEAD", "branch"}
 PORCELAIN_OPTIONAL_VALUE_FIELDS = {"locked", "prunable"}
@@ -660,19 +667,6 @@ def create(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
-def local_integration_ref(root: Path) -> str | None:
-    remote_head = git(root, "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD", check=False)
-    if remote_head.returncode == 0 and remote_head.stdout.strip().startswith("origin/"):
-        candidate = "refs/heads/" + remote_head.stdout.strip()[len("origin/"):]
-        if git(root, "show-ref", "--verify", "--quiet", candidate, check=False).returncode == 0:
-            return candidate
-    for branch in ("main", "master"):
-        candidate = f"refs/heads/{branch}"
-        if git(root, "show-ref", "--verify", "--quiet", candidate, check=False).returncode == 0:
-            return candidate
-    return None
-
-
 def remove(args: argparse.Namespace) -> dict[str, object]:
     validate_name(args.name)
     root = primary_root(args.repo)
@@ -699,11 +693,8 @@ def remove(args: argparse.Namespace) -> dict[str, object]:
     branch = branch_ref.removeprefix("refs/heads/") if branch_ref is not None else None
     branch_merged = False
     if branch is not None:
-        integration_ref = local_integration_ref(root)
-        root_branch = git(root, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
-        integration_name = integration_ref.removeprefix("refs/heads/") if integration_ref else None
-        if integration_ref is not None and root_branch.returncode == 0 \
-                and root_branch.stdout.strip() == integration_name:
+        integration_ref = _clean_module._integration_ref(root, required=True)
+        if not _clean_module._branch_at_integration_tip(root, branch, integration_ref):
             merged = git(root, "merge-base", "--is-ancestor", branch_ref, integration_ref,
                          check=False)
             if merged.returncode not in {0, 1}:
@@ -713,9 +704,9 @@ def remove(args: argparse.Namespace) -> dict[str, object]:
     if branch is not None and branch_merged:
         deleted = git(root, "branch", "-d", "--", branch, check=False)
         if deleted.returncode != 0:
-            print(f"kept branch {branch} because it is unmerged", file=sys.stderr)
+            print(f"kept branch {branch}: not proven merged into {integration_ref}", file=sys.stderr)
     elif branch is not None:
-        print(f"kept branch {branch} because it is unmerged", file=sys.stderr)
+        print(f"kept branch {branch}: not proven merged into {integration_ref}", file=sys.stderr)
     return {"status": "removed", "name": args.name, "primary_root": str(root)}
 
 

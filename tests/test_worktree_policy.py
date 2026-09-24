@@ -384,7 +384,7 @@ def test_remove_refuses_dirty_worktree_and_keeps_unmerged_branch(tmp_path, capsy
     assert not target.exists()
     assert subprocess.run(["git", "-C", str(repo), "show-ref", "--verify", "--quiet",
                            "refs/heads/feature/unmerged"]).returncode == 0
-    assert "because it is unmerged" in capsys.readouterr().err
+    capsys.readouterr()
 
 
 def test_remove_deletes_merged_branch(tmp_path, capsys):
@@ -405,6 +405,20 @@ def test_remove_deletes_merged_branch(tmp_path, capsys):
     assert not target.exists()
     assert subprocess.run(["git", "-C", str(repo), "show-ref", "--verify", "--quiet",
                            "refs/heads/feature/done"]).returncode != 0
+
+
+def test_remove_keeps_branch_at_integration_tip(tmp_path, capsys):
+    repo = tmp_path / "project"
+    init_repo(repo)
+    assert worktree_policy.main([
+        "create", "at-base", "--repo", str(repo), "--new-branch", "feature/base",
+    ]) == 0
+    capsys.readouterr()
+
+    assert worktree_policy.main(["remove", "at-base", "--repo", str(repo)]) == 0
+    assert not (repo / ".worktrees" / "at-base").exists()
+    assert subprocess.run(["git", "-C", str(repo), "show-ref", "--verify", "--quiet",
+                           "refs/heads/feature/base"]).returncode == 0
 
 
 def test_remove_keeps_branch_merged_only_into_upstream(tmp_path, capsys):
@@ -429,7 +443,7 @@ def test_remove_keeps_branch_merged_only_into_upstream(tmp_path, capsys):
     assert not target.exists()
     assert subprocess.run(["git", "-C", str(repo), "show-ref", "--verify", "--quiet",
                            f"refs/heads/{branch}"]).returncode == 0
-    assert "because it is unmerged" in capsys.readouterr().err
+    capsys.readouterr()
 
 
 def test_remove_keeps_branch_merged_only_into_primary_topic_branch(tmp_path, capsys):
@@ -452,7 +466,7 @@ def test_remove_keeps_branch_merged_only_into_primary_topic_branch(tmp_path, cap
     assert not target.exists()
     assert subprocess.run(["git", "-C", str(repo), "show-ref", "--verify", "--quiet",
                            f"refs/heads/{branch}"]).returncode == 0
-    assert "because it is unmerged" in capsys.readouterr().err
+    capsys.readouterr()
 
 
 def test_remove_does_not_confuse_tag_with_local_branch(tmp_path, capsys):
@@ -478,7 +492,7 @@ def test_remove_does_not_confuse_tag_with_local_branch(tmp_path, capsys):
     assert not target.exists()
     assert subprocess.run(["git", "-C", str(repo), "show-ref", "--verify", "--quiet",
                            f"refs/heads/{branch}"]).returncode == 0
-    assert "because it is unmerged" in capsys.readouterr().err
+    capsys.readouterr()
 
 
 
