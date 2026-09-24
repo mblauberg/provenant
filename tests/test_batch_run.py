@@ -221,6 +221,11 @@ def test_fixed_batch_caps_eight_tasks_and_produces_reducer_inputs(tmp_path, monk
 def test_current_routing_fixture_runs_real_dispatch_and_retains_partial_batch(tmp_path, monkeypatch):
     """The current seam proves batch custody, route identity, and reduction inputs without a provider."""
     monkeypatch.chdir(tmp_path)
+    policy_dir = tmp_path / '.agents'
+    policy_dir.mkdir()
+    (policy_dir / 'fabric-policy.json').write_text(
+        json.dumps({'memory_floor_percent': {'read_only': 0}}), encoding='utf-8'
+    )
     run_dir = make_run(tmp_path, 'current-routing-fixture')
     state_dir = tmp_path / 'fixture-state'
     state_dir.mkdir()
