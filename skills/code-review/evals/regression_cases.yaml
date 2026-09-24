@@ -1,0 +1,6 @@
+schema_version: 1
+target_skill: code-review
+cases:
+  - {id: r108, relation: positive, prompt: "Review this branch read-only from the shared checkout; compare against main using git show and git diff only.", tags: [direct, reviewer-git-denylist], expected: {primary_skill: code-review, companion_skills: []}, note: "Source-read-only review includes git state: read refs with git show and git diff."}
+  - {id: r109, relation: boundary, prompt: "Review this pull request that restyles the settings page, including how the changed screens look in light and dark mode.", tags: [composition], expected: {primary_skill: code-review, companion_skills: [ui-ux-design]}, note: "Rendered-UI change: the reviewer looks at light and dark captures of changed surfaces."}
+  - {id: r112, relation: negative, prompt: "Restructure this module into smaller files without changing behaviour, backed by characterisation tests.", tags: [adjacent], expected: {primary_skill: refactor, companion_skills: []}, note: "Authorised structural change is refactor, not review."}

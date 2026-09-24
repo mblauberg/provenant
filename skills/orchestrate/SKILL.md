@@ -10,8 +10,8 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
 1. Use a native subagent for the chair's own models; use Fabric for other providers, long runs, and worktree writers.
 2. Call `fabric_dispatch` with `prompt` or `prompt_file`, `adapter` or `model`, and optional `effort`.
 3. For writers, pass `mode: "worktree_write"` and the registered `worktree`.
-4. Take the returned id; call `fabric_status` with `ids: [id]` and `wait_seconds: 55`.
-5. Repeat status only while running; inspect the terminal row and copy its `Route:` provenance line.
+4. Wait without polling: a chair runs `fabric watch <ids>` ([chair-loop.md](references/chair-loop.md)); a dispatching sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
+5. Inspect the terminal row with `fabric_status` and copy its `Route:` provenance line.
 6. For a question, call `fabric_dispatch` with `resume: id` and the answer in `prompt`.
 7. Use `fabric_cancel` with `id` to stop; use `fabric_output` with `id` and `part` for a bounded tail.
 
@@ -23,6 +23,7 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
 - Send answer-bearing external work through Fabric request/reply when available. If unavailable, mark `FABRIC-ROUNDTRIP-UNAVAILABLE` and keep the direct result in a named artifact. Herdr observes and sends steering only.
 - Choose an explicit model when the user or task names one. Otherwise use `flagship`, `workhorse` or `scout`. `fabric_adapters` shows the current catalogue and health. Unknown models and unsupported effort should run with a reported note or substitution when executable; see [routing-and-tiers.md](references/routing-and-tiers.md).
 - Prefer per-dispatch flags. Editing global provider configuration requires explicit authority.
+- A chair running lanes across many wakes follows [chair-loop.md](references/chair-loop.md), including its reviewer git-verb denylist and decision council.
 - Keep full worker output in run files and return only the digest and path. For liveness, use `fabric_status`; see [worker-liveness.md](references/worker-liveness.md) for degraded runs. Size alone proves nothing.
 - On a terminal result, record `adapter/model@effort` from the receipt; derive family from it. Native subagents record `claude/<model>@<effort> (anthropic; resolved)` from the Agent tool's model parameter, never from self-report.
 

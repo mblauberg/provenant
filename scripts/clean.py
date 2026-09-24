@@ -311,7 +311,7 @@ def _indexed_run_ids(index: Path) -> dict[str, set[str]]:
 
 
 def _worktree_verdict(root: Path, path: Path, open_heads: set[str],
-                      registered: set[Path]) -> str:
+                      registered: set[Path], *, integration_ref: str | None = None) -> str:
     if path.resolve() not in registered:
         return "triage:unregistered"
     agent = path / ".agent-run"
@@ -334,10 +334,12 @@ def _worktree_verdict(root: Path, path: Path, open_heads: set[str],
     dirty = _command("git", "status", "--porcelain=v1", "--untracked-files=all", cwd=path)
     if dirty.returncode != 0:
         return "triage:git-error"
+    merged = (_merged_by_ancestry(root, branch, integration_ref) if integration_ref is not None
+              else _merged(root, branch))
     if dirty.stdout:
-        return "triage:merged-dirty" if _merged(root, branch) else "keep:dirty"
-    if _merged(root, branch):
-        base = "refs/heads/main" if _command("git", "show-ref", "--verify", "--quiet", "refs/heads/main", cwd=root).returncode == 0 else "HEAD"
+        return "triage:merged-dirty" if merged else "keep:dirty"
+    if merged:
+        base = integration_ref or _integration_ref(root)
         if _command("git", "rev-parse", branch, cwd=root).stdout.strip() == _command("git", "rev-parse", base, cwd=root).stdout.strip():
             return "keep:branch-at-base"
         # Query all process cwd paths once; +D recursively stats the worktree
@@ -355,9 +357,29 @@ def _worktree_verdict(root: Path, path: Path, open_heads: set[str],
     return "keep:unmerged"
 
 
+def _integration_ref(root: Path, *, required: bool = False) -> str:
+    remote_head = _command("git", "symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD", cwd=root)
+    if remote_head.returncode == 0 and remote_head.stdout.strip().startswith("origin/"):
+        candidate = "refs/heads/" + remote_head.stdout.strip()[len("origin/"):]
+        if _command("git", "show-ref", "--verify", "--quiet", candidate, cwd=root).returncode == 0:
+            return candidate
+    for branch in ("main", "master"):
+        candidate = f"refs/heads/{branch}"
+        if _command("git", "show-ref", "--verify", "--quiet", candidate, cwd=root).returncode == 0:
+            return candidate
+    if required:
+        raise CleanError("cannot identify integration branch: origin/HEAD has no local target and neither local main nor master exists")
+    return "HEAD"
+
+
+def _merged_by_ancestry(root: Path, branch: str, integration_ref: str | None = None) -> bool:
+    return _command("git", "merge-base", "--is-ancestor", f"refs/heads/{branch}",
+                    integration_ref or _integration_ref(root), cwd=root).returncode == 0
+
+
 def _merged(root: Path, branch: str) -> bool:
-    base = "refs/heads/main" if _command("git", "show-ref", "--verify", "--quiet", "refs/heads/main", cwd=root).returncode == 0 else "HEAD"
-    if _command("git", "merge-base", "--is-ancestor", branch, base, cwd=root).returncode == 0:
+    base = _integration_ref(root)
+    if _merged_by_ancestry(root, branch):
         return True
     # Squash proof needs both a merged PR and an empty scoped tree diff.
     try:
@@ -380,12 +402,39 @@ def _merged(root: Path, branch: str) -> bool:
 
 
 def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: float | None = None,
-         pr_bodies: list[str] | None = None, now: datetime | None = None) -> dict[str, Any]:
+         pr_bodies: list[str] | None = None, now: datetime | None = None,
+         prune_merged: bool = False, branches: tuple[str, ...] = (),
+         merged_since: str | None = None) -> dict[str, Any]:
     root = primary_root(repo)
     now = now or datetime.now(timezone.utc)
     if not include <= KINDS:
         raise CleanError("unknown include class")
-    if pr_bodies is None:
+    if prune_merged and (include != frozenset({"worktrees"}) or older_than is not None):
+        raise CleanError("--prune-merged only supports worktrees without a retention override")
+    if prune_merged and bool(branches) == bool(merged_since):
+        raise CleanError("--prune-merged requires --branch NAME or --merged-since REV")
+    if not prune_merged and (branches or merged_since):
+        raise CleanError("merge selectors require --prune-merged")
+    integration_ref = _integration_ref(root, required=True) if prune_merged else None
+    integration_revision = None
+    since_revision = None
+    if integration_ref is not None:
+        revision = _command("git", "rev-parse", "--verify", f"{integration_ref}^{{commit}}", cwd=root)
+        if revision.returncode != 0:
+            raise CleanError(f"cannot resolve integration branch: {integration_ref}")
+        integration_revision = revision.stdout.strip()
+        if merged_since is not None:
+            since = _command("git", "rev-parse", "--verify", "--end-of-options",
+                             f"{merged_since}^{{commit}}", cwd=root)
+            if since.returncode != 0:
+                raise CleanError(f"cannot resolve merge starting revision: {merged_since}")
+            since_revision = since.stdout.strip()
+            if _command("git", "merge-base", "--is-ancestor", since_revision,
+                        integration_ref, cwd=root).returncode != 0:
+                raise CleanError("merge starting revision is not an ancestor of the integration branch")
+    if prune_merged:
+        pr_bodies, open_heads = [], set()
+    elif pr_bodies is None:
         pr_bodies, open_heads = _open_prs(root)
     else:
         open_heads = set()
@@ -463,10 +512,25 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
     if worktrees.is_dir() and not worktrees.is_symlink():
         registered = _registered_worktrees(root)
         for path in sorted(worktrees.iterdir()):
+            if prune_merged:
+                if path.is_symlink() or not path.is_dir() or path.resolve() not in registered:
+                    continue
+                branch_result = _command("git", "symbolic-ref", "--quiet", "--short", "HEAD", cwd=path)
+                if branch_result.returncode != 0:
+                    continue
+                branch = branch_result.stdout.strip()
+                if branches:
+                    if branch not in branches:
+                        continue
+                elif (not _merged_by_ancestry(root, branch, integration_ref)
+                      or _command("git", "merge-base", "--is-ancestor", f"refs/heads/{branch}",
+                                  since_revision, cwd=root).returncode != 1):
+                    continue
             if path.is_symlink() or not path.is_dir():
                 verdict = "triage:unregistered"
             else:
-                verdict = _worktree_verdict(root, path, open_heads, registered)
+                verdict = _worktree_verdict(root, path, open_heads, registered,
+                                            integration_ref=integration_ref)
             if "worktrees" not in include and verdict == "delete":
                 verdict = "keep:excluded"
             elif verdict == "delete" and older_than is not None and _age(path, now) < older_than:
@@ -482,12 +546,22 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
     digest_data = {"root": str(root), "include": sorted(include), "older_than": older_than,
                    "rows": [{key: value for key, value in row.items() if key not in {"age_days", "size_bytes"}}
                             for row in rows if row["verdict"] in {"delete", "abandon"}]}
+    if integration_ref is not None:
+        digest_data["integration_ref"] = integration_ref
+        digest_data["integration_revision"] = integration_revision
+        digest_data["branches"] = branches
+        digest_data["merged_since_revision"] = since_revision
     digest = "sha256:" + hashlib.sha256(json.dumps(digest_data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     total = sum(row["size_bytes"] for row in rows if row["verdict"] == "delete")
     all_size = sum(row["size_bytes"] for row in rows if row["kind"] not in {"owner-log", "index"})
     result: dict[str, Any] = {"root": str(root), "rows": rows, "reclaimable_bytes": total, "plan_sha256": digest,
                               "warnings": (["GitHub PR state unavailable; run deletion held, merged worktrees use Git proof"]
                                            if pr_bodies is None else [])}
+    if integration_ref is not None:
+        result["integration_ref"] = integration_ref
+        result["integration_revision"] = integration_revision
+        result["branches"] = branches
+        result["merged_since_revision"] = since_revision
     if all_size > 500 * 1024 * 1024:
         result["warning"] = {"message": "run artifacts exceed 500 MB", "largest": sorted(
             [{"path": row["path"], "size_bytes": row["size_bytes"]} for row in rows if row["kind"] not in {"owner-log", "index"}],
@@ -495,15 +569,32 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
     return result
 
 
-def apply(repo: Path, approved_plan: str, *, include: frozenset[str] = DEFAULT_INCLUDE,
-          older_than: float | None = None, pr_bodies: list[str] | None = None,
-          human_authorised: bool = False) -> list[str]:
-    current = plan(repo, include=include, older_than=older_than, pr_bodies=pr_bodies)
+def _apply_plan(current: dict[str, Any], approved_plan: str, *, human_authorised: bool) -> list[str]:
     if approved_plan != current["plan_sha256"]:
         raise CleanError("approved plan digest does not match the current cleanup plan")
     if not human_authorised and any(row["kind"] == "worktree" and row["verdict"] == "delete" for row in current["rows"]):
         raise CleanError("worktree removal requires --human-authorised; or exclude worktrees from this plan")
     root = Path(current["root"])
+    if "integration_ref" in current:
+        integration_ref = _integration_ref(root, required=True)
+        revision = _command("git", "rev-parse", "--verify", f"{integration_ref}^{{commit}}", cwd=root)
+        if (integration_ref != current["integration_ref"] or revision.returncode != 0
+                or revision.stdout.strip() != current["integration_revision"]):
+            raise CleanError("integration branch changed since the pruning plan")
+        for row in current["rows"]:
+            if row["kind"] != "worktree" or row["verdict"] != "delete":
+                continue
+            path = root / row["path"]
+            branch = _command("git", "symbolic-ref", "--quiet", "--short", "HEAD", cwd=path)
+            if (branch.returncode != 0 or path.name != branch.stdout.strip().replace("/", "-")
+                    or not _merged_by_ancestry(root, branch.stdout.strip(), integration_ref)):
+                raise CleanError(f"merged worktree changed since the pruning plan: {path}")
+            if current.get("branches") and branch.stdout.strip() not in current["branches"]:
+                raise CleanError(f"pruning branch changed since the plan: {path}")
+            since_revision = current.get("merged_since_revision")
+            if since_revision and _command("git", "merge-base", "--is-ancestor", f"refs/heads/{branch.stdout.strip()}",
+                                           since_revision, cwd=root).returncode != 1:
+                raise CleanError(f"merge starting revision already contains branch: {path}")
     removed: list[str] = []
     for row in current["rows"]:
         path = root / row["path"]
@@ -538,6 +629,14 @@ def apply(repo: Path, approved_plan: str, *, include: frozenset[str] = DEFAULT_I
     return removed
 
 
+def apply(repo: Path, approved_plan: str, *, include: frozenset[str] = DEFAULT_INCLUDE,
+          older_than: float | None = None, pr_bodies: list[str] | None = None,
+          human_authorised: bool = False, prune_merged: bool = False) -> list[str]:
+    current = plan(repo, include=include, older_than=older_than, pr_bodies=pr_bodies,
+                   prune_merged=prune_merged)
+    return _apply_plan(current, approved_plan, human_authorised=human_authorised)
+
+
 def _duration(value: str) -> float:
     match = re.fullmatch(r"(\d+)([dh])", value)
     if not match:
@@ -553,13 +652,34 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--apply", action="store_true")
     parser.add_argument("--plan")
     parser.add_argument("--human-authorised", action="store_true", help="attest authority to remove merged worktrees")
+    parser.add_argument("--prune-merged", action="store_true", help="remove clean ancestry-proven merged worktrees")
+    selector = parser.add_mutually_exclusive_group()
+    selector.add_argument("--branch", action="append", default=[], metavar="NAME")
+    selector.add_argument("--merged-since", metavar="REV")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     include = frozenset(part.strip() for part in args.include.split(",") if part.strip())
     if args.apply != bool(args.plan):
         parser.error("--apply and --plan sha256:<digest> are required together")
+    if args.prune_merged and (args.apply or args.human_authorised or args.older_than is not None
+                              or args.include != "runs,scratch,worktrees"):
+        parser.error("--prune-merged accepts only --repo, --json, and a merge selector")
+    if args.prune_merged and not (args.branch or args.merged_since):
+        print("provenant clean: --prune-merged requires --branch NAME or --merged-since REV", file=sys.stderr)
+        return 2
+    if not args.prune_merged and (args.branch or args.merged_since):
+        parser.error("merge selectors require --prune-merged")
     try:
-        if args.apply:
+        if args.prune_merged:
+            worktrees = frozenset({"worktrees"})
+            proposal = plan(args.repo, include=worktrees, prune_merged=True,
+                            branches=tuple(args.branch), merged_since=args.merged_since)
+            removed = _apply_plan(proposal, proposal["plan_sha256"], human_authorised=True)
+            report = {"removed": removed, "skipped": [
+                {"path": row["path"], "reason": row["verdict"]}
+                for row in proposal["rows"] if row["kind"] == "worktree" and row["verdict"] != "delete"
+            ]}
+        elif args.apply:
             removed = apply(args.repo, args.plan, include=include, older_than=args.older_than,
                             human_authorised=args.human_authorised)
             report = {"removed": removed, "count": len(removed)}
@@ -570,8 +690,13 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     if args.json:
         public = {**report, "rows": [{key: value for key, value in row.items() if key != "_identity"}
-                                     for row in report["rows"]]} if not args.apply else report
+                                     for row in report["rows"]]} if not (args.apply or args.prune_merged) else report
         print(json.dumps(public, indent=2, sort_keys=True))
+    elif args.prune_merged:
+        for path in report["removed"]:
+            print(f"removed {path}")
+        for row in report["skipped"]:
+            print(f"skipped {row['path']}: {row['reason']}")
     elif args.apply:
         print(f"removed {report['count']} paths")
         for path in report["removed"]:

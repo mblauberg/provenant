@@ -132,6 +132,37 @@ across every project the harness is loaded into: a merged worktree left behind
 is stale state that later agents mistake for live work, and each one carries its
 own uninherited dependency tree, in this repository roughly 400 MB apiece.
 
+An optional `post-merge` hook automates this. It is off by default. Enable it
+only where pull requests merge on the forge and the primary checkout receives
+them by `git pull`. Do not enable it where merges are made locally and then
+verified and pushed, or where the project's landing tool already prunes after
+the push: the hook would fire on the local merge, before verification and push.
+To opt in, run this command in the primary checkout; it refuses to overwrite
+any existing hook. The hook passes
+`ORIG_HEAD` to `provenant clean --prune-merged --merged-since ORIG_HEAD`, so it
+prunes only branches the merge brought in. It quietly skips cleanup if
+`ORIG_HEAD` is missing. Squash merges fail the ancestry proof. Only selected
+branches receive removal or skip reports; older merged worktrees are untouched.
+
+```sh
+hook="$(git rev-parse --git-path hooks)/post-merge"; source="$(git rev-parse --show-toplevel)/scripts/hooks/post-merge"; if [ -e "$hook" ] || [ -L "$hook" ]; then printf '%s\n' 'post-merge hook already exists; inspect it' >&2; else ln -s "$source" "$hook"; fi
+```
+
+To disable it, remove only the symlink to this hook:
+
+```sh
+hook="$(git rev-parse --git-path hooks)/post-merge"; source="$(git rev-parse --show-toplevel)/scripts/hooks/post-merge"; if [ -L "$hook" ] && [ "$(readlink "$hook")" = "$source" ]; then rm "$hook"; fi
+```
+
+For a manual prune after one merge, name each branch that merge brought in:
+
+```sh
+provenant clean --prune-merged --branch <merged-branch> --repo <primary-root>
+```
+
+`--prune-merged` requires `--branch` (repeatable) or `--merged-since`; it refuses
+an unscoped sweep.
+
 Prune immediately after the merge, in this order:
 
 ```sh

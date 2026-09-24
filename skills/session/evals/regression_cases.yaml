@@ -1,0 +1,7 @@
+schema_version: 1
+target_skill: session
+cases:
+  - {id: r120, relation: positive, prompt: "Before this chair session compacts, rewrite its run-local STATE.md with the active lanes table and next actions, and check it stays under 6 KB.", tags: [direct, chair-state], expected: {primary_skill: session, companion_skills: []}, note: "Chair state file checkpoint and size check before compaction."}
+  - {id: r121, relation: positive, prompt: "Write compaction instructions for this project so the summary keeps the state file path, live lanes and next actions but drops tool output.", tags: [direct, compaction], expected: {primary_skill: session, companion_skills: []}, note: "Compaction instructions belong to session."}
+  - {id: r122, relation: negative, prompt: "Keep the lanes refilled from the board and wait for completions without polling.", tags: [adjacent], expected: {primary_skill: orchestrate, companion_skills: []}, note: "Lane scheduling is orchestration, not continuity."}
+  - {id: r123, relation: boundary, prompt: "Run this mission until I write STOP and make sure its state survives every compaction.", tags: [composition], expected: {primary_skill: autopilot, companion_skills: [session]}, note: "Mission conductor primary; session owns the compaction checkpoint."}
