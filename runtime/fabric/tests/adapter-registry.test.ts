@@ -159,25 +159,28 @@ describe("adapter rejection", () => {
     )).resolves.toMatchObject({ status: "rejected", fix: expect.stringMatching(/agy, claude, codex, copilot, cursor, kiro, opencode/u) });
   });
 
-  it("passes unknown model aliases to the owner, respecting cancellation", async () => {
-    await expect(dispatchConfiguredProvider(
-      { adapter: "codex", alias: "missing-model", prompt: "hello" },
-      identity,
-      AbortSignal.abort(),
-      { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot },
-    )).rejects.toThrow(/aborted/u);
+  it("rejects unknown model and alias selectors with valid choices", async () => {
+    for (const selector of [{ model: "missing-model" }, { alias: "missing-alias" }]) {
+      await expect(dispatchConfiguredProvider(
+        { adapter: "codex", ...selector, prompt: "hello" },
+        identity,
+        AbortSignal.abort(),
+        { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot },
+      )).resolves.toMatchObject({ status: "rejected", fix: expect.stringMatching(/valid (model|alias):/u) });
+    }
     expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
   });
 
-  it("uses the real router and returns every invalid task before creating a run", async () => {
+  it("returns each invalid task as a rejected row and creates no run when none is valid", async () => {
     const result = await dispatchConfiguredBatch({ tasks: [
-      { id: "bad-model", adapter: "claude", model: "unknown-model-family", prompt: "hello" },
       { id: "bad-prompt", adapter: "claude", prompt_file: "absent.md" },
-      { id: "bad-alias", adapter: "codex", alias: "not-in-catalogue", prompt: "hello" },
+      { id: "bad-prompt-too", adapter: "codex", prompt_file: "also-absent.md" },
     ], wait_seconds: 0 }, identity, new AbortController().signal,
     { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot, AGENT_FABRIC_INSTANCE_ROOT: repositoryRoot });
     expect(result.status).toBe("rejected");
-    expect((result.errors as Record<string, unknown>[]).map((error) => error.task_id)).toEqual(["bad-prompt"]);
+    const rows = result.tasks as Record<string, unknown>[];
+    expect(rows.map((row) => row.task_id).sort()).toEqual(["bad-prompt", "bad-prompt-too"]);
+    expect(rows.every((row) => row.status === "rejected" && typeof row.fix === "string")).toBe(true);
     expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
   });
 

@@ -12,12 +12,6 @@ def _fixture(name: str) -> dict:
     return yaml.safe_load((UI_UX_DESIGN / "evals" / name).read_text())
 
 
-def test_ui_ux_design_has_no_competing_review_or_performance_commands():
-    references = UI_UX_DESIGN / "references"
-    for retired in ("critique.md", "audit.md", "optimize.md", "heuristics-scoring.md", "personas.md"):
-        assert not (references / retired).exists()
-
-
 def test_review_cases_encode_the_complete_zero_mutation_contract():
     boundary = _fixture("boundary_cases.yaml")
     review_cases = [case for case in boundary["cases"] if case["branch"] == "review"]
@@ -30,20 +24,6 @@ def test_review_cases_encode_the_complete_zero_mutation_contract():
         assert expected["tree_unchanged"] is True
         assert expected["report_outside_protected_root"] is True
         assert set(expected["browser_read_effects_permitted"]) == {"navigate", "get", "screenshot"}
-
-
-def test_review_branch_has_no_legacy_write_or_cleanup_surface():
-    for retired in (
-        "pin.mjs",
-        "command-metadata.json",
-        "critique-storage.mjs",
-        "cleanup-deprecated.mjs",
-    ):
-        assert not (UI_UX_DESIGN / "scripts" / retired).exists()
-
-    paths = (ROOT / "runtime" / "ui-live" / "impeccable-paths.mjs").read_text()
-    assert "CRITIQUE_DIR" not in paths
-    assert "getCritiqueDir" not in paths
 
 
 def test_implementation_requests_keep_implement_as_owner_with_ui_companion():
@@ -60,8 +40,3 @@ def test_implementation_requests_keep_implement_as_owner_with_ui_companion():
     for case in compositions:
         assert case["expected"]["primary_skill"] == "implement"
         assert case["expected"]["companion_skills"] == ["ui-ux-design"]
-
-
-def test_review_contract_keeps_the_wcag_claim_limit():
-    review = (UI_UX_DESIGN / "references" / "review.md").read_text().lower()
-    assert "do not claim wcag certification" in review

@@ -340,7 +340,7 @@ def build_plan(
         str((candidate if candidate.is_absolute() else Path(workspace_root) / candidate).resolve())
         for candidate in (Path(p).expanduser() for p in add_dirs)
     ))
-    warnings = list(route.get("notes") or [])
+    warnings = list(route.get("notes") or []) + list(route.get("warnings") or [])
     safe_directories = []
     for directory in directories:
         if credential_path(directory) or Path.home().resolve().is_relative_to(Path(directory)):
@@ -1646,6 +1646,10 @@ def execute(
     private_cache.mkdir(parents=True, exist_ok=True)
     environment.update(TMPDIR=str(private_tmp), TMP=str(private_tmp), TEMP=str(private_tmp),
                        XDG_CACHE_HOME=str(private_cache))
+    if plan["adapter"] == "claude":
+        private_claude_tmp = private_tmp / "claude"
+        private_claude_tmp.mkdir(parents=True, exist_ok=True)
+        environment["CLAUDE_TMPDIR"] = str(private_claude_tmp)
     route = plan["route"]
     if (
         plan["adapter"] == "claude"

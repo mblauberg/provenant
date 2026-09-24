@@ -71,7 +71,17 @@ DEFAULT_TIMEOUT_SECONDS = 3600.0
 # before the batch falls back to killing that owner.
 CANCEL_DISPATCH_GRACE_SECONDS = 2.0
 DISPATCH_WATCHDOG_GRACE_SECONDS = 5.0
-TERMINAL_TASK_STATUSES = {"blocked", "ok", "failed", "timed_out", "cancelled"}
+TERMINAL_TASK_STATUSES = {"blocked", "ok", "failed", "rejected", "timed_out", "cancelled"}
+PREFLIGHT_REJECTION_CODES = {
+    "access_mode_invalid", "allow_secrets_invalid", "credential_or_auth_store_denied",
+    "effort_unsupported", "fallback_invalid", "invalid_task_id", "model_routing_unavailable",
+    "network_invalid", "prompt_hard_link_denied", "prompt_invalid", "prompt_path_forbidden",
+    "prompt_required", "prompt_unavailable", "protected_path_denied", "sandbox_forbidden",
+    "sandbox_invalid", "secret_detected", "secret_scan_budget_exceeded",
+    "secret_scan_unavailable", "unknown_task_class", "worktree_conflict",
+    "worktree_invalid", "worktree_not_applicable", "worktree_required",
+    "worktree_write_adapter_unsupported",
+}
 
 
 class BatchInputError(ValueError):
@@ -418,6 +428,25 @@ def _parse_record(output: str) -> dict[str, Any] | None:
     return None
 
 
+def _preflight_rejection(record: dict[str, Any], process_exit: int | None) -> dict[str, Any] | None:
+    if process_exit != 2:
+        return None
+    error = record.get("error")
+    if record.get("status") == "rejected" and isinstance(error, str) and error in PREFLIGHT_REJECTION_CODES:
+        if isinstance(record.get("fix"), str):
+            return {"error": error, "fix": record["fix"]}
+    status = record.get("status")
+    typed_status = (
+        isinstance(status, str) and status not in {"ok", "failed", "timed_out", "cancelled", "blocked", "rejected"}
+        and re.fullmatch(r"[a-z][a-z0-9_]{1,63}", status) and record.get("error") == status
+    )
+    if (record.get("schema_version") == 1 and isinstance(status, str) and
+            (status in PREFLIGHT_REJECTION_CODES or typed_status) and
+            isinstance(record.get("message"), str)):
+        return {"error": status, "message": record["message"], "fix": record["message"]}
+    return None
+
+
 def _contained_file(run_dir: Path, value: Any, label: str) -> tuple[str, bytes]:
     relative = retained_path(run_dir, value)
     try:
@@ -640,6 +669,11 @@ def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str,
                     "dispatch_exit": process.returncode, "stderr": stderr[-1000:]}
         return {"task_id": task_id, "status": "failed", "outcome": "dispatch_output_invalid",
                 "dispatch_exit": process.returncode, "stderr": stderr[-1000:]}
+    rejection = _preflight_rejection(record, process.returncode)
+    if rejection is not None:
+        return {"task_id": task_id, "status": "rejected", "outcome": "preflight_rejected",
+                "dispatch_exit": process.returncode,
+                **rejection}
     try:
         compact = _validate_child_record(task, record, run_dir, process.returncode)
     except BatchInputError as exc:
@@ -651,7 +685,9 @@ def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str,
 
 
 def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_dir: Path,
-                   source_bytes: bytes, custody=None) -> int:
+                   source_bytes: bytes, custody=None,
+                   preflight_results: dict[str, dict[str, Any]] | None = None,
+                   input_digest: str | None = None) -> int:
     batch_id = f"batch-{_batch_number(run_dir):03d}"
     batch_dir = run_dir / "dispatch" / "batches" / batch_id
     try:
@@ -668,7 +704,9 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
         _active_batch_dirs.add(batch_dir)
     try:
         with ThreadPoolExecutor(max_workers=args.concurrency, thread_name_prefix="provenant-batch") as pool:
-            futures = {pool.submit(_run_task, task, run_dir, batch_dir): task["id"] for task in tasks}
+            futures = {pool.submit(_run_task, task, run_dir, batch_dir): task["id"] for task in tasks
+                       if not (preflight_results or {}).get(task["id"])}
+            results.update(preflight_results or {})
             pending = set(futures)
             cancellation_handled = False
             while pending:
@@ -704,7 +742,8 @@ def _execute_batch(args: argparse.Namespace, tasks: list[dict[str, Any]], run_di
         "schema_version": 1, "record_type": "dispatch-batch", "batch_id": batch_id,
         "status": status, "task_count": len(ordered), "concurrency": args.concurrency,
         "counts": counts, "source_manifest": {"path": str(source_copy.relative_to(run_dir)),
-                                                "digest": source_digest},
+                                                "digest": source_digest,
+                                                **({"input_digest": input_digest} if input_digest else {})},
         "tasks": ordered,
         "reducer_inputs": [
             {"task_id": item["task_id"], "status": item["status"],
@@ -757,23 +796,52 @@ def batch(args: argparse.Namespace) -> int:
         print(json.dumps({"schema_version": 1, "status": "invalid_manifest", "message": str(exc)}, sort_keys=True))
         return 2
 
-    first_finding = None
-    try:
-        for task in tasks:
-            prompt_path = task.get("prompt_file", "<prompt>")
-            prompt = (task["_inline_prompt"].encode("utf-8") if "_inline_prompt" in task
+    rejected: dict[str, dict[str, Any]] = {}
+    for task in tasks:
+        check = dict(task)
+        if "_inline_prompt" in check:
+            check["prompt"] = check.pop("_inline_prompt")
+        if "allow_secrets" in check and type(check["allow_secrets"]) is not bool:
+            rejected[task["id"]] = {
+                "task_id": task["id"], "status": "rejected", "outcome": "preflight_rejected",
+                "error": "allow_secrets_invalid", "fix": "Pass allow_secrets: true or false.",
+            }
+            continue
+        prompt_path = check.get("prompt_file", "<prompt>")
+        try:
+            prompt = (check["prompt"].encode("utf-8") if isinstance(check.get("prompt"), str)
                       else Path(prompt_path).read_bytes())
-            scan = scan_inputs(prompt, prompt_path, task.get("add_dirs"))
-            if scan.findings and task.get("allow_secrets") is not True and first_finding is None:
-                first_finding = scan
-    except OSError:
-        print(json.dumps({"schema_version": 1, "status": "rejected", "error": "secret_scan_unavailable",
-                          "fix": "Make task inputs readable for the secret scan."}, sort_keys=True))
-        return 2
-    if first_finding is not None:
-        print(json.dumps({"schema_version": 1, "status": "rejected", "error": "secret_detected",
-                          "fix": first_finding.fix()}, sort_keys=True))
-        return 2
+        except OSError:
+            rejected[task["id"]] = {
+                "task_id": task["id"], "status": "rejected", "outcome": "preflight_rejected",
+                "error": "prompt_unavailable",
+                "fix": "Pass prompt text or prompt_file=<readable regular file inside the workspace>.",
+            }
+            continue
+        try:
+            scan = scan_inputs(prompt, prompt_path, check.get("add_dirs"))
+            finding = scan.findings[0] if scan.findings else None
+            if scan.budget_exceeded and check.get("allow_secrets") is not True:
+                error, fix = "secret_scan_budget_exceeded", scan.fix()
+            elif finding and check.get("allow_secrets") is not True:
+                error, fix = "secret_detected", scan.fix()
+            else:
+                continue
+        except OSError:
+            error, fix = "secret_scan_unavailable", "Make task inputs readable for the secret scan."
+        if error:
+            rejected[task["id"]] = {
+                "task_id": task["id"], "status": "rejected", "outcome": "preflight_rejected",
+                "error": error, "fix": fix,
+            }
+    safe_tasks = []
+    for task in tasks:
+        safe = {key: value for key, value in task.items() if key not in {"prompt", "_inline_prompt"}}
+        if task.get("prompt") is not None or task.get("_inline_prompt") is not None:
+            safe["prompt"] = "<redacted>"
+        safe_tasks.append(safe)
+    safe_source = json.dumps({"schema_version": 1, "tasks": safe_tasks}, sort_keys=True).encode() + b"\n"
+    input_digest = _digest_bytes(source_bytes)
 
     try:
         batch_lock = _acquire_batch_lock(run_dir)
@@ -796,7 +864,8 @@ def batch(args: argparse.Namespace) -> int:
             print(json.dumps({"schema_version": 1, "status": "custody_preflight_failed",
                               "message": str(exc)}, sort_keys=True))
             return 2
-        result = _execute_batch(args, tasks, run_dir, source_bytes, batch_lock)
+        result = _execute_batch(args, tasks, run_dir, safe_source, batch_lock,
+                                rejected, input_digest)
         close_mcp_run(run_dir)
         return result
     finally:

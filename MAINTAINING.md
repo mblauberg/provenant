@@ -202,6 +202,14 @@ numerator and denominator, model and harness versions.
   and component licences.
 - Keep runtime examples synthetic and visibly placeholder-based.
 
+## What a test may pin
+
+- Pin externally visible behaviour, authority boundaries, and stable machine contracts.
+- Prefer stable codes and focused fields over prose, full outputs, or incidental counts.
+- Derive expected registries and lists from their source of truth.
+- Keep security, confidentiality, evidence, lease, and schema assertions.
+- When an unbreaking change fails a test, rewrite it to pin behaviour or delete it; never bend product code around it.
+
 ## Verify and release
 
 Run the checkout gates, or require exact-head `ci-status`:

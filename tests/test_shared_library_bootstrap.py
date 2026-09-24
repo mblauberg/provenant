@@ -65,6 +65,14 @@ def _neutralise_sibling_repairs(tree: Path, keep: Path) -> None:
             path.write_text("".join(lines))
 
 
+def _copy_python_sources(tree: Path) -> None:
+    """Copy importable sources only; the probe never reads skill assets."""
+    for source in SKILLS.rglob("*.py"):
+        destination = tree / source.relative_to(SKILLS)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, destination)
+
+
 def test_the_consumer_list_is_not_empty() -> None:
     assert CONSUMERS, "no skill script imports the shared library: the discovery is wrong"
 
@@ -74,7 +82,7 @@ def test_each_shared_consumer_loads_without_a_sibling_path_repair(
     consumer: Path, tmp_path: Path
 ) -> None:
     tree = tmp_path / "skills"
-    shutil.copytree(SKILLS, tree, symlinks=False)
+    _copy_python_sources(tree)
     under_test = tree / consumer.relative_to(SKILLS)
     _neutralise_sibling_repairs(tree, under_test)
 

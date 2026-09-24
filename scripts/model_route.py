@@ -57,6 +57,7 @@ COMPATIBILITY_ADAPTER_IDS = {
 # The wire formats a provider CLI can be told to speak. Anything else is a
 # configuration error rather than a value to pass through to the CLI.
 ENDPOINT_WIRE_APIS = frozenset({"responses", "chat"})
+ROUTE_WARNINGS: list[str] = []
 TRUSTED_CAPABILITY_SOURCES = {
     "codex debug models": "codex",
     "claude subscription canary": "claude",
@@ -204,12 +205,41 @@ def catalogue_snapshot(path: Path | None = None) -> dict[str, Any]:
     base = json.loads(product.read_text())
     drift: list[str] = []
     sources = [str(product)]
+    stale_routing = False
     if path is None and CATALOG_PATH != product and CATALOG_PATH.exists():
         sources.append(str(CATALOG_PATH))
         try:
             overlay = json.loads(CATALOG_PATH.read_text())
             if isinstance(overlay, dict):
-                base = _merge_catalog(base, overlay, "", drift)
+                current = base
+                installed_date, current_date = overlay.get("catalog_date"), current.get("catalog_date")
+                stale_routing = (
+                    isinstance(installed_date, str) and isinstance(current_date, str)
+                    and installed_date < current_date
+                )
+                # Date-less instance files are supported as small preference
+                # overlays (often only a model alias or nullable override).
+                # Field absence is evidence of a stale full snapshot only
+                # when the file identifies itself as a catalog snapshot.
+                if isinstance(installed_date, str):
+                    for adapter, product_entry in current.get("adapters", {}).items():
+                        installed_entry = overlay.get("adapters", {}).get(adapter, {})
+                        stale_routing = stale_routing or (
+                            "trains_on_prompts" in product_entry and "trains_on_prompts" not in installed_entry
+                        )
+                        old_models = {model.get("id"): model for model in installed_entry.get("models", [])
+                                      if isinstance(model, dict)}
+                        for model in product_entry.get("models", []):
+                            if not isinstance(model, dict):
+                                continue
+                            old_model = old_models.get(model.get("id"), {})
+                            stale_routing = stale_routing or (
+                                "trains_on_prompts" in model and "trains_on_prompts" not in old_model
+                            )
+                if stale_routing:
+                    drift.append("instance catalogue is older than product routing; ignored until refreshed")
+                else:
+                    base = _merge_catalog(base, overlay, "", drift)
             else:
                 drift.append("instance catalogue: malformed overlay dropped; fix: use a JSON object")
         except (OSError, ValueError):
@@ -263,7 +293,7 @@ def catalogue_snapshot(path: Path | None = None) -> dict[str, Any]:
             "shorthands": shorthands, "families": base.get("families", {}),
             "endpoints": base.get("endpoints", {}),
             "task_class_routes": base.get("task_class_routes", {}), "catalogue": base,
-            "stale_alias_warnings": stale_alias_warnings}
+            "stale_alias_warnings": stale_alias_warnings, "stale_routing": stale_routing}
 
 
 def load_catalog(path: Path | None = None) -> dict[str, Any]:
@@ -786,6 +816,7 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                  "model_selection": "alias" if not explicit else "explicit",
                  "requested_effort": args.effort or "", "effort": effort if effort != "default" else "",
                  "effort_applied": effort if effort != "default" else "",
+                 "supported_efforts": list(supported),
                  "effort_note": next((note for note in notes if "effort" in note or "unsupported" in note), ""),
                  "effort_source": "explicit" if args.effort else "model-default" if (registered or {}).get("default_effort") else "adapter-default",
                  "effort_capability_source": "registry" if supported else "provider-unverified" if unverified_effort
@@ -915,6 +946,8 @@ def resolve_endpoint_profile(
 
 
 def emit(record: dict[str, Any], code: int) -> int:
+    if record.get("status") == "ok" and ROUTE_WARNINGS:
+        record["warnings"] = list(dict.fromkeys([*(record.get("warnings") or []), *ROUTE_WARNINGS]))
     print(json.dumps(record, sort_keys=True))
     return code
 
@@ -1640,6 +1673,8 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         )
 
     registered_model, _ = _registered_match(args.adapter, model, catalog)
+    probed = capability_models.get(model.casefold(), {})
+    supported = probed.get("supported_efforts") or (registered_model or {}).get("efforts", [])
     effort, effort_substitution, effort_status, capability_source = resolve_effort(
         args, family, model, family_config, requested_effort, account_default, registered_model
     )
@@ -1650,9 +1685,6 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if effort_status in {"effort_unsupported", "no_effort_available", "capability_discovery_failed"} and not (
         args.task_class or args.model_override_tier or args.require_distinct
     ):
-        probed = capability_models.get(model.casefold(), {})
-        registered, _ = _registered_match(args.adapter, model, catalog)
-        supported = probed.get("supported_efforts") or (registered or {}).get("efforts", [])
         if supported:
             rank = EFFORT_ORDER.get(requested_effort, EFFORT_ORDER["medium"])
             effort = max((candidate for candidate in supported if EFFORT_ORDER[candidate] <= rank),
@@ -1723,6 +1755,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         "effort": effort,
         "effort_substitution": effort_substitution,
         "effort_applied": effort,
+        "supported_efforts": list(supported),
         "effort_note": effort_substitution,
         "effort_capability_source": capability_source,
         "status": "ok",
@@ -1860,7 +1893,13 @@ def main(argv: list[str] | None = None) -> int:
         record, code = probe_capabilities(args.adapter, args.executable)
         print(json.dumps(record, sort_keys=True))
         return code
-    catalog = load_catalog(Path(args.catalog) if args.catalog else None)
+    snapshot = catalogue_snapshot(Path(args.catalog) if args.catalog else None)
+    catalog = snapshot["catalogue"]
+    global ROUTE_WARNINGS
+    ROUTE_WARNINGS = ([
+        "routing catalogue was stale; resolved against the fresh product snapshot; "
+        "fix: run scripts/install-harness --platform all --refresh-routing"
+    ] if args.command == "resolve" and snapshot.get("stale_routing") else [])
     if args.command == "resolve":
         # cf_dispatch defaults an alias beside a named model; that is not the caller's.
         args.alias_supplied = bool(args.alias) and os.environ.get("FABRIC_ALIAS_IMPLIED") != "1"

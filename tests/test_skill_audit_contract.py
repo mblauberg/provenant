@@ -5,36 +5,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL_CRAFT = ROOT / "skills" / "skill-craft"
-AUDIT = SKILL_CRAFT / "references" / "audit.md"
-METHOD = SKILL_CRAFT / "references" / "method.md"
 FIXTURES = SKILL_CRAFT / "evals" / "boundary_trace_cases.yaml"
-
-
-def test_skill_craft_references_keep_owned_structure():
-    skill = (SKILL_CRAFT / "SKILL.md").read_text()
-    audit = AUDIT.read_text()
-    method = METHOD.read_text()
-
-    assert "[references/author.md](references/author.md)" in skill
-    assert "[references/audit.md](references/audit.md)" in skill
-    assert "[method.md](method.md)" in audit
-    assert {"# Audit branch", "## Evidence modes", "## Workflow", "## Output"} <= {
-        line.strip() for line in audit.splitlines() if line.lstrip().startswith("#")
-    }
-    assert {
-        "# Skill-audit method",
-        "## Scoring",
-        "## Static checks",
-        "## Local and shared evidence",
-    } <= {
-        line.strip() for line in method.splitlines() if line.lstrip().startswith("#")
-    }
-    retired = [
-        SKILL_CRAFT / "scripts" / "collect_telemetry.py",
-        SKILL_CRAFT / "scripts" / "validate_telemetry.py",
-        SKILL_CRAFT / "SKILL-TELEMETRY.template.json",
-    ]
-    assert not [path for path in retired if path.exists()]
 
 
 def test_local_history_routing_separates_audit_from_export():

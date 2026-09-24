@@ -964,6 +964,20 @@ print(json.dumps({'type':'turn.completed'}))
     assert json.loads((tmp_path / "result.md").read_text()) == expected
 
 
+def test_claude_adapter_receives_attempt_private_claude_tmpdir(tmp_path):
+    code = """import json, os
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({key: os.environ.get(key) for key in ('TMPDIR','CLAUDE_TMPDIR')})}}))
+print(json.dumps({'type':'turn.completed'}))
+"""
+    plan = fixture_plan(tmp_path, code, adapter="claude")
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    paths = json.loads((tmp_path / "result.md").read_text())
+    assert paths["TMPDIR"] == str(tmp_path / "tmp")
+    assert paths["CLAUDE_TMPDIR"] == str(tmp_path / "tmp/claude")
+    assert (tmp_path / "tmp/claude").is_dir()
+
+
 def test_codex_read_only_records_native_write_boundary(tmp_path):
     plan = supervisor().build_plan("codex", {"resolved_model": "fixture"}, "hello",
                                    cwd=tmp_path, workspace_root=tmp_path)

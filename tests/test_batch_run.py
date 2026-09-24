@@ -71,6 +71,16 @@ def fake_dispatch(path: Path) -> None:
         ns, _ = p.parse_known_args()
         prompt = pathlib.Path(ns.prompt_file).read_text()
         values = dict(line.split('=', 1) for line in prompt.splitlines() if '=' in line)
+        if values.get('reject'):
+            print(json.dumps({'status': 'rejected', 'error': values['reject'], 'fix': 'narrow this task'}))
+            raise SystemExit(2)
+        if values.get('bad_output'):
+            print(json.dumps({'status': 'ok'}))
+            raise SystemExit(2)
+        if values.get('route_reject'):
+            print(json.dumps({'schema_version': 1, 'status': values['route_reject'],
+                              'error': values['route_reject'], 'message': 'invalid route'}))
+            raise SystemExit(2)
         counter = pathlib.Path(os.environ['BATCH_COUNTER'])
         active = counter.with_name('active')
         maximum = counter.with_name('maximum')
@@ -185,6 +195,34 @@ def task(tmp_path: Path, task_id: str, **values: str) -> dict:
         if key in values:
             result[key] = values[key]
     return result
+
+
+def test_batch_keeps_valid_task_when_another_task_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run_dir = make_run(tmp_path, 'task-local-rejection')
+    dispatch = tmp_path / 'fake-dispatch'
+    fake_dispatch(dispatch)
+    module = load_module()
+    module.DISPATCH_RUN = dispatch
+    counter = tmp_path / 'counter'
+    counter.write_text('0', encoding='utf-8')
+    monkeypatch.setenv('BATCH_COUNTER', str(counter))
+    manifest = task_manifest(tmp_path, [
+        task(tmp_path, 'rejected', reject='secret_scan_budget_exceeded'),
+        task(tmp_path, 'valid'),
+        task(tmp_path, 'malformed', bad_output='1'),
+        task(tmp_path, 'bad-route', route_reject='alias_unavailable'),
+    ])
+
+    assert module.batch(args(module, run_dir, manifest, 2)) == 1
+
+    summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
+    assert [(row['task_id'], row['status']) for row in summary['tasks']] == [
+        ('rejected', 'rejected'), ('valid', 'ok'), ('malformed', 'failed'), ('bad-route', 'rejected')]
+    assert summary['tasks'][0]['error'] == 'secret_scan_budget_exceeded'
+    assert summary['tasks'][0]['fix'] == 'narrow this task'
+    assert summary['tasks'][2]['outcome'] == 'child_receipt_invalid'
+    assert summary['tasks'][3]['error'] == 'alias_unavailable'
 
 
 def args(module, run_dir: Path, manifest: Path, concurrency: int = 3):
@@ -814,12 +852,18 @@ def test_inline_prompt_is_temporary_but_attempt_prompt_is_retained(tmp_path, mon
 
 @pytest.mark.parametrize('secret_in_file', [False, True])
 @pytest.mark.parametrize('override', [None, 'false', 1])
-def test_batch_rejects_later_secret_before_copying_manifest_or_staging_prompts(
+def test_batch_rejects_secret_task_but_runs_valid_task_without_retaining_prompt_text(
     tmp_path, monkeypatch, capsys, secret_in_file, override
 ):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'secret-batch')
     module = load_module()
+    dispatch = tmp_path / 'fake-dispatch'
+    fake_dispatch(dispatch)
+    module.DISPATCH_RUN = dispatch
+    counter = tmp_path / 'counter'
+    counter.write_text('0')
+    monkeypatch.setenv('BATCH_COUNTER', str(counter))
     secret = 'AKIA' + 'A' * 16
     second = {'id': 'second', 'adapter': 'gemini', 'model': 'flash', 'role': 'worker'}
     if secret_in_file:
@@ -836,13 +880,16 @@ def test_batch_rejects_later_secret_before_copying_manifest_or_staging_prompts(
         second,
     ])
 
-    assert module.batch(args(module, run_dir, manifest, 1)) == 2
+    assert module.batch(args(module, run_dir, manifest, 1)) == 1
     output = json.loads(capsys.readouterr().out)
-    assert output['error'] == 'secret_detected'
+    assert [(row['task_id'], row['status']) for row in output['tasks']] == [
+        ('first', 'ok'), ('second', 'rejected')]
+    assert output['tasks'][1]['error'] == (
+        'secret_detected' if override is None else 'allow_secrets_invalid')
     assert secret not in json.dumps(output)
-    assert not list(run_dir.rglob('task-manifest.json'))
-    assert not list(run_dir.rglob('prompts/*.md'))
-    assert not list(run_dir.rglob('attempt.json'))
+    assert list(run_dir.rglob('task-manifest.json'))
+    assert list(run_dir.rglob('prompts/*.md')) == []
+    assert (run_dir / 'dispatch/tasks/first/attempt-001/attempt.json').is_file()
     assert all(secret.encode() not in path.read_bytes() for path in run_dir.rglob('*') if path.is_file())
 
 
