@@ -23,6 +23,7 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
 
 ## Rules
 
+- A rejected batch task returns its `error` and `fix`; the other tasks still run.
 - Use parallel agents only when the tasks are independent, have stable interfaces and checkable outputs, and save more attention than coordination costs. Keep coupled work serial.
 - Partition writers into separate registered worktrees. The chair owns authority, decisions, user communication and the final synthesis. A worker's report is a claim: verify commits, counts and tests against the live tree and transcript.
 - Use the [HARNESS.md](../../HARNESS.md) risk ladder for review. It also governs provider choice and claim/ack; do not duplicate those policies here.
