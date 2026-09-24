@@ -462,6 +462,7 @@ def build_plan(
         warnings.append("sandbox control unsupported by " + adapter)
     if adapter in {"cursor", "kiro", "copilot", "opencode"} and directories:
         warnings.append("additional directories unsupported by " + adapter)
+        directories = []
     timeout = float(timeout_seconds or (10800 if mode == "worktree_write" else 3600))
     idle = float(
         idle_seconds
