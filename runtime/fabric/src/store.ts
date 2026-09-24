@@ -323,11 +323,14 @@ export class Store {
         AND m.created_at >= ? AND (? IS NULL OR m.task_id = ?)`;
     const args = [who.project, who.agentId, since, taskId ?? null, taskId ?? null];
     const total = (this.#db.prepare(`SELECT count(*) AS count ${predicate}`).get(...args) as { count: number }).count;
-    const rows = this.#db.prepare(`SELECT m.sender_id AS sender, m.task_id AS task_id,
-        count(*) AS count, min(m.message_id) AS sample_id,
-        substr(replace(replace(min(m.body), char(10), ' '), char(13), ' '), 1, 80) AS summary
-      ${predicate} GROUP BY m.sender_id, m.task_id
-      ORDER BY count DESC, m.sender_id, m.task_id LIMIT 21`).all(...args) as Array<{
+    const rows = this.#db.prepare(`WITH ranked AS (
+        SELECT m.sender_id AS sender, m.task_id AS task_id, m.message_id AS sample_id,
+          substr(replace(replace(m.body, char(10), ' '), char(13), ' '), 1, 80) AS summary,
+          count(*) OVER (PARTITION BY m.sender_id, m.task_id) AS count,
+          row_number() OVER (PARTITION BY m.sender_id, m.task_id ORDER BY m.message_id) AS rank
+        ${predicate}
+      ) SELECT sender, task_id, count, sample_id, summary FROM ranked WHERE rank = 1
+      ORDER BY count DESC, sender, task_id LIMIT 21`).all(...args) as Array<{
         sender: string; task_id: string | null; count: number; sample_id: string; summary: string;
       }>;
     return {

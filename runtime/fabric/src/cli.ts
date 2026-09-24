@@ -40,7 +40,7 @@ const USAGE = `fabric <command>
            [--limit N]
   watch [ids…] [--interval N] print run state changes; exit when all terminal
   lanes [--json] [id]         versioned run reader, root-relative paths
-  events [--follow]           JSON lines for task state and inbox changes
+  events [--follow] [--until-idle]  JSON lines; follow stays open unless idle exit is requested
   status [id] [--wait-seconds N]  run status by task, batch or run directory; no id: store summary
   doctor [--json]             read-only schema and integrity diagnostics
   adapters [--json]           configured providers: dispatch state, aliases,
@@ -377,13 +377,21 @@ try {
     const followAt = argv.indexOf("--follow");
     const follow = followAt !== -1;
     if (follow) argv.splice(followAt, 1);
-    if (argv.length !== 1) throw new Error("usage: fabric events [--follow]");
+    const idleAt = argv.indexOf("--until-idle");
+    const untilIdle = idleAt !== -1;
+    if (untilIdle) argv.splice(idleAt, 1);
+    if (argv.length !== 1 || (untilIdle && !follow)) throw new Error("usage: fabric events [--follow [--until-idle]]");
     let cursor: string | undefined;
     do {
       const snapshot = await readEvents(who.cwd, cursor, store.inbox(who, { peek: true, limit: 100 }));
       if (snapshot.status !== "ok") throw new Error(String(snapshot.error));
       cursor = snapshot.cursor;
       for (const event of snapshot.events) console.log(JSON.stringify(event));
+      if (untilIdle && snapshot.events.length === 0) {
+        const runs = await readRuns(who.cwd);
+        if (runs.status !== "ok") throw new Error(String(runs.error));
+        if (runs.runs.every((run) => run.state === "terminal" || run.state === "input_required")) break;
+      }
       if (follow) await sleep(250);
     } while (follow);
     break;

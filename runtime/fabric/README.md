@@ -159,10 +159,13 @@ project's `.agent-run` root. Missing facts are `null`; `pgid_alive: null` means
 the process identity cannot be verified. Both `tasks/<id>/attempt-NNN/` and
 `dispatch/tasks/<id>/attempt-NNN/` receipts are read internally. Fabric's status
 and output readers use the same underlying receipt scanner; consumers should
-use the versioned response instead of opening receipt files themselves.
+use the versioned response instead of opening receipt files themselves. The
+response reserves an optional `claims` field for the work-claims reader.
 
 `provenant events --follow` prints one JSON line per new terminal or
-`input_required` attempt and per unread inbox message. `fabric_events` returns
+`input_required` attempt and per unread inbox message, and stays open until
+stopped. Add `--until-idle` to exit once no run is active and a poll finds no
+new events; this lets a background monitor wake a chair and finish. `fabric_events` returns
 `fabric.events.v1` with `events` and an opaque `cursor`; pass that cursor back
 with `wait_seconds` (0–55) to wait for changes. Run one follower per session;
 restart it only after exit. The stream is a bounded recent view of retained

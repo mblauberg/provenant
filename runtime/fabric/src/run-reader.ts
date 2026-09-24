@@ -1,6 +1,6 @@
-import { existsSync, lstatSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
 import { runRoot } from "./identity.js";
 import { processMatches, processStartedAt, readOwnerRecord, readProviderRecord, statusRows } from "./run-registry.js";
@@ -26,29 +26,63 @@ export interface RunRead {
   attempt: number;
 }
 
+export interface RunReadResponse {
+  schema: "fabric.runs.v1";
+  status: "ok" | "unknown";
+  error?: string;
+  runs: RunRead[];
+  claims?: unknown;
+}
+
 function rootPath(root: string, runDir: string, value: unknown): string | null {
   if (typeof value !== "string" || !value) return null;
   const path = resolve(runDir, value);
-  try { if (lstatSync(path).isSymbolicLink()) return null; } catch { /* A result may not exist yet. */ }
-  const candidate = existsSync(path) ? realpathSync(path) : path;
-  const local = relative(runDir, candidate);
+  let ancestor = path;
+  const missing: string[] = [];
+  try {
+    if (lstatSync(path).isSymbolicLink()) return null;
+  } catch { /* A result may not exist yet. */ }
+  for (;;) {
+    try { lstatSync(ancestor); break; }
+    catch {
+      const parent = dirname(ancestor);
+      if (parent === ancestor) return null;
+      missing.unshift(basename(ancestor));
+      ancestor = parent;
+    }
+  }
+  let candidate: string;
+  let canonicalRunDir: string;
+  try {
+    if (missing.length && !statSync(ancestor).isDirectory()) return null;
+    candidate = resolve(realpathSync(ancestor), ...missing);
+    canonicalRunDir = realpathSync(runDir);
+  } catch { return null; }
+  const local = relative(canonicalRunDir, candidate);
   const rel = relative(root, candidate);
   return rel && !isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`) &&
     !isAbsolute(local) && local !== ".." && !local.startsWith(`..${sep}`) ? rel : null;
 }
 
 /** The public read contract. Receipt layout and absolute paths end here. */
-export async function readRuns(workspace: string, ids?: string[], waitSeconds = 0, signal?: AbortSignal) {
+export async function readRuns(workspace: string, ids?: string[], waitSeconds = 0, signal?: AbortSignal): Promise<RunReadResponse> {
   try {
     const source = await statusRows(workspace, ids, waitSeconds, "all", signal, "brief", false);
     if (!source.runs) return { schema: "fabric.runs.v1", status: "unknown" as const,
-      error: source.error ?? "run_read_failed", runs: [] as RunRead[] };
+      error: String(source.error ?? "run_read_failed"), runs: [] as RunRead[] };
     const root = existsSync(runRoot(workspace)) ? realpathSync(runRoot(workspace)) : resolve(runRoot(workspace));
     const runs: RunRead[] = source.runs.map((row) => {
       const runDir = String(row.run_dir);
       const latest = Array.isArray(row.attempts) ? row.attempts.at(-1) : undefined;
+      const resultForReceipt = latest?.paths?.result ?? row.paths?.result;
+      const taskId = typeof row.task_id === "string" ? row.task_id : "";
+      const attempt = Number(latest?.attempt ?? row.attempt);
+      const layoutReceipt = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(taskId) && Number.isSafeInteger(attempt) && attempt > 0
+        ? ["tasks", "dispatch/tasks"].map((tree) => `${tree}/${taskId}/attempt-${String(attempt).padStart(3, "0")}/attempt.json`)
+          .find((path) => existsSync(resolve(runDir, path)))
+        : undefined;
       const receipt = row.paths?.receipt ?? latest?.paths?.receipt ??
-        (typeof row.paths?.result === "string" ? `${dirname(row.paths.result)}/attempt.json` : undefined);
+        (typeof resultForReceipt === "string" ? `${dirname(resultForReceipt)}/attempt.json` : layoutReceipt);
       const owner = readOwnerRecord(runDir);
       const provider = owner && readProviderRecord(runDir, owner.run_token);
       const liveRecord = provider?.provider_started_at ? provider : owner;
@@ -89,25 +123,43 @@ export async function readRuns(workspace: string, ids?: string[], waitSeconds = 
 
 export async function readEvents(workspace: string, cursor?: string, messages: Message[] = []) {
   try {
-  const previous = new Set<string>(cursor ? JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) : []);
+  const previous = cursor
+    ? JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as { runs: Record<string, [number, string]>; messages: string[] }
+    : { runs: {}, messages: [] };
   const source = await statusRows(workspace, undefined, 0, "all", undefined, "brief", false);
   if (!source.runs) return { schema: "fabric.events.v1", status: "unknown", error: source.error, events: [], cursor: cursor ?? "" };
   const root = existsSync(runRoot(workspace)) ? realpathSync(runRoot(workspace)) : resolve(runRoot(workspace));
-  const candidates = [
-    ...source.runs.flatMap((run) => (Array.isArray(run.attempts) && run.attempts.length ? run.attempts : [run])
-      .filter((attempt: Record<string, any>) => attempt.state === "terminal" || attempt.state === "input_required" || attempt.status === "input_required")
-      .map((attempt: Record<string, any>) => ({ schema: "fabric.event.v1", type: "task_state",
-        id: `${run.run_id}:${run.task_id}:${attempt.attempt ?? run.attempt}:${attempt.status}`,
+  const key = (id: string) => createHash("sha256").update(id).digest("hex").slice(0, 16);
+  const runMarks: Record<string, [number, string]> = {};
+  const events: Record<string, unknown>[] = [];
+  for (const run of source.runs) {
+    const runKey = key(`${run.run_id}:${run.task_id}`);
+    const attempts = Array.isArray(run.attempts) && run.attempts.length ? run.attempts : [run];
+    for (const attempt of attempts) {
+      if (attempt.state !== "terminal" && attempt.state !== "input_required" && attempt.status !== "input_required") continue;
+      const number = Number(attempt.attempt ?? run.attempt);
+      if (!Number.isSafeInteger(number)) continue;
+      const state = key(`${attempt.state}:${attempt.status}`);
+      const mark = runMarks[runKey];
+      if (!mark || number >= mark[0]) runMarks[runKey] = [number, state];
+      const prior = previous.runs[runKey];
+      if (prior && (number < prior[0] || (number === prior[0] && state === prior[1]))) continue;
+      events.push({ schema: "fabric.event.v1", type: "task_state",
+        id: `${run.run_id}:${run.task_id}:${number}:${attempt.status}`,
         run_id: String(run.run_id), task_id: run.task_id ?? null,
         state: attempt.status === "input_required" ? "input_required" : attempt.state,
         status: attempt.status ?? null,
-        result_path: rootPath(root, String(run.run_dir), attempt.paths?.result ?? attempt.result_path) }))),
-    ...messages.map((row) => ({ schema: "fabric.event.v1", type: "inbox_message", id: row.messageId,
-      task_id: row.taskId ?? null, from: row.from, kind: row.kind, preview: row.body.replace(/\s+/gu, " ").slice(0, 80) })),
-  ];
-  const key = (id: string) => createHash("sha256").update(id).digest("hex").slice(0, 16);
-  const events = candidates.filter((row) => !previous.has(key(row.id)));
-  const next = Buffer.from(JSON.stringify(candidates.map((row) => key(row.id)))).toString("base64url");
+        result_path: rootPath(root, String(run.run_dir), attempt.paths?.result ?? attempt.result_path) });
+    }
+  }
+  const messageKeys = messages.slice(0, 100).map((row) => key(row.messageId));
+  const seenMessages = new Set(previous.messages);
+  for (const [index, row] of messages.slice(0, 100).entries()) {
+    if (seenMessages.has(messageKeys[index]!)) continue;
+    events.push({ schema: "fabric.event.v1", type: "inbox_message", id: row.messageId,
+      task_id: row.taskId ?? null, from: row.from, kind: row.kind, preview: row.body.replace(/\s+/gu, " ").slice(0, 80) });
+  }
+  const next = Buffer.from(JSON.stringify({ runs: runMarks, messages: messageKeys })).toString("base64url");
   return { schema: "fabric.events.v1", status: "ok", events, cursor: next };
   } catch (error) {
     return { schema: "fabric.events.v1", status: "unknown", error: error instanceof Error ? error.message : String(error),
