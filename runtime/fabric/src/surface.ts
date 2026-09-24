@@ -77,7 +77,7 @@ export function runView(value: Record<string, any>, detail = "brief"): Record<st
   if (Array.isArray(value.runs)) return { ...value, runs: value.runs.map((row: Record<string, any>) => runView(row)) };
   const keys = ["schema", "id", "run_id", "task_id", "batch_id", "run_dir", "state", "status",
     "attempt", "attempt_count", "digest", "paths", "cwd", "worktree", "mode", "applied",
-    "provenance", "warnings", "notes", "reason", "question", "fix", "retryable", "reset_at", "retry_after"];
+    "provenance", "warnings", "notes", "reason", "question", "error", "fix", "retryable", "reset_at", "retry_after"];
   return Object.fromEntries(keys.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]).concat(
     value.digest === undefined ? [["digest", digest(value)]] : [],
   ));
@@ -138,10 +138,10 @@ export function adapterView(snapshot: CatalogueSnapshot, detail?: string) {
     );
     return `${adapter.name} ${installed ? "ok auth?" : "cli missing"} ${adapter.models.join("|")} default=${adapter.aliases.workhorse?.[0] ?? "-"} ro=${adapter.read_only_guarantee ?? "unknown"} write=${adapter.write_modes?.length ? "yes" : "no"}${
       cooling.length
-        ? ` cooling until ${cooling
-            .map((c) => c.cooling_until)
+        ? ` cooling: ${cooling
+            .map((c) => `${c.model ?? "*"} until ${c.cooling_until}`)
             .sort()
-            .at(-1)}`
+            .join(", ")}`
         : ""
     }`;
   });

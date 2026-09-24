@@ -2033,6 +2033,28 @@ def test_opencode_worktree_writer_reaches_adapter_and_attempt(tmp_path: Path) ->
     assert attempt["requested_route"]["access_mode"] == "worktree_write"
 
 
+def test_writer_branch_name_warns_in_receipt_without_refusing(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "branch-warning")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Make a change\n", encoding="utf-8")
+    worktree = make_worktree(tmp_path)
+    result = run_writer_dispatch(tmp_path, run_dir, prompt, "--access-mode", "worktree_write",
+                                 "--worktree", str(worktree))
+    assert result.returncode == 0, result.stderr + result.stdout
+    receipt = json.loads(result.stdout)
+    assert receipt["status"] == "ok"
+    assert any("branch writer is outside" in note for note in receipt["fabric"]["warnings"])
+    attempt = json.loads((run_dir / "tasks/task-1/attempt-001/attempt.json").read_text())
+    assert any("branch writer is outside" in note for note in attempt["warnings"])
+
+    subprocess.run(["git", "-C", str(worktree), "branch", "-m", "feat/fabric-branch-warning"], check=True)
+    next_run = make_run(tmp_path, "branch-valid")
+    result = run_writer_dispatch(tmp_path, next_run, prompt, "--access-mode", "worktree_write",
+                                 "--worktree", str(worktree))
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert not any("branch " in note and "outside" in note for note in json.loads(result.stdout)["fabric"]["warnings"])
+
+
 def test_primary_checkout_writer_is_rejected(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path, "primary-writer")
     prompt = tmp_path / "prompt.md"
@@ -2509,6 +2531,9 @@ print(json.dumps({'models': [{'slug': 'gpt-6-luna', 'supported_reasoning_levels'
 @pytest.mark.parametrize('owner', ['dispatch', 'batch'])
 @pytest.mark.parametrize('instance', ['configured', 'missing', 'unset'])
 def test_provider_does_not_inherit_chair_fabric_environment(tmp_path, owner, instance):
+    policy = tmp_path / '.agents/fabric-policy.json'
+    policy.parent.mkdir()
+    policy.write_text('{"memory_floor_percent":{"read_only":0}}')
     run_dir = make_run(tmp_path, 'isolated-provider')
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('Reply OK')
@@ -2558,7 +2583,8 @@ else:
         command = [str(SCRIPT.with_name('batch_run.py')), '--run-dir', str(run_dir), '--manifest', str(manifest)]
     result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert json.loads(capture.read_text()) == {"PROVENANT_RUN_ID": "mcp-provider"}
+    run_id = json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['run_id']
+    assert json.loads(capture.read_text()) == {"PROVENANT_RUN_ID": run_id}
     assert (tmp_path / 'provider-instance.txt').read_text() == expected_instance
     assert not (tmp_path / 'chair-state').exists()
     scratch = Path((tmp_path / 'provider-tmp.txt').read_text())

@@ -774,8 +774,8 @@ def supervisor():
         ("rate limit exceeded; HTTP 429", "rate_limited"),
         ("Login expired; not logged in", "auth_required"),
         ("model not found", "model_unavailable"),
-        ('error: invalid model selection (--model "gemini-3.8-pro" --effort "high"): --effort is not supported for model "gemini-3.8-pro"', "model_unavailable"),
-        ("invalid model selection; quota exceeded", "usage_limited"),
+        ('error: invalid model selection (--model "gemini-3.8-pro" --effort "high"): --effort is not supported for model "gemini-3.8-pro"', "rejected"),
+        ("invalid model selection; quota exceeded", "rejected"),
         ("permission denied", "permission_blocked"),
     ],
 )
@@ -784,6 +784,22 @@ def test_failure_signatures(adapter, text, status):
     assert parsed["status"] == status
     assert parsed["signature"]
     assert len(parsed["excerpt"]) <= 200
+
+
+def test_invalid_effort_is_rejected_with_cli_fix_and_no_cooldown(tmp_path):
+    from skills.orchestrate.scripts.fabric_records import write_cooldown
+
+    message = ('error: invalid model selection (--model "gemini-3.8-pro-high" '
+               '--effort "high"): --effort is not supported for model "gemini-3.8-pro-high"')
+    code = f"import sys; print({message!r}, file=sys.stderr); sys.exit(1)"
+    row = supervisor().execute(fixture_plan(tmp_path, code, "agy"), tmp_path / "result.md")
+    assert row["status"] == "rejected"
+    assert row["error"] == "invalid_input"
+    assert row["evidence"]["signature"] == "invalid_input"
+    assert row["fix"] == message
+    cooldowns = tmp_path / "cooldowns.json"
+    write_cooldown(row, path=cooldowns)
+    assert not cooldowns.exists()
 
 
 @pytest.mark.parametrize(
