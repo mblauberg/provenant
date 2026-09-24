@@ -400,6 +400,7 @@ def _command(task: dict[str, Any], run_dir: Path) -> list[str]:
             value=task[key]
             command.extend(("--"+key,json.dumps(value) if not isinstance(value,str) else value))
     for directory in task.get("add_dirs",[]): command.extend(("--add-dir",directory))
+    if task.get("allow_secrets") is True: command.append("--allow-secrets")
     if task.get("preface") is False: command.append("--no-preface")
     return command
 

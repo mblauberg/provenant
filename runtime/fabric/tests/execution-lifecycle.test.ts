@@ -12,6 +12,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
+import { routeArguments } from "../src/execution-input.js";
 import { psOutput } from "../src/ps.mjs";
 import {
   listRecordedRuns,
@@ -825,6 +826,12 @@ describe("compact status", () => {
 });
 
 describe("front door model selection", () => {
+  it("forwards the explicit secret override to the owner", () => {
+    const route = { adapter: "codex", role: "worker", access_mode: "read_only" as const,
+      allow_secrets: true };
+    expect(routeArguments(route)).toContain("--allow-secrets");
+    expect(routeArguments({ ...route, allow_secrets: false })).not.toContain("--allow-secrets");
+  });
   it("leaves shorthand aliases for the routing owner to resolve", async () => {
     mkdirSync(join(product, "config"));
     copyFileSync(join(repositoryRoot, "config", "model-routing.json"), join(product, "config", "model-routing.json"));

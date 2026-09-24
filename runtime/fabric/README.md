@@ -61,7 +61,12 @@ legacy tools; the default task interface is `fabric_task`.
 
 Dispatch accepts exactly one of `prompt` and `prompt_file`. Route controls are
 `adapter`, `alias`, `model`, `effort`, `mode`, `worktree`, `cwd`, `network`,
-`sandbox`, `add_dirs` and `fallback`. Writers use `mode: worktree_write` and an
+`sandbox`, `add_dirs`, `fallback` and `allow_secrets`. Before dispatch, Fabric scans
+the prompt and eligible files under `add_dirs` for common live credential shapes.
+A finding rejects with `error: secret_detected` and a location in `fix`; set
+`allow_secrets: true` explicitly to proceed. The attempt records the override
+and finding names. Directory scanning stops at 2,000 files or 20 MB and records
+a warning. Writers use `mode: worktree_write` and an
 owned, registered worktree. `cwd` selects an existing read-only directory inside
 the caller workspace. The Python owner validates provider capabilities and
 applies controls; Fabric does not claim a stronger guarantee than its receipt.

@@ -53,6 +53,7 @@ CANCEL_MARKER_NAME = "cancel.request"
 from _shared.bounded_process import stop_process_group
 from layout import run_workspace, run_root, contains_run
 import provider_exec
+import secret_scan
 import exec_routing
 import context_usage
 from fabric_records import render_digest, write_cooldown, append_index, TERMINAL_STATUSES
@@ -1166,8 +1167,19 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                     raise PreflightError("credential_or_auth_store_denied","Additional directories must exclude credential stores.")
                 if (task.get("prompt") is None) == (task.get("prompt_file") is None):
                     raise PreflightError("prompt_required", "Pass exactly one of prompt or prompt_file.")
-                if task.get("prompt_file") is not None:
-                    read_prompt_input(Path(task["prompt_file"]), workspace, workspace)
+                if task.get("prompt") is not None and not isinstance(task["prompt"], str):
+                    raise PreflightError("prompt_invalid", "Pass prompt as text.")
+                if "allow_secrets" in task and type(task["allow_secrets"]) is not bool:
+                    raise PreflightError("allow_secrets_invalid", "Pass allow_secrets: true or false.")
+                prompt_bytes = (read_prompt_input(Path(task["prompt_file"]), workspace, workspace)
+                                if task.get("prompt_file") is not None else task["prompt"].encode())
+                try:
+                    scan = secret_scan.scan_inputs(
+                        prompt_bytes, str(task.get("prompt_file") or "<prompt>"), task.get("add_dirs"))
+                except (OSError, subprocess.SubprocessError) as exc:
+                    raise PreflightError("secret_scan_unavailable", "Make dispatch inputs readable for the secret scan.") from exc
+                if scan.findings and not task.get("allow_secrets", False):
+                    raise PreflightError("secret_detected", scan.fix())
                 adapter = task["adapter"]
                 mode = task.get("access_mode", "read_only")
                 if mode not in ACCESS_MODES:
@@ -1281,7 +1293,9 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         "pgid":None,"session_id":plan.get("session_id"),"retryable":False,"reset_at":None,"retry_after":None,"fix":None,
         "evidence":{"exit":None,"signal":None,"signature":None,"excerpt":""},"question":None,
         "applied":plan.get("applied",{"sandbox":None,"network":None,"add_dirs":[],"guarantee":"prompt_only"}),
-        "warnings":list(plan.get("warnings",[])),"provenance":provenance,
+        "warnings":list(plan.get("warnings",[])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", [])),"provenance":provenance,
+        "secret_scan":{"allow_secrets":getattr(args,"allow_secrets",False),
+                       "finding_names":getattr(getattr(args,"_secret_scan",None),"names",lambda:[])()},
         "timing":{"phases":getattr(args,"_phase_timings",{}).copy()},
         "paths":{"result":relative_path(run_dir,attempt_dir/"result.md"),"stderr":relative_path(run_dir,attempt_dir/"stderr.log"),
                  "events":relative_path(run_dir,attempt_dir/"events.jsonl"),"receipt":f"tasks/{args.task_id}/attempt-{number:03d}/attempt.json"},"digest":""}
@@ -1306,6 +1320,8 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     if status not in TERMINAL_STATUSES: status="failed"
     for field in ("session_id","retryable","reset_at","retry_after","fix","evidence","applied","context","warnings","reaped","spared","provenance","pgid","last_progress_at"):
         if field in adapter: row[field]=adapter[field]
+    row["warnings"] = list(dict.fromkeys(
+        list(row.get("warnings", [])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", []))))
     if refusal:
         row["fix"]=adapter.get("fix") or adapter.get("reason") or refusal["fix"];row["evidence"]=refusal["evidence"];row["error"]=refusal["error"]
     row.update(state="terminal",status=status,ended_at=legacy["finished_at"],question=adapter.get("question") or (legacy.get("question") or {}).get("prompt"))
@@ -1467,6 +1483,22 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         if batch_dir.is_symlink() or not batch_dir.is_dir():
             return fail(run_dir, "batch_path_invalid", "batch directory does not exist")
     try:
+        prompt_bytes = (read_prompt_input(args.prompt_file, workspace, run_dir)
+                        if args.prompt_file is not None else sys.stdin.buffer.read())
+    except PreflightError as exc:
+        return fail(run_dir, exc.code, str(exc))
+    except OSError as exc:
+        return fail(run_dir, "prompt_unavailable", str(exc))
+    try:
+        secret_scan_result = secret_scan.scan_inputs(
+            prompt_bytes or b"", str(args.prompt_file) if args.prompt_file else "<prompt>", args.add_dirs)
+    except (OSError, subprocess.SubprocessError):
+        return fail(run_dir, "secret_scan_unavailable", "Make dispatch inputs readable for the secret scan.")
+    if secret_scan_result.findings and not getattr(args, "allow_secrets", False):
+        print(json.dumps({"status": "rejected", "error": "secret_detected", "fix": secret_scan_result.fix()}))
+        return 2
+    args._secret_scan = secret_scan_result
+    try:
         ensure_owned_directory(run_dir, run_dir / "dispatch" / "tasks")
         if not args.batch_child:
             reconcile_manifest(run_dir, custody)
@@ -1475,14 +1507,6 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         return fail(run_dir, "attempt_evidence_incomplete", str(exc))
     except OSError as exc:
         return fail(run_dir, "manifest_not_appendable", f"MANIFEST.md is not appendable: {exc}")
-
-    try:
-        prompt_bytes = (read_prompt_input(args.prompt_file, workspace, run_dir)
-                        if args.prompt_file is not None else sys.stdin.buffer.read())
-    except PreflightError as exc:
-        return fail(run_dir, exc.code, str(exc))
-    except OSError as exc:
-        return fail(run_dir, "prompt_unavailable", str(exc))
     git_evidence_requested = args.git_evidence is not None
     git_evidence_identity: dict[str, Any] | None = None
     git_evidence_source: Path | None = None
@@ -1581,6 +1605,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "reviewer_id": args.reviewer_id or "",
         "access_mode": args.access_mode,
         "worktree": str(args.worktree) if args.worktree else "",
+        "allow_secrets": args.allow_secrets,
     }
     worktree_lease = None
     if args.access_mode == "worktree_write" and args.worktree is not None:
@@ -1956,6 +1981,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "retry_of": retry_of,
         "intent": args.intent,
         "requested_route": requested_route,
+        "secret_scan": {"allow_secrets": args.allow_secrets,
+                        "finding_names": secret_scan_result.names(),
+                        "warnings": secret_scan_result.warnings},
         "route": {
             "adapter": args.tool, "alias": args.alias or "", "model": args.model or "", "effort": args.effort or "",
             **{key: value for key, value in preflight_route.items() if key in {
@@ -2194,6 +2222,7 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--sandbox", choices=("read-only","workspace-write","full"))
     root.add_argument("--network", choices=("true","false"))
     root.add_argument("--add-dir", dest="add_dirs", action="append", default=[])
+    root.add_argument("--allow-secrets", action="store_true")
     root.add_argument("--no-preface", dest="preface", action="store_false")
     root.add_argument("--fallback", default=None, help="false, true, any, or JSON route list")
     return root
