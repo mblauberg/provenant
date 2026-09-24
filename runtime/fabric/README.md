@@ -36,8 +36,9 @@ verbatim digest; `structuredContent` contains minimal `fabric.status.v1` rows by
 default. `detail: full` includes attempt history, evidence and provenance. A small
 formatter supports older receipts when no digest exists. Request errors contain
 one line with `fix:`. Recognised field names and mode synonyms are corrected;
-model names accept case and punctuation variants, while unknown model and alias
-selectors name valid choices. Relative `cwd` and `worktree` paths resolve from
+model names accept case and punctuation variants, and a typo is corrected with a
+warning when exactly one name is close and its version numbers match. Anything
+else is rejected with the closest valid choices. Relative `cwd` and `worktree` paths resolve from
 the caller directory.
 No provider output is embedded in status responses.
 

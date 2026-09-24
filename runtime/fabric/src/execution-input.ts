@@ -155,8 +155,17 @@ function correctSelector(selector: string | undefined, catalogue: CatalogueSnaps
     return value === selector ? {} : { value, warning: `corrected ${field} ${selector} to ${value}` };
   }
   if (matches.size > 1) throw new InputError(`${field}_ambiguous`, `Choose one of: ${[...matches.values()].join(", ")}.`);
-  const closest = choices.map((item) => ({ item, score: editDistance(key, routeKey(item)) }))
-    .sort((left, right) => left.score - right.score).slice(0, 3).map(({ item }) => item);
+  const ranked = choices.map((item) => ({ item, score: editDistance(key, routeKey(item)) }))
+    .sort((left, right) => left.score - right.score);
+  // Correct a typo only to a single nearby name with the same version numbers, never across versions.
+  const digits = (value: string) => value.replace(/\D/gu, "");
+  const near = ranked.filter(({ item, score }) =>
+    score === ranked[0]?.score && score <= (key.length < 8 ? 1 : 2) && digits(item) === digits(selector));
+  if (near.length === 1) {
+    const value = correctSelector(near[0]!.item, catalogue, adapter, field).value ?? near[0]!.item;
+    return { value, warning: `corrected ${field} ${selector} to ${value}` };
+  }
+  const closest = ranked.slice(0, 3).map(({ item }) => item);
   throw new InputError(`${field}_invalid`, `Choose a valid ${field}: ${closest.join(", ") || choices.join(", ")}.`);
 }
 
@@ -166,8 +175,9 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
   let selector =
     input.model ?? (input.alias && !["flagship", "workhorse", "scout"].includes(input.alias) ? input.alias : undefined);
   const roleAlias = input.model === undefined && input.alias !== undefined
-    ? ["flagship", "workhorse", "scout"].find((alias) => routeKey(alias) === routeKey(input.alias!))
+    ? ["flagship", "workhorse", "scout"].find((alias) => editDistance(routeKey(alias), routeKey(input.alias!)) <= 1)
     : undefined;
+  if (roleAlias !== undefined && roleAlias !== input.alias) warnings.push(`corrected alias ${input.alias} to ${roleAlias}`);
   if (roleAlias !== undefined) input.alias = roleAlias;
   const isRoleAlias = roleAlias !== undefined;
   const corrected = isRoleAlias ? {} : correctSelector(selector, catalogue, input.adapter, input.model === undefined ? "alias" : "model");

@@ -54,10 +54,8 @@ describe("Fabric input corrections", () => {
     expect(result.worktree).toBe(resolve(identity.cwd, "../work"));
     expect(result.model).toBe("gpt-6-luna");
     expect(result.warnings?.some((warning) => warning.includes("mode"))).toBe(true);
-    expect(() => normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, catalogue))
-      .toThrow(/gpt-6-luna/u);
-    expect(() => normaliseRoute({ adapter: "codex", alias: "workhorze" }, identity, catalogue))
-      .toThrow(/workhorse/u);
+    expect(normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, catalogue).model).toBe("gpt-6-luna");
+    expect(normaliseRoute({ adapter: "codex", alias: "workhorze" }, identity, catalogue).alias).toBe("workhorse");
     expect(() => normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, {
       adapters: [{ name: "codex", models: ["gpt-6-luna", "gpt-6-luno"], model_details: [], aliases: {} }],
     } as any)).toThrow(/gpt-6-luna, gpt-6-luno/u);
@@ -72,6 +70,14 @@ describe("Fabric input corrections", () => {
       }
     }
     expect(normaliseRoute({ adapter: "claude", alias: "opus" }, identity, snapshot).model).toBe("claude-opus-5-5");
+  });
+
+  it("corrects a model typo but never changes its version", () => {
+    const snapshot = catalogueSnapshot(repositoryRoot);
+    const typo = normaliseRoute({ adapter: "codex", model: "gpt-6-lunna" }, identity, snapshot);
+    expect(typo.model).toBe("gpt-6-luna");
+    expect((typo.warnings ?? []).join(" ")).toContain("gpt-6-luna");
+    expect(() => normaliseRoute({ adapter: "codex", model: "gpt-7-luna" }, identity, snapshot)).toThrow(/valid model/u);
   });
 
   it("resolves relative read-only cwd against the caller directory", () => {
