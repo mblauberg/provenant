@@ -228,8 +228,7 @@ def os_confinement_profile(plan):
                 git_dirs[flag] = Path(result.stdout.strip()).resolve()
         private = git_dirs.get("--absolute-git-dir")
         common = git_dirs.get("--git-common-dir")
-        # add_dirs are read inputs, never write targets.
-        allowed = [cwd, *([run_dir] if run_dir else []), *state_writes, Path("/dev")]
+        allowed = [cwd, *add_dirs, *([run_dir] if run_dir else []), *state_writes, Path("/dev")]
         git_allowed = []
         if private is not None and private != common:
             git_allowed.append(private)
@@ -242,6 +241,7 @@ def os_confinement_profile(plan):
                 + _sbpl_rule("deny", "file-write*", [common] if common is not None else [])
                 + _sbpl_rule("allow", "file-write*", git_allowed)
                 + _sbpl_rule("allow", "file-write*", literal_files, literal=True)
+                + _sbpl_rule("deny", "file-write*", plan.get("protected_paths", []))
                 + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", [])))
     return (
         "(version 1)\n(allow default)\n(deny file-write*)\n"
@@ -346,7 +346,7 @@ def build_plan(
     directories = safe_directories
     if any(not Path(p).is_dir() for p in directories):
         raise ValueError("add-dir must be a readable directory")
-    if mode == "worktree_write" and Path(cwd, ".git").is_file():
+    if mode == "worktree_write" and adapter == "codex" and Path(cwd, ".git").is_file():
         common = subprocess.run(
             [
                 "git",
@@ -413,6 +413,8 @@ def build_plan(
         confinement = "provider-native"
     elif mode == "worktree_write" and adapter == "codex":
         warnings.append("worktree_write writes are unconfined: Codex sandbox is full")
+    if mode == "worktree_write" and adapter == "agy" and confinement != "sandbox-exec":
+        raise ValueError("agy worktree_write requires usable sandbox-exec")
     if (
         mode == "read_only"
         and cwd != workspace_root
@@ -424,6 +426,11 @@ def build_plan(
         mode == "worktree_write" and guarantee != "enforced"
     ):
         warnings.append(f"{adapter} {mode} guarantee={guarantee}")
+    if adapter in {"cursor", "kiro", "copilot", "opencode"} and directories and not (
+        mode == "worktree_write" and confinement == "sandbox-exec"
+    ):
+        warnings.append("additional directories unsupported by " + adapter)
+        directories = []
     attempt_dir = Path(run_dir or cwd).expanduser().resolve()
     if confinement == "sandbox-exec":
         writable_paths = [str(attempt_dir), *(str(Path.home() / path) for path in
@@ -432,8 +439,7 @@ def build_plan(
             git_paths = ([str(git_private), *(str(git_common / path) for path in
                            ("objects", "refs", "logs", "packed-refs", "packed-refs.lock"))]
                          if git_private is not None else [])
-            # Mirrors os_confinement_profile: add_dirs stay read-only for wrapped writers.
-            writable_paths = [cwd, *writable_paths, *git_paths]
+            writable_paths = [cwd, *directories, *writable_paths, *git_paths]
         write_boundary = {"kind": "sandbox-exec", "writable_paths": writable_paths}
     elif confinement == "provider-native":
         write_boundary = {"kind": "provider-native", "sandbox": sandbox}
@@ -461,9 +467,6 @@ def build_plan(
     )
     if sandbox == "full" and adapter != "codex":
         warnings.append("sandbox control unsupported by " + adapter)
-    if adapter in {"cursor", "kiro", "copilot", "opencode"} and directories:
-        warnings.append("additional directories unsupported by " + adapter)
-        directories = []
     timeout = float(timeout_seconds or (10800 if mode == "worktree_write" else 3600))
     idle = float(
         idle_seconds

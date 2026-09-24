@@ -2107,7 +2107,8 @@ def test_read_only_route_is_the_default_and_refuses_a_worktree(tmp_path: Path) -
     assert json.loads(result.stdout)["status"] == "worktree_not_applicable"
 
 
-def test_concurrent_writer_on_one_worktree_is_rejected(tmp_path: Path) -> None:
+@pytest.mark.parametrize("adapter", ["claude", "agy"])
+def test_concurrent_writer_on_one_worktree_is_rejected(tmp_path: Path, adapter: str) -> None:
     run_dir = make_run(tmp_path, "one-writer")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Reply exactly OK\n", encoding="utf-8")
@@ -2119,7 +2120,8 @@ def test_concurrent_writer_on_one_worktree_is_rejected(tmp_path: Path) -> None:
         with pytest.raises(module.WorktreeLeaseError, match="another writer"):
             module.acquire_worktree_lease(worktree)
         result = run_writer_dispatch(
-            tmp_path, run_dir, prompt, "--access-mode", "worktree_write", "--worktree", str(worktree)
+            tmp_path, run_dir, prompt, "--access-mode", "worktree_write", "--worktree", str(worktree),
+            adapter=adapter,
         )
         assert result.returncode != 0
         assert json.loads(result.stdout)["status"] == "worktree_busy"

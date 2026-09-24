@@ -346,6 +346,13 @@ def test_kiro_is_enabled_for_both_routes():
     assert route["adapter_enabled"] is True
 
 
+def test_agy_write_mode_is_registered():
+    compatibility = yaml.safe_load((ROOT / "config/adapter-compatibility.yaml").read_text())
+    registry = compatibility["dispatch_registry"]["agy"]
+    assert registry["write_modes"] == ["worktree_write"]
+    assert registry["read_only_guarantee"] == "prompt_only"
+
+
 def test_kiro_route_carries_cached_negative_probe_evidence(tmp_path):
     cli = tmp_path / "kiro-cli"
     cli.write_text("#!/bin/sh\necho 1.2.3\n")

@@ -81,21 +81,25 @@ paths. Codex read-only uses its native read-only sandbox.
 Inside another sandbox, where macOS refuses a nested one, the attempt records
 an explicit unconfined-write warning. A `cwd` below the root may also warn that
 it is not a read boundary.
-Writer runs on macOS use `sandbox-exec` to restrict writes to their worktree,
+Wrapped writer runs on macOS (agy, Claude, Cursor, OpenCode and Kiro) use
+`sandbox-exec` to restrict writes to their worktree, declared `add_dirs`,
 per-worktree Git metadata, common Git objects, refs, logs and packed refs,
-attempt files, device nodes and provider state; `add_dirs` stay read-only.
+attempt files, device nodes and provider state. Where protected-path policy
+applies, its read and write denies still take precedence inside an `add_dir`.
 Each attempt sets `TMPDIR`, `TMP`, `TEMP` and `XDG_CACHE_HOME` to private `tmp`
 and `cache` directories under its run directory. Shared temp and general user
 caches are not writable. Codex
 uses `-s workspace-write` (or `-c sandbox_mode="workspace-write"`
 on resume), with `-c sandbox_workspace_write.writable_roots=<add_dirs>` and
-`--cd <worktree>` on a fresh run. If OS confinement
-is unavailable, a writer receipt warns that writes are unconfined. Set the host
-environment variable `PROVENANT_NO_OS_CONFINEMENT=1` to opt out for new attempts;
-the receipt warns about the missing boundary. Protected-path dispatches to
-training routes still refuse without OS read confinement.
+`--cd <worktree>` on a fresh run. If OS confinement is unavailable, agy write
+dispatch is refused; other wrapped writer receipts warn that writes are
+unconfined. Setting `PROVENANT_NO_OS_CONFINEMENT=1` has the same effect on new
+wrapped attempts.
+Protected-path dispatches to training routes still refuse without OS read
+confinement.
 The receipt records `applied.confinement` as `sandbox-exec`, `provider-native` or `none`;
-`applied.write_boundary` records the effective writable paths or native sandbox;
+`applied.write_boundary` records the effective writable paths, including
+declared `add_dirs` for confined writers, or the native sandbox;
 `workspace.cwd` is the provider cwd and `workspace.root` is the caller workspace.
 Projects declare protected paths in `.agents/fabric-policy.json`, relative to
 the directory holding `.agents/`. Fabric checks the workspace root and the Git
