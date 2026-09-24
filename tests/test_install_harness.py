@@ -1243,7 +1243,9 @@ def test_claude_retired_agent_conflict_preflights_before_harness_mutation(tmp_pa
     agents = config / "agents"
     agents.mkdir(parents=True)
     modified_agent = agents / "retired-worker.md"
-    modified_agent.write_text("user modification\n")
+    replacement = tmp_path / "user-agent.md"
+    replacement.write_text("user-owned definition\n")
+    modified_agent.symlink_to(replacement)
     old_source = tmp_path / "old-product/agents/retired-worker.md"
     receipt = config / ".agent-harness-agents-installation.json"
     receipt.write_text(json.dumps({
@@ -1266,7 +1268,8 @@ def test_claude_retired_agent_conflict_preflights_before_harness_mutation(tmp_pa
 
     assert result.returncode == 3
     assert "conflicting retired managed agent target" in result.stderr
-    assert modified_agent.read_text() == "user modification\n"
+    assert modified_agent.is_symlink()
+    assert modified_agent.resolve() == replacement.resolve()
     assert receipt.is_file()
     assert not (config / "skills").exists()
     assert not instance_root_for(tmp_path).exists()
