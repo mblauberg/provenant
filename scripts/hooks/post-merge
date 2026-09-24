@@ -1,0 +1,38 @@
+#!/bin/sh
+
+top=$(git rev-parse --show-toplevel 2>/dev/null) || exit 0
+git_dir=$(git rev-parse --path-format=absolute --git-dir 2>/dev/null) || exit 0
+common_dir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || exit 0
+[ "$git_dir" = "$common_dir" ] || exit 0
+
+branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null) || exit 0
+integration=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null) || integration=
+if [ -n "$integration" ]; then
+    integration=${integration#origin/}
+    git show-ref --verify --quiet "refs/heads/$integration" || integration=
+fi
+if [ -z "$integration" ]; then
+    for candidate in main master; do
+        if git show-ref --verify --quiet "refs/heads/$candidate"; then
+            integration=$candidate
+            break
+        fi
+    done
+fi
+[ -n "$integration" ] || exit 0
+[ "$branch" = "$integration" ] || exit 0
+git rev-parse --verify --quiet 'ORIG_HEAD^{commit}' >/dev/null 2>&1 || exit 0
+
+git_env=$(git rev-parse --local-env-vars 2>/dev/null) || exit 0
+for variable in $git_env; do
+    unset "$variable"
+done
+
+if ! command -v provenant >/dev/null 2>&1; then
+    printf '%s\n' 'post-merge: provenant is unavailable; cleanup skipped' >&2
+    exit 0
+fi
+
+provenant clean --prune-merged --merged-since ORIG_HEAD --repo "$top" ||
+    printf '%s\n' 'post-merge: cleanup failed; merge remains successful' >&2
+exit 0
