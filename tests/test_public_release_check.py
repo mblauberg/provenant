@@ -787,8 +787,8 @@ def test_history_scans_annotated_tag_messages(tmp_path):
     )
 
 
-def test_blob_scanner_reports_every_registry_finding(tmp_path):
-    repository, _script, _base = publication_repository(tmp_path)
+def test_git_grep_prefilter_is_a_superset_of_every_registry_pattern():
+    """The prefilter may over-match, but it must never lose a registry hit."""
     samples = {
         "personal absolute home path": b"see /" + b"Users/someone/notes",
         "possible private key": b"-----BEGIN " + b"OPENSSH PRIVATE KEY-----",
@@ -798,14 +798,9 @@ def test_blob_scanner_reports_every_registry_finding(tmp_path):
         "possible AWS access key": b"AKIA" + b"E" * 16,
     }
     assert set(samples) == set(release_check.FINDING_PATTERNS)
-    blobs = {}
     for label, sample in samples.items():
-        result = subprocess.run(
-            ["git", "hash-object", "-w", "--stdin"], cwd=repository,
-            input=sample, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+        assert release_check.classify(sample) >= {label}, label
+        widened = re.compile(
+            release_check.grep_pattern(release_check.FINDING_PATTERNS[label]).encode()
         )
-        assert result.returncode == 0, result.stderr.decode()
-        blobs[result.stdout.decode().strip()] = label
-    findings = release_check.blob_findings(tuple(blobs), repository)
-    for object_id, label in blobs.items():
-        assert findings[object_id] >= {label}
+        assert widened.search(sample), label

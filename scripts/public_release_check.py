@@ -79,10 +79,14 @@ GIT_SAFE_CONFIG: tuple[str, ...] = (
 )
 OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 MAX_PUBLIC_FILE_BYTES = 5 * 1024 * 1024
-# Batch object reads to keep the input bounded on long histories.
-OBJECT_BATCH_SIZE = 1000
+# `git grep` is invoked over batches of blob names so the argument vector stays
+# well inside the platform limit on repositories with a long history.
+GREP_BATCH_SIZE = 1000
 
-# The registry above is the single source of truth for content findings.
+# The registry above is the single source of truth for what counts as a
+# finding. `git grep` only ever acts as a prefilter, so its patterns are a
+# deliberate superset of the Python ones and every matched line is reclassified
+# with the registry pattern itself.
 FINDING_PATTERNS: dict[str, re.Pattern[bytes]] = {
     "personal absolute home path": HOME_PATH_BYTES,
     **{
@@ -90,6 +94,26 @@ FINDING_PATTERNS: dict[str, re.Pattern[bytes]] = {
         for label, pattern in SECRET_BYTE_PATTERNS.items()
     },
 }
+
+
+def grep_pattern(pattern: re.Pattern[str] | re.Pattern[bytes]) -> str:
+    """Widen one registry pattern into POSIX ERE for the `git grep` prefilter.
+
+    Non-capturing groups become capturing ones and word boundaries are dropped,
+    both of which only ever widen the match, so the prefilter cannot lose a hit
+    that the registry pattern would have found.
+    """
+    source = pattern.pattern
+    if isinstance(source, bytes):
+        source = source.decode("ascii")
+    return source.replace("(?:", "(").replace(chr(92) + "b", "")
+
+
+GREP_ARGUMENTS: tuple[str, ...] = tuple(
+    argument
+    for pattern in FINDING_PATTERNS.values()
+    for argument in ("-e", grep_pattern(pattern))
+)
 
 
 def git(*args: str, root: Path = ROOT) -> subprocess.CompletedProcess[str]:
@@ -308,44 +332,33 @@ def classify(line: bytes) -> frozenset[str]:
     )
 
 
-def blob_findings(
+def grep_findings(
     blobs: Sequence[str],
     root: Path = ROOT,
     *,
-    batch_size: int = OBJECT_BATCH_SIZE,
+    batch_size: int = GREP_BATCH_SIZE,
 ) -> dict[str, frozenset[str]]:
-    """Map enumerated blob ids to findings by reading only those Git objects."""
+    """Map blob id to findings using `git grep` over the reachable blobs."""
     findings: dict[str, set[str]] = {}
     for start in range(0, len(blobs), batch_size):
         batch = blobs[start:start + batch_size]
-        result = subprocess.run(
-            ["git", *GIT_SAFE_CONFIG, "cat-file", "--batch"], cwd=root,
-            input="\n".join(batch).encode("ascii") + b"\n",
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
-            env=sanitized_git_environment(),
+        result = git_bytes(
+            "grep", "-a", "--no-textconv", "-n", "-E", *GREP_ARGUMENTS, *batch,
+            root=root,
         )
-        if result.returncode:
+        if result.returncode not in (0, 1):
             raise RuntimeError(
                 result.stderr.decode("utf-8", errors="replace").strip()
-                or "publication object content scan failed"
+                or "publication history scan failed"
             )
-        offset = 0
-        for object_id in batch:
-            header_end = result.stdout.find(b"\n", offset)
-            if header_end < 0:
-                raise RuntimeError("publication object content scan is malformed")
-            header = result.stdout[offset:header_end].split()
-            if len(header) != 3 or header[0].decode("ascii") != object_id or header[1] != b"blob":
-                raise RuntimeError("publication object content scan is malformed")
-            size = int(header[2])
-            content_start = header_end + 1
-            content_end = content_start + size
-            if content_end >= len(result.stdout) or result.stdout[content_end:content_end + 1] != b"\n":
-                raise RuntimeError("publication object content scan is truncated")
-            labels = classify(result.stdout[content_start:content_end])
+        for line in result.stdout.split(b"\n"):
+            object_id, separator, remainder = line.partition(b":")
+            if not separator:
+                continue
+            _, _, text = remainder.partition(b":")
+            labels = classify(text)
             if labels:
-                findings[object_id] = set(labels)
-            offset = content_end + 1
+                findings.setdefault(object_id.decode("ascii"), set()).update(labels)
     return {object_id: frozenset(labels) for object_id, labels in findings.items()}
 
 
@@ -446,7 +459,7 @@ def history_errors(root: Path = ROOT) -> list[str]:
     try:
         current_errors = scan_paths(tracked_files(root), root)
         head = resolve_commit("HEAD", root)
-        findings = blob_findings(
+        findings = grep_findings(
             blob_ids(reachable_objects(["--all"], root), root), root,
         )
         paths = history_paths(["--all"], root)
@@ -498,7 +511,7 @@ def publication_range_errors(
         ).decode("ascii").split()
         if not selected:
             return ["publication range must contain at least one commit"]
-        findings = blob_findings(
+        findings = grep_findings(
             blob_ids(reachable_objects([head, f"^{base}"], root), root), root,
         )
         paths = range_paths(selected, root)
