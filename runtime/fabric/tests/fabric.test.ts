@@ -1450,7 +1450,8 @@ describe("tasks", () => {
       /task claim-once is already assigned to alice/,
     );
     expect(store.tasks(alice.project)).toMatchObject([{ owner: "alice" }]);
-    expect(store.activity(alice.project).some((entry) => entry.kind === "task_claim")).toBe(true);
+    expect(store.activity(alice.project).filter((entry) => entry.detail.includes("claimed by")))
+      .toHaveLength(1);
   });
 
   it("reserves claimed state for the atomic ownership operation", () => {
