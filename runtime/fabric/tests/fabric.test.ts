@@ -192,7 +192,7 @@ describe("work ownership", () => {
       expect(brief.content).toHaveLength(1);
       const push = runCli(["landing-push", "other-session", "1", "main"]);
       expect(push.status).toBe(1);
-      expect(push.stderr).toBeTruthy();
+      expect(push.stderr).toMatch(/lease/u);
     } finally {
       await client.close().catch(() => undefined);
     }
