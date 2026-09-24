@@ -1308,6 +1308,9 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     for field in ("session_id","retryable","reset_at","retry_after","fix","evidence","applied","context","warnings","reaped","spared","provenance","pgid","last_progress_at"):
         if field in adapter: row[field]=adapter[field]
     row["warnings"] = list(dict.fromkeys([*row["warnings"], *getattr(args, "_memory_warnings", [])]))
+    row["timing"]["queued_seconds"] = getattr(args, "_queued_seconds", 0.0)
+    if legacy.get("process_error", "").startswith("FABRIC_MEMORY_FLOOR_MB"):
+        row["fix"] = "Set FABRIC_MEMORY_FLOOR_MB to a non-negative integer."
     if refusal:
         row["fix"]=adapter.get("fix") or adapter.get("reason") or refusal["fix"];row["evidence"]=refusal["evidence"];row["error"]=refusal["error"]
     row.update(state="terminal",status=status,ended_at=legacy["finished_at"],question=adapter.get("question") or (legacy.get("question") or {}).get("prompt"))
@@ -1605,6 +1608,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         def waiting(reason):
             active["state"] = "queued"
             active["reason"] = reason
+            active["timing"]["queued_since"] = waiting_since
+            active["timing"]["queued_seconds"] = getattr(args, "_queued_seconds", 0.0)
             publish_contract(run_dir, active)
         def warning(message):
             active["warnings"].append(message)
@@ -1612,6 +1617,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         admitted = memory_admission.admit(waiting, cancelled_now, warning)
         queued_seconds = time.monotonic() - waiting_since
         args._queued_seconds = getattr(args, "_queued_seconds", 0.0) + queued_seconds
+        active["timing"].pop("queued_since", None)
+        active["timing"]["queued_seconds"] = args._queued_seconds
         started = time.monotonic()
         started_at = now()
         if admitted:
@@ -1877,7 +1884,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         process_error = "cancelled"
         except InterruptedError:
             pass
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             process_error = str(exc)
         finally:
             release_worktree_lease(worktree_lease)

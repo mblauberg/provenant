@@ -6,15 +6,11 @@ import os
 import re
 import subprocess
 import sys
-import threading
 import time
-from collections import deque
 from pathlib import Path
 from typing import Callable
 
 POLL_SECONDS = 15
-_condition = threading.Condition()
-_waiting: deque[object] = deque()
 
 
 def parse_vm_stat(text: str) -> int:
@@ -62,34 +58,23 @@ def admit(
     on_warning: Callable[[str], None], probe: Callable[[], int] = available_mb,
     pause: Callable[[float], None] = time.sleep,
 ) -> bool:
-    """Admit in arrival order within this owner; false means cancelled."""
+    """Wait for available memory in this attempt owner; false means cancelled."""
     floor = floor_mb()
-    ticket = object()
-    with _condition:
-        _waiting.append(ticket)
-    try:
-        while True:
+    while True:
+        if cancelled():
+            return False
+        if floor == 0:
+            return True
+        try:
+            available = probe()
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            on_warning(f"memory probe failed: {exc}")
+            return True
+        if available >= floor:
+            return True
+        on_wait(f"waiting for memory: {available} MB available, floor {floor} MB")
+        deadline = time.monotonic() + POLL_SECONDS
+        while time.monotonic() < deadline:
             if cancelled():
                 return False
-            with _condition:
-                first = _waiting[0] is ticket
-            if first:
-                if floor == 0:
-                    return True
-                try:
-                    available = probe()
-                except (OSError, ValueError, subprocess.SubprocessError) as exc:
-                    on_warning(f"memory probe failed: {exc}")
-                    return True
-                if available >= floor:
-                    return True
-                on_wait(f"waiting for memory: {available} MB available, floor {floor} MB")
-            deadline = time.monotonic() + POLL_SECONDS
-            while time.monotonic() < deadline:
-                if cancelled():
-                    return False
-                pause(min(0.1, deadline - time.monotonic()))
-    finally:
-        with _condition:
-            _waiting.remove(ticket)
-            _condition.notify_all()
+            pause(min(0.1, deadline - time.monotonic()))

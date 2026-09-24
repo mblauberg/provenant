@@ -1,5 +1,7 @@
 """Focused checks for provider admission and its visible waiting state."""
 
+import threading
+
 from skills.orchestrate.scripts import memory_admission
 from skills.orchestrate.scripts.fabric_records import render_digest
 
@@ -28,7 +30,40 @@ def test_low_memory_waits_then_admits(monkeypatch):
                                   probe=lambda: next(readings), pause=lambda _: None)
     assert reasons == ["waiting for memory: 812 MB available, floor 1024 MB"]
     assert warnings == []
-    assert not memory_admission._waiting
+
+
+def test_every_low_probe_publishes_fresh_reason(monkeypatch):
+    monkeypatch.setenv("FABRIC_MEMORY_FLOOR_MB", "1024")
+    monkeypatch.setattr(memory_admission, "POLL_SECONDS", 0)
+    readings = iter([812, 900, 1300])
+    reasons = []
+    assert memory_admission.admit(reasons.append, lambda: False, lambda _: None,
+                                  probe=lambda: next(readings), pause=lambda _: None)
+    assert reasons == ["waiting for memory: 812 MB available, floor 1024 MB",
+                       "waiting for memory: 900 MB available, floor 1024 MB"]
+
+
+def test_separate_attempts_publish_their_first_wait_independently(monkeypatch):
+    monkeypatch.setenv("FABRIC_MEMORY_FLOOR_MB", "1024")
+    first_wait = threading.Event()
+    second_wait = threading.Event()
+    cancelled = threading.Event()
+    def owner(waited):
+        memory_admission.admit(lambda _: waited.set(), cancelled.is_set, lambda _: None,
+                               probe=lambda: 812)
+    first = threading.Thread(target=owner, args=(first_wait,))
+    second = threading.Thread(target=owner, args=(second_wait,))
+    first.start()
+    try:
+        assert first_wait.wait(1)
+        second.start()
+        assert second_wait.wait(0.5)
+    finally:
+        cancelled.set()
+        first.join(1)
+        if second.ident is not None:
+            second.join(1)
+    assert not first.is_alive() and not second.is_alive()
 
 
 def test_probe_failure_admits_with_warning(monkeypatch):
@@ -49,14 +84,13 @@ def test_zero_floor_skips_the_probe(monkeypatch):
                                   probe=fail_probe)
 
 
-def test_cancel_removes_waiting_attempt(monkeypatch):
+def test_cancel_stops_waiting_attempt(monkeypatch):
     monkeypatch.setenv("FABRIC_MEMORY_FLOOR_MB", "1024")
     cancelled = [False]
     def waiting(_):
         cancelled[0] = True
     assert not memory_admission.admit(waiting, lambda: cancelled[0], lambda _: None,
                                       probe=lambda: 812)
-    assert not memory_admission._waiting
 
 
 def test_queued_digest_shows_current_numbers():

@@ -222,6 +222,41 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
     assert (run_dir / "RUN_RECEIPT.json").read_bytes() == receipt_before
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("floor", ["invalid", "-1"])
+def test_invalid_memory_floor_retains_failed_attempt_with_fix(tmp_path, monkeypatch, legacy, floor):
+    run_dir = make_run(tmp_path, f"bad-floor-{legacy}-{floor}")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("hello\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_executable(bin_dir / "codex", '''#!/usr/bin/env bash
+if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+  printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+  exit 0
+fi
+exit 99
+''')
+    monkeypatch.setenv("PATH", f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
+    monkeypatch.setenv("FABRIC_MEMORY_FLOOR_MB", floor)
+    monkeypatch.chdir(tmp_path)
+    module = load_dispatch_module()
+    if legacy:
+        adapter = tmp_path / "adapter"
+        write_success_adapter(adapter)
+        module.CF_DISPATCH = adapter
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "bad-floor", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    assert module.dispatch(args) == 1
+    attempt = json.loads((run_dir / "dispatch/tasks/bad-floor/attempt-001/attempt.json").read_text())
+    state = json.loads((run_dir / "tasks/bad-floor/attempt-001/attempt.json").read_text())
+    assert attempt["status"] == state["status"] == "failed"
+    assert state["fix"] == "Set FABRIC_MEMORY_FLOOR_MB to a non-negative integer."
+    assert "FABRIC_MEMORY_FLOOR_MB" in attempt["process_error"]
+
+
 def test_opencode_explicit_model_receipt_drops_implied_alias(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path, "opencode-explicit-model")
     prompt = tmp_path / "prompt.md"

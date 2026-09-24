@@ -102,6 +102,8 @@ Queued time does not use the execution timeout. `fabric_status` and `fabric stat
 show `queued` with a current reason such as `waiting for memory: 812 MB available,
 floor 1024 MB`. Cancellation works while waiting. A failed memory probe admits
 the attempt and records a warning.
+An invalid floor records a failed attempt with a fix. The parent keeps a
+watchdog for child owners and excludes their published queued time.
 
 The wave-1 `id` argument and retained `mcp-*` directories remain readable.
 Without IDs it returns active and last-24-hour runs, capped at 20 rows. Rows
