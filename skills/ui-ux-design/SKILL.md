@@ -45,8 +45,9 @@ For a change to rendered UI, capture light and dark desktop views of the
 changed surfaces only, adding mobile where layout risk warrants, and look at
 every capture before judging; a capture nobody viewed is not evidence. Build an
 owner-facing prototype only for hard-to-describe UI, competing directions or on
-request. While it awaits the owner, continue other work; if it truly blocks,
-the chair decides by council (`orchestrate`) and the owner confirms later.
+request. While it awaits the owner, continue other work. If it truly blocks,
+lies within granted authority and is not a `HARNESS.md` user gate, the chair
+may decide by council (`orchestrate`) for the owner to confirm later.
 
 Label evidence as `verified` or `judgement`, and each selected lane as `tested`,
 `failed`, `not tested`, or `not applicable`. Deterministic checks and user

@@ -51,14 +51,17 @@ issue number where one exists and a short slug: `fix-1234-ledger-rounding`.
 
 ## Waiting
 
-The chair never loops `fabric_status`. After dispatch it arms one event-driven
-wait and continues useful work:
+The chair never loops `fabric_status` calls. After dispatch it arms one wait:
 
 - Where the harness notifies when a background command exits (Claude Code's
-  background Bash), run `fabric watch <ids>` there, plus one fallback wake of at
-  least 20 minutes in case the notifier dies.
-- Elsewhere, block once on `fabric watch <ids>` with the tool's largest
-  timeout.
+  background Bash), run `fabric watch <ids>` there and continue useful work.
+  Where the harness offers a timer, also set one fallback wake of at least 20
+  minutes in case the notifier dies.
+- Elsewhere, block on `fabric watch <ids>` within the tool's largest timeout
+  and re-arm it if the timeout expires.
+
+`fabric watch` polls locally and prints only state changes, so the wait costs
+no model tokens. It has no timeout of its own.
 
 A dispatching sub-agent still blocks in the foreground on its own worker; see
 [worker-liveness.md](worker-liveness.md). Run `fabric watch` from the directory
@@ -82,16 +85,15 @@ checkouts. Name the forbidden verbs in every reviewer brief: `checkout`,
 `switch`, `restore`, `reset`, `stash`, `clean`, `rebase`, `merge`, `commit`,
 `cherry-pick`, `am`, `apply`, `push`, `tag`, `branch -d/-D`, `worktree
 add/remove`. Read other refs with `git show <ref>:<path>`, `git diff` and
-`git log`. A lane that must write gets its own worktree. A read-only reviewer
-once ran `checkout -- .` and `reset --hard` in a primary checkout.
+`git log`. A lane that must write gets its own worktree.
 
 ## Decision council
 
 Use when a decision blocks lanes, lies inside granted authority, and the owner
-is away or has asked not to be consulted: competing design directions, an
-ambiguous acceptance criterion, a tooling choice. Never for a user gate in
-`HARNESS.md` or a question the owner already answered; the newest owner
-decision wins.
+is away or has asked not to be consulted: competing reversible design
+directions or a tooling choice within scope. Never for a user gate in
+`HARNESS.md`, including an unresolved acceptance criterion, or a question the
+owner already answered; the newest owner decision wins.
 
 1. **Packet.** One file: question, options, constraints, prior owner
    decisions, evidence links.
@@ -113,5 +115,5 @@ this council makes a choice.
 
 When an item waits on the owner, such as a prototype review or a question, park
 it with a ledger row or tracker comment and refill with other work. Never idle
-the loop on it. If it truly blocks and lies inside authority, convene a
-decision council.
+the loop on it. If it truly blocks, lies inside authority and is not a user
+gate, convene a decision council.

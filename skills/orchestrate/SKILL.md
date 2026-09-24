@@ -10,7 +10,7 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
 1. Use a native subagent for the chair's own models; use Fabric for other providers, long runs, and worktree writers.
 2. Call `fabric_dispatch` with `prompt` or `prompt_file`, `adapter` or `model`, and optional `effort`.
 3. For writers, pass `mode: "worktree_write"` and the registered `worktree`.
-4. Wait on the returned ids once, never by polling: `fabric watch <ids>`; see [chair-loop.md](references/chair-loop.md).
+4. Wait without polling: a chair runs `fabric watch <ids>` ([chair-loop.md](references/chair-loop.md)); a dispatching sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
 5. Inspect the terminal row with `fabric_status` and copy its `Route:` provenance line.
 6. For a question, call `fabric_dispatch` with `resume: id` and the answer in `prompt`.
 7. Use `fabric_cancel` with `id` to stop; use `fabric_output` with `id` and `part` for a bounded tail.
