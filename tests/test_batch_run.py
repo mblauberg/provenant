@@ -812,6 +812,40 @@ def test_inline_prompt_is_temporary_but_attempt_prompt_is_retained(tmp_path, mon
     assert not (run_dir / 'dispatch/batches/batch-001/prompts/inline.md').exists()
 
 
+@pytest.mark.parametrize('secret_in_file', [False, True])
+@pytest.mark.parametrize('override', [None, 'false', 1])
+def test_batch_rejects_later_secret_before_copying_manifest_or_staging_prompts(
+    tmp_path, monkeypatch, capsys, secret_in_file, override
+):
+    monkeypatch.chdir(tmp_path)
+    run_dir = make_run(tmp_path, 'secret-batch')
+    module = load_module()
+    secret = 'AKIA' + 'A' * 16
+    second = {'id': 'second', 'adapter': 'gemini', 'model': 'flash', 'role': 'worker'}
+    if secret_in_file:
+        prompt = tmp_path / 'second.md'
+        prompt.write_text(secret)
+        second['prompt_file'] = str(prompt)
+    else:
+        second['prompt'] = secret
+    if override is not None:
+        second['allow_secrets'] = override
+    manifest = task_manifest(tmp_path, [
+        {'id': 'first', 'prompt': 'ordinary task', 'adapter': 'gemini',
+         'model': 'flash', 'role': 'worker'},
+        second,
+    ])
+
+    assert module.batch(args(module, run_dir, manifest, 1)) == 2
+    output = json.loads(capsys.readouterr().out)
+    assert output['error'] == 'secret_detected'
+    assert secret not in json.dumps(output)
+    assert not list(run_dir.rglob('task-manifest.json'))
+    assert not list(run_dir.rglob('prompts/*.md'))
+    assert not list(run_dir.rglob('attempt.json'))
+    assert all(secret.encode() not in path.read_bytes() for path in run_dir.rglob('*') if path.is_file())
+
+
 def test_retry_creates_new_attempt_without_replacing_attempt_one(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'retry')

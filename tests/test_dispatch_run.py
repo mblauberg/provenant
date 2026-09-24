@@ -109,6 +109,112 @@ def load_dispatch_module():
     return module
 
 
+def load_secret_scan_module():
+    import importlib
+    load_dispatch_module()
+    return importlib.import_module('secret_scan')
+
+
+@pytest.mark.parametrize('name,positive,placeholder', [
+    ('PEM private key', '-----BEGIN RSA PRIVATE KEY-----\n' + 'A' * 64 + '\n-----END RSA PRIVATE KEY-----',
+     '-----BEGIN RSA PRIVATE KEY-----\nEXAMPLE\n-----END RSA PRIVATE KEY-----'),
+    ('AWS access key ID', 'AKIA' + 'A' * 16, 'AKIA' + 'X' * 12 + 'XXXX'),
+    ('AWS access key ID', 'ASIA' + 'A' * 16, '<ASIA' + 'A' * 16 + '>'),
+    ('GitHub token', 'ghp_' + 'a' * 36, 'ghp_' + 'a' * 16 + 'EXAMPLE' + 'a' * 12),
+    ('GitHub token', 'gho_' + 'a' * 36, 'gho_' + 'a' * 16 + 'XXXX' + 'a' * 12),
+    ('GitHub token', 'ghu_' + 'a' * 36, 'ghu_' + 'a' * 16 + 'EXAMPLE' + 'a' * 12),
+    ('GitHub token', 'ghs_' + 'a' * 36, 'ghs_' + 'a' * 16 + 'EXAMPLE' + 'a' * 12),
+    ('GitHub token', 'ghr_' + 'a' * 36, 'ghr_' + 'a' * 16 + 'EXAMPLE' + 'a' * 12),
+    ('GitHub token', 'github_pat_' + 'a' * 30, 'github_pat_EXAMPLE' + 'a' * 30),
+    ('OpenAI/Anthropic key', 'sk-ant-' + 'a' * 50, 'sk-ant-' + 'a' * 42 + 'EXAMPLE'),
+    ('OpenAI/Anthropic key', 'sk-proj-' + 'a' * 50, 'sk-proj-' + 'a' * 42 + 'EXAMPLE'),
+    ('OpenAI/Anthropic key', 'sk-' + 'a' * 50, 'sk-' + 'a' * 42 + 'EXAMPLE'),
+    ('Slack token', 'xoxb-' + 'a' * 24, 'xoxb-EXAMPLE' + 'a' * 24),
+    ('Slack token', 'xoxp-' + 'a' * 24, 'xoxp-EXAMPLE' + 'a' * 24),
+    ('Slack token', 'xoxa-' + 'a' * 24, 'xoxa-EXAMPLE' + 'a' * 24),
+    ('Slack token', 'xoxr-' + 'a' * 24, 'xoxr-EXAMPLE' + 'a' * 24),
+    ('Slack token', 'xoxs-' + 'a' * 24, 'xoxs-EXAMPLE' + 'a' * 24),
+    ('Google API key', 'AIza' + 'a' * 35, 'AIza' + 'a' * 28 + 'EXAMPLE'),
+    ('Stripe live key', 'sk_live_' + 'a' * 24, 'sk_live_EXAMPLE' + 'a' * 24),
+    ('Stripe live key', 'rk_live_' + 'a' * 24, 'rk_live_EXAMPLE' + 'a' * 24),
+    ('Bearer JWT', 'Bearer ' + 'a' * 12 + '.' + 'b' * 12 + '.' + 'c' * 32,
+     'Bearer ' + 'a' * 12 + '.' + 'EXAMPLEabcde' + '.' + 'c' * 32),
+])
+def test_secret_patterns_find_live_shapes_but_skip_placeholders(name, positive, placeholder):
+    scan = load_secret_scan_module()
+    assert [item.name for item in scan.scan_bytes(positive.encode(), '<prompt>')] == [name]
+    assert scan.scan_bytes(placeholder.encode(), '<prompt>') == []
+
+
+def test_secret_angle_placeholder_requires_both_brackets():
+    scan = load_secret_scan_module()
+    key = 'AKIA' + 'A' * 16
+    for content in (f'<{key}', f'{key}>'):
+        assert [item.name for item in scan.scan_bytes(content.encode(), '<prompt>')] == ['AWS access key ID']
+    assert scan.scan_bytes(f'<{key}>'.encode(), '<prompt>') == []
+
+
+def test_secret_scan_skips_deleted_tracked_files(tmp_path):
+    scan = load_secret_scan_module()
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    deleted = tmp_path / 'deleted.txt'
+    deleted.write_text('ordinary content')
+    subprocess.run(['git', 'add', 'deleted.txt'], cwd=tmp_path, check=True)
+    deleted.unlink()
+    (tmp_path / 'present.txt').write_text('AKIA' + 'A' * 16)
+
+    result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
+    assert [(finding.name, Path(finding.path).name) for finding in result.findings] == [
+        ('AWS access key ID', 'present.txt')
+    ]
+
+
+def test_secret_scan_add_dirs_includes_ignored_regular_files_and_warns_on_budgets(tmp_path, monkeypatch):
+    scan = load_secret_scan_module()
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    (tmp_path / '.gitignore').write_text('ignored.txt\n.env\n')
+    (tmp_path / 'ignored.txt').write_text('AKIA' + 'A' * 16)
+    (tmp_path / '.env').write_text('rk_live_' + 'a' * 24)
+    (tmp_path / 'tracked.txt').write_text('AKIA' + 'B' * 16)
+    (tmp_path / 'extra.txt').write_text('ghp_' + 'a' * 30)
+    result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
+    assert {finding.name for finding in result.findings} == {'AWS access key ID', 'GitHub token', 'Stripe live key'}
+    assert {Path(finding.path).name for finding in result.findings} == {
+        'ignored.txt', '.env', 'tracked.txt', 'extra.txt'
+    }
+    monkeypatch.setattr(scan, 'MAX_FILES', 1)
+    limited = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
+    assert limited.warnings == ['secret scan directory budget reached']
+    monkeypatch.setattr(scan, 'MAX_FILES', 2000)
+    monkeypatch.setattr(scan, 'MAX_TOTAL_BYTES', 1)
+    limited = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
+    assert limited.warnings == ['secret scan directory budget reached']
+
+
+def test_secret_scan_skips_binary_oversized_and_untracked_system_dirs(tmp_path):
+    scan = load_secret_scan_module()
+    secret = b'AKIA' + b'A' * 16
+    (tmp_path / 'binary.dat').write_bytes(b'\0' + secret)
+    (tmp_path / 'large.txt').write_bytes(secret + b'a' * scan.MAX_FILE_BYTES)
+    for name in ('node_modules', '.git'):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / 'secret.txt').write_bytes(secret)
+    assert scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)]).findings == []
+
+
+def test_secret_scan_skips_git_metadata_file(tmp_path):
+    scan = load_secret_scan_module()
+    (tmp_path / '.git').write_text('AKIA' + 'A' * 16)
+    assert scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)]).findings == []
+
+
+def test_secret_scan_avoids_generic_credential_words_and_unprefixed_jwt():
+    scan = load_secret_scan_module()
+    content = b'password=' + b'a' * 60 + b'\n' + b'a' * 12 + b'.' + b'b' * 12 + b'.' + b'c' * 32
+    assert scan.scan_bytes(content, '<prompt>') == []
+
+
 def test_terminal_attempt_carries_nested_owner_spared_count(tmp_path: Path) -> None:
     module = load_dispatch_module()
     args = SimpleNamespace(tool="codex", alias="workhorse", model="fixture", effort="low",
@@ -2153,6 +2259,69 @@ def test_front_door_preflight_rejects_all_invalid_tasks_without_run(tmp_path):
     assert {error['error'] for error in record['errors']} == {'prompt_unavailable'}
     assert all(error['fix'] for error in record['errors'])
     assert not (tmp_path / '.agent-run').exists()
+
+
+def test_secret_in_inline_prompt_is_rejected_before_preflight_route(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    module = load_dispatch_module()
+    result = module.preflight_tasks([{
+        'id': 'task-1', 'adapter': 'claude', 'prompt': 'Bearer ' +
+        'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.' + 'a' * 43,
+    }])
+    assert result['status'] == 'rejected'
+    assert result['error'] == 'secret_detected'
+    assert 'Bearer JWT' in result['fix']
+    assert 'Bearer eyJ' not in json.dumps(result)
+
+
+def test_preflight_secret_file_rejects_and_explicit_override_accepts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    module = load_dispatch_module()
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('hello\n' + 'AKIA' + 'A' * 16)
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt)}
+    rejected = module.preflight_tasks([task])
+    assert rejected['error'] == 'secret_detected'
+    assert f'{prompt}:2' in rejected['fix']
+    assert module.preflight_tasks([{**task, 'allow_secrets': True}])['status'] == 'validated'
+
+
+def test_preflight_secret_in_add_dirs_rejects_and_override_accepts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    directory = tmp_path / 'shared'
+    directory.mkdir()
+    (directory / 'source.txt').write_text('rk_live_' + 'a' * 24)
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse',
+            'prompt': 'review shared files', 'add_dirs': [str(directory)]}
+    module = load_dispatch_module()
+    rejected = module.preflight_tasks([task])
+    assert rejected['error'] == 'secret_detected'
+    assert 'Stripe live key' in rejected['fix']
+    assert module.preflight_tasks([{**task, 'allow_secrets': True}])['status'] == 'validated'
+
+
+def test_direct_dispatch_rejects_before_prompt_staging_and_override_records_finding(tmp_path, monkeypatch, capsys):
+    run_dir = make_run(tmp_path, 'secret-direct')
+    module = load_dispatch_module()
+    adapter = tmp_path / 'adapter'
+    write_success_adapter(adapter)
+    module.CF_DISPATCH = adapter
+    monkeypatch.chdir(tmp_path)
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('hello\n' + 'AKIA' + 'A' * 16)
+    args = module.parser().parse_args(['--run-dir', str(run_dir), '--adapter', 'codex',
+        '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker'])
+    assert module.dispatch(args) == 2
+    rejected = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert rejected['status'] == 'rejected' and rejected['error'] == 'secret_detected'
+    assert f'{prompt}:2' in rejected['fix']
+    assert not list((run_dir / 'dispatch/tasks').glob('*/attempt-*/prompt.md'))
+    args.allow_secrets = True
+    assert module.dispatch(args) == 0
+    attempt = json.loads(next((run_dir / 'tasks').glob('*/attempt-*/attempt.json')).read_text())
+    assert attempt['secret_scan'] == {'allow_secrets': True, 'finding_names': ['AWS access key ID']}
 
 
 def test_mcp_owner_closes_receipt(tmp_path, monkeypatch, capsys):
