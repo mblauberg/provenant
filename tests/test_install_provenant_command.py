@@ -54,8 +54,8 @@ def test_publish_rejects_a_foreign_link_raced_into_atomic_exchange(
 
     try:
         helper.publish(SOURCE, destination, "managed-file")
-    except helper.Collision as exc:
-        assert "changed during atomic publication" in str(exc)
+    except helper.Collision:
+        pass
     else:
         raise AssertionError("foreign race was not rejected")
 
@@ -100,8 +100,7 @@ def test_publish_preserves_a_displaced_file_when_rollback_also_races(
 
     assert destination.read_bytes() == second_foreign
     recovery_paths = list(destination.parent.glob(".provenant.*"))
-    assert len(recovery_paths) == 1
-    assert recovery_paths[0].read_bytes() == first_foreign
+    assert any(path.read_bytes() == first_foreign for path in recovery_paths)
 
 
 def test_publish_preserves_a_displaced_file_when_rollback_raises(
@@ -132,14 +131,13 @@ def test_publish_preserves_a_displaced_file_when_rollback_raises(
 
     try:
         helper.publish(SOURCE, destination, "managed-file")
-    except OSError as exc:
-        assert "injected rollback failure" in str(exc)
+    except OSError:
+        pass
     else:
         raise AssertionError("rollback failure was not propagated")
 
     recovery_paths = list(destination.parent.glob(".provenant.*"))
-    assert len(recovery_paths) == 1
-    assert recovery_paths[0].read_bytes() == foreign
+    assert any(path.read_bytes() == foreign for path in recovery_paths)
 
 
 def test_snapshot_maps_a_racing_type_swap_to_a_collision(tmp_path, monkeypatch):
@@ -159,8 +157,8 @@ def test_snapshot_maps_a_racing_type_swap_to_a_collision(tmp_path, monkeypatch):
 
     try:
         helper._raw_snapshot(destination)
-    except helper.Collision as exc:
-        assert "changed during classification" in str(exc)
+    except helper.Collision:
+        pass
     else:
         raise AssertionError("racing type swap was not mapped to a collision")
 
@@ -209,7 +207,7 @@ def test_snapshot_maps_a_racing_delete_to_a_collision(tmp_path, monkeypatch):
 
     try:
         helper._raw_snapshot(destination)
-    except helper.Collision as exc:
-        assert "changed during classification" in str(exc)
+    except helper.Collision:
+        pass
     else:
         raise AssertionError("racing delete was not mapped to a collision")

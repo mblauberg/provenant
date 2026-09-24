@@ -186,7 +186,7 @@ fi
 
 run_test "$SCRIPTS_ROOT/static-security-check.py"
 
-run_test -m pytest -q \
+run_test -m pytest -q --durations=25 \
   "$TESTS_ROOT" \
   "$SKILLS_ROOT/implement/tests/test_checkpoint_run.py"
 
