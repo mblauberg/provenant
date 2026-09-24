@@ -31,6 +31,8 @@ export interface RunReadResponse {
   status: "ok" | "unknown";
   error?: string;
   runs: RunRead[];
+  omitted?: number;
+  omitted_hint?: string;
   claims?: unknown;
 }
 
@@ -65,9 +67,12 @@ function rootPath(root: string, runDir: string, value: unknown): string | null {
 }
 
 /** The public read contract. Receipt layout and absolute paths end here. */
-export async function readRuns(workspace: string, ids?: string[], waitSeconds = 0, signal?: AbortSignal): Promise<RunReadResponse> {
+export async function readRuns(
+  workspace: string, ids?: string[], waitSeconds = 0, signal?: AbortSignal,
+  limit: number | null = 20,
+): Promise<RunReadResponse> {
   try {
-    const source = await statusRows(workspace, ids, waitSeconds, "all", signal, "brief", false);
+    const source = await statusRows(workspace, ids, waitSeconds, "all", signal, "brief", false, null);
     if (!source.runs) return { schema: "fabric.runs.v1", status: "unknown" as const,
       error: String(source.error ?? "run_read_failed"), runs: [] as RunRead[] };
     const root = existsSync(runRoot(workspace)) ? realpathSync(runRoot(workspace)) : resolve(runRoot(workspace));
@@ -114,7 +119,13 @@ export async function readRuns(workspace: string, ids?: string[], waitSeconds = 
         attempt: Number(row.attempt ?? 0),
       };
     });
-    return { schema: "fabric.runs.v1", status: "ok" as const, runs };
+    runs.sort((a, b) => (a.state === "running" ? 0 : 1) - (b.state === "running" ? 0 : 1) ||
+      Date.parse(b.started_at ?? "") - Date.parse(a.started_at ?? ""));
+    const capped = !ids?.length && limit !== null;
+    const omitted = capped ? Math.max(0, runs.length - limit) : 0;
+    return { schema: "fabric.runs.v1", status: "ok" as const,
+      runs: capped ? runs.slice(0, limit ?? runs.length) : runs,
+      ...(omitted ? { omitted, omitted_hint: "Use provenant lanes ID to see a lane past the 20-row cap." } : {}) };
   } catch (error) {
     return { schema: "fabric.runs.v1", status: "unknown" as const,
       error: error instanceof Error ? error.message : String(error), runs: [] as RunRead[] };

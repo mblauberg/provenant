@@ -745,6 +745,32 @@ def test_history_scan_reproduces_the_removed_parser_hits(tmp_path):
     ) == RANGE_ORACLE
 
 
+def test_publication_range_scans_only_blobs_added_after_the_base(tmp_path):
+    repository, _script, _initial = publication_repository(tmp_path)
+    (repository / "inherited-fixture.txt").write_text(
+        "ghp_" + "abcdefghijklmnopqrstuvwxyz123456\n"
+    )
+    git_at(repository, "add", "inherited-fixture.txt")
+    git_at(repository, "commit", "-q", "-m", "add inherited fixture")
+    base = git_at(repository, "rev-parse", "HEAD")
+
+    (repository / "notes.txt").write_text("unrelated safe change\n")
+    git_at(repository, "add", "notes.txt")
+    git_at(repository, "commit", "-q", "-m", "unrelated change")
+    untouched_head = git_at(repository, "rev-parse", "HEAD")
+    assert publication_range_errors(base, untouched_head, repository) == []
+
+    (repository / "new-fixture.txt").write_text(
+        "ghp_" + "abcdefghijklmnopqrstuvwxyz123457\n"
+    )
+    git_at(repository, "add", "new-fixture.txt")
+    git_at(repository, "commit", "-q", "-m", "add flagged blob")
+    flagged_head = git_at(repository, "rev-parse", "HEAD")
+    assert "publication range contains a possible GitHub token" in publication_range_errors(
+        base, flagged_head, repository,
+    )
+
+
 def test_history_scans_annotated_tag_messages(tmp_path):
     repository = tmp_path / "fixture"
     repository.mkdir()
