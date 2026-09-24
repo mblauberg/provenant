@@ -141,6 +141,44 @@ def test_writer_confinement_selection_and_degraded_warning(monkeypatch, tmp_path
     assert any("worktree_write writes are unconfined" in item for item in degraded["warnings"])
 
 
+def test_agy_writer_requires_os_confinement_and_uses_write_profile(monkeypatch, tmp_path):
+    mod = supervisor()
+    add_dir = tmp_path.parent / "agy-extra"
+    add_dir.mkdir()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None)
+    with pytest.raises(ValueError, match="sandbox-exec"):
+        mod.build_plan("agy", {}, "hello", cwd=tmp_path, mode="worktree_write")
+
+    (tmp_path / ".agents").mkdir()
+    (tmp_path / ".agents/fabric-policy.json").write_text(
+        '{"protected_paths":["secret/"]}'
+    )
+    probes = iter(("/usr/bin/sandbox-exec", None))
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: next(probes))
+    with pytest.raises(ValueError, match="sandbox-exec"):
+        mod.build_plan("agy", {}, "hello", cwd=tmp_path, mode="worktree_write")
+
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = mod.build_plan("agy", {}, "hello", cwd=tmp_path, mode="worktree_write",
+                          add_dirs=[add_dir])
+    assert plan["applied"]["confinement"] == "sandbox-exec"
+    assert "--dangerously-skip-permissions" in plan["argv"]
+    assert "--sandbox" not in plan["argv"]
+    assert plan["protected_paths"] == [str(tmp_path / "secret")]
+    profile = mod.os_confinement_profile(plan)
+    assert "(deny file-write*)" in profile
+    assert f'(allow file-write* (subpath "{tmp_path}")' in profile
+    assert f'(subpath "{add_dir}")' not in "\n".join(
+        line for line in profile.splitlines() if line.startswith("(allow file-write* ")
+    )
+    assert profile.rstrip().endswith(
+        f'(deny file-read* (subpath "{tmp_path / "secret"}"))'
+    )
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None)
+    with pytest.raises(RuntimeError, match="sandbox-exec"):
+        mod.confinement_command(plan, plan["argv"])
+
+
 @pytest.mark.parametrize("adapter", ["agy", "opencode", "claude", "cursor", "kiro"])
 def test_wrapped_writer_uses_only_provider_cache(monkeypatch, tmp_path, adapter):
     mod = supervisor()

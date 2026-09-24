@@ -87,11 +87,12 @@ and `cache` directories under its run directory. Shared temp and general user
 caches are not writable. Codex
 uses `-s workspace-write` (or `-c sandbox_mode="workspace-write"`
 on resume), with `-c sandbox_workspace_write.writable_roots=<add_dirs>` and
-`--cd <worktree>` on a fresh run. If OS confinement
-is unavailable, a writer receipt warns that writes are unconfined. Set the host
-environment variable `PROVENANT_NO_OS_CONFINEMENT=1` to opt out for new attempts;
-the receipt warns about the missing boundary. Protected-path dispatches to
-training routes still refuse without OS read confinement.
+`--cd <worktree>` on a fresh run. If OS confinement is unavailable, agy write
+dispatch is refused; other wrapped writer receipts warn that writes are
+unconfined. Setting `PROVENANT_NO_OS_CONFINEMENT=1` has the same effect on new
+wrapped attempts.
+Protected-path dispatches to training routes still refuse without OS read
+confinement.
 The receipt records `applied.confinement` as `sandbox-exec`, `provider-native` or `none`;
 `applied.write_boundary` records the effective writable paths or native sandbox;
 `workspace.cwd` is the provider cwd and `workspace.root` is the caller workspace.

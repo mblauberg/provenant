@@ -413,6 +413,8 @@ def build_plan(
         confinement = "provider-native"
     elif mode == "worktree_write" and adapter == "codex":
         warnings.append("worktree_write writes are unconfined: Codex sandbox is full")
+    if mode == "worktree_write" and adapter == "agy" and confinement != "sandbox-exec":
+        raise ValueError("agy worktree_write requires usable sandbox-exec")
     if (
         mode == "read_only"
         and cwd != workspace_root
