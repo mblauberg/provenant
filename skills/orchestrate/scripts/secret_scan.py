@@ -35,8 +35,12 @@ class Finding:
 class ScanResult:
     findings: list[Finding] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    budget_exceeded: bool = False
 
     def fix(self) -> str:
+        if self.budget_exceeded:
+            return ("Narrow the prompt or additional directories so the secret scan stays within its budget, "
+                    "or pass allow_secrets: true and explain why in the prompt.")
         finding = self.findings[0]
         return (f"Remove the {finding.name} at {finding.path}:{finding.line} "
                 "or pass allow_secrets: true to send it anyway.")
@@ -88,10 +92,15 @@ def scan_inputs(prompt: bytes, prompt_path: str, add_dirs: list[str] | None = No
         for path in _files(Path(raw_dir).expanduser().resolve()):
             try:
                 metadata = path.lstat()
-                if not stat.S_ISREG(metadata.st_mode) or metadata.st_size > MAX_FILE_BYTES:
+                if not stat.S_ISREG(metadata.st_mode):
                     continue
+                if metadata.st_size > MAX_FILE_BYTES:
+                    result.budget_exceeded = True
+                    result.warnings.append("secret scan budget reached")
+                    return result
                 if files_seen >= MAX_FILES or bytes_seen + metadata.st_size > MAX_TOTAL_BYTES:
-                    result.warnings.append("secret scan directory budget reached")
+                    result.budget_exceeded = True
+                    result.warnings.append("secret scan budget reached")
                     return result
                 files_seen += 1
                 with path.open("rb") as stream:
