@@ -58,6 +58,64 @@ def test_installer_links_every_skill_and_is_idempotent(tmp_path):
     assert f"linked=0 existing={len(expected)}" in second.stdout
 
 
+def _install_retired_agent_fixture(tmp_path: Path, target: Path):
+    old_source = tmp_path / "old-product/agents/retired-worker.md"
+    old_source.parent.mkdir(parents=True)
+    old_source.write_text("# Previously managed definition\n")
+    old_target = target.parent / "agents"
+    old_target.mkdir(parents=True)
+    (old_target / old_source.name).symlink_to(old_source)
+    receipt = target.parent / ".agent-harness-agents-installation.json"
+    receipt.write_text(json.dumps({
+        "schema_version": 1,
+        "owner": "agent-harness",
+        "surface": "claude-agents",
+        "target_root": str(old_target.resolve()),
+        "updated_at": "2026-01-01T00:00:00Z",
+        "managed": {
+            old_source.name: {
+                "owner": "agent-harness",
+                "source_target": str(old_source),
+                "source_sha256": "0" * 64,
+                "installed_at": "2026-01-01T00:00:00Z",
+            }
+        },
+    }))
+    return old_source, old_target, receipt
+
+
+def test_retiring_agents_does_not_add_names_to_skill_json_changes(tmp_path):
+    target = tmp_path / "skills"
+    initial = run(target)
+    assert initial.returncode == 0, initial.stderr
+    old_source, old_target, _ = _install_retired_agent_fixture(tmp_path, target)
+
+    result = subprocess.run(
+        [sys.executable, str(MANAGER), "install", "--target", str(target)],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["changed"] == []
+    assert not (old_target / old_source.name).is_symlink()
+
+
+def test_retiring_agents_does_not_count_as_a_linked_skill(tmp_path):
+    target = tmp_path / "skills"
+    initial = run(target)
+    assert initial.returncode == 0, initial.stderr
+    old_source, old_target, _ = _install_retired_agent_fixture(tmp_path, target)
+
+    result = run(target)
+
+    assert result.returncode == 0, result.stderr
+    assert f"linked=0 existing={len(catalogue_names())}" in result.stdout
+    assert not (old_target / old_source.name).is_symlink()
+
+
 def test_normal_install_retires_recorded_links_from_the_removed_agent_surface(tmp_path):
     target = tmp_path / "claude/skills"
     old_source = tmp_path / "old-product/agents/retired-worker.md"

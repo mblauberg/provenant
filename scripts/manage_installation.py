@@ -648,7 +648,7 @@ def execute(
     if changed:
         _write_manifest(target, manifest)
     if action in {"install", "reconcile"}:
-        changed.extend(_retire_legacy_agents(target, apply=True))
+        _retire_legacy_agents(target, apply=True)
     return {
         "schema_version": 1,
         "action": action,
