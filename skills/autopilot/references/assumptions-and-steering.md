@@ -6,7 +6,7 @@ away. Decisions keep flowing; the owner confirms them later in one pass.
 ## Assumption ledger
 
 One untracked, run-local Markdown file per chair session or mission, for
-example `.agent-run/sessions/<session>/ASSUMPTIONS.md`. Project instructions
+example `.agent-run/sessions/<session-id>/ASSUMPTIONS.md`. Project instructions
 may name the path. One row per decision or assumption the owner has not yet
 confirmed:
 
