@@ -74,10 +74,18 @@ warning. Codex, Claude and Cursor read-only runs restrict writes, not reads, so
 a `cwd` below the root carries the warning "cwd is not a read boundary".
 Writer runs on macOS use `sandbox-exec` to restrict writes to their worktree,
 Git metadata, attempt files, temporary directories, device nodes and provider
-state. Codex uses its own `workspace-write` sandbox instead. If OS confinement
+state. Codex uses `-s workspace-write` (or `-c sandbox_mode="workspace-write"`
+on resume), with `-c sandbox_workspace_write.writable_roots=<add_dirs>` and
+`--cd <worktree>` on a fresh run. If OS confinement
 is unavailable, a writer receipt warns that writes are unconfined.
 The receipt records `applied.confinement` as `sandbox-exec`, `provider-native` or `none`;
 `workspace.cwd` is the provider cwd and `workspace.root` is the caller workspace.
+Projects declare protected repository-relative files or directories in
+`config/fabric-policy.json`. A route marked as training, or lacking a resolved
+training flag, cannot receive a prompt file, additional directory or cwd that
+overlaps one. Its sandbox denies reads of protected paths in every registered
+worktree; without usable `sandbox-exec`, dispatch is rejected. Non-training
+routes keep their usual access.
 
 On macOS, a Codex `read-only` or `workspace-write` provider gets a bundled `ps`
 shim on PATH because seatbelt blocks the setuid `/bin/ps`. Process identity reads

@@ -117,6 +117,87 @@ def test_writer_confinement_selection_and_degraded_warning(monkeypatch, tmp_path
     assert any("worktree_write writes are unconfined" in item for item in degraded["warnings"])
 
 
+def protected_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / "config").mkdir()
+    (repo / "config/fabric-policy.json").write_text('{"protected_paths":["private/"]}')
+    (repo / "private").mkdir()
+    (repo / "safe").mkdir()
+    return repo
+
+
+def test_protected_profile_covers_registered_worktrees_and_non_training_route(monkeypatch, tmp_path):
+    mod = supervisor()
+    repo = protected_repo(tmp_path)
+    sibling = tmp_path / "linked"
+    original_run = mod.subprocess.run
+
+    def listed(command, *args, **kwargs):
+        if command[3:] == ["worktree", "list", "--porcelain"]:
+            return SimpleNamespace(returncode=0, stdout=f"worktree {repo}\n\nworktree {sibling}\n")
+        return original_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(mod.subprocess, "run", listed)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = mod.build_plan("opencode", {"trains_on_prompts": True}, "hello",
+                          cwd=repo / "safe", workspace_root=repo)
+    profile = mod.os_confinement_profile(plan)
+    deny = next(line for line in profile.splitlines() if line.startswith("(deny file-read* "))
+    for root in (repo, sibling):
+        assert f'(subpath "{root / "private"}")' in deny
+    assert plan["applied"]["confinement"] == "sandbox-exec"
+    safe = mod.build_plan("claude", {"trains_on_prompts": False}, "hello",
+                          cwd=repo / "safe", workspace_root=repo)
+    assert safe["protected_paths"] == []
+    assert safe["applied"]["confinement"] == "none"
+
+
+@pytest.mark.parametrize("field", ["prompt_file", "add_dirs", "cwd"])
+def test_protected_preflight_refuses_training_inputs(monkeypatch, tmp_path, field):
+    repo = protected_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    task = {"id": "one", "adapter": "opencode", "model": "opencode/mimo-v2.6-flash-free",
+            "prompt": "hello", "cwd": str(repo / "safe")}
+    if field == "prompt_file":
+        task.pop("prompt")
+        source = repo / "private/prompt.md"
+        source.write_text("sensitive")
+        task[field] = str(source)
+    elif field == "add_dirs":
+        task[field] = [str(repo / "private")]
+    else:
+        task[field] = str(repo)
+    result = importlib.import_module("skills.orchestrate.scripts.dispatch_run").preflight_tasks([task])
+    assert result["status"] == "rejected"
+    assert "private" in result["fix"] and "non-training route" in result["fix"]
+
+
+def test_unresolved_training_flag_fails_closed_without_sandbox(monkeypatch, tmp_path):
+    mod = supervisor()
+    repo = protected_repo(tmp_path)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None)
+    with pytest.raises(ValueError, match="sandbox-exec"):
+        mod.build_plan("claude", {}, "hello", cwd=repo / "safe", workspace_root=repo)
+
+
+def test_protected_preflight_rejects_unavailable_sandbox(monkeypatch, tmp_path):
+    repo = protected_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    mod = supervisor()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None)
+    task = {"id": "one", "adapter": "opencode", "model": "opencode/mimo-v2.6-flash-free",
+            "prompt": "hello", "cwd": str(repo / "safe")}
+    result = importlib.import_module("skills.orchestrate.scripts.dispatch_run").preflight_tasks([task])
+    assert result["status"] == "rejected"
+    assert "sandbox-exec" in result["fix"]
+
+
 def test_plan_only_uses_explicit_workspace_root_when_process_cwd_differs(monkeypatch, tmp_path, capsys):
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
     workspace_root = tmp_path / "fabric-workspace"

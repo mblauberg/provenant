@@ -65,4 +65,15 @@ Project `CLAUDE.md` keeps both `@AGENTS.md` and `@HARNESS.md`. `scripts/install-
 
 ## Routing and authority
 
+`config/fabric-policy.json` declares repository-relative `protected_paths` for
+every registered worktree. Routes resolve `trains_on_prompts` from the model,
+then the adapter; an unresolved value counts as training. A training route is
+rejected when its prompt file, additional directory or cwd overlaps a protected
+path, or when OS read confinement is unavailable. Its `sandbox-exec` profile
+denies reads of those paths in every registered worktree. Non-training routes
+are unaffected. Codex writer confinement is supplied by `-s workspace-write`
+(or `-c sandbox_mode="workspace-write"` on resume),
+`-c sandbox_workspace_write.writable_roots=<add_dirs>` and a fresh run's
+`--cd <worktree>`.
+
 `model_route.py snapshot --json` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Writer launches use it to restrict writes to the worktree, its Git metadata, attempt files, temp paths, devices and provider state. Codex writers use its native `workspace-write` sandbox. Unavailable OS confinement produces an explicit warning.

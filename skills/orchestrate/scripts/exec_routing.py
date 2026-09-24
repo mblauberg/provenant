@@ -197,13 +197,13 @@ def candidates(plan, policy=None, catalogue=None):
         meta = models.get(model, {})
         if not isinstance(meta, dict):
             meta = {}
-        training = item.get("trains_on_prompts", meta.get("trains_on_prompts", False))
+        training = item.get("trains_on_prompts", meta.get("trains_on_prompts"))
         free = (
             item.get("plan_cap_usd", meta.get("plan_cap_usd")) == 0
             or (model.endswith("-free") or model.endswith(":free"))
             or model.startswith("opencode/")
         )
-        if not explicit and policy != "any" and (training or free):
+        if not explicit and policy != "any" and (training is not False or free):
             continue
         answer.append(
             {

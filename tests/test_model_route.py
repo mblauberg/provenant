@@ -162,6 +162,36 @@ def test_snapshot_deep_merges_models_and_drops_malformed_overlay(tmp_path):
     assert any("codex.models" in note for note in snapshot["drift"])
 
 
+def test_training_flag_survives_model_overlay_and_free_override(tmp_path, monkeypatch):
+    router = load_router()
+    instance = tmp_path / "instance"
+    (instance / "config").mkdir(parents=True)
+    (instance / "config/model-routing.json").write_text(json.dumps({"adapters": {
+        "claude": {"models": [{"id": "claude-opus-5-5", "names": ["overlay-opus"]}]},
+        "codex": {"models": [{"id": "gpt-6-sol", "names": ["overlay-sol"]}]},
+        "agy": {"models": [{"id": "gemini-3.8-flash", "names": ["overlay-flash"]}]},
+        "opencode": {"models": [{"id": "opencode/mimo-v2.6-flash-free", "names": ["overlay-free"]}]},
+    }}))
+    monkeypatch.setattr(router, "CATALOG_PATH", instance / "config/model-routing.json")
+    catalog = router.catalogue_snapshot()["catalogue"]
+    for adapter, model in (("claude", "claude-opus-5-5"), ("codex", "gpt-6-sol"),
+                           ("agy", "gemini-3.8-flash")):
+        entry = next(item for item in catalog["adapters"][adapter]["models"] if item["id"] == model)
+        assert router.training_flag(catalog["adapters"][adapter], entry) is False
+    free = next(item for item in catalog["adapters"]["opencode"]["models"]
+                if item["id"] == "opencode/mimo-v2.6-flash-free")
+    assert router.training_flag(catalog["adapters"]["opencode"], free) is True
+    assert router.training_flag({}, {}) is None
+
+
+def test_resolved_routes_expose_training_flag():
+    for adapter, model, expected in (("claude", "opus", False),
+                                     ("opencode", "opencode/mimo-v2.6-flash-free", True)):
+        result, route = resolve("--adapter", adapter, "--model", model, "--role", "worker")
+        assert result.returncode == 0, result.stderr
+        assert route["trains_on_prompts"] is expected
+
+
 def test_snapshot_drops_invalid_new_adapter_effort_and_allows_nullable_override(tmp_path, monkeypatch):
     router = load_router()
     instance = tmp_path / "instance"

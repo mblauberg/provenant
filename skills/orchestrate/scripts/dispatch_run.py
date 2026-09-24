@@ -1167,8 +1167,6 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                     raise PreflightError("credential_or_auth_store_denied","Additional directories must exclude credential stores.")
                 if (task.get("prompt") is None) == (task.get("prompt_file") is None):
                     raise PreflightError("prompt_required", "Pass exactly one of prompt or prompt_file.")
-                if task.get("prompt_file") is not None:
-                    read_prompt_input(Path(task["prompt_file"]), workspace, workspace)
                 adapter = task["adapter"]
                 mode = task.get("access_mode", "read_only")
                 if mode not in ACCESS_MODES:
@@ -1245,16 +1243,23 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                     if "effort" in code:
                         fix = "Omit effort, or pass a supported level: low, medium, high, xhigh, max, ultra."
                     raise PreflightError(code, fixes.get(code, fix))
+                protected = provider_exec.check_protected_inputs(
+                    route, workspace, worktree if mode == "worktree_write" else task.get("cwd") or workspace,
+                    prompt_file=task.get("prompt_file"), add_dirs=task.get("add_dirs", []))
+                if protected and (adapter == "codex" or not provider_exec._sandbox_exec_path()):
+                    raise ValueError("protected paths require sandbox-exec read confinement; fix: use a non-training route")
+                if task.get("prompt_file") is not None:
+                    read_prompt_input(Path(task["prompt_file"]), workspace, workspace)
                 routes.append(route)
-            except (PreflightError, WorktreeLeaseError, OSError, subprocess.TimeoutExpired) as exc:
+            except (PreflightError, WorktreeLeaseError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
                 prompt_fixes = {
                     "prompt_unavailable": "Pass prompt text or prompt_file=<readable regular file inside the workspace>.",
                     "prompt_path_forbidden": "Pass prompt_file=<readable regular file inside the workspace>.",
                     "credential_or_auth_store_denied": "Pass prompt text or a workspace prompt file outside credential and authentication stores.",
                     "prompt_hard_link_denied": "Pass prompt_file=<workspace file with one hard link>.",
                 }
-                errors.append({"task_id": task_id, "error": getattr(exc, "code", "worktree_invalid" if isinstance(exc, WorktreeLeaseError) else "preflight_unavailable"),
-                               "fix": prompt_fixes.get(exc.code, str(exc)) if isinstance(exc, PreflightError) else "Pass a readable prompt and registered Git worktree; check adapter availability."})
+                errors.append({"task_id": task_id, "error": getattr(exc, "code", "protected_path_denied" if isinstance(exc, ValueError) else "worktree_invalid" if isinstance(exc, WorktreeLeaseError) else "preflight_unavailable"),
+                               "fix": prompt_fixes.get(exc.code, str(exc)) if isinstance(exc, PreflightError) else str(exc) if isinstance(exc, ValueError) else "Pass a readable prompt and registered Git worktree; check adapter availability."})
     return ({"status": "rejected", "error": errors[0]["error"], "fix": errors[0]["fix"], "errors": errors}
             if errors else {"status": "validated", "routes": routes})
 

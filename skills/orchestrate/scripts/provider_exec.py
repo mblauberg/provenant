@@ -159,6 +159,47 @@ def _sbpl_rule(action, operations, paths):
     return f"({action} {operations} " + " ".join(_sbpl_filter(path) for path in paths) + ")\n" if paths else ""
 
 
+def protected_paths(workspace_root):
+    root = subprocess.run(["git", "-C", str(workspace_root), "rev-parse", "--show-toplevel"],
+                          capture_output=True, text=True, timeout=5)
+    if root.returncode != 0:
+        return []
+    repo = Path(root.stdout.strip()).resolve()
+    declaration = repo / "config/fabric-policy.json"
+    if not declaration.is_file():
+        return []
+    try:
+        paths = json.loads(declaration.read_text())["protected_paths"]
+        if not isinstance(paths, list) or any(not isinstance(p, str) or not p or
+                                             Path(p).is_absolute() or ".." in Path(p).parts or
+                                             any(char in p for char in "*?[]") for p in paths):
+            raise ValueError("invalid protected paths")
+    except (OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid protected path policy: {declaration}") from exc
+    listing = subprocess.run(["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+                             capture_output=True, text=True, timeout=5)
+    if listing.returncode != 0:
+        raise ValueError("cannot list worktrees for protected path policy")
+    roots = [Path(line[9:]).resolve() for line in listing.stdout.splitlines() if line.startswith("worktree ")]
+    return [root / relative for root in roots for relative in paths]
+
+
+def check_protected_inputs(route, workspace_root, cwd, *, prompt_file=None, add_dirs=()):
+    if route.get("trains_on_prompts") is False:
+        return []
+    paths = protected_paths(workspace_root)
+    if not paths:
+        return []
+    for candidate in (prompt_file, cwd, *add_dirs):
+        if candidate is None:
+            continue
+        item = Path(candidate).expanduser().resolve()
+        for protected in paths:
+            if item.is_relative_to(protected) or protected.is_relative_to(item):
+                raise ValueError(f"protected path {protected}; fix: use a non-training route")
+    return paths
+
+
 def os_confinement_profile(plan):
     """Deny the home directory and shared temp, re-allow the provider's own state, then the task's paths.
 
@@ -179,7 +220,9 @@ def os_confinement_profile(plan):
         allowed = [cwd, *git_dirs, Path(plan["run_dir"]), Path(os.environ.get("TMPDIR", tempfile.gettempdir())),
                    Path("/private/tmp"), *_darwin_user_dirs(), Path("/dev"),
                    *(home / path for path in state.get("read_write", ()))]
-        return "(version 1)\n(allow default)\n(deny file-write*)\n" + _sbpl_rule("allow", "file-write*", allowed)
+        return ("(version 1)\n(allow default)\n(deny file-write*)\n"
+                + _sbpl_rule("allow", "file-write*", allowed)
+                + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", [])))
     return (
         "(version 1)\n(allow default)\n"
         + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
@@ -192,6 +235,7 @@ def os_confinement_profile(plan):
         + _sbpl_rule("allow", "file-read-data", [
             Path(plan["cwd"]), *add_dirs
         ])
+        + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
     )
 
 
@@ -229,6 +273,9 @@ def build_plan(
     context_ceiling=None,
     **metadata,
 ):
+    metadata = dict(metadata)
+    prompt_file = metadata.pop("prompt_file", None)
+    run_dir = metadata.pop("run_dir", None)
     config = profile(adapter)
     selected_cwd = Path(worktree or cwd or workspace_root or Path.cwd()).expanduser().resolve()
     if not selected_cwd.is_dir():
@@ -238,6 +285,8 @@ def build_plan(
         raise ValueError("cwd must be inside the workspace")
     workspace_root = str(Path(workspace_root or selected_cwd).expanduser().resolve())
     cwd = str(selected_cwd)
+    guarded = check_protected_inputs(route, workspace_root, cwd,
+                                     prompt_file=prompt_file, add_dirs=add_dirs)
     sandbox = sandbox or (
         "workspace-write" if mode == "worktree_write" else "read-only"
     )
@@ -307,8 +356,12 @@ def build_plan(
     ):
         guarantee = "best_effort"
     confinement = "none"
-    confinement_requested = (mode == "read_only" and adapter in {"agy", "opencode"}) or (
+    confinement_requested = bool(guarded) or (mode == "read_only" and adapter in {"agy", "opencode"}) or (
         mode == "worktree_write" and adapter != "codex")
+    if guarded and adapter == "codex":
+        raise ValueError("protected paths require OS read confinement; fix: use a non-training route")
+    if guarded and not _sandbox_exec_path():
+        raise ValueError("protected paths require sandbox-exec; fix: use a non-training route")
     if confinement_requested and _sandbox_exec_path():
         confinement = "sandbox-exec"
         if adapter == "agy":
@@ -381,9 +434,10 @@ def build_plan(
         "network_requested": network,
         "cwd": cwd,
         "workspace_root": workspace_root,
+        "protected_paths": [str(path) for path in guarded],
         "mode": mode,
         "worktree": str(worktree) if worktree else None,
-        "run_dir": str(Path(metadata.get("run_dir") or cwd).expanduser().resolve()),
+        "run_dir": str(Path(run_dir or cwd).expanduser().resolve()),
         "timeout_seconds": timeout,
         "idle_seconds": idle,
         "grace_seconds": 5.0,
@@ -2139,9 +2193,12 @@ def main():
         selected_cwd = Path(args.cwd or workspace_root).expanduser().resolve()
         if not args.worktree and not selected_cwd.is_relative_to(workspace_root):
             raise ValueError("cwd must be inside the workspace")
+        route = json.loads(args.route_file.read_text())
+        check_protected_inputs(route, workspace_root, selected_cwd,
+                               prompt_file=args.prompt_file, add_dirs=args.add_dir)
         plan = build_plan(
             args.adapter,
-            json.loads(args.route_file.read_text()),
+            route,
             args.prompt_file.read_text(),
             mode=args.mode,
             cwd=args.cwd,
@@ -2161,6 +2218,7 @@ def main():
             model_override_tier=args.model_override_tier,
             requested_model=args.requested_model,
             requested_effort=args.requested_effort,
+            prompt_file=args.prompt_file,
             run_dir=args.out.parent,
             run_id=os.environ.get("PROVENANT_RUN_ID", ""),
             chair=os.environ.get("PROVENANT_CHAIR", ""),
