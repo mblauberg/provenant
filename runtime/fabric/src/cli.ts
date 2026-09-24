@@ -35,7 +35,7 @@ const USAGE = `fabric <command>
   task <objective...>         open a task
   claim <task-id>             atomically claim an open, unowned task
   lanes                       active work claims and landing lease
-  landing-push <session> <generation> <branch>  verify lease and remote SHA, then push HEAD
+  landing-push <session> <generation> <branch> [--label <seat>]  verify lease and remote SHA, then push HEAD
   done <task-id>              close a task
   activity [--after-seq N]    list activity, optionally after a cursor
            [--limit N]
@@ -47,7 +47,8 @@ const USAGE = `fabric <command>
   dispatch list [--json]      configured-provider runs recorded in this workspace
   dispatch kill <run> [--json]  stop one recorded run and the group it leads
 
-Identity comes from the working directory and AGENT_FABRIC_LABEL. Registered
+Identity comes from the working directory and AGENT_FABRIC_LABEL (or
+landing-push --label for that command). Registered
 worktrees share one repository project while retaining their own cwd. There is
 nothing to install, trust or provision.`;
 
@@ -78,7 +79,14 @@ const flag = (name: string): string | undefined => {
   argv.splice(at, 2);
   return value;
 };
-const who = identify();
+let landingLabel: string | undefined;
+try {
+  landingLabel = command === "landing-push" ? flag("label") : undefined;
+} catch (error) {
+  console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
+  process.exit(2);
+}
+const who = identify(landingLabel === undefined ? process.env : { ...process.env, AGENT_FABRIC_LABEL: landingLabel });
 if (command === "status") {
   try {
     const wait = flag("wait-seconds");
@@ -218,7 +226,7 @@ const printActivity = (rows: ReturnType<Store["activity"]>): void => {
 
 try {
   store = new Store(databasePath());
-  store.announce(who);
+  if (command !== "landing-push") store.announce(who);
   switch (command) {
   case "whoami":
     if (argv.length !== 1) throw new Error("usage: fabric whoami");
@@ -234,7 +242,7 @@ try {
     const session = argv[1], generation = Number(argv[2]), branch = argv[3];
     if (argv.length !== 4 || !session || !Number.isSafeInteger(generation) || generation < 1 ||
       !branch || !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(branch) || branch.includes("..") || branch.endsWith("/"))
-      throw new Error("usage: fabric landing-push <session> <generation> <branch>");
+      throw new Error("usage: fabric landing-push <session> <generation> <branch> [--label <seat>]");
     const lease = store.landingLease(who.project);
     if (!lease) throw new Error("stale landing lease");
     store.verifyLanding(who, session, generation, lease.expectedSha);
@@ -244,10 +252,11 @@ try {
     if (remote !== lease.expectedSha) throw new Error("remote integration SHA changed; acquire a new landing lease");
     const head = execFileSync("git", ["rev-parse", "HEAD"], { ...gitOptions, encoding: "utf8" }).trim();
     execFileSync("git", ["merge-base", "--is-ancestor", remote, head], gitOptions);
-    store.withLandingPush(who, session, generation, remote, () =>
+    const pushed = store.withLandingPush(who, session, generation, remote, () =>
       execFileSync("git", ["push", `--force-with-lease=refs/heads/${branch}:${remote}`,
         "origin", `${head}:refs/heads/${branch}`], { ...gitOptions, stdio: "inherit", timeout: 120_000 }));
-    show({ pushed: branch, previous_sha: remote, generation });
+    show({ pushed: branch, previous_sha: remote, generation,
+      ...(pushed.releaseWarning ? { release_warning: pushed.releaseWarning } : {}) });
     break;
   }
 

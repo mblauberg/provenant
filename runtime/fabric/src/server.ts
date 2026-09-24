@@ -317,26 +317,30 @@ register(
     const result = await statusRows(who.cwd, ids ?? (id ? [id] : undefined), waitResult.value, until, signal, detail);
     acknowledgeRuns(result);
     const view = runView(withWarnings(result, waitResult.warnings), detail);
-    const workClaims = readyStore().workClaims(who.project), landingLease = readyStore().landingLease(who.project);
+    const ownershipStore = readyStore();
+    const workClaims = ownershipStore.workClaims(who.project), landingLease = ownershipStore.landingLease(who.project);
     const ownership = [
       ...workClaims.map((claim) => `claim ${claim.issue ?? claim.paths.join(",")} ${claim.holder} g${claim.generation}`),
       ...(landingLease ? [`landing ${landingLease.holder} g${landingLease.generation} ${landingLease.expectedSha}`] : []),
     ];
-    return { ...view, work_claims: workClaims, landing_lease: landingLease,
+    return { ...view,
+      ...(detail === "full" || ownership.length ? { work_claims: workClaims, landing_lease: landingLease } : {}),
       ...(ownership.length ? { digest: `${digest(view)}\n${ownership.join("\n")}` } : {}) };
   },
 );
-register("fabric_lanes", "Read active project work claims and landing lease.", {}, () => ({
-  work_claims: readyStore().workClaims(who.project), landing_lease: readyStore().landingLease(who.project),
-}));
-register("fabric_work_claim", "Acquire, renew or release an issue or path claim with fencing.", {
-  action: z.enum(["acquire", "renew", "release"]), session_id: z.string().min(1),
+register("fabric_lanes", "Read active project work claims and landing lease.", {}, () => {
+  const laneStore = readyStore();
+  return { work_claims: laneStore.workClaims(who.project), landing_lease: laneStore.landingLease(who.project) };
+});
+register("fabric_work_claim", "Acquire, renew, verify or release an advisory issue or path claim.", {
+  action: z.enum(["acquire", "renew", "verify", "release"]), session_id: z.string().min(1),
   issue: str, paths: z.array(z.string()).optional(), id: str,
   generation: z.number().int().positive().optional(), seconds: z.number().int().min(1).max(3600).optional(),
 }, ({ action, session_id, issue, paths, id, generation, seconds }) => {
   if (action === "acquire") return readyStore().acquireWork(who, session_id, { issue, paths }, seconds ?? 900);
   if (!id || generation === undefined) throw new Error("id and generation are required");
   if (action === "renew") return readyStore().renewWork(who, session_id, id, generation, seconds ?? 900);
+  if (action === "verify") return readyStore().verifyWork(who, session_id, id, generation);
   readyStore().releaseWork(who, session_id, id, generation);
   return { released: id, generation };
 });

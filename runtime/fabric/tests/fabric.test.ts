@@ -13,7 +13,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { identify } from "../src/identity.js";
+import { identify, withoutGitRedirects } from "../src/identity.js";
 import { inspectDatabase, Store, type Message } from "../src/store.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -60,15 +60,32 @@ describe("work ownership", () => {
     const first = openStore(), second = openStore();
     const alice = agent("alice"), bob = agent("bob");
     announce(first, "alice", "bob");
-    const claim = first.acquireWork(alice, "session-a", { issue: "869", paths: ["runtime/fabric"] }, 1);
+    const claim = first.acquireWork(alice, "session-a", { issue: "#869", paths: ["Runtime/Fabric"] }, 1);
+    expect(claim).toMatchObject({ issue: "869", paths: ["runtime/fabric"] });
+    expect(first.verifyWork(alice, "session-a", claim.id, claim.generation)).toMatchObject({ id: claim.id });
     expect(() => second.acquireWork(bob, "session-b", { issue: "869" }, 60)).toThrow(/claimed/);
     expect(() => second.acquireWork(alice, "another-session", { issue: "869" }, 60)).toThrow(/claimed/);
     expect(() => second.acquireWork(bob, "session-b", { paths: ["runtime/fabric/src"] }, 60)).toThrow(/claimed/);
+    expect(() => second.acquireWork(bob, "session-b", { paths: ["RUNTIME/FABRIC/SRC"] }, 60)).toThrow(/claimed/);
     expect(second.workClaims(bob.project)).toMatchObject([{ holder: "alice/session-a", issue: "869" }]);
     const replacement = second.acquireWork(bob, "session-b", { paths: ["runtime/fabric/src"] }, 60, claim.expiresAtMs);
     expect(replacement.generation).toBeGreaterThan(claim.generation);
     expect(() => first.renewWork(alice, "session-a", claim.id, claim.generation, 60, claim.expiresAtMs)).toThrow(/stale/);
+    expect(() => first.verifyWork(alice, "session-a", claim.id, claim.generation, claim.expiresAtMs)).toThrow(/stale/);
     expect(() => first.releaseWork(alice, "session-a", claim.id, claim.generation, claim.expiresAtMs)).toThrow(/stale/);
+  });
+
+  it("keeps sessions on one seat separate for work and landing", () => {
+    const store = openStore(), sameSeat = agent("alice"), sha = "a".repeat(40);
+    announce(store, "alice");
+    const claim = store.acquireWork(sameSeat, "session-a", { issue: "869" }, 60);
+    const lease = store.acquireLanding(sameSeat, "session-a", sha, 60);
+    expect(() => store.acquireWork(sameSeat, "bad/session", { issue: "870" }, 60)).toThrow(/must not contain/);
+    expect(() => store.renewWork(sameSeat, "session-b", claim.id, claim.generation, 60)).toThrow(/stale/);
+    expect(() => store.verifyWork(sameSeat, "session-b", claim.id, claim.generation)).toThrow(/stale/);
+    expect(() => store.releaseWork(sameSeat, "session-b", claim.id, claim.generation)).toThrow(/stale/);
+    expect(() => store.withLandingPush(sameSeat, "session-b", lease.generation, sha, () => {})).toThrow(/stale/);
+    expect(() => store.releaseLanding(sameSeat, "session-b", lease.generation)).toThrow(/stale/);
   });
 
   it("serialises landing, records stale takeover, and fences verify and release", () => {
@@ -101,6 +118,40 @@ describe("work ownership", () => {
     expect(second.activity(bob.project).some((entry) => entry.kind === "landing_takeover")).toBe(true);
   });
 
+  it("expires a crashed pusher's hold and records takeover", () => {
+    const first = openStore(), second = openStore();
+    const alice = agent("alice"), bob = agent("bob"), sha = "a".repeat(40);
+    announce(first, "alice", "bob");
+    const lease = first.acquireLanding(alice, "session-a", sha, 1);
+    const db = new Database(databasePath);
+    try {
+      db.prepare("UPDATE landing_leases SET pushing_until = ? WHERE project = ?")
+        .run(lease.expiresAtMs + 150_000, alice.project);
+      expect(() => first.releaseLanding(alice, "session-a", lease.generation)).toThrow(/stale/);
+      expect(() => second.acquireLanding(bob, "session-b", sha, 60, lease.expiresAtMs + 1)).toThrow(/held/);
+      db.prepare("UPDATE landing_leases SET pushing_until = ? WHERE project = ?")
+        .run(lease.expiresAtMs - 1, alice.project);
+      const takeover = second.acquireLanding(bob, "session-b", sha, 60, lease.expiresAtMs + 1);
+      expect(takeover).toMatchObject({ takenOverFrom: "alice/session-a", generation: lease.generation + 1 });
+    } finally { db.close(); }
+  });
+
+  it("reports a completed push when lease release fails", () => {
+    const store = openStore(), who = agent("alice"), sha = "a".repeat(40);
+    announce(store, "alice");
+    const lease = store.acquireLanding(who, "session-a", sha, 60);
+    const db = new Database(databasePath);
+    try {
+      const outcome = store.withLandingPush(who, "session-a", lease.generation, sha, () => {
+        db.exec(`CREATE TRIGGER fail_release BEFORE UPDATE OF released_at ON landing_leases
+          BEGIN SELECT RAISE(ABORT, 'release blocked'); END`);
+        return "pushed";
+      });
+      expect(outcome).toMatchObject({ result: "pushed", releaseWarning: expect.stringContaining("release blocked") });
+      expect(store.landingLease(who.project)).not.toBeNull();
+    } finally { db.close(); }
+  });
+
   it("exposes claims and landing through MCP and refuses a push without a lease", async () => {
     const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
     const tsxLoader = createRequire(import.meta.url).resolve("tsx");
@@ -114,10 +165,19 @@ describe("work ownership", () => {
     const client = new Client({ name: "work-ownership-test", version: "1" });
     try {
       await client.connect(transport);
+      const emptyStatus = await client.callTool({ name: "fabric_status", arguments: {} });
+      expect(emptyStatus.isError).not.toBe(true);
+      expect(JSON.stringify(emptyStatus)).not.toContain('"work_claims"');
+      expect(JSON.stringify(emptyStatus)).not.toContain('"landing_lease"');
       const claim = await client.callTool({ name: "fabric_work_claim", arguments: {
         action: "acquire", session_id: "claude-session-one", issue: "869", seconds: 60,
       } });
       expect(claim.isError).not.toBe(true);
+      const claimRecord = claim.structuredContent as { id: string; generation: number };
+      const verified = await client.callTool({ name: "fabric_work_claim", arguments: {
+        action: "verify", session_id: "claude-session-one", id: claimRecord.id, generation: claimRecord.generation,
+      } });
+      expect(verified.structuredContent).toMatchObject({ id: claimRecord.id });
       const lease = await client.callTool({ name: "fabric_landing_lease", arguments: {
         action: "acquire", session_id: "claude-session-one", expected_sha: "a".repeat(40), seconds: 60,
       } });
@@ -158,12 +218,20 @@ describe("work ownership", () => {
     const head = git(work, "rev-parse", "HEAD");
     const store = openStore();
     const who = identify({ AGENT_FABRIC_SEAT: "codex", AGENT_FABRIC_LABEL: "cli-reviewer" }, work);
+    store.announce(who);
     const lease = store.acquireLanding(who, "landing-session", base, 60);
-    const pushed = runCli(["landing-push", "landing-session", String(lease.generation), "main"],
-      temporaryDirectory, { GIT_DIR: bare }, work);
+    const pushed = runCli(["landing-push", "landing-session", String(lease.generation), "main", "--label", "cli-reviewer"],
+      temporaryDirectory, { GIT_DIR: bare, AGENT_FABRIC_SEAT: "agent", AGENT_FABRIC_LABEL: "other-seat", GIT_NAMESPACE: "shadow" }, work);
     expect(pushed.status, pushed.stderr).toBe(0);
     expect(git(bare, "rev-parse", "refs/heads/main")).toBe(head);
     expect(store.landingLease(who.project)).toBeNull();
+  });
+
+  it("removes Git configuration redirects from landing commands", () => {
+    const env = withoutGitRedirects({ GIT_CONFIG_PARAMETERS: "'url.bad.pushInsteadOf=origin'",
+      GIT_CONFIG_COUNT: "1", GIT_CONFIG_KEY_0: "url.bad.pushInsteadOf", GIT_CONFIG_VALUE_0: "origin",
+      GIT_CONFIG_GLOBAL: "/tmp/bogus", GIT_NAMESPACE: "shadow" });
+    expect(Object.keys(env).filter((key) => key.startsWith("GIT_"))).toEqual([]);
   });
 });
 

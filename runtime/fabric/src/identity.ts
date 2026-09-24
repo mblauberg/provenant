@@ -12,11 +12,18 @@ const GIT_REPOSITORY_REDIRECTS = [
   "GIT_ALTERNATE_OBJECT_DIRECTORIES",
   "GIT_CEILING_DIRECTORIES",
   "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+  "GIT_CONFIG_PARAMETERS",
+  "GIT_CONFIG_COUNT",
+  "GIT_CONFIG_GLOBAL",
+  "GIT_NAMESPACE",
 ] as const;
 
 export function withoutGitRedirects(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const cleanEnv: NodeJS.ProcessEnv = { ...env };
   for (const key of GIT_REPOSITORY_REDIRECTS) delete cleanEnv[key];
+  for (const key of Object.keys(cleanEnv)) {
+    if (/^GIT_CONFIG_(?:KEY|VALUE)_\d+$/u.test(key)) delete cleanEnv[key];
+  }
   return cleanEnv;
 }
 

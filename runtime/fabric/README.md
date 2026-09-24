@@ -155,26 +155,6 @@ CLI presence does not prove authentication; `auth?` makes that uncertainty expli
 
 ## Mailbox and identity
 
-### Work claims and landing
-
-`fabric_work_claim` acquires an issue or repository-relative path set for one
-chair session. Conflicting live issue claims and overlapping path prefixes are
-refused. Pass a distinct, stable `session_id` for each chair, even when two
-Claude Code sessions use the same Fabric seat. The returned `id` and fencing
-`generation` are required to renew or release; expired claims lapse. Active
-claims appear in `fabric_lanes`, `fabric_status` and `fabric lanes`.
-
-`fabric_landing_lease` separately acquires one repository-wide landing lease
-with the expected remote integration SHA. It has a holder, expiry, generation,
-verify and release operations. An expired lease can be taken over; the prior
-holder and new generation are recorded in activity. Before pushing, run
-`fabric landing-push <session-id> <generation> <branch>` from the landing
-checkout. It checks the remote SHA and live lease immediately before a normal
-fast-forward Git push, then releases the lease on success. A push is limited to
-two minutes and its persisted hold lasts another thirty seconds for stale
-recovery without blocking other Fabric writes. Renew or release an aborted
-lease through `fabric_landing_lease` as appropriate.
-
 `fabric_inbox` defaults to a non-claiming peek of ten headers: ID, sender, kind
 and an 80-character preview. `ids:[...]` claims up to 100 selected messages;
 `claim:true` claims available messages up to `limit`. Bodies are capped at
@@ -211,6 +191,33 @@ fabric watch --activity --interval 2 # activity stream
 fabric status <run-id> --wait-seconds 55
 fabric adapters --json
 ```
+
+### Work claims and landing
+
+`fabric_work_claim` records an advisory issue or repository-relative path claim
+for one chair session. Conflicting live issue claims and overlapping path
+prefixes are refused on acquisition; dispatch does not enforce claims. Acquire
+and verify a claim before dispatch or landing, and do not dispatch against a
+conflicting live claim. Pass a distinct, stable `session_id` without `/` for
+each chair, even when two sessions use the same Fabric seat. The returned `id`
+and `generation` identify renew, verify and release operations; expired claims
+lapse. `#869` and `869` share an issue key, and path claims compare without case.
+Active claims appear in `fabric_lanes`, `fabric lanes` and `fabric_status` when
+full detail is requested or ownership is present.
+
+`fabric_landing_lease` separately acquires one repository-wide landing lease
+with the expected remote integration SHA. It has a holder, expiry, generation,
+verify and release operations. An expired lease can be taken over; the prior
+holder and new generation are recorded in activity. Before pushing, run
+`fabric landing-push <session-id> <generation> <branch> --label <seat>` from the
+landing checkout, using the same label as the MCP lease holder. Alternatively,
+export that label as `AGENT_FABRIC_LABEL` in the shell. The command checks the
+remote SHA and live lease, confirms the remote commit is an ancestor of HEAD,
+then pushes with `--force-with-lease` and releases the lease on success. The
+command waits at most two minutes for Git; its persisted hold lasts another
+thirty seconds. A push orphaned by a crash is fenced by the remote SHA, not by
+the hold. If the push succeeds but release fails, it reports `pushed` with a
+`release_warning`. Renew or release an aborted lease as appropriate.
 
 ## Run storage and boundaries
 

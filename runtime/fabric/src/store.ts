@@ -81,7 +81,12 @@ export interface LandingLease {
 
 function holder(who: Identity, session: string): string {
   if (!session.trim() || session.length > 128) throw new Error("session id must be 1 to 128 characters");
+  if (session.includes("/")) throw new Error("session id must not contain /");
   return `${who.agentId}/${session}`;
+}
+
+function normalIssue(issue?: string): string | null {
+  return issue?.trim().replace(/^#/u, "") || null;
 }
 
 function expiry(seconds: number, now: number): number {
@@ -96,17 +101,19 @@ function normalPaths(paths: string[]): string[] {
     const clean = path.replace(/\\/gu, "/").replace(/\/$/u, "");
     if (!clean || clean.startsWith("/") || clean.split("/").some((part) => part === "" || part === ".." || part === "."))
       throw new Error(`invalid repository-relative path: ${path}`);
-    return clean;
+    return clean.toLowerCase();
   }))].sort();
 }
 
 function overlaps(left: string, right: string): boolean {
+  left = left.toLowerCase();
+  right = right.toLowerCase();
   return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
 }
 
 /**
- * Every operation is scoped to one project and one caller, both supplied by the
- * process rather than by the call, so no tool argument can widen its own reach.
+ * Every operation is scoped to one project and one caller. MCP callers derive
+ * both from the process; landing-push can select its already leased seat label.
  *
  * Concurrency is SQLite's problem, not ours: WAL lets any number of agent
  * processes read and write this file at once. That is the whole reason the
@@ -132,7 +139,6 @@ export class Store {
         try {
           this.#db.exec(schema);
           this.#ensureMessageLinkColumns();
-          this.#ensureLandingColumns();
           break;
         } catch (error) {
           if (!isSQLiteContention(error) || Date.now() >= deadline) throw error;
@@ -216,12 +222,13 @@ export class Store {
 
   acquireWork(who: Identity, session: string, scope: { issue?: string; paths?: string[] }, seconds: number, now = Date.now()): WorkClaim {
     const owner = holder(who, session), paths = normalPaths(scope.paths ?? []);
-    const issue = scope.issue?.trim() || null;
+    const issue = normalIssue(scope.issue);
     if (!issue && paths.length === 0) throw new Error("claim requires an issue or paths");
     const until = expiry(seconds, now), id = randomUUID();
     return this.#db.transaction(() => {
       for (const existing of this.workClaims(who.project, now)) {
-        if ((issue && issue === existing.issue) || paths.some((path) => existing.paths.some((other) => overlaps(path, other))))
+        if ((issue && issue === normalIssue(existing.issue ?? undefined)) ||
+          paths.some((path) => existing.paths.some((other) => overlaps(path, other))))
           throw new Error(`work already claimed by ${existing.holder} until ${new Date(existing.expiresAtMs).toISOString()}`);
       }
       const result = this.#db.prepare(`INSERT INTO work_claims(id, project, holder, issue, paths, expires_at)
@@ -241,6 +248,13 @@ export class Store {
       this.#log(who, "work_renew", `${owner} ${id} generation ${generation}`);
       return this.workClaims(who.project, now).find((claim) => claim.id === id)!;
     }).immediate();
+  }
+
+  verifyWork(who: Identity, session: string, id: string, generation: number, now = Date.now()): WorkClaim {
+    const claim = this.workClaims(who.project, now).find((item) => item.id === id);
+    if (!claim || claim.holder !== holder(who, session) || claim.generation !== generation)
+      throw new Error("stale work claim");
+    return claim;
   }
 
   releaseWork(who: Identity, session: string, id: string, generation: number, now = Date.now()): void {
@@ -305,7 +319,8 @@ export class Store {
   }
 
   /** Persist a bounded push hold without blocking unrelated Fabric writers during network I/O. */
-  withLandingPush<T>(who: Identity, session: string, generation: number, expectedSha: string, push: () => T): T {
+  withLandingPush<T>(who: Identity, session: string, generation: number, expectedSha: string, push: () => T):
+    { result: T; releaseWarning?: string } {
     const owner = holder(who, session);
     this.#db.transaction(() => {
       this.verifyLanding(who, session, generation, expectedSha);
@@ -315,20 +330,25 @@ export class Store {
         .run(now + PUSH_HOLD_MS, who.project, generation, now);
       if (changed.changes !== 1) throw new Error("landing push already in progress");
     }).immediate();
+    let result: T;
     try {
-      const result = push();
+      result = push();
+    } catch (error) {
+      this.#db.prepare(`UPDATE landing_leases SET pushing_until = NULL
+        WHERE project = ? AND holder = ? AND generation = ? AND released_at IS NULL`)
+        .run(who.project, owner, generation);
+      throw error;
+    }
+    try {
       this.#db.transaction(() => {
         this.#db.prepare(`UPDATE landing_leases SET released_at = ?, pushing_until = NULL
           WHERE project = ? AND holder = ? AND generation = ? AND released_at IS NULL`)
           .run(Date.now(), who.project, owner, generation);
         this.#log(who, "landing_release", `${owner} generation ${generation}`);
       }).immediate();
-      return result;
+      return { result };
     } catch (error) {
-      this.#db.prepare(`UPDATE landing_leases SET pushing_until = NULL
-        WHERE project = ? AND holder = ? AND generation = ? AND released_at IS NULL`)
-        .run(who.project, owner, generation);
-      throw error;
+      return { result, releaseWarning: error instanceof Error ? error.message : String(error) };
     }
   }
 
@@ -796,17 +816,6 @@ export class Store {
       } catch (error) {
         if (!(error instanceof Error) || !/duplicate column name/i.test(error.message)) throw error;
       }
-    }
-  }
-
-  #ensureLandingColumns(): void {
-    const columns = new Set(
-      (this.#db.pragma("table_info(landing_leases)") as Array<{ name: string }>).map((column) => column.name),
-    );
-    if (columns.has("pushing_until")) return;
-    try { this.#db.exec("ALTER TABLE landing_leases ADD COLUMN pushing_until INTEGER"); }
-    catch (error) {
-      if (!(error instanceof Error) || !/duplicate column name/i.test(error.message)) throw error;
     }
   }
 
