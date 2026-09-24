@@ -659,6 +659,10 @@ def resolve_writer_worktree(worktree: Path) -> Path:
             raise WorktreeLeaseError("worktree must be registered with Git")
     except (OSError, subprocess.SubprocessError) as exc:
         raise WorktreeLeaseError("cannot verify registered Git worktree") from exc
+    git_dir = _git_path(resolved, "--absolute-git-dir")
+    common_dir = _git_path(resolved, "--git-common-dir")
+    if git_dir is None or common_dir is None or git_dir.resolve() == common_dir.resolve():
+        raise WorktreeLeaseError("worktree_write requires a linked worktree; fix: create a linked worktree")
     return resolved
 
 
@@ -722,6 +726,8 @@ def build_command(
         str(prompt_path),
         "--out",
         str(result_path),
+        "--run-dir",
+        str(result_path.parent),
         "--role",
         args.role,
     ]
@@ -737,6 +743,7 @@ def build_command(
         ("--access-mode", args.access_mode),
         ("--worktree", str(args.worktree) if args.worktree else ""),
         ("--timeout-seconds", str(provider_timeout_seconds(args.timeout_seconds))),
+        ("--original-prompt-file", getattr(args, "original_prompt_file", None)),
     ):
         if value:
             command.extend((flag, value))
@@ -900,6 +907,8 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
             timeout_seconds=provider_timeout_seconds(args.timeout_seconds),
             intent=args.intent, preface=args.preface, requested_model=args.model,
             requested_effort=args.effort or "", run_id=os.environ.get("PROVENANT_RUN_ID", ""),
+            run_dir=result_path.parent,
+            original_prompt_file=getattr(args, "original_prompt_file", None) or prompt_path,
             chair=os.environ.get("PROVENANT_CHAIR", ""),
             reviewer_id=args.reviewer_id or "", risk_tier=args.risk_tier or "",
             model_override_tier=args.model_override_tier or "", orchestrator_family="",
@@ -1135,9 +1144,9 @@ def routing_environment() -> dict[str, str]:
     return env
 
 
-def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
+def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = None) -> dict[str, Any]:
     """Use the dispatcher router before creating custody or launching any task."""
-    workspace = Path.cwd().resolve()
+    workspace = Path(workspace_root or Path.cwd()).resolve()
     product = Path(os.environ.get("AGENT_FABRIC_PRODUCT_ROOT", SKILLS_ROOT.parent))
     instance = Path(routing_environment().get("AGENT_FABRIC_INSTANCE_ROOT") or Path.home() / ".agents").expanduser()
     catalog = instance / "config/model-routing.json"
@@ -1176,7 +1185,8 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                                 if task.get("prompt_file") is not None else task["prompt"].encode())
                 try:
                     scan = secret_scan.scan_inputs(
-                        prompt_bytes, str(task.get("prompt_file") or "<prompt>"), task.get("add_dirs"))
+                        prompt_bytes, str(task.get("prompt_file") or "<prompt>"),
+                        [str(workspace / Path(item).expanduser()) for item in task.get("add_dirs") or []])
                 except (OSError, subprocess.SubprocessError) as exc:
                     raise PreflightError("secret_scan_unavailable", "Make dispatch inputs readable for the secret scan.") from exc
                 if scan.findings and not task.get("allow_secrets", False):
@@ -1197,8 +1207,11 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                 elif task.get("worktree"):
                     raise PreflightError("worktree_not_applicable", "Pass mode worktree_write with worktree, or omit worktree.")
                 command = [sys.executable, str(product / "scripts/model_route.py"), "resolve",
-                           "--catalog", str(catalog), "--adapter", adapter, "--role", "worker"]
-                if task.get("alias"):
+                           "--catalog", str(catalog), "--adapter", adapter,
+                           "--role", task.get("role") or "worker"]
+                if task.get("task_class"):
+                    command.extend(("--task-class", task["task_class"]))
+                elif task.get("alias"):
                     command.extend(("--alias", task["alias"]))
                 elif not task.get("model"):
                     command.extend(("--alias", "workhorse"))
@@ -1257,16 +1270,24 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                     if "effort" in code:
                         fix = "Omit effort, or pass a supported level: low, medium, high, xhigh, max, ultra."
                     raise PreflightError(code, fixes.get(code, fix))
+                protected = provider_exec.check_protected_inputs(
+                    route, workspace, worktree if mode == "worktree_write" else task.get("cwd") or workspace,
+                    worktree=worktree if mode == "worktree_write" else None,
+                    prompt_file=task.get("prompt_file"), add_dirs=task.get("add_dirs", []))
+                if protected and (adapter == "codex" or not provider_exec._sandbox_exec_path()):
+                    raise ValueError("protected paths require sandbox-exec read confinement; fix: use a non-training route")
+                if task.get("prompt_file") is not None:
+                    read_prompt_input(Path(task["prompt_file"]), workspace, workspace)
                 routes.append(route)
-            except (PreflightError, WorktreeLeaseError, OSError, subprocess.TimeoutExpired) as exc:
+            except (PreflightError, WorktreeLeaseError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
                 prompt_fixes = {
                     "prompt_unavailable": "Pass prompt text or prompt_file=<readable regular file inside the workspace>.",
                     "prompt_path_forbidden": "Pass prompt_file=<readable regular file inside the workspace>.",
                     "credential_or_auth_store_denied": "Pass prompt text or a workspace prompt file outside credential and authentication stores.",
                     "prompt_hard_link_denied": "Pass prompt_file=<workspace file with one hard link>.",
                 }
-                errors.append({"task_id": task_id, "error": getattr(exc, "code", "worktree_invalid" if isinstance(exc, WorktreeLeaseError) else "preflight_unavailable"),
-                               "fix": prompt_fixes.get(exc.code, str(exc)) if isinstance(exc, PreflightError) else "Pass a readable prompt and registered Git worktree; check adapter availability."})
+                errors.append({"task_id": task_id, "error": getattr(exc, "code", "protected_path_denied" if isinstance(exc, ValueError) else "worktree_invalid" if isinstance(exc, WorktreeLeaseError) else "preflight_unavailable"),
+                               "fix": prompt_fixes.get(exc.code, str(exc)) if isinstance(exc, PreflightError) else str(exc) if isinstance(exc, ValueError) else "Pass a readable prompt and registered Git worktree; check adapter availability."})
     return ({"status": "rejected", "error": errors[0]["error"], "fix": errors[0]["fix"], "errors": errors}
             if errors else {"status": "validated", "routes": routes})
 
@@ -1490,6 +1511,28 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         batch_dir = run_dir / "dispatch" / "batches" / args.batch_id
         if batch_dir.is_symlink() or not batch_dir.is_dir():
             return fail(run_dir, "batch_path_invalid", "batch directory does not exist")
+    original_prompt = None
+    if args.prompt_file is not None:
+        source = args.prompt_file.expanduser()
+        original_prompt = str((source if source.is_absolute() else workspace / source).resolve())
+    args.original_prompt_file = original_prompt
+    try:
+        protected = provider_exec.protected_paths(workspace, provider_cwd, args.worktree)
+        if protected and (args.prompt_file is not None or args.add_dirs):
+            task = {"id": args.task_id, "adapter": args.tool, "access_mode": args.access_mode,
+                    "worktree": str(args.worktree) if args.worktree else None,
+                    "cwd": str(provider_cwd), "prompt_file": str(args.prompt_file) if args.prompt_file else None,
+                    "add_dirs": args.add_dirs, "alias": args.alias, "model": args.model,
+                    "effort": args.effort, "fallback": args.fallback,
+                    "role": args.role, "task_class": args.task_class}
+            if args.prompt_file is None:
+                task.pop("prompt_file")
+                task["prompt"] = "protected input preflight"
+            checked = preflight_tasks([task], workspace)
+            if checked["status"] != "validated":
+                return fail(run_dir, checked.get("error", "protected_path_denied"), checked["fix"])
+    except (OSError, ValueError) as exc:
+        return fail(run_dir, "protected_path_denied", str(exc))
     try:
         prompt_bytes = (read_prompt_input(args.prompt_file, workspace, run_dir)
                         if args.prompt_file is not None else sys.stdin.buffer.read())
@@ -1684,6 +1727,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             args._phase_timings["route_plan"] = round((time.monotonic() - plan_started) * 1000, 3)
             plan = fast_plan if fast_plan is not None else planner_result(planning)
             if plan.get("schema") == "fabric.exec-plan.v1":
+                old_run_dir = plan.get("run_dir")
+                plan["run_dir"] = str(attempt_dir)
+                boundary_paths = plan.get("applied", {}).get("write_boundary", {}).get("writable_paths")
+                if isinstance(boundary_paths, list):
+                    plan["applied"]["write_boundary"]["writable_paths"] = [
+                        str(attempt_dir) if path == old_run_dir else path for path in boundary_paths]
+                plan["original_prompt_file"] = original_prompt
                 provider_cwd = Path(plan.get("cwd") or workspace).resolve()
                 workspace_observation["cwd"] = str(provider_cwd)
                 plan.update(timeout_seconds=args.timeout_seconds,run_id=run_identity(run_dir,run_receipt),chair=os.environ.get("PROVENANT_CHAIR") or os.environ.get("AGENT_FABRIC_SEAT", ""),fallback_from=getattr(args,"fallback_from",None))
@@ -1703,6 +1753,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                             try: replacement=json.loads(resolved.stdout)
                             except ValueError: continue
                             if replacement.get("schema")!="fabric.exec-plan.v1": continue
+                            old_run_dir = replacement.get("run_dir")
+                            replacement["run_dir"] = str(attempt_dir)
+                            boundary_paths = replacement.get("applied", {}).get("write_boundary", {}).get("writable_paths")
+                            if isinstance(boundary_paths, list):
+                                replacement["applied"]["write_boundary"]["writable_paths"] = [
+                                    str(attempt_dir) if path == old_run_dir else path for path in boundary_paths]
+                            replacement["original_prompt_file"] = original_prompt
                             replacement.update(run_id=plan["run_id"],chair=plan["chair"])
                             replacement["warnings"].append("skipped cooling alias candidate "+args.tool+"/"+plan["model"])
                             plan=replacement;args.tool=candidate["adapter"];break
@@ -2086,7 +2143,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "finished_at": finished_at,
         "duration_seconds": duration_seconds,
         "workspace": workspace_observation,
-        "prompt": {"path": relative_path(run_dir, prompt_path), "digest": digest(prompt_path)},
+        "prompt": {"path": relative_path(run_dir, prompt_path), "digest": digest(prompt_path),
+                   "original_path": original_prompt},
         "result": (
             {"path": relative_path(run_dir, result_path), "digest": result_digest}
             if result_exists

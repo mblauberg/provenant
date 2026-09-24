@@ -15,6 +15,33 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "model-route"
 CATALOG = json.loads((ROOT / "config" / "model-routing.json").read_text())
+
+
+def test_opencode_models_have_explicit_training_flags():
+    models = CATALOG["adapters"]["opencode"]["models"]
+    assert models
+    for model in models:
+        assert type(model.get("trains_on_prompts")) is bool
+        assert model["trains_on_prompts"] is ("-free" in model["id"])
+
+
+def test_fallback_inherits_adapter_training_flag_without_false_default():
+    spec = importlib.util.spec_from_file_location("route_under_test", ROOT / "scripts/model_route.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    catalog = {"adapters": {"fixture": {"trains_on_prompts": True,
+                "aliases": {"workhorse": ["primary", "candidate"]},
+                "models": [{"id": "primary", "plan_cap_usd": 1},
+                           {"id": "candidate", "plan_cap_usd": 1}]}}}
+    assert module._fallback_candidates("fixture", "workhorse", "primary", catalog, {}) == []
+    catalog["adapters"]["fixture"]["trains_on_prompts"] = False
+    candidates = module._fallback_candidates("fixture", "workhorse", "primary", catalog, {})
+    assert len(candidates) == 1
+    assert candidates[0]["trains_on_prompts"] is False
+    del catalog["adapters"]["fixture"]["trains_on_prompts"]
+    candidates = module._fallback_candidates("fixture", "workhorse", "primary", catalog, {})
+    assert len(candidates) == 1
+    assert candidates[0]["trains_on_prompts"] is None
 CRUCIAL_RISK_OVERRIDE = CATALOG["families"]["anthropic"]["risk_tier_overrides"]["crucial"]
 RISK_OVERRIDE_MODEL = CRUCIAL_RISK_OVERRIDE["models"][0]
 NON_OCCUPANT_MODELS = tuple(
@@ -160,6 +187,36 @@ def test_snapshot_deep_merges_models_and_drops_malformed_overlay(tmp_path):
     assert "bad" not in snapshot["endpoints"]
     assert snapshot["adapters"]["codex"]["default_model"] if "default_model" in snapshot["adapters"]["codex"] else True
     assert any("codex.models" in note for note in snapshot["drift"])
+
+
+def test_training_flag_survives_model_overlay_and_free_override(tmp_path, monkeypatch):
+    router = load_router()
+    instance = tmp_path / "instance"
+    (instance / "config").mkdir(parents=True)
+    (instance / "config/model-routing.json").write_text(json.dumps({"adapters": {
+        "claude": {"models": [{"id": "claude-opus-5-5", "names": ["overlay-opus"]}]},
+        "codex": {"models": [{"id": "gpt-6-sol", "names": ["overlay-sol"]}]},
+        "agy": {"models": [{"id": "gemini-3.8-flash", "names": ["overlay-flash"]}]},
+        "opencode": {"models": [{"id": "opencode/mimo-v2.6-flash-free", "names": ["overlay-free"]}]},
+    }}))
+    monkeypatch.setattr(router, "CATALOG_PATH", instance / "config/model-routing.json")
+    catalog = router.catalogue_snapshot()["catalogue"]
+    for adapter, model in (("claude", "claude-opus-5-5"), ("codex", "gpt-6-sol"),
+                           ("agy", "gemini-3.8-flash")):
+        entry = next(item for item in catalog["adapters"][adapter]["models"] if item["id"] == model)
+        assert router.training_flag(catalog["adapters"][adapter], entry) is False
+    free = next(item for item in catalog["adapters"]["opencode"]["models"]
+                if item["id"] == "opencode/mimo-v2.6-flash-free")
+    assert router.training_flag(catalog["adapters"]["opencode"], free) is True
+    assert router.training_flag({}, {}) is None
+
+
+def test_resolved_routes_expose_training_flag():
+    for adapter, model, expected in (("claude", "opus", False),
+                                     ("opencode", "opencode/mimo-v2.6-flash-free", True)):
+        result, route = resolve("--adapter", adapter, "--model", model, "--role", "worker")
+        assert result.returncode == 0, result.stderr
+        assert route["trains_on_prompts"] is expected
 
 
 def test_snapshot_drops_invalid_new_adapter_effort_and_allows_nullable_override(tmp_path, monkeypatch):
@@ -474,7 +531,7 @@ def test_opencode_training_warning_and_paid_fallback_excludes_free():
     result, unregistered = resolve("--adapter", "opencode", "--model",
                                    "opencode/muse-spark-2-contributor-free", "--role", "worker")
     assert result.returncode == 0, unregistered
-    assert unregistered["trains_on_prompts"] is True
+    assert unregistered["trains_on_prompts"] is None
     assert unregistered["warnings"]
 
 

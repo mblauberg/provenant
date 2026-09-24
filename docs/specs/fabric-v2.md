@@ -69,4 +69,19 @@ Project `CLAUDE.md` keeps both `@AGENTS.md` and `@HARNESS.md`. `scripts/install-
 
 ## Routing and authority
 
-`model_route.py snapshot --json` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Without confinement, those reads are unconfined; agy retains `prompt_only`.
+`.agents/fabric-policy.json` declares `protected_paths` relative to the
+directory containing `.agents/`; Fabric discovers it at the workspace root and
+the Git toplevels of workspace, cwd and worktree, plus immediate child
+repository toplevels of a non-Git workspace, and mirrors repository paths into
+every registered worktree. Routes resolve `trains_on_prompts` from the model,
+then the adapter; an unresolved value counts as training. A training route is
+rejected when its prompt file or additional directory overlaps a protected
+path, its cwd lies inside one, or OS read confinement is unavailable. Its
+`sandbox-exec` profile
+denies reads of those paths in every registered worktree. Non-training routes
+are unaffected. Codex writer confinement is supplied by `-s workspace-write`
+(or `-c sandbox_mode="workspace-write"` on resume),
+`-c sandbox_workspace_write.writable_roots=<add_dirs>` and a fresh run's
+`--cd <worktree>`.
+
+`model_route.py snapshot --json` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Writer launches restrict writes to the worktree, per-worktree Git metadata, common Git objects, refs, logs and packed refs, attempt files, temp paths, devices and provider state. Codex writers use its native `workspace-write` sandbox. Unavailable OS confinement produces an explicit warning.

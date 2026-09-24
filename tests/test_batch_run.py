@@ -1204,9 +1204,14 @@ def test_artifact_failure_cleans_unindexed_batch_directory_and_releases_lock(tmp
 
 
 def make_worktree(root: Path, name: str) -> Path:
+    """A linked worktree: writers refuse a primary checkout."""
+    primary = root / f'{name}-primary'
+    primary.mkdir()
+    subprocess.run(['git', 'init', '-q'], cwd=primary, check=True)
+    subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                    'commit', '-q', '--allow-empty', '-m', 'initial'], cwd=primary, check=True)
     worktree = root / name
-    worktree.mkdir()
-    subprocess.run(['git', 'init', '-q'], cwd=worktree, check=True)
+    subprocess.run(['git', 'worktree', 'add', '-q', '-b', name, str(worktree)], cwd=primary, check=True)
     return worktree.resolve()
 
 

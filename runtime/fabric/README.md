@@ -67,18 +67,43 @@ A finding rejects with `error: secret_detected` and a location in `fix`; set
 `allow_secrets: true` explicitly to proceed. The attempt records the override
 and finding names. Directory scanning stops at 2,000 files or 20 MB and records
 a warning. Writers use `mode: worktree_write` and an
-owned, registered worktree. `cwd` selects an existing read-only directory inside
+owned, registered linked worktree. The primary checkout is refused; create a linked
+worktree. `cwd` selects an existing read-only directory inside
 the caller workspace. The Python owner validates provider capabilities and
 applies controls; Fabric does not claim a stronger guarantee than its receipt.
-On macOS, read-only agy and OpenCode launches run under `sandbox-exec` when it
-is available. The profile denies reads of the home directory, `/private/tmp` and
-the workspace outside `cwd` and `add_dirs`, and writes there and in shared temp.
-It re-allows only the provider's own state and sign-in files. Inside another
-sandbox, where macOS refuses a nested one, the run proceeds unconfined with a
-warning. Codex, Claude and Cursor read-only runs restrict writes, not reads, so
-a `cwd` below the root carries the warning "cwd is not a read boundary".
-The receipt records `applied.confinement` as `sandbox-exec` or `none`;
+On macOS, non-Codex read-only launches use `sandbox-exec` when available. The
+profile limits writes to the attempt directory and provider state. It denies
+reads of home, shared temp and the workspace outside `cwd` and `add_dirs`, with
+provider sign-in paths re-allowed. Training routes also deny reads of protected
+paths. Codex read-only uses its native read-only sandbox.
+Inside another sandbox, where macOS refuses a nested one, the attempt records
+an explicit unconfined-write warning. A `cwd` below the root may also warn that
+it is not a read boundary.
+Writer runs on macOS use `sandbox-exec` to restrict writes to their worktree,
+per-worktree Git metadata, common Git objects, refs, logs and packed refs,
+attempt files, device nodes and provider state; `add_dirs` stay read-only.
+Each attempt sets `TMPDIR`, `TMP`, `TEMP` and `XDG_CACHE_HOME` to private `tmp`
+and `cache` directories under its run directory. Shared temp and general user
+caches are not writable. Codex
+uses `-s workspace-write` (or `-c sandbox_mode="workspace-write"`
+on resume), with `-c sandbox_workspace_write.writable_roots=<add_dirs>` and
+`--cd <worktree>` on a fresh run. If OS confinement
+is unavailable, a writer receipt warns that writes are unconfined. Set the host
+environment variable `PROVENANT_NO_OS_CONFINEMENT=1` to opt out for new attempts;
+the receipt warns about the missing boundary. Protected-path dispatches to
+training routes still refuse without OS read confinement.
+The receipt records `applied.confinement` as `sandbox-exec`, `provider-native` or `none`;
+`applied.write_boundary` records the effective writable paths or native sandbox;
 `workspace.cwd` is the provider cwd and `workspace.root` is the caller workspace.
+Projects declare protected paths in `.agents/fabric-policy.json`, relative to
+the directory holding `.agents/`. Fabric checks the workspace root and the Git
+toplevels of the workspace, cwd and worktree; for a non-Git workspace, it also
+checks immediate child repository toplevels and mirrors repository paths into
+their registered worktrees. A route marked as training, or lacking a resolved
+training flag, cannot receive a prompt file or additional directory that
+overlaps one, or a cwd inside one. Its sandbox denies reads of protected paths
+in every registered worktree; without usable `sandbox-exec`, dispatch is rejected. Non-training
+routes keep their usual access.
 
 On macOS, a Codex `read-only` or `workspace-write` provider gets a bundled `ps`
 shim on PATH because seatbelt blocks the setuid `/bin/ps`. Process identity reads

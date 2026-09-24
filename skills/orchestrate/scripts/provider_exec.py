@@ -43,9 +43,11 @@ CONFINED_STATE = {
         "read_write": (".local/share/opencode", ".local/state/opencode", ".cache/opencode"),
         "read": (".config/opencode",),
     },
+    "claude": {"read_write": (".claude", ".claude.json*", ".cache/claude", ".npm")},
+    "cursor": {"read_write": (".cursor", ".cache/cursor", ".npm")},
+    "kiro": {"read_write": (".kiro", ".cache/kiro", ".npm")},
 }
 EXTRA_DENIED_READS = (".claude/projects", ".codex/sessions")
-_DARWIN_USER_DIRS_CACHE = None
 
 
 def now():
@@ -122,26 +124,6 @@ def _sbpl_string(path):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _darwin_user_dirs():
-    global _DARWIN_USER_DIRS_CACHE
-    if _DARWIN_USER_DIRS_CACHE is not None:
-        return _DARWIN_USER_DIRS_CACHE
-    found = []
-    for name in ("DARWIN_USER_TEMP_DIR", "DARWIN_USER_CACHE_DIR"):
-        try:
-            result = subprocess.run(["/usr/bin/getconf", name], capture_output=True, text=True, timeout=5)
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if result.returncode != 0:
-            continue
-        value = result.stdout.strip()
-        if value:
-            found.append(Path(value))
-    if len(found) == 2:
-        _DARWIN_USER_DIRS_CACHE = tuple(found)
-    return tuple(found)
-
-
 def _sbpl_filter(path):
     text = str(path)
     if text.endswith("*"):
@@ -152,12 +134,81 @@ def _sbpl_filter(path):
     return "(subpath " + _sbpl_string(path) + ")"
 
 
-def _sbpl_rule(action, operations, paths):
-    return f"({action} {operations} " + " ".join(_sbpl_filter(path) for path in paths) + ")\n" if paths else ""
+def _sbpl_rule(action, operations, paths, *, literal=False):
+    filters = (('(literal ' + _sbpl_string(path) + ')') if literal else _sbpl_filter(path) for path in paths)
+    return f"({action} {operations} " + " ".join(filters) + ")\n" if paths else ""
+
+
+def _git_toplevel(path):
+    result = subprocess.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+                            capture_output=True, text=True, timeout=5)
+    return Path(result.stdout.strip()).resolve() if result.returncode == 0 and result.stdout.strip() else None
+
+
+def protected_paths(workspace_root, cwd=None, worktree=None):
+    workspace = Path(workspace_root).expanduser().resolve()
+    owners = [workspace]
+    roots = [_git_toplevel(path) for path in (workspace, cwd, worktree) if path is not None]
+    if roots[0] is None:
+        for child in sorted(workspace.iterdir()):
+            if child.is_dir() and _git_toplevel(child) == child.resolve():
+                roots.append(child.resolve())
+    owners.extend(root for root in roots if root is not None and root not in owners)
+    protected = []
+    worktrees = {}
+    for owner in owners:
+        declaration = owner / ".agents/fabric-policy.json"
+        if not declaration.is_file():
+            continue
+        try:
+            policy = json.loads(declaration.read_text())
+            paths = policy.get("protected_paths", []) if isinstance(policy, dict) else None
+            if not isinstance(paths, list) or any(not isinstance(p, str) or not p or
+                                                 Path(p).is_absolute() or ".." in Path(p).parts or
+                                                 any(char in p for char in "*?[]") for p in paths):
+                raise ValueError("invalid protected paths")
+        except (OSError, KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"invalid protected path policy: {declaration}") from exc
+        for relative in paths:
+            resolved = (owner / relative).resolve()
+            existing = resolved
+            while not existing.is_dir() and existing != existing.parent:
+                existing = existing.parent
+            repo = _git_toplevel(existing)
+            if repo is None or not resolved.is_relative_to(repo):
+                protected.append(resolved)
+                continue
+            if repo not in worktrees:
+                listing = subprocess.run(["git", "-C", str(repo), "worktree", "list", "--porcelain"],
+                                         capture_output=True, text=True, timeout=5)
+                if listing.returncode != 0:
+                    raise ValueError("cannot list worktrees for protected path policy")
+                worktrees[repo] = [Path(line[9:]).resolve() for line in listing.stdout.splitlines()
+                                   if line.startswith("worktree ")]
+            protected.extend(root / resolved.relative_to(repo) for root in worktrees[repo])
+    return list(dict.fromkeys(protected))
+
+
+def check_protected_inputs(route, workspace_root, cwd, *, worktree=None, prompt_file=None, add_dirs=()):
+    if route.get("trains_on_prompts") is False:
+        return []
+    workspace = Path(workspace_root).expanduser().resolve()
+    paths = protected_paths(workspace, cwd, worktree)
+    if not paths:
+        return []
+    for candidate, reject_parent in ((prompt_file, True), (cwd, False), *((path, True) for path in add_dirs)):
+        if candidate is None:
+            continue
+        item = Path(candidate).expanduser()
+        item = (item if item.is_absolute() else workspace / item).resolve()
+        for protected in paths:
+            if item.is_relative_to(protected) or (reject_parent and protected.is_relative_to(item)):
+                raise ValueError(f"protected path {protected}; fix: use a non-training route")
+    return paths
 
 
 def os_confinement_profile(plan):
-    """Deny the home directory and shared temp, re-allow the provider's own state, then the task's paths.
+    """Apply the provider's read and write boundary to this attempt.
 
     SBPL applies the last matching rule, so each later rule narrows or widens the one before.
     """
@@ -165,18 +216,44 @@ def os_confinement_profile(plan):
     home = Path.home().resolve()
     state = CONFINED_STATE.get(plan.get("adapter"), {})
     add_dirs = [Path(path) for path in plan.get("applied", {}).get("add_dirs", [])]
+    run_dir = Path(plan["run_dir"]) if plan.get("run_dir") else None
+    state_writes = [home / path for path in state.get("read_write", ())]
+    if plan.get("mode") == "worktree_write":
+        cwd = Path(plan["cwd"])
+        git_dirs = {}
+        for flag in ("--absolute-git-dir", "--git-common-dir"):
+            result = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", flag],
+                                    capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                git_dirs[flag] = Path(result.stdout.strip()).resolve()
+        private = git_dirs.get("--absolute-git-dir")
+        common = git_dirs.get("--git-common-dir")
+        # add_dirs are read inputs, never write targets.
+        allowed = [cwd, *([run_dir] if run_dir else []), *state_writes, Path("/dev")]
+        git_allowed = []
+        if private is not None and private != common:
+            git_allowed.append(private)
+        if common is not None:
+            git_allowed.extend(common / path for path in ("objects", "refs", "logs"))
+        literal_files = ([common / path for path in ("packed-refs", "packed-refs.lock")]
+                         if common is not None else [])
+        return ("(version 1)\n(allow default)\n(deny file-write*)\n"
+                + _sbpl_rule("allow", "file-write*", allowed)
+                + _sbpl_rule("deny", "file-write*", [common] if common is not None else [])
+                + _sbpl_rule("allow", "file-write*", git_allowed)
+                + _sbpl_rule("allow", "file-write*", literal_files, literal=True)
+                + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", [])))
     return (
-        "(version 1)\n(allow default)\n"
+        "(version 1)\n(allow default)\n(deny file-write*)\n"
+        + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), *state_writes, Path("/dev")])
         + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
-        + _sbpl_rule("deny", "file-write*", [home, Path("/private/tmp"), Path("/private/var/folders")])
-        + _sbpl_rule("allow", "file-read-data file-write*", list(_darwin_user_dirs()))
-        + _sbpl_rule("deny", "file-read-data file-write*", [root, *add_dirs, *(home / path for path in EXTRA_DENIED_READS)])
-        + _sbpl_rule("allow", "file-read-data file-write*", [home / path for path in state.get("read_write", ())])
+        + _sbpl_rule("deny", "file-read-data", [root, *add_dirs, *(home / path for path in EXTRA_DENIED_READS)])
+        + _sbpl_rule("allow", "file-read-data", [*([run_dir] if run_dir else []), *state_writes])
         + _sbpl_rule("allow", "file-read-data", [home / path for path in state.get("read", ())])
-        + _sbpl_rule("deny", "file-write*", add_dirs)
         + _sbpl_rule("allow", "file-read-data", [
             Path(plan["cwd"]), *add_dirs
         ])
+        + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
     )
 
 
@@ -214,6 +291,10 @@ def build_plan(
     context_ceiling=None,
     **metadata,
 ):
+    metadata = dict(metadata)
+    prompt_file = metadata.pop("prompt_file", None)
+    original_prompt_file = metadata.pop("original_prompt_file", prompt_file)
+    run_dir = metadata.pop("run_dir", None)
     config = profile(adapter)
     selected_cwd = Path(worktree or cwd or workspace_root or Path.cwd()).expanduser().resolve()
     if not selected_cwd.is_dir():
@@ -223,6 +304,25 @@ def build_plan(
         raise ValueError("cwd must be inside the workspace")
     workspace_root = str(Path(workspace_root or selected_cwd).expanduser().resolve())
     cwd = str(selected_cwd)
+    git_common = None
+    git_private = None
+    if mode == "worktree_write" and worktree is not None:
+        git_dirs = []
+        for flag in ("--absolute-git-dir", "--git-common-dir"):
+            result = subprocess.run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", flag],
+                                    capture_output=True, text=True, timeout=5)
+            if result.returncode != 0 or not result.stdout.strip():
+                raise ValueError("worktree_write requires a linked worktree; fix: create a linked worktree")
+            git_dirs.append(Path(result.stdout.strip()).resolve())
+        if git_dirs[0] == git_dirs[1]:
+            raise ValueError("worktree_write requires a linked worktree; fix: create a linked worktree")
+        git_private = git_dirs[0]
+        git_common = git_dirs[1]
+    guarded = check_protected_inputs(route, workspace_root, cwd, worktree=worktree,
+                                     prompt_file=original_prompt_file, add_dirs=add_dirs)
+    if prompt_file is not None and prompt_file != original_prompt_file:
+        check_protected_inputs(route, workspace_root, cwd, worktree=worktree,
+                               prompt_file=prompt_file, add_dirs=add_dirs)
     sandbox = sandbox or (
         "workspace-write" if mode == "worktree_write" else "read-only"
     )
@@ -232,9 +332,10 @@ def build_plan(
         raise ValueError("invalid sandbox")
     if network is not None and type(network) is not bool:
         raise ValueError("network must be a boolean")
-    directories = list(
-        dict.fromkeys(str(Path(p).expanduser().resolve()) for p in add_dirs)
-    )
+    directories = list(dict.fromkeys(
+        str((candidate if candidate.is_absolute() else Path(workspace_root) / candidate).resolve())
+        for candidate in (Path(p).expanduser() for p in add_dirs)
+    ))
     warnings = list(route.get("notes") or [])
     safe_directories = []
     for directory in directories:
@@ -292,13 +393,26 @@ def build_plan(
     ):
         guarantee = "best_effort"
     confinement = "none"
-    confinement_requested = mode == "read_only" and adapter in {"agy", "opencode"}
+    confinement_requested = bool(guarded) or adapter != "codex"
+    if guarded and adapter == "codex":
+        raise ValueError("protected paths require OS read confinement; fix: use a non-training route")
+    if guarded and not _sandbox_exec_path():
+        raise ValueError("protected paths require sandbox-exec; fix: use a non-training route")
     if confinement_requested and _sandbox_exec_path():
         confinement = "sandbox-exec"
         if adapter == "agy":
             guarantee = "best_effort"
     elif confinement_requested:
-        warnings.append(f"{adapter} read-only reads are unconfined")
+        if mode == "worktree_write":
+            warnings.append("worktree_write writes are unconfined: sandbox-exec unavailable or unusable")
+        else:
+            warnings.append(f"{adapter} read_only writes are unconfined: sandbox-exec unavailable or unusable")
+    if mode == "read_only" and adapter == "codex":
+        confinement = "provider-native"
+    if mode == "worktree_write" and adapter == "codex" and sandbox == "workspace-write":
+        confinement = "provider-native"
+    elif mode == "worktree_write" and adapter == "codex":
+        warnings.append("worktree_write writes are unconfined: Codex sandbox is full")
     if (
         mode == "read_only"
         and cwd != workspace_root
@@ -310,6 +424,21 @@ def build_plan(
         mode == "worktree_write" and guarantee != "enforced"
     ):
         warnings.append(f"{adapter} {mode} guarantee={guarantee}")
+    attempt_dir = Path(run_dir or cwd).expanduser().resolve()
+    if confinement == "sandbox-exec":
+        writable_paths = [str(attempt_dir), *(str(Path.home() / path) for path in
+                           CONFINED_STATE.get(adapter, {}).get("read_write", ())), "/dev"]
+        if mode == "worktree_write":
+            git_paths = ([str(git_private), *(str(git_common / path) for path in
+                           ("objects", "refs", "logs", "packed-refs", "packed-refs.lock"))]
+                         if git_private is not None else [])
+            # Mirrors os_confinement_profile: add_dirs stay read-only for wrapped writers.
+            writable_paths = [cwd, *writable_paths, *git_paths]
+        write_boundary = {"kind": "sandbox-exec", "writable_paths": writable_paths}
+    elif confinement == "provider-native":
+        write_boundary = {"kind": "provider-native", "sandbox": sandbox}
+    else:
+        write_boundary = {"kind": "none", "writable_paths": None}
     applied_network = network
     if adapter == "codex":
         applied_network = (
@@ -348,6 +477,8 @@ def build_plan(
         if mode == "worktree_write"
         else "Do not modify files or run commands that mutate state. Use file-reading tools only."
     )
+    source = Path(original_prompt_file).expanduser() if original_prompt_file is not None else None
+    original_path = str((source if source.is_absolute() else Path(workspace_root) / source).resolve()) if source is not None else None
     plan = {
         "schema": "fabric.exec-plan.v1",
         "adapter": adapter,
@@ -358,8 +489,11 @@ def build_plan(
         "network_requested": network,
         "cwd": cwd,
         "workspace_root": workspace_root,
+        "protected_paths": [str(path) for path in guarded],
         "mode": mode,
         "worktree": str(worktree) if worktree else None,
+        "run_dir": str(attempt_dir),
+        "original_prompt_file": original_path,
         "timeout_seconds": timeout,
         "idle_seconds": idle,
         "grace_seconds": 5.0,
@@ -382,6 +516,7 @@ def build_plan(
             "add_dirs": directories,
             "guarantee": guarantee,
             "confinement": confinement,
+            "write_boundary": write_boundary,
         },
         "agy_sandbox": intent == "assurance"
         or os.environ.get("CF_DISPATCH_AGY_SANDBOX", "0") == "1",
@@ -1490,8 +1625,13 @@ def execute(
     attempt_marker = uuid.uuid4().hex
     environment["PROVENANT_ATTEMPT_MARKER"] = attempt_marker
     environment["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
-    # Linux CI and service shells may have no TMPDIR; providers expect one.
-    environment.setdefault("TMPDIR", tempfile.gettempdir())
+    attempt_dir = Path(plan["run_dir"])
+    private_tmp = attempt_dir / "tmp"
+    private_cache = attempt_dir / "cache"
+    private_tmp.mkdir(parents=True, exist_ok=True)
+    private_cache.mkdir(parents=True, exist_ok=True)
+    environment.update(TMPDIR=str(private_tmp), TMP=str(private_tmp), TEMP=str(private_tmp),
+                       XDG_CACHE_HOME=str(private_cache))
     route = plan["route"]
     if (
         plan["adapter"] == "claude"
@@ -1628,7 +1768,7 @@ def execute(
     selector = selectors.DefaultSelector()
     try:
         if plan["stdin_policy"] == "prompt":
-            input_file = tempfile.TemporaryFile()
+            input_file = tempfile.TemporaryFile(dir=private_tmp)
             input_file.write(plan["prompt"].encode())
             input_file.seek(0)
             stdin = input_file
@@ -1951,7 +2091,7 @@ def execute(
     digest_value = ""
     output_value = ""
     try:
-        with tempfile.NamedTemporaryFile() as staged:
+        with tempfile.NamedTemporaryFile(dir=private_tmp) as staged:
             staged.write(output.encode())
             staged.flush()
             digest_value, device, inode = install(staged.name, str(output_path))
@@ -2025,6 +2165,7 @@ def execute(
         "provider_network": plan["applied"]["network"],
         "access_mode": plan["mode"],
         "worktree": plan["worktree"] or "",
+        "original_prompt_file": plan.get("original_prompt_file"),
         "orchestrator_family": plan.get("orchestrator_family", ""),
         "provider_family": family,
         "model_family": family,
@@ -2082,7 +2223,9 @@ def parser():
     p.add_argument("--route-file", type=Path, required=True)
     p.add_argument("--adapter", required=True)
     p.add_argument("--prompt-file", type=Path, required=True)
+    p.add_argument("--original-prompt-file", type=Path)
     p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--run-dir", type=Path)
     p.add_argument("--plan-only", action="store_true")
     p.add_argument("--mode", default="read_only")
     p.add_argument("--cwd", type=Path)
@@ -2115,9 +2258,16 @@ def main():
         selected_cwd = Path(args.cwd or workspace_root).expanduser().resolve()
         if not args.worktree and not selected_cwd.is_relative_to(workspace_root):
             raise ValueError("cwd must be inside the workspace")
+        route = json.loads(args.route_file.read_text())
+        original_prompt_file = args.original_prompt_file or args.prompt_file
+        check_protected_inputs(route, workspace_root, selected_cwd, worktree=args.worktree,
+                               prompt_file=original_prompt_file, add_dirs=args.add_dir)
+        if original_prompt_file != args.prompt_file:
+            check_protected_inputs(route, workspace_root, selected_cwd, worktree=args.worktree,
+                                   prompt_file=args.prompt_file, add_dirs=args.add_dir)
         plan = build_plan(
             args.adapter,
-            json.loads(args.route_file.read_text()),
+            route,
             args.prompt_file.read_text(),
             mode=args.mode,
             cwd=args.cwd,
@@ -2137,6 +2287,9 @@ def main():
             model_override_tier=args.model_override_tier,
             requested_model=args.requested_model,
             requested_effort=args.requested_effort,
+            prompt_file=args.prompt_file,
+            original_prompt_file=original_prompt_file,
+            run_dir=args.run_dir or args.out.parent,
             run_id=os.environ.get("PROVENANT_RUN_ID", ""),
             chair=os.environ.get("PROVENANT_CHAIR", ""),
         )

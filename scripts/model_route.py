@@ -312,6 +312,11 @@ def _registered_match(adapter: str, requested: str, catalog: dict[str, Any]) -> 
     return chosen, notes
 
 
+def training_flag(adapter: dict[str, Any], registered: dict[str, Any] | None) -> bool | None:
+    value = (registered or {}).get("trains_on_prompts", adapter.get("trains_on_prompts"))
+    return value if type(value) is bool else None
+
+
 def _no_effort_control(entry: dict[str, Any] | None) -> bool:
     """A registered model without an effort list takes none, whatever its adapter's transport."""
     return isinstance(entry, dict) and (entry.get("effort_transport") == "none" or not entry.get("efforts"))
@@ -605,11 +610,12 @@ def _fallback_candidates(
         seen.add((candidate_adapter, canonical))
         entry, _ = _registered_match(candidate_adapter, candidate, catalog)
         opt_in = fallback == "any" or f"{candidate_adapter}/{candidate}" in (requested_routes or []) or candidate in (requested_routes or [])
-        if (entry and (opt_in or (entry.get("plan_cap_usd", 1) > 0 and not entry.get("trains_on_prompts")))
+        flag = training_flag(catalog["adapters"].get(candidate_adapter, {}), entry)
+        if (entry and (opt_in or (entry.get("plan_cap_usd", 1) > 0 and flag is not True))
                 and not _cooling(candidate_adapter, canonical, cooldowns, catalog)):
             results.append({"adapter": candidate_adapter, "model": canonical,
                             "plan_cap_usd": entry.get("plan_cap_usd"),
-                            "trains_on_prompts": bool(entry.get("trains_on_prompts"))})
+                            "trains_on_prompts": flag})
     return results
 
 
@@ -713,7 +719,7 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         notes.append(_effort_ignored(requested_effort, model))
     if registered and registered.get("effort_transport") == "model-suffix" and effort != "default":
         model += registered.get("suffix", {}).get(effort, "")
-    training_model = bool((registered or {}).get("trains_on_prompts")) or "muse-spark-" in model
+    training_model = training_flag(adapter, registered)
     warning = (registered or {}).get("warning")
     if warning:
         warnings.append(warning)
@@ -1681,6 +1687,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             args.adapter, args.alias, model, catalog, cooldowns,
             args.fallback, args.fallback_route, bool(args.model) or bool(args.alias and args.alias not in ALIAS_ORDER),
         ),
+        "trains_on_prompts": training_flag(adapter, registered_model),
     }
     if adapter_default:
         record["model_selection"] = "adapter-default"

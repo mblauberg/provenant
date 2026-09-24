@@ -163,6 +163,7 @@
   },
   "adapters": {
     "claude": {
+      "trains_on_prompts": false,
       "endpoint_provider": "anthropic",
       "fixed_model_family": "anthropic",
       "effort_transport": "flag",
@@ -220,6 +221,7 @@
       ]
     },
     "codex": {
+      "trains_on_prompts": false,
       "endpoint_provider": "openai",
       "fixed_model_family": "openai",
       "effort_transport": "flag",
@@ -269,6 +271,7 @@
       ]
     },
     "cursor": {
+      "trains_on_prompts": false,
       "endpoint_provider": "cursor",
       "fixed_model_family": null,
       "default_model": "auto",
@@ -340,6 +343,7 @@
       }
     },
     "agy": {
+      "trains_on_prompts": false,
       "endpoint_provider": "agy",
       "fixed_model_family": null,
       "effort_transport": "flag",

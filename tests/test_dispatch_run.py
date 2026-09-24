@@ -1544,6 +1544,54 @@ def test_hard_linked_prompt_is_rejected_before_provider_launch(tmp_path: Path, m
     assert module.dispatch(args) == 2
 
 
+def test_relative_protected_prompt_is_rejected_before_staging(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".agents").mkdir()
+    (repo / ".agents/fabric-policy.json").write_text('{"protected_paths":["private/"]}')
+    (repo / "private").mkdir()
+    (repo / "private/prompt.md").write_text("secret", encoding="utf-8")
+    run_dir = make_run(repo, "protected-direct")
+    module = load_dispatch_module()
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "blocked", "--adapter", "opencode",
+        "--prompt-file", "private/prompt.md", "--model", "opencode/mimo-v2.6-flash-free",
+        "--role", "worker",
+    ])
+    assert module.dispatch(args) == 2
+    rejection = json.loads(capsys.readouterr().out)
+    assert rejection["status"] == "protected_path_denied"
+    assert "protected path" in str(rejection), rejection
+    assert not (run_dir / "dispatch/tasks/blocked/attempt-001/prompt.md").exists()
+
+
+def test_relative_protected_add_dir_is_rejected_before_staging(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".agents").mkdir()
+    (repo / ".agents/fabric-policy.json").write_text('{"protected_paths":["private/"]}')
+    (repo / "private").mkdir()
+    (repo / "prompt.md").write_text("safe", encoding="utf-8")
+    run_dir = make_run(repo, "protected-add-dir")
+    module = load_dispatch_module()
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "blocked", "--adapter", "opencode",
+        "--prompt-file", "prompt.md", "--add-dir", "private",
+        "--model", "opencode/mimo-v2.6-flash-free", "--role", "worker",
+    ])
+    assert module.dispatch(args) == 2
+    assert "protected path" in str(json.loads(capsys.readouterr().out))
+    assert not (run_dir / "dispatch/tasks/blocked/attempt-001/prompt.md").exists()
+
+
 def test_hard_linked_prompt_reports_typed_custody_error(tmp_path: Path, monkeypatch, capsys) -> None:
     run_dir = make_run(tmp_path, "hardlink-typed")
     source = tmp_path / "prompt.md"
@@ -1928,9 +1976,13 @@ def test_new_attempt_rejects_preexisting_directory_symlink(
 
 
 def make_worktree(root: Path) -> Path:
+    repo = root / "writer-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test", "-c",
+                    "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "initial"], check=True)
     worktree = root / "writer-worktree"
-    worktree.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "writer", str(worktree)], check=True)
     return worktree.resolve()
 
 
@@ -1977,6 +2029,19 @@ def test_opencode_worktree_writer_reaches_adapter_and_attempt(tmp_path: Path) ->
     assert attempt["requested_route"]["access_mode"] == "worktree_write"
 
 
+def test_primary_checkout_writer_is_rejected(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "primary-writer")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("hello", encoding="utf-8")
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    subprocess.run(["git", "init", "-q", str(primary)], check=True)
+    result = run_writer_dispatch(tmp_path, run_dir, prompt, "--access-mode", "worktree_write",
+                                 "--worktree", str(primary))
+    assert result.returncode == 2
+    assert "create a linked worktree" in result.stdout
+
+
 def test_worktree_writer_route_reaches_the_adapter_and_the_attempt_record(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path, "writer")
     prompt = tmp_path / "prompt.md"
@@ -2006,6 +2071,13 @@ def test_worktree_writer_route_reaches_the_adapter_and_the_attempt_record(tmp_pa
     )
     assert record["requested_route"]["access_mode"] == "worktree_write"
     assert record["requested_route"]["worktree"] == str(worktree)
+    assert record["prompt"]["original_path"] == str(prompt)
+    boundary = record["route"]["applied"]["write_boundary"]
+    assert boundary["kind"] in {"sandbox-exec", "none"}
+    if boundary["kind"] == "sandbox-exec":
+        assert str(run_dir / "dispatch/tasks/task-1/attempt-001") in boundary["writable_paths"]
+    else:
+        assert any("writes are unconfined" in warning for warning in record["route"]["warnings"])
     receipt = json.loads(
         (run_dir / "dispatch/tasks/task-1/attempt-001/adapter-receipt.json").read_text(encoding="utf-8")
     )
