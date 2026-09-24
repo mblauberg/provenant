@@ -55,8 +55,9 @@ const USAGE = `fabric <command>
                               read-only guarantee, endpoint profiles
   dispatch list [--json]      configured-provider runs recorded in this workspace
   dispatch kill <run> [--json]  stop one recorded run and the group it leads
-  dispatch --adapter A --model M --effort E --mode MODE --prompt-file F [--wait]
-  dispatch --tasks F          run a JSON task manifest
+  dispatch --prompt-file F [--adapter A] [--alias NAME | --model M] [--effort E]
+           [--mode MODE] [--worktree W | --cwd D] [--id ID] [--wait]
+  dispatch --tasks F [route flags]  run a JSON task manifest; flags set task defaults
 
 Identity comes from the working directory and AGENT_FABRIC_LABEL (or
 landing-push --label for that command). Registered
