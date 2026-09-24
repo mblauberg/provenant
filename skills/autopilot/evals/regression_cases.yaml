@@ -1,0 +1,6 @@
+schema_version: 1
+target_skill: autopilot
+cases:
+  - {id: r105, relation: positive, prompt: "I am away for ten hours; keep this open-ended mission running until I write STOP, taking in-authority decisions yourself and keeping a ledger of assumptions for me to confirm when I return.", tags: [direct, owner-away], expected: {primary_skill: autopilot, companion_skills: []}, note: "Owner-away steering with an assumption ledger inside a STOP-gated mission."}
+  - {id: r106, relation: negative, prompt: "Summarise the three decisions we made in this chat so I can paste them into an email.", tags: [adjacent], expected: {primary_skill: natural-writing, companion_skills: []}, note: "Plain prose summary; no mission or ledger."}
+  - {id: r107, relation: boundary, prompt: "Run this persistent research mission until I write STOP, and use a decision council whenever lanes block on a design choice while I am away.", tags: [composition], expected: {primary_skill: autopilot, companion_skills: [orchestrate]}, note: "Mission conductor primary; the council is an orchestration mechanism."}
