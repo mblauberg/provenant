@@ -202,7 +202,7 @@ def admit(
             while time.monotonic() < poll_end:
                 if cancelled():
                     return None
-                pause(min(0.1, poll_end - time.monotonic()))
+                pause(max(0.0, min(0.1, poll_end - time.monotonic())))
             continue
         if (waited_below_floor or contended or waited_seconds > 0) and time.monotonic() >= deadline:
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -224,4 +224,4 @@ def admit(
         while time.monotonic() < poll_end:
             if cancelled():
                 return None
-            pause(min(0.1, poll_end - time.monotonic()))
+            pause(max(0.0, min(0.1, poll_end - time.monotonic())))
