@@ -512,7 +512,7 @@ def publication_range_errors(
         if not selected:
             return ["publication range must contain at least one commit"]
         findings = grep_findings(
-            blob_ids(reachable_objects(["--no-walk", *selected], root), root), root,
+            blob_ids(reachable_objects([head, f"^{base}"], root), root), root,
         )
         paths = range_paths(selected, root)
         errors = publication_tree_errors(tree_entries(head, root), findings)

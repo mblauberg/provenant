@@ -46,7 +46,8 @@ const USAGE = `fabric <command>
   activity [--after-seq N]    list activity, optionally after a cursor
            [--limit N]
   watch [ids…] [--interval N] print run state changes; exit when all terminal
-  lanes [--json] [id]         versioned run reader, root-relative paths
+  lanes [--json] [id…]       run states; use an id to see rows past the 20-row cap
+  lanes --wait [id…]         wait for a lane to finish or need input
   events [--follow] [--until-idle]  JSON lines; follow stays open unless idle exit is requested
   status [id] [--wait-seconds N]  run status by task, batch or run directory; no id: store summary
   doctor [--json]             read-only schema and integrity diagnostics
@@ -108,13 +109,81 @@ const executionIdentity = () => {
   }
 };
 if (command === "lanes") {
-  const rest = argv.slice(1).filter((value) => value !== "--json");
-  if (rest.length > 1 || rest.some((value) => value.startsWith("--"))) {
-    console.error("fabric: usage: fabric lanes [--json] [id]");
+  const args = argv.slice(1);
+  const json = args.includes("--json");
+  const wait = args.includes("--wait");
+  const ids = args.filter((value) => value !== "--json" && value !== "--wait");
+  if (args.filter((value) => value === "--json").length > 1 ||
+      args.filter((value) => value === "--wait").length > 1 ||
+      (json && wait) || ids.some((value) => value.startsWith("--"))) {
+    console.error("fabric: usage: fabric lanes [--json] [id…] | lanes --wait [id…]");
     process.exit(2);
   }
-  const result = await readRuns(who.cwd, rest.length ? rest : undefined);
-  console.log(JSON.stringify(result, null, 2));
+  if (wait) {
+    const watched = ids.length ? ids : undefined;
+    const snapshot = await readRuns(who.cwd, undefined, 0, undefined, null);
+    if (snapshot.status !== "ok") {
+      console.error(JSON.stringify(snapshot));
+      process.exit(1);
+    }
+    const selected = watched === undefined ? snapshot : await readRuns(who.cwd, watched, 0, undefined, null);
+    if (selected.status !== "ok") {
+      console.error(JSON.stringify(selected));
+      process.exit(1);
+    }
+    const done = (row: (typeof snapshot.runs)[number]) =>
+      row.state === "terminal" || row.state === "input_required" || row.status === "input_required";
+    const laneKey = (row: (typeof snapshot.runs)[number]) => `${row.run_path || row.run_id}:${row.task_id ?? row.id}`;
+    const observed = new Set(snapshot.runs.map(laneKey));
+    const active = new Set(selected.runs.filter((row) => !done(row)).map(laneKey));
+    if (!active.size) {
+      console.log("no lanes are running");
+      process.exit(0);
+    }
+    const reported = new Set<string>();
+    for (;;) {
+      await new Promise((resolveWait) => setTimeout(resolveWait, 2000));
+      const current = await readRuns(who.cwd, undefined, 0, undefined, null);
+      if (current.status !== "ok") continue;
+      const changed = current.runs.filter((row) => {
+        const key = laneKey(row);
+        if (!observed.has(key)) {
+          observed.add(key);
+          active.add(key);
+        }
+        return active.has(key) && done(row) && !reported.has(key);
+      });
+      if (changed.length) {
+        for (const row of changed) {
+          reported.add(laneKey(row));
+          console.log(`${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${row.result_path ?? "-"}`);
+        }
+        process.exit(0);
+      }
+    }
+  }
+  const result = await readRuns(who.cwd, ids.length ? ids : undefined);
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else if (result.status === "ok") {
+    const now = Date.now();
+    const age = (started: string | null) => {
+      if (!started) return "unknown";
+      const seconds = Math.max(0, Math.floor((now - Date.parse(started)) / 1000));
+      return seconds < 60 ? `${seconds}s` : seconds < 3600
+        ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
+    };
+    const rows = [...result.runs].sort((a, b) => {
+      const active = (row: typeof a) => row.state === "running" ? 0 : 1;
+      return active(a) - active(b) || Date.parse(b.started_at ?? "") - Date.parse(a.started_at ?? "");
+    });
+    for (const row of rows)
+      console.log(`${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${age(row.started_at)}`);
+    if (result.omitted)
+      console.log(`${result.omitted} lanes omitted; use provenant lanes ID to see a lane past the 20-row cap`);
+  } else {
+    console.log(JSON.stringify(result));
+  }
   process.exit(result.status === "ok" ? 0 : 1);
 }
 if (command === "status") {
