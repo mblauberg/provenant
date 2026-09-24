@@ -326,11 +326,12 @@ def test_protected_preflight_rejects_unavailable_sandbox(monkeypatch, tmp_path):
     monkeypatch.chdir(repo)
     monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
-    mod = supervisor()
-    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None)
+    dispatch_run = importlib.import_module("skills.orchestrate.scripts.dispatch_run")
+    # dispatch_run imports provider_exec by its script name; patch that module object.
+    monkeypatch.setattr(dispatch_run.provider_exec, "_sandbox_exec_path", lambda: None)
     task = {"id": "one", "adapter": "opencode", "model": "opencode/mimo-v2.6-flash-free",
             "prompt": "hello", "cwd": str(repo / "safe")}
-    result = importlib.import_module("skills.orchestrate.scripts.dispatch_run").preflight_tasks([task])
+    result = dispatch_run.preflight_tasks([task])
     assert result["status"] == "rejected"
     assert "sandbox-exec" in result["fix"]
 
