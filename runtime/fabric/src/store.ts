@@ -10,12 +10,13 @@ import type { Identity } from "./identity.js";
 const SCHEMA = resolve(dirname(fileURLToPath(import.meta.url)), "../schema.sql");
 const REQUIRED_TABLES = [
   "agents", "messages", "deliveries", "delivery_claims", "teams", "team_members",
-  "tasks", "task_dependencies", "activity",
+  "tasks", "task_dependencies", "activity", "work_claims", "landing_leases",
 ];
 const REQUIRED_CLAIM_COLUMNS = [
   "message_id", "project", "recipient_id", "claim_id", "claimed_at", "expires_at",
 ];
 const BOOTSTRAP_WAIT = new Int32Array(new SharedArrayBuffer(4));
+const PUSH_HOLD_MS = 150_000;
 
 export const isSQLiteContention = (error: unknown): boolean => {
   const code = (error as { code?: unknown } | null)?.code;
@@ -60,9 +61,59 @@ export interface Activity {
   detail: string;
 }
 
+export interface WorkClaim {
+  id: string;
+  generation: number;
+  holder: string;
+  issue: string | null;
+  paths: string[];
+  expiresAtMs: number;
+}
+
+export interface LandingLease {
+  holder: string;
+  generation: number;
+  expectedSha: string;
+  expiresAtMs: number;
+  pushingUntilMs?: number;
+  takenOverFrom?: string;
+}
+
+function holder(who: Identity, session: string): string {
+  if (!session.trim() || session.length > 128) throw new Error("session id must be 1 to 128 characters");
+  if (session.includes("/")) throw new Error("session id must not contain /");
+  return `${who.agentId}/${session}`;
+}
+
+function normalIssue(issue?: string): string | null {
+  return issue?.trim().replace(/^#/u, "") || null;
+}
+
+function expiry(seconds: number, now: number): number {
+  if (!Number.isSafeInteger(seconds) || seconds < 1 || seconds > 3600)
+    throw new Error("lease seconds must be between 1 and 3600");
+  return now + seconds * 1000;
+}
+
+function normalPaths(paths: string[]): string[] {
+  if (paths.length > 100) throw new Error("at most 100 paths may be claimed");
+  return [...new Set(paths.map((path) => {
+    const clean = path.replace(/\\/gu, "/").replace(/\/$/u, "");
+    if (!clean || clean.startsWith("/") || clean.split("/").some((part) => part === "" || part === ".." || part === "."))
+      throw new Error(`invalid repository-relative path: ${path}`);
+    return clean.toLowerCase();
+  }))].sort();
+}
+
+function overlaps(left: string, right: string): boolean {
+  left = left.toLowerCase();
+  right = right.toLowerCase();
+  return left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+}
+
 /**
- * Every operation is scoped to one project and one caller, both supplied by the
- * process rather than by the call, so no tool argument can widen its own reach.
+ * Every operation is scoped to one project and one caller. MCP callers derive
+ * both from the process; landing-push can select its already leased seat label.
  *
  * Concurrency is SQLite's problem, not ours: WAL lets any number of agent
  * processes read and write this file at once. That is the whole reason the
@@ -159,6 +210,158 @@ export class Store {
           lastSeen: new Date(record.last_seen).toISOString(),
         };
       });
+  }
+
+  workClaims(project: string, now = Date.now()): WorkClaim[] {
+    return (this.#db.prepare(`SELECT id, generation, holder, issue, paths, expires_at
+      FROM work_claims WHERE project = ? AND released_at IS NULL AND expires_at > ? ORDER BY generation`)
+      .all(project, now) as Array<{ id: string; generation: number; holder: string; issue: string | null; paths: string; expires_at: number }>)
+      .map((row) => ({ id: row.id, generation: row.generation, holder: row.holder,
+        issue: row.issue, paths: JSON.parse(row.paths) as string[], expiresAtMs: row.expires_at }));
+  }
+
+  acquireWork(who: Identity, session: string, scope: { issue?: string; paths?: string[] }, seconds: number, now = Date.now()): WorkClaim {
+    const owner = holder(who, session), paths = normalPaths(scope.paths ?? []);
+    const issue = normalIssue(scope.issue);
+    if (!issue && paths.length === 0) throw new Error("claim requires an issue or paths");
+    const until = expiry(seconds, now), id = randomUUID();
+    return this.#db.transaction(() => {
+      for (const existing of this.workClaims(who.project, now)) {
+        if ((issue && issue === normalIssue(existing.issue ?? undefined)) ||
+          paths.some((path) => existing.paths.some((other) => overlaps(path, other))))
+          throw new Error(`work already claimed by ${existing.holder} until ${new Date(existing.expiresAtMs).toISOString()}`);
+      }
+      const result = this.#db.prepare(`INSERT INTO work_claims(id, project, holder, issue, paths, expires_at)
+        VALUES (?, ?, ?, ?, ?, ?)`).run(id, who.project, owner, issue, JSON.stringify(paths), until);
+      this.#log(who, "work_claim", `${owner} ${issue ?? ""} ${paths.join(",")}`);
+      return { id, generation: Number(result.lastInsertRowid), holder: owner, issue, paths, expiresAtMs: until };
+    }).immediate();
+  }
+
+  renewWork(who: Identity, session: string, id: string, generation: number, seconds: number, now = Date.now()): WorkClaim {
+    const owner = holder(who, session), until = expiry(seconds, now);
+    return this.#db.transaction(() => {
+      const changed = this.#db.prepare(`UPDATE work_claims SET expires_at = MAX(expires_at, ?) WHERE id = ? AND project = ?
+        AND holder = ? AND generation = ? AND released_at IS NULL AND expires_at > ?`)
+        .run(until, id, who.project, owner, generation, now);
+      if (changed.changes !== 1) throw new Error("stale work claim");
+      this.#log(who, "work_renew", `${owner} ${id} generation ${generation}`);
+      return this.workClaims(who.project, now).find((claim) => claim.id === id)!;
+    }).immediate();
+  }
+
+  verifyWork(who: Identity, session: string, id: string, generation: number, now = Date.now()): WorkClaim {
+    const claim = this.workClaims(who.project, now).find((item) => item.id === id);
+    if (!claim || claim.holder !== holder(who, session) || claim.generation !== generation)
+      throw new Error("stale work claim");
+    return claim;
+  }
+
+  releaseWork(who: Identity, session: string, id: string, generation: number, now = Date.now()): void {
+    const owner = holder(who, session);
+    this.#db.transaction(() => {
+      const changed = this.#db.prepare(`UPDATE work_claims SET released_at = ? WHERE id = ? AND project = ?
+        AND holder = ? AND generation = ? AND released_at IS NULL AND expires_at > ?`)
+        .run(now, id, who.project, owner, generation, now);
+      if (changed.changes !== 1) throw new Error("stale work claim");
+      this.#log(who, "work_release", `${owner} ${id} generation ${generation}`);
+    }).immediate();
+  }
+
+  landingLease(project: string, now = Date.now()): LandingLease | null {
+    const row = this.#db.prepare(`SELECT holder, generation, expected_sha, expires_at, pushing_until FROM landing_leases
+      WHERE project = ? AND released_at IS NULL AND (expires_at > ? OR pushing_until > ?)`)
+      .get(project, now, now) as
+      { holder: string; generation: number; expected_sha: string; expires_at: number; pushing_until: number | null } | undefined;
+    return row ? { holder: row.holder, generation: row.generation, expectedSha: row.expected_sha,
+      expiresAtMs: row.expires_at, ...(row.pushing_until === null ? {} : { pushingUntilMs: row.pushing_until }) } : null;
+  }
+
+  acquireLanding(who: Identity, session: string, expectedSha: string, seconds: number, now = Date.now()): LandingLease {
+    const owner = holder(who, session), until = expiry(seconds, now);
+    if (!/^[0-9a-f]{40}$/u.test(expectedSha)) throw new Error("expected integration SHA must be 40 lowercase hex digits");
+    return this.#db.transaction(() => {
+      const live = this.landingLease(who.project, now);
+      if (live) throw new Error(`landing lease held by ${live.holder} until ${new Date(Math.max(live.expiresAtMs, live.pushingUntilMs ?? 0)).toISOString()}`);
+      const prior = this.#db.prepare(`SELECT holder, expires_at, pushing_until, released_at FROM landing_leases WHERE project = ?`)
+        .get(who.project) as { holder: string; expires_at: number; pushing_until: number | null; released_at: number | null } | undefined;
+      this.#db.prepare(`INSERT INTO landing_leases(project, holder, generation, expected_sha, expires_at, released_at)
+        VALUES (?, ?, 1, ?, ?, NULL) ON CONFLICT(project) DO UPDATE SET holder = excluded.holder,
+        generation = landing_leases.generation + 1, expected_sha = excluded.expected_sha,
+        expires_at = excluded.expires_at, pushing_until = NULL, released_at = NULL`).run(who.project, owner, expectedSha, until);
+      const lease = this.landingLease(who.project, now)!;
+      if (prior && prior.released_at === null && prior.expires_at <= now && (prior.pushing_until ?? 0) <= now) {
+        lease.takenOverFrom = prior.holder;
+        this.#log(who, "landing_takeover", `${owner} took over from ${prior.holder} generation ${lease.generation}`);
+      } else this.#log(who, "landing_acquire", `${owner} generation ${lease.generation}`);
+      return lease;
+    }).immediate();
+  }
+
+  verifyLanding(who: Identity, session: string, generation: number, expectedSha: string, now = Date.now()): LandingLease {
+    const lease = this.landingLease(who.project, now);
+    if (!lease || lease.holder !== holder(who, session) || lease.generation !== generation)
+      throw new Error("stale landing lease");
+    if (lease.expectedSha !== expectedSha) throw new Error("integration SHA does not match landing lease");
+    return lease;
+  }
+
+  renewLanding(who: Identity, session: string, generation: number, seconds: number, now = Date.now()): LandingLease {
+    const owner = holder(who, session), until = expiry(seconds, now);
+    return this.#db.transaction(() => {
+      const changed = this.#db.prepare(`UPDATE landing_leases SET expires_at = MAX(expires_at, ?) WHERE project = ?
+        AND holder = ? AND generation = ? AND released_at IS NULL AND expires_at > ?`)
+        .run(until, who.project, owner, generation, now);
+      if (changed.changes !== 1) throw new Error("stale landing lease");
+      this.#log(who, "landing_renew", `${owner} generation ${generation}`);
+      return this.landingLease(who.project, now)!;
+    }).immediate();
+  }
+
+  /** Persist a bounded push hold without blocking unrelated Fabric writers during network I/O. */
+  withLandingPush<T>(who: Identity, session: string, generation: number, expectedSha: string, push: () => T):
+    { result: T; releaseWarning?: string } {
+    const owner = holder(who, session);
+    this.#db.transaction(() => {
+      this.verifyLanding(who, session, generation, expectedSha);
+      const now = Date.now();
+      const changed = this.#db.prepare(`UPDATE landing_leases SET pushing_until = ?
+        WHERE project = ? AND generation = ? AND (pushing_until IS NULL OR pushing_until <= ?)`)
+        .run(now + PUSH_HOLD_MS, who.project, generation, now);
+      if (changed.changes !== 1) throw new Error("landing push already in progress");
+    }).immediate();
+    let result: T;
+    try {
+      result = push();
+    } catch (error) {
+      this.#db.prepare(`UPDATE landing_leases SET pushing_until = NULL
+        WHERE project = ? AND holder = ? AND generation = ? AND released_at IS NULL`)
+        .run(who.project, owner, generation);
+      throw error;
+    }
+    try {
+      this.#db.transaction(() => {
+        this.#db.prepare(`UPDATE landing_leases SET released_at = ?, pushing_until = NULL
+          WHERE project = ? AND holder = ? AND generation = ? AND released_at IS NULL`)
+          .run(Date.now(), who.project, owner, generation);
+        this.#log(who, "landing_release", `${owner} generation ${generation}`);
+      }).immediate();
+      return { result };
+    } catch (error) {
+      return { result, releaseWarning: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  releaseLanding(who: Identity, session: string, generation: number): void {
+    const owner = holder(who, session);
+    this.#db.transaction(() => {
+      const changed = this.#db.prepare(`UPDATE landing_leases SET released_at = ? WHERE project = ?
+        AND holder = ? AND generation = ? AND released_at IS NULL AND expires_at > ?
+        AND (pushing_until IS NULL OR pushing_until <= ?)`)
+        .run(Date.now(), who.project, owner, generation, Date.now(), Date.now());
+      if (changed.changes !== 1) throw new Error("stale landing lease");
+      this.#log(who, "landing_release", `${owner} generation ${generation}`);
+    }).immediate();
   }
 
   /**
@@ -313,6 +516,31 @@ export class Store {
     } finally {
       if (busyTimeoutMs !== 5000) this.#db.pragma("busy_timeout = 5000");
     }
+  }
+
+  /** Read-only triage: count every active delivery, return at most twenty short groups. */
+  inboxDigest(who: Identity, taskId?: string) {
+    const since = Date.now() - 14 * 86400000;
+    const predicate = `FROM deliveries d JOIN messages m ON m.message_id = d.message_id
+      WHERE d.project = ? AND d.recipient_id = ? AND d.read_at IS NULL
+        AND m.created_at >= ? AND (? IS NULL OR m.task_id = ?)`;
+    const args = [who.project, who.agentId, since, taskId ?? null, taskId ?? null];
+    const total = (this.#db.prepare(`SELECT count(*) AS count ${predicate}`).get(...args) as { count: number }).count;
+    const rows = this.#db.prepare(`WITH ranked AS (
+        SELECT m.sender_id AS sender, m.task_id AS task_id, m.message_id AS sample_id,
+          substr(replace(replace(m.body, char(10), ' '), char(13), ' '), 1, 80) AS summary,
+          count(*) OVER (PARTITION BY m.sender_id, m.task_id) AS count,
+          row_number() OVER (PARTITION BY m.sender_id, m.task_id ORDER BY m.message_id) AS rank
+        ${predicate}
+      ) SELECT sender, task_id, count, sample_id, summary FROM ranked WHERE rank = 1
+      ORDER BY count DESC, sender, task_id LIMIT 21`).all(...args) as Array<{
+        sender: string; task_id: string | null; count: number; sample_id: string; summary: string;
+      }>;
+    return {
+      schema: "fabric.inbox_digest.v1", total, truncated: rows.length > 20,
+      groups: rows.slice(0, 20).map((row) => ({ from: row.sender, taskId: row.task_id,
+        count: row.count, sampleId: row.sample_id, summary: row.summary })),
+    };
   }
 
   /** Status observation consumes only this seat's matching terminal notices. */

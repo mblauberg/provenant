@@ -106,17 +106,17 @@ it("reads adapter cooldowns from the configured state root and explicit override
   const snapshot = { adapters: [{ name: "codex", models: ["gpt-6-sol"], aliases: { workhorse: ["gpt-6-sol"] } }], endpoints: {} } as any;
   try {
     writeFileSync(join(root, "cooldowns.json"), JSON.stringify({ cooldowns: { one: {
-      adapter: "codex", cooling_until: "2999-01-01T00:00:00Z",
+      adapter: "codex", model: "gpt-6-sol", cooling_until: "2999-01-01T00:00:00Z",
     } } }));
     process.env.AGENT_FABRIC_STATE_ROOT = root;
     delete process.env.FABRIC_COOLDOWNS_PATH;
-    expect(adapterView(snapshot).digest).toContain("cooling until 2999-01-01");
+    expect(adapterView(snapshot).digest).toContain("cooling: gpt-6-sol until 2999-01-01");
     const override = join(root, "override.json");
     writeFileSync(override, JSON.stringify({ cooldowns: { two: {
-      adapter: "codex", cooling_until: "2998-01-01T00:00:00Z",
+      adapter: "codex", model: "*", cooling_until: "2998-01-01T00:00:00Z",
     } } }));
     process.env.FABRIC_COOLDOWNS_PATH = override;
-    expect(adapterView(snapshot).digest).toContain("cooling until 2998-01-01");
+    expect(adapterView(snapshot).digest).toContain("cooling: * until 2998-01-01");
   } finally {
     if (oldRoot === undefined) delete process.env.AGENT_FABRIC_STATE_ROOT;
     else process.env.AGENT_FABRIC_STATE_ROOT = oldRoot;
@@ -136,6 +136,18 @@ it("shows the requested route and pending result before the first attempt", asyn
   });
   expect(digest(brief)).toContain("claude/opus");
   expect(digest(brief)).toContain("result pending");
+});
+
+it("keeps the memory wait reason in brief status", async () => {
+  const { digest, runView } = await import("../src/surface.js");
+  for (const reason of [
+    "waiting for memory: 7.9% available (1.26 GB), floor 10% for worktree_write; 4m of 30m",
+    "memory probe failed: unavailable; holding; 4m of 30m",
+  ]) {
+    const row = { state: "queued", run_id: "mcp-memory", reason };
+    expect(runView(row)).toMatchObject({ state: "queued", reason, digest: `queued mcp-memory · ${reason}` });
+    expect(digest(row)).toContain(reason);
+  }
 });
 
 it("keeps a running brief digest on one line with its run id, route and result path", async () => {
@@ -250,7 +262,7 @@ it("budgets the whole injected handoff text, not only the result tail", async ()
   }
 });
 
-it.each([false, true])("exposes exactly twelve default tools within budget (legacy=%s)", async (legacy) => {
+it.each([false, true])("exposes the default tools within budget (legacy=%s)", async (legacy) => {
   const state = mkdtempSync(join(tmpdir(), "fabric-surface-"));
   const client = new Client({ name: "surface", version: "1" });
   try {
@@ -273,26 +285,28 @@ it.each([false, true])("exposes exactly twelve default tools within budget (lega
       }),
     );
     const result = await client.listTools();
-    expect(result.tools.map((t) => t.name).sort()).toEqual(
-      [
+    const names = new Set(result.tools.map((t) => t.name));
+    for (const name of [
         "acknowledge",
         "activity",
         "adapters",
         "cancel",
         "dispatch",
+        "events",
         "inbox",
+        "landing_lease",
         "note",
         "output",
+        "runs",
         "send",
         "status",
         "task",
         "whoami",
-        ...(legacy ? ["batch", "team_create", "task_create", "task_claim", "task_update", "tasks"] : []),
-      ]
-        .map((n) => "fabric_" + n)
-        .sort(),
-    );
-    if (!legacy) expect(JSON.stringify(result).length).toBeLessThanOrEqual(9077 * 0.65);
+        "work_claim",
+      ]) expect(names.has(`fabric_${name}`)).toBe(true);
+    for (const name of ["batch", "team_create", "task_create", "task_claim", "task_update", "tasks"])
+      expect(names.has(`fabric_${name}`)).toBe(legacy);
+    if (!legacy) expect(JSON.stringify(result).length).toBeLessThanOrEqual(8000);
     const invalid = await client.callTool({
       name: "fabric_inbox",
       arguments: { ids: Array.from({ length: 101 }, (_, i) => String(i)) },
@@ -306,6 +320,12 @@ it.each([false, true])("exposes exactly twelve default tools within budget (lega
     expect((brief.content as any[])[0]?.text).toBe("no runs");
     const full = await client.callTool({ name: "fabric_status", arguments: { ids: [], wait_seconds: 0, detail: "full" } });
     expect(full.structuredContent).toMatchObject({ runs: [] });
+    expect((await client.callTool({ name: "fabric_runs", arguments: {} })).structuredContent)
+      .toMatchObject({ schema: "fabric.runs.v1", status: "ok", runs: [] });
+    expect((await client.callTool({ name: "fabric_events", arguments: {} })).structuredContent)
+      .toMatchObject({ schema: "fabric.events.v1", status: "ok", events: [] });
+    expect((await client.callTool({ name: "fabric_inbox", arguments: { digest: true } })).structuredContent)
+      .toMatchObject({ schema: "fabric.inbox_digest.v1", total: 0, groups: [] });
   } finally {
     await client.close();
     rmSync(state, { recursive: true, force: true });

@@ -65,6 +65,13 @@ TRUSTED_CAPABILITY_SOURCES = {
 TASK_CLASS_POLICY = {
     "mechanical": {"minimum_alias": "scout", "minimum_effort": "low", "role": "worker"},
     "legwork": {"minimum_alias": "workhorse", "minimum_effort": "medium", "role": "worker"},
+    "implementation": {"minimum_alias": "workhorse", "minimum_effort": "high", "role": "worker"},
+    "ui-taste": {"minimum_alias": "flagship", "minimum_effort": "high", "role": "worker"},
+    "screenshots": {"minimum_alias": "workhorse", "minimum_effort": "high", "role": "worker"},
+    "review": {"minimum_alias": "flagship", "minimum_effort": "high", "role": "reviewer"},
+    "second-opinion": {"minimum_alias": "flagship", "minimum_effort": "high", "role": "reviewer"},
+    "research": {"minimum_alias": "workhorse", "minimum_effort": "medium", "role": "worker"},
+    "bulk": {"minimum_alias": "scout", "minimum_effort": "low", "role": "worker"},
     "critical-review": {"minimum_alias": "flagship", "minimum_effort": "high", "role": "critical-review"},
     "orchestration": {"minimum_alias": "flagship", "minimum_effort": "high", "role": "orchestrator"},
 }
@@ -254,7 +261,8 @@ def catalogue_snapshot(path: Path | None = None) -> dict[str, Any]:
     return {"schema": "fabric.catalogue.v1", "sha256": digest, "sources": sources,
             "drift": drift, "adapters": base.get("adapters", {}), "models": models,
             "shorthands": shorthands, "families": base.get("families", {}),
-            "endpoints": base.get("endpoints", {}), "catalogue": base,
+            "endpoints": base.get("endpoints", {}),
+            "task_class_routes": base.get("task_class_routes", {}), "catalogue": base,
             "stale_alias_warnings": stale_alias_warnings}
 
 
@@ -310,6 +318,11 @@ def _registered_match(adapter: str, requested: str, catalog: dict[str, Any]) -> 
     if retired:
         notes.append(f"{requested} is retired; routed to {chosen['id']}")
     return chosen, notes
+
+
+def training_flag(adapter: dict[str, Any], registered: dict[str, Any] | None) -> bool | None:
+    value = (registered or {}).get("trains_on_prompts", adapter.get("trains_on_prompts"))
+    return value if type(value) is bool else None
 
 
 def _no_effort_control(entry: dict[str, Any] | None) -> bool:
@@ -371,6 +384,34 @@ def _cooldowns(catalog: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(previous, dict) or str(record.get("cooling_until", "")) > str(previous.get("cooling_until", "")):
             normalised[canonical] = record
     return normalised
+
+
+def _recent_failed_task_class_models(adapter: str, task_class: str) -> set[str]:
+    path = _state_root() / "route-health.json"
+    try:
+        document = json.loads(path.read_text())
+        routes = document.get("routes", {}) if document.get("schema") == "fabric.route-health.v1" else {}
+        now = datetime.now(timezone.utc)
+        failed = set()
+        for record in routes.values():
+            if not isinstance(record, dict) or record.get("adapter") != adapter or record.get("task_class") != task_class:
+                continue
+            recent = record.get("recent", [])
+            if not isinstance(recent, list) or not recent:
+                continue
+            latest = recent[0]
+            if not isinstance(latest, dict):
+                continue
+            observed = datetime.fromisoformat(str(latest.get("at", "")).replace("Z", "+00:00"))
+            age = (now - observed).total_seconds()
+            if (0 <= age <= 7 * 86400
+                    and latest.get("status") in {"failed", "empty_output"}):
+                model = record.get("model")
+                if isinstance(model, str):
+                    failed.add(model)
+        return failed
+    except (OSError, ValueError, TypeError, AttributeError):
+        return set()
 
 
 def _state_root() -> Path:
@@ -605,11 +646,12 @@ def _fallback_candidates(
         seen.add((candidate_adapter, canonical))
         entry, _ = _registered_match(candidate_adapter, candidate, catalog)
         opt_in = fallback == "any" or f"{candidate_adapter}/{candidate}" in (requested_routes or []) or candidate in (requested_routes or [])
-        if (entry and (opt_in or (entry.get("plan_cap_usd", 1) > 0 and not entry.get("trains_on_prompts")))
+        flag = training_flag(catalog["adapters"].get(candidate_adapter, {}), entry)
+        if (entry and (opt_in or (entry.get("plan_cap_usd", 1) > 0 and flag is not True))
                 and not _cooling(candidate_adapter, canonical, cooldowns, catalog)):
             results.append({"adapter": candidate_adapter, "model": canonical,
                             "plan_cap_usd": entry.get("plan_cap_usd"),
-                            "trains_on_prompts": bool(entry.get("trains_on_prompts"))})
+                            "trains_on_prompts": flag})
     return results
 
 
@@ -713,7 +755,7 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         notes.append(_effort_ignored(requested_effort, model))
     if registered and registered.get("effort_transport") == "model-suffix" and effort != "default":
         model += registered.get("suffix", {}).get(effort, "")
-    training_model = bool((registered or {}).get("trains_on_prompts")) or "muse-spark-" in model
+    training_model = training_flag(adapter, registered)
     warning = (registered or {}).get("warning")
     if warning:
         warnings.append(warning)
@@ -735,7 +777,8 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     fallback = _fallback_candidates(adapter_name, tier, model, catalog, cooldowns,
                                     args.fallback, args.fallback_route, explicit)
     return emit({"schema_version": 1, "status": "ok", "adapter": adapter_name,
-                 "alias": args.alias or "", "role": args.role, "requested_model": requested if explicit else "",
+                 "alias": "" if args.model and not getattr(args, "alias_supplied", True) else args.alias or "",
+                 "role": args.role, "requested_model": requested if explicit else "",
                  "resolved_model": model, "model_family": family, "family_source": family_source,
                  "identity_source": "registry" if registered else "passed-through",
                  "endpoint_provider": adapter.get("endpoint_provider", adapter_name), "provider": provider,
@@ -1132,10 +1175,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         return emit(record, 2)
     model_override_effort = args.model_override.get("default_effort", "")
     if task_class_effort:
-        if role_effort and EFFORT_ORDER[role_effort] > EFFORT_ORDER[task_class_effort]:
-            requested_effort, effort_source = role_effort, "role-default"
-        else:
-            requested_effort, effort_source = task_class_effort, "task-class"
+        requested_effort, effort_source = task_class_effort, "task-class"
     else:
         requested_effort = args.effort or model_override_effort or role_effort or {
             "flagship": "high", "workhorse": "medium", "scout": "low"
@@ -1149,7 +1189,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         "schema_version": 1,
         "catalog_date": catalog["catalog_date"],
         "adapter": args.adapter,
-        "alias": args.alias,
+        "alias": "" if args.model and not getattr(args, "alias_supplied", True) else args.alias,
         "role": args.role,
         "requested_effort": getattr(args, "raw_effort", requested_effort),
         "effort": requested_effort,
@@ -1157,7 +1197,8 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         "lead_family": args.lead_family,
     }
     if args.task_class:
-        base.update({"task_class": args.task_class, "route_source": "task-class"})
+        base.update({"task_class": args.task_class, "route_source": "task-class",
+                     "configured_models": getattr(args, "task_class_configured_models", [])})
     elif args.model_override_tier:
         override_models = args.model_override.get("models", [])
         override_roles = args.model_override.get("roles", [])
@@ -1382,7 +1423,14 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                 aliases = preferred_config.get("aliases")
                 if not isinstance(aliases, dict):
                     continue
-                preferred_candidates = aliases.get(args.alias)
+                task_class_models = getattr(args, "task_class_models", None)
+                if task_class_models is not None:
+                    preferred_candidates = [
+                        candidate for candidate in task_class_models
+                        if infer_family(candidate, catalog) == preferred_family
+                    ]
+                else:
+                    preferred_candidates = aliases.get(args.alias)
                 if not isinstance(preferred_candidates, list):
                     continue
                 candidates.extend(preferred_candidates)
@@ -1403,6 +1451,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                     {
                         **base,
                         "status": "no_candidate_available",
+                        "effort": "",
                         "endpoint_provider": endpoint,
                         "candidates": candidates,
                     },
@@ -1415,10 +1464,20 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         else:
             family = fixed_family
             family_source = "catalog-family"
-            candidates = args.model_override.get("models")
-            candidates = candidates or family_config.get("role_overrides", {}).get(args.role, {}).get(args.alias)
-            candidates = candidates or family_config["aliases"].get(args.alias)
+            task_class_models = getattr(args, "task_class_models", None)
+            if task_class_models is not None:
+                candidates = task_class_models
+            else:
+                candidates = args.model_override.get("models")
+                candidates = candidates or family_config.get("role_overrides", {}).get(args.role, {}).get(args.alias)
+                candidates = candidates or family_config["aliases"].get(args.alias)
         if not candidates:
+            if getattr(args, "task_class_models", None) is not None:
+                return emit_route(
+                    {**base, "status": "no_candidate_available", "effort": "",
+                     "model_family": family, "candidates": []},
+                    1,
+                )
             return emit_route({**base, "status": "alias_unavailable", "model_family": family}, 1)
         if not fixed_family:
             pass
@@ -1439,6 +1498,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
                         {
                             **base,
                             "status": "no_candidate_available",
+                            "effort": "",
                             "endpoint_provider": endpoint,
                             "model_family": family,
                             "candidates": candidates,
@@ -1680,7 +1740,16 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             args.adapter, args.alias, model, catalog, cooldowns,
             args.fallback, args.fallback_route, bool(args.model) or bool(args.alias and args.alias not in ALIAS_ORDER),
         ),
+        "trains_on_prompts": training_flag(adapter, registered_model),
     }
+    if args.task_class in {"review", "critical-review", "second-opinion"}:
+        failed_models = _recent_failed_task_class_models(args.adapter, args.task_class)
+        alternate = next((candidate for candidate in args.task_class_configured_models
+                          if candidate != model and candidate not in failed_models), None)
+        record["fallback_candidates"] = (
+            [{"adapter": args.adapter, "model": alternate, "effort": effort}]
+            if alternate else []
+        )
     if adapter_default:
         record["model_selection"] = "adapter-default"
     if account_default:
@@ -1748,6 +1817,8 @@ def parser() -> argparse.ArgumentParser:
     )
     snapshot = commands.add_parser("snapshot")
     snapshot.add_argument("--json", action="store_true")
+    health = commands.add_parser("health")
+    health.add_argument("--json", action="store_true")
     probe = commands.add_parser("probe")
     probe.add_argument("--adapter", required=True)
     probe.add_argument("--executable", required=True)
@@ -1767,6 +1838,23 @@ def main(argv: list[str] | None = None) -> int:
         record = catalogue_snapshot()
         record.pop("catalogue", None)
         print(json.dumps(record, sort_keys=True))
+        return 0
+    if args.command == "health":
+        catalog = load_catalog()
+        record = {"schema": "fabric.route-health.v1", "task_class_routes": catalog.get("task_class_routes", {})}
+        try:
+            path = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts" / "fabric_records.py"
+            spec = importlib.util.spec_from_file_location(
+                "provenant_fabric_records", path, submodule_search_locations=[str(path.parent)]
+            )
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            record["routes"] = module.read_route_health()
+        except (ImportError, OSError, AttributeError, TypeError, ValueError):
+            record["routes"] = {}
+        print(json.dumps(record, sort_keys=True) if args.json else json.dumps(record, indent=2, sort_keys=True))
         return 0
     if args.command == "probe":
         record, code = probe_capabilities(args.adapter, args.executable)
@@ -1913,7 +2001,7 @@ def main(argv: list[str] | None = None) -> int:
                     alias=route_alias if isinstance(route_alias, str) else "",
                     effort=route_effort if isinstance(route_effort, str) else "",
                 )
-            if route_effort != policy["minimum_effort"]:
+            if EFFORT_ORDER[route_effort] < EFFORT_ORDER[policy["minimum_effort"]]:
                 return reject(
                     "task_class_config_invalid",
                     alias=route_alias,
@@ -1921,7 +2009,7 @@ def main(argv: list[str] | None = None) -> int:
                     message=(
                         "configuration error: "
                         f"task_class_routes.{args.task_class}.effort {route_effort!r} "
-                        "must equal probe policy minimum_effort "
+                        "must meet probe policy minimum_effort "
                         f"{policy['minimum_effort']!r}"
                     ),
                 )
@@ -1931,6 +2019,30 @@ def main(argv: list[str] | None = None) -> int:
                 return reject("task_class_model_conflict", alias=route_alias, effort=route_effort)
             if args.role != route_role:
                 return reject("task_class_role_mismatch", alias=route_alias, effort=route_effort)
+            model_routes = route.get("models")
+            if not isinstance(args.adapter, str) or args.adapter not in catalog.get("adapters", {}):
+                return reject("unknown_adapter")
+            configured_models = model_routes.get(args.adapter) if isinstance(model_routes, dict) else None
+            if (not isinstance(configured_models, list) or not configured_models
+                    or any(not isinstance(model, str) or not model.strip() for model in configured_models)
+                    or len(set(configured_models)) != len(configured_models)):
+                return reject("task_class_config_invalid", alias=route_alias, effort=route_effort)
+            resolved_models = []
+            for configured_model in configured_models:
+                entry, _ = _registered_match(args.adapter, configured_model, catalog)
+                if (entry is None or configured_model != entry["id"]
+                        or entry.get("effort_transport") == "none"
+                        or route_effort not in entry.get("efforts", [])):
+                    return reject("task_class_config_invalid", alias=route_alias, effort=route_effort)
+                resolved_models.append(entry["id"])
+            args.task_class_configured_models = list(resolved_models)
+            if args.task_class in {"review", "critical-review", "second-opinion"}:
+                failed_models = _recent_failed_task_class_models(args.adapter, args.task_class)
+                failed_in_roster = [model for model in resolved_models if model in failed_models]
+                if failed_in_roster:
+                    alternate = next((model for model in resolved_models if model not in failed_models), None)
+                    resolved_models = [alternate] if alternate else []
+            args.task_class_models = resolved_models
             args.alias = route_alias
             args.task_class_effort = route_effort
         elif args.alias not in {"flagship", "workhorse", "scout"}:

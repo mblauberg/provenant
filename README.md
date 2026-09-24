@@ -41,7 +41,7 @@ flowchart TB
     U(["User request"]) --> LOOP["Delivery loop<br/>scope · implement · verify · review"]
     LOOP --> OUT(["Scoped, verified,<br/>independently reviewed change"])
     H["HARNESS.md: the constitution<br/>authority · lifecycle · review pressure"] -. "sets the rules" .-> LOOP
-    SK["Skills library: 25 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
+    SK["Skills library: 26 Agent Skills<br/>one procedure per task, loaded on match"] -. "supplies the procedure" .-> LOOP
     F["Cross-provider dispatch<br/>Claude Code and Codex review each other;<br/>Fabric coordinates and can start existing dispatch owners"] -. "runs and reviews the work" .-> LOOP
     classDef out fill:#1f6f43,stroke:#4fd08a,color:#ffffff,stroke-width:2px
     class OUT out
@@ -50,7 +50,7 @@ flowchart TB
 - **Harness:** [`HARNESS.md`](HARNESS.md) is the constitution. It sets
   authority, the delivery lifecycle, and how much review pressure each risk tier
   owes, and stays small so it can be read every session.
-- **Skills:** the <!--skills-->25<!--/skills--> Agent Skills are task-specific
+- **Skills:** the <!--skills-->26<!--/skills--> Agent Skills are task-specific
   procedures, one folder with a `SKILL.md` each. Only the one-line descriptions
   sit in permanent context; a full body loads only when the task matches it.
 - **Fabric:** messages, shared tasks and activity between agents working on one
@@ -101,7 +101,7 @@ installs. Pass `--mcp-clients all` to either one to register all six clients
 instead.
 
 With `--platform all`, installation links skills into both primary clients and
-installs the Claude subagents and workflows. Both clients also receive the
+installs Claude workflows. Both clients also receive the
 instance-owned skills in `<instance-root>/custom-skills/`; `scripts/instance_installation.py validate`
 reports how many it will project. A custom skill whose name matches a product
 skill fails the install rather than shadowing it. If a client still exposes the
@@ -111,6 +111,8 @@ only that primary. Every install also writes a managed copy of the thin
 `provenant` command in
 `${PROVENANT_BIN_DIR:-$HOME/.local/bin}`; it warns when that directory is not
 on `PATH`, and never edits shell startup files. During an upgrade, the installer
+also retires prior managed Claude custom-agent links recorded by the old
+installation receipt, while preserving changed or unrecorded files. It
 replaces only the legacy link that exactly names
 `<instance-root>/scripts/provenant`, including a dangling link. It preserves
 other files and links as user-owned. If the installer exits
@@ -135,11 +137,6 @@ whether `uv` is on `PATH`.
 To move the product checkout while retaining a small instance root, follow the
 [split-product relocation runbook](docs/runbooks/split-product-relocation.md).
 
-The Claude subagent links have a separate
-`.agent-harness-agents-installation.json` receipt beside `~/.claude/agents/`.
-Re-running the installer repairs recorded links, while unmanaged files remain
-untouched.
-
 `provenant fabric whoami` creates the project-local Fabric identity and shared
 SQLite bus on first use. There is no daemon, trust record, initial provisioning or
 warm/build step. `provenant check` runs the harness policy gate from the registered
@@ -154,7 +151,7 @@ operator to run `npm ci`; it never installs or borrows another checkout's tree.
 ```text
 <PRODUCT_ROOT>/                product checkout
   HARNESS.md                      product constitution
-  runtime/  agents/  skills/  workflows/
+  runtime/  skills/  workflows/
   scripts/  config/
           |
           | scripts/install-harness
@@ -165,7 +162,6 @@ operator to run `npm ci`; it never installs or borrows another checkout's tree.
   .agent-fabric/product-root.json machine-local product pointer
 
 ~/.claude/skills/                 managed links
-~/.claude/agents/                 managed Claude subagent links
 ~/.codex/skills/                  managed links
 ~/.claude/workflows/              managed links
 ~/.local/bin/provenant            managed command
@@ -293,15 +289,15 @@ steering; it does not provide wake, callback or completion delivery.
 
 ## Skill library
 
-The full <!--skills-->25<!--/skills-->-skill catalogue, grouped by area:
+The full <!--skills-->26<!--/skills-->-skill catalogue, grouped by area:
 
 <!-- skill-catalogue:start -->
 <details>
-<summary>All 25 skills</summary>
+<summary>All 26 skills</summary>
 
 | Area | Skills |
 |---|---|
-| Delivery | [`session`](skills/session/SKILL.md), [`scope`](skills/scope/SKILL.md), [`grill-me`](skills/grill-me/SKILL.md), [`deliver`](skills/deliver/SKILL.md), [`implement`](skills/implement/SKILL.md), [`tdd`](skills/tdd/SKILL.md), [`refactor`](skills/refactor/SKILL.md), [`diagnose`](skills/diagnose/SKILL.md), [`code-review`](skills/code-review/SKILL.md), [`evaluate`](skills/evaluate/SKILL.md), [`release`](skills/release/SKILL.md), [`retrospect`](skills/retrospect/SKILL.md), [`work-map`](skills/work-map/SKILL.md), [`setup-repo`](skills/setup-repo/SKILL.md) |
+| Delivery | [`session`](skills/session/SKILL.md), [`scope`](skills/scope/SKILL.md), [`grill-me`](skills/grill-me/SKILL.md), [`deliver`](skills/deliver/SKILL.md), [`implement`](skills/implement/SKILL.md), [`tdd`](skills/tdd/SKILL.md), [`refactor`](skills/refactor/SKILL.md), [`diagnose`](skills/diagnose/SKILL.md), [`code-review`](skills/code-review/SKILL.md), [`evaluate`](skills/evaluate/SKILL.md), [`release`](skills/release/SKILL.md), [`retrospect`](skills/retrospect/SKILL.md), [`work-map`](skills/work-map/SKILL.md), [`setup-repo`](skills/setup-repo/SKILL.md), [`tracker`](skills/tracker/SKILL.md) |
 | Orchestration | [`orchestrate`](skills/orchestrate/SKILL.md), [`autopilot`](skills/autopilot/SKILL.md) |
 | Writing and documentation | [`engineering-docs`](skills/engineering-docs/SKILL.md), [`engineering-writing`](skills/engineering-writing/SKILL.md), [`legal-writing`](skills/legal-writing/SKILL.md), [`natural-writing`](skills/natural-writing/SKILL.md) |
 | Design and diagrams | [`ui-ux-design`](skills/ui-ux-design/SKILL.md), [`prototype`](skills/prototype/SKILL.md), [`d2-diagrams`](skills/d2-diagrams/SKILL.md) |

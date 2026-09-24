@@ -48,12 +48,715 @@ def test_plan_only_resolves_without_launch(tmp_path):
     assert result.returncode == 0, result.stderr + result.stdout
     plan = json.loads(result.stdout)
     assert plan["schema"] == "fabric.exec-plan.v1"
+    assert Path(plan["run_dir"]) != Path(plan["output_path"]).parent
     assert "--bare" not in plan["argv"]
     assert "--no-session-persistence" not in plan["argv"]
     assert "--session-id" in plan["argv"]
     assert "--permission-prompts" in plan["argv"]
     assert "stream-json" in plan["argv"]
     assert not (tmp_path / "launched").exists()
+
+
+def test_read_only_os_confinement_profile_and_argv(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    root = tmp_path / "workspace"
+    cwd = root / "sub"
+    add_dir = tmp_path / "extra"
+    cwd.mkdir(parents=True)
+    add_dir.mkdir()
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    plan = {
+        "adapter": "agy", "mode": "read_only", "workspace_root": str(root),
+        "cwd": str(cwd), "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]},
+    }
+    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    profile = supervisor.os_confinement_profile(plan)
+    assert '(deny file-write*)' in profile
+    assert '(deny file-read-data (subpath "' + str(root) + '")' in profile
+    assert '(subpath "' + str(Path.home() / ".claude/projects") + '")' in profile
+    assert '(subpath "' + str(Path.home() / ".codex/sessions") + '")' in profile
+    git_config_rule = (
+        f'(allow file-read-data (literal "{Path.home() / ".gitconfig"}") '
+        f'(literal "{xdg / "git/config"}"))'
+    )
+    assert git_config_rule in profile
+    assert '(allow file-read-data (subpath "' + str(cwd) + '") (subpath "' + str(add_dir) + '"))' in profile
+    monkeypatch.setattr(supervisor, "os_confinement_profile", lambda _plan: "(version 1)")
+    assert supervisor.confinement_command(plan, ["/bin/cat", "file"]) == [
+        "/usr/bin/sandbox-exec", "-p", "(version 1)", "/bin/cat", "file",
+    ]
+
+
+def test_read_only_git_config_allowlist_is_limited_to_the_two_global_files(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    home = (tmp_path / "home").resolve()
+    home.mkdir()
+    xdg = tmp_path / "xdg" / "config"
+    monkeypatch.setattr(supervisor.Path, "home", lambda: home)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    plan = {
+        "adapter": "opencode", "mode": "read_only", "workspace_root": str(tmp_path / "workspace"),
+        "cwd": str(tmp_path / "workspace"), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    }
+    profile = supervisor.os_confinement_profile(plan)
+
+    assert f'(literal "{home / ".gitconfig"}")' in profile
+    assert f'(literal "{xdg / "git/config"}")' in profile
+    assert f'(subpath "{home}")' in profile
+    assert f'(literal "{home / ".ssh/config"}")' not in profile
+
+    monkeypatch.delenv("XDG_CONFIG_HOME")
+    default_profile = supervisor.os_confinement_profile(plan)
+    assert f'(literal "{home / ".config/git/config"}")' in default_profile
+
+
+@pytest.mark.parametrize("adapter", ["agy", "claude", "cursor", "opencode", "kiro"])
+def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_path, adapter):
+    mod = supervisor()
+    worktree = tmp_path / "worktree"
+    attempt = tmp_path / "run" / "attempt"
+    common = tmp_path / "common.git"
+    private = tmp_path / "linked.git"
+    add_dir = tmp_path / "extra"
+    for path in (worktree, attempt, common, private, add_dir):
+        path.mkdir(parents=True)
+    dirs = iter((private, common))
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=str(next(dirs))))
+    plan = {"adapter": adapter, "mode": "worktree_write", "cwd": str(worktree),
+            "workspace_root": str(worktree), "run_dir": str(attempt),
+            "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]}}
+    profile = mod.os_confinement_profile(plan)
+    assert "(deny file-write*)" in profile
+    assert f'(deny file-write* (subpath "{common}"))' in profile
+    allow = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-write* "))
+    for path in (worktree, add_dir, attempt, private, Path("/dev")):
+        assert f'(subpath "{path}")' in allow
+    assert f'(subpath "{common}")' not in allow
+    for path in (common / "objects", common / "refs", common / "logs"):
+        assert f'(subpath "{path}")' in profile
+    for path in (common / "packed-refs", common / "packed-refs.lock"):
+        assert f'(literal "{path}")' in profile
+    for path in (common / "config", common / "hooks", common / "HEAD", common / "index"):
+        assert f'(subpath "{path}")' not in profile
+        assert f'(literal "{path}")' not in profile
+    for path in (Path.home() / ".cache", Path.home() / "Library/Caches", Path("/private/tmp")):
+        assert f'(subpath "{path}")' not in profile
+    for state_path in mod.CONFINED_STATE[adapter]["read_write"]:
+        assert mod._sbpl_filter(Path.home() / state_path) in profile
+    assert f'(subpath "{tmp_path}")' not in profile
+    assert '(subpath "/dev")' in profile
+    assert "(deny file-read-data" not in profile
+
+
+def test_writer_protected_path_inside_add_dir_keeps_read_and_write_denied(monkeypatch, tmp_path):
+    mod = supervisor()
+    worktree = tmp_path / "worktree"
+    add_dir = tmp_path / "extra"
+    protected = add_dir / "private"
+    worktree.mkdir()
+    protected.mkdir(parents=True)
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stdout=""))
+    plan = {"adapter": "agy", "mode": "worktree_write", "cwd": str(worktree),
+            "workspace_root": str(worktree), "protected_paths": [str(protected)],
+            "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]}}
+
+    profile = mod.os_confinement_profile(plan)
+
+    assert f'(allow file-write* (subpath "{worktree}") (subpath "{add_dir}")' in profile
+    assert profile.rfind(f'(deny file-write* (subpath "{protected}"))') > profile.rfind(
+        '(allow file-write* ')
+    assert profile.rstrip().endswith(f'(deny file-read* (subpath "{protected}"))')
+
+
+def test_writer_rejects_primary_checkout(tmp_path):
+    mod = supervisor()
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    with pytest.raises(ValueError, match="create a linked worktree"):
+        mod.build_plan("claude", {}, "hello", workspace_root=tmp_path,
+                       mode="worktree_write", worktree=tmp_path)
+
+
+def test_writer_confinement_selection_and_degraded_warning(monkeypatch, tmp_path):
+    mod = supervisor()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    claude = mod.build_plan("claude", {}, "hello", cwd=tmp_path, mode="worktree_write")
+    codex = mod.build_plan("codex", {}, "hello", cwd=tmp_path, mode="worktree_write")
+    assert claude["applied"]["confinement"] == "sandbox-exec"
+    assert codex["applied"]["confinement"] == "provider-native"
+    assert "-s" in codex["argv"] and "workspace-write" in codex["argv"]
+    assert any("sandbox_workspace_write.writable_roots=" in arg for arg in codex["argv"])
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None)
+    degraded = mod.build_plan("claude", {}, "hello", cwd=tmp_path, mode="worktree_write")
+    assert degraded["applied"]["confinement"] == "none"
+    assert any("worktree_write writes are unconfined" in item for item in degraded["warnings"])
+
+
+def test_agy_writer_requires_os_confinement_and_uses_write_profile(monkeypatch, tmp_path):
+    mod = supervisor()
+    add_dir = tmp_path.parent / "agy-extra"
+    add_dir.mkdir()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None)
+    with pytest.raises(ValueError, match="sandbox-exec"):
+        mod.build_plan("agy", {}, "hello", cwd=tmp_path, mode="worktree_write")
+
+    (tmp_path / ".agents").mkdir()
+    (tmp_path / ".agents/fabric-policy.json").write_text(
+        '{"protected_paths":["secret/"]}'
+    )
+    probes = iter(("/usr/bin/sandbox-exec", None))
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: next(probes))
+    with pytest.raises(ValueError, match="sandbox-exec"):
+        mod.build_plan("agy", {}, "hello", cwd=tmp_path, mode="worktree_write")
+
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = mod.build_plan("agy", {}, "hello", cwd=tmp_path, mode="worktree_write",
+                          add_dirs=[add_dir])
+    assert plan["applied"]["confinement"] == "sandbox-exec"
+    assert "--dangerously-skip-permissions" in plan["argv"]
+    assert "--sandbox" not in plan["argv"]
+    assert plan["protected_paths"] == [str(tmp_path / "secret")]
+    profile = mod.os_confinement_profile(plan)
+    assert "(deny file-write*)" in profile
+    assert f'(allow file-write* (subpath "{tmp_path}")' in profile
+    assert f'(subpath "{add_dir}")' in "\n".join(
+        line for line in profile.splitlines() if line.startswith("(allow file-write* ")
+    )
+    assert str(add_dir) in plan["applied"]["write_boundary"]["writable_paths"]
+    assert profile.rstrip().endswith(
+        f'(deny file-read* (subpath "{tmp_path / "secret"}"))'
+    )
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None)
+    with pytest.raises(RuntimeError, match="sandbox-exec"):
+        mod.confinement_command(plan, plan["argv"])
+
+
+@pytest.mark.parametrize("adapter", ["agy", "opencode", "claude", "cursor", "kiro"])
+def test_wrapped_writer_uses_only_provider_cache(monkeypatch, tmp_path, adapter):
+    mod = supervisor()
+    profile = mod.os_confinement_profile({
+        "adapter": adapter, "mode": "worktree_write", "cwd": str(tmp_path),
+        "workspace_root": str(tmp_path), "run_dir": str(tmp_path / "run"), "applied": {},
+    })
+    for path in (Path.home() / ".cache", Path.home() / "Library/Caches", Path("/private/tmp")):
+        assert f'(subpath "{path}")' not in profile
+    for path in mod.CONFINED_STATE[adapter]["read_write"]:
+        assert mod._sbpl_filter(Path.home() / path) in profile
+
+
+def protected_repo(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".agents").mkdir()
+    (repo / ".agents/fabric-policy.json").write_text('{"protected_paths":["private/"]}')
+    (repo / "private").mkdir()
+    (repo / "safe").mkdir()
+    return repo
+
+
+def test_workspace_root_policy_resolves_outside_git(monkeypatch, tmp_path):
+    mod = supervisor()
+    workspace = tmp_path / "workspace"
+    (workspace / ".agents").mkdir(parents=True)
+    (workspace / ".agents/fabric-policy.json").write_text('{"protected_paths":["secret/"]}')
+    (workspace / "secret").mkdir()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = mod.build_plan("opencode", {"trains_on_prompts": True}, "hello",
+                          cwd=workspace, workspace_root=workspace)
+    assert plan["protected_paths"] == [str(workspace / "secret")]
+    with pytest.raises(ValueError, match="protected path"):
+        mod.build_plan("opencode", {"trains_on_prompts": True}, "hello",
+                       cwd=workspace / "secret", workspace_root=workspace)
+
+
+@pytest.mark.parametrize("declaration", ["{", "[]", '{"protected_paths":"secret/"}',
+                                           '{"protected_paths":["../secret/"]}'])
+def test_invalid_workspace_policy_refuses_training_route(tmp_path, declaration):
+    mod = supervisor()
+    (tmp_path / ".agents").mkdir()
+    (tmp_path / ".agents/fabric-policy.json").write_text(declaration)
+    with pytest.raises(ValueError, match="invalid protected path policy"):
+        mod.build_plan("opencode", {"trains_on_prompts": True}, "hello",
+                       cwd=tmp_path, workspace_root=tmp_path)
+
+
+def test_policy_without_protected_paths_declares_none(tmp_path):
+    mod = supervisor()
+    (tmp_path / ".agents").mkdir()
+    (tmp_path / ".agents/fabric-policy.json").write_text('{"memory_floor_percent":{"read_only":5}}')
+    assert mod.protected_paths(tmp_path) == []
+
+
+def test_writer_discovers_worktree_policy_outside_workspace(monkeypatch, tmp_path):
+    mod = supervisor()
+    repo = protected_repo(tmp_path)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    (repo / "private/fixture.txt").write_text("fixture", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repo), "add", ".agents/fabric-policy.json", "private/fixture.txt"], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test", "-c",
+                    "user.email=test@example.invalid", "commit", "-q", "-m", "initial"], check=True)
+    linked = tmp_path / "linked"
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "linked", str(linked)], check=True)
+    extra = tmp_path / "extra"
+    extra.mkdir()
+    plan = mod.build_plan("opencode", {"trains_on_prompts": True}, "hello",
+                          workspace_root=workspace, mode="worktree_write", worktree=linked,
+                          add_dirs=[str(extra)])
+    assert str(repo / "private") in plan["protected_paths"]
+    boundary = plan["applied"]["write_boundary"]
+    assert str(extra) in boundary["writable_paths"]
+    assert str(repo / ".git/config") not in boundary["writable_paths"]
+    assert str(repo / ".git/objects") in boundary["writable_paths"]
+
+
+def test_non_git_workspace_discovers_child_repo_policy_and_linked_worktree(monkeypatch, tmp_path):
+    mod = supervisor()
+    workspace = tmp_path / "workspace"
+    repo = workspace / "app"
+    repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test", "-c",
+                    "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "initial"], check=True)
+    linked = repo / ".worktrees/linked"
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "linked", str(linked)], check=True)
+    (repo / ".agents").mkdir()
+    (repo / ".agents/fabric-policy.json").write_text('{"protected_paths":["secret/"]}')
+    for root in (repo, linked):
+        (root / "secret").mkdir()
+        (root / "secret/prompt.md").write_text("sensitive")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = mod.build_plan("opencode", {"trains_on_prompts": True}, "hello",
+                          cwd=workspace, workspace_root=workspace)
+    profile = mod.os_confinement_profile(plan)
+    deny = next(line for line in profile.splitlines() if line.startswith("(deny file-read* "))
+    for root in (repo, linked):
+        assert f'(subpath "{root / "secret"}")' in deny
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    for root in (repo, linked):
+        task = {"id": "one", "adapter": "opencode", "model": "opencode/mimo-v2.6-flash-free",
+                "prompt_file": str(root / "secret/prompt.md"), "cwd": str(workspace)}
+        result = importlib.import_module("skills.orchestrate.scripts.dispatch_run").preflight_tasks([task])
+        assert result["status"] == "rejected"
+        assert "secret" in result["fix"] and "non-training route" in result["fix"]
+
+
+def test_protected_profile_covers_registered_worktrees_and_non_training_route(monkeypatch, tmp_path):
+    mod = supervisor()
+    repo = protected_repo(tmp_path)
+    sibling = tmp_path / "linked"
+    original_run = mod.subprocess.run
+
+    def listed(command, *args, **kwargs):
+        if command[3:] == ["worktree", "list", "--porcelain"]:
+            return SimpleNamespace(returncode=0, stdout=f"worktree {repo}\n\nworktree {sibling}\n")
+        return original_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(mod.subprocess, "run", listed)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = mod.build_plan("opencode", {"trains_on_prompts": True}, "hello",
+                          cwd=repo / "safe", workspace_root=repo)
+    profile = mod.os_confinement_profile(plan)
+    deny = next(line for line in profile.splitlines() if line.startswith("(deny file-read* "))
+    for root in (repo, sibling):
+        assert f'(subpath "{root / "private"}")' in deny
+    assert plan["applied"]["confinement"] == "sandbox-exec"
+    safe = mod.build_plan("claude", {"trains_on_prompts": False}, "hello",
+                          cwd=repo / "safe", workspace_root=repo)
+    assert safe["protected_paths"] == []
+    assert safe["applied"]["confinement"] == "sandbox-exec"
+
+
+@pytest.mark.parametrize("field", ["prompt_file", "add_dirs", "cwd"])
+def test_protected_preflight_refuses_training_inputs(monkeypatch, tmp_path, field):
+    repo = protected_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    task = {"id": "one", "adapter": "opencode", "model": "opencode/mimo-v2.6-flash-free",
+            "prompt": "hello", "cwd": str(repo / "safe")}
+    if field == "prompt_file":
+        task.pop("prompt")
+        source = repo / "private/prompt.md"
+        source.write_text("sensitive")
+        task[field] = str(source)
+    elif field == "add_dirs":
+        task[field] = [str(repo / "private")]
+    else:
+        task[field] = str(repo / "private")
+    result = importlib.import_module("skills.orchestrate.scripts.dispatch_run").preflight_tasks([task])
+    assert result["status"] == "rejected"
+    assert "private" in result["fix"] and "non-training route" in result["fix"]
+
+
+@pytest.mark.parametrize("field", ["prompt_file", "add_dirs"])
+def test_relative_protected_inputs_anchor_to_workspace(monkeypatch, tmp_path, field):
+    repo = protected_repo(tmp_path)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    (repo / "private/prompt.md").write_text("secret", encoding="utf-8")
+    task = {"id": "one", "adapter": "opencode", "model": "opencode/mimo-v2.6-flash-free",
+            "prompt": "hello", "cwd": str(repo / "safe")}
+    if field == "prompt_file":
+        task.pop("prompt")
+        task[field] = "private/prompt.md"
+    else:
+        task[field] = ["private"]
+    result = importlib.import_module("skills.orchestrate.scripts.dispatch_run").preflight_tasks([task], repo)
+    assert result["status"] == "rejected"
+    assert "protected path" in result["fix"]
+
+
+def test_unresolved_training_flag_fails_closed_without_sandbox(monkeypatch, tmp_path):
+    mod = supervisor()
+    repo = protected_repo(tmp_path)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None)
+    with pytest.raises(ValueError, match="sandbox-exec"):
+        mod.build_plan("claude", {}, "hello", cwd=repo / "safe", workspace_root=repo)
+
+
+def test_protected_preflight_rejects_unavailable_sandbox(monkeypatch, tmp_path):
+    repo = protected_repo(tmp_path)
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    dispatch_run = importlib.import_module("skills.orchestrate.scripts.dispatch_run")
+    # dispatch_run imports provider_exec by its script name; patch that module object.
+    monkeypatch.setattr(dispatch_run.provider_exec, "_sandbox_exec_path", lambda: None)
+    task = {"id": "one", "adapter": "opencode", "model": "opencode/mimo-v2.6-flash-free",
+            "prompt": "hello", "cwd": str(repo / "safe")}
+    result = dispatch_run.preflight_tasks([task])
+    assert result["status"] == "rejected"
+    assert "sandbox-exec" in result["fix"]
+
+
+def test_plan_only_uses_explicit_workspace_root_when_process_cwd_differs(monkeypatch, tmp_path, capsys):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    workspace_root = tmp_path / "fabric-workspace"
+    workspace_root.mkdir()
+    process_cwd = tmp_path / "launcher"
+    provider_cwd = workspace_root / "provider"
+    process_cwd.mkdir()
+    provider_cwd.mkdir()
+    route_file = tmp_path / "route.json"
+    route_file.write_text('{"resolved_model":"fixture"}', encoding="utf-8")
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("hello", encoding="utf-8")
+    output_file = tmp_path / "out.md"
+    monkeypatch.chdir(process_cwd)
+    monkeypatch.setattr(sys, "argv", [
+        "provider_exec.py", "--route-file", str(route_file), "--adapter", "agy",
+        "--prompt-file", str(prompt_file), "--out", str(output_file), "--plan-only",
+        "--cwd", str(provider_cwd), "--workspace-root", str(workspace_root),
+    ])
+
+    assert supervisor.main() == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["cwd"] == str(provider_cwd.resolve())
+    assert plan["workspace_root"] == str(workspace_root.resolve())
+
+
+def test_main_rejects_cwd_outside_explicit_workspace_root(monkeypatch, tmp_path, capsys):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    launcher = tmp_path / "launcher"
+    root = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    launcher.mkdir()
+    root.mkdir()
+    outside.mkdir()
+    route_file = tmp_path / "route.json"
+    route_file.write_text('{"resolved_model":"fixture"}', encoding="utf-8")
+    prompt_file = tmp_path / "prompt.md"
+    prompt_file.write_text("hello", encoding="utf-8")
+    monkeypatch.chdir(launcher)
+    monkeypatch.setattr(sys, "argv", [
+        "provider_exec.py", "--route-file", str(route_file), "--adapter", "agy",
+        "--prompt-file", str(prompt_file), "--out", str(tmp_path / "out.md"), "--plan-only",
+        "--cwd", str(outside), "--workspace-root", str(root),
+    ])
+
+    assert supervisor.main() == 2
+    assert json.loads(capsys.readouterr().out)["fix"] == "cwd must be inside the workspace"
+
+
+def test_build_plan_rejects_cwd_outside_explicit_workspace_root(tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    root = tmp_path / "workspace"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+
+    with pytest.raises(ValueError, match="cwd must be inside the workspace"):
+        supervisor.build_plan(
+            "agy", {"resolved_model": "fixture"}, "hello",
+            cwd=outside, workspace_root=root,
+        )
+
+
+def test_build_plan_accepts_writer_worktree_outside_the_callers_tree(tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test", "-c",
+                    "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "initial"], check=True)
+    caller = tmp_path / "caller"
+    sibling = tmp_path / "sibling"
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "caller", str(caller)], check=True)
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "sibling", str(sibling)], check=True)
+
+    plan = supervisor.build_plan(
+        "codex", {"resolved_model": "fixture"}, "hello",
+        workspace_root=caller, mode="worktree_write", worktree=sibling,
+    )
+
+    assert plan["cwd"] == str(sibling.resolve())
+
+
+def test_build_plan_defaults_cwd_to_the_workspace_root(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    root = tmp_path / "workspace"
+    elsewhere = tmp_path / "elsewhere"
+    root.mkdir()
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    plan = supervisor.build_plan("agy", {"resolved_model": "fixture"}, "hello", workspace_root=root)
+
+    assert plan["cwd"] == str(root.resolve())
+
+
+def test_read_only_profile_denies_writes_outside_attempt_and_provider_state(monkeypatch, tmp_path):
+    mod = supervisor()
+    home = tmp_path / "home"
+    workspace = home / "repo"
+    attempt = workspace / ".agent-run/attempt"
+    add_dir = tmp_path / "extra"
+    attempt.mkdir(parents=True)
+    add_dir.mkdir()
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    monkeypatch.setattr(mod, "CONFINED_STATE", {"agy": {"read_write": ("state",), "read": ()}})
+    plan = {"adapter": "agy", "mode": "read_only", "workspace_root": str(workspace),
+            "cwd": str(workspace), "run_dir": str(attempt),
+            "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]}}
+    profile = mod.os_confinement_profile(plan)
+    assert "(deny file-write*)" in profile
+    allow = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-write* "))
+    assert f'(subpath "{attempt}")' in allow
+    assert f'(subpath "{home / "state"}")' in allow
+    assert '(subpath "/dev")' in allow
+    for path in (workspace, add_dir, home, tmp_path / "T", Path("/private/tmp")):
+        assert f'(subpath "{path}")' not in allow
+
+
+def test_sbpl_filter_star_escapes_regex_without_resolving_symlink_target(tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    target = tmp_path / "target with [regex].json"
+    target.write_text("secret", encoding="utf-8")
+    link = tmp_path / "link with [regex].json"
+    link.symlink_to(target)
+
+    rule = supervisor._sbpl_filter(str(link) + "*")
+
+    assert rule == f'(regex #"^{link.parent}/link with \\[regex\\]\\.json[^/]*$")'
+
+
+def test_read_only_confinement_paths_escape_sbpl_literals(tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    root = tmp_path / 'space"and\\slash'
+    cwd = root / "sub"
+    cwd.mkdir(parents=True)
+    plan = {
+        "adapter": "opencode", "mode": "read_only", "workspace_root": str(root),
+        "cwd": str(cwd), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    }
+    profile = supervisor.os_confinement_profile(plan)
+    assert 'space\\"and\\\\slash' in profile
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+def test_sandbox_exec_profile_denies_home_reads_and_writes_but_keeps_provider_state(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    sandbox_exec = supervisor._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    home = (tmp_path / "home").resolve()
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh/id").write_text("key\n", encoding="utf-8")
+    (home / "state").mkdir()
+    (home / "creds.json").write_text("token\n", encoding="utf-8")
+    cwd = home / "repo/sub"
+    cwd.mkdir(parents=True)
+    (cwd / "note.txt").write_text("note\n", encoding="utf-8")
+    (home / ".gitconfig").write_text("[user]\n\tname = home-config\n", encoding="utf-8")
+    xdg_git = home / ".config/git"
+    xdg_git.mkdir(parents=True)
+    (xdg_git / "config").write_text("[user]\n\temail = xdg-config@example.invalid\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(cwd)], check=True)
+    monkeypatch.setattr(supervisor.Path, "home", lambda: home)
+    monkeypatch.setattr(supervisor, "CONFINED_STATE", {"agy": {"read_write": ("state", "creds.json*"), "read": ()}})
+    plan = {
+        "adapter": "agy", "mode": "read_only", "workspace_root": str(home / "repo"),
+        "cwd": str(cwd), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    }
+    profile = supervisor.os_confinement_profile(plan)
+
+    def run(script):
+        return subprocess.run(
+            [sandbox_exec, "-p", profile, "/bin/sh", "-c", script], capture_output=True, text=True,
+            env={**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config")},
+        )
+
+    probe = run(f"cat {cwd}/note.txt")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert probe.stdout == "note\n"
+    config = run(
+        f"git -C '{cwd}' config --global user.name && git -C '{cwd}' config --global user.email"
+    )
+    assert config.returncode == 0, config.stderr
+    assert config.stdout.splitlines() == ["home-config", "xdg-config@example.invalid"]
+    status = run(f"git -C '{cwd}' status --short")
+    assert status.returncode == 0, status.stderr
+    assert run(f"cat {home}/.ssh/id").returncode != 0
+    assert run(f"echo x > {home}/written").returncode != 0
+    assert not (home / "written").exists()
+    assert run(f"echo x > {cwd}/written").returncode != 0
+    assert run(f"echo x > {home}/state/log && cat {home}/creds.json").stdout == "token\n"
+    assert run(f"echo y > {home}/creds.json.tmp").returncode == 0
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+def test_sandbox_exec_keeps_add_dir_under_user_temp_read_only(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    sandbox_exec = supervisor._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    user_temp = (tmp_path / "T").resolve()
+    add_dir = user_temp / "extra"
+    cwd = (tmp_path / "workspace").resolve()
+    add_dir.mkdir(parents=True)
+    cwd.mkdir()
+    (add_dir / "note.txt").write_text("note\n", encoding="utf-8")
+    plan = {
+        "adapter": "agy", "mode": "read_only", "workspace_root": str(cwd),
+        "cwd": str(cwd), "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]},
+    }
+    profile = supervisor.os_confinement_profile(plan)
+
+    def run(script):
+        return subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script], capture_output=True, text=True)
+
+    probe = run(f"cat {add_dir}/note.txt")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert probe.stdout == "note\n"
+    assert run(f"echo blocked > {add_dir}/written.txt").returncode != 0
+    assert not (add_dir / "written.txt").exists()
+
+
+def test_agy_read_only_guarantee_tracks_os_confinement(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    confined = supervisor.build_plan("agy", {"resolved_model": "gemini-test"}, "prompt", cwd=tmp_path, workspace_root=tmp_path)
+    assert confined["applied"]["confinement"] == "sandbox-exec"
+    assert confined["applied"]["guarantee"] == "best_effort"
+    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: None)
+    unconfined = supervisor.build_plan("agy", {"resolved_model": "gemini-test"}, "prompt", cwd=tmp_path, workspace_root=tmp_path)
+    assert unconfined["applied"]["confinement"] == "none"
+    assert unconfined["applied"]["guarantee"] == "prompt_only"
+    assert any("writes are unconfined" in warning for warning in unconfined["warnings"])
+
+
+@pytest.mark.parametrize("adapter", ["codex", "claude", "cursor", "kiro", "agy", "opencode"])
+def test_read_only_cwd_outside_workspace_warns_when_reads_are_unconfined(
+    monkeypatch, tmp_path, adapter,
+):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    root = tmp_path / "workspace"
+    cwd = root / "sub"
+    cwd.mkdir(parents=True)
+    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: None)
+
+    plan = supervisor.build_plan(
+        adapter, {"resolved_model": "fixture"}, "prompt", cwd=cwd, workspace_root=root,
+    )
+
+    warning = f"{adapter} read_only: cwd is not a read boundary"
+    assert plan["warnings"].count(warning) == 1
+
+
+@pytest.mark.parametrize("adapter", ["agy", "opencode"])
+def test_read_only_cwd_warning_is_omitted_with_os_read_confinement(
+    monkeypatch, tmp_path, adapter,
+):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    root = tmp_path / "workspace"
+    cwd = root / "sub"
+    cwd.mkdir(parents=True)
+    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+
+    plan = supervisor.build_plan(
+        adapter, {"resolved_model": "fixture"}, "prompt", cwd=cwd, workspace_root=root,
+    )
+
+    assert f"{adapter} read_only: cwd is not a read boundary" not in plan["warnings"]
+
+
+def test_os_confinement_opt_out_disables_sandbox_exec(monkeypatch):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.setattr(supervisor.shutil, "which", lambda _name: "/usr/bin/sandbox-exec")
+    monkeypatch.setenv("PROVENANT_NO_OS_CONFINEMENT", "1")
+    assert supervisor._sandbox_exec_path() is None
+
+
+def test_refused_sandbox_exec_falls_back_to_unconfined_with_warning(monkeypatch):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    monkeypatch.setattr(supervisor.sys, "platform", "darwin")
+    monkeypatch.delenv("PROVENANT_NO_OS_CONFINEMENT", raising=False)
+    monkeypatch.setattr(supervisor.shutil, "which", lambda _name: "/usr/bin/sandbox-exec")
+    refused = subprocess.CompletedProcess([], 71, "", "sandbox-exec: sandbox_apply: Operation not permitted\n")
+    monkeypatch.setattr(supervisor.subprocess, "run", lambda *_a, **_k: refused)
+    supervisor._sandbox_exec_usable.cache_clear()
+    try:
+        assert supervisor._sandbox_exec_path() is None
+    finally:
+        supervisor._sandbox_exec_usable.cache_clear()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+def test_sandbox_exec_profile_confines_reads_to_temp_subdirectory(tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    sandbox_exec = supervisor._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    root = tmp_path / "workspace"
+    cwd = root / "sub"
+    cwd.mkdir(parents=True)
+    allowed = cwd / "allowed.txt"
+    denied = root / "denied.txt"
+    allowed.write_text("allowed\n", encoding="utf-8")
+    denied.write_text("denied\n", encoding="utf-8")
+    plan = {
+        "adapter": "agy", "mode": "read_only", "workspace_root": str(root),
+        "cwd": str(cwd), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    }
+    profile = supervisor.os_confinement_profile(plan)
+    permitted = subprocess.run([sandbox_exec, "-p", profile, "/bin/cat", str(allowed)], capture_output=True, text=True)
+    if permitted.returncode and any(word in permitted.stderr.lower() for word in ("sandbox_apply", "operation not permitted")):
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert permitted.returncode == 0, permitted.stderr
+    assert permitted.stdout == "allowed\n"
+    blocked = subprocess.run([sandbox_exec, "-p", profile, "/bin/cat", str(denied)], capture_output=True, text=True)
+    assert blocked.returncode != 0
 
 
 def supervisor():
@@ -71,8 +774,8 @@ def supervisor():
         ("rate limit exceeded; HTTP 429", "rate_limited"),
         ("Login expired; not logged in", "auth_required"),
         ("model not found", "model_unavailable"),
-        ('error: invalid model selection (--model "gemini-3.8-pro" --effort "high"): --effort is not supported for model "gemini-3.8-pro"', "model_unavailable"),
-        ("invalid model selection; quota exceeded", "usage_limited"),
+        ('error: invalid model selection (--model "gemini-3.8-pro" --effort "high"): --effort is not supported for model "gemini-3.8-pro"', "rejected"),
+        ("invalid model selection; quota exceeded", "rejected"),
         ("permission denied", "permission_blocked"),
     ],
 )
@@ -81,6 +784,22 @@ def test_failure_signatures(adapter, text, status):
     assert parsed["status"] == status
     assert parsed["signature"]
     assert len(parsed["excerpt"]) <= 200
+
+
+def test_invalid_effort_is_rejected_with_cli_fix_and_no_cooldown(tmp_path):
+    from skills.orchestrate.scripts.fabric_records import write_cooldown
+
+    message = ('error: invalid model selection (--model "gemini-3.8-pro-high" '
+               '--effort "high"): --effort is not supported for model "gemini-3.8-pro-high"')
+    code = f"import sys; print({message!r}, file=sys.stderr); sys.exit(1)"
+    row = supervisor().execute(fixture_plan(tmp_path, code, "agy"), tmp_path / "result.md")
+    assert row["status"] == "rejected"
+    assert row["error"] == "invalid_input"
+    assert row["evidence"]["signature"] == "invalid_input"
+    assert row["fix"] == message
+    cooldowns = tmp_path / "cooldowns.json"
+    write_cooldown(row, path=cooldowns)
+    assert not cooldowns.exists()
 
 
 @pytest.mark.parametrize(
@@ -205,26 +924,127 @@ def test_reset_evidence_uses_provider_time_units():
 
 def fixture_plan(tmp_path, code, adapter="codex", **controls):
     mod = supervisor()
-    plan = mod.build_plan(
-        adapter,
-        {
-            "resolved_model": "fixture",
-            "model_family": "openai",
-            "endpoint_provider": "openai",
-            "effort": "high",
-        },
-        "hello",
-        cwd=tmp_path,
-        **controls,
-    )
+    previous = os.environ.get("PROVENANT_NO_OS_CONFINEMENT")
+    os.environ["PROVENANT_NO_OS_CONFINEMENT"] = "1"
+    try:
+        plan = mod.build_plan(
+            adapter,
+            {
+                "resolved_model": "fixture",
+                "model_family": "openai",
+                "endpoint_provider": "openai",
+                "effort": "high",
+            },
+            "hello",
+            cwd=tmp_path,
+            workspace_root=tmp_path,
+            **controls,
+        )
+    finally:
+        if previous is None:
+            os.environ.pop("PROVENANT_NO_OS_CONFINEMENT", None)
+        else:
+            os.environ["PROVENANT_NO_OS_CONFINEMENT"] = previous
     plan["argv"] = [sys.executable, "-u", "-c", code]
     plan["grace_seconds"] = 0.1
     return plan
 
 
+def test_attempt_private_temp_and_cache_environment(tmp_path):
+    code = """import json, os
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({key: os.environ.get(key) for key in ('TMPDIR','TMP','TEMP','XDG_CACHE_HOME')})}}))
+print(json.dumps({'type':'turn.completed'}))
+"""
+    plan = fixture_plan(tmp_path, code)
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    expected = {key: str(tmp_path / ("cache" if key == "XDG_CACHE_HOME" else "tmp"))
+                for key in ("TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME")}
+    assert all(path.is_dir() for path in (tmp_path / "tmp", tmp_path / "cache"))
+    assert json.loads((tmp_path / "result.md").read_text()) == expected
+
+
+def test_codex_read_only_records_native_write_boundary(tmp_path):
+    plan = supervisor().build_plan("codex", {"resolved_model": "fixture"}, "hello",
+                                   cwd=tmp_path, workspace_root=tmp_path)
+    assert plan["applied"]["confinement"] == "provider-native"
+    assert plan["applied"]["write_boundary"]["kind"] == "provider-native"
+
+
 def test_worker_preface_explains_process_cleanup(tmp_path):
-    plan = supervisor().build_plan("codex", {"resolved_model": "fixture"}, "hello", cwd=tmp_path)
+    plan = supervisor().build_plan("codex", {"resolved_model": "fixture"}, "hello", cwd=tmp_path, workspace_root=tmp_path)
     assert "processes left running are then stopped." in plan["prompt"]
+
+
+def test_provider_launch_sets_pwd_to_resolved_cwd(tmp_path):
+    child = tmp_path / "child"
+    child.mkdir()
+    code = "import json, os; print(json.dumps({'type':'result','result':os.environ['PWD']}))"
+    plan = fixture_plan(tmp_path, code)
+    plan["cwd"] = str(child)
+    record = supervisor().execute(
+        plan,
+        tmp_path / "result.md",
+        env={**os.environ, "PWD": str(tmp_path)},
+    )
+    assert record["status"] == "ok"
+    assert record["output_path"]
+    assert (tmp_path / "result.md").read_text() == str(child)
+
+
+def test_opencode_read_only_declares_fully_denied_bash_tool(tmp_path):
+    code = "import json, os; print(json.dumps({'type':'result','result':os.environ['OPENCODE_CONFIG_CONTENT']}))"
+    record = supervisor().execute(
+        fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md"
+    )
+    permission = json.loads((tmp_path / "result.md").read_text())["permission"]
+    assert permission["bash"]["*"] == "deny"
+    assert permission["bash"]["provenant-no-shell"] == "allow"
+
+
+def test_opencode_free_tier_refusal_is_model_unavailable(tmp_path):
+    code = "import sys; print(\"403 FreeTierError: OpenCode's free tier can only be used from within OpenCode\", file=sys.stderr); sys.exit(1)"
+    record = supervisor().execute(
+        fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md"
+    )
+    assert record["status"] == "model_unavailable"
+    assert record["fix"] == (
+        "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"
+    )
+
+
+def test_opencode_free_tier_fix_uses_failure_text_beyond_excerpt_limit(tmp_path):
+    preamble = "diagnostic preamble " * 20
+    code = (
+        "import sys; print(" + repr(preamble +
+        "403 FreeTierError: OpenCode's free tier can only be used from within OpenCode") +
+        ", file=sys.stderr); sys.exit(1)"
+    )
+    record = supervisor().execute(
+        fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md"
+    )
+
+    assert record["status"] == "model_unavailable"
+    assert record["fix"] == (
+        "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"
+    )
+
+
+def test_opencode_free_tier_fix_uses_structured_failure_text(tmp_path):
+    event = {
+        "type": "error",
+        "error": "diagnostic preamble " * 20
+        + "403 FreeTierError: OpenCode's free tier can only be used from within OpenCode",
+    }
+    code = "import json, sys; print(json.dumps(" + repr(event) + ")); sys.exit(1)"
+    record = supervisor().execute(
+        fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md"
+    )
+
+    assert record["status"] == "model_unavailable"
+    assert record["fix"] == (
+        "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"
+    )
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="Codex seatbelt is macOS-only")
@@ -1571,6 +2391,7 @@ sys.exit(1 if model=='opus' else 0)
     fallback_cli.chmod(0o755)
     env = {
         **os.environ,
+        "PROVENANT_NO_OS_CONFINEMENT": "1",
         "PATH": str(bindir) + ":" + os.environ["PATH"],
         "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
         "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
@@ -1642,9 +2463,16 @@ def test_codex_observed_model_comes_from_rollout_turn_context(tmp_path):
 
 
 def test_opencode_observed_model_comes_from_export(tmp_path):
+    child = tmp_path / "child"
+    child.mkdir()
+    pwd_file = tmp_path / "export-pwd"
     cli = tmp_path / "opencode"
     cli.write_text(
-        '#!/bin/sh\nif [ "$1" = export ]; then echo \'{"messages":[{"info":{"providerID":"opencode-go","modelID":"deepseek-v4.1-flash"}}]}\'; fi\n'
+        "#!/usr/bin/env python3\n"
+        "import json, os, pathlib, sys\n"
+        "if sys.argv[1] == 'export':\n"
+        f"    pathlib.Path({str(pwd_file)!r}).write_text(os.environ['PWD'])\n"
+        "    print(json.dumps({'messages':[{'info':{'providerID':'opencode-go','modelID':'deepseek-v4.1-flash'}}]}))\n"
     )
     cli.chmod(0o755)
     plan = fixture_plan(
@@ -1652,13 +2480,15 @@ def test_opencode_observed_model_comes_from_export(tmp_path):
         "import json; print(json.dumps({'type':'text','sessionID':'oc-1','part':{'text':'OK'}}))",
         "opencode",
     )
+    plan["cwd"] = str(child)
     record = supervisor().execute(
         plan,
         tmp_path / "result.md",
-        env={**os.environ, "PATH": str(tmp_path) + ":" + os.environ["PATH"]},
+        env={**os.environ, "PATH": str(tmp_path) + ":" + os.environ["PATH"], "PWD": str(tmp_path)},
     )
     assert record["provenance"]["observed_model"] == "opencode-go/deepseek-v4.1-flash"
     assert record["provenance"]["observed_source"] == "opencode:export.modelID"
+    assert pwd_file.read_text() == str(child)
 
 
 def test_capture_is_bounded_but_result_is_complete(tmp_path, monkeypatch):
@@ -1704,6 +2534,7 @@ def test_linked_writer_automatically_grants_git_metadata(tmp_path):
         "hello",
         mode="worktree_write",
         worktree=lane,
+        workspace_root=tmp_path,
         network=False,
     )
     assert str(repo / ".git") in plan["applied"]["add_dirs"]
@@ -1746,12 +2577,27 @@ def test_plan_only_honors_read_only_cwd_inside_workspace(tmp_path):
     assert json.loads(result.stdout)["cwd"] == str(child)
 
 
+def test_opencode_argv_always_pins_plan_cwd(tmp_path):
+    adapter = importlib.import_module("skills.orchestrate.scripts.adapters.opencode")
+    plan = {
+        "worktree": "",
+        "cwd": str(tmp_path),
+        "resume_session": "",
+        "model": "opencode/mimo-v2.6-flash-free",
+        "effort": "",
+        "prompt": "hello",
+    }
+    argv = adapter.argv(plan)
+    assert argv[argv.index("--dir") + 1] == str(tmp_path)
+
+
 def test_unsupported_controls_are_not_claimed_as_applied(tmp_path):
     plan = supervisor().build_plan(
         "cursor",
         {"resolved_model": "fixture", "effort": "high"},
         "hello",
         cwd=tmp_path,
+        workspace_root=tmp_path,
         requested_effort="high",
         network=False,
     )
@@ -1763,6 +2609,7 @@ def test_unsupported_controls_are_not_claimed_as_applied(tmp_path):
         {"resolved_model": "fixture"},
         "hello",
         cwd=tmp_path,
+        workspace_root=tmp_path,
         mode="worktree_write",
         sandbox="full",
         network=False,
@@ -1821,14 +2668,14 @@ def test_kiro_enforcement_requires_fresh_version_bound_negative_probe(tmp_path):
         },
     }
     assert (
-        supervisor().build_plan("kiro", route, "hello", cwd=tmp_path)["applied"][
+        supervisor().build_plan("kiro", route, "hello", cwd=tmp_path, workspace_root=tmp_path)["applied"][
             "guarantee"
         ]
         == "enforced"
     )
     route["read_only_probe"]["cli_version"] = "old"
     assert (
-        supervisor().build_plan("kiro", route, "hello", cwd=tmp_path)["applied"][
+        supervisor().build_plan("kiro", route, "hello", cwd=tmp_path, workspace_root=tmp_path)["applied"][
             "guarantee"
         ]
         == "prompt_only"
@@ -1838,7 +2685,7 @@ def test_kiro_enforcement_requires_fresh_version_bound_negative_probe(tmp_path):
         checked_at=(datetime.now(UTC) - timedelta(days=2)).isoformat(),
     )
     assert (
-        supervisor().build_plan("kiro", route, "hello", cwd=tmp_path)["applied"][
+        supervisor().build_plan("kiro", route, "hello", cwd=tmp_path, workspace_root=tmp_path)["applied"][
             "guarantee"
         ]
         == "prompt_only"
@@ -1863,7 +2710,7 @@ def test_claude_plan_isolates_settings_and_mcp(tmp_path, monkeypatch, api_key):
     monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
     if api_key:
         monkeypatch.setenv('ANTHROPIC_API_KEY', 'fixture-key')
-    plan = supervisor().build_plan('claude', {'resolved_model': 'opus'}, 'hello', cwd=tmp_path)
+    plan = supervisor().build_plan('claude', {'resolved_model': 'opus'}, 'hello', cwd=tmp_path, workspace_root=tmp_path)
     assert ('--bare' if api_key else '--safe-mode') in plan['argv']
     assert '--strict-mcp-config' in plan['argv']
     assert plan['argv'][plan['argv'].index('--permission-mode') + 1] == 'default'
@@ -1886,13 +2733,27 @@ def test_add_dirs_deny_ancestors_of_credential_stores(tmp_path, monkeypatch, dir
     monkeypatch.setenv('HOME', str(tmp_path))
     target = tmp_path / directory
     target.mkdir(parents=True)
-    plan = supervisor().build_plan('codex', {}, 'hello', cwd=tmp_path, add_dirs=[target])
+    plan = supervisor().build_plan('codex', {}, 'hello', cwd=tmp_path, workspace_root=tmp_path, add_dirs=[target])
     assert str(target) not in plan['applied']['add_dirs']
     assert any('credential' in warning for warning in plan['warnings'])
 
 
-def test_opencode_does_not_claim_unsupported_add_dirs(tmp_path):
-    plan = supervisor().build_plan('opencode', {}, 'hello', cwd=tmp_path, add_dirs=[tmp_path])
+@pytest.mark.parametrize('adapter', ['agy', 'claude', 'cursor', 'opencode', 'kiro'])
+def test_wrapped_writer_records_add_dirs_in_write_boundary(monkeypatch, tmp_path, adapter):
+    mod = supervisor()
+    add_dir = tmp_path / 'extra'
+    add_dir.mkdir()
+    monkeypatch.setattr(mod, '_sandbox_exec_path', lambda: '/usr/bin/sandbox-exec')
+    plan = mod.build_plan(adapter, {}, 'hello', cwd=tmp_path, workspace_root=tmp_path,
+                          mode='worktree_write', add_dirs=[add_dir])
+    assert str(add_dir) in plan['applied']['add_dirs']
+    assert str(add_dir) in plan['applied']['write_boundary']['writable_paths']
+
+
+def test_opencode_does_not_claim_unsupported_add_dirs_without_wrapper(monkeypatch, tmp_path):
+    mod = supervisor()
+    monkeypatch.setattr(mod, '_sandbox_exec_path', lambda: None)
+    plan = mod.build_plan('opencode', {}, 'hello', cwd=tmp_path, workspace_root=tmp_path, add_dirs=[tmp_path])
     assert plan['applied']['add_dirs'] == []
     assert 'additional directories unsupported by opencode' in plan['warnings']
 
@@ -1908,7 +2769,7 @@ def test_add_dirs_warns_and_drops_credential_stores(tmp_path, monkeypatch, direc
     target.mkdir(parents=True)
     safe = tmp_path / 'source'
     safe.mkdir()
-    plan = supervisor().build_plan('codex', {}, 'hello', cwd=tmp_path, add_dirs=[target, safe])
+    plan = supervisor().build_plan('codex', {}, 'hello', cwd=tmp_path, workspace_root=tmp_path, add_dirs=[target, safe])
     assert str(target) not in plan['applied']['add_dirs']
     assert str(safe) in plan['applied']['add_dirs']
     assert any('credential' in warning for warning in plan['warnings'])
@@ -1966,7 +2827,7 @@ for i in range(10000): print(json.dumps({'type':'telemetry','data':'x'*100}))
 
 
 def test_plan_uses_router_applied_effort(tmp_path):
-    plan = supervisor().build_plan('opencode', {'resolved_model':'fixture', 'effort':'high', 'effort_applied':'medium'}, 'hello', cwd=tmp_path)
+    plan = supervisor().build_plan('opencode', {'resolved_model':'fixture', 'effort':'high', 'effort_applied':'medium'}, 'hello', cwd=tmp_path, workspace_root=tmp_path)
     assert plan['effort'] == 'medium'
     assert plan['argv'][plan['argv'].index('--variant') + 1] == 'medium'
 

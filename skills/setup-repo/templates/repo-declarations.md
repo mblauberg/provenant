@@ -4,6 +4,7 @@
 
 - Choice: `<github-issues|tracker-name|none>`
 - Pointer: `<tracker-url-or-none>`
+- Command: `<tracker-command-or-none>`
 
 ### Scope and stories
 

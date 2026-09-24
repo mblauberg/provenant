@@ -15,6 +15,49 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "model-route"
 CATALOG = json.loads((ROOT / "config" / "model-routing.json").read_text())
+
+
+def test_opencode_models_have_explicit_training_flags():
+    models = CATALOG["adapters"]["opencode"]["models"]
+    assert models
+    for model in models:
+        assert type(model.get("trains_on_prompts")) is bool
+        assert model["trains_on_prompts"] is ("-free" in model["id"])
+
+
+def test_required_task_classes_bind_registered_exact_models_and_supported_efforts():
+    required = {"implementation", "ui-taste", "screenshots", "review",
+                "second-opinion", "research", "bulk"}
+    routes = CATALOG["task_class_routes"]
+    assert required <= routes.keys()
+    for name in required:
+        route = routes[name]
+        assert isinstance(route["models"], dict) and route["models"]
+        for adapter, models in route["models"].items():
+            entries = {item["id"]: item for item in CATALOG["adapters"][adapter]["models"]}
+            for model in models:
+                assert model in entries
+                assert route["effort"] in entries[model].get("efforts", [])
+                assert entries[model].get("effort_transport") != "none"
+
+
+def test_fallback_inherits_adapter_training_flag_without_false_default():
+    spec = importlib.util.spec_from_file_location("route_under_test", ROOT / "scripts/model_route.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    catalog = {"adapters": {"fixture": {"trains_on_prompts": True,
+                "aliases": {"workhorse": ["primary", "candidate"]},
+                "models": [{"id": "primary", "plan_cap_usd": 1},
+                           {"id": "candidate", "plan_cap_usd": 1}]}}}
+    assert module._fallback_candidates("fixture", "workhorse", "primary", catalog, {}) == []
+    catalog["adapters"]["fixture"]["trains_on_prompts"] = False
+    candidates = module._fallback_candidates("fixture", "workhorse", "primary", catalog, {})
+    assert len(candidates) == 1
+    assert candidates[0]["trains_on_prompts"] is False
+    del catalog["adapters"]["fixture"]["trains_on_prompts"]
+    candidates = module._fallback_candidates("fixture", "workhorse", "primary", catalog, {})
+    assert len(candidates) == 1
+    assert candidates[0]["trains_on_prompts"] is None
 CRUCIAL_RISK_OVERRIDE = CATALOG["families"]["anthropic"]["risk_tier_overrides"]["crucial"]
 RISK_OVERRIDE_MODEL = CRUCIAL_RISK_OVERRIDE["models"][0]
 NON_OCCUPANT_MODELS = tuple(
@@ -137,6 +180,9 @@ def test_snapshot_deep_merges_models_and_drops_malformed_overlay(tmp_path):
                         "effort_transport": "flag", "models": [{"names": ["oops"]}]}},
         "families": {"bad-family": {"aliases": "not-a-map"}},
         "endpoints": {"bad": {"token_env": 3}},
+        "task_class_routes": {"implementation": {
+            "effort": "xhigh", "models": {"codex": ["gpt-6-astra"]},
+        }},
     }))
     result = subprocess.run(
         [str(SCRIPT), "snapshot", "--json"], capture_output=True, text=True,
@@ -158,8 +204,40 @@ def test_snapshot_deep_merges_models_and_drops_malformed_overlay(tmp_path):
     assert "also-broken" not in snapshot["adapters"]
     assert "bad-family" not in snapshot["families"]
     assert "bad" not in snapshot["endpoints"]
+    assert snapshot["task_class_routes"]["implementation"]["effort"] == "xhigh"
+    assert snapshot["task_class_routes"]["implementation"]["models"]["codex"] == ["gpt-6-astra"]
     assert snapshot["adapters"]["codex"]["default_model"] if "default_model" in snapshot["adapters"]["codex"] else True
     assert any("codex.models" in note for note in snapshot["drift"])
+
+
+def test_training_flag_survives_model_overlay_and_free_override(tmp_path, monkeypatch):
+    router = load_router()
+    instance = tmp_path / "instance"
+    (instance / "config").mkdir(parents=True)
+    (instance / "config/model-routing.json").write_text(json.dumps({"adapters": {
+        "claude": {"models": [{"id": "claude-opus-5-5", "names": ["overlay-opus"]}]},
+        "codex": {"models": [{"id": "gpt-6-sol", "names": ["overlay-sol"]}]},
+        "agy": {"models": [{"id": "gemini-3.8-flash", "names": ["overlay-flash"]}]},
+        "opencode": {"models": [{"id": "opencode/mimo-v2.6-flash-free", "names": ["overlay-free"]}]},
+    }}))
+    monkeypatch.setattr(router, "CATALOG_PATH", instance / "config/model-routing.json")
+    catalog = router.catalogue_snapshot()["catalogue"]
+    for adapter, model in (("claude", "claude-opus-5-5"), ("codex", "gpt-6-sol"),
+                           ("agy", "gemini-3.8-flash")):
+        entry = next(item for item in catalog["adapters"][adapter]["models"] if item["id"] == model)
+        assert router.training_flag(catalog["adapters"][adapter], entry) is False
+    free = next(item for item in catalog["adapters"]["opencode"]["models"]
+                if item["id"] == "opencode/mimo-v2.6-flash-free")
+    assert router.training_flag(catalog["adapters"]["opencode"], free) is True
+    assert router.training_flag({}, {}) is None
+
+
+def test_resolved_routes_expose_training_flag():
+    for adapter, model, expected in (("claude", "opus", False),
+                                     ("opencode", "opencode/mimo-v2.6-flash-free", True)):
+        result, route = resolve("--adapter", adapter, "--model", model, "--role", "worker")
+        assert result.returncode == 0, result.stderr
+        assert route["trains_on_prompts"] is expected
 
 
 def test_snapshot_drops_invalid_new_adapter_effort_and_allows_nullable_override(tmp_path, monkeypatch):
@@ -287,6 +365,13 @@ def test_kiro_is_enabled_for_both_routes():
                             "--alias", "scout", "--role", "worker")
     assert result.returncode == 0, route
     assert route["adapter_enabled"] is True
+
+
+def test_agy_write_mode_is_registered():
+    compatibility = yaml.safe_load((ROOT / "config/adapter-compatibility.yaml").read_text())
+    registry = compatibility["dispatch_registry"]["agy"]
+    assert registry["write_modes"] == ["worktree_write"]
+    assert registry["read_only_guarantee"] == "prompt_only"
 
 
 def test_kiro_route_carries_cached_negative_probe_evidence(tmp_path):
@@ -458,6 +543,11 @@ def test_unregistered_agy_model_passes_explicit_effort_unverified():
 
 
 def test_opencode_training_warning_and_paid_fallback_excludes_free():
+    for model in ("opencode/mimo-v2.6-flash-free", "opencode/nemotron-3-ultra-free"):
+        result, free_route = resolve("--adapter", "opencode", "--model", model, "--role", "worker")
+        assert result.returncode == 0, free_route
+        assert free_route["trains_on_prompts"] is True
+        assert free_route["warnings"]
     result, route = resolve("--adapter", "opencode", "--model",
                             "opencode/muse-spark-1.3-contributor-free", "--role", "worker")
     assert result.returncode == 0, route
@@ -469,7 +559,7 @@ def test_opencode_training_warning_and_paid_fallback_excludes_free():
     result, unregistered = resolve("--adapter", "opencode", "--model",
                                    "opencode/muse-spark-2-contributor-free", "--role", "worker")
     assert result.returncode == 0, unregistered
-    assert unregistered["trains_on_prompts"] is True
+    assert unregistered["trains_on_prompts"] is None
     assert unregistered["warnings"]
 
 
@@ -1964,7 +2054,9 @@ def test_capability_resolved_override_occupant_requires_explicit_risk_tier(
     receipt = json.loads(capsys.readouterr().out)
     assert router.CATALOG_PATH == catalog_path
     assert result == 1
-    assert receipt["status"] == "risk_tier_override_required"
+    assert receipt["status"] == (
+        "no_candidate_available" if route[0] == "--task-class" else "risk_tier_override_required"
+    )
 
 
 def test_capability_resolved_override_occupant_records_explicit_risk_tier(
@@ -2632,14 +2724,10 @@ def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
 @pytest.mark.parametrize(
     ("task_class", "alias", "effort", "resolved_model"),
     (
-        # Sol and Luna at high on the worker aliases, not the task-class floors of
-        # low and medium: the OpenAI family raises worker+scout and
-        # worker+workhorse in role_effort_defaults, the same way
-        # critical-review and orchestration are raised below.
-        ("mechanical", "scout", "high", "gpt-6-luna"),
-        ("legwork", "workhorse", "high", "gpt-6-sol"),
-        ("critical-review", "flagship", "xhigh", "gpt-6-astra"),
-        ("orchestration", "flagship", "xhigh", "gpt-6-astra"),
+        ("mechanical", "scout", "low", "gpt-6-luna"),
+        ("legwork", "workhorse", "medium", "gpt-6-sol"),
+        ("critical-review", "flagship", "high", "gpt-6-astra"),
+        ("orchestration", "flagship", "high", "gpt-6-astra"),
     ),
 )
 def test_task_classes_bind_codex_runtime_identity(
@@ -2667,6 +2755,118 @@ def test_task_classes_bind_codex_runtime_identity(
     assert route["identity_source"] == "runtime-capability+catalog"
     assert "catalog_model" not in route
     assert "model_selection" not in route
+
+
+def test_task_class_uses_ordered_exact_models_from_catalogue(tmp_path):
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["task_class_routes"]["implementation"] = {
+        "alias": "workhorse", "effort": "high", "role": "worker",
+        "models": {"codex": ["gpt-6-astra", "gpt-6-sol"]},
+    }
+    catalog_path = tmp_path / "catalog.json"
+    catalog_path.write_text(json.dumps(catalog))
+    capabilities = tmp_path / "caps.json"
+    capabilities.write_text(json.dumps(capability_snapshot({
+        "gpt-6-sol": {"resolved_model": "gpt-6-sol", "supported_efforts": ["high"]},
+    })))
+    result, route = resolve(
+        "--adapter", "codex", "--task-class", "implementation", "--role", "worker",
+        "--catalog", str(catalog_path), "--capabilities-file", str(capabilities),
+    )
+    assert result.returncode == 0
+    assert route["resolved_model"] == "gpt-6-sol"
+    assert route["configured_models"] == ["gpt-6-astra", "gpt-6-sol"]
+
+
+def test_task_class_rejects_adapter_alias_instead_of_exact_model_id(tmp_path):
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["task_class_routes"]["implementation"]["models"]["codex"] = ["sol"]
+    catalog_path = tmp_path / "catalog.json"
+    catalog_path.write_text(json.dumps(catalog))
+    result, route = resolve(
+        "--adapter", "codex", "--task-class", "implementation", "--role", "worker",
+        "--catalog", str(catalog_path),
+    )
+    assert result.returncode == 2
+    assert route["status"] == "task_class_config_invalid"
+
+
+def test_failed_review_route_gets_one_exact_alternate(tmp_path, monkeypatch):
+    catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
+    catalog["task_class_routes"]["critical-review"]["models"]["codex"] = ["gpt-6-astra", "gpt-6-sol"]
+    catalog_path = tmp_path / "catalog.json"
+    catalog_path.write_text(json.dumps(catalog))
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(state))
+    caps = tmp_path / "caps.json"
+    caps.write_text(json.dumps(capability_snapshot({
+        "gpt-6-astra": {"resolved_model": "gpt-6-astra", "supported_efforts": ["high"]},
+        "gpt-6-sol": {"resolved_model": "gpt-6-sol", "supported_efforts": ["high"]},
+    })))
+    first, initial = resolve(
+        "--adapter", "codex", "--task-class", "critical-review", "--role", "critical-review",
+        "--catalog", str(catalog_path), "--capabilities-file", str(caps),
+    )
+    assert first.returncode == 0
+    assert initial["resolved_model"] == "gpt-6-astra"
+    assert initial["fallback_candidates"] == [{"adapter": "codex", "model": "gpt-6-sol", "effort": "high"}]
+    (state / "route-health.json").write_text(json.dumps({
+        "schema": "fabric.route-health.v1",
+        "routes": {"codex|gpt-6-astra|critical-review": {
+            "adapter": "codex", "model": "gpt-6-astra", "task_class": "critical-review",
+            "recent": [{"status": "empty_output", "at": "2026-09-23T00:00:00Z"}],
+        }},
+    }))
+    result, route = resolve(
+        "--adapter", "codex", "--task-class", "critical-review", "--role", "critical-review",
+        "--catalog", str(catalog_path), "--capabilities-file", str(caps),
+    )
+    assert result.returncode == 0
+    assert route["resolved_model"] == "gpt-6-sol"
+    assert route["configured_models"] == ["gpt-6-astra", "gpt-6-sol"]
+
+
+@pytest.mark.parametrize(
+    ("adapter", "models"),
+    [
+        ("codex", ["gpt-6-astra", "gpt-6-sol"]),
+        ("agy", ["gemini-3.8-flash"]),
+    ],
+)
+def test_exhausted_review_roster_fails_closed(tmp_path, monkeypatch, adapter, models):
+    state = tmp_path / "state"
+    state.mkdir()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(state))
+    now = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+    (state / "route-health.json").write_text(json.dumps({
+        "schema": "fabric.route-health.v1",
+        "routes": {
+            f"{adapter}|{model}|review": {
+                "adapter": adapter, "model": model, "task_class": "review",
+                "recent": [{"status": "failed", "at": now}],
+            }
+            for model in models
+        },
+    }))
+    capability_models = {
+        model: {"resolved_model": model, "supported_efforts": ["high"]}
+        for model in models
+    }
+    snapshot = (
+        write_agy_capability_snapshot(tmp_path, models=capability_models)
+        if adapter == "agy"
+        else write_codex_capability_snapshot(tmp_path, models=capability_models)
+    )
+
+    result, route = resolve(
+        "--adapter", adapter, "--task-class", "review", "--role", "reviewer",
+        "--capabilities-file", str(snapshot),
+    )
+
+    assert result.returncode == 1
+    assert route["status"] == "no_candidate_available"
+    assert route["effort"] == ""
 
 
 def test_claude_task_class_rejects_caller_authored_capability_claim(tmp_path):
@@ -2703,15 +2903,8 @@ def test_claude_task_class_admits_probed_effort_without_laundering_provenance(tm
         "--role", "critical-review", "--capabilities-file", str(snapshot),
     )
 
-    assert result.returncode == 0
-    assert route["status"] == "ok"
-    assert route["resolved_model"] == "claude-opus-4-8"
-    assert route["requested_effort"] == route["effort"] == "high"
-    # The model identity is genuinely runtime-verified; only the effort is not.
-    assert route["identity_source"] == "runtime-capability+catalog"
-    # The weaker provenance must survive into the receipt. If this ever reads
-    # "runtime-model-catalog" the router is claiming effort evidence it lacks.
-    assert route["effort_capability_source"] == "provider-unverified"
+    assert result.returncode == 1
+    assert route["status"] == "no_candidate_available"
 
 
 def test_claude_capability_alias_must_anchor_the_resolved_model_identity(tmp_path):
@@ -2796,8 +2989,7 @@ def test_claude_task_class_snapshot_probed_at_another_effort_fails_closed(tmp_pa
     )
 
     assert result.returncode == 1
-    assert route["status"] == "effort_capability_unverified"
-    assert route["effort"] == ""
+    assert route["status"] == "no_candidate_available"
 
 
 def test_claude_alias_route_uses_verified_model_without_claiming_effort_support(tmp_path):
@@ -2863,7 +3055,7 @@ def test_task_class_without_trusted_capability_evidence_fails_closed():
         "--role", "critical-review", "--available-model", "opus",
     )
     assert result.returncode == 1
-    assert route["status"] == "task_class_capability_unverified"
+    assert route["status"] == "no_candidate_available"
 
 
 def test_critical_review_task_class_rejects_worker_role_before_model_resolution():
@@ -2932,7 +3124,7 @@ def test_task_class_rejects_effective_effort_below_policy_floor(tmp_path):
 
     assert result.returncode == 1
     assert route["status"] == "task_class_effort_below_floor"
-    assert route["requested_effort"] == "xhigh"
+    assert route["requested_effort"] == "high"
     assert route["effort"] == ""
 
 
@@ -3000,7 +3192,7 @@ def test_critical_review_policy_rejects_valid_vocabulary_downgrade(
     assert route["status"] == "task_class_config_invalid"
 
 
-def test_task_class_effort_must_equal_the_capability_probe_effort(
+def test_task_class_effort_overlay_may_raise_effort_above_policy_floor(
     tmp_path, monkeypatch, capsys
 ):
     router = load_router()
@@ -3017,10 +3209,9 @@ def test_task_class_effort_must_equal_the_capability_probe_effort(
     ])
 
     route = json.loads(capsys.readouterr().out)
-    assert route["status"] == "task_class_config_invalid"
-    assert result == 2
-    assert "configuration error" in route["message"]
-    assert "must equal probe policy minimum_effort 'high'" in route["message"]
+    assert route["status"] != "task_class_config_invalid"
+    assert route["requested_effort"] == "max"
+    assert result == 1
 
 
 def test_role_default_cannot_lower_task_class_effort(tmp_path, monkeypatch, capsys):
@@ -3349,7 +3540,7 @@ def test_task_class_effort_fallback_never_escalates_when_only_higher_effort_is_s
 
     assert route["status"] == "no_effort_available"
     assert result.returncode == 1
-    assert route["requested_effort"] == "high"
+    assert route["requested_effort"] == "low"
     assert route["effort"] == ""
     assert route["effort_substitution"] == ""
 
@@ -3376,7 +3567,7 @@ def test_fresh_openai_snapshot_without_alias_candidate_fails_closed(
     assert route["status"] == "no_candidate_available"
     assert route["candidates"] == ["gpt-6-astra"]
     assert route["requested_effort"] == "xhigh"
-    assert route["effort"] == "xhigh"
+    assert route["effort"] == ""
 
 
 def test_explicit_unsupported_effort_maps_against_runtime_snapshot(tmp_path):
@@ -3638,7 +3829,7 @@ def test_agy_routes_use_fresh_preferred_family_capabilities(tmp_path, selector, 
     assert route["effort_capability_source"] == "runtime-model-catalog"
 
 
-def test_agy_broker_records_google_to_anthropic_substitution(tmp_path):
+def test_agy_task_class_does_not_substitute_outside_exact_model_roster(tmp_path):
     snapshot = write_agy_capability_snapshot(
         tmp_path,
         models={
@@ -3655,11 +3846,9 @@ def test_agy_broker_records_google_to_anthropic_substitution(tmp_path):
         "--capabilities-file", str(snapshot),
     )
 
-    assert result.returncode == 0
-    assert route["status"] == "ok"
-    assert route["resolved_model"] == "haiku"
-    assert route["model_family"] == "anthropic"
-    assert route["substitution"] == "gemini-3.8-flash unavailable; used haiku"
+    assert result.returncode == 1
+    assert route["status"] == "no_candidate_available"
+    assert route["effort"] == ""
 
 
 def test_opencode_route_resolves_explicit_free_model():
@@ -3676,6 +3865,40 @@ def test_opencode_route_resolves_explicit_free_model():
     assert route["family_source"] == "broker-default"
     assert route["resolved_model"] == "opencode/union-alpha"
     assert route["endpoint_provider"] == "opencode"
+
+
+@pytest.mark.parametrize(("adapter", "model"), [
+    ("opencode", "mimo"),
+    ("agy", "gemini-3.8-flash"),
+])
+def test_ordinary_route_drops_only_an_implied_alias_for_explicit_model(adapter, model):
+    command = [sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve",
+               "--adapter", adapter, "--alias", "flagship", "--model", model,
+               "--role", "worker"]
+    env = {**os.environ, "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+           "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "FABRIC_ALIAS_IMPLIED": "1"}
+    implied = subprocess.run(command, capture_output=True, text=True, env=env)
+    assert implied.returncode == 0, implied.stderr
+    assert json.loads(implied.stdout)["alias"] == ""
+
+    env["FABRIC_ALIAS_IMPLIED"] = "0"
+    explicit = subprocess.run(command, capture_output=True, text=True, env=env)
+    assert explicit.returncode == 0, explicit.stderr
+    assert json.loads(explicit.stdout)["alias"] == "flagship"
+
+
+def test_model_route_namespace_without_alias_supplied_keeps_explicit_alias(monkeypatch, capsys):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    args = router.parser().parse_args([
+        "resolve", "--adapter", "codex", "--alias", "workhorse",
+        "--model", "gpt-6-luna", "--role", "worker",
+    ])
+    args.task_class_effort = None
+    args.model_override = {}
+    assert router.resolve(args, router.load_catalog(None)) == 0
+    assert json.loads(capsys.readouterr().out)["alias"] == "workhorse"
 
 
 @pytest.mark.parametrize("model", [

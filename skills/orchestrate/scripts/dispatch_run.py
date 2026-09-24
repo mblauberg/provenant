@@ -49,13 +49,17 @@ MAX_GIT_EVIDENCE_HEADER_BYTES = 64 * 1024
 WORKER_TERMINAL_RECORD_TYPE = "provenant-worker-terminal"
 GIT_EVIDENCE_RECORD_TYPE = "provenant-git-evidence"
 CANCEL_MARKER_NAME = "cancel.request"
+BRANCH_TYPES = "feat|fix|refactor|perf|test|docs|chore|ci|build"
+BRANCH_PATTERN = re.compile(rf"^(?:(?:{BRANCH_TYPES}|proto)/[a-z][a-z0-9]*-[a-z0-9]+(?:-[a-z0-9]+){{1,4}}|land/[0-9]{{8}}-[a-z0-9]+(?:-[a-z0-9]+)*)$")
 
 from _shared.bounded_process import stop_process_group
 from layout import run_workspace, run_root, contains_run
 import provider_exec
+import memory_admission
+import secret_scan
 import exec_routing
 import context_usage
-from fabric_records import render_digest, write_cooldown, append_index, TERMINAL_STATUSES
+from fabric_records import render_digest, write_cooldown, write_route_health, append_index, TERMINAL_STATUSES
 from _shared.custody import (
     OwnedFileError, OwnedLinkError, atomic_write_contained, contained_regular_path,
     ensure_contained_directory, create_contained_directory, open_contained_regular, read_bound_bytes,
@@ -220,10 +224,10 @@ def active_receipt_error(receipt: Any) -> str | None:
     return None
 
 
-def workspace_identity(workspace: Path) -> dict[str, Any]:
+def workspace_identity(workspace: Path, provider_cwd: Path | None = None) -> dict[str, Any]:
     identity: dict[str, Any] = {
-        "cwd": str(workspace),
-        "root": str(workspace),
+        "cwd": str((provider_cwd or workspace).resolve()),
+        "root": str(workspace.resolve()),
         "base_revision": None,
         "working_tree": "unavailable",
     }
@@ -249,7 +253,6 @@ def workspace_identity(workspace: Path) -> dict[str, Any]:
             check=True,
         ).stdout
         identity.update(
-            root=str(Path(base[0]).resolve()),
             base_revision=base[1].lower(),
             working_tree="dirty" if dirty else "clean",
         )
@@ -658,7 +661,23 @@ def resolve_writer_worktree(worktree: Path) -> Path:
             raise WorktreeLeaseError("worktree must be registered with Git")
     except (OSError, subprocess.SubprocessError) as exc:
         raise WorktreeLeaseError("cannot verify registered Git worktree") from exc
+    git_dir = _git_path(resolved, "--absolute-git-dir")
+    common_dir = _git_path(resolved, "--git-common-dir")
+    if git_dir is None or common_dir is None or git_dir.resolve() == common_dir.resolve():
+        raise WorktreeLeaseError("worktree_write requires a linked worktree; fix: create a linked worktree")
     return resolved
+
+
+def branch_name_warning(worktree: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(worktree), "symbolic-ref", "--quiet", "--short", "HEAD"],
+        env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        capture_output=True, text=True, timeout=3,
+    )
+    branch = result.stdout.strip() if result.returncode == 0 else "(detached HEAD)"
+    if len(branch) <= 48 and BRANCH_PATTERN.fullmatch(branch):
+        return None
+    return f"branch {branch} is outside <type>/<area>-<slug> (or land/, proto/); rename for repository convention"
 
 
 def acquire_worktree_lease(worktree: Path):
@@ -721,6 +740,8 @@ def build_command(
         str(prompt_path),
         "--out",
         str(result_path),
+        "--run-dir",
+        str(result_path.parent),
         "--role",
         args.role,
     ]
@@ -736,6 +757,7 @@ def build_command(
         ("--access-mode", args.access_mode),
         ("--worktree", str(args.worktree) if args.worktree else ""),
         ("--timeout-seconds", str(provider_timeout_seconds(args.timeout_seconds))),
+        ("--original-prompt-file", getattr(args, "original_prompt_file", None)),
     ):
         if value:
             command.extend((flag, value))
@@ -895,9 +917,12 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
             return None
         plan = provider_exec.build_plan(
             args.tool, route, prompt,
-            cwd=workspace, mode=args.access_mode, timeout_seconds=provider_timeout_seconds(args.timeout_seconds),
+            cwd=workspace, workspace_root=workspace, mode=args.access_mode,
+            timeout_seconds=provider_timeout_seconds(args.timeout_seconds),
             intent=args.intent, preface=args.preface, requested_model=args.model,
             requested_effort=args.effort or "", run_id=os.environ.get("PROVENANT_RUN_ID", ""),
+            run_dir=result_path.parent,
+            original_prompt_file=getattr(args, "original_prompt_file", None) or prompt_path,
             chair=os.environ.get("PROVENANT_CHAIR", ""),
             reviewer_id=args.reviewer_id or "", risk_tier=args.risk_tier or "",
             model_override_tier=args.model_override_tier or "", orchestrator_family="",
@@ -1133,9 +1158,9 @@ def routing_environment() -> dict[str, str]:
     return env
 
 
-def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
+def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = None) -> dict[str, Any]:
     """Use the dispatcher router before creating custody or launching any task."""
-    workspace = Path.cwd().resolve()
+    workspace = Path(workspace_root or Path.cwd()).resolve()
     product = Path(os.environ.get("AGENT_FABRIC_PRODUCT_ROOT", SKILLS_ROOT.parent))
     instance = Path(routing_environment().get("AGENT_FABRIC_INSTANCE_ROOT") or Path.home() / ".agents").expanduser()
     catalog = instance / "config/model-routing.json"
@@ -1166,8 +1191,22 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                     raise PreflightError("credential_or_auth_store_denied","Additional directories must exclude credential stores.")
                 if (task.get("prompt") is None) == (task.get("prompt_file") is None):
                     raise PreflightError("prompt_required", "Pass exactly one of prompt or prompt_file.")
-                if task.get("prompt_file") is not None:
-                    read_prompt_input(Path(task["prompt_file"]), workspace, workspace)
+                if task.get("prompt") is not None and not isinstance(task["prompt"], str):
+                    raise PreflightError("prompt_invalid", "Pass prompt as text.")
+                if "allow_secrets" in task and type(task["allow_secrets"]) is not bool:
+                    raise PreflightError("allow_secrets_invalid", "Pass allow_secrets: true or false.")
+                prompt_bytes = (read_prompt_input(Path(task["prompt_file"]), workspace, workspace)
+                                if task.get("prompt_file") is not None else task["prompt"].encode())
+                try:
+                    scan = secret_scan.scan_inputs(
+                        prompt_bytes, str(task.get("prompt_file") or "<prompt>"),
+                        [str(workspace / Path(item).expanduser()) for item in task.get("add_dirs") or []])
+                except (OSError, subprocess.SubprocessError) as exc:
+                    raise PreflightError("secret_scan_unavailable", "Make dispatch inputs readable for the secret scan.") from exc
+                if scan.budget_exceeded and not task.get("allow_secrets", False):
+                    raise PreflightError("secret_scan_budget_exceeded", scan.fix())
+                if scan.findings and not task.get("allow_secrets", False):
+                    raise PreflightError("secret_detected", scan.fix())
                 adapter = task["adapter"]
                 mode = task.get("access_mode", "read_only")
                 if mode not in ACCESS_MODES:
@@ -1184,8 +1223,11 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                 elif task.get("worktree"):
                     raise PreflightError("worktree_not_applicable", "Pass mode worktree_write with worktree, or omit worktree.")
                 command = [sys.executable, str(product / "scripts/model_route.py"), "resolve",
-                           "--catalog", str(catalog), "--adapter", adapter, "--role", "worker"]
-                if task.get("alias"):
+                           "--catalog", str(catalog), "--adapter", adapter,
+                           "--role", task.get("role") or "worker"]
+                if task.get("task_class"):
+                    command.extend(("--task-class", task["task_class"]))
+                elif task.get("alias"):
                     command.extend(("--alias", task["alias"]))
                 elif not task.get("model"):
                     command.extend(("--alias", "workhorse"))
@@ -1244,16 +1286,24 @@ def preflight_tasks(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                     if "effort" in code:
                         fix = "Omit effort, or pass a supported level: low, medium, high, xhigh, max, ultra."
                     raise PreflightError(code, fixes.get(code, fix))
+                protected = provider_exec.check_protected_inputs(
+                    route, workspace, worktree if mode == "worktree_write" else task.get("cwd") or workspace,
+                    worktree=worktree if mode == "worktree_write" else None,
+                    prompt_file=task.get("prompt_file"), add_dirs=task.get("add_dirs", []))
+                if protected and (adapter == "codex" or not provider_exec._sandbox_exec_path()):
+                    raise ValueError("protected paths require sandbox-exec read confinement; fix: use a non-training route")
+                if task.get("prompt_file") is not None:
+                    read_prompt_input(Path(task["prompt_file"]), workspace, workspace)
                 routes.append(route)
-            except (PreflightError, WorktreeLeaseError, OSError, subprocess.TimeoutExpired) as exc:
+            except (PreflightError, WorktreeLeaseError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
                 prompt_fixes = {
                     "prompt_unavailable": "Pass prompt text or prompt_file=<readable regular file inside the workspace>.",
                     "prompt_path_forbidden": "Pass prompt_file=<readable regular file inside the workspace>.",
                     "credential_or_auth_store_denied": "Pass prompt text or a workspace prompt file outside credential and authentication stores.",
                     "prompt_hard_link_denied": "Pass prompt_file=<workspace file with one hard link>.",
                 }
-                errors.append({"task_id": task_id, "error": getattr(exc, "code", "worktree_invalid" if isinstance(exc, WorktreeLeaseError) else "preflight_unavailable"),
-                               "fix": prompt_fixes.get(exc.code, str(exc)) if isinstance(exc, PreflightError) else "Pass a readable prompt and registered Git worktree; check adapter availability."})
+                errors.append({"task_id": task_id, "error": getattr(exc, "code", "protected_path_denied" if isinstance(exc, ValueError) else "worktree_invalid" if isinstance(exc, WorktreeLeaseError) else "preflight_unavailable"),
+                               "fix": prompt_fixes.get(exc.code, str(exc)) if isinstance(exc, PreflightError) else str(exc) if isinstance(exc, ValueError) else "Pass a readable prompt and registered Git worktree; check adapter availability."})
     return ({"status": "rejected", "error": errors[0]["error"], "fix": errors[0]["fix"], "errors": errors}
             if errors else {"status": "validated", "routes": routes})
 
@@ -1269,18 +1319,22 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     family=route.get("model_family") or "unknown"
     label=args.tool+"/"+model+("@"+effort if effort else "")
     identity="resolved" if model else "unknown"
-    provenance={"requested":{"adapter":args.tool,"alias":args.alias,"model":args.model,"effort":args.effort},
+    task_class = getattr(args, "task_class", None) or ""
+    provenance={"requested":{"adapter":args.tool,"alias":"" if args.model and not getattr(args,"alias_supplied",True) else args.alias or "","model":args.model,"effort":args.effort,"task_class":task_class},
         "resolved_model":model,"observed_model":None,"observed_source":None,"identity":identity,
         "provider":route.get("endpoint_provider") or args.tool,"transport":args.tool,"family":family,
         "effort_requested":args.effort,"effort_applied":effort,"cli_version":route.get("cli_version"),
         "fallback_from":getattr(args,"fallback_from",None),"notes":[],"line":f"Route: {label} ({family}; {identity})"}
-    return {"schema":"fabric.attempt.v1","run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,
+    return {"schema":"fabric.attempt.v1","run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
         "attempt":number,"state":"running","status":None,"mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
+        "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
         "worktree":str(args.worktree) if args.worktree else None,"started_at":started_at,"ended_at":None,"last_progress_at":started_at,
         "pgid":None,"session_id":plan.get("session_id"),"retryable":False,"reset_at":None,"retry_after":None,"fix":None,
         "evidence":{"exit":None,"signal":None,"signature":None,"excerpt":""},"question":None,
         "applied":plan.get("applied",{"sandbox":None,"network":None,"add_dirs":[],"guarantee":"prompt_only"}),
-        "warnings":list(plan.get("warnings",[])),"provenance":provenance,
+        "warnings":list(plan.get("warnings",[])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", [])) + list(getattr(args, "_branch_warnings", [])),"provenance":provenance,
+        "secret_scan":{"allow_secrets":getattr(args,"allow_secrets",False),
+                       "finding_names":getattr(getattr(args,"_secret_scan",None),"names",lambda:[])()},
         "timing":{"phases":getattr(args,"_phase_timings",{}).copy()},
         "paths":{"result":relative_path(run_dir,attempt_dir/"result.md"),"stderr":relative_path(run_dir,attempt_dir/"stderr.log"),
                  "events":relative_path(run_dir,attempt_dir/"events.jsonl"),"receipt":f"tasks/{args.task_id}/attempt-{number:03d}/attempt.json"},"digest":""}
@@ -1303,8 +1357,17 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     refusal=route_refusal(adapter,args.tool)
     if refusal: status=refusal["status"]
     if status not in TERMINAL_STATUSES: status="failed"
-    for field in ("session_id","retryable","reset_at","retry_after","fix","evidence","applied","context","warnings","reaped","spared","provenance","pgid","last_progress_at"):
+    for field in ("session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","warnings","reaped","spared","provenance","pgid","last_progress_at"):
         if field in adapter: row[field]=adapter[field]
+    row["warnings"] = list(dict.fromkeys(
+        list(row.get("warnings", [])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", []))
+        + list(getattr(args, "_memory_warnings", [])) + list(getattr(args, "_branch_warnings", []))))
+    row["timing"]["queued_seconds"] = getattr(args, "_queued_seconds", 0.0)
+    if legacy.get("process_error", "").startswith("Set .agents/fabric-policy.json memory_floor_percent"):
+        row["fix"] = legacy["process_error"]
+    if legacy["outcome"] == "memory_unavailable":
+        row["error"] = "memory_unavailable"
+        row["fix"] = "memory_unavailable: free memory or lower the mode's memory_floor_percent in .agents/fabric-policy.json."
     if refusal:
         row["fix"]=adapter.get("fix") or adapter.get("reason") or refusal["fix"];row["evidence"]=refusal["evidence"];row["error"]=refusal["error"]
     row.update(state="terminal",status=status,ended_at=legacy["finished_at"],question=adapter.get("question") or (legacy.get("question") or {}).get("prompt"))
@@ -1360,6 +1423,7 @@ def prepare_resume(args):
     args.effort=None if previous["provenance"].get("effort_observed_source") else previous["provenance"]["effort_applied"];args.task_id=previous["task_id"]
     args.access_mode=previous["mode"];args.worktree=Path(previous["worktree"]) if previous.get("worktree") else None
     args.provider_cwd=Path(previous["cwd"]) if previous["mode"]=="read_only" else None
+    args.workspace_root=Path(previous.get("workspace_root") or (previous.get("workspace") or {}).get("root") or Path.cwd()).expanduser().resolve()
     args.sandbox=previous["applied"]["sandbox"];args.network=None if previous["applied"]["network"] is None else str(previous["applied"]["network"]).lower()
     args.add_dirs=previous["applied"]["add_dirs"];args.resume_session=previous["session_id"]
     args.fallback="false"
@@ -1425,7 +1489,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     )
     args._phase_timings.update(measured)
     run_dir = args.run_dir.resolve()
-    workspace = Path.cwd().resolve()
+    workspace = Path(getattr(args, "workspace_root", None) or Path.cwd()).expanduser().resolve()
+    provider_cwd = Path(args.provider_cwd).expanduser().resolve() if args.provider_cwd else workspace
+    workspace_observation = workspace_identity(workspace, provider_cwd)
     if not contains_run(run_dir, workspace):
         return fail(run_dir, "run_dir_invalid", "run directory must be inside run_root(cwd)")
     if not run_dir.is_dir():
@@ -1462,6 +1528,47 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         batch_dir = run_dir / "dispatch" / "batches" / args.batch_id
         if batch_dir.is_symlink() or not batch_dir.is_dir():
             return fail(run_dir, "batch_path_invalid", "batch directory does not exist")
+    original_prompt = None
+    if args.prompt_file is not None:
+        source = args.prompt_file.expanduser()
+        original_prompt = str((source if source.is_absolute() else workspace / source).resolve())
+    args.original_prompt_file = original_prompt
+    try:
+        protected = provider_exec.protected_paths(workspace, provider_cwd, args.worktree)
+        if protected and (args.prompt_file is not None or args.add_dirs):
+            task = {"id": args.task_id, "adapter": args.tool, "access_mode": args.access_mode,
+                    "worktree": str(args.worktree) if args.worktree else None,
+                    "cwd": str(provider_cwd), "prompt_file": str(args.prompt_file) if args.prompt_file else None,
+                    "add_dirs": args.add_dirs, "alias": args.alias, "model": args.model,
+                    "effort": args.effort, "fallback": args.fallback,
+                    "role": args.role, "task_class": args.task_class}
+            if args.prompt_file is None:
+                task.pop("prompt_file")
+                task["prompt"] = "protected input preflight"
+            checked = preflight_tasks([task], workspace)
+            if checked["status"] != "validated":
+                return fail(run_dir, checked.get("error", "protected_path_denied"), checked["fix"])
+    except (OSError, ValueError) as exc:
+        return fail(run_dir, "protected_path_denied", str(exc))
+    try:
+        prompt_bytes = (read_prompt_input(args.prompt_file, workspace, run_dir)
+                        if args.prompt_file is not None else sys.stdin.buffer.read())
+    except PreflightError as exc:
+        return fail(run_dir, exc.code, str(exc))
+    except OSError as exc:
+        return fail(run_dir, "prompt_unavailable", str(exc))
+    try:
+        secret_scan_result = secret_scan.scan_inputs(
+            prompt_bytes or b"", str(args.prompt_file) if args.prompt_file else "<prompt>", args.add_dirs)
+    except (OSError, subprocess.SubprocessError):
+        return fail(run_dir, "secret_scan_unavailable", "Make dispatch inputs readable for the secret scan.")
+    if secret_scan_result.budget_exceeded and not getattr(args, "allow_secrets", False):
+        print(json.dumps({"status": "rejected", "error": "secret_scan_budget_exceeded", "fix": secret_scan_result.fix()}))
+        return 2
+    if secret_scan_result.findings and not getattr(args, "allow_secrets", False):
+        print(json.dumps({"status": "rejected", "error": "secret_detected", "fix": secret_scan_result.fix()}))
+        return 2
+    args._secret_scan = secret_scan_result
     try:
         ensure_owned_directory(run_dir, run_dir / "dispatch" / "tasks")
         if not args.batch_child:
@@ -1471,14 +1578,6 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         return fail(run_dir, "attempt_evidence_incomplete", str(exc))
     except OSError as exc:
         return fail(run_dir, "manifest_not_appendable", f"MANIFEST.md is not appendable: {exc}")
-
-    try:
-        prompt_bytes = (read_prompt_input(args.prompt_file, workspace, run_dir)
-                        if args.prompt_file is not None else sys.stdin.buffer.read())
-    except PreflightError as exc:
-        return fail(run_dir, exc.code, str(exc))
-    except OSError as exc:
-        return fail(run_dir, "prompt_unavailable", str(exc))
     git_evidence_requested = args.git_evidence is not None
     git_evidence_identity: dict[str, Any] | None = None
     git_evidence_source: Path | None = None
@@ -1502,6 +1601,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             )
         try:
             args.worktree = resolve_writer_worktree(args.worktree)
+            warning = branch_name_warning(args.worktree)
+            args._branch_warnings = [warning] if warning else []
         except WorktreeLeaseError as exc:
             return fail(run_dir, "worktree_invalid", str(exc))
     elif args.worktree is not None:
@@ -1577,8 +1678,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "reviewer_id": args.reviewer_id or "",
         "access_mode": args.access_mode,
         "worktree": str(args.worktree) if args.worktree else "",
+        "allow_secrets": args.allow_secrets,
     }
-    workspace_observation = workspace_identity(workspace)
     worktree_lease = None
     if args.access_mode == "worktree_write" and args.worktree is not None:
         try:
@@ -1591,9 +1692,44 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     exit_code: int | None = None
     process_error = ""
     process = None
+    memory_lease = None
+    admission_queued_seconds = 0.0
     provider_temporary = None
     cancelled = False
     old_handlers: dict[int, Any] = {}
+    def admit_attempt(active, cancelled_now):
+        nonlocal started, started_at, memory_lease, process_error, admission_queued_seconds
+        waiting_since = time.monotonic()
+        def waiting(reason):
+            active["state"] = "queued"
+            active["reason"] = reason
+            active["timing"]["queued_since"] = waiting_since
+            active["timing"]["queued_seconds"] = getattr(args, "_queued_seconds", 0.0)
+            publish_contract(run_dir, active)
+        def warning(message):
+            active["warnings"].append(message)
+            args._memory_warnings = getattr(args, "_memory_warnings", []) + [message]
+        try:
+            memory_lease = memory_admission.admit(waiting, cancelled_now, warning,
+                                                   waited_seconds=admission_queued_seconds,
+                                                   workspace_root=workspace, mode=args.access_mode)
+        except memory_admission.MemoryUnavailableError as exc:
+            process_error = exc.code
+            memory_lease = None
+        queued_seconds = time.monotonic() - waiting_since
+        admission_queued_seconds += queued_seconds
+        args._queued_seconds = getattr(args, "_queued_seconds", 0.0) + queued_seconds
+        active["timing"].pop("queued_since", None)
+        active["timing"]["queued_seconds"] = args._queued_seconds
+        started = time.monotonic()
+        started_at = now()
+        if memory_lease is not None:
+            active["state"] = "running"
+            active.pop("reason", None)
+            active["started_at"] = started_at
+            active["last_progress_at"] = started_at
+            publish_contract(run_dir, active)
+        return memory_lease is not None
     if CF_DISPATCH == Path(__file__).with_name("cf_dispatch.sh"):
         owner_cancel=[False]
         def cancel_owner(_signal,_frame): owner_cancel[0]=True
@@ -1613,6 +1749,15 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             args._phase_timings["route_plan"] = round((time.monotonic() - plan_started) * 1000, 3)
             plan = fast_plan if fast_plan is not None else planner_result(planning)
             if plan.get("schema") == "fabric.exec-plan.v1":
+                old_run_dir = plan.get("run_dir")
+                plan["run_dir"] = str(attempt_dir)
+                boundary_paths = plan.get("applied", {}).get("write_boundary", {}).get("writable_paths")
+                if isinstance(boundary_paths, list):
+                    plan["applied"]["write_boundary"]["writable_paths"] = [
+                        str(attempt_dir) if path == old_run_dir else path for path in boundary_paths]
+                plan["original_prompt_file"] = original_prompt
+                provider_cwd = Path(plan.get("cwd") or workspace).resolve()
+                workspace_observation["cwd"] = str(provider_cwd)
                 plan.update(timeout_seconds=args.timeout_seconds,run_id=run_identity(run_dir,run_receipt),chair=os.environ.get("PROVENANT_CHAIR") or os.environ.get("AGENT_FABRIC_SEAT", ""),fallback_from=getattr(args,"fallback_from",None))
                 if hasattr(args,"resume_relaunch"):
                     plan["prompt"] += "\n\nPrevious turn and question:\n"+args.resume_relaunch
@@ -1630,6 +1775,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                             try: replacement=json.loads(resolved.stdout)
                             except ValueError: continue
                             if replacement.get("schema")!="fabric.exec-plan.v1": continue
+                            old_run_dir = replacement.get("run_dir")
+                            replacement["run_dir"] = str(attempt_dir)
+                            boundary_paths = replacement.get("applied", {}).get("write_boundary", {}).get("writable_paths")
+                            if isinstance(boundary_paths, list):
+                                replacement["applied"]["write_boundary"]["writable_paths"] = [
+                                    str(attempt_dir) if path == old_run_dir else path for path in boundary_paths]
+                            replacement["original_prompt_file"] = original_prompt
                             replacement.update(run_id=plan["run_id"],chair=plan["chair"])
                             replacement["warnings"].append("skipped cooling alias candidate "+args.tool+"/"+plan["model"])
                             plan=replacement;args.tool=candidate["adapter"];break
@@ -1645,12 +1797,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     if args.resume_warning: plan["warnings"].insert(0,args.resume_warning)
                 active = contract_row(args,run_dir,attempt_number,attempt_dir,plan,started_at)
                 active["requested_route"] = requested_route
-                publish_contract(run_dir,active)
                 spawn_started = time.monotonic()
                 provider_started_at = [None]
                 def provider_started(child):
                     nonlocal process
                     process=child
+                    if memory_lease is not None:
+                        memory_lease.started()
                     provider_started_at[0] = time.monotonic()
                     args._phase_timings["spawn"] = round((provider_started_at[0] - spawn_started) * 1000, 3)
                     active["pgid"]=child.pid
@@ -1665,8 +1818,18 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         progress_publication[0]=time.monotonic()
                 def cancellation():
                     return owner_cancel[0] or cancellation_marker_present(run_dir,attempt_dir) or (batch_dir is not None and cancellation_marker_present(run_dir,batch_dir))
-                adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
-                    on_start=provider_started,on_progress=progress,cancelled=cancellation)
+                admitted = admit_attempt(active, cancellation)
+                spawn_started = time.monotonic()
+                if not admitted:
+                    plan["warnings"] = active["warnings"]
+                    process_error = process_error or "cancelled"
+                    adapter_record = {"status": "failed" if process_error == "memory_unavailable" else "cancelled",
+                                      "exit": 1, "warnings": active["warnings"]}
+                else:
+                    plan["warnings"] = active["warnings"]
+                    adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
+                        on_start=provider_started,on_progress=progress,cancelled=cancellation)
+                relaunch_skipped = False
                 args._phase_timings["provider"] = round((time.monotonic() - (provider_started_at[0] or spawn_started)) * 1000, 3)
                 if (args.resume and args.tool=="claude" and plan.get("resume_session")
                     and adapter_record.get("status")=="failed"
@@ -1687,15 +1850,25 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         plan["argv"]=provider_exec.profile(args.tool).argv(plan)
                         active["session_id"]=plan["session_id"]
                         publish_contract(run_dir,active)
-                        adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
-                            on_start=provider_started,on_progress=progress,cancelled=cancellation)
-                if hasattr(args,"resume_relaunch"):
+                        if memory_lease is not None:
+                            memory_lease.close()
+                        if admit_attempt(active, cancellation):
+                            adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
+                                on_start=provider_started,on_progress=progress,cancelled=cancellation)
+                        else:
+                            relaunch_skipped = True
+                            process_error = process_error or "cancelled"
+                            adapter_record = {"status": "failed" if process_error == "memory_unavailable" else "cancelled",
+                                              "exit": 1, "warnings": active["warnings"]}
+                if hasattr(args,"resume_relaunch") and not relaunch_skipped:
                     adapter_record["provenance"]["notes"].append("resumed_by_relaunch")
                     adapter_record["warnings"].append("resume: relaunched")
                 args._last_plan=plan
             else:
                 adapter_record=plan
                 write_owned(run_dir,stderr_path,planning.stderr if planning is not None else "")
+            if not stderr_path.exists():
+                write_owned(run_dir, stderr_path, "")
             write_owned(run_dir,adapter_path,json.dumps(adapter_record)+"\n")
             exit_code=adapter_record.get("exit")
             if type(exit_code) is not int: exit_code=1
@@ -1707,6 +1880,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             if not adapter_path.exists(): write_owned(run_dir,adapter_path,"{}\n")
             if not stderr_path.exists(): write_owned(run_dir,stderr_path,str(exc))
         finally:
+            if memory_lease is not None:
+                memory_lease.close()
             release_worktree_lease(worktree_lease)
     else:
         try:
@@ -1733,12 +1908,19 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
                     signal.signal(signal.SIGTERM, cancel_handler)
                     signal.signal(signal.SIGHUP, cancel_handler)
+                    active = contract_row(args, run_dir, attempt_number, attempt_dir, {}, started_at)
+                    active["requested_route"] = requested_route
+                    if not admit_attempt(active, lambda: cancel_pending or cancellation_marker_present(run_dir, attempt_dir)
+                                         or (batch_dir is not None and cancellation_marker_present(run_dir, batch_dir))):
+                        process_error = process_error or "cancelled"
+                        observed_exit = True
+                        raise InterruptedError("memory wait cancelled")
                     provider_environment = os.environ.copy()
                     # Owners retain chair custody; provider work must discover its own
                     # seat, state directory and checkout rather than inherit the chair's.
                     for name in ("AGENT_FABRIC_STATE_DIRECTORY", "AGENT_FABRIC_SEAT",
                                  "AGENT_FABRIC_CLIENT_LABEL", "AGENT_FABRIC_LABEL", "AGENT_FABRIC_PRODUCT_ROOT",
-                                 "PROVENANT_FABRIC_PHASES"):
+                                 "PROVENANT_FABRIC_PHASES", "PROVENANT_NO_OS_CONFINEMENT"):
                         provider_environment.pop(name, None)
                     for name in list(provider_environment):
                         if name.startswith(("PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")):
@@ -1760,6 +1942,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         env=provider_environment,
                         start_new_session=True,
                     )
+                    if memory_lease is not None:
+                        memory_lease.started()
                     _record_provider_process(run_dir, process)
 
                     # A request can arrive after the provider is spawned but
@@ -1832,9 +2016,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         pass
                     if cancelled:
                         process_error = "cancelled"
-        except OSError as exc:
+        except InterruptedError:
+            pass
+        except (OSError, ValueError) as exc:
             process_error = str(exc)
         finally:
+            if memory_lease is not None:
+                memory_lease.close()
             release_worktree_lease(worktree_lease)
             if provider_temporary is not None:
                 provider_temporary.cleanup()
@@ -1890,7 +2078,10 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         and not result_integrity_error and not terminal_envelope_error
     )
     deadline_reached = duration_seconds >= provider_timeout_seconds(args.timeout_seconds)
-    if process_error == "timeout":
+    if process_error == "memory_unavailable":
+        status = "failed"
+        outcome = "memory_unavailable"
+    elif process_error == "timeout":
         status = "timed_out"
         outcome = "timeout"
     elif process_error == "cancelled":
@@ -1951,6 +2142,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "retry_of": retry_of,
         "intent": args.intent,
         "requested_route": requested_route,
+        "secret_scan": {"allow_secrets": args.allow_secrets,
+                        "finding_names": secret_scan_result.names(),
+                        "warnings": secret_scan_result.warnings},
         "route": {
             "adapter": args.tool, "alias": args.alias or "", "model": args.model or "", "effort": args.effort or "",
             **{key: value for key, value in preflight_route.items() if key in {
@@ -1971,7 +2165,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "finished_at": finished_at,
         "duration_seconds": duration_seconds,
         "workspace": workspace_observation,
-        "prompt": {"path": relative_path(run_dir, prompt_path), "digest": digest(prompt_path)},
+        "prompt": {"path": relative_path(run_dir, prompt_path), "digest": digest(prompt_path),
+                   "original_path": original_prompt},
         "result": (
             {"path": relative_path(run_dir, result_path), "digest": result_digest}
             if result_exists
@@ -2025,7 +2220,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     for sig, handler in old_handlers.items():
         signal.signal(sig, handler)
     row = terminal_contract(args,run_dir,record,adapter,attempt_number,attempt_dir)
-    for action in (lambda: write_cooldown(row),lambda: append_index(row,run_dir,root=run_workspace(run_dir, Path.cwd())/".agent-run")):
+    for action in (lambda: write_cooldown(row),lambda: write_route_health(row),lambda: append_index(row,run_dir,root=run_workspace(run_dir, Path.cwd())/".agent-run")):
         try: action()
         except (OSError,ValueError) as exc: row["warnings"].append("terminal index unavailable: "+str(exc))
     publish_contract(run_dir,row)
@@ -2095,7 +2290,7 @@ def execute_attempt_sequence(args,custody=None):
     plan=getattr(args,"_last_plan",None)
     if plan and previous and previous["retryable"] and not args.resume:
         for candidate in exec_routing.candidates(plan,args.fallback):
-            remaining=sequence_budget-(time.monotonic()-sequence_start)
+            remaining=sequence_budget-(time.monotonic()-sequence_start-getattr(args,"_queued_seconds",0.0))
             if remaining<=0: break
             args.timeout_seconds=remaining
             if exec_routing.cooling(candidate["adapter"],candidate["model"]): continue
@@ -2189,6 +2384,7 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--sandbox", choices=("read-only","workspace-write","full"))
     root.add_argument("--network", choices=("true","false"))
     root.add_argument("--add-dir", dest="add_dirs", action="append", default=[])
+    root.add_argument("--allow-secrets", action="store_true")
     root.add_argument("--no-preface", dest="preface", action="store_false")
     root.add_argument("--fallback", default=None, help="false, true, any, or JSON route list")
     return root

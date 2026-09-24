@@ -77,6 +77,8 @@ def render_digest(row):
             + f' · reply: fabric_dispatch{{resume:"{run_id}",prompt:"…"}}'
         )
     if state != "terminal":
+        if state == "queued":
+            return f"queued {run_id} {route} · {row.get('reason') or 'waiting to start'}"
         fallback = prov.get("fallback_from")
         if fallback:
             previous = fallback.get("route", "")
@@ -133,6 +135,14 @@ def cooldown_path():
     if os.environ.get("AGENT_FABRIC_STATE_ROOT"):
         return Path(os.environ["AGENT_FABRIC_STATE_ROOT"]) / "cooldowns.json"
     return Path.home() / ".local/state/agent-harness/fabric/cooldowns.json"
+
+
+def route_health_path():
+    if os.environ.get("AGENT_FABRIC_ROUTE_HEALTH_PATH"):
+        return Path(os.environ["AGENT_FABRIC_ROUTE_HEALTH_PATH"])
+    if os.environ.get("AGENT_FABRIC_STATE_ROOT"):
+        return Path(os.environ["AGENT_FABRIC_STATE_ROOT"]) / "route-health.json"
+    return Path.home() / ".local/state/agent-harness/fabric/route-health.json"
 
 
 def store_parent(path):
@@ -193,6 +203,111 @@ def read_cooldowns(path=None, at=None):
         }
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return {}
+
+
+def read_route_health(path=None, *, cooldowns_path=None, at=None):
+    """Read recent route outcomes joined with currently active cooldowns."""
+    at = at or datetime.now(UTC)
+    path = Path(path or route_health_path())
+    try:
+        if path.is_symlink():
+            return {}
+        with os.fdopen(store_open(path, os.O_RDONLY)) as stream:
+            document = json.load(stream)
+        routes = document.get("routes", {}) if document.get("schema") == "fabric.route-health.v1" else {}
+        if not isinstance(routes, dict):
+            return {}
+    except (OSError, ValueError, TypeError, AttributeError):
+        routes = {}
+    cooldowns = read_cooldowns(cooldowns_path, at)
+    result = {}
+    for key, route in routes.items():
+        if not isinstance(key, str) or not isinstance(route, dict):
+            continue
+        recent = route.get("recent", [])
+        if not isinstance(recent, list):
+            recent = []
+        current = []
+        for item in recent:
+            if not isinstance(item, dict):
+                continue
+            try:
+                age = (at - parse_time(item.get("at"))).total_seconds()
+            except (ValueError, TypeError):
+                continue
+            if 0 <= age <= 7 * 86400:
+                current.append(item)
+        recent = current[:20]
+        adapter = str(route.get("adapter", ""))
+        model = str(route.get("model", ""))
+        task_class = str(route.get("task_class", ""))
+        cooldown = cooldowns.get(f"{adapter}/{model}") or cooldowns.get(f"{adapter}/*") or {}
+        result[key] = {
+            "adapter": adapter,
+            "model": model,
+            "task_class": task_class,
+            "recent": recent,
+            "recent_failures": sum(item.get("status") in {"failed", "empty_output"} for item in recent),
+            "rate_limits": sum(item.get("status") in {"rate_limited", "usage_limited"} for item in recent),
+            "cooling_until": cooldown.get("cooling_until", "") if isinstance(cooldown, dict) else "",
+        }
+    return result
+
+
+def write_route_health(row, *, path=None, at=None):
+    """Append one bounded terminal outcome for an adapter/model/task-class route."""
+    try:
+        from .exec_routing import registered_model
+    except ImportError:
+        from exec_routing import registered_model
+    path = Path(path or route_health_path())
+    at = at or datetime.now(UTC)
+    provenance = row["provenance"]
+    adapter = provenance["requested"]["adapter"]
+    model = registered_model(adapter, provenance.get("resolved_model") or "*")
+    task_class = row.get("task_class") or provenance.get("requested", {}).get("task_class") or "ordinary"
+    status = row.get("status", "failed")
+    if row.get("evidence", {}).get("signature") == "empty_output":
+        status = "empty_output"
+    if status not in {"ok", "failed", "empty_output", "cancelled", "rate_limited", "usage_limited"}:
+        status = "failed"
+    key = f"{adapter}|{model}|{task_class}"
+    entry = {"status": status, "task_class": task_class, "at": timestamp(at), "run_id": row.get("run_id", "")}
+    with locked(path.with_name("route-health.lock")):
+        try:
+            if path.is_symlink():
+                raise ValueError("route health store must not be a symlink")
+            with os.fdopen(store_open(path, os.O_RDONLY)) as stream:
+                document = json.load(stream)
+            routes = document.get("routes", {}) if document.get("schema") == "fabric.route-health.v1" else {}
+            if not isinstance(routes, dict):
+                routes = {}
+        except FileNotFoundError:
+            routes = {}
+        except (OSError, ValueError, TypeError, AttributeError):
+            routes = {}
+        previous = routes.get(key, {})
+        recent = previous.get("recent", []) if isinstance(previous, dict) else []
+        recent = [item for item in recent if isinstance(item, dict)]
+        routes[key] = {"adapter": adapter, "model": model, "task_class": task_class,
+                       "recent": [entry, *recent][:20]}
+        parent, leaf = store_parent(path)
+        temp = ".route-health-" + secrets.token_hex(12)
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent)
+        try:
+            with os.fdopen(fd, "w") as stream:
+                json.dump({"schema": "fabric.route-health.v1", "routes": routes}, stream, indent=2, sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temp, leaf, src_dir_fd=parent, dst_dir_fd=parent)
+            os.fsync(parent)
+        finally:
+            try:
+                os.unlink(temp, dir_fd=parent)
+            except FileNotFoundError:
+                pass
+            os.close(parent)
 
 
 def write_cooldown(row, *, path=None, at=None):

@@ -279,6 +279,7 @@ dispatch_registry:
   agy:
     dispatch: implemented
     read_only_guarantee: prompt_only
+    write_modes: [worktree_write]
   claude:
     dispatch: implemented
     read_only_guarantee: enforced

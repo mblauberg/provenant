@@ -8,22 +8,186 @@
     "mechanical": {
       "alias": "scout",
       "effort": "low",
-      "role": "worker"
+      "role": "worker",
+      "models": {
+        "codex": [
+          "gpt-6-luna"
+        ],
+        "claude": [
+          "sonnet"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
     },
     "legwork": {
       "alias": "workhorse",
       "effort": "medium",
-      "role": "worker"
+      "role": "worker",
+      "models": {
+        "codex": [
+          "gpt-6-sol"
+        ],
+        "claude": [
+          "sonnet"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
     },
     "critical-review": {
       "alias": "flagship",
       "effort": "high",
-      "role": "critical-review"
+      "role": "critical-review",
+      "models": {
+        "codex": [
+          "gpt-6-astra"
+        ],
+        "claude": [
+          "claude-opus-5-5"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
     },
     "orchestration": {
       "alias": "flagship",
       "effort": "high",
-      "role": "orchestrator"
+      "role": "orchestrator",
+      "models": {
+        "codex": [
+          "gpt-6-astra"
+        ],
+        "claude": [
+          "claude-opus-5-5"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
+    },
+    "implementation": {
+      "alias": "workhorse",
+      "effort": "high",
+      "role": "worker",
+      "models": {
+        "codex": [
+          "gpt-6-sol",
+          "gpt-6-luna"
+        ],
+        "claude": [
+          "sonnet",
+          "claude-opus-5-5"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
+    },
+    "ui-taste": {
+      "alias": "flagship",
+      "effort": "high",
+      "role": "worker",
+      "models": {
+        "codex": [
+          "gpt-6-astra"
+        ],
+        "claude": [
+          "claude-opus-5-5",
+          "sonnet"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
+    },
+    "screenshots": {
+      "alias": "workhorse",
+      "effort": "high",
+      "role": "worker",
+      "models": {
+        "codex": [
+          "gpt-6-sol"
+        ],
+        "claude": [
+          "sonnet"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
+    },
+    "review": {
+      "alias": "flagship",
+      "effort": "high",
+      "role": "reviewer",
+      "models": {
+        "codex": [
+          "gpt-6-astra",
+          "gpt-6-sol"
+        ],
+        "claude": [
+          "claude-opus-5-5",
+          "sonnet"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
+    },
+    "second-opinion": {
+      "alias": "flagship",
+      "effort": "high",
+      "role": "reviewer",
+      "models": {
+        "codex": [
+          "gpt-6-sol",
+          "gpt-6-astra"
+        ],
+        "claude": [
+          "sonnet",
+          "claude-opus-5-5"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
+    },
+    "research": {
+      "alias": "workhorse",
+      "effort": "medium",
+      "role": "worker",
+      "models": {
+        "codex": [
+          "gpt-6-sol",
+          "gpt-6-luna"
+        ],
+        "claude": [
+          "sonnet"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
+    },
+    "bulk": {
+      "alias": "scout",
+      "effort": "low",
+      "role": "worker",
+      "models": {
+        "codex": [
+          "gpt-6-luna"
+        ],
+        "claude": [
+          "sonnet"
+        ],
+        "agy": [
+          "gemini-3.8-flash"
+        ]
+      }
     }
   },
   "families": {
@@ -163,6 +327,7 @@
   },
   "adapters": {
     "claude": {
+      "trains_on_prompts": false,
       "endpoint_provider": "anthropic",
       "fixed_model_family": "anthropic",
       "effort_transport": "flag",
@@ -220,6 +385,7 @@
       ]
     },
     "codex": {
+      "trains_on_prompts": false,
       "endpoint_provider": "openai",
       "fixed_model_family": "openai",
       "effort_transport": "flag",
@@ -269,6 +435,7 @@
       ]
     },
     "cursor": {
+      "trains_on_prompts": false,
       "endpoint_provider": "cursor",
       "fixed_model_family": null,
       "default_model": "auto",
@@ -340,6 +507,7 @@
       }
     },
     "agy": {
+      "trains_on_prompts": false,
       "endpoint_provider": "agy",
       "fixed_model_family": null,
       "effort_transport": "flag",
@@ -466,7 +634,8 @@
             "mimo-free"
           ],
           "plan_cap_usd": 0,
-          "trains_on_prompts": false
+          "trains_on_prompts": true,
+          "warning": "Contributor free tier: prompts may be used for training. Do not send sensitive, private or client data."
         },
         {
           "id": "opencode/nemotron-3-ultra-free",
@@ -474,7 +643,8 @@
             "nemotron-free"
           ],
           "plan_cap_usd": 0,
-          "trains_on_prompts": false
+          "trains_on_prompts": true,
+          "warning": "Contributor free tier: prompts may be used for training. Do not send sensitive, private or client data."
         },
         {
           "id": "opencode/muse-spark-1.3-contributor-free",

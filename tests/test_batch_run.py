@@ -221,6 +221,11 @@ def test_fixed_batch_caps_eight_tasks_and_produces_reducer_inputs(tmp_path, monk
 def test_current_routing_fixture_runs_real_dispatch_and_retains_partial_batch(tmp_path, monkeypatch):
     """The current seam proves batch custody, route identity, and reduction inputs without a provider."""
     monkeypatch.chdir(tmp_path)
+    policy_dir = tmp_path / '.agents'
+    policy_dir.mkdir()
+    (policy_dir / 'fabric-policy.json').write_text(
+        json.dumps({'memory_floor_percent': {'read_only': 0}}), encoding='utf-8'
+    )
     run_dir = make_run(tmp_path, 'current-routing-fixture')
     state_dir = tmp_path / 'fixture-state'
     state_dir.mkdir()
@@ -409,7 +414,7 @@ def test_real_full_chain_keeps_lifecycle_risk_separate_from_model_override(
     assert attempt['route']['risk_tier'] == 'routine'
     assert attempt['route']['model_override_tier'] == 'crucial'
     assert attempt['route']['resolved_model'] == 'claude-fable-5-1'
-    assert attempt['route']['route_alias'] == 'flagship'
+    assert attempt['route']['route_alias'] == ''
     assert attempt['route']['policy_override'] == 'crucial-claude-fable-5-1-synthesis-adjudication'
     assert '--model\nclaude-fable-5-1\n' in claude_args.read_text(encoding='utf-8')
     assert '--effort\nmedium\n' in claude_args.read_text(encoding='utf-8')
@@ -615,6 +620,63 @@ def test_real_dispatch_timeout_retains_typed_non_success_attempt(tmp_path, monke
     assert (run_dir / 'dispatch/tasks/slow/attempt-001/attempt.json').is_file()
 
 
+def test_parent_watchdog_stops_hung_child(tmp_path, monkeypatch):
+    child = tmp_path / 'hung-child'
+    write_executable(child, '#!/usr/bin/env python3\nimport time\ntime.sleep(10)\n')
+    module = load_module()
+    module.DISPATCH_RUN = child
+    monkeypatch.setattr(module, 'DISPATCH_WATCHDOG_GRACE_SECONDS', 0.05)
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('hello\n')
+    started = time.monotonic()
+    row = module._run_task({'id': 'hung', 'prompt_file': str(prompt), 'adapter': 'codex',
+                            'model': 'gpt-6-luna', 'role': 'worker', 'timeout': 0.1}, tmp_path, tmp_path)
+    assert row['status'] == 'timed_out' and row['outcome'] == 'batch_timeout'
+    assert time.monotonic() - started < 7
+
+
+def test_parent_watchdog_ignores_prior_attempt_wait(tmp_path, monkeypatch):
+    old = tmp_path / 'tasks/hung/attempt-001/attempt.json'
+    old.parent.mkdir(parents=True)
+    old.write_text(json.dumps({'state': 'terminal', 'timing': {'queued_seconds': 100}}))
+    child = tmp_path / 'hung-child'
+    write_executable(child, '#!/usr/bin/env python3\nimport time\ntime.sleep(1)\n')
+    module = load_module()
+    module.DISPATCH_RUN = child
+    monkeypatch.setattr(module, 'DISPATCH_WATCHDOG_GRACE_SECONDS', 0.05)
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('hello\n')
+    row = module._run_task({'id': 'hung', 'prompt_file': str(prompt), 'adapter': 'codex',
+                            'model': 'gpt-6-luna', 'role': 'worker', 'timeout': 0.1}, tmp_path, tmp_path)
+    assert row['status'] == 'timed_out' and row['outcome'] == 'batch_timeout'
+
+
+def test_parent_watchdog_excludes_published_memory_wait(tmp_path, monkeypatch):
+    child = tmp_path / 'queued-child'
+    write_executable(child, '''#!/usr/bin/env python3
+import json, pathlib, sys, time
+args = sys.argv
+run_dir = pathlib.Path(args[args.index('--run-dir') + 1])
+task_id = args[args.index('--task-id') + 1]
+path = run_dir / 'tasks' / task_id / 'attempt-001' / 'attempt.json'
+path.parent.mkdir(parents=True)
+path.write_text(json.dumps({'state': 'queued', 'timing': {'queued_since': time.monotonic(), 'queued_seconds': 0}}))
+time.sleep(0.3)
+path.write_text(json.dumps({'state': 'running', 'timing': {'queued_seconds': 0.3}}))
+time.sleep(1)
+''')
+    module = load_module()
+    module.DISPATCH_RUN = child
+    monkeypatch.setattr(module, 'DISPATCH_WATCHDOG_GRACE_SECONDS', 0.05)
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('hello\n')
+    row = module._run_task({'id': 'queued', 'prompt_file': str(prompt), 'adapter': 'codex',
+                            'model': 'gpt-6-luna', 'role': 'worker', 'timeout': 0.1}, tmp_path, tmp_path)
+    assert row['status'] == 'timed_out' and row['outcome'] == 'batch_timeout'
+    state = json.loads((tmp_path / 'tasks/queued/attempt-001/attempt.json').read_text())
+    assert state['state'] == 'running'
+
+
 def test_real_dispatch_cancellation_reaps_provider_process(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run_dir = make_run(tmp_path, 'real-cancel')
@@ -748,6 +810,40 @@ def test_inline_prompt_is_temporary_but_attempt_prompt_is_retained(tmp_path, mon
     attempt = run_dir / 'dispatch/tasks/inline/attempt-001'
     assert (attempt / 'prompt.md').read_text() == 'inline body\n'
     assert not (run_dir / 'dispatch/batches/batch-001/prompts/inline.md').exists()
+
+
+@pytest.mark.parametrize('secret_in_file', [False, True])
+@pytest.mark.parametrize('override', [None, 'false', 1])
+def test_batch_rejects_later_secret_before_copying_manifest_or_staging_prompts(
+    tmp_path, monkeypatch, capsys, secret_in_file, override
+):
+    monkeypatch.chdir(tmp_path)
+    run_dir = make_run(tmp_path, 'secret-batch')
+    module = load_module()
+    secret = 'AKIA' + 'A' * 16
+    second = {'id': 'second', 'adapter': 'gemini', 'model': 'flash', 'role': 'worker'}
+    if secret_in_file:
+        prompt = tmp_path / 'second.md'
+        prompt.write_text(secret)
+        second['prompt_file'] = str(prompt)
+    else:
+        second['prompt'] = secret
+    if override is not None:
+        second['allow_secrets'] = override
+    manifest = task_manifest(tmp_path, [
+        {'id': 'first', 'prompt': 'ordinary task', 'adapter': 'gemini',
+         'model': 'flash', 'role': 'worker'},
+        second,
+    ])
+
+    assert module.batch(args(module, run_dir, manifest, 1)) == 2
+    output = json.loads(capsys.readouterr().out)
+    assert output['error'] == 'secret_detected'
+    assert secret not in json.dumps(output)
+    assert not list(run_dir.rglob('task-manifest.json'))
+    assert not list(run_dir.rglob('prompts/*.md'))
+    assert not list(run_dir.rglob('attempt.json'))
+    assert all(secret.encode() not in path.read_bytes() for path in run_dir.rglob('*') if path.is_file())
 
 
 def test_retry_creates_new_attempt_without_replacing_attempt_one(tmp_path, monkeypatch):
@@ -1108,9 +1204,14 @@ def test_artifact_failure_cleans_unindexed_batch_directory_and_releases_lock(tmp
 
 
 def make_worktree(root: Path, name: str) -> Path:
+    """A linked worktree: writers refuse a primary checkout."""
+    primary = root / f'{name}-primary'
+    primary.mkdir()
+    subprocess.run(['git', 'init', '-q'], cwd=primary, check=True)
+    subprocess.run(['git', '-c', 'user.name=Test', '-c', 'user.email=test@example.invalid',
+                    'commit', '-q', '--allow-empty', '-m', 'initial'], cwd=primary, check=True)
     worktree = root / name
-    worktree.mkdir()
-    subprocess.run(['git', 'init', '-q'], cwd=worktree, check=True)
+    subprocess.run(['git', 'worktree', 'add', '-q', '-b', name, str(worktree)], cwd=primary, check=True)
     return worktree.resolve()
 
 

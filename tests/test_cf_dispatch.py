@@ -286,6 +286,7 @@ def fabric_free_env():
     }
     env["AGENT_FABRIC_PRODUCT_ROOT"] = str(PRODUCT_ROOT)
     env["AGENT_FABRIC_INSTANCE_ROOT"] = str(PRODUCT_ROOT)
+    env["PROVENANT_NO_OS_CONFINEMENT"] = "1"
     return env
 
 
@@ -831,7 +832,7 @@ def test_claude_task_class_runs_the_subscription_capability_canary():
             fi
             for arg in "$@"; do
               if [ "$arg" = "--output-format" ]; then
-                printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"OK","modelUsage":{{"claude-opus-4-8":{{"inputTokens":1}}}}}}'
+                printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"OK","modelUsage":{{"claude-opus-5-5":{{"inputTokens":1}}}}}}'
                 exit 0
               fi
             done
@@ -858,7 +859,7 @@ def test_claude_task_class_runs_the_subscription_capability_canary():
         assert result.returncode == 0, result.stderr + result.stdout
         assert record["status"] == "ok"
         assert record["route_alias"] == "flagship"
-        assert record["resolved_model"] == "claude-opus-4-8"
+        assert record["resolved_model"] == "claude-opus-5-5"
         assert record["provider_family"] == "anthropic"
         assert record["effort"] == "high"
         assert record["effort_capability_source"] == "provider-unverified"
@@ -1339,9 +1340,51 @@ def test_nul_prompt_file_is_rejected_before_provider_execution():
         )
 
         assert result.returncode == 2
-        assert "prompt contains unsupported NUL bytes" in result.stderr
-        assert result.stdout == ""
+        assert json.loads(result.stdout)["status"] == "prompt_unavailable"
         assert not invoked.exists()
+
+
+@pytest.mark.parametrize("field", ["prompt_file", "add_dir"])
+def test_shell_checks_original_protected_inputs_before_copy(tmp_path, field):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".agents").mkdir()
+    (repo / ".agents/fabric-policy.json").write_text('{"protected_paths":["private/"]}')
+    (repo / "private").mkdir()
+    (repo / "private/prompt.md").write_text("secret", encoding="utf-8")
+    (repo / "prompt.md").write_text("safe", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "copied"
+    write_executable(bin_dir / "cp", f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexec /bin/cp \"$@\"\n")
+    env = fabric_free_env()
+    env["AGENT_FABRIC_INSTANCE_ROOT"] = str(PRODUCT_ROOT)
+    env["AGENT_FABRIC_PRODUCT_ROOT"] = str(PRODUCT_ROOT)
+    env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+    command = [
+        str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+        "--model", "opencode/mimo-v2.6-flash-free", "--prompt-file",
+        "private/prompt.md" if field == "prompt_file" else "prompt.md",
+    ]
+    if field == "add_dir":
+        command.extend(("--add-dir", "private"))
+    result = subprocess.run(command, cwd=repo, env=env, text=True, capture_output=True)
+    assert result.returncode != 0
+    assert "protected_path_denied" in result.stdout
+    assert not marker.exists()
+
+
+def test_shell_rejects_primary_checkout_writer(tmp_path):
+    repo = tmp_path / "primary"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    result = subprocess.run([
+        str(SCRIPT), "--intent", "ordinary", "--tool", "claude", "--prompt", "hello",
+        "--access-mode", "worktree_write", "--worktree", str(repo),
+    ], cwd=tmp_path, env=fabric_free_env(), text=True, capture_output=True)
+    assert result.returncode == 2
+    assert "create a linked worktree" in result.stderr
 
 
 def test_agy_failure_preserves_the_provider_reason_in_the_output():
@@ -2149,6 +2192,7 @@ def test_codex_explicit_model_reaches_adapter_and_reports_runtime_failure():
         assert record["status"] == "failed"
         assert record["resolved_model"] == "gpt-5.6-sol"
         assert record["requested_model"] == "gpt-5.6-sol"
+        assert record["route_alias"] == ""
         assert record["catalog_model"] == ""
         assert record["model_selection"] == ""
         assert invoked.exists()
@@ -2299,6 +2343,35 @@ def test_chain_all_failed_uses_dispatch_schema():
         assert record["tool"] == "chain"
         assert record["status"] == "all_failed"
         assert record["read_only_guarantee"] == "none"
+
+
+def test_chain_tool_missing_uses_the_entry_model_when_recording_alias(tmp_path):
+    env = fabric_free_env()
+    env["HOME"] = str(tmp_path / "home")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    # A wrapper, not a symlink: a symlinked venv python loses its site-packages.
+    (bin_dir / "python3").write_text(f'#!/bin/sh\nexec "{sys.executable}" "$@"\n', encoding="utf-8")
+    (bin_dir / "python3").chmod(0o755)
+    available_path = os.pathsep.join(
+        path for path in os.environ["PATH"].split(os.pathsep)
+        if path and not (Path(path) / "cursor-agent").exists()
+    )
+    env["PATH"] = f"{bin_dir}:{available_path}"
+    result = subprocess.run(
+        [str(SCRIPT), "--intent", "ordinary", "--chain", "cursor:cursor-grok-4.5-high:",
+         "--orchestrator-family", "openai", "--prompt", "Reply OK"],
+        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode != 0
+    entry_record = next(
+        json.loads(line) for line in result.stderr.splitlines() if line.startswith("{")
+    )
+    assert entry_record["tool"] == "cursor"
+    assert entry_record["status"] == "tool_missing", result.stderr
+    assert entry_record["requested_model"] == "cursor-grok-4.5-high"
+    assert entry_record["route_alias"] == ""
 
 
 def test_opencode_chain_all_failed_removes_raw_sidecar():
@@ -2481,9 +2554,13 @@ if __name__ == "__main__":
 
 def make_worktree(root):
     """Create a real Git worktree root a writer may own."""
+    repo = root / "primary"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test", "-c",
+                    "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "initial"], check=True)
     worktree = root / "worktree"
-    worktree.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "writer", str(worktree)], check=True)
     return worktree.resolve()
 
 

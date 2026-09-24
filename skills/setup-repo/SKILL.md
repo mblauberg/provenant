@@ -73,6 +73,11 @@ Only when the tracker is GitHub issues and the remote host is confirmed:
    target's declared work-item runbook path (default
    `docs/runbooks/github-workflow.md`), adding its mechanics; the project
    decides merge authority.
+   If the repository declares a tracker command, offer the
+   [Claude Code PreToolUse hook template](templates/claude-tracker-hook.py)
+   with [its settings snippet](templates/claude-tracker-settings.json). It
+   redirects raw issue and project-item writes to that command; adapt the
+   snippet into the repository's existing settings rather than replacing them.
 6. **Project board:** create the [six-status board](references/project-board.md).
 7. **CODEOWNERS/Dependabot:** adapt to the stack; the
    [`Dependabot` template](templates/dependabot.yml) keeps its dependency label.

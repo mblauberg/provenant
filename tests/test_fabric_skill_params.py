@@ -72,7 +72,7 @@ def call_fits_schema(tool: str, fields: list[str]) -> bool:
 
 
 def documentation_paths():
-    for directory in ("skills", "agents", "docs"):
+    for directory in ("skills", "docs"):
         yield from (ROOT / directory).rglob("*.md")
     yield from (ROOT / "workflows").rglob("*.js")
 
@@ -113,8 +113,9 @@ def test_documented_fabric_call_parameters_fit_server_schema():
     assert {"fabric_dispatch", "fabric_status", "fabric_cancel", "fabric_output"} <= covered
 
 
-def test_checker_reads_twelve_registered_tools_and_all_doc_surfaces():
-    assert len(SCHEMA) == 12
+def test_checker_reads_registered_tools_and_all_doc_surfaces():
+    assert {"fabric_dispatch", "fabric_status", "fabric_cancel", "fabric_output", "fabric_adapters", "fabric_whoami"} <= set(SCHEMA)
+    assert {"fabric_batch", "fabric_team_create", "fabric_task_create", "fabric_task_claim", "fabric_task_update", "fabric_tasks"}.isdisjoint(SCHEMA)
     assert {"tasks", "concurrency", "resume"} <= SCHEMA["fabric_dispatch"]
     assert {"ids", "wait_seconds", "until"} <= SCHEMA["fabric_status"]
     assert {"id", "reason"} <= SCHEMA["fabric_cancel"]
@@ -124,7 +125,7 @@ def test_checker_reads_twelve_registered_tools_and_all_doc_surfaces():
     assert {"detail"} <= SCHEMA["fabric_adapters"]
     assert {"detail"} <= SCHEMA["fabric_whoami"]
     directories = {path.relative_to(ROOT).parts[0] for path in documentation_paths()}
-    assert {"skills", "agents", "workflows", "docs"} <= directories
+    assert {"skills", "workflows", "docs"} <= directories
 
 
 def test_checker_rejects_unknown_field_and_removed_tool():

@@ -65,8 +65,10 @@ Prefer per-dispatch controls. Editing global provider configuration (for example
 `~/.codex/config.toml`) requires explicit authority for that path and action.
 Run artifacts live under `.agent-run/`; `provenant clean` classifies retention.
 Durable knowledge belongs in project state, specs, ADRs and runbooks; harness-private memory
-holds only cross-project preferences. Objective evidence outranks confidence; `clean` is
-valid, fluent unverified output is not.
+holds only cross-project preferences. Once a memory file's content is promoted to its
+owning project doc or skill, delete the memory file and its `MEMORY.md` entry; do not leave a
+pointer stub. Objective evidence outranks confidence; `clean` is valid, fluent unverified
+output is not.
 
 A user correction names a class, not an instance: sweep every artefact in scope for the same
 defect and report what the sweep found.
@@ -79,7 +81,7 @@ defect and report what the sweep found.
 | `terminal` | all preceding coverage with stronger targeted and adversarial pressure |
 
 For machine checking, multiple means at least two distinct targeted lenses; terminal raises that minimum to three and requires an adversarial or challenge lens.
-The other-primary leg remains required from substantial upwards; skipped distinct-family legs record a reason. Evidence, never majority voting, decides claims.
+The other-primary leg is expected from substantial upwards when a route is available; a skipped or unavailable leg records a reason and is covered by a same-family review with a different lens. Review timing and grouping are the chair's judgement: small or low-risk changes may be reviewed once, together, after they merge into a batch; risky changes are reviewed on their own head first. Evidence, never majority voting, decides claims.
 
 ## Load depth only when triggered
 

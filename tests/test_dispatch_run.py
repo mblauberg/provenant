@@ -109,6 +109,116 @@ def load_dispatch_module():
     return module
 
 
+def load_secret_scan_module():
+    import importlib
+    load_dispatch_module()
+    return importlib.import_module('secret_scan')
+
+
+@pytest.mark.parametrize('name,positive,placeholder', [
+    ('PEM private key', '-----BEGIN RSA PRIVATE KEY-----\n' + 'A' * 64 + '\n-----END RSA PRIVATE KEY-----',
+     '-----BEGIN RSA PRIVATE KEY-----\nEXAMPLE\n-----END RSA PRIVATE KEY-----'),
+    ('AWS access key ID', 'AKIA' + 'A' * 16, 'AKIA' + 'X' * 12 + 'XXXX'),
+    ('AWS access key ID', 'ASIA' + 'A' * 16, '<ASIA' + 'A' * 16 + '>'),
+    ('GitHub token', 'ghp_' + 'a' * 36, 'ghp_' + 'a' * 16 + 'EXAMPLE' + 'a' * 12),
+    ('GitHub token', 'gho_' + 'a' * 36, 'gho_' + 'a' * 16 + 'XXXX' + 'a' * 12),
+    ('GitHub token', 'ghu_' + 'a' * 36, 'ghu_' + 'a' * 16 + 'EXAMPLE' + 'a' * 12),
+    ('GitHub token', 'ghs_' + 'a' * 36, 'ghs_' + 'a' * 16 + 'EXAMPLE' + 'a' * 12),
+    ('GitHub token', 'ghr_' + 'a' * 36, 'ghr_' + 'a' * 16 + 'EXAMPLE' + 'a' * 12),
+    ('GitHub token', 'github_pat_' + 'a' * 30, 'github_pat_EXAMPLE' + 'a' * 30),
+    ('OpenAI/Anthropic key', 'sk-ant-' + 'a' * 50, 'sk-ant-' + 'a' * 42 + 'EXAMPLE'),
+    ('OpenAI/Anthropic key', 'sk-proj-' + 'a' * 50, 'sk-proj-' + 'a' * 42 + 'EXAMPLE'),
+    ('OpenAI/Anthropic key', 'sk-' + 'a' * 50, 'sk-' + 'a' * 42 + 'EXAMPLE'),
+    ('Slack token', 'xoxb-' + 'a' * 24, 'xoxb-EXAMPLE' + 'a' * 24),
+    ('Slack token', 'xoxp-' + 'a' * 24, 'xoxp-EXAMPLE' + 'a' * 24),
+    ('Slack token', 'xoxa-' + 'a' * 24, 'xoxa-EXAMPLE' + 'a' * 24),
+    ('Slack token', 'xoxr-' + 'a' * 24, 'xoxr-EXAMPLE' + 'a' * 24),
+    ('Slack token', 'xoxs-' + 'a' * 24, 'xoxs-EXAMPLE' + 'a' * 24),
+    ('Google API key', 'AIza' + 'a' * 35, 'AIza' + 'a' * 28 + 'EXAMPLE'),
+    ('Stripe live key', 'sk_live_' + 'a' * 24, 'sk_live_EXAMPLE' + 'a' * 24),
+    ('Stripe live key', 'rk_live_' + 'a' * 24, 'rk_live_EXAMPLE' + 'a' * 24),
+    ('Bearer JWT', 'Bearer ' + 'a' * 12 + '.' + 'b' * 12 + '.' + 'c' * 32,
+     'Bearer ' + 'a' * 12 + '.' + 'EXAMPLEabcde' + '.' + 'c' * 32),
+])
+def test_secret_patterns_find_live_shapes_but_skip_placeholders(name, positive, placeholder):
+    scan = load_secret_scan_module()
+    assert [item.name for item in scan.scan_bytes(positive.encode(), '<prompt>')] == [name]
+    assert scan.scan_bytes(placeholder.encode(), '<prompt>') == []
+
+
+def test_secret_angle_placeholder_requires_both_brackets():
+    scan = load_secret_scan_module()
+    key = 'AKIA' + 'A' * 16
+    for content in (f'<{key}', f'{key}>'):
+        assert [item.name for item in scan.scan_bytes(content.encode(), '<prompt>')] == ['AWS access key ID']
+    assert scan.scan_bytes(f'<{key}>'.encode(), '<prompt>') == []
+
+
+def test_secret_scan_skips_deleted_tracked_files(tmp_path):
+    scan = load_secret_scan_module()
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    deleted = tmp_path / 'deleted.txt'
+    deleted.write_text('ordinary content')
+    subprocess.run(['git', 'add', 'deleted.txt'], cwd=tmp_path, check=True)
+    deleted.unlink()
+    (tmp_path / 'present.txt').write_text('AKIA' + 'A' * 16)
+
+    result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
+    assert [(finding.name, Path(finding.path).name) for finding in result.findings] == [
+        ('AWS access key ID', 'present.txt')
+    ]
+
+
+def test_secret_scan_add_dirs_includes_ignored_regular_files_and_marks_budget_exceeded(tmp_path, monkeypatch):
+    scan = load_secret_scan_module()
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    (tmp_path / '.gitignore').write_text('ignored.txt\n.env\n')
+    (tmp_path / 'ignored.txt').write_text('AKIA' + 'A' * 16)
+    (tmp_path / '.env').write_text('rk_live_' + 'a' * 24)
+    (tmp_path / 'tracked.txt').write_text('AKIA' + 'B' * 16)
+    (tmp_path / 'extra.txt').write_text('ghp_' + 'a' * 30)
+    result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
+    assert {finding.name for finding in result.findings} == {'AWS access key ID', 'GitHub token', 'Stripe live key'}
+    assert {Path(finding.path).name for finding in result.findings} == {
+        'ignored.txt', '.env', 'tracked.txt', 'extra.txt'
+    }
+    monkeypatch.setattr(scan, 'MAX_FILES', 1)
+    limited = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
+    assert limited.budget_exceeded
+    assert limited.warnings == ['secret scan budget reached']
+    monkeypatch.setattr(scan, 'MAX_FILES', 2000)
+    monkeypatch.setattr(scan, 'MAX_TOTAL_BYTES', 1)
+    limited = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
+    assert limited.budget_exceeded
+    assert limited.warnings == ['secret scan budget reached']
+
+
+def test_secret_scan_skips_binary_and_untracked_system_dirs_but_refuses_oversized_files(tmp_path):
+    scan = load_secret_scan_module()
+    secret = b'AKIA' + b'A' * 16
+    (tmp_path / 'binary.dat').write_bytes(b'\0' + secret)
+    (tmp_path / 'large.txt').write_bytes(secret + b'a' * scan.MAX_FILE_BYTES)
+    for name in ('node_modules', '.git'):
+        directory = tmp_path / name
+        directory.mkdir()
+        (directory / 'secret.txt').write_bytes(secret)
+    result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
+    assert result.findings == []
+    assert result.budget_exceeded
+
+
+def test_secret_scan_skips_git_metadata_file(tmp_path):
+    scan = load_secret_scan_module()
+    (tmp_path / '.git').write_text('AKIA' + 'A' * 16)
+    assert scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)]).findings == []
+
+
+def test_secret_scan_avoids_generic_credential_words_and_unprefixed_jwt():
+    scan = load_secret_scan_module()
+    content = b'password=' + b'a' * 60 + b'\n' + b'a' * 12 + b'.' + b'b' * 12 + b'.' + b'c' * 32
+    assert scan.scan_bytes(content, '<prompt>') == []
+
+
 def test_terminal_attempt_carries_nested_owner_spared_count(tmp_path: Path) -> None:
     module = load_dispatch_module()
     args = SimpleNamespace(tool="codex", alias="workhorse", model="fixture", effort="low",
@@ -121,6 +231,35 @@ def test_terminal_attempt_carries_nested_owner_spared_count(tmp_path: Path) -> N
                                    {"status": "ok", "spared": 2}, 1,
                                    tmp_path / "tasks/task-1/attempt-001")
     assert row["spared"] == 2
+
+
+def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
+    module = load_dispatch_module()
+    run_dir = make_run(tmp_path, "resume-root")
+    attempt_dir = run_dir / "tasks/task-1/attempt-001"
+    attempt_dir.mkdir(parents=True)
+    workspace = tmp_path / "recorded-workspace"
+    workspace.mkdir()
+    previous = {
+        "run_id": "resume-me", "task_id": "task-1", "attempt": 1, "state": "terminal",
+        "status": "ok", "mode": "read_only", "cwd": str(workspace / "src"), "worktree": None,
+        "workspace": {"root": str(workspace)}, "session_id": "saved-session",
+        "provenance": {"requested": {"adapter": "codex"}, "resolved_model": "fixture", "effort_applied": ""},
+        "applied": {"sandbox": "read-only", "network": None, "add_dirs": []},
+        "paths": {"events": None}, "requested_route": {},
+    }
+    (attempt_dir / "attempt.json").write_text(json.dumps(previous), encoding="utf-8")
+    args = SimpleNamespace(
+        run_dir=run_dir, resume="resume-me", task_id=None, tool=None, model=None, effort=None,
+        access_mode=None, worktree=None, provider_cwd=None, sandbox=None, network=None,
+        add_dirs=[], resume_session=None, fallback=None, context_ceiling=None,
+        intent="ordinary", orchestrator_family="", role="worker", risk_tier="",
+        model_override_tier="", reviewer_id="", preface=True,
+    )
+
+    module.prepare_resume(args)
+
+    assert args.workspace_root == workspace
 
 
 def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_path: Path) -> None:
@@ -193,6 +332,113 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
     assert (run_dir / "RUN_RECEIPT.json").read_bytes() == receipt_before
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("floor", ['"invalid"', "-1", "101"])
+def test_invalid_memory_floor_retains_failed_attempt_with_fix(tmp_path, monkeypatch, legacy, floor):
+    run_dir = make_run(tmp_path, f"bad-floor-{legacy}-{floor}")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("hello\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_executable(bin_dir / "codex", '''#!/usr/bin/env bash
+if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+  printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+  exit 0
+fi
+exit 99
+''')
+    monkeypatch.setenv("PATH", f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
+    policy = tmp_path / ".agents/fabric-policy.json"
+    policy.parent.mkdir()
+    policy.write_text('{"memory_floor_percent":{"read_only":' + floor + '}}')
+    monkeypatch.chdir(tmp_path)
+    module = load_dispatch_module()
+    if legacy:
+        adapter = tmp_path / "adapter"
+        write_success_adapter(adapter)
+        module.CF_DISPATCH = adapter
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "bad-floor", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    assert module.dispatch(args) == 1
+    attempt = json.loads((run_dir / "dispatch/tasks/bad-floor/attempt-001/attempt.json").read_text())
+    state = json.loads((run_dir / "tasks/bad-floor/attempt-001/attempt.json").read_text())
+    assert attempt["status"] == state["status"] == "failed"
+    assert state["fix"] == "Set .agents/fabric-policy.json memory_floor_percent to numbers from 0 to 100."
+    assert "memory_floor_percent" in attempt["process_error"]
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_memory_wait_expiry_is_typed_and_visible(tmp_path, monkeypatch, legacy):
+    run_dir = make_run(tmp_path, f"memory-expiry-{legacy}")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("hello\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_executable(bin_dir / "codex", '''#!/usr/bin/env bash
+if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+  printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+  exit 0
+fi
+exit 99
+''')
+    monkeypatch.setenv("PATH", f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    module = load_dispatch_module()
+    monkeypatch.setattr(module.memory_admission, "available_memory_mb", lambda: (640, 16384))
+    monkeypatch.setenv("FABRIC_MEMORY_WAIT_SECONDS", "0")
+    monkeypatch.chdir(tmp_path)
+    if legacy:
+        adapter = tmp_path / "adapter"
+        write_success_adapter(adapter)
+        module.CF_DISPATCH = adapter
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "memory-expiry", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    assert module.dispatch(args) == 1
+    attempt = json.loads((run_dir / "dispatch/tasks/memory-expiry/attempt-001/attempt.json").read_text())
+    state = json.loads((run_dir / "tasks/memory-expiry/attempt-001/attempt.json").read_text())
+    assert attempt["status"] == state["status"] == "failed"
+    assert attempt["outcome"] == state["error"] == "memory_unavailable"
+    assert "lower the mode's memory_floor_percent" in state["fix"]
+    assert "memory_unavailable" in state["digest"]
+
+
+def test_opencode_explicit_model_receipt_drops_implied_alias(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "opencode-explicit-model")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Reply exactly OK\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_executable(
+        bin_dir / "opencode",
+        """#!/usr/bin/env bash
+        printf '{\"type\":\"text\",\"part\":{\"text\":\"OK\"}}\\n'
+        """,
+    )
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
+    env["PROVENANT_NO_OS_CONFINEMENT"] = "1"
+
+    result = subprocess.run(
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "task-1",
+         "--adapter", "opencode", "--prompt-file", str(prompt),
+         "--orchestrator-family", "openai", "--model", "mimo", "--role", "worker"],
+        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+    )
+
+    assert result.returncode == 0, result.stderr + result.stdout
+    attempt = run_dir / "dispatch/tasks/task-1/attempt-001"
+    adapter_receipt = json.loads((attempt / "adapter-receipt.json").read_text(encoding="utf-8"))
+    record = json.loads(
+        (run_dir / "tasks/task-1/attempt-001/attempt.json").read_text(encoding="utf-8")
+    )
+    assert adapter_receipt["route_alias"] == ""
+    assert record["provenance"]["requested"]["alias"] == ""
+
+
 def test_batch_preflight_does_not_invent_an_explicit_alias_for_model_routes(tmp_path: Path, monkeypatch) -> None:
     module = load_dispatch_module()
     monkeypatch.chdir(tmp_path)
@@ -222,6 +468,75 @@ def test_batch_preflight_does_not_invent_an_explicit_alias_for_model_routes(tmp_
     assert model_only["notes"] == []
     assert "--alias" in resolve_commands[1]
     assert explicit_both["notes"] == ["alias and model both supplied; model won"]
+
+
+def test_explicit_model_receipt_does_not_record_an_implied_alias(tmp_path):
+    mod = load_dispatch_module()
+    args = SimpleNamespace(
+        tool="opencode", alias="flagship", model="mimo", alias_supplied=False, effort=None,
+        task_id="dispatch-001", access_mode="read_only", worktree=None,
+        _phase_timings={}, reviewer_id=None, risk_tier=None,
+        model_override_tier=None,
+    )
+    row = mod.contract_row(args, tmp_path, 1, tmp_path / "attempt", {}, "now")
+    assert row["provenance"]["requested"]["alias"] == ""
+
+
+def test_explicit_model_and_alias_are_both_recorded_in_receipt(tmp_path):
+    mod = load_dispatch_module()
+    args = SimpleNamespace(
+        tool="opencode", alias="workhorse", model="gpt-6-luna", alias_supplied=True,
+        effort=None, task_id="dispatch-001", access_mode="read_only", worktree=None,
+        _phase_timings={}, reviewer_id=None, risk_tier=None,
+        model_override_tier=None,
+    )
+    row = mod.contract_row(args, tmp_path, 1, tmp_path / "attempt", {}, "now")
+    assert row["provenance"]["requested"]["alias"] == "workhorse"
+
+
+def test_workspace_identity_keeps_root_and_records_provider_cwd(tmp_path):
+    mod = load_dispatch_module()
+    root = tmp_path / "workspace"
+    cwd = root / "sub"
+    cwd.mkdir(parents=True)
+    identity = mod.workspace_identity(root, cwd)
+    assert identity["cwd"] == str(cwd)
+    assert identity["root"] == str(root)
+
+
+def test_workspace_identity_canonicalizes_fallback_root(tmp_path):
+    mod = load_dispatch_module()
+    real_root = tmp_path / "workspace"
+    (real_root / "sub").mkdir(parents=True)
+    workspace_link = tmp_path / "workspace-link"
+    workspace_link.symlink_to(real_root, target_is_directory=True)
+
+    identity = mod.workspace_identity(workspace_link, workspace_link / "sub")
+
+    assert identity["root"] == str(real_root.resolve())
+    assert identity["cwd"] == str((real_root / "sub").resolve())
+
+
+def test_workspace_identity_keeps_canonical_caller_root_inside_git_checkout(tmp_path, monkeypatch):
+    mod = load_dispatch_module()
+    repo = tmp_path / "repo"
+    workspace = repo / "workspace"
+    provider_cwd = workspace / "sub"
+    provider_cwd.mkdir(parents=True)
+    monkeypatch.setattr(
+        mod.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0,
+            f"{repo}\n{'a' * 40}\n" if args[0][1:3] == ["rev-parse", "--show-toplevel"] else "",
+            "",
+        ),
+    )
+
+    identity = mod.workspace_identity(workspace, provider_cwd)
+
+    assert identity["root"] == str(workspace.resolve())
+    assert identity["cwd"] == str(provider_cwd.resolve())
 
 
 def test_agy_git_evidence_is_copied_into_attempt_and_bound_to_prompt(tmp_path: Path, monkeypatch) -> None:
@@ -977,7 +1292,7 @@ def test_late_signal_after_provider_exit_preserves_attempt_publication(tmp_path:
         def publish(run_dir, path, content):
             global fired
             original(run_dir, path, content)
-            if path.name == "attempt.json" and not fired:
+            if path == run_dir / "dispatch/tasks/late/attempt-001/attempt.json" and not fired:
                 fired = True
                 os.kill(os.getpid(), signal.SIGTERM)
         module.write_owned = publish
@@ -1231,6 +1546,54 @@ def test_hard_linked_prompt_is_rejected_before_provider_launch(tmp_path: Path, m
     ])
     monkeypatch.chdir(tmp_path)
     assert module.dispatch(args) == 2
+
+
+def test_relative_protected_prompt_is_rejected_before_staging(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".agents").mkdir()
+    (repo / ".agents/fabric-policy.json").write_text('{"protected_paths":["private/"]}')
+    (repo / "private").mkdir()
+    (repo / "private/prompt.md").write_text("secret", encoding="utf-8")
+    run_dir = make_run(repo, "protected-direct")
+    module = load_dispatch_module()
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "blocked", "--adapter", "opencode",
+        "--prompt-file", "private/prompt.md", "--model", "opencode/mimo-v2.6-flash-free",
+        "--role", "worker",
+    ])
+    assert module.dispatch(args) == 2
+    rejection = json.loads(capsys.readouterr().out)
+    assert rejection["status"] == "protected_path_denied"
+    assert "protected path" in str(rejection), rejection
+    assert not (run_dir / "dispatch/tasks/blocked/attempt-001/prompt.md").exists()
+
+
+def test_relative_protected_add_dir_is_rejected_before_staging(tmp_path: Path, monkeypatch, capsys) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".agents").mkdir()
+    (repo / ".agents/fabric-policy.json").write_text('{"protected_paths":["private/"]}')
+    (repo / "private").mkdir()
+    (repo / "prompt.md").write_text("safe", encoding="utf-8")
+    run_dir = make_run(repo, "protected-add-dir")
+    module = load_dispatch_module()
+    monkeypatch.chdir(repo)
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "blocked", "--adapter", "opencode",
+        "--prompt-file", "prompt.md", "--add-dir", "private",
+        "--model", "opencode/mimo-v2.6-flash-free", "--role", "worker",
+    ])
+    assert module.dispatch(args) == 2
+    assert "protected path" in str(json.loads(capsys.readouterr().out))
+    assert not (run_dir / "dispatch/tasks/blocked/attempt-001/prompt.md").exists()
 
 
 def test_hard_linked_prompt_reports_typed_custody_error(tmp_path: Path, monkeypatch, capsys) -> None:
@@ -1617,9 +1980,13 @@ def test_new_attempt_rejects_preexisting_directory_symlink(
 
 
 def make_worktree(root: Path) -> Path:
+    repo = root / "writer-repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test", "-c",
+                    "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "initial"], check=True)
     worktree = root / "writer-worktree"
-    worktree.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "writer", str(worktree)], check=True)
     return worktree.resolve()
 
 
@@ -1666,6 +2033,42 @@ def test_opencode_worktree_writer_reaches_adapter_and_attempt(tmp_path: Path) ->
     assert attempt["requested_route"]["access_mode"] == "worktree_write"
 
 
+def test_writer_branch_name_warns_in_receipt_without_refusing(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "branch-warning")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Make a change\n", encoding="utf-8")
+    worktree = make_worktree(tmp_path)
+    result = run_writer_dispatch(tmp_path, run_dir, prompt, "--access-mode", "worktree_write",
+                                 "--worktree", str(worktree))
+    receipt = json.loads(result.stdout.splitlines()[-1])
+    assert result.returncode in {0, 1}, result.stderr + result.stdout
+    assert receipt["status"] != "invalid_worktree"
+    assert any("branch writer is outside" in note for note in receipt["fabric"]["warnings"])
+    attempt = json.loads((run_dir / "tasks/task-1/attempt-001/attempt.json").read_text())
+    assert any("branch writer is outside" in note for note in attempt["warnings"])
+
+    subprocess.run(["git", "-C", str(worktree), "branch", "-m", "feat/fabric-branch-warning"], check=True)
+    next_run = make_run(tmp_path, "branch-valid")
+    result = run_writer_dispatch(tmp_path, next_run, prompt, "--access-mode", "worktree_write",
+                                 "--worktree", str(worktree))
+    receipt = json.loads(result.stdout.splitlines()[-1])
+    assert receipt["status"] != "invalid_worktree"
+    assert not any("branch " in note and "outside" in note for note in receipt["fabric"]["warnings"])
+
+
+def test_primary_checkout_writer_is_rejected(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path, "primary-writer")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("hello", encoding="utf-8")
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    subprocess.run(["git", "init", "-q", str(primary)], check=True)
+    result = run_writer_dispatch(tmp_path, run_dir, prompt, "--access-mode", "worktree_write",
+                                 "--worktree", str(primary))
+    assert result.returncode == 2
+    assert "create a linked worktree" in result.stdout
+
+
 def test_worktree_writer_route_reaches_the_adapter_and_the_attempt_record(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path, "writer")
     prompt = tmp_path / "prompt.md"
@@ -1695,6 +2098,13 @@ def test_worktree_writer_route_reaches_the_adapter_and_the_attempt_record(tmp_pa
     )
     assert record["requested_route"]["access_mode"] == "worktree_write"
     assert record["requested_route"]["worktree"] == str(worktree)
+    assert record["prompt"]["original_path"] == str(prompt)
+    boundary = record["route"]["applied"]["write_boundary"]
+    assert boundary["kind"] in {"sandbox-exec", "none"}
+    if boundary["kind"] == "sandbox-exec":
+        assert str(run_dir / "dispatch/tasks/task-1/attempt-001") in boundary["writable_paths"]
+    else:
+        assert any("writes are unconfined" in warning for warning in record["route"]["warnings"])
     receipt = json.loads(
         (run_dir / "dispatch/tasks/task-1/attempt-001/adapter-receipt.json").read_text(encoding="utf-8")
     )
@@ -1724,7 +2134,8 @@ def test_read_only_route_is_the_default_and_refuses_a_worktree(tmp_path: Path) -
     assert json.loads(result.stdout)["status"] == "worktree_not_applicable"
 
 
-def test_concurrent_writer_on_one_worktree_is_rejected(tmp_path: Path) -> None:
+@pytest.mark.parametrize("adapter", ["claude", "agy"])
+def test_concurrent_writer_on_one_worktree_is_rejected(tmp_path: Path, adapter: str) -> None:
     run_dir = make_run(tmp_path, "one-writer")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Reply exactly OK\n", encoding="utf-8")
@@ -1736,7 +2147,8 @@ def test_concurrent_writer_on_one_worktree_is_rejected(tmp_path: Path) -> None:
         with pytest.raises(module.WorktreeLeaseError, match="another writer"):
             module.acquire_worktree_lease(worktree)
         result = run_writer_dispatch(
-            tmp_path, run_dir, prompt, "--access-mode", "worktree_write", "--worktree", str(worktree)
+            tmp_path, run_dir, prompt, "--access-mode", "worktree_write", "--worktree", str(worktree),
+            adapter=adapter,
         )
         assert result.returncode != 0
         assert json.loads(result.stdout)["status"] == "worktree_busy"
@@ -1950,6 +2362,106 @@ def test_front_door_preflight_rejects_all_invalid_tasks_without_run(tmp_path):
     assert not (tmp_path / '.agent-run').exists()
 
 
+def test_secret_in_inline_prompt_is_rejected_before_preflight_route(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    module = load_dispatch_module()
+    result = module.preflight_tasks([{
+        'id': 'task-1', 'adapter': 'claude', 'prompt': 'Bearer ' +
+        'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.' + 'a' * 43,
+    }])
+    assert result['status'] == 'rejected'
+    assert result['error'] == 'secret_detected'
+    assert 'Bearer JWT' in result['fix']
+    assert 'Bearer eyJ' not in json.dumps(result)
+
+
+def test_preflight_secret_file_rejects_and_explicit_override_accepts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    module = load_dispatch_module()
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('hello\n' + 'AKIA' + 'A' * 16)
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt)}
+    rejected = module.preflight_tasks([task])
+    assert rejected['error'] == 'secret_detected'
+    assert f'{prompt}:2' in rejected['fix']
+    assert module.preflight_tasks([{**task, 'allow_secrets': True}])['status'] == 'validated'
+
+
+def test_preflight_secret_in_add_dirs_rejects_and_override_accepts(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    directory = tmp_path / 'shared'
+    directory.mkdir()
+    (directory / 'source.txt').write_text('rk_live_' + 'a' * 24)
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse',
+            'prompt': 'review shared files', 'add_dirs': [str(directory)]}
+    module = load_dispatch_module()
+    rejected = module.preflight_tasks([task])
+    assert rejected['error'] == 'secret_detected'
+    assert 'Stripe live key' in rejected['fix']
+    assert module.preflight_tasks([{**task, 'allow_secrets': True}])['status'] == 'validated'
+
+
+def test_preflight_and_dispatch_refuse_scan_budget_overrun_unless_overridden(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    scan = load_secret_scan_module()
+    monkeypatch.setattr(scan, 'MAX_FILES', 0)
+    directory = tmp_path / 'shared'
+    directory.mkdir()
+    (directory / 'source.txt').write_text('ordinary content')
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse',
+            'prompt': 'review shared files', 'add_dirs': [str(directory)]}
+    module = load_dispatch_module()
+
+    rejected = module.preflight_tasks([task])
+    assert rejected['status'] == 'rejected'
+    assert rejected['error'] == 'secret_scan_budget_exceeded'
+    assert 'Narrow the prompt or additional directories' in rejected['fix']
+    assert module.preflight_tasks([{**task, 'allow_secrets': True}])['status'] == 'validated'
+
+    run_dir = make_run(tmp_path, 'scan-budget')
+    adapter = tmp_path / 'adapter'
+    write_success_adapter(adapter)
+    module.CF_DISPATCH = adapter
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('review shared files')
+    args = module.parser().parse_args(['--run-dir', str(run_dir), '--adapter', 'codex',
+        '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker',
+        '--add-dir', str(directory)])
+    assert module.dispatch(args) == 2
+    refused = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert refused['status'] == 'rejected'
+    assert refused['error'] == 'secret_scan_budget_exceeded'
+    assert 'allow_secrets: true and explain why in the prompt' in refused['fix']
+
+    args.allow_secrets = True
+    assert module.dispatch(args) == 0
+
+
+def test_direct_dispatch_rejects_before_prompt_staging_and_override_records_finding(tmp_path, monkeypatch, capsys):
+    run_dir = make_run(tmp_path, 'secret-direct')
+    module = load_dispatch_module()
+    adapter = tmp_path / 'adapter'
+    write_success_adapter(adapter)
+    module.CF_DISPATCH = adapter
+    monkeypatch.chdir(tmp_path)
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('hello\n' + 'AKIA' + 'A' * 16)
+    args = module.parser().parse_args(['--run-dir', str(run_dir), '--adapter', 'codex',
+        '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker'])
+    assert module.dispatch(args) == 2
+    rejected = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert rejected['status'] == 'rejected' and rejected['error'] == 'secret_detected'
+    assert f'{prompt}:2' in rejected['fix']
+    assert not list((run_dir / 'dispatch/tasks').glob('*/attempt-*/prompt.md'))
+    args.allow_secrets = True
+    assert module.dispatch(args) == 0
+    attempt = json.loads(next((run_dir / 'tasks').glob('*/attempt-*/attempt.json')).read_text())
+    assert attempt['secret_scan'] == {'allow_secrets': True, 'finding_names': ['AWS access key ID']}
+
+
 def test_mcp_owner_closes_receipt(tmp_path, monkeypatch, capsys):
     run_dir = make_run(tmp_path, 'mcp-finished')
     module = load_dispatch_module()
@@ -2020,6 +2532,9 @@ print(json.dumps({'models': [{'slug': 'gpt-6-luna', 'supported_reasoning_levels'
 @pytest.mark.parametrize('owner', ['dispatch', 'batch'])
 @pytest.mark.parametrize('instance', ['configured', 'missing', 'unset'])
 def test_provider_does_not_inherit_chair_fabric_environment(tmp_path, owner, instance):
+    policy = tmp_path / '.agents/fabric-policy.json'
+    policy.parent.mkdir()
+    policy.write_text('{"memory_floor_percent":{"read_only":0}}')
     run_dir = make_run(tmp_path, 'isolated-provider')
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('Reply OK')
@@ -2069,7 +2584,8 @@ else:
         command = [str(SCRIPT.with_name('batch_run.py')), '--run-dir', str(run_dir), '--manifest', str(manifest)]
     result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
-    assert json.loads(capture.read_text()) == {"PROVENANT_RUN_ID": "mcp-provider"}
+    run_id = json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['run_id']
+    assert json.loads(capture.read_text()) == {"PROVENANT_RUN_ID": run_id}
     assert (tmp_path / 'provider-instance.txt').read_text() == expected_instance
     assert not (tmp_path / 'chair-state').exists()
     scratch = Path((tmp_path / 'provider-tmp.txt').read_text())
@@ -2114,6 +2630,12 @@ print(json.dumps({{'type': 'result', 'result': 'DONE', 'is_error': False}}), flu
         assert row["status"] == "ok"
         assert any(item["pid"] == pid for item in row["reaped"])
         assert "! reaped 1 leftover process(es)" in row["digest"]
+        route_health = json.loads(Path(os.environ["AGENT_FABRIC_ROUTE_HEALTH_PATH"]).read_text())
+        assert any(
+            route.get("task_class") == "ordinary"
+            and route.get("recent", [{}])[0].get("status") == "ok"
+            for route in route_health["routes"].values()
+        )
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
     finally:
@@ -2552,6 +3074,8 @@ print(json.dumps({"type":"result","result":os.getcwd()}))
     second = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
     assert second['status'] == 'ok'
     assert second['cwd'] == str(nested)
+    second_legacy = json.loads((run / second['legacy_attempt_path']).read_text())
+    assert second_legacy['workspace']['root'] == str(tmp_path.resolve())
     assert second['requested_route']['preface'] is False
     assert second['requested_route']['intent'] == row['requested_route']['intent']
     assert 'resumed_by_relaunch' in second['provenance']['notes']
