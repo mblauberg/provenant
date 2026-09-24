@@ -21,9 +21,9 @@ reports `server_version`, `build_stale` and a restart fix when needed.
 each client has its own seat and inbox, and a detected client with conflicting
 instructions is skipped and reported. `check-provenant-install.py` warns about
 routing drift (`--strict` fails); `install-harness` refreshes the instance
-catalogue when the product date advances or ships missing fields, preserving
-instance values and additions. `--refresh-routing` forces a
-refresh; `--no-refresh-routing` skips it.
+catalogue whenever a product snapshot exists, preserving three-way instance
+overrides. Without a snapshot it skips and prints a hint; `--refresh-routing`
+forces a refresh.
 
 ## MCP quickstart
 

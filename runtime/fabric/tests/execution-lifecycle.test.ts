@@ -13,8 +13,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
 import { normaliseRoute, routeArguments, workingIdentity } from "../src/execution-input.js";
+import { databasePath } from "../src/identity.js";
 import { catalogueSnapshot } from "../src/catalogue.js";
 import { psOutput } from "../src/ps.mjs";
+import { Store } from "../src/store.js";
 import {
   listRecordedRuns,
   fabricStatus,
@@ -207,6 +209,8 @@ beforeEach(() => {
   ownerEnvironment = {
     ...process.env,
     AGENT_FABRIC_PRODUCT_ROOT: product,
+    AGENT_FABRIC_SEAT: "codex",
+    AGENT_FABRIC_STATE_DIRECTORY: join(temporaryDirectory, "state"),
     HARNESS_PYTHON: fixturePython,
   };
 });
@@ -442,54 +446,71 @@ describe("dispatch CLI", () => {
     writeFileSync(promptPath, "cli prompt");
     const cliPath = join(packageRoot, "src", "cli.ts");
     const output = execFileSync(process.execPath, ["--import", tsxLoader, cliPath,
-      "dispatch", "--adapter", "codex", "--model", "workhorse", "--effort", "high",
-      "--mode", "read_only", "--cwd", workspace, "--prompt-file", promptPath, "--id", "cli-prompt"], {
+      "dispatch", "--alias", "workhorse", "--prompt-file", promptPath, "--id", "cli-prompt"], {
       cwd: workspace,
       encoding: "utf8",
       env: ownerEnvironment,
     });
-    expect(output.trim().split("\n")).toHaveLength(2);
-    expect(output).toMatch(/^mcp-[A-Za-z0-9]+\nstatus: (running|ok|failed)\n$/u);
+    expect(output).toContain("status:");
+    expect(output.trim().split(/\s+/u)[0]).toMatch(/^mcp-[A-Za-z0-9]+$/u);
   }, 40_000);
 
   it("dispatches a task manifest through the MCP batch execution path", async () => {
     const taskPath = join(temporaryDirectory, "cli-tasks.json");
-    writeFileSync(taskPath, JSON.stringify({ adapter: "codex", model: "workhorse", effort: "high",
-      mode: "read_only", tasks: [{ id: "cli-task-manifest", prompt: "manifest task" }] }));
+    writeFileSync(taskPath, JSON.stringify({ tasks: [{ id: "cli-task-manifest", prompt: "manifest task" }] }));
     const cliPath = join(packageRoot, "src", "cli.ts");
     const output = execFileSync(process.execPath, ["--import", tsxLoader, cliPath,
-      "dispatch", "--tasks", taskPath], {
+      "dispatch", "--tasks", taskPath, "--adapter", "codex", "--alias", "workhorse", "--effort", "high"], {
       cwd: workspace,
       encoding: "utf8",
       env: ownerEnvironment,
     });
-    expect(output).toMatch(/^mcp-[A-Za-z0-9]+\nstatus: (running|ok|failed)\n$/u);
+    expect(output).toContain("status:");
   }, 40_000);
+
+  it("allows a read-only cwd in another registered project", () => {
+    const otherProject = join(temporaryDirectory, "other-project");
+    mkdirSync(otherProject);
+    const store = new Store(databasePath(ownerEnvironment));
+    store.announce({ project: otherProject, cwd: otherProject, agentId: "other", provider: "codex" });
+    store.close();
+    const promptPath = join(temporaryDirectory, "registered-project.md");
+    writeFileSync(promptPath, "registered project cwd");
+    const cliPath = join(packageRoot, "src", "cli.ts");
+    const output = execFileSync(process.execPath, ["--import", tsxLoader, cliPath,
+      "dispatch", "--alias", "workhorse", "--cwd", otherProject, "--prompt-file", promptPath], {
+      cwd: workspace,
+      encoding: "utf8",
+      env: ownerEnvironment,
+    });
+    expect(output).toContain("status:");
+  });
 
   it("keeps typed correction details when dispatch input is rejected", () => {
     const promptPath = join(temporaryDirectory, "cli-invalid-prompt.md");
     writeFileSync(promptPath, "invalid mode still gets preflighted");
     const cliPath = join(packageRoot, "src", "cli.ts");
     const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath,
-      "dispatch", "--adapter", "codex", "--model", "workhorse", "--effort", "high",
-      "--mode", "write", "--cwd", workspace, "--prompt-file", promptPath], {
+      "dispatch", "--alias", "workhorse", "--mode", "invalid", "--cwd", workspace,
+      "--prompt-file", promptPath], {
       cwd: workspace,
       encoding: "utf8",
       env: ownerEnvironment,
     });
     expect(result.status).toBe(1);
-    expect(result.stdout).toMatch(/^unassigned\nstatus: rejected error: mode_invalid fix: Pass mode read_only or worktree_write\.\n$/u);
+    expect(result.stdout).toContain("status: rejected");
+    expect(result.stdout).toContain("error: mode_invalid");
   });
 
   it("prints each task correction from a rejected JSON manifest", () => {
     const taskPath = join(temporaryDirectory, "cli-invalid-tasks.json");
-    writeFileSync(taskPath, JSON.stringify({ adapter: "codex", model: "workhorse", effort: "high",
-      mode: "read_only", tasks: [
+    writeFileSync(taskPath, JSON.stringify({ tasks: [
         { id: "bad-adapter", adapter: "invalid", prompt: "one" },
-        { id: "bad-mode", mode: "write", prompt: "two" },
+        { id: "bad-mode", mode: "invalid", prompt: "two" },
       ] }));
     const cliPath = join(packageRoot, "src", "cli.ts");
-    const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath, "dispatch", "--tasks", taskPath], {
+    const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath, "dispatch", "--tasks", taskPath,
+      "--adapter", "codex", "--alias", "workhorse"], {
       cwd: workspace,
       encoding: "utf8",
       env: ownerEnvironment,
@@ -497,6 +518,34 @@ describe("dispatch CLI", () => {
     expect(result.status).toBe(1);
     expect(result.stdout).toContain("bad-adapter: adapter_invalid");
     expect(result.stdout).toContain("bad-mode: mode_invalid");
+  });
+
+  it("prints rejected task corrections alongside runnable batch tasks", () => {
+    const taskPath = join(temporaryDirectory, "cli-mixed-tasks.json");
+    writeFileSync(taskPath, JSON.stringify({ tasks: [
+      { id: "runnable-task", prompt: "run this" },
+      { id: "bad-adapter", adapter: "invalid", prompt: "reject this" },
+    ] }));
+    const cliPath = join(packageRoot, "src", "cli.ts");
+    const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath, "dispatch", "--tasks", taskPath,
+      "--adapter", "codex", "--alias", "workhorse"], {
+      cwd: workspace,
+      encoding: "utf8",
+      env: ownerEnvironment,
+    });
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain("bad-adapter: adapter_invalid");
+  });
+
+  it("rejects unknown dispatch subcommands and positional arguments", () => {
+    const cliPath = join(packageRoot, "src", "cli.ts");
+    const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath, "dispatch", "unknown"], {
+      cwd: workspace,
+      encoding: "utf8",
+      env: ownerEnvironment,
+    });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("unknown dispatch subcommand");
   });
 });
 

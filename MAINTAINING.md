@@ -214,6 +214,8 @@ numerator and denominator, model and harness versions.
 
 Run the checkout gates, or require exact-head `ci-status`:
 
+For a pull request branch, run only the tests covering changed files; the hosted runner runs the gates on the pull request head, and for heavy files such as `tests/test_cf_dispatch.py`, run only the named failing test.
+
 ```sh
 scripts/check-harness
 npm run check

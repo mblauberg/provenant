@@ -1044,13 +1044,13 @@ def test_install_refreshes_newer_routing_catalogue_and_preserves_overrides(tmp_p
 
     newer = {**shipped, "catalog_date": "2999-01-02"}
     product_catalogue.write_text(json.dumps(newer))
-    skipped = run_product(product, "codex", tmp_path / "install", "--no-refresh-routing")
-    assert skipped.returncode == 0, skipped.stderr
-    assert json.loads(target.read_text())["catalog_date"] == "2999-01-01"
-    assert len(list(target.parent.glob("model-routing.json.bak-*"))) == 1
+    refreshed = run_product(product, "codex", tmp_path / "install")
+    assert refreshed.returncode == 0, refreshed.stderr
+    assert json.loads(target.read_text())["catalog_date"] == "2999-01-02"
+    assert len(list(target.parent.glob("model-routing.json.bak-*"))) == 2
 
-    forced = run_product(product, "codex", tmp_path / "install", "--refresh-routing")
-    assert forced.returncode == 0, forced.stderr
+    unchanged = run_product(product, "codex", tmp_path / "install", "--refresh-routing")
+    assert unchanged.returncode == 0, unchanged.stderr
     assert len(list(target.parent.glob("model-routing.json.bak-*"))) == 2
 
     incomplete = json.loads(target.read_text())
@@ -1070,11 +1070,19 @@ def test_install_refreshes_newer_routing_catalogue_and_preserves_overrides(tmp_p
         "catalog_date": "2999-01-03",
         "second_product_field": "newer",
     }))
+    before_unbased_refresh = target.read_bytes()
     legacy_refresh = run_product(product, "codex", tmp_path / "install")
     assert legacy_refresh.returncode == 0, legacy_refresh.stderr
+    assert target.read_bytes() == before_unbased_refresh
+    assert "--refresh-routing" in legacy_refresh.stdout
+    assert len(list(target.parent.glob("model-routing.json.bak-*"))) == 3
+
+    forced = run_product(product, "codex", tmp_path / "install", "--refresh-routing")
+    assert forced.returncode == 0, forced.stderr
     legacy_catalogue = json.loads(target.read_text())
-    assert legacy_catalogue["adapters"]["opencode"]["endpoint_provider"] == "codex"
+    assert legacy_catalogue["adapters"]["opencode"]["endpoint_provider"] == "opencode"
     assert legacy_catalogue["second_product_field"] == "newer"
+    assert len(list(target.parent.glob("model-routing.json.bak-*"))) == 4
 
 
 def test_rejects_unknown_mcp_client_selection(tmp_path):
