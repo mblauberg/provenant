@@ -25,13 +25,6 @@ MAX_DIAGNOSTIC_BYTES = 8192
 AUTHENTICATED_URL = re.compile(r"(?i)(https?://)([^/\s:@]*(?::[^@\s/]*)?@)")
 PARTIAL_CREDENTIAL_URL = re.compile(r"(?i)(https?://)([^/\s:@]*:[^/\s@]*)(?=[/\s]|$)")
 PARTIAL_AUTHENTICATED_URL = re.compile(r"(?i)(https?://)[^/\s]*$")
-_CLEAN_SCRIPT = Path(__file__).resolve().with_name("clean.py")
-_clean_spec = importlib.util.spec_from_file_location("provenant_clean", _CLEAN_SCRIPT)
-if _clean_spec is None or _clean_spec.loader is None:  # pragma: no cover - defensive
-    raise ModuleNotFoundError(f"cleanup policy is missing: {_CLEAN_SCRIPT}")
-_clean_module = importlib.util.module_from_spec(_clean_spec)
-sys.modules[_clean_spec.name] = _clean_module
-_clean_spec.loader.exec_module(_clean_module)
 PORCELAIN_FLAG_FIELDS = {"bare", "detached"}
 PORCELAIN_REQUIRED_VALUE_FIELDS = {"worktree", "HEAD", "branch"}
 PORCELAIN_OPTIONAL_VALUE_FIELDS = {"locked", "prunable"}
@@ -591,6 +584,18 @@ def verify_claim(
     }
 
 
+def clean_policy():
+    """Load the cleanup policy only when a branch drop needs it."""
+    script = Path(__file__).resolve().with_name("clean.py")
+    spec = importlib.util.spec_from_file_location("provenant_clean", script)
+    if spec is None or spec.loader is None:
+        raise PolicyError(f"cleanup policy is missing: {script}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def ensure_shared_root(root: Path) -> Path:
     helper = Path(__file__).resolve().parent.parent / "skills" / "_shared" / "excludes.py"
     spec = importlib.util.spec_from_file_location("provenant_excludes", helper)
@@ -693,8 +698,9 @@ def remove(args: argparse.Namespace) -> dict[str, object]:
     branch = branch_ref.removeprefix("refs/heads/") if branch_ref is not None else None
     branch_merged = False
     if branch is not None:
-        integration_ref = _clean_module._integration_ref(root)
-        if integration_ref != "HEAD" and not _clean_module._branch_at_integration_tip(root, branch, integration_ref):
+        clean = clean_policy()
+        integration_ref = clean._integration_ref(root)
+        if integration_ref != "HEAD" and not clean._branch_at_integration_tip(root, branch, integration_ref):
             merged = git(root, "merge-base", "--is-ancestor", branch_ref, integration_ref,
                          check=False)
             if merged.returncode not in {0, 1}:
