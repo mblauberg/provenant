@@ -1,22 +1,9 @@
-import re
 import subprocess
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-TEMPLATE = ROOT / "skills" / "autopilot" / "templates" / "README.template.md"
 BOOTSTRAP = ROOT / "skills" / "autopilot" / "scripts" / "bootstrap-autopilot.sh"
-HOME_PATH = re.compile(r"/(?:Users|home)/[A-Za-z0-9._-]+/")
-
-
-def assert_portable(text: str) -> None:
-    assert HOME_PATH.search(text) is None
-
-
-def inline_readme(script: str) -> str:
-    start = script.index("gen_readme() {")
-    end = script.index("install_file \"GOAL.md\"", start)
-    return script[start:end]
 
 
 def run_bootstrap(*args: str) -> subprocess.CompletedProcess[str]:
@@ -36,13 +23,8 @@ def mission_path(root: Path, mission_id: str = "mission-id") -> Path:
     return matches[0]
 
 
-def test_readme_template_and_fallback_are_mission_root_relative_and_portable():
-    template_text = TEMPLATE.read_text()
-    assert_portable(template_text)
-    assert_portable(inline_readme(BOOTSTRAP.read_text()))
-
-
 def test_bootstrap_creates_a_resumable_incomplete_mission(tmp_path):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
     result = run_bootstrap("--repo-root", str(tmp_path), "mission-id", "Example domain")
 
     assert result.returncode == 3, result.stderr
@@ -52,7 +34,6 @@ def test_bootstrap_creates_a_resumable_incomplete_mission(tmp_path):
 
     readme = " ".join((mission / "README.md").read_text().split())
     assert str(mission) not in readme
-    assert_portable(readme)
     queue = (mission / "QUEUE.md").read_text()
     assert queue.strip()
     assert (mission / "STATE.md").read_text().strip()

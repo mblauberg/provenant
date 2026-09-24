@@ -1,8 +1,9 @@
 from pathlib import Path
 import signal
+import time
 import subprocess
 import sys
-import time
+import os
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -147,7 +148,8 @@ def test_detached_helper_validation_graces_fresh_claim_without_wrapper_pid(tmp_p
         capture_output=True,
         text=True,
     )
-    time.sleep(3)
+    old = time.time() - 60
+    os.utime(run_dir, (old, old))
     stale = subprocess.run(
         [str(DETACHED_HELPER), "--validate", "--run-dir", str(run_dir)],
         capture_output=True,

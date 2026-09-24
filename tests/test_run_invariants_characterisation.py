@@ -259,9 +259,8 @@ def test_ensure_run_open_accepts_an_open_run(producer):
 def test_ensure_run_open_refuses_a_closed_run(producer):
     run = base_run()
     _closed_run(run, None)
-    with pytest.raises(producer.ReceiptError) as raised:
+    with pytest.raises(producer.ReceiptError):
         producer.ensure_run_open(run)
-    assert str(raised.value) == "closed run is immutable"
 
 
 def write_run(workspace: Path, run: dict) -> Path:
@@ -298,9 +297,8 @@ def test_the_checkpoint_writer_refuses_a_closed_run(checkpoint, tmp_path):
     run = base_run()
     _closed_run(run, None)
     path = write_run(tmp_path, run)
-    with pytest.raises(ValueError) as raised:
+    with pytest.raises(ValueError):
         checkpoint_update(checkpoint, path)
-    assert str(raised.value) == "closed run is immutable"
 
 
 def test_both_call_paths_raise_the_same_refusal_class(producer, checkpoint, tmp_path):

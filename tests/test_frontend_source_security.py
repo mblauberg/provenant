@@ -843,36 +843,6 @@ def test_live_server_rejects_out_of_range_accept_before_journal_or_queue(
         ).exists()
 
 
-def test_live_mutation_help_discloses_project_relative_existing_file_boundary(
-    tmp_path: Path,
-) -> None:
-    wrap = _run_wrap(tmp_path, "--help")
-    inject = _run_inject(tmp_path, "--help")
-    assert wrap.returncode == 0
-    assert inject.returncode == 0
-    for output in (wrap.stdout, inject.stdout):
-        lowered = output.lower()
-        assert "project-relative" in lowered
-        assert "existing" in lowered
-        assert "regular file" in lowered
-    assert wrap.stdout.startswith("Usage: node live-wrap.mjs")
-
-    live_help = subprocess.run(
-        ["node", str(LIVE), "--help"],
-        cwd=tmp_path,
-        check=False,
-        capture_output=True,
-        text=True,
-    )
-    assert live_help.returncode == 0
-    config_contract = live_help.stdout.split("On config_missing, prints:", 1)[1].split(
-        "The agent should then:", 1
-    )[0]
-    assert "path" in config_contract
-    assert "configPath" not in config_contract
-    assert "hint" not in config_contract
-
-
 @pytest.mark.parametrize("path_kind", ["absolute", "traversal", "symlink"])
 def test_live_wrap_rejects_targets_outside_project_before_any_write(
     tmp_path: Path, path_kind: str

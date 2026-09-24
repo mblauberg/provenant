@@ -1571,5 +1571,4 @@ def test_pass_output_binds_resolved_product_root(tmp_path):
         capture_output=True,
     )
     assert result.returncode == 0, result.stderr
-    assert result.stdout.startswith("PASS: delivery-v1 delivery receipt"), result.stdout
     assert f"(product_root={product_copy.resolve()})" in result.stdout

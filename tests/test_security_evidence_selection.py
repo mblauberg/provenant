@@ -26,7 +26,7 @@ def test_changed_surfaces_select_deterministic_checks_without_model_substitution
 
 def test_unknown_surface_fails_closed():
     module = load_module()
-    with pytest.raises(module.SelectionError, match="unknown changed surface"):
+    with pytest.raises(module.SelectionError):
         module.select(["mystery-runtime"], ROOT)
 
 

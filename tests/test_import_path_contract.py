@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import re
+import ast
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-MUTATION = re.compile(r"sys\.path\.(insert|append)\b")
 
 # Both files run a probe under `python -I`, which ignores PYTHONPATH by design
 # and, since it implies `-P`, also drops the script-directory entry a real
@@ -27,16 +26,30 @@ def _sources(directory: str):
     )
 
 
+def _mutates_sys_path(path: Path) -> bool:
+    tree = ast.parse(path.read_text())
+    return any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr in {"append", "insert"}
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "path"
+        and isinstance(node.func.value.value, ast.Name)
+        and node.func.value.value.id == "sys"
+        for node in ast.walk(tree)
+    )
+
+
 def test_no_sys_path_mutation_under_tests():
     offenders = [
-        str(path.relative_to(ROOT)) for path in _sources("tests") if MUTATION.search(path.read_text())
+        str(path.relative_to(ROOT)) for path in _sources("tests") if _mutates_sys_path(path)
     ]
     assert offenders == []
 
 
 def test_no_sys_path_mutation_under_scripts():
     offenders = [
-        str(path.relative_to(ROOT)) for path in _sources("scripts") if MUTATION.search(path.read_text())
+        str(path.relative_to(ROOT)) for path in _sources("scripts") if _mutates_sys_path(path)
     ]
     assert offenders == []
 
