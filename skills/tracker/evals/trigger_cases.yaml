@@ -1,0 +1,12 @@
+schema_version: 1
+target_skill: tracker
+cases:
+  - {id: q910, relation: positive, prompt: "Search for an existing issue before filing this bug report, and record the searches you ran either way.", tags: [direct, filing], expected: {primary_skill: tracker, companion_skills: []}}
+  - {id: q911, relation: positive, prompt: "Sweep the backlog for stale, orphaned or mis-closed issues and update the board to match what actually landed.", tags: [direct, hygiene], expected: {primary_skill: tracker, companion_skills: []}}
+  - {id: q912, relation: positive, prompt: "Load the tracker skill in steward mode and drain tracker-queue.jsonl, then send back a short digest of what you filed and closed.", tags: [direct, steward], expected: {primary_skill: tracker, companion_skills: []}}
+  - {id: q913, relation: negative, prompt: "The accepted issue is ready; implement it through verification and open the pull request.", tags: [adjacent], expected: {primary_skill: implement, companion_skills: []}}
+  - {id: q914, relation: negative, prompt: "Scaffold this new repository's labels, ruleset, issue forms and board from scratch.", tags: [adjacent], expected: {primary_skill: setup-repo, companion_skills: []}}
+  - {id: q915, relation: negative, prompt: "Keep four implementation lanes running from the board's ready column, refilling as each finishes.", tags: [adjacent], expected: {primary_skill: orchestrate, companion_skills: []}}
+  - {id: q916, relation: boundary, prompt: "As the coordinator, dispatch a background subagent to load the tracker skill in steward mode while the implementation lanes keep running.", tags: [composition], expected: {primary_skill: orchestrate, companion_skills: [tracker]}}
+  - {id: q917, relation: boundary, prompt: "Before merging, add one Closes line per issue this pull request resolves and set each issue's board Status to match.", tags: [composition, adjacent], expected: {primary_skill: tracker, companion_skills: [implement]}}
+  - {id: q918, relation: boundary, prompt: "File a follow-up issue for this deferred edge case under the right epic, or standalone if it doesn't belong to one.", tags: [composition, adjacent], expected: {primary_skill: tracker, companion_skills: [scope]}}

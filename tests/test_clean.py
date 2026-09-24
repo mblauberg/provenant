@@ -201,6 +201,24 @@ def test_worktrees_need_registration_clean_state_and_merge_proof(tmp_path):
     assert rows[".worktrees/lane-merged"]["verdict"] == "triage:merged-dirty"
 
 
+def test_worktree_directory_name_matches_branch_with_slash_replaced(tmp_path):
+    root = repo(tmp_path)
+    shared = root / ".worktrees"
+    shared.mkdir()
+    head = subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip()
+    doctrine_named = shared / "feat-skills-tracker-naming"
+    subprocess.run(["git", "-C", str(root), "branch", "feat/skills-tracker-naming", head], check=True)
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", str(doctrine_named),
+                    "feat/skills-tracker-naming"], check=True)
+    mismatched = shared / "wrong-name"
+    subprocess.run(["git", "-C", str(root), "branch", "fix/cli-clean-naming", head], check=True)
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", str(mismatched),
+                    "fix/cli-clean-naming"], check=True)
+    rows = {row["path"]: row for row in cleaner().plan(root, pr_bodies=[])["rows"]}
+    assert rows[".worktrees/feat-skills-tracker-naming"]["verdict"] != "triage:name-mismatch"
+    assert rows[".worktrees/wrong-name"]["verdict"] == "triage:name-mismatch"
+
+
 def test_live_process_cwd_protects_a_merged_worktree(tmp_path):
     root = repo(tmp_path)
     shared = root / ".worktrees"

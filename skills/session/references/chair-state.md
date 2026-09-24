@@ -31,7 +31,9 @@ Keep `STATE.md` untracked, at or under 6 KB, starting from
 - **Stage and blockers:** current stage; each blocker with its owner.
 - **Active lanes:** a table `id | route | worktree | issue | state | since`,
   one row per live lane or native subagent. Remove a row when its work lands or
-  is abandoned.
+  is abandoned. `worktree` names the directory a writer lane owns, per
+  `setup-repo`'s branch naming doctrine (the branch with `/` replaced by `-`);
+  `id` is this table's own lane label, not that branch name.
 - **Queue:** a pointer to the frontier (board query, queue file), not a copy.
 - **Last checkpoint:** time, base revision and what changed since the previous
   checkpoint.
