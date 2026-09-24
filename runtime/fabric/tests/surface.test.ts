@@ -475,6 +475,22 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     });
     expect((batch.structuredContent as any).runs).toHaveLength(2);
     expect((batch.content as any[])[0].text).toMatch(/^batch mcp-.* 2 tasks: 2 ok/u);
+    const partialBatch = await call("dispatch", { tasks: [
+      { id: "valid", prompt: "still runs" },
+      { id: "invalid", prompt: "bad route", mode: "worktree_write" },
+      { id: "preflight-invalid", prompt_file: "missing-prompt.md" },
+      { id: "schema-invalid", prompt: "bad field", promtp: "typo" },
+    ], wait_seconds: 5 });
+    expect((partialBatch.structuredContent as any).runs).toHaveLength(1);
+    expect((partialBatch.structuredContent as any).tasks).toContainEqual(expect.objectContaining({
+      task_id: "invalid", status: "rejected", state: "terminal", error: "worktree_required",
+    }));
+    expect((partialBatch.structuredContent as any).tasks).toContainEqual(expect.objectContaining({
+      task_id: "preflight-invalid", status: "rejected", state: "terminal", error: "prompt_unavailable",
+    }));
+    expect((partialBatch.structuredContent as any).tasks).toContainEqual(expect.objectContaining({
+      task_id: "schema-invalid", status: "rejected", state: "terminal", error: "argument_unknown",
+    }));
     await call("status", { ids: [(batch.structuredContent as any).runs[0].run_id] });
     const batchRow = (batch.structuredContent as any).runs[0];
     const unnamed = await call("dispatch", { resume: batchRow.run_id, prompt: "again", wait_seconds: 5 });
@@ -620,13 +636,19 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect((output.content as any[])[0].text).toContain(`${"x".repeat(20000)}\n! max_bytes 20001 clamped to 20000`);
     const badMaxBytes = await client.callTool({ name: "fabric_output", arguments: { id: row.run_id, max_bytes: 0 } });
     expect((badMaxBytes.content as any[])[0].text).toContain("rejected max_bytes_invalid");
+    const tailAlias = await client.callTool({ name: "fabric_output", arguments: { id: row.run_id, tail_lines: 1 } });
+    expect((tailAlias.content as any[])[0].text).toMatch(/(?:^|\n)warning:/u);
+    const unknownOutput = await client.callTool({ name: "fabric_output", arguments: { id: row.run_id, tail_linez: true } });
+    expect((unknownOutput.content as any[])[0].text).toContain("rejected argument_unknown");
+    expect((unknownOutput.content as any[])[0].text).toContain("tail");
     await call("send", { to: "chair", body: "hello".repeat(1000), kind: "question" });
     const peek = await call("inbox");
     const messages = (peek.structuredContent as any).messages;
     const message = messages.find((m: any) => m.kind === "question");
     expect(message.preview).toHaveLength(80);
     expect(message.body).toBeUndefined();
-    const claimed = await call("inbox", { ids: [message.id] });
+    const claimed = await call("inbox", { ids: message.id });
+    expect((claimed.content as any[])[0].text).toMatch(/(?:^|\n)warning:/u);
     const body = (claimed.structuredContent as any).messages[0];
     expect(Buffer.byteLength(body.body)).toBeLessThanOrEqual(4096);
     expect(existsSync(body.body_path)).toBe(true);

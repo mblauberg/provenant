@@ -689,9 +689,10 @@ async function dispatchConfiguredProviderUnchecked(
     ),
     signal,
   );
-  return completion === undefined
+  const result = completion === undefined
     ? running(started, "dispatch", identity, taskId)
     : compactDispatch(started, completion);
+  return route.warnings?.length ? { ...result, warnings: [...((result.warnings as string[] | undefined) ?? []), `warning: ${route.warnings.join("; ")}`] } : result;
 }
 
 function normaliseTask(
@@ -732,6 +733,11 @@ async function dispatchConfiguredBatchUnchecked(
   const errors: Record<string, unknown>[] = [];
   const tasks = input.tasks.flatMap((task, index) => {
     try {
+      const taskError = (task as BatchTaskInput & { _fabric_error?: Record<string, unknown> })._fabric_error;
+      if (taskError) {
+        errors.push({ task_id: task.id ?? `task-${index + 1}`, ...taskError });
+        return [];
+      }
       const defaults = Object.fromEntries(Object.entries(input).filter(([key]) =>
         ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets"].includes(key)));
       return [normaliseTask({ ...defaults, ...task }, index, identity, catalogue)];
@@ -740,11 +746,11 @@ async function dispatchConfiguredBatchUnchecked(
       return [];
     }
   });
-  if (tasks.length === 0) return { status: "rejected", error: errors[0]!.error, fix: errors[0]!.fix, errors };
+  if (tasks.length === 0) return { status: "rejected", error: errors[0]!.error, fix: errors[0]!.fix, tasks: errors.map((row) => ({ ...row, status: "rejected", state: "terminal" })) };
   const owner = executableOwner(root, "skills/orchestrate/scripts/batch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
   const python = await pythonOwner(root, identity, env);
-  const checked = await preflight(
+  let checked = await preflight(
     python,
     executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py"),
     tasks,
@@ -753,8 +759,17 @@ async function dispatchConfiguredBatchUnchecked(
     signal,
   );
   signal.throwIfAborted();
-  if (checked.status === "rejected") errors.push(...(checked.errors as Record<string, unknown>[]));
-  if (errors.length > 0) return { status: "rejected", error: errors[0]!.error, fix: errors[0]!.fix, errors };
+  if (checked.status === "rejected") {
+    const preflightErrors = Array.isArray(checked.errors) ? checked.errors as Record<string, unknown>[] : [];
+    errors.push(...preflightErrors);
+    const rejectedIds = new Set(preflightErrors.map((error) => String(error.task_id)));
+    tasks.splice(0, tasks.length, ...tasks.filter((task) => !rejectedIds.has(String(task.id))));
+    if (!preflightErrors.length || tasks.length === 0)
+      return { status: "rejected", error: checked.error, fix: checked.fix,
+        tasks: errors.map((row) => ({ ...row, status: "rejected", state: "terminal" })) };
+    checked = await preflight(python, executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py"), tasks, identity, env, signal);
+    if (checked.status === "rejected") return rejected(new InputError(String(checked.error ?? "preflight_unavailable"), String(checked.fix ?? "Check task preflight inputs.")));
+  }
   const runDir = await initialiseRun(identity, env, root, signal, "batch");
   if (signal.aborted) rmSync(runDir, { recursive: true, force: true });
   signal.throwIfAborted();
@@ -799,9 +814,16 @@ async function dispatchConfiguredBatchUnchecked(
     Math.max(0, Math.min(input.wait_seconds ?? 0, Math.floor(55 - (Date.now() - callStarted) / 1000))),
     signal,
   );
-  return completion === undefined
+  const result = completion === undefined
     ? running(started, "batch", identity, FIRST_BATCH_ID)
     : compactBatch(started, completion);
+  const rejectedTasks = errors.map((row) => ({ ...row, status: "rejected", state: "terminal" }));
+  const warnings = tasks.flatMap((task) => Array.isArray(task.warnings) ? task.warnings : []);
+  return {
+    ...result,
+    ...(rejectedTasks.length ? { tasks: [...((result.tasks as Record<string, unknown>[] | undefined) ?? []), ...rejectedTasks] } : {}),
+    ...(warnings.length ? { warnings: [...((result.warnings as string[] | undefined) ?? []), `warning: ${warnings.join("; ")}`] } : {}),
+  };
 }
 
 

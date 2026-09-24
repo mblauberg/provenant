@@ -1,7 +1,7 @@
 /** Validate the Fabric request and forward routing/control choices to its owner. */
 import { realpathSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { withoutGitRedirects, type Identity } from "./identity.js";
+import { projectRoot, withoutGitRedirects, type Identity } from "./identity.js";
 import { execFile } from "node:child_process";
 import type { CatalogueSnapshot } from "./catalogue.js";
 const DEFAULT_TIMEOUT_SECONDS = 3600;
@@ -41,7 +41,7 @@ export interface RouteInput {
   alias?: string;
   model?: string;
   effort?: string;
-  mode?: AccessMode;
+  mode?: AccessMode | "write" | "worktree" | "rw" | "read" | "ro";
   worktree?: string;
   cwd?: string;
   network?: boolean;
@@ -86,12 +86,64 @@ export interface NormalisedRoute {
   worktree?: string;
   context_ceiling?: number;
   allow_secrets?: boolean;
+  warnings?: string[];
+}
+
+const MODE_SYNONYMS: Record<string, AccessMode> = {
+  write: "worktree_write", worktree: "worktree_write", rw: "worktree_write",
+  read: "read_only", ro: "read_only",
+};
+const routeKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/gu, "");
+
+function editDistance(left: string, right: string): number {
+  const row = Array.from({ length: right.length + 1 }, (_, index) => index);
+  for (let i = 1; i <= left.length; i++) {
+    let diagonal = row[0]!;
+    row[0] = i;
+    for (let j = 1; j <= right.length; j++) {
+      const above = row[j]!;
+      row[j] = Math.min(row[j]! + 1, row[j - 1]! + 1, diagonal + (left[i - 1] === right[j - 1] ? 0 : 1));
+      diagonal = above;
+    }
+  }
+  return row[right.length]!;
+}
+
+function correctSelector(selector: string | undefined, catalogue: CatalogueSnapshot, adapter?: string):
+  { value?: string; warning?: string } {
+  if (!selector) return {};
+  const all = catalogue.adapters.filter((entry) => adapter === undefined || entry.name === adapter)
+    .flatMap((entry) => [...entry.models, ...Object.keys(entry.aliases ?? {}), ...Object.values(entry.aliases ?? {}).flat(),
+      ...(entry.model_details ?? []).flatMap((model) => [model.id, ...(Array.isArray(model.names) ? model.names : [])])]
+      .filter((item): item is string => typeof item === "string"));
+  const unique = [...new Set(all)];
+  const selectorKeys = [routeKey(selector), routeKey(selector.split("/").at(-1) ?? selector)];
+  const comparable = (item: string) => [routeKey(item), routeKey(item.split("/").at(-1) ?? item)];
+  const exact = unique.filter((item) => comparable(item).some((key) => selectorKeys.includes(key)));
+  if (exact.length === 1 && exact[0] !== selector)
+    return { value: exact[0], warning: `corrected model ${selector} to ${exact[0]}` };
+  if (exact.length > 1) throw new InputError("model_ambiguous", `Choose one of: ${exact.join(", ")}.`);
+  const candidates = unique.map((item) => ({ item, distance: Math.min(...comparable(item).flatMap((key) => selectorKeys.map((selectorKey) => editDistance(selectorKey, key)))) }))
+    .filter(({ item, distance }) => distance > 0 && distance <= (Math.min(...selectorKeys.map((key) => key.length)) < 8 ? 1 : 2))
+    .sort((a, b) => a.distance - b.distance);
+  if (!candidates.length) return {};
+  const closest = candidates.filter((candidate) => candidate.distance === candidates[0]!.distance).map(({ item }) => item);
+  if (closest.length > 1) throw new InputError("model_ambiguous", `Choose one of: ${closest.join(", ")}.`);
+  return { value: closest[0], warning: `corrected model ${selector} to ${closest[0]}` };
 }
 
 export function normaliseRoute(input: RouteInput, identity: Identity, catalogue: CatalogueSnapshot): NormalisedRoute {
   input = { ...input, model: input.model || undefined, alias: input.alias || undefined };
-  const selector =
+  const warnings: string[] = [];
+  let selector =
     input.model ?? (input.alias && !["flagship", "workhorse", "scout"].includes(input.alias) ? input.alias : undefined);
+  const corrected = correctSelector(selector, catalogue, input.adapter);
+  if (corrected.warning) warnings.push(corrected.warning);
+  selector = corrected.value ?? selector;
+  if (corrected.value !== undefined) {
+    if (input.model !== undefined) input.model = corrected.value;
+    else if (input.alias !== undefined) input.alias = corrected.value;
+  }
   const candidates =
     selector === undefined
       ? []
@@ -99,6 +151,7 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
           const details = entry.model_details ?? [];
           return (
             entry.models.includes(selector) ||
+            Object.hasOwn(entry.aliases ?? {}, selector) ||
             details.some((model) => model.id === selector || (Array.isArray(model.names) && model.names.includes(selector))) ||
             entry.models.some((model) =>
               model
@@ -115,7 +168,9 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
   if (!SUPPORTED_ADAPTERS.has(adapter)) {
     throw new InputError("adapter_invalid", `Pass adapter ${DISPATCH_ADAPTERS.join(", ")}.`);
   }
-  const mode = input.mode ?? "read_only";
+  const requestedMode = input.mode ?? "read_only";
+  const mode = (MODE_SYNONYMS[requestedMode] ?? requestedMode) as AccessMode;
+  if (mode !== requestedMode) warnings.push(`corrected mode ${requestedMode} to ${mode}`);
   if (!ACCESS_MODES.includes(mode)) throw new InputError("mode_invalid", `Pass mode ${ACCESS_MODES.join(" or ")}.`);
   if (mode === "worktree_write" && input.worktree === undefined) {
     throw new InputError("worktree_required", "Pass worktree=<registered Git worktree root> with mode worktree_write.");
@@ -131,7 +186,8 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
     ...(input.effort === undefined ? {} : { effort: input.effort }),
     role: "worker",
     access_mode: mode,
-    ...(input.worktree === undefined ? {} : { worktree: input.worktree }),
+    ...(input.worktree === undefined ? {} : { worktree: resolve(identity.cwd, input.worktree) }),
+    ...(warnings.length ? { warnings } : {}),
     ...Object.fromEntries(
       ["cwd", "network", "sandbox", "add_dirs", "fallback", "context_ceiling", "allow_secrets"]
         .filter((key) => input[key as keyof RouteInput] !== undefined)
@@ -143,6 +199,7 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
 export function routeArguments(route: NormalisedRoute): string[] {
   const args: string[] = [];
   for (const [key, value] of Object.entries(route)) {
+    if (key === "warnings") continue;
     if (value === undefined || (key === "alias" && route.model !== undefined)) continue;
     if (key === "add_dirs") {
       for (const dir of value as string[]) args.push("--add-dir", dir);
@@ -159,20 +216,24 @@ export function validatePrompt(prompt: string | undefined, promptFile: string | 
   }
 }
 
-export function timeoutSeconds(value: number | undefined, mode?: AccessMode): number {
-  const timeout = value ?? (mode === "worktree_write" ? 10800 : DEFAULT_TIMEOUT_SECONDS);
+export function timeoutSeconds(value: number | undefined, mode?: RouteInput["mode"]): number {
+  const timeout = value ?? (["worktree_write", "write", "worktree", "rw"].includes(mode ?? "") ? 10800 : DEFAULT_TIMEOUT_SECONDS);
   if (!Number.isFinite(timeout) || timeout <= 0)
     throw new InputError("invalid_input", "timeout_seconds must be finite and positive");
   return timeout;
 }
 
-export function workingIdentity(input: RouteInput, identity: Identity): Identity {
+export function workingIdentity(input: RouteInput, identity: Identity, projectRoots: string[] = identity.registeredProjects ?? [identity.project]): Identity {
   if (input.cwd === undefined) return identity;
-  if (input.mode === "worktree_write")
+  if (["worktree_write", "write", "worktree", "rw"].includes(input.mode ?? ""))
     throw new InputError("cwd_not_applicable", "Use worktree for writers; cwd is a read-only directory.");
   const cwd = canonical(resolve(identity.cwd, input.cwd));
-  if (!inside(canonical(identity.cwd), cwd) || !statSync(cwd).isDirectory())
-    throw new InputError("cwd_unavailable", "Pass an existing cwd inside this workspace.");
+  let directory = false;
+  try { directory = statSync(cwd).isDirectory(); } catch { /* typed below */ }
+  const candidateProject = projectRoot(cwd);
+  const belongsToRegisteredProject = projectRoots.some((root) => inside(canonical(root), cwd) || candidateProject === canonical(root));
+  if ((!inside(canonical(identity.cwd), cwd) && !belongsToRegisteredProject) || !directory)
+    throw new InputError("cwd_unavailable", "Pass an existing cwd inside a registered Fabric project.");
   return { ...identity, cwd };
 }
 

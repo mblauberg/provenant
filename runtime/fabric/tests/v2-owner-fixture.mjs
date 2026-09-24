@@ -100,7 +100,7 @@ if (prompt === "reject-before-attempt") {
   console.log(JSON.stringify({schema_version:1,status:"rejected",message:"dispatch a new run",fix:"dispatch a new run"})); process.exit(2);
 }
 if (prompt === "crash-before-attempt") process.exit(2);
-if (prompt === "pause-before-attempt") await new Promise((r) => setTimeout(r, 500));
+if (prompt === "pause-before-attempt") await new Promise((r) => setTimeout(r, 2000));
 const path = join(dir, "tasks", task, `attempt-${String(attempt).padStart(3, "0")}`);
 mkdirSync(path, { recursive: true });
 const run_id = process.env.PROVENANT_RUN_ID;

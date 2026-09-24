@@ -53,6 +53,7 @@ const readyStore = (busyTimeoutMs = 5000): Store => {
     throw new Error(`fabric startup failed: ${detail}`, { cause: error });
   }
 };
+const executionIdentity = () => ({ ...who, registeredProjects: readyStore().projects() });
 
 const server = new McpServer(
   { name: "fabric", version: "2.0.0" },
@@ -143,7 +144,7 @@ const route = {
   alias: str,
   model: str,
   effort: str,
-  mode: z.enum(["read_only", "worktree_write"]).optional(),
+  mode: z.string().optional(),
   worktree: str,
   cwd: str,
   network: z.boolean().optional(),
@@ -156,13 +157,75 @@ const route = {
 };
 const task = { prompt: str, prompt_file: str, timeout_seconds: optionalNumber, ...route };
 const batch = {
-  tasks: z
-    .array(z.record(z.string(), z.unknown()).pipe(z.strictObject({ id: str, ...task })))
-    .min(1)
-    .max(64),
+  tasks: z.array(z.unknown()).min(1).max(64),
   concurrency: optionalNumber,
   wait_seconds: wait,
 };
+const INPUT_SYNONYMS: Record<string, string> = {
+  tail_lines: "tail", lines: "tail", prompt_path: "prompt_file", file: "prompt_file",
+  dir: "cwd", path: "cwd", task: "task_id",
+};
+const inputKey = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/gu, "");
+function normaliseInputKeys(name: string, input: Record<string, any>, fields: string[], nestedTask = false) {
+  const aliases = nestedTask ? { ...INPUT_SYNONYMS, task_id: "id", task: "id" } : INPUT_SYNONYMS;
+  const result: Record<string, any> = {};
+  const warnings: string[] = [];
+  for (const [key, value] of Object.entries(input)) {
+    const canonical = fields.find((field) => inputKey(field) === inputKey(key));
+    const synonym = Object.entries(aliases).find(([alias]) => inputKey(alias) === inputKey(key))?.[1];
+    let target = canonical ?? synonym;
+    if (target === "ids" && typeof value === "string") {
+      target = key;
+      result.ids = [value];
+      warnings.push("corrected ids string to a one-item list");
+      continue;
+    }
+    if (!target || !fields.includes(target)) {
+      const distance = (left: string, right: string) => {
+        const row = Array.from({ length: right.length + 1 }, (_, index) => index);
+        for (let i = 1; i <= left.length; i++) {
+          let diagonal = row[0]!; row[0] = i;
+          for (let j = 1; j <= right.length; j++) {
+            const above = row[j]!;
+            row[j] = Math.min(row[j]! + 1, row[j - 1]! + 1, diagonal + (left[i - 1] === right[j - 1] ? 0 : 1));
+            diagonal = above;
+          }
+        }
+        return row[right.length]!;
+      };
+      const matches = fields.map((field) => ({ field, score: distance(inputKey(key), inputKey(field)) }))
+        .sort((a, b) => a.score - b.score);
+      const closest = matches.filter((match) => match.score === matches[0]?.score && match.score <= 3).map((match) => match.field);
+      throw { status: "rejected", error: "argument_unknown", fix: `Unknown ${name} field ${key}; closest valid field${closest.length === 1 ? "" : "s"}: ${closest.join(", ") || fields.join(", ")}.` };
+    }
+    if (Object.hasOwn(result, target))
+      throw { status: "rejected", error: "argument_ambiguous", fix: `Pass only one of the fields that map to ${target}.` };
+    result[target] = target === "tail" && typeof value === "number" ? value > 0 : value;
+    if (target !== key) warnings.push(`corrected ${key} to ${target}`);
+  }
+  if (name === "fabric_dispatch" || name === "fabric_batch") {
+    if (Array.isArray(result.tasks)) result.tasks = result.tasks.map((item: unknown, index: number) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return {
+        id: `task-${index + 1}`,
+        _fabric_error: { status: "rejected", error: "invalid_input", fix: "Pass each task as an object." },
+      };
+      const rawTask = item as Record<string, any>;
+      const requestedTaskId = rawTask.id ?? rawTask.task_id ?? rawTask.task;
+      const taskId = typeof requestedTaskId === "string" ? requestedTaskId : `task-${index + 1}`;
+      try {
+        const normalized = normaliseInputKeys(name, rawTask, ["id", ...Object.keys({ ...task })], true);
+        warnings.push(...normalized.warnings);
+        const parsed = z.strictObject({ id: str, ...task }).safeParse(normalized.value);
+        return parsed.success ? parsed.data : { id: taskId, _fabric_error: {
+          status: "rejected", error: "invalid_input", fix: parsed.error.issues[0]?.message ?? "Check this task's fields.",
+        } };
+      } catch (error) {
+        return { id: taskId, _fabric_error: error as Record<string, unknown> };
+      }
+    });
+  }
+  return { value: result, warnings };
+}
 // Catch domain errors at the boundary; SDK validation errors retain its protocol error envelope.
 function register(
   name: string,
@@ -170,11 +233,19 @@ function register(
   schema: z.ZodRawShape,
   handler: (input: any, extra: any) => unknown | Promise<unknown>,
 ) {
-  server.registerTool(name, { description, inputSchema: z.strictObject(schema) }, async (input, extra) => {
+  server.registerTool(name, { description, inputSchema: z.object(schema).catchall(z.unknown()) }, async (rawInput, extra) => {
     const includeStructuredContent =
-      !["fabric_dispatch", "fabric_status"].includes(name) || input.detail === "full";
+      !["fabric_dispatch", "fabric_status"].includes(name) || rawInput.detail === "full";
     try {
-      return reply(await handler(input, extra), includeStructuredContent);
+      let corrected;
+      try { corrected = normaliseInputKeys(name, rawInput, Object.keys(schema)); }
+      catch (error) { return reply(error as Record<string, unknown>, includeStructuredContent); }
+      const parsed = z.strictObject(schema).safeParse(corrected.value);
+      if (!parsed.success) return reply({ status: "rejected", error: "invalid_input", fix: parsed.error.issues[0]?.message ?? "Check the supplied fields." }, includeStructuredContent);
+      const input = parsed.data as any;
+      const result = await handler(input, extra) as Record<string, any>;
+      const warning = corrected.warnings.length ? [`warning: ${corrected.warnings.join("; ")}`] : [];
+      return reply(warning.length ? withWarnings(result, warning) : result, includeStructuredContent);
     } catch (error) {
       return {
         ...reply({
@@ -230,7 +301,7 @@ register(
     peek: z.boolean().optional(),
     task_id: str,
     claim_seconds: z.number().int().min(1).max(3600).optional(),
-    ids: z.array(z.string()).max(100).optional(),
+    ids: z.union([z.array(z.string()).max(100), z.string()]).optional(),
     claim: z.boolean().optional(),
     limit: z.number().int().min(1).max(100).optional(),
     wait_seconds: wait,
@@ -259,7 +330,7 @@ register(
 register(
   "fabric_runs",
   "Versioned, bounded run and lane reader with root-relative paths.",
-  { ids: z.array(z.string()).max(20).optional(), wait_seconds: wait },
+  { ids: z.union([z.array(z.string()).max(20), z.string()]).optional(), wait_seconds: wait },
   async ({ ids, wait_seconds }, { signal }) => {
     const bounded = boundedWait(wait_seconds);
     if (bounded.error) return bounded.error;
@@ -320,8 +391,8 @@ register(
       : input.handoff
         ? await handoffDispatch(input, who, signal)
         : input.tasks
-        ? await dispatchConfiguredBatch({ ...input, wait_seconds: input.wait_seconds ?? 0 }, who, signal)
-        : await dispatchConfiguredProvider(input, who, signal);
+        ? await dispatchConfiguredBatch({ ...input, wait_seconds: input.wait_seconds ?? 0 }, executionIdentity(), signal)
+        : await dispatchConfiguredProvider(input, executionIdentity(), signal);
     if (!result.id) return withWarnings(result, waitResult.warnings);
     const observed = await statusRows(who.cwd, [String(result.id)], 0, "all", signal, input.detail);
     if (input.resume && result.task_id) observed.runs = observed.runs?.filter((row) => row.task_id === result.task_id);
@@ -330,14 +401,19 @@ register(
       const row = observed.runs[0]!;
       return runView(withWarnings({ ...result, ...row, paths: { ...(result.paths as object), ...row.paths } }, waitResult.warnings), input.detail);
     }
-    return runView(withWarnings(observed.runs ? observed : result, waitResult.warnings), input.detail);
+    const value = observed.runs ? {
+      ...observed,
+      ...(result.tasks === undefined ? {} : { tasks: result.tasks }),
+      ...(result.warnings === undefined ? {} : { warnings: result.warnings }),
+    } : result;
+    return runView(withWarnings(value, waitResult.warnings), input.detail);
   },
 );
 register(
   "fabric_status",
   "Read or wait for runs. wait_seconds above 55 is clamped to 55; invalid numeric values return a typed rejection.",
   {
-    ids: z.array(z.string()).optional(),
+    ids: z.union([z.array(z.string()), z.string()]).optional(),
     id: str,
     wait_seconds: wait,
     until: z.enum(["any", "all"]).optional(),
@@ -471,7 +547,7 @@ register("fabric_adapters", "List routes and guarantees; full includes profiles.
 );
 if (process.env.FABRIC_LEGACY_TOOLS === "1") {
   register("fabric_batch", "Run a task batch.", batch, (input, { signal }) =>
-    dispatchConfiguredBatch(input, who, signal),
+    dispatchConfiguredBatch(input, executionIdentity(), signal),
   );
   register(
     "fabric_team_create",

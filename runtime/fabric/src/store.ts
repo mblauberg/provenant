@@ -212,6 +212,12 @@ export class Store {
       });
   }
 
+  /** Canonical project roots with at least one Fabric seat registration. */
+  projects(): string[] {
+    return this.#db.prepare(`SELECT DISTINCT project FROM agents ORDER BY project`).all()
+      .map((row) => (row as { project: string }).project);
+  }
+
   workClaims(project: string, now = Date.now()): WorkClaim[] {
     return (this.#db.prepare(`SELECT id, generation, holder, issue, paths, expires_at
       FROM work_claims WHERE project = ? AND released_at IS NULL AND expires_at > ? ORDER BY generation`)

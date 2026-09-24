@@ -35,7 +35,10 @@ Copy the returned `Route:` line for provenance. `content` contains the owner's
 verbatim digest; `structuredContent` contains minimal `fabric.status.v1` rows by
 default. `detail: full` includes attempt history, evidence and provenance. A small
 formatter supports older receipts when no digest exists. Request errors contain
-one line with `fix:`. No provider output is embedded in status responses.
+one line with `fix:`. Recognised field, mode and unique model near-misses are
+corrected with one `warning:` line; unknown or ambiguous values name valid
+choices. Relative `cwd` and `worktree` paths resolve from the caller directory.
+No provider output is embedded in status responses.
 
 Fourteen tools are registered by default:
 
@@ -71,8 +74,8 @@ and finding names. If scanning `add_dirs` exceeds 2,000 files or 20 MB, dispatch
 rejects with `error: secret_scan_budget_exceeded`; narrow the inputs or explicitly
 set `allow_secrets: true` and explain why in the prompt. Writers use `mode: worktree_write` and an
 owned, registered linked worktree. The primary checkout is refused; create a linked
-worktree. `cwd` selects an existing read-only directory inside
-the caller workspace. The Python owner validates provider capabilities and
+worktree. `cwd` selects an existing read-only directory inside any registered
+Fabric project. The Python owner validates provider capabilities and
 applies controls; Fabric does not claim a stronger guarantee than its receipt.
 On macOS, non-Codex read-only launches use `sandbox-exec` when available. The
 profile limits writes to the attempt directory and provider state. It denies

@@ -12,7 +12,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
-import { routeArguments } from "../src/execution-input.js";
+import { normaliseRoute, routeArguments, workingIdentity } from "../src/execution-input.js";
 import { psOutput } from "../src/ps.mjs";
 import {
   listRecordedRuns,
@@ -41,6 +41,46 @@ let product: string;
 let identity: Identity;
 let ownerEnvironment: NodeJS.ProcessEnv;
 const spawnedPids: number[] = [];
+
+describe("Fabric input corrections", () => {
+  it("normalises common mode, model and relative path near-misses with warnings", async () => {
+    const catalogue = { adapters: [
+      { name: "codex", models: ["gpt-6-luna"], model_details: [], aliases: { workhorse: ["gpt-6-luna"] } },
+    ] } as any;
+    const result = normaliseRoute({ adapter: "codex", mode: "rw" as any, worktree: "../work",
+      model: "GPT_6_LUNA" }, identity, catalogue);
+    expect(result.access_mode).toBe("worktree_write");
+    expect(result.worktree).toBe(resolve(identity.cwd, "../work"));
+    expect(result.model).toBe("gpt-6-luna");
+    expect(result.warnings).toHaveLength(2);
+    const typo = normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, catalogue);
+    expect(typo.model).toBe("gpt-6-luna");
+    expect(typo.warnings).toHaveLength(1);
+    const alias = normaliseRoute({ adapter: "codex", alias: "workhorze" }, identity, catalogue);
+    expect(alias.alias).toBe("workhorse");
+    expect(alias.warnings).toHaveLength(1);
+    expect(() => normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, {
+      adapters: [{ name: "codex", models: ["gpt-6-luna", "gpt-6-luno"], model_details: [], aliases: {} }],
+    } as any)).toThrow(/gpt-6-luna, gpt-6-luno/u);
+  });
+
+  it("resolves relative read-only cwd against the caller directory", () => {
+    const base = mkdtempSync(join(tmpdir(), "fabric-cwd-"));
+    const child = join(base, "child");
+    mkdirSync(child);
+    expect(workingIdentity({ cwd: "child" }, { ...identity, project: base, cwd: base }).cwd).toBe(realpathSync(child));
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  it("accepts read-only cwd under another registered project", () => {
+    const base = mkdtempSync(join(tmpdir(), "fabric-other-project-"));
+    const child = join(base, "child");
+    mkdirSync(child);
+    const caller = { ...identity, registeredProjects: [identity.project, base] };
+    expect(workingIdentity({ cwd: child }, caller).cwd).toBe(realpathSync(child));
+    rmSync(base, { recursive: true, force: true });
+  });
+});
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
