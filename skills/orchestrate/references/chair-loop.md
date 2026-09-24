@@ -18,7 +18,9 @@ wake, in this order:
 3. **Review** finished lanes; adjudicate returned reviews.
 4. **Refill** from the frontier up to the resource budget.
 5. **Tracker:** make issues and the board match what started and landed, when
-   tracker writes are authorised.
+   tracker writes are authorised — following `tracker`'s filing, linking and
+   hygiene rules rather than restating them here; hand steady-state upkeep to
+   its steward mode instead of doing it inline.
 6. **Checkpoint** the state file, then arm the wait.
 
 Keep a wake short. Anything longer than a few commands goes to a lane.
@@ -48,8 +50,12 @@ work.
 
 Start every lane id and native subagent description with a role prefix so
 status lines and receipts group them: `tool-`, `skill-`, `ui-`, `api-`, `db-`,
-`fix-`, `rev-`, `land-`, `scope-`. Projects may add prefixes. Follow it with the
-issue number where one exists and a short slug: `fix-1234-ledger-rounding`.
+`fix-`, `rev-`, `land-`, `scope-`. Projects may add prefixes. Follow it with a
+short slug, and the issue number where one helps a human scan the status line:
+`fix-1234-ledger-rounding`. A lane id is a status-line label, not a branch
+name. When the lane owns a registered worktree, name its branch and worktree
+per `setup-repo`'s branch naming doctrine instead — no issue number, no lane
+code — independently of this lane id.
 
 ## Waiting
 

@@ -9,7 +9,7 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
 
 1. Use a native subagent for the chair's own models; use Fabric for other providers, long runs, and worktree writers.
 2. Call `fabric_dispatch` with `prompt` or `prompt_file`, `adapter` or `model`, and optional `effort`.
-3. For writers, pass `mode: "worktree_write"` and the registered `worktree`.
+3. For writers, pass `mode: "worktree_write"` and the registered `worktree`, named per `setup-repo`'s branch naming doctrine; the task id defaults to that same branch-derived string.
 4. Wait without polling: a chair runs `fabric watch <ids>` ([chair-loop.md](references/chair-loop.md)); a dispatching sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
 5. Inspect the terminal row with `fabric_status` and copy its `Route:` provenance line.
 6. For a question, call `fabric_dispatch` with `resume: id` and the answer in `prompt`.

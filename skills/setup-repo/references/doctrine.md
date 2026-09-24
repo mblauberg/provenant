@@ -25,13 +25,29 @@ automation switches, never progress. Never add a status label to
 
 ## Branch naming
 
-Name every implementation branch `issue-<n>-<slug>`, for example
-`issue-148-runbook-mechanics`. The number ties the branch back to its issue
-unambiguously; the slug is a short kebab-case reminder, not the source of
-truth.
+Branches are `<type>/<area>-<slug>`, at most 48 characters:
+
+- `<type>` is `feat`, `fix`, `refactor`, `perf`, `test`, `docs`, `chore`, `ci`
+  or `build`.
+- `<area>` is one of the repository's declared areas (record the list in its
+  contributing doc).
+- `<slug>` is 2-5 kebab-case words.
+
+Special forms: `land/<yyyymmdd>-<slug>` for a landing/integration branch and
+`proto/<area>-<slug>` for a prototype spike.
+
+No issue numbers in the branch: a branch may cover one issue, several, or a
+slice of one, so the link lives in the pull request instead, one
+`Closes #<n>` or `References #<n>` line per issue (see below). No run
+vocabulary either: no batch, wave, round or lane code, and no model or agent
+name.
+
+The worktree directory is the branch with every `/` replaced by `-`; a
+writer's task id defaults to that same string.
 
 ```sh
-gh issue develop <n> --name issue-<n>-<slug> --base main
+scripts/worktree create --human-authorised --branch-authorised \
+  --new-branch <type>/<area>-<slug>
 ```
 
 ## Closes vs References
