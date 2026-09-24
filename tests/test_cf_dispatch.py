@@ -832,7 +832,7 @@ def test_claude_task_class_runs_the_subscription_capability_canary():
             fi
             for arg in "$@"; do
               if [ "$arg" = "--output-format" ]; then
-                printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"OK","modelUsage":{{"claude-opus-4-8":{{"inputTokens":1}}}}}}'
+                printf '%s\n' '{{"type":"result","subtype":"success","is_error":false,"result":"OK","modelUsage":{{"claude-opus-5-5":{{"inputTokens":1}}}}}}'
                 exit 0
               fi
             done
@@ -859,7 +859,7 @@ def test_claude_task_class_runs_the_subscription_capability_canary():
         assert result.returncode == 0, result.stderr + result.stdout
         assert record["status"] == "ok"
         assert record["route_alias"] == "flagship"
-        assert record["resolved_model"] == "claude-opus-4-8"
+        assert record["resolved_model"] == "claude-opus-5-5"
         assert record["provider_family"] == "anthropic"
         assert record["effort"] == "high"
         assert record["effort_capability_source"] == "provider-unverified"

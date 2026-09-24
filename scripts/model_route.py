@@ -1843,10 +1843,15 @@ def main(argv: list[str] | None = None) -> int:
         catalog = load_catalog()
         record = {"schema": "fabric.route-health.v1", "task_class_routes": catalog.get("task_class_routes", {})}
         try:
-            if str(PRODUCT_ROOT) not in sys.path:
-                sys.path.insert(0, str(PRODUCT_ROOT))
-            from skills.orchestrate.scripts.fabric_records import read_route_health
-            record["routes"] = read_route_health()
+            path = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts" / "fabric_records.py"
+            spec = importlib.util.spec_from_file_location(
+                "provenant_fabric_records", path, submodule_search_locations=[str(path.parent)]
+            )
+            assert spec is not None and spec.loader is not None
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            record["routes"] = module.read_route_health()
         except (ImportError, OSError, AttributeError, TypeError, ValueError):
             record["routes"] = {}
         print(json.dumps(record, sort_keys=True) if args.json else json.dumps(record, indent=2, sort_keys=True))
