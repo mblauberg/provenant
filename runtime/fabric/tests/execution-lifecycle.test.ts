@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync,
   rmSync, utimesSync, writeFileSync,
@@ -31,6 +31,7 @@ const repositoryRoot = resolve(testDirectory, "../../..");
 const packageRoot = resolve(testDirectory, "..");
 const fixture = join(testDirectory, "lifecycle-owner-fixture.mjs");
 const hostWorker = join(testDirectory, "dispatch-host-worker.ts");
+const batchHostWorker = join(testDirectory, "batch-host-worker.ts");
 const tsxLoader = createRequire(import.meta.url).resolve("tsx");
 const fixturePython = execFileSync("/usr/bin/env", [
   "python3", "-c", "import sys; print(sys.executable)",
@@ -435,6 +436,70 @@ describe("owner records", () => {
   }, 40_000);
 });
 
+describe("dispatch CLI", () => {
+  it("dispatches a prompt file through the MCP execution path", async () => {
+    const promptPath = join(temporaryDirectory, "cli-prompt.md");
+    writeFileSync(promptPath, "cli prompt");
+    const cliPath = join(packageRoot, "src", "cli.ts");
+    const output = execFileSync(process.execPath, ["--import", tsxLoader, cliPath,
+      "dispatch", "--adapter", "codex", "--model", "workhorse", "--effort", "high",
+      "--mode", "read_only", "--cwd", workspace, "--prompt-file", promptPath, "--id", "cli-prompt"], {
+      cwd: workspace,
+      encoding: "utf8",
+      env: ownerEnvironment,
+    });
+    expect(output.trim().split("\n")).toHaveLength(2);
+    expect(output).toMatch(/^mcp-[A-Za-z0-9]+\nstatus: (running|ok|failed)\n$/u);
+  }, 40_000);
+
+  it("dispatches a task manifest through the MCP batch execution path", async () => {
+    const taskPath = join(temporaryDirectory, "cli-tasks.json");
+    writeFileSync(taskPath, JSON.stringify({ adapter: "codex", model: "workhorse", effort: "high",
+      mode: "read_only", tasks: [{ id: "cli-task-manifest", prompt: "manifest task" }] }));
+    const cliPath = join(packageRoot, "src", "cli.ts");
+    const output = execFileSync(process.execPath, ["--import", tsxLoader, cliPath,
+      "dispatch", "--tasks", taskPath], {
+      cwd: workspace,
+      encoding: "utf8",
+      env: ownerEnvironment,
+    });
+    expect(output).toMatch(/^mcp-[A-Za-z0-9]+\nstatus: (running|ok|failed)\n$/u);
+  }, 40_000);
+
+  it("keeps typed correction details when dispatch input is rejected", () => {
+    const promptPath = join(temporaryDirectory, "cli-invalid-prompt.md");
+    writeFileSync(promptPath, "invalid mode still gets preflighted");
+    const cliPath = join(packageRoot, "src", "cli.ts");
+    const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath,
+      "dispatch", "--adapter", "codex", "--model", "workhorse", "--effort", "high",
+      "--mode", "write", "--cwd", workspace, "--prompt-file", promptPath], {
+      cwd: workspace,
+      encoding: "utf8",
+      env: ownerEnvironment,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toMatch(/^unassigned\nstatus: rejected error: mode_invalid fix: Pass mode read_only or worktree_write\.\n$/u);
+  });
+
+  it("prints each task correction from a rejected JSON manifest", () => {
+    const taskPath = join(temporaryDirectory, "cli-invalid-tasks.json");
+    writeFileSync(taskPath, JSON.stringify({ adapter: "codex", model: "workhorse", effort: "high",
+      mode: "read_only", tasks: [
+        { id: "bad-adapter", adapter: "invalid", prompt: "one" },
+        { id: "bad-mode", mode: "write", prompt: "two" },
+      ] }));
+    const cliPath = join(packageRoot, "src", "cli.ts");
+    const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath, "dispatch", "--tasks", taskPath], {
+      cwd: workspace,
+      encoding: "utf8",
+      env: ownerEnvironment,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stdout).toContain("bad-adapter: adapter_invalid");
+    expect(result.stdout).toContain("bad-mode: mode_invalid");
+  });
+});
+
 describe("cancellation", () => {
   it("prints an unconfirmed stop reason from dispatch kill", async () => {
     const runDir = join(workspace, ".agent-run", "mcp-cli-reason");
@@ -631,6 +696,36 @@ describe("cancellation", () => {
 });
 
 describe("orphan reaping", () => {
+  it("keeps a batch lane alive and readable after its MCP host exits", async () => {
+    const host = spawn(process.execPath, ["--import", tsxLoader, batchHostWorker, workspace, "sleep with provider"], {
+      env: ownerEnvironment,
+      stdio: ["ignore", "pipe", "inherit"],
+    });
+    spawnedPids.push(host.pid!);
+    let stdout = "";
+    host.stdout.setEncoding("utf8");
+    host.stdout.on("data", (chunk: string) => { stdout += chunk; });
+    await waitFor(() => stdout.includes("\n"), "the batch host never reported its run");
+    const started = JSON.parse(stdout.split("\n")[0]!) as Record<string, unknown>;
+    const runDir = String((started.paths as Record<string, string>).run_dir);
+    const ownerRecordPath = join(runDir, OWNER_RECORD_NAME);
+    const ownerRecord = JSON.parse(await waitForFile(ownerRecordPath)) as Record<string, unknown>;
+    expect(ownerRecord.kind).toBe("batch");
+    expect(ownerRecord.owner_pgid).toBe(ownerRecord.owner_pid);
+    spawnedPids.push(Number(ownerRecord.owner_pid));
+
+    host.kill("SIGKILL");
+    await waitFor(() => host.exitCode !== null || host.signalCode !== null, "the batch host never died");
+    expect(alive(Number(ownerRecord.owner_pid))).toBe(true);
+
+    const listed = JSON.parse(fabricCli(["dispatch", "list", "--json"])) as {
+      runs: Array<Record<string, unknown>>;
+    };
+    expect(listed.runs.find((run) => run.run_dir === runDir)).toMatchObject({ running: true, kind: "batch" });
+    const status = JSON.parse(fabricCli(["status", runDir])) as Record<string, unknown>;
+    expect(status).toMatchObject({ status: "running", id: started.id });
+  }, 40_000);
+
   it("leaves no running provider process after its MCP host is killed", async () => {
     const host = spawn(process.execPath, ["--import", tsxLoader, hostWorker, workspace, "sleep with provider"], {
       env: ownerEnvironment,

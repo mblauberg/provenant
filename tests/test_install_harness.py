@@ -94,7 +94,7 @@ def copy_product(root: Path, destination: Path) -> Path:
     return destination
 
 
-def run_product(product: Path, platform: str, home: Path, **extra_env):
+def run_product(product: Path, platform: str, home: Path, *arguments: str, **extra_env):
     environment = os.environ.copy()
     environment.pop("AGENT_FABRIC_STATE_DIRECTORY", None)
     # Resolve the copied product through the pointer written by this install,
@@ -113,7 +113,7 @@ def run_product(product: Path, platform: str, home: Path, **extra_env):
     )
     environment.update(extra_env)
     return subprocess.run(
-        [str(product / "scripts/install-harness"), "--platform", platform],
+        [str(product / "scripts/install-harness"), "--platform", platform, *arguments],
         cwd=product,
         env=environment,
         text=True,
@@ -1019,23 +1019,62 @@ def test_all_reports_detected_client_link_failure_and_continues(tmp_path):
     assert (tmp_path / ".codex/config.toml").exists()
 
 
-def test_refresh_routing_is_opt_in_through_install_harness(tmp_path):
-    first = run("codex", tmp_path)
+def test_install_refreshes_newer_routing_catalogue_and_preserves_overrides(tmp_path):
+    product = copy_product(ROOT, tmp_path / "product")
+    first = run_product(product, "codex", tmp_path / "install")
     assert first.returncode == 0, first.stderr
-    target = instance_root_for(tmp_path) / "config/model-routing.json"
+    instance_root = tmp_path / "install" / "instance"
+    target = instance_root / "config/model-routing.json"
     document = json.loads(target.read_text())
     document["adapters"]["opencode"]["endpoint_provider"] = "codex"
     target.write_text(json.dumps(document))
 
-    second = run("codex", tmp_path)
+    product_catalogue = product / "config/model-routing.json"
+    shipped = json.loads(product_catalogue.read_text())
+    shipped["catalog_date"] = "2999-01-01"
+    shipped["task_class_routes"]["review"]["models"]["codex"] = ["new-product-route"]
+    product_catalogue.write_text(json.dumps(shipped))
+
+    second = run_product(product, "codex", tmp_path / "install")
     assert second.returncode == 0, second.stderr
     assert json.loads(target.read_text())["adapters"]["opencode"]["endpoint_provider"] == "codex"
-    assert "routing drift=" not in second.stdout
+    refreshed = json.loads(target.read_text())
+    assert refreshed["task_class_routes"]["review"]["models"]["codex"] == ["new-product-route"]
+    assert len(list(target.parent.glob("model-routing.json.bak-*"))) == 1
 
-    refreshed = run("codex", tmp_path, "--refresh-routing")
-    assert refreshed.returncode == 0, refreshed.stderr
-    assert json.loads(target.read_text())["adapters"]["opencode"]["endpoint_provider"] == "codex"
-    assert len(list(target.parent.glob("model-routing.json.bak-*"))) == 0
+    newer = {**shipped, "catalog_date": "2999-01-02"}
+    product_catalogue.write_text(json.dumps(newer))
+    skipped = run_product(product, "codex", tmp_path / "install", "--no-refresh-routing")
+    assert skipped.returncode == 0, skipped.stderr
+    assert json.loads(target.read_text())["catalog_date"] == "2999-01-01"
+    assert len(list(target.parent.glob("model-routing.json.bak-*"))) == 1
+
+    forced = run_product(product, "codex", tmp_path / "install", "--refresh-routing")
+    assert forced.returncode == 0, forced.stderr
+    assert len(list(target.parent.glob("model-routing.json.bak-*"))) == 2
+
+    incomplete = json.loads(target.read_text())
+    del incomplete["context"]
+    target.write_text(json.dumps(incomplete))
+    product_catalogue.write_text(json.dumps({**newer, "additional_product_field": "new"}))
+    repaired = run_product(product, "codex", tmp_path / "install")
+    assert repaired.returncode == 0, repaired.stderr
+    repaired_catalogue = json.loads(target.read_text())
+    assert "context" not in repaired_catalogue
+    assert repaired_catalogue["additional_product_field"] == "new"
+    assert len(list(target.parent.glob("model-routing.json.bak-*"))) == 3
+
+    (instance_root / "config/.model-routing.base.json").unlink()
+    product_catalogue.write_text(json.dumps({
+        **json.loads(product_catalogue.read_text()),
+        "catalog_date": "2999-01-03",
+        "second_product_field": "newer",
+    }))
+    legacy_refresh = run_product(product, "codex", tmp_path / "install")
+    assert legacy_refresh.returncode == 0, legacy_refresh.stderr
+    legacy_catalogue = json.loads(target.read_text())
+    assert legacy_catalogue["adapters"]["opencode"]["endpoint_provider"] == "codex"
+    assert legacy_catalogue["second_product_field"] == "newer"
 
 
 def test_rejects_unknown_mcp_client_selection(tmp_path):

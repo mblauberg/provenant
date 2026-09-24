@@ -16,8 +16,10 @@ machine-local and ignored.
 Seeded files are the third owner in that ADR. The product ships a template; the
 installer copies it into the instance root only when nothing is there, and never
 again. The routing catalogue is the one exception: seeding records a product
-snapshot, and an explicit refresh backs up and three-way merges the catalogue.
-Other seeded files have no hash-drift check or three-way merge.
+snapshot, then installs refresh it when the product date advances or ships
+missing fields. The refresh backs up and merges while retaining instance values;
+`--refresh-routing` forces it. Other seeded files have no hash-drift check or
+three-way merge.
 """
 
 from __future__ import annotations
@@ -388,6 +390,19 @@ def _routing_merge_without_base(product: Any, installed: Any) -> Any:
     } | {key: value for key, value in installed.items() if key not in product}
 
 
+def _routing_merge_without_base_preserving_instance(product: Any, installed: Any) -> Any:
+    """For automatic upgrades, add shipped keys without guessing overlaid values."""
+    if not isinstance(product, dict):
+        return installed
+    current = dict(installed) if isinstance(installed, dict) else {}
+    for key, value in product.items():
+        if key not in current:
+            current[key] = value
+        elif isinstance(value, dict) and isinstance(current[key], dict):
+            current[key] = _routing_merge_without_base_preserving_instance(value, current[key])
+    return current
+
+
 def _routing_no_base_changes(product: Any, installed: Any, path: tuple[str, ...] = ()) -> tuple[list[str], list[str]]:
     updated: list[str] = []
     retained: list[str] = []
@@ -428,7 +443,43 @@ def routing_drift(product_root: Path, instance_root: Path) -> list[str]:
     return _routing_differences(merged, installed, ())
 
 
-def refresh_routing(product_root: Path, instance_root: Path) -> dict[str, Any]:
+def routing_refresh_needed(product_root: Path, instance_root: Path) -> bool:
+    """Whether the shipped routing snapshot adds a date or product fields."""
+    documents = _routing_documents(product_root, instance_root)
+    if documents is None:
+        return False
+    product, installed = documents
+    base = _routing_base(instance_root)
+    product_date = product.get("catalog_date")
+    seen_dates = [installed.get("catalog_date")]
+    if base is not None:
+        seen_dates.append(base.get("catalog_date"))
+    if isinstance(product_date, str) and any(
+        isinstance(value, str) and product_date > value for value in seen_dates
+    ):
+        return True
+
+    def missing_fields(shipped: Any, current: Any) -> bool:
+        if isinstance(shipped, dict):
+            if not isinstance(current, dict):
+                return bool(shipped)
+            return any(
+                key not in current or missing_fields(value, current[key])
+                for key, value in shipped.items()
+            )
+        if isinstance(shipped, list):
+            return not isinstance(current, list) or len(current) < len(shipped)
+        return False
+
+    return missing_fields(product, installed)
+
+
+def refresh_routing(
+    product_root: Path,
+    instance_root: Path,
+    *,
+    preserve_unbased_overrides: bool = False,
+) -> dict[str, Any]:
     documents = _routing_documents(product_root, instance_root)
     if documents is None:
         raise InstallError("routing catalogue is missing; run install-harness first")
@@ -441,9 +492,14 @@ def refresh_routing(product_root: Path, instance_root: Path) -> dict[str, Any]:
                 "updated_from_product": [], "retained": []}
     base = _routing_base(instance_root)
     result, conflicts = _routing_result(product, installed, base)
-    updated_from_product, retained = (
-        _routing_no_base_changes(product, installed) if base is None else ([], [])
-    )
+    if base is None and preserve_unbased_overrides:
+        result = _routing_merge_without_base_preserving_instance(product, installed)
+    if base is None and preserve_unbased_overrides:
+        updated_from_product, retained = _routing_differences(result, installed, ()), []
+    elif base is None:
+        updated_from_product, retained = _routing_no_base_changes(product, installed)
+    else:
+        updated_from_product, retained = [], []
     schema_change = (
         (base.get("schema_version") if base is not None else installed.get("schema_version"))
         != product.get("schema_version")
@@ -577,6 +633,7 @@ def execute(
     instance_root: Path,
     *,
     write_product_pointer: bool = True,
+    if_needed: bool = False,
 ) -> dict[str, Any]:
     if action not in {"seed", "show", "validate", "refresh-routing"}:
         raise InstallError(f"unsupported action: {action}")
@@ -607,10 +664,22 @@ def execute(
     if action == "validate":
         return validate_install(product_root, instance_root)
     if action == "refresh-routing":
+        if if_needed and not routing_refresh_needed(product_root, instance_root):
+            return {
+                "schema_version": 1,
+                "action": action,
+                "routing": {"state": "current", "conflicts": [], "schema_changed": False,
+                            "updated_from_product": [], "retained": []},
+                "routing_drift": routing_drift(product_root, instance_root),
+            }
         return {
             "schema_version": 1,
             "action": action,
-            "routing": refresh_routing(product_root, instance_root),
+            "routing": refresh_routing(
+                product_root,
+                instance_root,
+                preserve_unbased_overrides=if_needed,
+            ),
             "routing_drift": routing_drift(product_root, instance_root),
         }
     state, desired = seed_desired_state(product_root, instance_root)
@@ -668,6 +737,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="seed instance files without publishing the product pointer",
     )
+    parser.add_argument("--if-needed", action="store_true", help="refresh routing only when the product catalogue advances")
     args = parser.parse_args(argv)
     try:
         instance_root = (
@@ -680,6 +750,7 @@ def main(argv: list[str] | None = None) -> int:
             args.product_root,
             instance_root,
             write_product_pointer=not args.no_pointer,
+            if_needed=args.if_needed,
         )
     except (OSError, InstallError) as exc:
         print(f"conflicting: {exc}", file=sys.stderr)

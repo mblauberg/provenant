@@ -43,7 +43,7 @@ or [visual QA](references/visual-qa.md).
 
 For a change to rendered UI, capture light and dark desktop views of the
 changed surfaces only, adding mobile where layout risk warrants, and look at
-every capture before judging; a capture nobody viewed is not evidence. Build an
+every capture before judging; a capture nobody viewed is not evidence. When a pull request carries the change, a few viewed captures may go on it as optional evidence; never open a follow-up issue just to add captures later. Build an
 owner-facing prototype only for hard-to-describe UI, competing directions or on
 request. While it awaits the owner, continue other work. If it truly blocks,
 lies within granted authority and is not a `HARNESS.md` user gate, the chair
