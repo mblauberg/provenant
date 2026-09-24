@@ -462,6 +462,31 @@ def test_binder_materialises_the_post_merge_chain_without_advancing_acceptance(t
         "network": {"tool_egress": "allowlist", "allowed_hosts": ["api.github.com"]},
     })
     receipt.write_text(json.dumps(run))
+    original_review = review_sources[0].read_bytes()
+    invalid_review = json.loads(original_review)
+    invalid_review["reviewed_at"] = "2026-07-10T00:07:30+00:00"
+    review_sources[0].write_text(json.dumps(invalid_review) + "\n")
+    before_invalid_review = receipt.read_bytes()
+    rejected_review = subprocess.run(command, env=environment, capture_output=True, text=True)
+    assert rejected_review.returncode == 1
+    assert receipt.read_bytes() == before_invalid_review
+    assert not (tmp_path / "github").exists()
+    review_sources[0].write_bytes(original_review)
+
+    before_invalid_ci = receipt.read_bytes()
+    environment["GH_CHECKS_JSON"] = json.dumps({"check_runs": [{
+        "name": "ci-status", "head_sha": pr["merge_commit"], "status": "completed",
+        "conclusion": "success", "completed_at": "2026-07-10T00:08:30+00:00",
+    }]})
+    rejected_ci = subprocess.run(command, env=environment, capture_output=True, text=True)
+    assert rejected_ci.returncode == 1
+    assert receipt.read_bytes() == before_invalid_ci
+    assert not (tmp_path / "github").exists()
+    environment["GH_CHECKS_JSON"] = json.dumps({"check_runs": [{
+        "name": "ci-status", "head_sha": pr["merge_commit"], "status": "completed",
+        "conclusion": "success", "completed_at": ci["completed_at"],
+    }]})
+
     first = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     second = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     results = [first.communicate(), second.communicate()]
