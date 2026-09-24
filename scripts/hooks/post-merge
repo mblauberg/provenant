@@ -21,6 +21,7 @@ if [ -z "$integration" ]; then
 fi
 [ -n "$integration" ] || exit 0
 [ "$branch" = "$integration" ] || exit 0
+git rev-parse --verify --quiet 'ORIG_HEAD^{commit}' >/dev/null 2>&1 || exit 0
 
 git_env=$(git rev-parse --local-env-vars 2>/dev/null) || exit 0
 for variable in $git_env; do
@@ -32,6 +33,6 @@ if ! command -v provenant >/dev/null 2>&1; then
     exit 0
 fi
 
-provenant clean --prune-merged --repo "$top" ||
+provenant clean --prune-merged --merged-since ORIG_HEAD --repo "$top" ||
     printf '%s\n' 'post-merge: cleanup failed; merge remains successful' >&2
 exit 0

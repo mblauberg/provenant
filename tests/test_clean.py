@@ -551,18 +551,77 @@ def test_prune_merged_removes_only_clean_ancestry_proven_worktrees(tmp_path):
     (run / "RUN_RECEIPT.json").write_text('{"status":"ok"}\n')
     old(run)
 
-    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--repo", str(root)],
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--branch", "lane/done",
+                             "--branch", "lane/dirty", "--repo", str(root)],
                             text=True, capture_output=True, check=False)
 
     assert result.returncode == 0, result.stderr
     assert "removed .worktrees/lane-done" in result.stdout
     assert "skipped .worktrees/lane-dirty: triage:merged-dirty" in result.stdout
-    assert "skipped .worktrees/lane-pending: keep:unmerged" in result.stdout
+    assert "lane-pending" not in result.stdout
     assert not targets["done"].exists()
     assert targets["dirty"].exists() and targets["pending"].exists()
     assert scratch.read_text() == "preserve\n"
     assert run.exists()
     assert subprocess.run(["git", "-C", str(root), "show-ref", "--verify", "--quiet", "refs/heads/lane/done"], check=False).returncode == 0
+
+
+def test_prune_merged_since_removes_only_branches_brought_in_by_merge(tmp_path):
+    root = repo(tmp_path)
+    subprocess.run(["git", "-C", str(root), "branch", "-M", "main"], check=True)
+    targets = {}
+    for name in ("older", "current"):
+        target = root / ".worktrees" / f"lane-{name}"
+        target.parent.mkdir(exist_ok=True)
+        subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", f"lane/{name}", str(target)], check=True)
+        (target / f"{name}.txt").write_text(f"{name}\n")
+        subprocess.run(["git", "-C", str(target), "add", f"{name}.txt"], check=True)
+        subprocess.run(["git", "-C", str(target), "commit", "-qm", name], check=True)
+        targets[name] = target
+    subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", "merge older", "lane/older"], check=True)
+    before = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"], text=True, capture_output=True, check=True).stdout.strip()
+    subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", "merge current", "lane/current"], check=True)
+
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--merged-since", before,
+                             "--repo", str(root)], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert "removed .worktrees/lane-current" in result.stdout
+    assert "lane-older" not in result.stdout
+    assert not targets["current"].exists()
+    assert targets["older"].exists()
+
+
+def test_prune_merged_requires_merge_selector(tmp_path):
+    root = repo(tmp_path)
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--repo", str(root)],
+                            text=True, capture_output=True, check=False)
+    assert result.returncode != 0
+    assert "--branch NAME or --merged-since REV" in result.stderr
+
+
+def test_prune_merged_branch_targets_only_named_branch(tmp_path):
+    root = repo(tmp_path)
+    subprocess.run(["git", "-C", str(root), "branch", "-M", "main"], check=True)
+    targets = {}
+    for name in ("selected", "other"):
+        target = root / ".worktrees" / f"lane-{name}"
+        target.parent.mkdir(exist_ok=True)
+        subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", f"lane/{name}", str(target)], check=True)
+        (target / f"{name}.txt").write_text(f"{name}\n")
+        subprocess.run(["git", "-C", str(target), "add", f"{name}.txt"], check=True)
+        subprocess.run(["git", "-C", str(target), "commit", "-qm", name], check=True)
+        subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", f"merge {name}", f"lane/{name}"], check=True)
+        targets[name] = target
+
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--branch", "lane/selected",
+                             "--repo", str(root)], text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert "removed .worktrees/lane-selected" in result.stdout
+    assert "lane-other" not in result.stdout
+    assert not targets["selected"].exists()
+    assert targets["other"].exists()
 
 
 def test_post_merge_hook_skips_other_branches(tmp_path):
@@ -594,6 +653,7 @@ def test_post_merge_hook_skips_other_branches(tmp_path):
 def test_post_merge_hook_calls_clean_and_never_fails_merge(tmp_path):
     root = repo(tmp_path)
     subprocess.run(["git", "-C", str(root), "branch", "-M", "main"], check=True)
+    subprocess.run(["git", "-C", str(root), "update-ref", "ORIG_HEAD", "HEAD"], check=True)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     marker = tmp_path / "called"
@@ -609,7 +669,7 @@ def test_post_merge_hook_calls_clean_and_never_fails_merge(tmp_path):
                             text=True, capture_output=True, check=False)
 
     assert result.returncode == 0
-    assert marker.read_text() == f"clean --prune-merged --repo {root}\n"
+    assert marker.read_text() == f"clean --prune-merged --merged-since ORIG_HEAD --repo {root}\n"
     assert env_marker.read_text() == "unset|unset\n"
     assert "cleanup failed" in result.stderr
 
@@ -617,6 +677,7 @@ def test_post_merge_hook_calls_clean_and_never_fails_merge(tmp_path):
 def test_post_merge_hook_uses_local_master_without_origin_head(tmp_path):
     root = repo(tmp_path)
     subprocess.run(["git", "-C", str(root), "branch", "-M", "master"], check=True)
+    subprocess.run(["git", "-C", str(root), "update-ref", "ORIG_HEAD", "HEAD"], check=True)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     marker = tmp_path / "called"
@@ -629,7 +690,26 @@ def test_post_merge_hook_uses_local_master_without_origin_head(tmp_path):
                             text=True, capture_output=True, check=False)
 
     assert result.returncode == 0, result.stderr
-    assert marker.read_text() == f"clean --prune-merged --repo {root}\n"
+    assert marker.read_text() == f"clean --prune-merged --merged-since ORIG_HEAD --repo {root}\n"
+
+
+def test_post_merge_hook_skips_quietly_without_orig_head(tmp_path):
+    root = repo(tmp_path)
+    subprocess.run(["git", "-C", str(root), "branch", "-M", "main"], check=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "called"
+    stub = bin_dir / "provenant"
+    stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" > "{marker}"\n')
+    stub.chmod(0o755)
+    environment = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+    result = subprocess.run([str(HOOK)], cwd=root, env=environment,
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == ""
+    assert not marker.exists()
 
 
 def test_prune_merged_uses_origin_default_branch(tmp_path):
@@ -647,7 +727,8 @@ def test_prune_merged_uses_origin_default_branch(tmp_path):
     subprocess.run(["git", "-C", str(target), "commit", "-qm", "done"], check=True)
     subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", "merge dev", "lane/dev"], check=True)
 
-    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--repo", str(root)],
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--branch", "lane/dev",
+                             "--repo", str(root)],
                             text=True, capture_output=True, check=False)
 
     assert result.returncode == 0, result.stderr
@@ -678,7 +759,8 @@ def test_prune_merged_reports_unproven_squash_candidate(tmp_path):
     gh.chmod(0o755)
     environment = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
 
-    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--repo", str(root)],
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--branch", "lane/squashed",
+                             "--repo", str(root)],
                             env=environment, text=True, capture_output=True, check=False)
 
     assert result.returncode == 0, result.stderr
@@ -698,7 +780,8 @@ def test_prune_merged_fails_closed_without_integration_branch(tmp_path):
     subprocess.run(["git", "-C", str(target), "commit", "-qm", "done"], check=True)
     subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", "feature merge", "lane/done"], check=True)
 
-    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--repo", str(root)],
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--branch", "lane/done",
+                             "--repo", str(root)],
                             text=True, capture_output=True, check=False)
 
     assert result.returncode != 0
@@ -718,7 +801,8 @@ def test_prune_merged_uses_local_master_instead_of_feature_head(tmp_path):
     subprocess.run(["git", "-C", str(target), "commit", "-qm", "done"], check=True)
     subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", "feature merge", "lane/done"], check=True)
 
-    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--repo", str(root)],
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--branch", "lane/done",
+                             "--repo", str(root)],
                             text=True, capture_output=True, check=False)
 
     assert result.returncode == 0, result.stderr
@@ -738,7 +822,7 @@ def test_prune_merged_reuses_its_plan(tmp_path, monkeypatch):
         return real_plan(*args, **kwargs)
 
     monkeypatch.setattr(module, "plan", counted_plan)
-    assert module.main(["--prune-merged", "--repo", str(root)]) == 0
+    assert module.main(["--prune-merged", "--branch", "lane/done", "--repo", str(root)]) == 0
     assert len(calls) == 1
 
 
@@ -753,7 +837,8 @@ def test_prune_merged_plan_fails_closed_if_integration_branch_disappears(tmp_pat
     subprocess.run(["git", "-C", str(target), "commit", "-qm", "done"], check=True)
     subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", "merge lane", "lane/done"], check=True)
     module = cleaner()
-    proposal = module.plan(root, include=frozenset({"worktrees"}), prune_merged=True)
+    proposal = module.plan(root, include=frozenset({"worktrees"}), prune_merged=True,
+                           branches=("lane/done",))
     subprocess.run(["git", "-C", str(root), "branch", "-M", "feature"], check=True)
 
     try:

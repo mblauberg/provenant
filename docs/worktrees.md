@@ -133,9 +133,11 @@ is stale state that later agents mistake for live work, and each one carries its
 own uninherited dependency tree, in this repository roughly 400 MB apiece.
 
 To opt in to automatic pruning after a merge or pull, run this command in the
-primary checkout; it refuses to overwrite any existing hook. The hook skips
-squash merges when Git ancestry cannot prove the merge and reports each
-skipped worktree.
+primary checkout; it refuses to overwrite any existing hook. The hook passes
+`ORIG_HEAD` to `provenant clean --prune-merged --merged-since ORIG_HEAD`, so it
+prunes only branches the merge brought in. It quietly skips cleanup if
+`ORIG_HEAD` is missing. Squash merges fail the ancestry proof. Only selected
+branches receive removal or skip reports; older merged worktrees are untouched.
 
 ```sh
 hook="$(git rev-parse --git-path hooks)/post-merge"; source="$(git rev-parse --show-toplevel)/scripts/hooks/post-merge"; if [ -e "$hook" ] || [ -L "$hook" ]; then printf '%s\n' 'post-merge hook already exists; inspect it' >&2; else ln -s "$source" "$hook"; fi
@@ -146,6 +148,15 @@ To disable it, remove only the symlink to this hook:
 ```sh
 hook="$(git rev-parse --git-path hooks)/post-merge"; source="$(git rev-parse --show-toplevel)/scripts/hooks/post-merge"; if [ -L "$hook" ] && [ "$(readlink "$hook")" = "$source" ]; then rm "$hook"; fi
 ```
+
+For a manual prune after one merge, name each branch that merge brought in:
+
+```sh
+provenant clean --prune-merged --branch <merged-branch> --repo <primary-root>
+```
+
+`--prune-merged` requires `--branch` (repeatable) or `--merged-since`; it refuses
+an unscoped sweep.
 
 Prune immediately after the merge, in this order:
 
