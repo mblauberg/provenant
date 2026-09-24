@@ -228,7 +228,7 @@ def os_confinement_profile(plan):
         private = git_dirs.get("--absolute-git-dir")
         common = git_dirs.get("--git-common-dir")
         # add_dirs are read inputs, never write targets.
-        allowed = [cwd, run_dir, *state_writes, Path("/dev")]
+        allowed = [cwd, *([run_dir] if run_dir else []), *state_writes, Path("/dev")]
         git_allowed = []
         if private is not None and private != common:
             git_allowed.append(private)

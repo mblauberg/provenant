@@ -81,7 +81,7 @@ an explicit unconfined-write warning. A `cwd` below the root may also warn that
 it is not a read boundary.
 Writer runs on macOS use `sandbox-exec` to restrict writes to their worktree,
 per-worktree Git metadata, common Git objects, refs, logs and packed refs,
-attempt files, declared additional directories, device nodes and provider state.
+attempt files, device nodes and provider state; `add_dirs` stay read-only.
 Each attempt sets `TMPDIR`, `TMP`, `TEMP` and `XDG_CACHE_HOME` to private `tmp`
 and `cache` directories under its run directory. Shared temp and general user
 caches are not writable. Codex
