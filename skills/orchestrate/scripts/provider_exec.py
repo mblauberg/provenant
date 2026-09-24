@@ -43,6 +43,9 @@ CONFINED_STATE = {
         "read_write": (".local/share/opencode", ".local/state/opencode", ".cache/opencode"),
         "read": (".config/opencode",),
     },
+    "claude": {"read_write": (".claude", ".cache/claude", ".npm")},
+    "cursor": {"read_write": (".cursor", ".cache/cursor", ".npm")},
+    "kiro": {"read_write": (".kiro", ".cache/kiro", ".npm")},
 }
 EXTRA_DENIED_READS = (".claude/projects", ".codex/sessions")
 _DARWIN_USER_DIRS_CACHE = None
@@ -165,6 +168,18 @@ def os_confinement_profile(plan):
     home = Path.home().resolve()
     state = CONFINED_STATE.get(plan.get("adapter"), {})
     add_dirs = [Path(path) for path in plan.get("applied", {}).get("add_dirs", [])]
+    if plan.get("mode") == "worktree_write":
+        cwd = Path(plan["cwd"])
+        git_dirs = []
+        for flag in ("--absolute-git-dir", "--git-common-dir"):
+            result = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", flag],
+                                    capture_output=True, text=True, timeout=5)
+            if result.returncode == 0 and result.stdout.strip():
+                git_dirs.append(Path(result.stdout.strip()))
+        allowed = [cwd, *git_dirs, Path(plan["run_dir"]), Path(os.environ.get("TMPDIR", tempfile.gettempdir())),
+                   Path("/private/tmp"), *_darwin_user_dirs(), Path("/dev"),
+                   *(home / path for path in state.get("read_write", ()))]
+        return "(version 1)\n(allow default)\n(deny file-write*)\n" + _sbpl_rule("allow", "file-write*", allowed)
     return (
         "(version 1)\n(allow default)\n"
         + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
@@ -292,13 +307,21 @@ def build_plan(
     ):
         guarantee = "best_effort"
     confinement = "none"
-    confinement_requested = mode == "read_only" and adapter in {"agy", "opencode"}
+    confinement_requested = (mode == "read_only" and adapter in {"agy", "opencode"}) or (
+        mode == "worktree_write" and adapter != "codex")
     if confinement_requested and _sandbox_exec_path():
         confinement = "sandbox-exec"
         if adapter == "agy":
             guarantee = "best_effort"
     elif confinement_requested:
-        warnings.append(f"{adapter} read-only reads are unconfined")
+        if mode == "worktree_write":
+            warnings.append("worktree_write writes are unconfined: sandbox-exec unavailable or unusable")
+        else:
+            warnings.append(f"{adapter} read-only reads are unconfined")
+    if mode == "worktree_write" and adapter == "codex" and sandbox == "workspace-write":
+        confinement = "provider-native"
+    elif mode == "worktree_write" and adapter == "codex":
+        warnings.append("worktree_write writes are unconfined: Codex sandbox is full")
     if (
         mode == "read_only"
         and cwd != workspace_root
@@ -360,6 +383,7 @@ def build_plan(
         "workspace_root": workspace_root,
         "mode": mode,
         "worktree": str(worktree) if worktree else None,
+        "run_dir": str(Path(metadata.get("run_dir") or cwd).expanduser().resolve()),
         "timeout_seconds": timeout,
         "idle_seconds": idle,
         "grace_seconds": 5.0,
@@ -2137,6 +2161,7 @@ def main():
             model_override_tier=args.model_override_tier,
             requested_model=args.requested_model,
             requested_effort=args.requested_effort,
+            run_dir=args.out.parent,
             run_id=os.environ.get("PROVENANT_RUN_ID", ""),
             chair=os.environ.get("PROVENANT_CHAIR", ""),
         )

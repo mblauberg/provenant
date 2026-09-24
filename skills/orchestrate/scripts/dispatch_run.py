@@ -898,6 +898,7 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
             timeout_seconds=provider_timeout_seconds(args.timeout_seconds),
             intent=args.intent, preface=args.preface, requested_model=args.model,
             requested_effort=args.effort or "", run_id=os.environ.get("PROVENANT_RUN_ID", ""),
+            run_dir=result_path.parent,
             chair=os.environ.get("PROVENANT_CHAIR", ""),
             reviewer_id=args.reviewer_id or "", risk_tier=args.risk_tier or "",
             model_override_tier=args.model_override_tier or "", orchestrator_family="",

@@ -79,6 +79,44 @@ def test_read_only_os_confinement_profile_and_argv(monkeypatch, tmp_path):
     ]
 
 
+def test_writer_confinement_allows_only_owned_paths(monkeypatch, tmp_path):
+    mod = supervisor()
+    worktree = tmp_path / "worktree"
+    attempt = tmp_path / "run" / "attempt"
+    common = tmp_path / "common.git"
+    private = tmp_path / "linked.git"
+    for path in (worktree, attempt, common, private):
+        path.mkdir(parents=True)
+    dirs = iter((private, common))
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=str(next(dirs))))
+    monkeypatch.setattr(mod, "_darwin_user_dirs", lambda: ())
+    plan = {"adapter": "claude", "mode": "worktree_write", "cwd": str(worktree),
+            "workspace_root": str(worktree), "run_dir": str(attempt),
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    profile = mod.os_confinement_profile(plan)
+    assert "(deny file-write*)" in profile
+    for path in (worktree, attempt, private, common):
+        assert f'(subpath "{path}")' in profile
+    assert f'(subpath "{tmp_path}")' not in profile
+    assert '(subpath "/dev")' in profile
+    assert "(deny file-read-data" not in profile
+
+
+def test_writer_confinement_selection_and_degraded_warning(monkeypatch, tmp_path):
+    mod = supervisor()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    claude = mod.build_plan("claude", {}, "hello", cwd=tmp_path, mode="worktree_write")
+    codex = mod.build_plan("codex", {}, "hello", cwd=tmp_path, mode="worktree_write")
+    assert claude["applied"]["confinement"] == "sandbox-exec"
+    assert codex["applied"]["confinement"] == "provider-native"
+    assert "-s" in codex["argv"] and "workspace-write" in codex["argv"]
+    assert any("sandbox_workspace_write.writable_roots=" in arg for arg in codex["argv"])
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None)
+    degraded = mod.build_plan("claude", {}, "hello", cwd=tmp_path, mode="worktree_write")
+    assert degraded["applied"]["confinement"] == "none"
+    assert any("worktree_write writes are unconfined" in item for item in degraded["warnings"])
+
+
 def test_plan_only_uses_explicit_workspace_root_when_process_cwd_differs(monkeypatch, tmp_path, capsys):
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
     workspace_root = tmp_path / "fabric-workspace"

@@ -72,7 +72,11 @@ It re-allows only the provider's own state and sign-in files. Inside another
 sandbox, where macOS refuses a nested one, the run proceeds unconfined with a
 warning. Codex, Claude and Cursor read-only runs restrict writes, not reads, so
 a `cwd` below the root carries the warning "cwd is not a read boundary".
-The receipt records `applied.confinement` as `sandbox-exec` or `none`;
+Writer runs on macOS use `sandbox-exec` to restrict writes to their worktree,
+Git metadata, attempt files, temporary directories, device nodes and provider
+state. Codex uses its own `workspace-write` sandbox instead. If OS confinement
+is unavailable, a writer receipt warns that writes are unconfined.
+The receipt records `applied.confinement` as `sandbox-exec`, `provider-native` or `none`;
 `workspace.cwd` is the provider cwd and `workspace.root` is the caller workspace.
 
 On macOS, a Codex `read-only` or `workspace-write` provider gets a bundled `ps`
