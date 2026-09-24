@@ -371,8 +371,10 @@ excluded from context scans.
 
 `scripts/manage_installation.py` plans, checks, installs, reconciles and removes
 only harness-owned skill links. Every normal install repairs missing or stale
-managed links and retires safe managed leftovers. A versioned manifest records
-current ownership, source tree digests and the bound target beside the
+managed links and retires safe managed leftovers. It also retires links still
+recorded by the former Claude custom-agent receipt during the first upgrade.
+A versioned manifest records current ownership, source tree digests and the
+bound target beside the
 target skills directory. The post-install integrity check verifies catalogue
 presence. Missing or noncanonical required names fail; extra symlinks resolving
 outside the canonical skill tree produce warnings. Unmanaged paths are never
