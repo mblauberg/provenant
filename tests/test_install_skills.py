@@ -65,6 +65,7 @@ def _install_retired_agent_fixture(tmp_path: Path, target: Path):
     old_target = target.parent / "agents"
     old_target.mkdir(parents=True)
     (old_target / old_source.name).symlink_to(old_source)
+    old_source.unlink()
     receipt = target.parent / ".agent-harness-agents-installation.json"
     receipt.write_text(json.dumps({
         "schema_version": 1,
@@ -145,7 +146,8 @@ def test_normal_install_retires_recorded_links_from_the_removed_agent_surface(tm
     result = run(target)
 
     assert result.returncode == 0, result.stderr
-    assert not (old_target / old_source.name).exists()
+    assert not (old_target / old_source.name).is_symlink()
+    assert not os.path.lexists(old_target / old_source.name)
     assert (old_target / "user-owned.md").read_text() == "keep\n"
     assert not receipt.exists()
 
@@ -195,6 +197,7 @@ def test_directory_link_install_still_retires_the_previous_managed_surface(tmp_p
     old_target = target.parent / "agents"
     old_target.mkdir()
     (old_target / old_source.name).symlink_to(old_source)
+    old_source.unlink()
     receipt = target.parent / ".agent-harness-agents-installation.json"
     receipt.write_text(json.dumps({
         "schema_version": 1,
@@ -217,7 +220,8 @@ def test_directory_link_install_still_retires_the_previous_managed_surface(tmp_p
     assert result.returncode == 0, result.stderr
     assert target.is_symlink()
     assert target.resolve() == (ROOT / "skills").resolve()
-    assert not (old_target / old_source.name).exists()
+    assert not (old_target / old_source.name).is_symlink()
+    assert not os.path.lexists(old_target / old_source.name)
     assert not receipt.exists()
 
 
