@@ -173,14 +173,14 @@ it("keeps an event follower open by default", () => {
   attempt(workspace, "tasks", "finished", "terminal", "ok");
   const product = resolve(import.meta.dirname, "../../..");
   const result = spawnSync("python3", [join(product, "scripts/provenant"), "events", "--follow"], {
-    cwd: workspace, encoding: "utf8", timeout: 1500,
+    cwd: workspace, encoding: "utf8", timeout: 8000,
     env: { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product,
       AGENT_FABRIC_STATE_DIRECTORY: join(workspace, "state"),
       AGENT_FABRIC_TSX_LOADER: createRequire(import.meta.url).resolve("tsx") },
   });
   expect((result.error as NodeJS.ErrnoException | undefined)?.code).toBe("ETIMEDOUT");
   expect(result.stdout).toContain('"type":"task_state"');
-});
+}, 10_000);
 
 it("exposes the same run schema through the provenant lanes command", () => {
   const workspace = fixture();

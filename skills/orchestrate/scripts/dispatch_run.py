@@ -49,6 +49,8 @@ MAX_GIT_EVIDENCE_HEADER_BYTES = 64 * 1024
 WORKER_TERMINAL_RECORD_TYPE = "provenant-worker-terminal"
 GIT_EVIDENCE_RECORD_TYPE = "provenant-git-evidence"
 CANCEL_MARKER_NAME = "cancel.request"
+BRANCH_TYPES = "feat|fix|refactor|perf|test|docs|chore|ci|build"
+BRANCH_PATTERN = re.compile(rf"^(?:(?:{BRANCH_TYPES}|proto)/[a-z][a-z0-9]*-[a-z0-9]+(?:-[a-z0-9]+){{1,4}}|land/[0-9]{{8}}-[a-z0-9]+(?:-[a-z0-9]+)*)$")
 
 from _shared.bounded_process import stop_process_group
 from layout import run_workspace, run_root, contains_run
@@ -664,6 +666,18 @@ def resolve_writer_worktree(worktree: Path) -> Path:
     if git_dir is None or common_dir is None or git_dir.resolve() == common_dir.resolve():
         raise WorktreeLeaseError("worktree_write requires a linked worktree; fix: create a linked worktree")
     return resolved
+
+
+def branch_name_warning(worktree: Path) -> str | None:
+    result = subprocess.run(
+        ["git", "-C", str(worktree), "symbolic-ref", "--quiet", "--short", "HEAD"],
+        env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        capture_output=True, text=True, timeout=3,
+    )
+    branch = result.stdout.strip() if result.returncode == 0 else "(detached HEAD)"
+    if len(branch) <= 48 and BRANCH_PATTERN.fullmatch(branch):
+        return None
+    return f"branch {branch} is outside <type>/<area>-<slug> (or land/, proto/); rename for repository convention"
 
 
 def acquire_worktree_lease(worktree: Path):
@@ -1318,7 +1332,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         "pgid":None,"session_id":plan.get("session_id"),"retryable":False,"reset_at":None,"retry_after":None,"fix":None,
         "evidence":{"exit":None,"signal":None,"signature":None,"excerpt":""},"question":None,
         "applied":plan.get("applied",{"sandbox":None,"network":None,"add_dirs":[],"guarantee":"prompt_only"}),
-        "warnings":list(plan.get("warnings",[])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", [])),"provenance":provenance,
+        "warnings":list(plan.get("warnings",[])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", [])) + list(getattr(args, "_branch_warnings", [])),"provenance":provenance,
         "secret_scan":{"allow_secrets":getattr(args,"allow_secrets",False),
                        "finding_names":getattr(getattr(args,"_secret_scan",None),"names",lambda:[])()},
         "timing":{"phases":getattr(args,"_phase_timings",{}).copy()},
@@ -1343,11 +1357,11 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     refusal=route_refusal(adapter,args.tool)
     if refusal: status=refusal["status"]
     if status not in TERMINAL_STATUSES: status="failed"
-    for field in ("session_id","retryable","reset_at","retry_after","fix","evidence","applied","context","warnings","reaped","spared","provenance","pgid","last_progress_at"):
+    for field in ("session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","warnings","reaped","spared","provenance","pgid","last_progress_at"):
         if field in adapter: row[field]=adapter[field]
     row["warnings"] = list(dict.fromkeys(
         list(row.get("warnings", [])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", []))
-        + list(getattr(args, "_memory_warnings", []))))
+        + list(getattr(args, "_memory_warnings", [])) + list(getattr(args, "_branch_warnings", []))))
     row["timing"]["queued_seconds"] = getattr(args, "_queued_seconds", 0.0)
     if legacy.get("process_error", "").startswith("Set .agents/fabric-policy.json memory_floor_percent"):
         row["fix"] = legacy["process_error"]
@@ -1587,6 +1601,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             )
         try:
             args.worktree = resolve_writer_worktree(args.worktree)
+            warning = branch_name_warning(args.worktree)
+            args._branch_warnings = [warning] if warning else []
         except WorktreeLeaseError as exc:
             return fail(run_dir, "worktree_invalid", str(exc))
     elif args.worktree is not None:

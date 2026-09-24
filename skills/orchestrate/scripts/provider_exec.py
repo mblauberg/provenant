@@ -540,10 +540,16 @@ def build_plan(
     return plan
 
 
+PERMISSION_DENIAL_PATTERN = r"permission denied|permission blocked|not allowed to|tool required the .+ permission|denied_actions"
+INVALID_INPUT_PATTERN = r"invalid model selection|--effort is not supported for model"
 SIGNATURES = (
     (
+        "invalid_input",
+        INVALID_INPUT_PATTERN,
+    ),
+    (
         "permission_blocked",
-        r"permission denied|permission blocked|not allowed to|tool required the .+ permission|denied_actions",
+        PERMISSION_DENIAL_PATTERN,
     ),
     (
         "usage_limited",
@@ -556,7 +562,7 @@ SIGNATURES = (
     ("rate_limited", r"rate.?limit|too many requests|overloaded|\b(?:429|529)\b"),
     (
         "model_unavailable",
-        r"invalid model selection|not supported for model|model[^\n]*(?:unavailable|not available|not found|unsupported|does not exist)|unknown model",
+        r"model[^\n]*(?:unavailable|not available|not found|unsupported|does not exist)|unknown model",
     ),
     ("permission_blocked", r"\b403\b|forbidden"),
 )
@@ -859,15 +865,16 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
     )
     result["failure_text"] = failure_text
     # Permission denials in diagnostics invalidate a claimed success (Agy does this).
-    denial = adapter == "agy" and re.search(SIGNATURES[0][1], stderr, re.I)
+    denial = adapter == "agy" and re.search(PERMISSION_DENIAL_PATTERN, stderr, re.I)
     if denial:
         errors.insert(0, stderr)
         failure_text = stderr + "\n" + failure_text
     status = None
     if errors or exit_code != 0 or denial:
-        for name, pattern in (*config.SIGNATURES, *SIGNATURES):
+        signatures = (SIGNATURES[0], *config.SIGNATURES, *SIGNATURES[1:])
+        for name, pattern in signatures:
             if re.search(pattern, failure_text, re.I):
-                status = name
+                status = "rejected" if name == "invalid_input" else name
                 result["signature"] = name
                 break
         status = status or (
@@ -1983,7 +1990,7 @@ def execute(
         if retry_failure:
             failures.setdefault(retry_failure["status"], retry_failure)
         if failures:
-            priority = [status for status, _ in (*profile(plan["adapter"]).SIGNATURES, *SIGNATURES)]
+            priority = [status for status, _ in (SIGNATURES[0], *profile(plan["adapter"]).SIGNATURES, *SIGNATURES[1:])]
             selected = next((failures[status] for status in priority if status in failures), next(iter(failures.values())))
             parsed.update(selected)
     if forced:
@@ -2115,6 +2122,9 @@ def execute(
     )
     guarantee = plan["applied"]["guarantee"]
     fix = (
+        parsed["failure_text"].strip()[:400]
+        if status == "rejected" and parsed["signature"] == "invalid_input"
+        else
         "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"
         if status == "model_unavailable"
         and plan["adapter"] == "opencode"
@@ -2159,6 +2169,7 @@ def execute(
         "resolved_model": plan["model"],
         "effort": plan["effort"],
         "status": status,
+        **({"error": "invalid_input"} if status == "rejected" and parsed["signature"] == "invalid_input" else {}),
         "reason": parsed["excerpt"],
         "exit": 0
         if status in {"ok", "input_required"} and terminal_at is not None
