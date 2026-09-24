@@ -67,7 +67,6 @@ jobs:
               - *ci-contract
               - *node-workspace
               - '.github/**'
-              - 'agents/**'
               - 'config/**'
               - 'docs/**'
               - 'evals/**'
@@ -112,14 +111,13 @@ jobs:
               # configure-*, write-product-root-pointer, lib/**,
               # provenant.template). tests/ narrows to exactly the contract
               # files this job runs — every other test rides the harness
-              # fused suite. Broader docs/skills/agents changes skip split;
+              # fused suite. Broader docs/skills changes skip split;
               # the harness filter stays near-total by design.
               - 'config/**'
               - 'runtime/**'
               - 'scripts/**'
               - 'tests/test_split_root_contract.py'
               - 'tests/test_install_harness.py'
-              - 'tests/test_install_agents.py'
               - 'tests/test_install_provenant_command.py'
               - 'tests/test_install_skills.py'
               - 'tests/test_instance_installation.py'
@@ -284,7 +282,7 @@ jobs:
           # order-dependence is recorded for hygiene follow-up.
           $HARNESS_PYTHON -m pytest tests/test_split_root_contract.py \
             tests/test_instance_installation.py tests/test_install_harness.py \
-            tests/test_install_agents.py tests/test_install_provenant_command.py \
+            tests/test_install_provenant_command.py \
             tests/test_install_skills.py tests/test_check_provenant_install.py \
             --deselect tests/test_instance_installation.py::test_the_repository_ships_a_valid_fused_desired_state -q
       # The workspace suite already ran fused in the fabric job (`npm run

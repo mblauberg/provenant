@@ -55,12 +55,10 @@ def _provider_lines(home: Path) -> tuple[list[str], bool]:
             mcp = isinstance(servers, dict) and "fabric" in servers
         except (OSError, ValueError):
             mcp = False
-        agents = (root / "agents").is_dir() if provider == "claude" else None
-        complete = skills and mcp and agents is not False
+        complete = skills and mcp
         missing |= not complete
         lines.append(
             f"provider {provider} present=yes skills={'ok' if skills else 'missing'} "
-            f"agents={'ok' if agents else 'missing' if agents is False else 'unsupported'} "
             f"mcp={'ok' if mcp else 'missing'}"
             + (" repair=install-harness --platform all" if not complete else "")
         )

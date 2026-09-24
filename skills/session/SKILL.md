@@ -11,8 +11,10 @@ return a chat handoff; never invent one. Write continuity only to an authorised
 handoff or explicit run-local state; without that authority, propose a chat
 delta. Updating an external tracker requires external-write authority.
 There is no default rolling project state file. Run state remains run-local,
-not project-wide truth. Project instructions may override continuity
-paths. Fallbacks: handoffs `docs/handoffs/`, archive `docs/archive/`.
+not project-wide truth. A chair running lanes across compactions keeps a run-local
+state file ([chair-state.md](references/chair-state.md)).
+Project instructions may override continuity paths. Fallbacks: handoffs
+`docs/handoffs/`, archive `docs/archive/`.
 
 ## Start
 

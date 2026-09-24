@@ -134,7 +134,7 @@ def test_installed_wrapper_does_not_promote_default_instance_root_to_explicit_en
 
 def test_managed_skill_commands_do_not_resolve_from_fused_agents_home_fallback() -> None:
     matches: list[str] = []
-    for relative in ("skills", "agents", "workflows"):
+    for relative in ("skills", "workflows"):
         for path in sorted((ROOT / relative).rglob("*")):
             if not path.is_file():
                 continue
