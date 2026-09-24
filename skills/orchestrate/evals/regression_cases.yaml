@@ -1,0 +1,7 @@
+schema_version: 1
+target_skill: orchestrate
+cases:
+  - {id: r101, relation: positive, prompt: "Keep six implementation lanes running from the board's ready column, refilling as each finishes without exceeding free memory, and wait for completions without polling status.", tags: [direct, chair-loop], expected: {primary_skill: orchestrate, companion_skills: []}, note: "Chair loop: refill to the resource budget and wait on events, not status polls."}
+  - {id: r102, relation: positive, prompt: "The owner is unavailable and two lanes are blocked on a choice between two export formats; convene a cross-family decision council and record the outcome for later confirmation.", tags: [direct, decision-council], expected: {primary_skill: orchestrate, companion_skills: []}, note: "Decision council: independent first round across families, chair reconciles, assumption recorded."}
+  - {id: r103, relation: negative, prompt: "Write a short commit message for this one-file typo fix.", tags: [adjacent], expected: {primary_skill: engineering-writing, companion_skills: []}, note: "A one-file commit message needs no orchestration."}
+  - {id: r104, relation: boundary, prompt: "Review these three open pull requests with independent reviewers from two model families, none of which may run git write commands in the shared checkout.", tags: [composition, reviewer-git-denylist], expected: {primary_skill: code-review, companion_skills: [orchestrate]}, note: "Review primary; orchestration supplies the families and the git-verb denylist."}

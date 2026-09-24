@@ -53,14 +53,17 @@ before writing findings.
   defines what each reviewer inspects and the independence/reduction contract.
 - `diagnose` owns reproduction and root cause for known broken behaviour.
 - `implement` owns authorised fixes and bounded re-review; `tdd` or `refactor`
-  may supply the method. Do not mutate source during review.
+  may supply the method. Do not mutate source or Git state during review: no
+  Git write verbs (`orchestrate` lists them); read other refs with `git show`.
 - Artifact-only authority permits named outputs under the assigned run
   directory; it does not permit arbitrary repo-root scratch. Use
   `.agent-run/scratch/` when no run directory exists. Never redirect a command
   over a wildcard/list that can include its own growing output; keep
   captures bounded.
 - Language, framework, UI, security, and project skills add specialised lenses;
-  do not repeat their doctrine here.
+  do not repeat their doctrine here. For a rendered-UI change, look at light
+  and dark desktop captures of the changed surfaces before the verdict
+  (`ui-ux-design`).
 - A structural alternative blocks only when tied to a present defect or
   material regression with a safer, validated design. Attractive redesign
   alone is not a finding.
