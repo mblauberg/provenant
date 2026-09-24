@@ -1182,7 +1182,7 @@ def test_late_signal_after_provider_exit_preserves_attempt_publication(tmp_path:
         def publish(run_dir, path, content):
             global fired
             original(run_dir, path, content)
-            if path.name == "attempt.json" and not fired:
+            if path == run_dir / "dispatch/tasks/late/attempt-001/attempt.json" and not fired:
                 fired = True
                 os.kill(os.getpid(), signal.SIGTERM)
         module.write_owned = publish
