@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Plan, install, reconcile or remove harness-managed skill and agent links."""
+"""Plan, install, reconcile or remove harness-managed skill links."""
 
 from __future__ import annotations
 
@@ -7,6 +7,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import tempfile
 import sys
@@ -19,16 +20,9 @@ except ModuleNotFoundError as exc:
         raise
     import managed_installation_manifest as manifest_io  # type: ignore[no-redef]
 
-try:
-    import scripts.agent_installation as agent_installation
-except ModuleNotFoundError:
-    try:
-        import agent_installation  # type: ignore[no-redef]
-    except ModuleNotFoundError:
-        agent_installation = None
-
-
 ROOT = Path(__file__).resolve().parents[1]
+LEGACY_AGENT_MANIFEST = ".agent-harness-agents-installation.json"
+LEGACY_AGENT_NAME = re.compile(r"^[a-z0-9][a-z0-9-]*\.md$")
 SKILL_NAME = manifest_io.SKILL_NAME
 SHARED_NAMES = manifest_io.SHARED_NAMES
 InstallError = manifest_io.InstallError
@@ -130,6 +124,70 @@ def _replace_link(destination: Path, source: Path) -> None:
     finally:
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+
+def _legacy_agent_manifest(target: Path) -> tuple[Path, dict[str, Any]] | None:
+    """Read the retired Claude-agent receipt beside a skills target."""
+    path = target.parent / LEGACY_AGENT_MANIFEST
+    if not path.exists() and not path.is_symlink():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise InstallError("legacy agent installation receipt is not a regular file")
+    try:
+        receipt = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise InstallError(f"legacy agent installation receipt is unreadable: {exc}") from exc
+    legacy_target = target.parent / "agents"
+    if (
+        not isinstance(receipt, dict)
+        or receipt.get("schema_version") != 1
+        or receipt.get("owner") != "agent-harness"
+        or receipt.get("surface") != "claude-agents"
+        or receipt.get("target_root") != str(legacy_target.resolve())
+        or not isinstance(receipt.get("managed"), dict)
+    ):
+        raise InstallError("legacy agent installation receipt is invalid")
+    required = {"owner", "source_target", "source_sha256", "installed_at"}
+    for name, entry in receipt["managed"].items():
+        if (
+            not isinstance(name, str)
+            or not LEGACY_AGENT_NAME.fullmatch(name)
+            or not isinstance(entry, dict)
+            or set(entry) != required
+            or entry.get("owner") != "agent-harness"
+            or not isinstance(entry.get("source_target"), str)
+            or not Path(entry["source_target"]).is_absolute()
+            or not isinstance(entry.get("source_sha256"), str)
+            or not re.fullmatch(r"[0-9a-f]{64}", entry["source_sha256"])
+            or not isinstance(entry.get("installed_at"), str)
+        ):
+            raise InstallError(f"legacy agent installation entry is invalid: {name}")
+    for name, entry in receipt["managed"].items():
+        destination = legacy_target / name
+        if (destination.exists() or destination.is_symlink()) and not _same_link(
+            destination, Path(entry["source_target"])
+        ):
+            raise InstallError(
+                f"conflicting retired managed agent target changed outside harness: {name}"
+            )
+    return path, receipt
+
+
+def _retire_legacy_agents(target: Path, *, apply: bool) -> list[str]:
+    """Retire only links recorded by the previous Claude-agent installer."""
+    legacy = _legacy_agent_manifest(target)
+    if legacy is None:
+        return []
+    path, receipt = legacy
+    names = sorted(receipt["managed"])
+    if apply:
+        legacy_target = target.parent / "agents"
+        for name in names:
+            destination = legacy_target / name
+            if destination.is_symlink():
+                destination.unlink()
+        path.unlink()
+    return names
 
 
 def _migrate_directory_link(
@@ -416,6 +474,8 @@ def execute(
 ) -> dict[str, Any]:
     if action not in {
         "validate-sources",
+        "preflight-retirement",
+        "retire-legacy-agents",
         "migrate-directory-link",
         "plan",
         "preflight",
@@ -425,6 +485,18 @@ def execute(
         "uninstall-managed",
     }:
         raise InstallError(f"unsupported action: {action}")
+    if action in {"preflight-retirement", "retire-legacy-agents"}:
+        target = Path(target)
+        target = target.parent.resolve() / target.name
+        changed = _retire_legacy_agents(
+            target, apply=action == "retire-legacy-agents"
+        )
+        return {
+            "schema_version": 1,
+            "action": action,
+            "items": [],
+            "changed": changed if action == "retire-legacy-agents" else [],
+        }
     source = Path(source)
     if source.is_symlink():
         raise InstallError("skill source contains a symlink: source")
@@ -457,6 +529,8 @@ def execute(
             custom_catalogue,
         )
     target = Path(target).resolve()
+    if action in {"preflight", "install", "reconcile"}:
+        _retire_legacy_agents(target, apply=False)
     manifest = _load_manifest(target)
     if action in {"plan", "preflight"}:
         if action == "preflight":
@@ -573,6 +647,8 @@ def execute(
                 changed.append(name)
     if changed:
         _write_manifest(target, manifest)
+    if action in {"install", "reconcile"}:
+        changed.extend(_retire_legacy_agents(target, apply=True))
     return {
         "schema_version": 1,
         "action": action,
@@ -593,6 +669,8 @@ def main(argv: list[str] | None = None) -> int:
         "action",
         choices=(
             "validate-sources",
+            "preflight-retirement",
+            "retire-legacy-agents",
             "migrate-directory-link",
             "plan",
             "preflight",
@@ -604,21 +682,9 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--target", required=True, type=Path)
     parser.add_argument("--source", type=Path, default=ROOT / "skills")
-    parser.add_argument("--surface", choices=("skills", "agents"), default="skills")
     parser.add_argument("--custom-source", type=Path)
     parser.add_argument("--summary", action="store_true")
     args = parser.parse_args(argv)
-    if args.surface == "agents":
-        if agent_installation is None:
-            print("conflicting: agents installation mechanics are unavailable", file=sys.stderr)
-            return 3
-        try:
-            return agent_installation.run(
-                args.action, args.source, args.target, args.summary
-            )
-        except (OSError, agent_installation.InstallError) as exc:
-            print(f"conflicting: {exc}", file=sys.stderr)
-            return 3
     try:
         result = execute(
             args.action,
@@ -663,6 +729,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"conflicting: skill installation integrity failed: {failures}", file=sys.stderr)
         return 3
     if args.summary:
+        if args.action == "preflight-retirement":
+            print(f"legacy retirement=checked target={args.target}")
+            return 0
+        if args.action == "retire-legacy-agents":
+            print(f"legacy retirement=complete target={args.target}")
+            return 0
         if args.action == "migrate-directory-link":
             print(
                 f"skills layout={result['layout']} "

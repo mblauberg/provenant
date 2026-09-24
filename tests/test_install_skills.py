@@ -58,6 +58,111 @@ def test_installer_links_every_skill_and_is_idempotent(tmp_path):
     assert f"linked=0 existing={len(expected)}" in second.stdout
 
 
+def test_normal_install_retires_recorded_links_from_the_removed_agent_surface(tmp_path):
+    target = tmp_path / "claude/skills"
+    old_source = tmp_path / "old-product/agents/retired-worker.md"
+    old_source.parent.mkdir(parents=True)
+    old_source.write_text("# Previously managed definition\n")
+    old_target = target.parent / "agents"
+    old_target.mkdir(parents=True)
+    (old_target / old_source.name).symlink_to(old_source)
+    (old_target / "user-owned.md").write_text("keep\n")
+    receipt = target.parent / ".agent-harness-agents-installation.json"
+    receipt.write_text(json.dumps({
+        "schema_version": 1,
+        "owner": "agent-harness",
+        "surface": "claude-agents",
+        "target_root": str(old_target.resolve()),
+        "updated_at": "2026-01-01T00:00:00Z",
+        "managed": {
+            old_source.name: {
+                "owner": "agent-harness",
+                "source_target": str(old_source),
+                "source_sha256": "0" * 64,
+                "installed_at": "2026-01-01T00:00:00Z",
+            }
+        },
+    }))
+
+    result = run(target)
+
+    assert result.returncode == 0, result.stderr
+    assert not (old_target / old_source.name).exists()
+    assert (old_target / "user-owned.md").read_text() == "keep\n"
+    assert not receipt.exists()
+
+
+def test_normal_install_preserves_retired_surface_when_recorded_target_changed(tmp_path):
+    target = tmp_path / "claude/skills"
+    old_source = tmp_path / "old-product/agents/retired-worker.md"
+    old_source.parent.mkdir(parents=True)
+    old_source.write_text("# Previously managed definition\n")
+    old_target = target.parent / "agents"
+    old_target.mkdir(parents=True)
+    destination = old_target / old_source.name
+    destination.write_text("user modification\n")
+    receipt = target.parent / ".agent-harness-agents-installation.json"
+    receipt.write_text(json.dumps({
+        "schema_version": 1,
+        "owner": "agent-harness",
+        "surface": "claude-agents",
+        "target_root": str(old_target.resolve()),
+        "updated_at": "2026-01-01T00:00:00Z",
+        "managed": {
+            old_source.name: {
+                "owner": "agent-harness",
+                "source_target": str(old_source),
+                "source_sha256": "0" * 64,
+                "installed_at": "2026-01-01T00:00:00Z",
+            }
+        },
+    }))
+
+    result = run(target)
+
+    assert result.returncode == 3
+    assert "conflicting retired managed agent target" in result.stderr
+    assert destination.read_text() == "user modification\n"
+    assert receipt.is_file()
+    assert not target.exists()
+
+
+def test_directory_link_install_still_retires_the_previous_managed_surface(tmp_path):
+    target = tmp_path / "claude/skills"
+    target.parent.mkdir(parents=True)
+    target.symlink_to(ROOT / "skills", target_is_directory=True)
+    old_source = tmp_path / "old-product/agents/retired-worker.md"
+    old_source.parent.mkdir(parents=True)
+    old_source.write_text("# Previously managed definition\n")
+    old_target = target.parent / "agents"
+    old_target.mkdir()
+    (old_target / old_source.name).symlink_to(old_source)
+    receipt = target.parent / ".agent-harness-agents-installation.json"
+    receipt.write_text(json.dumps({
+        "schema_version": 1,
+        "owner": "agent-harness",
+        "surface": "claude-agents",
+        "target_root": str(old_target.resolve()),
+        "updated_at": "2026-01-01T00:00:00Z",
+        "managed": {
+            old_source.name: {
+                "owner": "agent-harness",
+                "source_target": str(old_source),
+                "source_sha256": "0" * 64,
+                "installed_at": "2026-01-01T00:00:00Z",
+            }
+        },
+    }))
+
+    result = run(target)
+
+    assert result.returncode == 0, result.stderr
+    assert target.is_symlink()
+    assert target.resolve() == (ROOT / "skills").resolve()
+    assert not (old_target / old_source.name).exists()
+    assert not receipt.exists()
+
+
 def test_instance_skill_appears_in_per_entry_layout_without_managed_ownership(tmp_path):
     target = tmp_path / "skills"
     custom_source = custom_skill_source(tmp_path)
@@ -361,13 +466,17 @@ def test_installer_reconciles_previously_managed_link_drift(tmp_path):
 
 
 def test_directory_symlink_to_canonical_skills_is_preserved_without_manifest(tmp_path):
-    fixture_root = tmp_path / "agents"
+    fixture_root = tmp_path / "product-fixture"
     scripts = fixture_root / "scripts"
     scripts.mkdir(parents=True)
     shutil.copy2(SCRIPT, scripts / "install-skills")
     (scripts / "lib").mkdir()
     shutil.copy2(PYTHON_RESOLVER, scripts / "lib" / "harness-python.sh")
     shutil.copy2(MANAGER, scripts / "manage_installation.py")
+    shutil.copy2(
+        ROOT / "scripts" / "managed_installation_manifest.py",
+        scripts / "managed_installation_manifest.py",
+    )
     shutil.copytree(ROOT / "skills", fixture_root / "skills")
     platform_home = tmp_path / "claude"
     platform_home.mkdir()
@@ -397,7 +506,7 @@ def test_directory_symlink_to_canonical_skills_is_preserved_without_manifest(tmp
 
 def directory_link_fixture(tmp_path: Path, custom_names=()):
     """A Claude-shaped install: the whole product tree behind one directory link."""
-    fixture_root = tmp_path / "agents"
+    fixture_root = tmp_path / "product-fixture"
     scripts = fixture_root / "scripts"
     scripts.mkdir(parents=True)
     shutil.copy2(SCRIPT, scripts / "install-skills")
@@ -522,7 +631,7 @@ def test_directory_link_layout_without_custom_skills_stays_a_directory_link(tmp_
 
 
 def test_directory_symlink_layout_rejects_two_source_name_collision(tmp_path):
-    fixture_root = tmp_path / "agents"
+    fixture_root = tmp_path / "product-fixture"
     scripts = fixture_root / "scripts"
     scripts.mkdir(parents=True)
     shutil.copy2(SCRIPT, scripts / "install-skills")
