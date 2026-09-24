@@ -146,19 +146,42 @@ def test_secret_patterns_find_live_shapes_but_skip_placeholders(name, positive, 
     assert scan.scan_bytes(placeholder.encode(), '<prompt>') == []
 
 
-def test_secret_scan_add_dirs_observes_git_ignore_and_budgets(tmp_path, monkeypatch):
+def test_secret_angle_placeholder_requires_both_brackets():
+    scan = load_secret_scan_module()
+    key = 'AKIA' + 'A' * 16
+    for content in (f'<{key}', f'{key}>'):
+        assert [item.name for item in scan.scan_bytes(content.encode(), '<prompt>')] == ['AWS access key ID']
+    assert scan.scan_bytes(f'<{key}>'.encode(), '<prompt>') == []
+
+
+def test_secret_scan_skips_deleted_tracked_files(tmp_path):
     scan = load_secret_scan_module()
     subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
-    (tmp_path / '.gitignore').write_text('ignored.txt\n')
+    deleted = tmp_path / 'deleted.txt'
+    deleted.write_text('ordinary content')
+    subprocess.run(['git', 'add', 'deleted.txt'], cwd=tmp_path, check=True)
+    deleted.unlink()
+    (tmp_path / 'present.txt').write_text('AKIA' + 'A' * 16)
+
+    result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
+    assert [(finding.name, Path(finding.path).name) for finding in result.findings] == [
+        ('AWS access key ID', 'present.txt')
+    ]
+
+
+def test_secret_scan_add_dirs_includes_ignored_regular_files_and_warns_on_budgets(tmp_path, monkeypatch):
+    scan = load_secret_scan_module()
+    subprocess.run(['git', 'init', '-q'], cwd=tmp_path, check=True)
+    (tmp_path / '.gitignore').write_text('ignored.txt\n.env\n')
     (tmp_path / 'ignored.txt').write_text('AKIA' + 'A' * 16)
+    (tmp_path / '.env').write_text('rk_live_' + 'a' * 24)
     (tmp_path / 'tracked.txt').write_text('AKIA' + 'B' * 16)
     (tmp_path / 'extra.txt').write_text('ghp_' + 'a' * 30)
     result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
-    assert {finding.name for finding in result.findings} == {'AWS access key ID', 'GitHub token'}
-    assert not any('ignored.txt' in finding.path for finding in result.findings)
-    subprocess.run(['git', 'add', '-f', 'ignored.txt'], cwd=tmp_path, check=True)
-    assert any('ignored.txt' in finding.path for finding in
-               scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)]).findings)
+    assert {finding.name for finding in result.findings} == {'AWS access key ID', 'GitHub token', 'Stripe live key'}
+    assert {Path(finding.path).name for finding in result.findings} == {
+        'ignored.txt', '.env', 'tracked.txt', 'extra.txt'
+    }
     monkeypatch.setattr(scan, 'MAX_FILES', 1)
     limited = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
     assert limited.warnings == ['secret scan directory budget reached']
@@ -177,6 +200,12 @@ def test_secret_scan_skips_binary_oversized_and_untracked_system_dirs(tmp_path):
         directory = tmp_path / name
         directory.mkdir()
         (directory / 'secret.txt').write_bytes(secret)
+    assert scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)]).findings == []
+
+
+def test_secret_scan_skips_git_metadata_file(tmp_path):
+    scan = load_secret_scan_module()
+    (tmp_path / '.git').write_text('AKIA' + 'A' * 16)
     assert scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)]).findings == []
 
 

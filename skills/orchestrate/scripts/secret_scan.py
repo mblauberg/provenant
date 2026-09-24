@@ -6,7 +6,6 @@ import os
 from pathlib import Path
 import re
 import stat
-import subprocess
 from dataclasses import dataclass, field
 
 MAX_FILE_BYTES = 1024 * 1024
@@ -59,7 +58,7 @@ def scan_bytes(content: bytes, path: str) -> list[Finding]:
             before = content[max(0, match.start() - 3):match.start()]
             after = content[match.end():match.end() + 3]
             if (any(marker in candidate for marker in (b"EXAMPLE", b"XXXX", b"<", b"..."))
-                    or before.endswith(b"<") or after.startswith(b">")
+                    or (before.endswith(b"<") and after.startswith(b">"))
                     or before.endswith(b"...") or after.startswith(b"...")):
                 continue
             findings.append(Finding(name, shown_path, content.count(b"\n", 0, match.start()) + 1))
@@ -71,23 +70,13 @@ def _files(directory: Path):
         raise OSError(f"additional directory unavailable: {directory}")
     if {"node_modules", ".git"}.intersection(directory.parts):
         return
-    repo = subprocess.run(["git", "rev-parse", "--is-inside-work-tree"], cwd=directory,
-                          capture_output=True, timeout=5)
-    if repo.returncode == 0 and repo.stdout.strip() == b"true":
-        listed = subprocess.run(["git", "ls-files", "-co", "--exclude-standard", "-z", "--", "."],
-                                cwd=directory, capture_output=True, timeout=10, check=True)
-        for name in listed.stdout.split(b"\0"):
-            if name:
-                path = directory / os.fsdecode(name)
-                if not {"node_modules", ".git"}.intersection(path.parts):
-                    yield path
-    else:
-        def raise_walk_error(error: OSError) -> None:
-            raise error
+    def raise_walk_error(error: OSError) -> None:
+        raise error
 
-        for root, dirs, files in os.walk(directory, followlinks=False, onerror=raise_walk_error):
-            dirs[:] = [name for name in dirs if name not in {"node_modules", ".git"}]
-            for name in files:
+    for root, dirs, files in os.walk(directory, followlinks=False, onerror=raise_walk_error):
+        dirs[:] = [name for name in dirs if name not in {"node_modules", ".git"}]
+        for name in files:
+            if name not in {"node_modules", ".git"}:
                 yield Path(root) / name
 
 
@@ -111,6 +100,8 @@ def scan_inputs(prompt: bytes, prompt_path: str, add_dirs: list[str] | None = No
                 if len(content) > MAX_FILE_BYTES or b"\0" in content:
                     continue
                 result.findings.extend(scan_bytes(content, str(path)))
+            except FileNotFoundError:
+                continue
             except OSError as exc:
                 raise OSError(f"cannot scan additional file: {path}") from exc
     return result

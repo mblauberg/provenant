@@ -54,6 +54,7 @@ from dispatch_run import (
     remove_cancellation_marker,
 )
 from attempt_evidence import AttemptEvidenceError as SharedAttemptEvidenceError, canonical_success_status, validate_successful_attempt
+from secret_scan import scan_inputs
 from _shared.custody import (
     OwnedFileError, atomic_write_contained, contained_regular_path, open_contained_regular,
     read_bound_bytes, read_contained_regular,
@@ -722,6 +723,24 @@ def batch(args: argparse.Namespace) -> int:
             raise BatchInputError(f"dispatch owner is unavailable: {DISPATCH_RUN}")
     except BatchInputError as exc:
         print(json.dumps({"schema_version": 1, "status": "invalid_manifest", "message": str(exc)}, sort_keys=True))
+        return 2
+
+    first_finding = None
+    try:
+        for task in tasks:
+            prompt_path = task.get("prompt_file", "<prompt>")
+            prompt = (task["_inline_prompt"].encode("utf-8") if "_inline_prompt" in task
+                      else Path(prompt_path).read_bytes())
+            scan = scan_inputs(prompt, prompt_path, task.get("add_dirs"))
+            if scan.findings and task.get("allow_secrets") is not True and first_finding is None:
+                first_finding = scan
+    except OSError:
+        print(json.dumps({"schema_version": 1, "status": "rejected", "error": "secret_scan_unavailable",
+                          "fix": "Make task inputs readable for the secret scan."}, sort_keys=True))
+        return 2
+    if first_finding is not None:
+        print(json.dumps({"schema_version": 1, "status": "rejected", "error": "secret_detected",
+                          "fix": first_finding.fix()}, sort_keys=True))
         return 2
 
     try:
