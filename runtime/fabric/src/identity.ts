@@ -41,6 +41,7 @@ export interface Identity {
   readonly cwd: string;
   readonly agentId: string;
   readonly provider: string;
+  readonly registeredProjects?: string[];
 }
 
 /**

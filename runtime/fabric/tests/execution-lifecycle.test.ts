@@ -12,7 +12,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
-import { routeArguments } from "../src/execution-input.js";
+import { normaliseRoute, routeArguments, workingIdentity } from "../src/execution-input.js";
+import { catalogueSnapshot } from "../src/catalogue.js";
 import { psOutput } from "../src/ps.mjs";
 import {
   listRecordedRuns,
@@ -42,6 +43,61 @@ let identity: Identity;
 let ownerEnvironment: NodeJS.ProcessEnv;
 const spawnedPids: number[] = [];
 
+describe("Fabric input corrections", () => {
+  it("normalises common mode, model casing and relative path with warnings", async () => {
+    const catalogue = { adapters: [
+      { name: "codex", models: ["gpt-6-luna"], model_details: [], aliases: { workhorse: ["gpt-6-luna"] } },
+    ] } as any;
+    const result = normaliseRoute({ adapter: "codex", mode: "rw" as any, worktree: "../work",
+      model: "GPT_6_LUNA" }, identity, catalogue);
+    expect(result.access_mode).toBe("worktree_write");
+    expect(result.worktree).toBe(resolve(identity.cwd, "../work"));
+    expect(result.model).toBe("gpt-6-luna");
+    expect(result.warnings?.some((warning) => warning.includes("mode"))).toBe(true);
+    expect(normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, catalogue).model).toBe("gpt-6-luna");
+    expect(normaliseRoute({ adapter: "codex", alias: "workhorze" }, identity, catalogue).alias).toBe("workhorse");
+    expect(() => normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, {
+      adapters: [{ name: "codex", models: ["gpt-6-luna", "gpt-6-luno"], model_details: [], aliases: {} }],
+    } as any)).toThrow(/gpt-6-luna, gpt-6-luno/u);
+  });
+
+  it("resolves every configured model id to itself", () => {
+    const configured = JSON.parse(readFileSync(join(repositoryRoot, "config/model-routing.json"), "utf8"));
+    const snapshot = catalogueSnapshot(repositoryRoot);
+    for (const [adapter, entry] of Object.entries(configured.adapters as Record<string, { models?: { id: string }[] }>)) {
+      for (const { id } of entry.models ?? []) {
+        expect(normaliseRoute({ adapter, model: id }, identity, snapshot).model, `${adapter}/${id}`).toBe(id);
+      }
+    }
+    expect(normaliseRoute({ adapter: "claude", alias: "opus" }, identity, snapshot).model).toBe("claude-opus-5-5");
+  });
+
+  it("corrects a model typo but never changes its version", () => {
+    const snapshot = catalogueSnapshot(repositoryRoot);
+    const typo = normaliseRoute({ adapter: "codex", model: "gpt-6-lunna" }, identity, snapshot);
+    expect(typo.model).toBe("gpt-6-luna");
+    expect((typo.warnings ?? []).join(" ")).toContain("gpt-6-luna");
+    expect(() => normaliseRoute({ adapter: "codex", model: "gpt-7-luna" }, identity, snapshot)).toThrow(/valid model/u);
+  });
+
+  it("resolves relative read-only cwd against the caller directory", () => {
+    const base = mkdtempSync(join(tmpdir(), "fabric-cwd-"));
+    const child = join(base, "child");
+    mkdirSync(child);
+    expect(workingIdentity({ cwd: "child" }, { ...identity, project: base, cwd: base }).cwd).toBe(realpathSync(child));
+    rmSync(base, { recursive: true, force: true });
+  });
+
+  it("accepts read-only cwd under another registered project", () => {
+    const base = mkdtempSync(join(tmpdir(), "fabric-other-project-"));
+    const child = join(base, "child");
+    mkdirSync(child);
+    const caller = { ...identity, registeredProjects: [identity.project, base] };
+    expect(workingIdentity({ cwd: child }, caller).cwd).toBe(realpathSync(child));
+    rmSync(base, { recursive: true, force: true });
+  });
+});
+
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
@@ -51,6 +107,9 @@ function buildProduct(root: string): string {
   const fake = join(root, "product");
   const owners = join(fake, "skills/orchestrate/scripts");
   const helpers = join(fake, "scripts/lib");
+  mkdirSync(join(fake, "config"), { recursive: true });
+  copyFileSync(join(repositoryRoot, "config/model-routing.json"), join(fake, "config/model-routing.json"));
+  copyFileSync(join(repositoryRoot, "config/adapter-compatibility.yaml"), join(fake, "config/adapter-compatibility.yaml"));
   mkdirSync(owners, { recursive: true });
   mkdirSync(helpers, { recursive: true });
   copyFileSync(
@@ -832,13 +891,13 @@ describe("front door model selection", () => {
     expect(routeArguments(route)).toContain("--allow-secrets");
     expect(routeArguments({ ...route, allow_secrets: false })).not.toContain("--allow-secrets");
   });
-  it("leaves shorthand aliases for the routing owner to resolve", async () => {
-    mkdirSync(join(product, "config"));
+  it("resolves exact model aliases to their canonical model IDs", async () => {
     copyFileSync(join(repositoryRoot, "config", "model-routing.json"), join(product, "config", "model-routing.json"));
     for (const name of ["luna", "sol", "astra"]) {
       const done = await dispatchConfiguredProvider({ adapter: "codex", alias: name, prompt: "ordinary run", wait_seconds: 5 },
         identity, new AbortController().signal, { ...ownerEnvironment, AGENT_FABRIC_INSTANCE_ROOT: product });
-      expect(done).toMatchObject({ status: "ok", route: { resolved_model: name } });
+      const modelId = name === "luna" ? "gpt-6-luna" : name === "sol" ? "gpt-6-sol" : "gpt-6-astra";
+      expect(done).toMatchObject({ status: "ok", route: { resolved_model: modelId } });
     }
   });
   it("treats an empty model as omitted and keeps the alias", async () => {
@@ -1087,7 +1146,7 @@ it('bounds output slices, rejects escaped output, and waits for all requested ta
 });
 
 it('selects the catalogue owner for a model-only request from another seat', async () => {
- mkdirSync(join(product,'config'));copyFileSync(join(repositoryRoot,'config/model-routing.json'),join(product,'config/model-routing.json'));
+ copyFileSync(join(repositoryRoot,'config/model-routing.json'),join(product,'config/model-routing.json'));
  const result=await dispatchConfiguredProvider({model:'gpt-6-luna',prompt:'fixture',wait_seconds:5},{...identity,provider:'claude'},new AbortController().signal,{...ownerEnvironment,AGENT_FABRIC_INSTANCE_ROOT:product});
  expect(result).toMatchObject({status:'ok',route:{adapter:'codex',resolved_model:'gpt-6-luna'}});
 });

@@ -18,6 +18,7 @@ import {
 } from "./execution.js";
 import { isSQLiteContention, Store, type Message } from "./store.js";
 import { readEvents, readRuns } from "./run-reader.js";
+import { canonicalMode, editDistance, ACCESS_MODES } from "./execution-input.js";
 
 // Leave margin under the MCP SDK's 60-second default request timeout.
 const MAX_WAIT_SECONDS = MAX_EXECUTION_WAIT_SECONDS;
@@ -53,6 +54,7 @@ const readyStore = (busyTimeoutMs = 5000): Store => {
     throw new Error(`fabric startup failed: ${detail}`, { cause: error });
   }
 };
+const executionIdentity = () => ({ ...who, registeredProjects: readyStore().projects() });
 
 const server = new McpServer(
   { name: "fabric", version: "2.0.0" },
@@ -136,6 +138,9 @@ const waitForInbox = async (
 
 const detail = z.enum(["brief", "full"]).optional();
 const str = z.string().optional();
+const ids = (maximum?: number) => z.union([
+  maximum === undefined ? z.array(z.string()) : z.array(z.string()).max(maximum), z.string(),
+]).transform((value) => typeof value === "string" ? [value] : value).optional();
 const wait = z.unknown().optional();
 const optionalNumber = z.unknown().optional();
 const route = {
@@ -143,7 +148,7 @@ const route = {
   alias: str,
   model: str,
   effort: str,
-  mode: z.enum(["read_only", "worktree_write"]).optional(),
+  mode: z.enum(ACCESS_MODES).optional(),
   worktree: str,
   cwd: str,
   network: z.boolean().optional(),
@@ -155,14 +160,49 @@ const route = {
     .optional(),
 };
 const task = { prompt: str, prompt_file: str, timeout_seconds: optionalNumber, ...route };
+const taskFields = { id: str, ...task };
 const batch = {
-  tasks: z
-    .array(z.record(z.string(), z.unknown()).pipe(z.strictObject({ id: str, ...task })))
-    .min(1)
-    .max(64),
+  tasks: z.array(z.object(taskFields).catchall(z.unknown()).meta({ additionalProperties: false })).min(1).max(64),
   concurrency: optionalNumber,
   wait_seconds: wait,
 };
+const INPUT_SYNONYMS: Record<string, string> = {
+  prompt_path: "prompt_file", file: "prompt_file",
+  dir: "cwd", path: "cwd", task: "task_id",
+};
+const inputKey = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/gu, "");
+function normaliseInputKeys(name: string, input: Record<string, any>, fields: string[], nestedTask = false) {
+  const aliases = nestedTask ? { ...INPUT_SYNONYMS, task_id: "id", task: "id" } : INPUT_SYNONYMS;
+  const result: Record<string, any> = {};
+  const warnings: string[] = [];
+  for (const [key, value] of Object.entries(input)) {
+    const canonical = fields.find((field) => inputKey(field) === inputKey(key));
+    const synonym = Object.entries(aliases).find(([alias]) => inputKey(alias) === inputKey(key))?.[1];
+    let target = canonical ?? synonym;
+    if (!target || !fields.includes(target)) {
+      const matches = fields.map((field) => ({ field, score: editDistance(inputKey(key), inputKey(field)) }))
+        .sort((a, b) => a.score - b.score);
+      const closest = matches.filter((match) => match.score === matches[0]?.score && match.score <= 3).map((match) => match.field);
+      throw { status: "rejected", error: "argument_unknown", fix: `Unknown ${name} field ${key}; closest valid field${closest.length === 1 ? "" : "s"}: ${closest.join(", ") || fields.join(", ")}.` };
+    }
+    if (Object.hasOwn(result, target))
+      throw { status: "rejected", error: "argument_ambiguous", fix: `Pass only one of the fields that map to ${target}.` };
+    result[target] = target === "mode" && typeof value === "string" ? canonicalMode(value) : value;
+    if (target !== key) warnings.push(`corrected ${key} to ${target}`);
+  }
+  if ((name === "fabric_dispatch" || name === "fabric_batch") && Array.isArray(result.tasks))
+    result.tasks = result.tasks.map((item: unknown, index: number) => {
+      if (!item || typeof item !== "object" || Array.isArray(item))
+        return { id: `task-${index + 1}`, prompt: "", prompt_file: "" };
+      const rawTask = item as Record<string, any>;
+      try { return normaliseInputKeys(name, rawTask, ["id", ...Object.keys(task)], true).value; }
+      catch {
+        const id = rawTask.id ?? rawTask.task_id ?? rawTask.task;
+        return { id: typeof id === "string" ? id : `task-${index + 1}`, prompt: "", prompt_file: "" };
+      }
+    });
+  return { value: result, warnings };
+}
 // Catch domain errors at the boundary; SDK validation errors retain its protocol error envelope.
 function register(
   name: string,
@@ -170,11 +210,31 @@ function register(
   schema: z.ZodRawShape,
   handler: (input: any, extra: any) => unknown | Promise<unknown>,
 ) {
-  server.registerTool(name, { description, inputSchema: z.strictObject(schema) }, async (input, extra) => {
+  const accepted = { ...schema };
+  if (Object.hasOwn(accepted, "mode")) accepted.mode = z.string().optional().meta({ enum: ACCESS_MODES });
+  if (name === "fabric_dispatch" || name === "fabric_batch") {
+    const acceptedTask = { id: str, ...task, mode: z.string().optional().meta({ enum: ACCESS_MODES }) };
+    const acceptedTasks = z.array(z.object(acceptedTask).catchall(z.unknown()).meta({ additionalProperties: false }))
+      .min(1).max(64);
+    accepted.tasks = name === "fabric_batch" ? acceptedTasks : acceptedTasks.optional();
+  }
+  const inputSchema = z.object(accepted).catchall(z.unknown()).meta({ additionalProperties: false });
+  server.registerTool(name, { description, inputSchema }, async (rawInput, extra) => {
     const includeStructuredContent =
-      !["fabric_dispatch", "fabric_status"].includes(name) || input.detail === "full";
+      !["fabric_dispatch", "fabric_status"].includes(name) || rawInput.detail === "full";
     try {
-      return reply(await handler(input, extra), includeStructuredContent);
+      let corrected;
+      try { corrected = normaliseInputKeys(name, rawInput, Object.keys(schema)); }
+      catch (error) { return reply(error as Record<string, unknown>, includeStructuredContent); }
+      const strictFields = { ...schema };
+      if (name === "fabric_dispatch") strictFields.tasks = z.array(z.strictObject(taskFields)).min(1).max(64).optional();
+      if (name === "fabric_batch") strictFields.tasks = z.array(z.strictObject(taskFields)).min(1).max(64);
+      const parsed = z.strictObject(strictFields).safeParse(corrected.value);
+      if (!parsed.success) return reply({ status: "rejected", error: "invalid_input", fix: parsed.error.issues[0]?.message ?? "Check the supplied fields." }, includeStructuredContent);
+      const input = parsed.data as any;
+      const result = await handler(input, extra) as Record<string, any>;
+      const warning = corrected.warnings.length ? [`warning: ${corrected.warnings.join("; ")}`] : [];
+      return reply(warning.length ? withWarnings(result, warning) : result, includeStructuredContent);
     } catch (error) {
       return {
         ...reply({
@@ -230,7 +290,7 @@ register(
     peek: z.boolean().optional(),
     task_id: str,
     claim_seconds: z.number().int().min(1).max(3600).optional(),
-    ids: z.array(z.string()).max(100).optional(),
+    ids: ids(100),
     claim: z.boolean().optional(),
     limit: z.number().int().min(1).max(100).optional(),
     wait_seconds: wait,
@@ -259,7 +319,7 @@ register(
 register(
   "fabric_runs",
   "Versioned, bounded run and lane reader with root-relative paths.",
-  { ids: z.array(z.string()).max(20).optional(), wait_seconds: wait },
+  { ids: ids(20), wait_seconds: wait },
   async ({ ids, wait_seconds }, { signal }) => {
     const bounded = boundedWait(wait_seconds);
     if (bounded.error) return bounded.error;
@@ -320,8 +380,8 @@ register(
       : input.handoff
         ? await handoffDispatch(input, who, signal)
         : input.tasks
-        ? await dispatchConfiguredBatch({ ...input, wait_seconds: input.wait_seconds ?? 0 }, who, signal)
-        : await dispatchConfiguredProvider(input, who, signal);
+        ? await dispatchConfiguredBatch({ ...input, wait_seconds: input.wait_seconds ?? 0 }, executionIdentity(), signal)
+        : await dispatchConfiguredProvider(input, executionIdentity(), signal);
     if (!result.id) return withWarnings(result, waitResult.warnings);
     const observed = await statusRows(who.cwd, [String(result.id)], 0, "all", signal, input.detail);
     if (input.resume && result.task_id) observed.runs = observed.runs?.filter((row) => row.task_id === result.task_id);
@@ -330,14 +390,19 @@ register(
       const row = observed.runs[0]!;
       return runView(withWarnings({ ...result, ...row, paths: { ...(result.paths as object), ...row.paths } }, waitResult.warnings), input.detail);
     }
-    return runView(withWarnings(observed.runs ? observed : result, waitResult.warnings), input.detail);
+    const value = observed.runs ? {
+      ...observed,
+      ...(result.tasks === undefined ? {} : { tasks: result.tasks }),
+      ...(result.warnings === undefined ? {} : { warnings: result.warnings }),
+    } : result;
+    return runView(withWarnings(value, waitResult.warnings), input.detail);
   },
 );
 register(
   "fabric_status",
   "Read or wait for runs. wait_seconds above 55 is clamped to 55; invalid numeric values return a typed rejection.",
   {
-    ids: z.array(z.string()).optional(),
+    ids: ids(),
     id: str,
     wait_seconds: wait,
     until: z.enum(["any", "all"]).optional(),
@@ -471,7 +536,7 @@ register("fabric_adapters", "List routes and guarantees; full includes profiles.
 );
 if (process.env.FABRIC_LEGACY_TOOLS === "1") {
   register("fabric_batch", "Run a task batch.", batch, (input, { signal }) =>
-    dispatchConfiguredBatch(input, who, signal),
+    dispatchConfiguredBatch(input, executionIdentity(), signal),
   );
   register(
     "fabric_team_create",
