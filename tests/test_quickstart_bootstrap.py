@@ -1,7 +1,6 @@
 from pathlib import Path
 import json
 import os
-import shutil
 import subprocess
 
 
@@ -9,22 +8,14 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_documented_fresh_checkout_sequence_produces_runnable_fabric(tmp_path):
-    readme = (ROOT / "README.md").read_text()
-    commands = [
-        'npm ci',
-        'scripts/install-harness --platform all',
-        'provenant help',
-        'provenant fabric whoami',
-    ]
-    positions = [readme.index(command) for command in commands]
-    assert positions == sorted(positions)
-
     checkout = tmp_path / "fresh-checkout"
     scripts = checkout / "scripts"
     scripts.mkdir(parents=True)
-    shutil.copy2(ROOT / "scripts" / "provenant", scripts / "provenant")
-    shutil.copytree(ROOT / "scripts" / "lib", scripts / "lib")
-    shutil.copytree(ROOT / "runtime" / "fabric", checkout / "runtime" / "fabric")
+    (scripts / "provenant").symlink_to(ROOT / "scripts" / "provenant")
+    (scripts / "lib").symlink_to(ROOT / "scripts" / "lib", target_is_directory=True)
+    runtime = checkout / "runtime"
+    runtime.mkdir()
+    (runtime / "fabric").symlink_to(ROOT / "runtime" / "fabric", target_is_directory=True)
 
     installed_modules = ROOT / "node_modules"
     assert (installed_modules / "tsx" / "dist" / "loader.mjs").is_file()

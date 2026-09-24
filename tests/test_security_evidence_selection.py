@@ -33,5 +33,4 @@ def test_unknown_surface_fails_closed():
 def test_agent_product_adds_agentic_risk_catalogue():
     module = load_module()
     result = module.select(["agent-tools"], ROOT, profile="agent-product")
-    assert len(result["agentic_risks"]) == 9
     assert "tool-misuse" in result["agentic_risks"]

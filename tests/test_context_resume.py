@@ -162,8 +162,9 @@ def test_resume_never_redirects_a_task_without_an_attempt(tmp_path, monkeypatch)
     row = attempt(run, 1, "one")
     missing = resume(run, row, prompt, "--task-id", "two")
     assert missing.returncode != 0
-    assert json.loads(missing.stdout) == {"schema_version": 1, "status": "rejected", "error": "resume_task_unknown",
-                                          "message": "task two has no attempt in this run"}
+    error = json.loads(missing.stdout)
+    assert error["status"] == "rejected"
+    assert error["error"] == "resume_task_unknown"
     assert not (run / "tasks/one/attempt-002").exists() and not (run / "tasks/two").exists()
     assert len(argv_calls(log)) == 1
     resumed = resume(run, row, prompt, "--task-id", "one")

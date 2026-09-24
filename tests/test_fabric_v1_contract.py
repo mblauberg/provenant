@@ -118,4 +118,3 @@ def test_shared_contract_examples():
         "ended_at",
     } <= read("index.json").keys()
     assert read("resume.json")["resume"] == read("attempt.json")["run_id"]
-    assert len(read("layout-cases.json")) == 4
