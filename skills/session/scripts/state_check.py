@@ -14,6 +14,7 @@ import time
 
 
 MAX_BYTES = 6144
+INACTIVE_AFTER_SECONDS = 24 * 60 * 60
 REQUIRED_HEADINGS = (
     "Goal and authority",
     "Stage and blockers",
@@ -134,11 +135,16 @@ def main(argv: list[str] | None = None) -> int:
         cwd = hook_cwd(cwd)
     root = project_root(cwd)
     paths = [path if path.is_absolute() else cwd / path for path in args.paths]
+    now = time.time()
     if not paths:
-        paths = sorted((root / ".agent-run" / "sessions").glob("*/STATE.md"))
+        # A session untouched for a day is finished, not a live chair to warn about.
+        paths = [
+            path
+            for path in sorted((root / ".agent-run" / "sessions").glob("*/STATE.md"))
+            if now - path.stat().st_mtime <= INACTIVE_AFTER_SECONDS
+        ]
 
     findings = []
-    now = time.time()
     for path in paths:
         findings.extend(
             check_file(

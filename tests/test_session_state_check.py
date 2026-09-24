@@ -117,6 +117,21 @@ def test_stale_file_reports_problem_and_fix(tmp_path):
     ]
 
 
+def test_discovery_skips_sessions_untouched_for_a_day(tmp_path):
+    live = write_state(tmp_path / ".agent-run" / "sessions" / "live" / "STATE.md", missing="Links")
+    finished = write_state(tmp_path / ".agent-run" / "sessions" / "finished" / "STATE.md", missing="Links")
+    old = finished.stat().st_mtime - 25 * 60 * 60
+    os.utime(finished, (old, old))
+
+    result = run_check(tmp_path)
+
+    assert result.returncode == 1
+    assert result.stdout.splitlines() == [
+        "state_check: .agent-run/sessions/live/STATE.md: missing level-2 heading 'Links'; add the required heading"
+    ]
+    assert live.exists()
+
+
 def test_no_discovered_state_files_is_silent_success(tmp_path):
     result = run_check(tmp_path)
 

@@ -36,8 +36,8 @@ and before a handoff. Then check it:
 python3 "<installed-session-skill>/scripts/state_check.py"
 ```
 
-With no arguments it finds `.agent-run/sessions/*/STATE.md` under the project
-root and reports size, missing sections, the next-action count and staleness
+With no arguments it finds `.agent-run/sessions/*/STATE.md` files modified in
+the last day under the project root and reports size, missing sections, the next-action count and staleness
 (over 30 minutes), exiting non-zero on a problem. Outside such projects it
 prints nothing.
 
