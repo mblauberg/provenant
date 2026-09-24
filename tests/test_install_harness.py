@@ -1238,6 +1238,41 @@ def test_skill_source_collision_preflights_before_harness_mutation(tmp_path):
     assert not (config / ".agent-harness-installation.json").exists()
 
 
+def test_claude_retired_agent_conflict_preflights_before_harness_mutation(tmp_path):
+    config = tmp_path / "claude-config"
+    agents = config / "agents"
+    agents.mkdir(parents=True)
+    modified_agent = agents / "retired-worker.md"
+    modified_agent.write_text("user modification\n")
+    old_source = tmp_path / "old-product/agents/retired-worker.md"
+    receipt = config / ".agent-harness-agents-installation.json"
+    receipt.write_text(json.dumps({
+        "schema_version": 1,
+        "owner": "agent-harness",
+        "surface": "claude-agents",
+        "target_root": str(agents.resolve()),
+        "updated_at": "2026-01-01T00:00:00Z",
+        "managed": {
+            old_source.name: {
+                "owner": "agent-harness",
+                "source_target": str(old_source),
+                "source_sha256": "0" * 64,
+                "installed_at": "2026-01-01T00:00:00Z",
+            }
+        },
+    }))
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 3
+    assert "conflicting retired managed agent target" in result.stderr
+    assert modified_agent.read_text() == "user modification\n"
+    assert receipt.is_file()
+    assert not (config / "skills").exists()
+    assert not instance_root_for(tmp_path).exists()
+    assert not (tmp_path / "bin" / "provenant").exists()
+
+
 def test_rejects_a_relative_provenant_bin_directory_before_mutation(tmp_path):
     relative_bin = "relative-provenant-bin"
 
