@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import fcntl
 from functools import lru_cache
 import hashlib
@@ -228,7 +229,6 @@ def main(argv: list[str] | None = None) -> int:
             })
 
             target_dir = workspace / evidence_dir
-            target_dir.mkdir(parents=True, exist_ok=True)
             with tempfile.TemporaryDirectory(prefix=".software-bind-", dir=receipt.parent) as temporary:
                 stage = Path(temporary)
                 for artifact_id, raw in payloads:
@@ -239,16 +239,33 @@ def main(argv: list[str] | None = None) -> int:
                     staged.write_bytes(raw)
                     with staged.open("rb") as handle:
                         os.fsync(handle.fileno())
+
+                staged_prefix = stage.relative_to(workspace)
+                payload_ids = {artifact_id for artifact_id, _ in payloads}
+                validation_run = deepcopy(run)
+                for item in validation_run["artifacts"]:
+                    if item.get("id") in payload_ids:
+                        item["path"] = (staged_prefix / f"{item['id']}.json").as_posix()
+                preflight(validation_run, receipt, workspace, validator, resolved_product_root)
+
+                for item in run["artifacts"]:
+                    if item.get("id") in payload_ids:
+                        item["path"] = (evidence_dir / f"{item['id']}.json").as_posix()
                 staged_receipt = stage / "RUN.json"
                 staged_receipt.write_text(json.dumps(run, indent=2) + "\n")
                 with staged_receipt.open("rb") as handle:
                     os.fsync(handle.fileno())
+                target_dir.mkdir(parents=True, exist_ok=True)
                 for artifact_id, _ in payloads:
                     target = target_dir / f"{artifact_id}.json"
-                    if not target.exists():
-                        os.replace(stage / f"{artifact_id}.json", target)
+                    staged = stage / f"{artifact_id}.json"
+                    try:
+                        os.link(staged, target)
+                    except FileExistsError:
+                        fail(target.read_bytes() != staged.read_bytes(),
+                             f"refusing to replace conflicting evidence artifact: {target}")
+                    staged.unlink()
                 fsync_directory(target_dir)
-                preflight(run, receipt, workspace, validator, resolved_product_root)
                 os.replace(staged_receipt, receipt)
                 fsync_directory(receipt.parent)
         print(f"PASS: bound merged software artifact {merge_commit} to {receipt}")
