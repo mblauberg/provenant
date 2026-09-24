@@ -1340,9 +1340,51 @@ def test_nul_prompt_file_is_rejected_before_provider_execution():
         )
 
         assert result.returncode == 2
-        assert "prompt contains unsupported NUL bytes" in result.stderr
-        assert result.stdout == ""
+        assert json.loads(result.stdout)["status"] == "prompt_unavailable"
         assert not invoked.exists()
+
+
+@pytest.mark.parametrize("field", ["prompt_file", "add_dir"])
+def test_shell_checks_original_protected_inputs_before_copy(tmp_path, field):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    (repo / ".agents").mkdir()
+    (repo / ".agents/fabric-policy.json").write_text('{"protected_paths":["private/"]}')
+    (repo / "private").mkdir()
+    (repo / "private/prompt.md").write_text("secret", encoding="utf-8")
+    (repo / "prompt.md").write_text("safe", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "copied"
+    write_executable(bin_dir / "cp", f"#!/bin/sh\ntouch {shlex.quote(str(marker))}\nexec /bin/cp \"$@\"\n")
+    env = fabric_free_env()
+    env["AGENT_FABRIC_INSTANCE_ROOT"] = str(PRODUCT_ROOT)
+    env["AGENT_FABRIC_PRODUCT_ROOT"] = str(PRODUCT_ROOT)
+    env["PATH"] = str(bin_dir) + os.pathsep + env["PATH"]
+    command = [
+        str(SCRIPT), "--intent", "ordinary", "--tool", "opencode",
+        "--model", "opencode/mimo-v2.6-flash-free", "--prompt-file",
+        "private/prompt.md" if field == "prompt_file" else "prompt.md",
+    ]
+    if field == "add_dir":
+        command.extend(("--add-dir", "private"))
+    result = subprocess.run(command, cwd=repo, env=env, text=True, capture_output=True)
+    assert result.returncode != 0
+    assert "protected_path_denied" in result.stdout
+    assert not marker.exists()
+
+
+def test_shell_rejects_primary_checkout_writer(tmp_path):
+    repo = tmp_path / "primary"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    result = subprocess.run([
+        str(SCRIPT), "--intent", "ordinary", "--tool", "claude", "--prompt", "hello",
+        "--access-mode", "worktree_write", "--worktree", str(repo),
+    ], cwd=tmp_path, env=fabric_free_env(), text=True, capture_output=True)
+    assert result.returncode == 2
+    assert "create a linked worktree" in result.stderr
 
 
 def test_agy_failure_preserves_the_provider_reason_in_the_output():
@@ -2512,9 +2554,13 @@ if __name__ == "__main__":
 
 def make_worktree(root):
     """Create a real Git worktree root a writer may own."""
+    repo = root / "primary"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test", "-c",
+                    "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "initial"], check=True)
     worktree = root / "worktree"
-    worktree.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=worktree, check=True)
+    subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "writer", str(worktree)], check=True)
     return worktree.resolve()
 
 

@@ -60,7 +60,7 @@ When Fabric is used, the caller records any Fabric correlation.
 EOF
 }
 
-TOOL="" MODEL="" EFFORT="" OUT="" PROMPT="" PROMPT_FILE="" CHAIN="" ORCH_FAMILY="" MODEL_ALIAS="" TASK_CLASS="" ROUTE_ROLE="reviewer" RISK_TIER="" MODEL_OVERRIDE_TIER="" REVIEWER_ID="" INTENT="assurance" DOCTOR=0
+TOOL="" MODEL="" EFFORT="" OUT="" PROMPT="" PROMPT_FILE="" ORIGINAL_PROMPT_FILE="" CHAIN="" ORCH_FAMILY="" MODEL_ALIAS="" TASK_CLASS="" ROUTE_ROLE="reviewer" RISK_TIER="" MODEL_OVERRIDE_TIER="" REVIEWER_ID="" INTENT="assurance" DOCTOR=0
 PLAN_ONLY=0
 SANDBOX="" NETWORK="" RESUME_SESSION="" PROVIDER_CWD=""
 PREFACE=1
@@ -105,6 +105,7 @@ while [ $# -gt 0 ]; do
     --out) need_value "$@"; OUT="$2"; shift 2;;
     --prompt) need_value "$@"; PROMPT="$2"; shift 2;;
     --prompt-file) need_value "$@"; PROMPT_FILE="$2"; shift 2;;
+    --original-prompt-file) need_value "$@"; ORIGINAL_PROMPT_FILE="$2"; shift 2;;
     --chain) need_value "$@"; CHAIN="$2"; shift 2;;
     --orchestrator-family) need_value "$@"; ORCH_FAMILY="$2"; shift 2;;
     --intent|--execution-intent) need_value "$@"; INTENT="$2"; shift 2;;
@@ -191,6 +192,11 @@ case "$ACCESS_MODE" in
       echo "--worktree must be the root of a Git worktree: $WORKTREE" >&2; exit 2
     fi
     WORKTREE_GIT_COMMON="$(git -C "$WORKTREE" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || WORKTREE_GIT_COMMON=""
+    worktree_git_dir="$(git -C "$WORKTREE" rev-parse --path-format=absolute --absolute-git-dir 2>/dev/null)" || worktree_git_dir=""
+    if [ -z "$WORKTREE_GIT_COMMON" ] || [ "$worktree_git_dir" = "$WORKTREE_GIT_COMMON" ]; then
+      echo "worktree_write requires a linked worktree; fix: create a linked worktree" >&2
+      exit 2
+    fi
     ;;
   *) echo "invalid access mode: $ACCESS_MODE" >&2; exit 2;;
 esac
@@ -269,6 +275,7 @@ python3 "$WORKTREE_POLICY" validate-context --repo "$(pwd -P)" --allow-non-git \
 
 if [ -n "$PROMPT_FILE" ]; then
   [ -r "$PROMPT_FILE" ] || { echo "cannot read prompt file: $PROMPT_FILE" >&2; exit 2; }
+  [ -n "$ORIGINAL_PROMPT_FILE" ] || ORIGINAL_PROMPT_FILE="$PROMPT_FILE"
 elif [ -z "$PROMPT" ]; then
   echo "need --prompt or --prompt-file" >&2
   exit 2
@@ -288,15 +295,23 @@ if [ -z "$OUT" ]; then
   OUT_CREATED=true
 fi
 PROMPT_TMP="$(make_tmp)"
-if [ -n "$PROMPT_FILE" ]; then
-  if ! cp -- "$PROMPT_FILE" "$PROMPT_TMP"; then
-    echo "cannot retain prompt file: $PROMPT_FILE" >&2
-    [ "$OUT_CREATED" = true ] && rm -f "$OUT"
-    exit 2
+PROMPT_STAGED=0
+stage_prompt() {
+  [ "$PROMPT_STAGED" = 1 ] && return 0
+  if [ -n "$PROMPT_FILE" ]; then
+    cp -- "$PROMPT_FILE" "$PROMPT_TMP" || return 1
+  else
+    printf '%s' "$PROMPT" >"$PROMPT_TMP" || return 1
   fi
-else
-  printf '%s' "$PROMPT" >"$PROMPT_TMP"
-fi
+  [ -s "$PROMPT_TMP" ] || return 1
+  python3 - "$PROMPT_TMP" <<'PY'
+import sys
+from pathlib import Path
+raise SystemExit(1 if b"\0" in Path(sys.argv[1]).read_bytes() else 0)
+PY
+  [ $? -eq 0 ] || return 1
+  PROMPT_STAGED=1
+}
 cleanup_dispatch() {
   rm -f "$PROMPT_TMP"
   [ -n "$ACTIVE_RUN_TMPDIR" ] && rm -rf -- "$ACTIVE_RUN_TMPDIR"
@@ -309,22 +324,6 @@ abort_dispatch() {
 }
 trap cleanup_dispatch EXIT
 trap abort_dispatch INT TERM HUP
-[ -s "$PROMPT_TMP" ] || {
-  echo "need --prompt or --prompt-file" >&2
-  [ "$OUT_CREATED" = true ] && rm -f "$OUT"
-  exit 2
-}
-if ! python3 - "$PROMPT_TMP" <<'PY'
-import sys
-from pathlib import Path
-
-raise SystemExit(1 if b"\0" in Path(sys.argv[1]).read_bytes() else 0)
-PY
-then
-  echo "prompt contains unsupported NUL bytes" >&2
-  [ "$OUT_CREATED" = true ] && rm -f "$OUT"
-  exit 2
-fi
 json_escape() {
   python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])'
 }
@@ -663,6 +662,36 @@ agy_has_unsafe_arg() {
   esac
 }
 
+preflight_original() {
+  local route_file="$1" provider_cwd="$2" worktree="$3"
+  python3 - "$SCRIPT_DIR" "$route_file" "$(pwd -P)" "$provider_cwd" "$worktree" "$ORIGINAL_PROMPT_FILE" "$PROMPT_FILE" "${AGY_ADD_DIRS[@]:-}" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+script_dir, route_file, workspace, cwd, worktree, original, source, *add_dirs = sys.argv[1:]
+add_dirs = [path for path in add_dirs if path]
+sys.path.insert(0, script_dir)
+import provider_exec
+
+route = json.loads(Path(route_file).read_text())
+routes = [route, *route.get("fallback_candidates", [])]
+try:
+    for candidate in routes:
+        protected = []
+        for prompt_file in dict.fromkeys((original, source)):
+            protected = provider_exec.check_protected_inputs(
+                candidate, workspace, cwd, worktree=worktree or None,
+                prompt_file=prompt_file or None, add_dirs=add_dirs,
+            )
+        if protected and (candidate.get("adapter") == "codex" or not provider_exec._sandbox_exec_path()):
+            raise ValueError("protected paths require sandbox-exec read confinement; fix: use a non-training route")
+except (OSError, ValueError) as exc:
+    print(str(exc), file=sys.stderr)
+    raise SystemExit(2)
+PY
+}
+
 run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/1
   local tool="$1" model="$2" effort="$3" route_effort_input="$3" tmpdir="$4" raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier route_model_override_tier route_alias route_reason endpoint_profile endpoint_base_url endpoint_token_env endpoint_wire_api agy_status agy_dir agy_prompt_bytes
   local model_pin="$2"
@@ -784,6 +813,18 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
         printf '%s\n' "$route_json" >>"$diag"
         rc=1
       else
+        local selected_cwd="${WORKTREE:-${PROVIDER_CWD:-$(pwd -P)}}"
+        if ! preflight_original "$tmpdir/route.json" "$selected_cwd" "$WORKTREE" >>"$diag" 2>&1; then
+          install_output "$diag" "$OUT" || true
+          emit_record "$tool" "$model" "$effort" "protected_path_denied" 2 "$OUT" "none" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source" "$substitution" "$requested_model" "$fallback_model"
+          return 2
+        fi
+        if ! stage_prompt; then
+          echo "cannot retain prompt or prompt contains unsupported NUL bytes" >"$diag"
+          install_output "$diag" "$OUT" || true
+          emit_record "$tool" "$model" "$effort" "prompt_unavailable" 2 "$OUT" "none" "$family" "$endpoint" "$identity" "$effort_substitution" "$requested_effort" "$effort_source" "$effort_capability_source" "$substitution" "$requested_model" "$fallback_model"
+          return 2
+        fi
         local provider_cli="$tool"
         [ "$tool" = cursor ] && provider_cli=cursor-agent
         [ "$tool" = kiro ] && provider_cli=kiro-cli
@@ -793,11 +834,12 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
           return 1
         fi
         local -a supervisor=(python3 "$SCRIPT_DIR/provider_exec.py" --route-file "$tmpdir/route.json"
-          --adapter "$tool" --prompt-file "$PROMPT_TMP" --out "$OUT" --mode "$ACCESS_MODE"
+          --adapter "$tool" --prompt-file "$PROMPT_TMP" --out "$OUT" --run-dir "$tmpdir" --mode "$ACCESS_MODE"
           --workspace-root "$(pwd -P)"
           --intent "$INTENT" --orchestrator-family "$ORCH_FAMILY" --reviewer-id "$REVIEWER_ID"
           --risk-tier "$RISK_TIER" --model-override-tier "$MODEL_OVERRIDE_TIER"
           --requested-model "$model_pin" --requested-effort "$route_effort_input")
+        [ -n "$ORIGINAL_PROMPT_FILE" ] && supervisor+=(--original-prompt-file "$ORIGINAL_PROMPT_FILE")
         [ "$PLAN_ONLY" = 1 ] && supervisor+=(--plan-only)
         [ "$PREFACE" = 0 ] && supervisor+=(--no-preface)
         [ -n "$WORKTREE" ] && supervisor+=(--worktree "$WORKTREE")
