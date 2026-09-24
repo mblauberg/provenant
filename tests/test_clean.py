@@ -7,6 +7,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 
 
@@ -613,6 +614,24 @@ def test_post_merge_hook_calls_clean_and_never_fails_merge(tmp_path):
     assert "cleanup failed" in result.stderr
 
 
+def test_post_merge_hook_uses_local_master_without_origin_head(tmp_path):
+    root = repo(tmp_path)
+    subprocess.run(["git", "-C", str(root), "branch", "-M", "master"], check=True)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    marker = tmp_path / "called"
+    stub = bin_dir / "provenant"
+    stub.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" > "{marker}"\n')
+    stub.chmod(0o755)
+    environment = {**os.environ, "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+
+    result = subprocess.run([str(HOOK)], cwd=root, env=environment,
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text() == f"clean --prune-merged --repo {root}\n"
+
+
 def test_prune_merged_uses_origin_default_branch(tmp_path):
     root = repo(tmp_path)
     subprocess.run(["git", "-C", str(root), "branch", "-M", "main"], check=True)
@@ -650,8 +669,10 @@ def test_prune_merged_reports_unproven_squash_candidate(tmp_path):
     subprocess.run(["git", "-C", str(root), "commit", "-qm", "squash"], check=True)
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
+    marker = tmp_path / "github-called"
     gh = bin_dir / "gh"
-    gh.write_text('#!/bin/sh\nif [ "$2" = "list" ]; then\n'
+    gh.write_text(f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{marker}"\n'
+                  'if [ "$2" = "list" ]; then\n'
                   '  if [ "$4" = "open" ]; then echo "[]"; else echo \'[{"number":42,"state":"MERGED"}]\'; fi\n'
                   'else echo \'{"files":[{"path":"work.txt"}]}\'; fi\n')
     gh.chmod(0o755)
@@ -661,8 +682,101 @@ def test_prune_merged_reports_unproven_squash_candidate(tmp_path):
                             env=environment, text=True, capture_output=True, check=False)
 
     assert result.returncode == 0, result.stderr
-    assert "skipped .worktrees/lane-squashed: keep:squash-proof-unavailable" in result.stdout
+    assert "skipped .worktrees/lane-squashed: keep:unmerged" in result.stdout
     assert target.exists()
+    assert not marker.exists()
+
+
+def test_prune_merged_fails_closed_without_integration_branch(tmp_path):
+    root = repo(tmp_path)
+    subprocess.run(["git", "-C", str(root), "branch", "-M", "feature"], check=True)
+    target = root / ".worktrees" / "lane-done"
+    target.parent.mkdir()
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", "lane/done", str(target)], check=True)
+    (target / "work.txt").write_text("done\n")
+    subprocess.run(["git", "-C", str(target), "add", "work.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "done"], check=True)
+    subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", "feature merge", "lane/done"], check=True)
+
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--repo", str(root)],
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode != 0
+    assert "integration branch" in result.stderr
+    assert target.exists()
+
+
+def test_prune_merged_uses_local_master_instead_of_feature_head(tmp_path):
+    root = repo(tmp_path)
+    subprocess.run(["git", "-C", str(root), "branch", "-M", "master"], check=True)
+    subprocess.run(["git", "-C", str(root), "switch", "-q", "-c", "feature"], check=True)
+    target = root / ".worktrees" / "lane-done"
+    target.parent.mkdir()
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", "lane/done", str(target)], check=True)
+    (target / "work.txt").write_text("done\n")
+    subprocess.run(["git", "-C", str(target), "add", "work.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "done"], check=True)
+    subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", "feature merge", "lane/done"], check=True)
+
+    result = subprocess.run(["python3", str(SCRIPT), "--prune-merged", "--repo", str(root)],
+                            text=True, capture_output=True, check=False)
+
+    assert result.returncode == 0, result.stderr
+    assert "skipped .worktrees/lane-done: keep:unmerged" in result.stdout
+    assert target.exists()
+
+
+def test_prune_merged_reuses_its_plan(tmp_path, monkeypatch):
+    root = repo(tmp_path)
+    subprocess.run(["git", "-C", str(root), "branch", "-M", "main"], check=True)
+    module = cleaner()
+    real_plan = module.plan
+    calls = []
+
+    def counted_plan(*args, **kwargs):
+        calls.append((args, kwargs))
+        return real_plan(*args, **kwargs)
+
+    monkeypatch.setattr(module, "plan", counted_plan)
+    assert module.main(["--prune-merged", "--repo", str(root)]) == 0
+    assert len(calls) == 1
+
+
+def test_prune_merged_plan_fails_closed_if_integration_branch_disappears(tmp_path):
+    root = repo(tmp_path)
+    subprocess.run(["git", "-C", str(root), "branch", "-M", "main"], check=True)
+    target = root / ".worktrees" / "lane-done"
+    target.parent.mkdir()
+    subprocess.run(["git", "-C", str(root), "worktree", "add", "-q", "-b", "lane/done", str(target)], check=True)
+    (target / "work.txt").write_text("done\n")
+    subprocess.run(["git", "-C", str(target), "add", "work.txt"], check=True)
+    subprocess.run(["git", "-C", str(target), "commit", "-qm", "done"], check=True)
+    subprocess.run(["git", "-C", str(root), "merge", "--no-ff", "-qm", "merge lane", "lane/done"], check=True)
+    module = cleaner()
+    proposal = module.plan(root, include=frozenset({"worktrees"}), prune_merged=True)
+    subprocess.run(["git", "-C", str(root), "branch", "-M", "feature"], check=True)
+
+    try:
+        module._apply_plan(proposal, proposal["plan_sha256"], human_authorised=True)
+    except module.CleanError as exc:
+        assert "integration branch" in str(exc)
+    else:
+        raise AssertionError("a plan with no integration branch was applied")
+    assert target.exists()
+
+
+def test_post_merge_hook_documented_commands_use_configured_hooks_path(tmp_path):
+    root = repo(tmp_path)
+    hooks = tmp_path / "custom-hooks"
+    hooks.mkdir()
+    subprocess.run(["git", "-C", str(root), "config", "core.hooksPath", str(hooks)], check=True)
+    document = (SCRIPT.parent.parent / "docs" / "worktrees.md").read_text()
+    section = document.split("## Post-merge pruning", 1)[1]
+    commands = re.findall(r"```sh\n([^`]+)\n```", section)
+
+    for command in commands[:2]:
+        subprocess.run(["sh", "-c", command], cwd=root, check=True)
+        assert (hooks / "post-merge").is_symlink() == (command == commands[0])
 
 
 def test_squash_merge_proof_uses_pr_changed_paths(tmp_path, monkeypatch):

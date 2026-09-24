@@ -138,13 +138,13 @@ squash merges when Git ancestry cannot prove the merge and reports each
 skipped worktree.
 
 ```sh
-hook="$(git rev-parse --git-common-dir)/hooks/post-merge"; source="$(git rev-parse --show-toplevel)/scripts/hooks/post-merge"; if [ -e "$hook" ] || [ -L "$hook" ]; then printf '%s\n' 'post-merge hook already exists; inspect it' >&2; else ln -s "$source" "$hook"; fi
+hook="$(git rev-parse --git-path hooks)/post-merge"; source="$(git rev-parse --show-toplevel)/scripts/hooks/post-merge"; if [ -e "$hook" ] || [ -L "$hook" ]; then printf '%s\n' 'post-merge hook already exists; inspect it' >&2; else ln -s "$source" "$hook"; fi
 ```
 
 To disable it, remove only the symlink to this hook:
 
 ```sh
-hook="$(git rev-parse --git-common-dir)/hooks/post-merge"; source="$(git rev-parse --show-toplevel)/scripts/hooks/post-merge"; if [ -L "$hook" ] && [ "$(readlink "$hook")" = "$source" ]; then rm "$hook"; fi
+hook="$(git rev-parse --git-path hooks)/post-merge"; source="$(git rev-parse --show-toplevel)/scripts/hooks/post-merge"; if [ -L "$hook" ] && [ "$(readlink "$hook")" = "$source" ]; then rm "$hook"; fi
 ```
 
 Prune immediately after the merge, in this order:
