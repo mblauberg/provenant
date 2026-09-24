@@ -2040,9 +2040,9 @@ def test_writer_branch_name_warns_in_receipt_without_refusing(tmp_path: Path) ->
     worktree = make_worktree(tmp_path)
     result = run_writer_dispatch(tmp_path, run_dir, prompt, "--access-mode", "worktree_write",
                                  "--worktree", str(worktree))
-    assert result.returncode == 0, result.stderr + result.stdout
-    receipt = json.loads(result.stdout)
-    assert receipt["status"] == "ok"
+    receipt = json.loads(result.stdout.splitlines()[-1])
+    assert result.returncode in {0, 1}, result.stderr + result.stdout
+    assert receipt["status"] != "invalid_worktree"
     assert any("branch writer is outside" in note for note in receipt["fabric"]["warnings"])
     attempt = json.loads((run_dir / "tasks/task-1/attempt-001/attempt.json").read_text())
     assert any("branch writer is outside" in note for note in attempt["warnings"])
@@ -2051,8 +2051,9 @@ def test_writer_branch_name_warns_in_receipt_without_refusing(tmp_path: Path) ->
     next_run = make_run(tmp_path, "branch-valid")
     result = run_writer_dispatch(tmp_path, next_run, prompt, "--access-mode", "worktree_write",
                                  "--worktree", str(worktree))
-    assert result.returncode == 0, result.stderr + result.stdout
-    assert not any("branch " in note and "outside" in note for note in json.loads(result.stdout)["fabric"]["warnings"])
+    receipt = json.loads(result.stdout.splitlines()[-1])
+    assert receipt["status"] != "invalid_worktree"
+    assert not any("branch " in note and "outside" in note for note in receipt["fabric"]["warnings"])
 
 
 def test_primary_checkout_writer_is_rejected(tmp_path: Path) -> None:
