@@ -65,8 +65,9 @@ Dispatch accepts exactly one of `prompt` and `prompt_file`. Route controls are
 the prompt and eligible files under `add_dirs` for common live credential shapes.
 A finding rejects with `error: secret_detected` and a location in `fix`; set
 `allow_secrets: true` explicitly to proceed. The attempt records the override
-and finding names. Directory scanning stops at 2,000 files or 20 MB and records
-a warning. Writers use `mode: worktree_write` and an
+and finding names. If scanning `add_dirs` exceeds 2,000 files or 20 MB, dispatch
+rejects with `error: secret_scan_budget_exceeded`; narrow the inputs or explicitly
+set `allow_secrets: true` and explain why in the prompt. Writers use `mode: worktree_write` and an
 owned, registered linked worktree. The primary checkout is refused; create a linked
 worktree. `cwd` selects an existing read-only directory inside
 the caller workspace. The Python owner validates provider capabilities and
@@ -95,6 +96,10 @@ training routes still refuse without OS read confinement.
 The receipt records `applied.confinement` as `sandbox-exec`, `provider-native` or `none`;
 `applied.write_boundary` records the effective writable paths or native sandbox;
 `workspace.cwd` is the provider cwd and `workspace.root` is the caller workspace.
+Read-only macOS launches can read `~/.gitconfig` and
+`$XDG_CONFIG_HOME/git/config` (default `~/.config/git/config`) so `git status`
+works. Other home-directory reads remain denied apart from provider state and
+sign-in files listed by the adapter profile.
 Projects declare protected paths in `.agents/fabric-policy.json`, relative to
 the directory holding `.agents/`. Fabric checks the workspace root and the Git
 toplevels of the workspace, cwd and worktree; for a non-Git workspace, it also
@@ -133,6 +138,24 @@ Queued time does not use the execution timeout, but `FABRIC_MEMORY_WAIT_SECONDS`
 limits each wait (default 1800); expiry fails the attempt as `memory_unavailable`.
 Owners serialise admission through a per-user host lock in `$XDG_STATE_HOME/provenant/admission.lock`
 (default `~/.local/state/provenant/admission.lock`) and hold it for up to 20 seconds after provider start; lock creation failure admits with a warning, while probe failure holds and retries until the wait expires. `fabric_status` and `fabric status` show the available percentage, floor and wait budget and allow cancellation.
+
+### Live provider sandbox smoke
+
+The live check is opt-in and makes real provider calls. On macOS with
+`sandbox-exec`, run:
+
+```sh
+python3 runtime/fabric/live-sandbox-smoke.py --execute
+```
+
+It dispatches one short `read_only` and one `worktree_write` task for each
+installed writer adapter among Codex, Claude, Kiro and OpenCode. Each task
+probes a declared protected file and a write target outside its boundary. The
+command exits nonzero if a probe fails and prints JSON containing each adapter,
+mode, resolved `Route:` line, confinement, warnings and result. It creates its
+Git fixtures and run artifacts in a temporary directory, which is removed when
+the command exits. Do not add this command to the default test run. Record the
+first run's JSON results in the pull request.
 An invalid floor records a failed attempt with a fix. The parent keeps a
 watchdog for child owners and excludes their published queued time.
 

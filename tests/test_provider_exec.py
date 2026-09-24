@@ -64,6 +64,8 @@ def test_read_only_os_confinement_profile_and_argv(monkeypatch, tmp_path):
     add_dir = tmp_path / "extra"
     cwd.mkdir(parents=True)
     add_dir.mkdir()
+    xdg = tmp_path / "xdg"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
     plan = {
         "adapter": "agy", "mode": "read_only", "workspace_root": str(root),
         "cwd": str(cwd), "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]},
@@ -74,11 +76,39 @@ def test_read_only_os_confinement_profile_and_argv(monkeypatch, tmp_path):
     assert '(deny file-read-data (subpath "' + str(root) + '")' in profile
     assert '(subpath "' + str(Path.home() / ".claude/projects") + '")' in profile
     assert '(subpath "' + str(Path.home() / ".codex/sessions") + '")' in profile
+    git_config_rule = (
+        f'(allow file-read-data (literal "{Path.home() / ".gitconfig"}") '
+        f'(literal "{xdg / "git/config"}"))'
+    )
+    assert git_config_rule in profile
     assert '(allow file-read-data (subpath "' + str(cwd) + '") (subpath "' + str(add_dir) + '"))' in profile
     monkeypatch.setattr(supervisor, "os_confinement_profile", lambda _plan: "(version 1)")
     assert supervisor.confinement_command(plan, ["/bin/cat", "file"]) == [
         "/usr/bin/sandbox-exec", "-p", "(version 1)", "/bin/cat", "file",
     ]
+
+
+def test_read_only_git_config_allowlist_is_limited_to_the_two_global_files(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    home = (tmp_path / "home").resolve()
+    home.mkdir()
+    xdg = tmp_path / "xdg" / "config"
+    monkeypatch.setattr(supervisor.Path, "home", lambda: home)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+    plan = {
+        "adapter": "opencode", "mode": "read_only", "workspace_root": str(tmp_path / "workspace"),
+        "cwd": str(tmp_path / "workspace"), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    }
+    profile = supervisor.os_confinement_profile(plan)
+
+    assert f'(literal "{home / ".gitconfig"}")' in profile
+    assert f'(literal "{xdg / "git/config"}")' in profile
+    assert f'(subpath "{home}")' in profile
+    assert f'(literal "{home / ".ssh/config"}")' not in profile
+
+    monkeypatch.delenv("XDG_CONFIG_HOME")
+    default_profile = supervisor.os_confinement_profile(plan)
+    assert f'(literal "{home / ".config/git/config"}")' in default_profile
 
 
 def test_writer_confinement_allows_only_owned_paths(monkeypatch, tmp_path):
@@ -505,6 +535,11 @@ def test_sandbox_exec_profile_denies_home_reads_and_writes_but_keeps_provider_st
     cwd = home / "repo/sub"
     cwd.mkdir(parents=True)
     (cwd / "note.txt").write_text("note\n", encoding="utf-8")
+    (home / ".gitconfig").write_text("[user]\n\tname = home-config\n", encoding="utf-8")
+    xdg_git = home / ".config/git"
+    xdg_git.mkdir(parents=True)
+    (xdg_git / "config").write_text("[user]\n\temail = xdg-config@example.invalid\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(cwd)], check=True)
     monkeypatch.setattr(supervisor.Path, "home", lambda: home)
     monkeypatch.setattr(supervisor, "CONFINED_STATE", {"agy": {"read_write": ("state", "creds.json*"), "read": ()}})
     plan = {
@@ -514,12 +549,22 @@ def test_sandbox_exec_profile_denies_home_reads_and_writes_but_keeps_provider_st
     profile = supervisor.os_confinement_profile(plan)
 
     def run(script):
-        return subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script], capture_output=True, text=True)
+        return subprocess.run(
+            [sandbox_exec, "-p", profile, "/bin/sh", "-c", script], capture_output=True, text=True,
+            env={**os.environ, "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config")},
+        )
 
     probe = run(f"cat {cwd}/note.txt")
     if probe.returncode and "sandbox_apply" in probe.stderr:
         pytest.skip("sandbox_apply is refused in this test environment")
     assert probe.stdout == "note\n"
+    config = run(
+        f"git -C '{cwd}' config --global user.name && git -C '{cwd}' config --global user.email"
+    )
+    assert config.returncode == 0, config.stderr
+    assert config.stdout.splitlines() == ["home-config", "xdg-config@example.invalid"]
+    status = run(f"git -C '{cwd}' status --short")
+    assert status.returncode == 0, status.stderr
     assert run(f"cat {home}/.ssh/id").returncode != 0
     assert run(f"echo x > {home}/written").returncode != 0
     assert not (home / "written").exists()

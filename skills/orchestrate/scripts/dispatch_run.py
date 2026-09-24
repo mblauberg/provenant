@@ -1189,6 +1189,8 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                         [str(workspace / Path(item).expanduser()) for item in task.get("add_dirs") or []])
                 except (OSError, subprocess.SubprocessError) as exc:
                     raise PreflightError("secret_scan_unavailable", "Make dispatch inputs readable for the secret scan.") from exc
+                if scan.budget_exceeded and not task.get("allow_secrets", False):
+                    raise PreflightError("secret_scan_budget_exceeded", scan.fix())
                 if scan.findings and not task.get("allow_secrets", False):
                     raise PreflightError("secret_detected", scan.fix())
                 adapter = task["adapter"]
@@ -1545,6 +1547,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             prompt_bytes or b"", str(args.prompt_file) if args.prompt_file else "<prompt>", args.add_dirs)
     except (OSError, subprocess.SubprocessError):
         return fail(run_dir, "secret_scan_unavailable", "Make dispatch inputs readable for the secret scan.")
+    if secret_scan_result.budget_exceeded and not getattr(args, "allow_secrets", False):
+        print(json.dumps({"status": "rejected", "error": "secret_scan_budget_exceeded", "fix": secret_scan_result.fix()}))
+        return 2
     if secret_scan_result.findings and not getattr(args, "allow_secrets", False):
         print(json.dumps({"status": "rejected", "error": "secret_detected", "fix": secret_scan_result.fix()}))
         return 2

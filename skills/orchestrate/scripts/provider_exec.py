@@ -243,6 +243,9 @@ def os_confinement_profile(plan):
                 + _sbpl_rule("allow", "file-write*", git_allowed)
                 + _sbpl_rule("allow", "file-write*", literal_files, literal=True)
                 + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", [])))
+    configured_xdg = Path(os.environ.get("XDG_CONFIG_HOME", "")).expanduser()
+    xdg_config_home = configured_xdg if configured_xdg.is_absolute() else home / ".config"
+    git_config_files = [home / ".gitconfig", xdg_config_home / "git/config"]
     return (
         "(version 1)\n(allow default)\n(deny file-write*)\n"
         + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), *state_writes, Path("/dev")])
@@ -250,6 +253,7 @@ def os_confinement_profile(plan):
         + _sbpl_rule("deny", "file-read-data", [root, *add_dirs, *(home / path for path in EXTRA_DENIED_READS)])
         + _sbpl_rule("allow", "file-read-data", [*([run_dir] if run_dir else []), *state_writes])
         + _sbpl_rule("allow", "file-read-data", [home / path for path in state.get("read", ())])
+        + _sbpl_rule("allow", "file-read-data", git_config_files, literal=True)
         + _sbpl_rule("allow", "file-read-data", [
             Path(plan["cwd"]), *add_dirs
         ])
