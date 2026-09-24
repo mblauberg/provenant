@@ -15,7 +15,7 @@ it("closing a run whose directory was already removed resolves instead of reject
     owner_stdout: `${runDir}-owner.stdout.jsonl`, owner_stderr: `${runDir}-owner.stderr.log`,
     run_id: "mcp-remove", running: false, orphaned: false, provider: null,
   } as unknown as RecordedRun;
-  await expect(terminateRecordedRun(run, 10, "cancelled")).resolves.toMatchObject({ reason: "not running" });
+  await expect(terminateRecordedRun(run, 10, "cancelled")).resolves.toMatchObject({ signalled: false });
 });
 
 it("a closure write that fails for another reason keeps the owner record", async () => {
@@ -34,7 +34,7 @@ it("a closure write that fails for another reason keeps the owner record", async
       owner_stdout: `${runDir}-owner.stdout.jsonl`, owner_stderr: `${runDir}-owner.stderr.log`,
       run_id: "mcp-blocked", running: false, orphaned: false, provider: null,
     } as unknown as RecordedRun;
-    await expect(terminateRecordedRun(run, 10, "cancelled")).resolves.toMatchObject({ reason: "not running" });
+    await expect(terminateRecordedRun(run, 10, "cancelled")).resolves.toMatchObject({ signalled: false });
     expect(existsSync(join(runDir, OWNER_RECORD_NAME))).toBe(true);
   } finally {
     rmSync(root, { recursive: true, force: true });
