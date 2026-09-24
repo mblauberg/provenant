@@ -81,7 +81,8 @@ def test_read_only_os_confinement_profile_and_argv(monkeypatch, tmp_path):
     ]
 
 
-def test_writer_confinement_allows_only_owned_paths(monkeypatch, tmp_path):
+@pytest.mark.parametrize("adapter", ["agy", "claude", "cursor", "opencode", "kiro"])
+def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_path, adapter):
     mod = supervisor()
     worktree = tmp_path / "worktree"
     attempt = tmp_path / "run" / "attempt"
@@ -92,16 +93,15 @@ def test_writer_confinement_allows_only_owned_paths(monkeypatch, tmp_path):
         path.mkdir(parents=True)
     dirs = iter((private, common))
     monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=str(next(dirs))))
-    plan = {"adapter": "claude", "mode": "worktree_write", "cwd": str(worktree),
+    plan = {"adapter": adapter, "mode": "worktree_write", "cwd": str(worktree),
             "workspace_root": str(worktree), "run_dir": str(attempt),
             "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]}}
     profile = mod.os_confinement_profile(plan)
     assert "(deny file-write*)" in profile
     assert f'(deny file-write* (subpath "{common}"))' in profile
     allow = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-write* "))
-    for path in (worktree, attempt, private, Path("/dev")):
+    for path in (worktree, add_dir, attempt, private, Path("/dev")):
         assert f'(subpath "{path}")' in allow
-    assert f'(subpath "{add_dir}")' not in allow
     assert f'(subpath "{common}")' not in allow
     for path in (common / "objects", common / "refs", common / "logs"):
         assert f'(subpath "{path}")' in profile
@@ -112,10 +112,31 @@ def test_writer_confinement_allows_only_owned_paths(monkeypatch, tmp_path):
         assert f'(literal "{path}")' not in profile
     for path in (Path.home() / ".cache", Path.home() / "Library/Caches", Path("/private/tmp")):
         assert f'(subpath "{path}")' not in profile
-    assert mod._sbpl_filter(str(Path.home() / ".claude.json" ) + "*") in profile
+    for state_path in mod.CONFINED_STATE[adapter]["read_write"]:
+        assert mod._sbpl_filter(Path.home() / state_path) in profile
     assert f'(subpath "{tmp_path}")' not in profile
     assert '(subpath "/dev")' in profile
     assert "(deny file-read-data" not in profile
+
+
+def test_writer_protected_path_inside_add_dir_keeps_read_and_write_denied(monkeypatch, tmp_path):
+    mod = supervisor()
+    worktree = tmp_path / "worktree"
+    add_dir = tmp_path / "extra"
+    protected = add_dir / "private"
+    worktree.mkdir()
+    protected.mkdir(parents=True)
+    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stdout=""))
+    plan = {"adapter": "agy", "mode": "worktree_write", "cwd": str(worktree),
+            "workspace_root": str(worktree), "protected_paths": [str(protected)],
+            "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]}}
+
+    profile = mod.os_confinement_profile(plan)
+
+    assert f'(allow file-write* (subpath "{worktree}") (subpath "{add_dir}")' in profile
+    assert profile.rfind(f'(deny file-write* (subpath "{protected}"))') > profile.rfind(
+        '(allow file-write* ')
+    assert profile.rstrip().endswith(f'(deny file-read* (subpath "{protected}"))')
 
 
 def test_writer_rejects_primary_checkout(tmp_path):
@@ -168,9 +189,10 @@ def test_agy_writer_requires_os_confinement_and_uses_write_profile(monkeypatch, 
     profile = mod.os_confinement_profile(plan)
     assert "(deny file-write*)" in profile
     assert f'(allow file-write* (subpath "{tmp_path}")' in profile
-    assert f'(subpath "{add_dir}")' not in "\n".join(
+    assert f'(subpath "{add_dir}")' in "\n".join(
         line for line in profile.splitlines() if line.startswith("(allow file-write* ")
     )
+    assert str(add_dir) in plan["applied"]["write_boundary"]["writable_paths"]
     assert profile.rstrip().endswith(
         f'(deny file-read* (subpath "{tmp_path / "secret"}"))'
     )
@@ -255,7 +277,7 @@ def test_writer_discovers_worktree_policy_outside_workspace(monkeypatch, tmp_pat
                           add_dirs=[str(extra)])
     assert str(repo / "private") in plan["protected_paths"]
     boundary = plan["applied"]["write_boundary"]
-    assert str(extra) not in boundary["writable_paths"]
+    assert str(extra) in boundary["writable_paths"]
     assert str(repo / ".git/config") not in boundary["writable_paths"]
     assert str(repo / ".git/objects") in boundary["writable_paths"]
 
@@ -2655,8 +2677,22 @@ def test_add_dirs_deny_ancestors_of_credential_stores(tmp_path, monkeypatch, dir
     assert any('credential' in warning for warning in plan['warnings'])
 
 
-def test_opencode_does_not_claim_unsupported_add_dirs(tmp_path):
-    plan = supervisor().build_plan('opencode', {}, 'hello', cwd=tmp_path, workspace_root=tmp_path, add_dirs=[tmp_path])
+@pytest.mark.parametrize('adapter', ['agy', 'claude', 'cursor', 'opencode', 'kiro'])
+def test_wrapped_writer_records_add_dirs_in_write_boundary(monkeypatch, tmp_path, adapter):
+    mod = supervisor()
+    add_dir = tmp_path / 'extra'
+    add_dir.mkdir()
+    monkeypatch.setattr(mod, '_sandbox_exec_path', lambda: '/usr/bin/sandbox-exec')
+    plan = mod.build_plan(adapter, {}, 'hello', cwd=tmp_path, workspace_root=tmp_path,
+                          mode='worktree_write', add_dirs=[add_dir])
+    assert str(add_dir) in plan['applied']['add_dirs']
+    assert str(add_dir) in plan['applied']['write_boundary']['writable_paths']
+
+
+def test_opencode_does_not_claim_unsupported_add_dirs_without_wrapper(monkeypatch, tmp_path):
+    mod = supervisor()
+    monkeypatch.setattr(mod, '_sandbox_exec_path', lambda: None)
+    plan = mod.build_plan('opencode', {}, 'hello', cwd=tmp_path, workspace_root=tmp_path, add_dirs=[tmp_path])
     assert plan['applied']['add_dirs'] == []
     assert 'additional directories unsupported by opencode' in plan['warnings']
 
