@@ -62,7 +62,9 @@ only user STOP closes the mission. See
 
 The run-local `STATE.md` holds current recovery truth; `QUEUE.md` is the durable work queue
 and item-lease ledger. Durable decisions are delegated, not forked here; see
-[state-contract.md](references/state-contract.md).
+[state-contract.md](references/state-contract.md). Decisions taken while the
+user is away go to the assumption ledger for later confirmation; see
+[assumptions-and-steering.md](references/assumptions-and-steering.md).
 
 Cleanup must classify first: never delete unknown files; prune only
 mission-owned, manifest-classified ephemeral payload with no live reference.
@@ -73,5 +75,6 @@ closure protocol.
 ## References
 
 Load one relevant reference: [state-contract.md](references/state-contract.md),
-[cross-family-review.md](references/cross-family-review.md), or the
+[cross-family-review.md](references/cross-family-review.md),
+[assumptions-and-steering.md](references/assumptions-and-steering.md), or the
 loop/recovery/Codex files above.

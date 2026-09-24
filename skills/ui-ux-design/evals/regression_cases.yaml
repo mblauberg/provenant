@@ -84,3 +84,18 @@ cases:
     note: >-
       The explicit read-only constraint prevents live setup, injection,
       wrapping and acceptance; gather non-mutating rendered evidence instead.
+  - id: r110
+    relation: positive
+    prompt: "Capture light and dark desktop screenshots of the two screens this branch changed and review them for visual regressions without editing anything."
+    tags: [direct, changed-surface-capture]
+    expected: {primary_skill: ui-ux-design, companion_skills: []}
+    note: >-
+      Changed surfaces only, both themes, and the reviewer looks at every
+      capture before judging.
+  - id: r111
+    relation: boundary
+    prompt: "Build an interactive prototype of two competing dashboard layouts for the owner to choose between, then implement the chosen one."
+    tags: [composition]
+    expected: {primary_skill: implement, companion_skills: [ui-ux-design]}
+    note: >-
+      A prototype awaiting the owner parks that item; other work continues.

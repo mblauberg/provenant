@@ -1,0 +1,5 @@
+schema_version: 1
+target_skill: code-review
+cases:
+  - {id: r108, relation: positive, prompt: "Review this branch read-only from the shared checkout; compare against main using git show and git diff only.", tags: [direct, reviewer-git-denylist], expected: {primary_skill: code-review, companion_skills: []}, note: "Source-read-only review includes git state: read refs with git show and git diff."}
+  - {id: r109, relation: boundary, prompt: "Review this pull request that restyles the settings page, including how the changed screens look in light and dark mode.", tags: [composition], expected: {primary_skill: code-review, companion_skills: [ui-ux-design]}, note: "Rendered-UI change: the reviewer looks at light and dark captures of changed surfaces."}
