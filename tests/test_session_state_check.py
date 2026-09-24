@@ -162,3 +162,40 @@ def test_hook_ignores_malformed_stdin_and_uses_process_cwd(tmp_path):
     assert result.stdout.splitlines() == [
         f"Checkpoint check: state_check: {state.relative_to(tmp_path).as_posix()}: missing level-2 heading 'Links'; add the required heading"
     ]
+
+
+def test_nested_bullets_do_not_count_as_separate_next_actions(tmp_path):
+    state = write_state(tmp_path / "STATE.md", actions=1)
+    text = state.read_text(encoding="utf-8").replace(
+        "- Action 0.\n", "- Action 0.\n  - step a\n  - step b\n  - step c\n"
+    )
+    state.write_text(text, encoding="utf-8")
+
+    result = run_check(tmp_path, str(state))
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+
+
+def test_discovery_walks_up_from_a_nested_checkout(tmp_path):
+    write_state(tmp_path / ".agent-run" / "sessions" / "chair" / "STATE.md", missing="Links")
+    nested = tmp_path / "app" / ".worktrees" / "lane"
+    nested.mkdir(parents=True)
+
+    result = run_check(nested)
+
+    assert result.returncode == 1
+    assert result.stdout.splitlines() == [
+        "state_check: .agent-run/sessions/chair/STATE.md: missing level-2 heading 'Links'; add the required heading"
+    ]
+
+
+def test_hook_skips_a_dangling_state_link(tmp_path):
+    sessions = tmp_path / ".agent-run" / "sessions" / "gone"
+    sessions.mkdir(parents=True)
+    (sessions / "STATE.md").symlink_to(tmp_path / "missing.md")
+
+    result = run_check(tmp_path, "--hook", input_text=json.dumps({"cwd": str(tmp_path)}))
+
+    assert result.returncode == 0
+    assert result.stdout == ""

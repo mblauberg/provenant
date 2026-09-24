@@ -8,7 +8,7 @@ owners (issues, board, specs, ADRs) still win.
 
 `.agent-run/sessions/<session>/STATE.md`, untracked. Project instructions may
 name the session. Start from [the template](../templates/STATE.template.md).
-Keep it at or under 6 KB, with these level-2 sections in order:
+Keep it at or under 6 KB, with these level-2 sections:
 
 - **Goal and authority:** the goal in one or two lines; the authority source,
   its limits and expiry; links to the owner directions in force.
@@ -30,14 +30,17 @@ lanes.
 ## Checkpoint
 
 Rewrite the state file at the end of every wake, before any manual compaction,
-and before a handoff. Then check it:
+and before a handoff. It supplements the canonical handoff rather than
+replacing it: a handoff is still written when the session ends or passes the
+work to another owner. Then check it:
 
 ```sh
 python3 "<installed-session-skill>/scripts/state_check.py"
 ```
 
 With no arguments it finds `.agent-run/sessions/*/STATE.md` files modified in
-the last day under the project root and reports size, missing sections, the next-action count and staleness
+the last day in the nearest directory at or above the working directory that
+has them, and reports size, missing sections, the top-level next-action count and staleness
 (over 30 minutes), exiting non-zero on a problem. Outside such projects it
 prints nothing.
 

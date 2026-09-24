@@ -8,7 +8,6 @@ import json
 import os
 from pathlib import Path
 import re
-import subprocess
 import sys
 import time
 
@@ -25,22 +24,18 @@ REQUIRED_HEADINGS = (
     "Links",
 )
 HEADING = re.compile(r"^##[ \t]+(.+?)\s*#*\s*$")
-LIST_ITEM = re.compile(r"^\s*(?:[-*+]|\d+[.)])\s+")
+LIST_ITEM = re.compile(r"^(?:[-*+]|\d+[.)])\s+")
 
 
 def project_root(cwd: Path) -> Path:
-    try:
-        result = subprocess.run(
-            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=0.25,
-        )
-    except (OSError, subprocess.TimeoutExpired):
-        return cwd
-    if result.returncode == 0 and result.stdout.strip():
-        return Path(result.stdout.strip()).resolve()
+    """Nearest directory at or above cwd that holds session state, else cwd.
+
+    Walking up reaches the primary project from a linked worktree or a nested
+    repository, where the chair's `.agent-run/` usually lives.
+    """
+    for candidate in (cwd, *cwd.parents):
+        if (candidate / ".agent-run" / "sessions").is_dir():
+            return candidate
     return cwd
 
 
@@ -57,6 +52,13 @@ def hook_cwd(cwd: Path) -> Path:
             candidate = cwd / candidate
         return candidate.resolve()
     return cwd
+
+
+def recently_modified(path: Path, now: float) -> bool:
+    try:
+        return now - path.stat().st_mtime <= INACTIVE_AFTER_SECONDS
+    except OSError:
+        return False
 
 
 def display_path(path: Path, root: Path, cwd: Path) -> str:
@@ -141,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         paths = [
             path
             for path in sorted((root / ".agent-run" / "sessions").glob("*/STATE.md"))
-            if now - path.stat().st_mtime <= INACTIVE_AFTER_SECONDS
+            if recently_modified(path, now)
         ]
 
     findings = []
