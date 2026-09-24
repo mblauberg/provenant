@@ -294,7 +294,9 @@ def main(arguments: list[str]) -> int:
     if command in {"lanes", "events"}:
         command_arguments = [command, *command_arguments]
         command = "fabric"
-    if command in {"help", "-h", "--help"}:
+    if command == "help" and command_arguments == ["routes"]:
+        command, command_arguments = "route", ["health", "--json"]
+    elif command in {"help", "-h", "--help"}:
         if command_arguments:
             usage()
             return 2

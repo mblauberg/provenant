@@ -2603,6 +2603,12 @@ print(json.dumps({{'type': 'result', 'result': 'DONE', 'is_error': False}}), flu
         assert row["status"] == "ok"
         assert any(item["pid"] == pid for item in row["reaped"])
         assert "! reaped 1 leftover process(es)" in row["digest"]
+        route_health = json.loads(Path(os.environ["AGENT_FABRIC_ROUTE_HEALTH_PATH"]).read_text())
+        assert any(
+            route.get("task_class") == "ordinary"
+            and route.get("recent", [{}])[0].get("status") == "ok"
+            for route in route_health["routes"].values()
+        )
         with pytest.raises(ProcessLookupError):
             os.kill(pid, 0)
     finally:
