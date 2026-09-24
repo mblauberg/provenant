@@ -473,6 +473,20 @@ def test_binder_materialises_the_post_merge_chain_without_advancing_acceptance(t
     assert not (tmp_path / "github").exists()
     review_sources[0].write_bytes(original_review)
 
+    before_invalid_ci = receipt.read_bytes()
+    environment["GH_CHECKS_JSON"] = json.dumps({"check_runs": [{
+        "name": "ci-status", "head_sha": pr["merge_commit"], "status": "completed",
+        "conclusion": "success", "completed_at": "2026-07-10T00:08:30+00:00",
+    }]})
+    rejected_ci = subprocess.run(command, env=environment, capture_output=True, text=True)
+    assert rejected_ci.returncode == 1
+    assert receipt.read_bytes() == before_invalid_ci
+    assert not (tmp_path / "github").exists()
+    environment["GH_CHECKS_JSON"] = json.dumps({"check_runs": [{
+        "name": "ci-status", "head_sha": pr["merge_commit"], "status": "completed",
+        "conclusion": "success", "completed_at": ci["completed_at"],
+    }]})
+
     first = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     second = subprocess.Popen(command, env=environment, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     results = [first.communicate(), second.communicate()]
@@ -483,82 +497,4 @@ def test_binder_materialises_the_post_merge_chain_without_advancing_acceptance(t
     assert merged_source["media_type"] == "application/x-git-revision"
     assert "digest" not in merged_source
     assert "digest_unavailable_reason" not in merged_source
-    DELIVERY.validate(bound, ROOT, workspace_root=tmp_path, verify_hashes=True)
-
-
-def test_binder_preflight_rejection_leaves_no_evidence_and_can_retry(tmp_path):
-    run = merged_software_delivery(tmp_path)
-    pr = json.loads((tmp_path / "evidence/github-pr.json").read_text())
-    ci = json.loads((tmp_path / "evidence/github-ci.json").read_text())
-    review_sources = []
-    source_dir = tmp_path / "review-source"
-    source_dir.mkdir()
-    for name in ("review-openai", "review-anthropic"):
-        source = source_dir / f"{name}.json"
-        source.write_bytes((tmp_path / "evidence" / f"{name}.json").read_bytes())
-        review_sources.append(source)
-    generated = {"merged-source", "github-pr", "github-ci", "review-openai", "review-anthropic"}
-    run["artifacts"] = [item for item in run["artifacts"] if item["id"] not in generated]
-    run["security"]["artifact_surfaces"] = [
-        item for item in run["security"]["artifact_surfaces"] if item["artifact_id"] != "merged-source"
-    ]
-    del run["software_delivery"]
-    before_acceptance(run)
-    for artifact_id in generated - {"merged-source"}:
-        (tmp_path / "evidence" / f"{artifact_id}.json").unlink()
-    receipt = tmp_path / "RUN.json"
-    run["authority"].update({
-        "secrets_access": "use-without-disclosure",
-        "secret_refs": ["github-cli-auth"],
-        "network": {"tool_egress": "allowlist", "allowed_hosts": ["api.github.com"]},
-    })
-    receipt.write_text(json.dumps(run))
-    bin_dir = tmp_path / "bin"
-    bin_dir.mkdir()
-    gh = bin_dir / "gh"
-    gh.write_text(
-        "#!/bin/sh\n"
-        "case \"$*\" in\n"
-        "  *check-runs*) printf '%s\\n' \"$GH_CHECKS_JSON\" ;;\n"
-        "  *pulls*) printf '%s\\n' \"$GH_PR_JSON\" ;;\n"
-        "  *) exit 9 ;;\n"
-        "esac\n"
-    )
-    gh.chmod(0o755)
-    redirected_git_dir = tmp_path / "redirected.git"
-    git(tmp_path, "init", "--bare", str(redirected_git_dir))
-    environment = {
-        **os.environ,
-        "PATH": f"{bin_dir}:{os.environ['PATH']}",
-        "GIT_DIR": str(redirected_git_dir),
-        "GH_PR_JSON": json.dumps({
-            "number": pr["number"], "state": "closed", "merged_at": "2026-07-10T00:08:00Z",
-            "html_url": pr["url"], "head": {"sha": pr["head_commit"]},
-            "merge_commit_sha": pr["merge_commit"],
-        }),
-    }
-    command = [
-        str(ROOT / "skills/implement/scripts/bind_merged_delivery.py"), str(receipt),
-        "--workspace-root", str(tmp_path), "--repository", pr["repository"],
-        "--pr-number", str(pr["number"]),
-        *[argument for source in review_sources for argument in ("--review-artifact", str(source))],
-    ]
-
-    def checks(completed_at):
-        environment["GH_CHECKS_JSON"] = json.dumps({"check_runs": [{
-            "name": "ci-status", "head_sha": pr["merge_commit"], "status": "completed",
-            "conclusion": "success", "completed_at": completed_at,
-        }]})
-
-    before_invalid_ci = receipt.read_bytes()
-    checks("2026-07-10T00:08:30+00:00")
-    rejected = subprocess.run(command, env=environment, capture_output=True, text=True)
-    assert rejected.returncode == 1
-    assert receipt.read_bytes() == before_invalid_ci
-    assert not (tmp_path / "github").exists()
-
-    checks(ci["completed_at"])
-    retried = subprocess.run(command, env=environment, capture_output=True, text=True)
-    assert retried.returncode == 0, retried.stdout + retried.stderr
-    bound = json.loads(receipt.read_text())
     DELIVERY.validate(bound, ROOT, workspace_root=tmp_path, verify_hashes=True)

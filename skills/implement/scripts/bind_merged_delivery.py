@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import fcntl
 from functools import lru_cache
 import hashlib
@@ -241,10 +242,11 @@ def main(argv: list[str] | None = None) -> int:
 
                 staged_prefix = stage.relative_to(workspace)
                 payload_ids = {artifact_id for artifact_id, _ in payloads}
-                for item in run["artifacts"]:
+                validation_run = deepcopy(run)
+                for item in validation_run["artifacts"]:
                     if item.get("id") in payload_ids:
                         item["path"] = (staged_prefix / f"{item['id']}.json").as_posix()
-                preflight(run, receipt, workspace, validator, resolved_product_root)
+                preflight(validation_run, receipt, workspace, validator, resolved_product_root)
 
                 for item in run["artifacts"]:
                     if item.get("id") in payload_ids:
