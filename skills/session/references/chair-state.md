@@ -81,7 +81,8 @@ file contents, diffs, images and resolved threads; they are on disk.
 ```
 
 Claude Code runs the check before every compaction once the hook is
-installed. Installing it is part of setting up a chair; the command adds one
+installed, and installing it is part of setting up a Claude Code chair; hosts
+without such a hook run the check at each checkpoint instead. The command adds one
 `PreCompact` entry to `~/.claude/settings.json` (or the settings file given),
 keeps everything else and is idempotent. The hook always exits 0, so it warns
 without blocking compaction:

@@ -81,15 +81,19 @@ def hook_config() -> str:
 
 def install_hook(settings: Path) -> str:
     """Add the PreCompact entry to a Claude Code settings file once; keep everything else."""
+    settings = settings.resolve()  # write through a dotfile symlink, not over it
     data = json.loads(settings.read_text(encoding="utf-8")) if settings.exists() else {}
     if not isinstance(data, dict):
         raise ValueError(f"{settings} is not a JSON object")
     hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        raise ValueError(f"{settings} has an unexpected hooks shape")
     entries = hooks.setdefault("PreCompact", [])
-    if not isinstance(hooks, dict) or not isinstance(entries, list):
+    if not isinstance(entries, list):
         raise ValueError(f"{settings} has an unexpected hooks shape")
     for entry in entries:
-        for hook in entry.get("hooks", []) if isinstance(entry, dict) else []:
+        inner = entry.get("hooks") if isinstance(entry, dict) else None
+        for hook in inner if isinstance(inner, list) else []:
             if isinstance(hook, dict) and "state_check.py" in str(hook.get("command", "")):
                 return f"already installed in {settings}"
     entries.append(hook_entry())

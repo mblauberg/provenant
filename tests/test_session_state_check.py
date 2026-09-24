@@ -300,14 +300,29 @@ def test_install_hook_adds_one_entry_and_keeps_existing_settings(tmp_path):
     assert data["hooks"]["PreCompact"][0]["hooks"][0]["command"] == f'python3 "{SCRIPT.resolve()}" --hook'
 
 
-def test_install_hook_refuses_a_non_object_settings_file(tmp_path):
-    settings = tmp_path / "settings.json"
-    settings.write_text("[]", encoding="utf-8")
+def test_install_hook_refuses_unexpected_shapes_without_writing(tmp_path):
+    for text in ("[]", '{"hooks": null}', '{"hooks": {"PreCompact": {}}}'):
+        settings = tmp_path / "settings.json"
+        settings.write_text(text, encoding="utf-8")
 
-    result = run_check(tmp_path, "--install-hook", str(settings))
+        result = run_check(tmp_path, "--install-hook", str(settings))
 
-    assert result.returncode == 1
-    assert settings.read_text(encoding="utf-8") == "[]"
+        assert result.returncode == 1
+        assert settings.read_text(encoding="utf-8") == text
+
+
+def test_install_hook_tolerates_null_inner_hooks_and_writes_through_symlink(tmp_path):
+    real = tmp_path / "dotfiles" / "settings.json"
+    real.parent.mkdir()
+    real.write_text(json.dumps({"hooks": {"PreCompact": [{"hooks": None}]}}), encoding="utf-8")
+    link = tmp_path / "settings.json"
+    link.symlink_to(real)
+
+    result = run_check(tmp_path, "--install-hook", str(link))
+
+    assert result.returncode == 0
+    assert link.is_symlink()
+    assert len(json.loads(real.read_text(encoding="utf-8"))["hooks"]["PreCompact"]) == 2
 
 
 def test_session_directory_named_by_session_id_is_checked(tmp_path):
