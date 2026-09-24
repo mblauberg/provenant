@@ -4,11 +4,26 @@ A chair that runs lanes across compactions and wakes keeps one run-local state
 file. It is the recovery anchor after compaction, not project truth: tracked
 owners (issues, board, specs, ADRs) still win.
 
-## Location and shape
+## Run layout
 
-`.agent-run/sessions/<session>/STATE.md`, untracked. Project instructions may
-name the session. Start from [the template](../templates/STATE.template.md).
-Keep it at or under 6 KB, with these level-2 sections:
+One `.agent-run/` per Git common directory, shared by its linked worktrees,
+unless project instructions name another root. Its top level holds only:
+
+- `runs/`: Fabric-owned run directories; read them through Fabric, not by path;
+- `sessions/<session-id>/`: one per chair session, holding its `STATE.md`,
+  assumption ledger, lane briefs and any scripts the session resumes with;
+- `locks/`: shared host or project locks.
+
+Each chair keeps exactly one `STATE.md`; no `NOW.md`, `PICKUP.md` or parallel
+status files. A host scratchpad or temporary directory is for disposable probes
+only: anything a later wake or successor needs lives under the session
+directory. Retention and cleanup go through `provenant clean`, never manual
+deletion.
+
+## Shape
+
+Keep `STATE.md` untracked, at or under 6 KB, starting from
+[the template](../templates/STATE.template.md), with these level-2 sections:
 
 - **Goal and authority:** the goal in one or two lines; the authority source,
   its limits and expiry; links to the owner directions in force; the line
@@ -36,15 +51,17 @@ replacing it: a handoff is still written when the session ends or passes the
 work to another owner. Then check it:
 
 ```sh
-python3 "<installed-session-skill>/scripts/state_check.py" .agent-run/sessions/<session>/STATE.md
+python3 "<installed-session-skill>/scripts/state_check.py" .agent-run/sessions/<session-id>/STATE.md
 ```
 
-It reports size, missing sections, the top-level next-action count and
-staleness (over 30 minutes), exiting non-zero on a problem. Several chairs can
-share one project, so without a path it checks only a state file this session
-identifies: the `PROVENANT_SESSION_STATE` environment variable, or, in hook
-mode, recent state files that name the host session id. Otherwise it prints
-nothing.
+It is the single state validator; project checkpoint scripts call it rather
+than re-implementing it. It reports size, missing sections, the top-level
+next-action count and staleness (over 30 minutes), exiting non-zero on a
+problem. Several chairs can share one project, so without a path it checks
+only a state file this session identifies: the `PROVENANT_SESSION_STATE`
+environment variable, or, in hook mode, a recent state file whose directory is
+the host session id or whose `Chair session:` line names it. Otherwise it
+prints nothing.
 
 ## Compaction
 
@@ -63,14 +80,17 @@ directions in force, open decisions and the next actions. Drop tool output,
 file contents, diffs, images and resolved threads; they are on disk.
 ```
 
-Claude Code can run the check automatically before every compaction. Print the
-settings fragment with the installed script path, then merge it into
-`~/.claude/settings.json`; the hook always exits 0, so it warns without
-blocking compaction:
+Claude Code runs the check before every compaction once the hook is
+installed. Installing it is part of setting up a chair; the command adds one
+`PreCompact` entry to `~/.claude/settings.json` (or the settings file given),
+keeps everything else and is idempotent. The hook always exits 0, so it warns
+without blocking compaction:
 
 ```sh
-python3 "<installed-session-skill>/scripts/state_check.py" --hook-config
+python3 "<installed-session-skill>/scripts/state_check.py" --install-hook
 ```
+
+`--hook-config` prints the same fragment for manual merging.
 
 Hosts without a pre-compaction hook run the check as part of the checkpoint
 above.

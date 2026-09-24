@@ -9,7 +9,9 @@ owns the portable protocol that such a skill specialises.
 A wake is a lane finishing, an owner message or the fallback timer. On every
 wake, in this order:
 
-1. **Reconcile.** Read the session state file (`session`), then live evidence:
+1. **Reconcile.** Read the session state file (`session` owns it and the
+   `.agent-run/` layout: one `STATE.md` per chair under `sessions/<session-id>/`),
+   then live evidence:
    run states, native subagents, worktrees (dirty, ahead, merged), open pull
    requests, free memory. Evidence wins; correct the state file.
 2. **Land** what is ready under the repository's merge workflow, then prune.

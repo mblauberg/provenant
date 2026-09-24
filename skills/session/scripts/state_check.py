@@ -60,6 +60,8 @@ def hook_input(cwd: Path) -> tuple[Path, str]:
 
 
 def names_session(path: Path, session_id: str) -> bool:
+    if path.parent.name == session_id:
+        return True
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -68,13 +70,34 @@ def names_session(path: Path, session_id: str) -> bool:
     return line.search(text) is not None
 
 
+def hook_entry() -> dict:
+    command = f'python3 "{Path(__file__).resolve()}" --hook'
+    return {"hooks": [{"type": "command", "command": command, "timeout": 5}]}
+
+
 def hook_config() -> str:
-    script = Path(__file__).resolve()
-    command = f'python3 "{script}" --hook'
-    return json.dumps(
-        {"hooks": {"PreCompact": [{"hooks": [{"type": "command", "command": command, "timeout": 5}]}]}},
-        indent=2,
-    )
+    return json.dumps({"hooks": {"PreCompact": [hook_entry()]}}, indent=2)
+
+
+def install_hook(settings: Path) -> str:
+    """Add the PreCompact entry to a Claude Code settings file once; keep everything else."""
+    data = json.loads(settings.read_text(encoding="utf-8")) if settings.exists() else {}
+    if not isinstance(data, dict):
+        raise ValueError(f"{settings} is not a JSON object")
+    hooks = data.setdefault("hooks", {})
+    entries = hooks.setdefault("PreCompact", [])
+    if not isinstance(hooks, dict) or not isinstance(entries, list):
+        raise ValueError(f"{settings} has an unexpected hooks shape")
+    for entry in entries:
+        for hook in entry.get("hooks", []) if isinstance(entry, dict) else []:
+            if isinstance(hook, dict) and "state_check.py" in str(hook.get("command", "")):
+                return f"already installed in {settings}"
+    entries.append(hook_entry())
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    temporary = settings.with_name(settings.name + ".state-check.tmp")
+    temporary.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, settings)
+    return f"installed PreCompact hook in {settings}"
 
 
 def recently_modified(path: Path, now: float) -> bool:
@@ -155,9 +178,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--hook", action="store_true", help="run as a non-blocking PreCompact hook")
     parser.add_argument("--hook-config", action="store_true",
                         help="print the Claude Code settings fragment that registers the hook")
+    parser.add_argument("--install-hook", nargs="?", const=Path.home() / ".claude" / "settings.json",
+                        type=Path, metavar="SETTINGS",
+                        help="add the PreCompact hook to a Claude Code settings file (default ~/.claude/settings.json)")
     args = parser.parse_args(argv)
     if args.hook_config:
         print(hook_config())
+        return 0
+    if args.install_hook:
+        try:
+            print(install_hook(args.install_hook.expanduser()))
+        except (OSError, ValueError) as exc:
+            print(f"state_check: cannot install hook: {exc}", file=sys.stderr)
+            return 1
         return 0
 
     cwd = Path.cwd().resolve()

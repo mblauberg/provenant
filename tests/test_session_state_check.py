@@ -282,3 +282,39 @@ def test_hook_skips_a_dangling_state_link(tmp_path):
 
     assert result.returncode == 0
     assert result.stdout == ""
+
+
+def test_install_hook_adds_one_entry_and_keeps_existing_settings(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"model": "x", "hooks": {"SessionStart": [{"hooks": []}]}}), encoding="utf-8")
+
+    first = run_check(tmp_path, "--install-hook", str(settings))
+    second = run_check(tmp_path, "--install-hook", str(settings))
+
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    assert first.returncode == 0 and second.returncode == 0
+    assert "already installed" in second.stdout
+    assert data["model"] == "x"
+    assert data["hooks"]["SessionStart"] == [{"hooks": []}]
+    assert len(data["hooks"]["PreCompact"]) == 1
+    assert data["hooks"]["PreCompact"][0]["hooks"][0]["command"] == f'python3 "{SCRIPT.resolve()}" --hook'
+
+
+def test_install_hook_refuses_a_non_object_settings_file(tmp_path):
+    settings = tmp_path / "settings.json"
+    settings.write_text("[]", encoding="utf-8")
+
+    result = run_check(tmp_path, "--install-hook", str(settings))
+
+    assert result.returncode == 1
+    assert settings.read_text(encoding="utf-8") == "[]"
+
+
+def test_session_directory_named_by_session_id_is_checked(tmp_path):
+    write_state(tmp_path / ".agent-run" / "sessions" / "sess-7" / "STATE.md", missing="Links")
+
+    result = run_check(tmp_path, "--hook", input_text=hook_json(tmp_path, "sess-7"))
+
+    assert result.stdout.splitlines() == [
+        "Checkpoint check: state_check: .agent-run/sessions/sess-7/STATE.md: missing level-2 heading 'Links'; add the required heading"
+    ]
