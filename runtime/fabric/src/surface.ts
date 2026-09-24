@@ -54,7 +54,7 @@ function digestBase(row: Record<string, any>): string {
       : typeof route === "string" ? ` ${route.replace(/^Route:\s*/u, "")}` : "";
     const resultPath = row.result_path ?? row.paths?.result;
     const state = row.status ?? row.state;
-    const resultText = resultPath ? ` · result ${resultPath}` : state === "running" ? ` · fabric_status{ids:["${id}"],wait_seconds:55}` : ` · result pending`;
+    const resultText = resultPath ? ` · result ${resultPath}` : state === "running" ? ` · fabric_status{ids:["${id}"],wait_seconds:55}` : row.reason ? ` · ${row.reason}` : ` · result pending`;
     return `${state} ${id}${routeText}${resultText}${route ? `\n  ${route}` : ""}`;
   }
   return JSON.stringify(row);
@@ -77,7 +77,7 @@ export function runView(value: Record<string, any>, detail = "brief"): Record<st
   if (Array.isArray(value.runs)) return { ...value, runs: value.runs.map((row: Record<string, any>) => runView(row)) };
   const keys = ["schema", "id", "run_id", "task_id", "batch_id", "run_dir", "state", "status",
     "attempt", "attempt_count", "digest", "paths", "cwd", "worktree", "mode", "applied",
-    "provenance", "warnings", "notes", "question", "fix", "retryable", "reset_at", "retry_after"];
+    "provenance", "warnings", "notes", "reason", "question", "fix", "retryable", "reset_at", "retry_after"];
   return Object.fromEntries(keys.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]).concat(
     value.digest === undefined ? [["digest", digest(value)]] : [],
   ));

@@ -126,6 +126,16 @@ and the terminal Route line shows it as `ctx 212k/1M`. See
 [`docs/specs/fabric-v2.md`](../../docs/specs/fabric-v2.md#session-context).
 
 Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, and `detail`.
+New attempts wait when available host memory is below 10% of physical RAM for
+`worktree_write` or 5% for `read_only`; set either percentage from 0 to 100 in
+`<workspace_root>/.agents/fabric-policy.json` as `{"memory_floor_percent":{"worktree_write":10,"read_only":5}}` (either key may be omitted, and 0 disables that mode's floor).
+Queued time does not use the execution timeout, but `FABRIC_MEMORY_WAIT_SECONDS`
+limits each wait (default 1800); expiry fails the attempt as `memory_unavailable`.
+Owners serialise admission through a per-user host lock in `$XDG_STATE_HOME/provenant/admission.lock`
+(default `~/.local/state/provenant/admission.lock`) and hold it for up to 20 seconds after provider start; lock creation failure admits with a warning, while probe failure holds and retries until the wait expires. `fabric_status` and `fabric status` show the available percentage, floor and wait budget and allow cancellation.
+An invalid floor records a failed attempt with a fix. The parent keeps a
+watchdog for child owners and excludes their published queued time.
+
 The wave-1 `id` argument and retained `mcp-*` directories remain readable.
 Without IDs it returns active and last-24-hour runs, capped at 20 rows. Rows
 include the latest attempt and count. Full detail adds history and the worktree

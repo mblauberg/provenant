@@ -70,6 +70,7 @@ DEFAULT_TIMEOUT_SECONDS = 3600.0
 # must be allowed to stop/reap its provider and publish the attempt receipt
 # before the batch falls back to killing that owner.
 CANCEL_DISPATCH_GRACE_SECONDS = 2.0
+DISPATCH_WATCHDOG_GRACE_SECONDS = 5.0
 TERMINAL_TASK_STATUSES = {"blocked", "ok", "failed", "timed_out", "cancelled"}
 
 
@@ -563,6 +564,27 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
     return compact
 
 
+def _child_queued_seconds(run_dir: Path, task_id: str, after_attempt: int) -> float:
+    attempts = (path for path in (run_dir / "tasks" / task_id).glob("attempt-*/attempt.json")
+                if ATTEMPT_ID_RE.fullmatch(path.parent.name)
+                and int(path.parent.name[8:]) > after_attempt)
+    latest = max(attempts, key=lambda path: int(path.parent.name.split("-")[-1]), default=None)
+    if latest is None:
+        return 0.0
+    try:
+        row = json.loads(latest.read_text(encoding="utf-8"))
+        timing = row.get("timing", {})
+        total = timing.get("queued_seconds", 0.0)
+        since = timing.get("queued_since") if row.get("state") == "queued" else None
+        if not isinstance(total, (int, float)) or total < 0:
+            return 0.0
+        if isinstance(since, (int, float)):
+            return total + max(0.0, time.monotonic() - since)
+        return total
+    except (OSError, ValueError, TypeError, AttributeError):
+        return 0.0
+
+
 def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str, Any]:
     task_id = task["id"]
     if _cancel_requested or cancellation_marker_present(run_dir, batch_dir):
@@ -575,6 +597,8 @@ def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str,
         atomic_write(run_dir, temporary_prompt, task["_inline_prompt"])
         dispatch_task = {**task, "prompt_file": str(temporary_prompt), "_batch_id": batch_dir.name}
     process: subprocess.Popen[str] | None = None
+    prior_attempt = max((int(path.name[8:]) for path in (run_dir / "tasks" / task_id).glob("attempt-*")
+                         if ATTEMPT_ID_RE.fullmatch(path.name)), default=0)
     started = time.monotonic()
     timed_out = False
     try:
@@ -583,12 +607,20 @@ def _run_task(task: dict[str, Any], run_dir: Path, batch_dir: Path) -> dict[str,
                                    start_new_session=True)
         with _state_lock:
             _active_processes[task_id] = process
-        try:
-            stdout, stderr = process.communicate(timeout=task["timeout"] + 5.0)
-        except subprocess.TimeoutExpired:
-            stop_process_group(process)
-            stdout, stderr = process.communicate()
-            timed_out = True
+        queued_seconds = 0.0
+        while True:
+            queued_seconds = max(queued_seconds, _child_queued_seconds(run_dir, task_id, prior_attempt))
+            remaining = task["timeout"] + DISPATCH_WATCHDOG_GRACE_SECONDS + queued_seconds - (time.monotonic() - started)
+            if remaining <= 0:
+                stop_process_group(process)
+                stdout, stderr = process.communicate()
+                timed_out = True
+                break
+            try:
+                stdout, stderr = process.communicate(timeout=min(0.1, remaining))
+                break
+            except subprocess.TimeoutExpired:
+                continue
     except (OSError, subprocess.SubprocessError) as exc:
         return {"task_id": task_id, "status": "failed", "outcome": "dispatch_spawn_error",
                 "message": str(exc)}

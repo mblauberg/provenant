@@ -53,6 +53,7 @@ CANCEL_MARKER_NAME = "cancel.request"
 from _shared.bounded_process import stop_process_group
 from layout import run_workspace, run_root, contains_run
 import provider_exec
+import memory_admission
 import secret_scan
 import exec_routing
 import context_usage
@@ -1342,7 +1343,14 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     for field in ("session_id","retryable","reset_at","retry_after","fix","evidence","applied","context","warnings","reaped","spared","provenance","pgid","last_progress_at"):
         if field in adapter: row[field]=adapter[field]
     row["warnings"] = list(dict.fromkeys(
-        list(row.get("warnings", [])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", []))))
+        list(row.get("warnings", [])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", []))
+        + list(getattr(args, "_memory_warnings", []))))
+    row["timing"]["queued_seconds"] = getattr(args, "_queued_seconds", 0.0)
+    if legacy.get("process_error", "").startswith("Set .agents/fabric-policy.json memory_floor_percent"):
+        row["fix"] = legacy["process_error"]
+    if legacy["outcome"] == "memory_unavailable":
+        row["error"] = "memory_unavailable"
+        row["fix"] = "memory_unavailable: free memory or lower the mode's memory_floor_percent in .agents/fabric-policy.json."
     if refusal:
         row["fix"]=adapter.get("fix") or adapter.get("reason") or refusal["fix"];row["evidence"]=refusal["evidence"];row["error"]=refusal["error"]
     row.update(state="terminal",status=status,ended_at=legacy["finished_at"],question=adapter.get("question") or (legacy.get("question") or {}).get("prompt"))
@@ -1662,9 +1670,44 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     exit_code: int | None = None
     process_error = ""
     process = None
+    memory_lease = None
+    admission_queued_seconds = 0.0
     provider_temporary = None
     cancelled = False
     old_handlers: dict[int, Any] = {}
+    def admit_attempt(active, cancelled_now):
+        nonlocal started, started_at, memory_lease, process_error, admission_queued_seconds
+        waiting_since = time.monotonic()
+        def waiting(reason):
+            active["state"] = "queued"
+            active["reason"] = reason
+            active["timing"]["queued_since"] = waiting_since
+            active["timing"]["queued_seconds"] = getattr(args, "_queued_seconds", 0.0)
+            publish_contract(run_dir, active)
+        def warning(message):
+            active["warnings"].append(message)
+            args._memory_warnings = getattr(args, "_memory_warnings", []) + [message]
+        try:
+            memory_lease = memory_admission.admit(waiting, cancelled_now, warning,
+                                                   waited_seconds=admission_queued_seconds,
+                                                   workspace_root=workspace, mode=args.access_mode)
+        except memory_admission.MemoryUnavailableError as exc:
+            process_error = exc.code
+            memory_lease = None
+        queued_seconds = time.monotonic() - waiting_since
+        admission_queued_seconds += queued_seconds
+        args._queued_seconds = getattr(args, "_queued_seconds", 0.0) + queued_seconds
+        active["timing"].pop("queued_since", None)
+        active["timing"]["queued_seconds"] = args._queued_seconds
+        started = time.monotonic()
+        started_at = now()
+        if memory_lease is not None:
+            active["state"] = "running"
+            active.pop("reason", None)
+            active["started_at"] = started_at
+            active["last_progress_at"] = started_at
+            publish_contract(run_dir, active)
+        return memory_lease is not None
     if CF_DISPATCH == Path(__file__).with_name("cf_dispatch.sh"):
         owner_cancel=[False]
         def cancel_owner(_signal,_frame): owner_cancel[0]=True
@@ -1732,12 +1775,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     if args.resume_warning: plan["warnings"].insert(0,args.resume_warning)
                 active = contract_row(args,run_dir,attempt_number,attempt_dir,plan,started_at)
                 active["requested_route"] = requested_route
-                publish_contract(run_dir,active)
                 spawn_started = time.monotonic()
                 provider_started_at = [None]
                 def provider_started(child):
                     nonlocal process
                     process=child
+                    if memory_lease is not None:
+                        memory_lease.started()
                     provider_started_at[0] = time.monotonic()
                     args._phase_timings["spawn"] = round((provider_started_at[0] - spawn_started) * 1000, 3)
                     active["pgid"]=child.pid
@@ -1752,8 +1796,18 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         progress_publication[0]=time.monotonic()
                 def cancellation():
                     return owner_cancel[0] or cancellation_marker_present(run_dir,attempt_dir) or (batch_dir is not None and cancellation_marker_present(run_dir,batch_dir))
-                adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
-                    on_start=provider_started,on_progress=progress,cancelled=cancellation)
+                admitted = admit_attempt(active, cancellation)
+                spawn_started = time.monotonic()
+                if not admitted:
+                    plan["warnings"] = active["warnings"]
+                    process_error = process_error or "cancelled"
+                    adapter_record = {"status": "failed" if process_error == "memory_unavailable" else "cancelled",
+                                      "exit": 1, "warnings": active["warnings"]}
+                else:
+                    plan["warnings"] = active["warnings"]
+                    adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
+                        on_start=provider_started,on_progress=progress,cancelled=cancellation)
+                relaunch_skipped = False
                 args._phase_timings["provider"] = round((time.monotonic() - (provider_started_at[0] or spawn_started)) * 1000, 3)
                 if (args.resume and args.tool=="claude" and plan.get("resume_session")
                     and adapter_record.get("status")=="failed"
@@ -1774,15 +1828,25 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         plan["argv"]=provider_exec.profile(args.tool).argv(plan)
                         active["session_id"]=plan["session_id"]
                         publish_contract(run_dir,active)
-                        adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
-                            on_start=provider_started,on_progress=progress,cancelled=cancellation)
-                if hasattr(args,"resume_relaunch"):
+                        if memory_lease is not None:
+                            memory_lease.close()
+                        if admit_attempt(active, cancellation):
+                            adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
+                                on_start=provider_started,on_progress=progress,cancelled=cancellation)
+                        else:
+                            relaunch_skipped = True
+                            process_error = process_error or "cancelled"
+                            adapter_record = {"status": "failed" if process_error == "memory_unavailable" else "cancelled",
+                                              "exit": 1, "warnings": active["warnings"]}
+                if hasattr(args,"resume_relaunch") and not relaunch_skipped:
                     adapter_record["provenance"]["notes"].append("resumed_by_relaunch")
                     adapter_record["warnings"].append("resume: relaunched")
                 args._last_plan=plan
             else:
                 adapter_record=plan
                 write_owned(run_dir,stderr_path,planning.stderr if planning is not None else "")
+            if not stderr_path.exists():
+                write_owned(run_dir, stderr_path, "")
             write_owned(run_dir,adapter_path,json.dumps(adapter_record)+"\n")
             exit_code=adapter_record.get("exit")
             if type(exit_code) is not int: exit_code=1
@@ -1794,6 +1858,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             if not adapter_path.exists(): write_owned(run_dir,adapter_path,"{}\n")
             if not stderr_path.exists(): write_owned(run_dir,stderr_path,str(exc))
         finally:
+            if memory_lease is not None:
+                memory_lease.close()
             release_worktree_lease(worktree_lease)
     else:
         try:
@@ -1820,6 +1886,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     old_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP)}
                     signal.signal(signal.SIGTERM, cancel_handler)
                     signal.signal(signal.SIGHUP, cancel_handler)
+                    active = contract_row(args, run_dir, attempt_number, attempt_dir, {}, started_at)
+                    active["requested_route"] = requested_route
+                    if not admit_attempt(active, lambda: cancel_pending or cancellation_marker_present(run_dir, attempt_dir)
+                                         or (batch_dir is not None and cancellation_marker_present(run_dir, batch_dir))):
+                        process_error = process_error or "cancelled"
+                        observed_exit = True
+                        raise InterruptedError("memory wait cancelled")
                     provider_environment = os.environ.copy()
                     # Owners retain chair custody; provider work must discover its own
                     # seat, state directory and checkout rather than inherit the chair's.
@@ -1847,6 +1920,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         env=provider_environment,
                         start_new_session=True,
                     )
+                    if memory_lease is not None:
+                        memory_lease.started()
                     _record_provider_process(run_dir, process)
 
                     # A request can arrive after the provider is spawned but
@@ -1919,9 +1994,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         pass
                     if cancelled:
                         process_error = "cancelled"
-        except OSError as exc:
+        except InterruptedError:
+            pass
+        except (OSError, ValueError) as exc:
             process_error = str(exc)
         finally:
+            if memory_lease is not None:
+                memory_lease.close()
             release_worktree_lease(worktree_lease)
             if provider_temporary is not None:
                 provider_temporary.cleanup()
@@ -1977,7 +2056,10 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         and not result_integrity_error and not terminal_envelope_error
     )
     deadline_reached = duration_seconds >= provider_timeout_seconds(args.timeout_seconds)
-    if process_error == "timeout":
+    if process_error == "memory_unavailable":
+        status = "failed"
+        outcome = "memory_unavailable"
+    elif process_error == "timeout":
         status = "timed_out"
         outcome = "timeout"
     elif process_error == "cancelled":
@@ -2186,7 +2268,7 @@ def execute_attempt_sequence(args,custody=None):
     plan=getattr(args,"_last_plan",None)
     if plan and previous and previous["retryable"] and not args.resume:
         for candidate in exec_routing.candidates(plan,args.fallback):
-            remaining=sequence_budget-(time.monotonic()-sequence_start)
+            remaining=sequence_budget-(time.monotonic()-sequence_start-getattr(args,"_queued_seconds",0.0))
             if remaining<=0: break
             args.timeout_seconds=remaining
             if exec_routing.cooling(candidate["adapter"],candidate["model"]): continue
