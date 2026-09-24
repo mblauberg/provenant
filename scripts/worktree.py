@@ -693,8 +693,8 @@ def remove(args: argparse.Namespace) -> dict[str, object]:
     branch = branch_ref.removeprefix("refs/heads/") if branch_ref is not None else None
     branch_merged = False
     if branch is not None:
-        integration_ref = _clean_module._integration_ref(root, required=True)
-        if not _clean_module._branch_at_integration_tip(root, branch, integration_ref):
+        integration_ref = _clean_module._integration_ref(root)
+        if integration_ref != "HEAD" and not _clean_module._branch_at_integration_tip(root, branch, integration_ref):
             merged = git(root, "merge-base", "--is-ancestor", branch_ref, integration_ref,
                          check=False)
             if merged.returncode not in {0, 1}:
