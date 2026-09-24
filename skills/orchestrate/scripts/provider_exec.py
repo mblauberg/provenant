@@ -161,7 +161,8 @@ def protected_paths(workspace_root, cwd=None, worktree=None):
         if not declaration.is_file():
             continue
         try:
-            paths = json.loads(declaration.read_text())["protected_paths"]
+            policy = json.loads(declaration.read_text())
+            paths = policy.get("protected_paths", []) if isinstance(policy, dict) else None
             if not isinstance(paths, list) or any(not isinstance(p, str) or not p or
                                                  Path(p).is_absolute() or ".." in Path(p).parts or
                                                  any(char in p for char in "*?[]") for p in paths):

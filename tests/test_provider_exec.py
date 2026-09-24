@@ -180,7 +180,7 @@ def test_workspace_root_policy_resolves_outside_git(monkeypatch, tmp_path):
                        cwd=workspace / "secret", workspace_root=workspace)
 
 
-@pytest.mark.parametrize("declaration", ["{", "{}", '{"protected_paths":"secret/"}',
+@pytest.mark.parametrize("declaration", ["{", "[]", '{"protected_paths":"secret/"}',
                                            '{"protected_paths":["../secret/"]}'])
 def test_invalid_workspace_policy_refuses_training_route(tmp_path, declaration):
     mod = supervisor()
@@ -189,6 +189,13 @@ def test_invalid_workspace_policy_refuses_training_route(tmp_path, declaration):
     with pytest.raises(ValueError, match="invalid protected path policy"):
         mod.build_plan("opencode", {"trains_on_prompts": True}, "hello",
                        cwd=tmp_path, workspace_root=tmp_path)
+
+
+def test_policy_without_protected_paths_declares_none(tmp_path):
+    mod = supervisor()
+    (tmp_path / ".agents").mkdir()
+    (tmp_path / ".agents/fabric-policy.json").write_text('{"memory_floor_percent":{"read_only":5}}')
+    assert mod.protected_paths(tmp_path) == []
 
 
 def test_writer_discovers_worktree_policy_outside_workspace(monkeypatch, tmp_path):
