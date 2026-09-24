@@ -15,6 +15,29 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "model-route"
 CATALOG = json.loads((ROOT / "config" / "model-routing.json").read_text())
+
+
+def test_opencode_models_have_explicit_training_flags():
+    models = CATALOG["adapters"]["opencode"]["models"]
+    assert models
+    for model in models:
+        assert type(model.get("trains_on_prompts")) is bool
+        assert model["trains_on_prompts"] is ("-free" in model["id"])
+
+
+def test_fallback_inherits_adapter_training_flag_without_false_default():
+    spec = importlib.util.spec_from_file_location("route_under_test", ROOT / "scripts/model_route.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    catalog = {"adapters": {"fixture": {"trains_on_prompts": True,
+                "aliases": {"workhorse": ["primary", "candidate"]},
+                "models": [{"id": "primary", "plan_cap_usd": 1},
+                           {"id": "candidate", "plan_cap_usd": 1}]}}}
+    assert module._fallback_candidates("fixture", "workhorse", "primary", catalog, {}) == []
+    catalog["adapters"]["fixture"]["trains_on_prompts"] = False
+    candidates = module._fallback_candidates("fixture", "workhorse", "primary", catalog, {})
+    assert len(candidates) == 1
+    assert candidates[0]["trains_on_prompts"] is False
 CRUCIAL_RISK_OVERRIDE = CATALOG["families"]["anthropic"]["risk_tier_overrides"]["crucial"]
 RISK_OVERRIDE_MODEL = CRUCIAL_RISK_OVERRIDE["models"][0]
 NON_OCCUPANT_MODELS = tuple(
@@ -504,7 +527,7 @@ def test_opencode_training_warning_and_paid_fallback_excludes_free():
     result, unregistered = resolve("--adapter", "opencode", "--model",
                                    "opencode/muse-spark-2-contributor-free", "--role", "worker")
     assert result.returncode == 0, unregistered
-    assert unregistered["trains_on_prompts"] is True
+    assert unregistered["trains_on_prompts"] is None
     assert unregistered["warnings"]
 
 

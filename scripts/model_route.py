@@ -610,11 +610,12 @@ def _fallback_candidates(
         seen.add((candidate_adapter, canonical))
         entry, _ = _registered_match(candidate_adapter, candidate, catalog)
         opt_in = fallback == "any" or f"{candidate_adapter}/{candidate}" in (requested_routes or []) or candidate in (requested_routes or [])
-        if (entry and (opt_in or (entry.get("plan_cap_usd", 1) > 0 and not entry.get("trains_on_prompts")))
+        flag = training_flag(catalog["adapters"].get(candidate_adapter, {}), entry)
+        if (entry and (opt_in or (entry.get("plan_cap_usd", 1) > 0 and flag is False))
                 and not _cooling(candidate_adapter, canonical, cooldowns, catalog)):
             results.append({"adapter": candidate_adapter, "model": canonical,
                             "plan_cap_usd": entry.get("plan_cap_usd"),
-                            "trains_on_prompts": bool(entry.get("trains_on_prompts"))})
+                            "trains_on_prompts": flag})
     return results
 
 
