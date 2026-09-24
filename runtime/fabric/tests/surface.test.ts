@@ -141,9 +141,8 @@ it("shows the requested route and pending result before the first attempt", asyn
 it("keeps the memory wait reason in brief status", async () => {
   const { digest, runView } = await import("../src/surface.js");
   const reason = "waiting for memory: 812 MB available, floor 1024 MB";
-  const row = { state: "queued", run_id: "mcp-memory", reason,
-    digest: `queued mcp-memory codex/gpt-6-sol · ${reason}` };
-  expect(runView(row)).toMatchObject({ state: "queued", reason, digest: row.digest });
+  const row = { state: "queued", run_id: "mcp-memory", reason };
+  expect(runView(row)).toMatchObject({ state: "queued", reason, digest: `queued mcp-memory · ${reason}` });
   expect(digest(row)).toContain(reason);
 });
 

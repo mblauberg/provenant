@@ -54,7 +54,7 @@ function digestBase(row: Record<string, any>): string {
       : typeof route === "string" ? ` ${route.replace(/^Route:\s*/u, "")}` : "";
     const resultPath = row.result_path ?? row.paths?.result;
     const state = row.status ?? row.state;
-    const resultText = resultPath ? ` · result ${resultPath}` : state === "running" ? ` · fabric_status{ids:["${id}"],wait_seconds:55}` : ` · result pending`;
+    const resultText = resultPath ? ` · result ${resultPath}` : state === "running" ? ` · fabric_status{ids:["${id}"],wait_seconds:55}` : row.reason ? ` · ${row.reason}` : ` · result pending`;
     return `${state} ${id}${routeText}${resultText}${route ? `\n  ${route}` : ""}`;
   }
   return JSON.stringify(row);
