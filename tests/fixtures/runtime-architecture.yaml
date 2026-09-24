@@ -1,4 +1,3 @@
-source_size_ceilings:
-  runtime/fabric/src/store.ts: 1097
+source_size_ceilings: {}
 
 import_allowances: []

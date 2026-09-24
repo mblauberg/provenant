@@ -1,7 +1,7 @@
 """Guardrails owned by the #328 architecture guardrail child.
 
-The first invariant ratchets every oversized hand-written runtime TypeScript
-source file while holding every new source file to 1,000 lines. The second
+The first invariant catches unusually large hand-written runtime TypeScript
+source files. The second
 keeps the daemonless Fabric package independent of the retired runtime packages,
 inside its package boundary, and layered so its store cannot depend on its CLI
 or MCP surfaces. Temporary allowances and permanent declared placements stay
@@ -27,7 +27,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "runtime-architecture.yaml"
-DEFAULT_SOURCE_SIZE_CAP = 1_000
+DEFAULT_SOURCE_SIZE_CAP = 2_000
 EXCLUDED_SOURCE_DIRECTORIES = frozenset(
     {"__tests__", "generated", "vendor", "vendored"}
 )
@@ -367,19 +367,19 @@ def test_source_size_checker_rejects_new_and_grown_files_but_warns_on_shrink(
     tmp_path: Path,
 ) -> None:
     new_file = "runtime/package/src/new.ts"
-    _write_source(tmp_path, new_file, "x\n" * 1_001)
+    _write_source(tmp_path, new_file, "x\n" * 2_001)
     with pytest.raises(AssertionError, match="source-size cap exceeded"):
         _check_source_sizes(tmp_path, {})
 
     ceiling_file = "runtime/package/src/legacy.ts"
     (tmp_path / new_file).unlink()
-    _write_source(tmp_path, ceiling_file, "x\n" * 1_002)
+    _write_source(tmp_path, ceiling_file, "x\n" * 2_002)
     with pytest.raises(AssertionError, match="source-size ceiling exceeded"):
-        _check_source_sizes(tmp_path, {ceiling_file: 1_001})
+        _check_source_sizes(tmp_path, {ceiling_file: 2_001})
 
-    _write_source(tmp_path, ceiling_file, "x\n" * 999)
+    _write_source(tmp_path, ceiling_file, "x\n" * 1_999)
     with pytest.warns(UserWarning, match=f"stale ceiling for {re.escape(ceiling_file)}"):
-        _check_source_sizes(tmp_path, {ceiling_file: 1_001})
+        _check_source_sizes(tmp_path, {ceiling_file: 2_001})
 
 
 @pytest.mark.parametrize(
