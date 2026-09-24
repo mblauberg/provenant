@@ -725,6 +725,8 @@ def build_command(
         str(prompt_path),
         "--out",
         str(result_path),
+        "--run-dir",
+        str(result_path.parent),
         "--role",
         args.role,
     ]
@@ -905,6 +907,7 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
             intent=args.intent, preface=args.preface, requested_model=args.model,
             requested_effort=args.effort or "", run_id=os.environ.get("PROVENANT_RUN_ID", ""),
             run_dir=result_path.parent,
+            original_prompt_file=getattr(args, "original_prompt_file", None) or prompt_path,
             chair=os.environ.get("PROVENANT_CHAIR", ""),
             reviewer_id=args.reviewer_id or "", risk_tier=args.risk_tier or "",
             model_override_tier=args.model_override_tier or "", orchestrator_family="",

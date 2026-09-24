@@ -51,6 +51,7 @@ Options:
   --worktree PATH              Git worktree root the writer owns exclusively.
                                Required by, and only valid with, worktree_write.
   --out PATH                   Clean output path; defaults to mktemp.
+  --run-dir PATH               Provider attempt directory; defaults to a private temp directory.
   --prompt TEXT                Prompt text.
   --prompt-file PATH           Read prompt from file.
   --doctor                     Print local dispatch diagnostics and exit.
@@ -60,7 +61,7 @@ When Fabric is used, the caller records any Fabric correlation.
 EOF
 }
 
-TOOL="" MODEL="" EFFORT="" OUT="" PROMPT="" PROMPT_FILE="" ORIGINAL_PROMPT_FILE="" CHAIN="" ORCH_FAMILY="" MODEL_ALIAS="" TASK_CLASS="" ROUTE_ROLE="reviewer" RISK_TIER="" MODEL_OVERRIDE_TIER="" REVIEWER_ID="" INTENT="assurance" DOCTOR=0
+TOOL="" MODEL="" EFFORT="" OUT="" RUN_DIR="" PROMPT="" PROMPT_FILE="" ORIGINAL_PROMPT_FILE="" CHAIN="" ORCH_FAMILY="" MODEL_ALIAS="" TASK_CLASS="" ROUTE_ROLE="reviewer" RISK_TIER="" MODEL_OVERRIDE_TIER="" REVIEWER_ID="" INTENT="assurance" DOCTOR=0
 PLAN_ONLY=0
 SANDBOX="" NETWORK="" RESUME_SESSION="" PROVIDER_CWD=""
 PREFACE=1
@@ -103,6 +104,7 @@ while [ $# -gt 0 ]; do
     --timeout-seconds) need_value "$@"; TIMEOUT_SECONDS="$2"; shift 2;;
     --worktree) need_value "$@"; WORKTREE="$2"; shift 2;;
     --out) need_value "$@"; OUT="$2"; shift 2;;
+    --run-dir) need_value "$@"; RUN_DIR="$2"; shift 2;;
     --prompt) need_value "$@"; PROMPT="$2"; shift 2;;
     --prompt-file) need_value "$@"; PROMPT_FILE="$2"; shift 2;;
     --original-prompt-file) need_value "$@"; ORIGINAL_PROMPT_FILE="$2"; shift 2;;
@@ -834,7 +836,7 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
           return 1
         fi
         local -a supervisor=(python3 "$SCRIPT_DIR/provider_exec.py" --route-file "$tmpdir/route.json"
-          --adapter "$tool" --prompt-file "$PROMPT_TMP" --out "$OUT" --run-dir "$tmpdir" --mode "$ACCESS_MODE"
+          --adapter "$tool" --prompt-file "$PROMPT_TMP" --out "$OUT" --run-dir "${RUN_DIR:-$tmpdir}" --mode "$ACCESS_MODE"
           --workspace-root "$(pwd -P)"
           --intent "$INTENT" --orchestrator-family "$ORCH_FAMILY" --reviewer-id "$REVIEWER_ID"
           --risk-tier "$RISK_TIER" --model-override-tier "$MODEL_OVERRIDE_TIER"
