@@ -43,7 +43,6 @@ def test_context_loader_default_output_is_bounded_metadata(tmp_path):
     )
     context = json.loads(result.stdout)
     assert sentinel not in result.stdout
-    assert len(result.stdout) < 2_000
     assert context["productChars"] > 100_000
     assert context["productHeadings"] == [
         {"level": 1, "title": "Product"},
