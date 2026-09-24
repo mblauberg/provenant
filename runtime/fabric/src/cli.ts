@@ -15,6 +15,7 @@ import {
   statusRows, fabricStatus, findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
 } from "./run-registry.js";
 import { inspectDatabase, Store } from "./store.js";
+import { readEvents, readRuns } from "./run-reader.js";
 
 const USAGE = `fabric <command>
 
@@ -25,6 +26,7 @@ const USAGE = `fabric <command>
        [--task-id <id>]       link an existing Fabric task
        [--output-path <path>]  opaque output or run path metadata
   inbox [--peek]              claim unacknowledged messages; --peek does not claim
+        [--digest]            bounded unread counts and summaries
         [--limit N]           return at most N deliveries (default 20)
         [--claim-seconds N]   claim lifetime, 1 to 3600 seconds (default 300)
         [--task-id <id>]       return only deliveries linked to this task
@@ -37,6 +39,8 @@ const USAGE = `fabric <command>
   activity [--after-seq N]    list activity, optionally after a cursor
            [--limit N]
   watch [ids…] [--interval N] print run state changes; exit when all terminal
+  lanes [--json] [id]         versioned run reader, root-relative paths
+  events [--follow]           JSON lines for task state and inbox changes
   status [id] [--wait-seconds N]  run status by task, batch or run directory; no id: store summary
   doctor [--json]             read-only schema and integrity diagnostics
   adapters [--json]           configured providers: dispatch state, aliases,
@@ -52,7 +56,7 @@ const argv = process.argv.slice(2);
 const command = argv[0] ?? "whoami";
 const commands = new Set([
   "whoami", "send", "inbox", "ack", "note", "tasks", "task", "claim", "done",
-  "activity", "watch", "status", "doctor", "dispatch", "adapters",
+  "activity", "watch", "status", "doctor", "dispatch", "adapters", "lanes", "events",
 ]);
 
 if (command === "--help" || command === "-h" || command === "help") {
@@ -76,6 +80,16 @@ const flag = (name: string): string | undefined => {
   return value;
 };
 const who = identify();
+if (command === "lanes") {
+  const rest = argv.slice(1).filter((value) => value !== "--json");
+  if (rest.length > 1 || rest.some((value) => value.startsWith("--"))) {
+    console.error("fabric: usage: fabric lanes [--json] [id]");
+    process.exit(2);
+  }
+  const result = await readRuns(who.cwd, rest.length ? rest : undefined);
+  console.log(JSON.stringify(result, null, 2));
+  process.exit(result.status === "ok" ? 0 : 1);
+}
 if (command === "status") {
   try {
     const wait = flag("wait-seconds");
@@ -238,6 +252,14 @@ try {
   }
 
   case "inbox": {
+    const digestAt = argv.indexOf("--digest");
+    if (digestAt !== -1) {
+      argv.splice(digestAt, 1);
+      const taskId = flag("task-id");
+      if (argv.length !== 1) throw new Error("usage: fabric inbox --digest [--task-id <id>]");
+      show(store.inboxDigest(who, taskId));
+      break;
+    }
     const limitText = flag("limit");
     const limit = limitText === undefined ? 20 : Number(limitText);
     if (!Number.isSafeInteger(limit) || limit <= 0) {
@@ -348,6 +370,22 @@ try {
       if(result.runs.every(row=>row.state === "terminal")) break;
       await sleep(interval*1000);
     }
+    break;
+  }
+
+  case "events": {
+    const followAt = argv.indexOf("--follow");
+    const follow = followAt !== -1;
+    if (follow) argv.splice(followAt, 1);
+    if (argv.length !== 1) throw new Error("usage: fabric events [--follow]");
+    let cursor: string | undefined;
+    do {
+      const snapshot = await readEvents(who.cwd, cursor, store.inbox(who, { peek: true, limit: 100 }));
+      if (snapshot.status !== "ok") throw new Error(String(snapshot.error));
+      cursor = snapshot.cursor;
+      for (const event of snapshot.events) console.log(JSON.stringify(event));
+      if (follow) await sleep(250);
+    } while (follow);
     break;
   }
 

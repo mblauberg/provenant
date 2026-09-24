@@ -17,6 +17,7 @@ import {
   terminateActiveExecutionGroups,
 } from "./execution.js";
 import { isSQLiteContention, Store, type Message } from "./store.js";
+import { readEvents, readRuns } from "./run-reader.js";
 
 // Leave margin under the MCP SDK's 60-second default request timeout.
 const MAX_WAIT_SECONDS = MAX_EXECUTION_WAIT_SECONDS;
@@ -233,8 +234,13 @@ register(
     claim: z.boolean().optional(),
     limit: z.number().int().min(1).max(100).optional(),
     wait_seconds: wait,
+    digest: z.boolean().optional(),
   },
-  async ({ ids, claim, peek: explicitPeek, task_id, claim_seconds, limit, wait_seconds }, { signal }) => {
+  async ({ ids, claim, peek: explicitPeek, task_id, claim_seconds, limit, wait_seconds, digest }, { signal }) => {
+    if (digest) {
+      if (ids !== undefined || claim === true) return { status: "rejected", error: "digest_conflict", fix: "Fetch message bodies by id in a separate inbox call." };
+      return readyStore().inboxDigest(who, task_id);
+    }
     const peek = explicitPeek ?? (ids === undefined && claim !== true);
     const rows = await waitForInbox(
       {
@@ -248,6 +254,32 @@ register(
       signal,
     );
     return { messages: rows.map((row) => mailboxView(row, peek)) };
+  },
+);
+register(
+  "fabric_runs",
+  "Versioned, bounded run and lane reader with root-relative paths.",
+  { ids: z.array(z.string()).max(20).optional(), wait_seconds: wait },
+  async ({ ids, wait_seconds }, { signal }) => {
+    const bounded = boundedWait(wait_seconds);
+    if (bounded.error) return bounded.error;
+    return readRuns(who.cwd, ids, bounded.value, signal);
+  },
+);
+register(
+  "fabric_events",
+  "Read task terminal/input_required and inbox events; pass cursor to wait for new events.",
+  { cursor: z.string().max(8192).optional(), wait_seconds: wait },
+  async ({ cursor, wait_seconds }, { signal }) => {
+    const bounded = boundedWait(wait_seconds);
+    if (bounded.error) return bounded.error;
+    const deadline = Date.now() + (bounded.value ?? 0) * 1000;
+    for (;;) {
+      signal.throwIfAborted();
+      const result = await readEvents(who.cwd, cursor, readyStore().inbox(who, { peek: true, limit: 100 }));
+      if (result.status !== "ok" || result.events.length || Date.now() >= deadline) return result;
+      await delay(Math.min(250, deadline - Date.now()), undefined, { signal });
+    }
   },
 );
 function acknowledgeRuns(result: { runs?: Record<string, any>[] }) {

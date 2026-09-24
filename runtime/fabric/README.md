@@ -37,12 +37,14 @@ default. `detail: full` includes attempt history, evidence and provenance. A sma
 formatter supports older receipts when no digest exists. Request errors contain
 one line with `fix:`. No provider output is embedded in status responses.
 
-Exactly twelve tools are registered by default:
+Fourteen tools are registered by default:
 
 | Tool | Purpose |
 | --- | --- |
 | `fabric_dispatch` | One prompt, `tasks[]`, `resume` or `handoff` |
 | `fabric_status` | Read run/task/batch IDs; bounded wait for `any` or `all` |
+| `fabric_runs` | Versioned run and lane list with root-relative paths |
+| `fabric_events` | Cursor-based terminal, input-required and inbox events |
 | `fabric_cancel` | Cancel the owner and provider group |
 | `fabric_output` | Bounded result, stderr, events or receipt slice |
 | `fabric_adapters` | Compact catalogue, CLI availability and guarantees |
@@ -146,6 +148,27 @@ Status and output readers accept `succeeded` in older retained files.
 Unpublished batch children remain visible until an attempt or terminal batch
 summary accounts for them.
 
+`provenant lanes --json` and `fabric_runs` expose `fabric.runs.v1`. The response
+has `status: ok|unknown` and `runs`; read failure is `unknown` with an `error`,
+never an apparently empty successful list. The default list covers active and
+recent runs (at most 20 task rows); an ID reads that run or task. Each row has
+`id`, `run_id`, `task_id`, `run_path`, `state`, `status`, `route`, `model`,
+`started_at`, `last_progress_at`, `pgid`, `pgid_alive`, `result_path`,
+`receipt_path`, `writer`, `worktree` and `attempt`. Paths are relative to the
+project's `.agent-run` root. Missing facts are `null`; `pgid_alive: null` means
+the process identity cannot be verified. Both `tasks/<id>/attempt-NNN/` and
+`dispatch/tasks/<id>/attempt-NNN/` receipts are read internally. Fabric's status
+and output readers use the same underlying receipt scanner; consumers should
+use the versioned response instead of opening receipt files themselves.
+
+`provenant events --follow` prints one JSON line per new terminal or
+`input_required` attempt and per unread inbox message. `fabric_events` returns
+`fabric.events.v1` with `events` and an opaque `cursor`; pass that cursor back
+with `wait_seconds` (0–55) to wait for changes. Run one follower per session;
+restart it only after exit. The stream is a bounded recent view of retained
+attempts and the active inbox, so a chair should reconcile with `fabric_runs`
+after a long disconnect. Arm a fallback wake of at least 20 minutes.
+
 Output defaults to 4,000 bytes and caps each request at 20,000. Continue at
 `next_offset`; pages preserve UTF-8 boundaries and `eof` reflects the current
 file size. Use `tail: true` for a bounded tail, including while a run is active.
@@ -160,6 +183,12 @@ and an 80-character preview. `ids:[...]` claims up to 100 selected messages;
 `claim:true` claims available messages up to `limit`. Bodies are capped at
 4 KiB each, with `body_path` for the full text. Deliveries older than fourteen
 days stay in storage but are excluded from the active inbox.
+
+`fabric_inbox{digest:true}` and `fabric inbox --digest` return
+`fabric.inbox_digest.v1`: unread `total`, up to 20 `groups` by sender and task,
+and `truncated`. Each group has a count, an 80-character one-line summary and a
+sample message ID. Fetch a full body by calling `fabric_inbox` with `ids:[id]`;
+the digest neither claims nor acknowledges deliveries.
 
 A claim lasts five minutes by default. Acknowledge only after processing the
 message; expired claims redeliver. Claim tokens prevent another reader from

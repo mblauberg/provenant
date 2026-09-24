@@ -82,6 +82,22 @@ function statSnapshot(path: string) {
 }
 
 describe("CLI boundaries", () => {
+  it("summarises unread messages by task and sender within a bounded digest", () => {
+    const store = openStore();
+    announce(store, "chair", "worker");
+    for (let index = 0; index < 30; index += 1) {
+      store.send(agent("worker"), "chair", `update ${index} ${"x".repeat(2000)}`);
+    }
+    const task = store.createTask(agent("worker"), "Review the result");
+    store.send(agent("worker"), "chair", "Task update", { taskId: task.taskId });
+    const digest = store.inboxDigest(agent("chair"));
+    expect(digest.total).toBe(31);
+    expect(digest.groups).toHaveLength(2);
+    expect(digest.groups[0]).toMatchObject({ from: "worker", taskId: null, count: 30 });
+    expect(digest.groups[1]).toMatchObject({ from: "worker", taskId: task.taskId, count: 1 });
+    expect(JSON.stringify(digest).length).toBeLessThan(3000);
+    expect(store.inbox(agent("chair"), { ids: [store.inbox(agent("chair"), { peek: true, limit: 1 })[0]!.messageId] })).toHaveLength(1);
+  });
   it("rejects an unknown command before creating or announcing", () => {
     const stateDirectory = join(temporaryDirectory, "unknown-command-state");
     const result = runCli(["frobnicate"], stateDirectory);
