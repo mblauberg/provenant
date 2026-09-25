@@ -52,7 +52,12 @@ Required:
   --id SESSION_ID    Session ID of the variant wrapper
 
 Output (JSON):
-  { handled, file, carbonize }`);
+  { handled, file, carbonize }
+
+carbonize: true means accepted variant output still has run-owned scaffolding
+that must be consolidated into project-native source before polling again.
+Source mutation is descriptor-bound, no-follow, in-place, and verified, with
+process-level rollback. It is not crash-atomic: a crash can leave partial bytes.`);
     process.exit(0);
   }
 

@@ -28,6 +28,7 @@ The component ledgers at `skills/ui-ux-design/evals/provenance_components.yaml`
 harness-original exceptions and ownership boundary. Attribution is centralised
 here and in those ledgers; modified derived files carry only a neutral local
 modification notice. `skills/ui-ux-design/SKILL.md`, its `evals/`,
+`references/emotional-design.md`,
 `scripts/ui-evidence-paths.mjs`, `scripts/ui-live-paths.mjs`, and
 `scripts/ui-runtime-paths.mjs` are
 harness-original rather than upstream Impeccable expression. The detector and
@@ -54,10 +55,10 @@ redistributed by the current skill.
 The consolidated references independently paraphrase small methods inspected
 at the immutable commits below. These repositories are research inputs, not
 redistributed components: no source expression, code, prompt pack, catalogue,
-demo, runtime, or asset was copied, so their MIT texts are not carried as
+demo, runtime, or asset was copied, so their licence texts are not carried as
 component licences.
 
-All seven sources in this section were retrieved on 2026-08-29.
+The first seven sources in this section were retrieved on 2026-08-29.
 
 - [Designer Skills](https://github.com/Owl-Listener/designer-skills/tree/20e34c4a587e5eb09fcdf8351fa97b3ad761b31e),
   commit `20e34c4a587e5eb09fcdf8351fa97b3ad761b31e`: knowledge-owner and workflow
@@ -82,6 +83,15 @@ All seven sources in this section were retrieved on 2026-08-29.
 - [Tastemaker](https://github.com/codeswithroh/tastemaker/tree/45313ce9f60971134704a17f7b1a64c30909c240),
   commit `45313ce9f60971134704a17f7b1a64c30909c240`: field-specific evidence limits
   and stamp-versus-render integrity.
+
+These two sources were retrieved on 2026-09-25:
+
+- [Anthropic Skills: frontend-design](https://github.com/anthropics/skills/tree/41bbe19d1a1a7eaab5e7bb9050a417e5c6cffc8f/skills/frontend-design),
+  commit `41bbe19d1a1a7eaab5e7bb9050a417e5c6cffc8f` (Apache-2.0): a named direction
+  with one memorable choice, and review of a plan against generic defaults.
+- [Vercel Web Interface Guidelines](https://github.com/vercel-labs/web-interface-guidelines/tree/e3d624baaf29dc1fc645aff3e38f03e564d2d6b1),
+  commit `e3d624baaf29dc1fc645aff3e38f03e564d2d6b1` (MIT): tabular numerals,
+  optical alignment, concentric radii, keyboard paths, and optimistic updates.
 
 Nested Three.js, GSAP, image-generation, and other bundled source-repository
 assets were not imported and are not claimed under a parent repository's MIT

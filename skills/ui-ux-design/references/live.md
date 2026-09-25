@@ -2,93 +2,46 @@
 
 # Live iteration
 
-Live is a write-capable design sub-mode. Before boot, the active implementation
-lifecycle must already bound the project root, allowed source paths,
-configuration changes, and output/cache locations. This is internal routing,
-not wording the user must supply. A read-only request never enters live setup;
-use read-only rendered evidence or an authorised isolated prototype instead.
+Live is a write-capable sub-mode of an active implementation lifecycle. Before
+setup, that lifecycle must bound the project root, allowed source paths, config
+changes, and output/cache locations. A read-only request never enters live
+setup; use read-only rendered evidence or an authorised isolated prototype.
 
-Start live mode through the stable skill entry point:
-`node "$(provenant root)/skills/ui-ux-design/scripts/live.mjs"` and use
-its help and JSON event contract as the operational procedure. Keep internal
-focus keys as protocol data, not a user interaction model. Validate every
-project-relative source target with descriptor-bound, no-follow containment
-before setup, injection, wrapping, acceptance, carbonisation, or cleanup. Stop
-on ambiguity, server loss, stale session identity, malformed events, or an
-expanded write set.
+Enter with `node "$(provenant root)/skills/ui-ux-design/scripts/live.mjs"`.
+Use its `--help` and the help for `live-poll.mjs`, `live-resume.mjs`,
+`live-accept.mjs`, `live-complete.mjs`, and `live-server.mjs` for config,
+polling, recovery, carbonisation, and stop. The JSON event contract is in
+`live-poll.mjs --help`.
+Keep focus keys as protocol data, not a user interaction model. Stop on
+ambiguity, server loss, stale session identity, malformed events, or an expanded
+write set. Use protocol accept/discard/completion paths, not ad hoc edits.
+Validate each project-relative source target with descriptor-bound, no-follow
+containment before any write.
 
-## First run
-
-If boot returns `{ "ok": false, "error": "config_missing", "path": "..." }`,
-create only that project-local config path. Its minimum schema is:
-
-```json
-{
-  "files": ["index.html"],
-  "insertBefore": "</body>",
-  "commentSyntax": "html"
-}
-```
-
-`files` accepts project-relative files or globs; optional `exclude` applies to
-glob matches. Use either `insertBefore` or `insertAfter`, and choose
-`commentSyntax` as `html` or `jsx`. Hard exclusions always remove `.git` and
-`node_modules` targets. Re-run `live.mjs`; do not invent alternate config keys.
-
-Record the session ID, project root, source baseline, server identity, event
-revision, selected variant, and every changed path. Poll monotonically. A
-restarted server never re-enqueues pending browser events from project journals;
-retained journal state is advisory and untrusted. If the same authenticated page
-still holds the complete request, reconnect live mode and click `Retry` once to
-reissue it explicitly. After a reload, click `Restart` to discard the incomplete
-session, wait for the agent's discard confirmation, then reselect the element;
-the browser never reconstructs a partial request from the journal. Preview
-selection is not lifecycle acceptance.
-Preserve the action protocol and use its accept/discard/completion paths rather
-than editing around them. An Accept or Discard HTTP receipt means queued only;
-the browser keeps the session recoverable until the agent acknowledgement.
-
-`server.json` is transient bearer-token state. Exclude `server.json` and
-`sessions/` from version control. Annotation output uses a fresh private OS
-temporary run directory and is removed with that run; keep any legacy
-`annotations/` path ignored. Do not expose tokens in logs or screenshots.
+On `config_missing`, create only the returned path using the schema in
+`live.mjs --help`; never invent keys. Keep secrets out of logs and screenshots.
+Preview selection is not lifecycle acceptance.
 
 ## Handle fallback
 
 On `element_not_in_source`, `element_not_found`, `file_is_generated`, or
 `element_ambiguous`, the wrapper returns `fallback: "agent-driven"` without a
-source write. Read the candidate ranges and rendered context, then use a more
-specific element id/classes/tag/text or an explicit source `--file`. If the
-element is runtime-generated, persist the selected result in its canonical
-source owner rather than editing generated output. Manually place the exact
-session wrapper only inside the already bounded source path; if identity or
-ownership remains ambiguous, stop and report it.
+source write. Read candidate ranges and rendered context; retry with a more
+specific element id/classes/tag/text or explicit source `--file`. For runtime-
+generated elements, persist the result in its canonical source owner. Manually
+place the exact session wrapper only inside the bounded source path; if identity
+or ownership remains ambiguous, stop and report it.
 
 ## Required after accept
 
-When acceptance emits a carbonisation (variant promotion and consolidation)
-task, replace run-owned variant scaffolding with project-native source while preserving the selected result,
-verify the preview, then record completion with `live-complete.mjs`. Do not poll
-again until that task succeeds or is explicitly abandoned.
-Reporting a carbonisation error is explicit abandonment: the accepted change
-remains saved while the browser closes that session.
-
-Source mutation uses descriptor-bound, no-follow in-place writes with
-verification and process-level rollback. It is not crash-atomic: completed
-edits are verified, but partial bytes can be briefly visible during a write or
-remain after a process or power crash.
+Complete the carbonisation task: replace run-owned variant scaffolding with
+project-native source, verify the preview, and record `live-complete.mjs` before
+polling again. Reporting a carbonisation error explicitly abandons the task;
+the accepted change stays saved.
 
 ## Exit
 
-Stop only the exact background-task handle returned by this run, or a run-owned
-PID plus its command and start identity. Refuse broad name or pattern kills. A
-successful stop waits for that exact PID to exit; a timeout reports the PID,
-port, and state path so the residual listener can be inspected or stopped
-explicitly. Stop also reports a cleanup failure and retains the matching state
-record rather than claiming a clean shutdown. Verify source/configuration
-cleanup against the baseline and retain the journal needed for honest recovery.
-
-## Cleanup
-
-Remove only run-owned transient output after source and server state are
-verified. If cleanup ownership is uncertain, report the residual path and stop.
+Stop only this run's exact background handle, or a run-owned PID matched by
+command and start identity; never kill by broad name or pattern. Verify
+source/config cleanup against the baseline and keep the recovery journal. Remove only run-owned transient output after source and server state
+are verified. If ownership is uncertain, report the residual path and stop.

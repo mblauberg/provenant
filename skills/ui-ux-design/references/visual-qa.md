@@ -9,11 +9,14 @@ or unusual content where risk warrants it. Include an unbroken URL, UUID/hash,
 long token, nested flex/grid child with `min-width: 0`, and line clamp or
 multiline limit where those shapes can occur.
 
-Capture only after the viewport is settled: fonts resolved, loading accounted
-for, intended content present, layout stable, and animation paused or allowed
-to finish consistently. Compare against approved references under like
+Capture a motion-bearing change per the motion evidence protocol in
+[motion](motion.md); a frozen or finished-animation still is valid only for
+states that carry no motion. Capture a still only after the viewport is
+settled: fonts resolved, loading accounted for, intended content present, and
+layout stable. Compare against approved references under like
 conditions. A screenshot does not prove interaction, accessibility, source
-correctness, or responsive behaviour beyond the captured state.
+correctness, or responsive behaviour beyond the captured state, and a
+screenshot alone never certifies motion quality.
 
 Use rendered inspection, screenshots, accessibility tree, keyboard path,
 console, and network evidence as distinct lanes. Check hierarchy, alignment,

@@ -6,6 +6,7 @@ components:
     exact: []
     prefixes: [agents/, references/, scripts/]
     exclude:
+      - references/emotional-design.md
       - scripts/ui-evidence-paths.mjs
       - scripts/ui-live-paths.mjs
       - scripts/ui-runtime-paths.mjs
@@ -34,7 +35,8 @@ components:
     prefixes: [evals/]
     exact:
       - SKILL.md
+      - references/emotional-design.md
       - scripts/ui-evidence-paths.mjs
       - scripts/ui-live-paths.mjs
       - scripts/ui-runtime-paths.mjs
-    description: Local skill entrypoint, runtime safeguards, tests, routing, authority, disposition, and provenance fixtures; not upstream Impeccable expression.
+    description: Local skill entrypoint, emotional-design reference, runtime safeguards, tests, routing, authority, disposition, and provenance fixtures; not upstream Impeccable expression.

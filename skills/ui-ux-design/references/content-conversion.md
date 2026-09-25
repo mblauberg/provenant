@@ -30,13 +30,21 @@ decision. Build section by section from that argument arc. When the request
 already settles these choices, record them and proceed without an approval
 round-trip.
 
-Empty and first-run states should orient, explain value, and offer an honest
-next action. Loading, error, permission, offline, and destructive states need
-specific, actionable content consistent with the interaction contract. Tone
-follows seriousness and recovery; novelty must not hide meaning. Accessible
-names and alternative text describe purpose rather than visual jokes or
-keywords.
+Distinguish "nothing here yet" from loading, error, and no-results; each needs
+its own content. An empty or first-run state orients, explains value, and gives
+one direct next action; a no-results state offers to clear or widen the query.
+Safe sample content may aid orientation when it is clearly marked, never mixed
+into real records, and easy to remove. Loading, error, permission, offline, and
+destructive states need specific, actionable content consistent with the
+interaction contract. Tone follows seriousness and recovery; novelty must not
+hide meaning. Accessible names and alternative text describe purpose rather
+than visual jokes or keywords.
+
+Engagement mechanics in content, such as streaks, prompts, or progress framing,
+follow the never-gamify list in [emotional design](emotional-design.md).
 
 This owner sets UI content hierarchy and constraints. Route substantial copy
 rewriting to `engineering-writing` or `natural-writing`, and preserve approved
 product, legal, localisation, and brand owners.
+
+Source: NN/g, [Designing empty states in complex applications](https://www.nngroup.com/articles/empty-state-interface-design/).
