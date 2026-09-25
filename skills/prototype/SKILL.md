@@ -7,7 +7,8 @@ description: "Use for an authorised, timeboxed throwaway build that answers one 
 
 Some uncertainty is cheaper to build through than to talk through. A
 prototype exists to answer ONE named question; the deliverable is the
-answer, never the code.
+answer, never the code. A retained design-comparison prototype that a project
+keeps under its own register is not a spike; that project's rules govern it.
 
 ## Contract (agree before writing code)
 

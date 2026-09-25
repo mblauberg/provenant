@@ -30,6 +30,12 @@ exception; deadline pressure is not one.
 3. **Refactor:** only while green, remove duplication, improve names and deepen
    modules. Rerun tests after each structural step.
 
+When project instructions set a later execution point for tests, such as a
+merged-tree gate under a machine budget, follow that cadence: still write each
+test first, name the mutation or missing behaviour it must fail on, and report
+its red and green runs as deferred. That gate must run them before merge; a
+deferred run is not yet evidence.
+
 Work vertically: test -> implementation -> repeat. Start with one tracer bullet
 through the full path, then add behaviours from what each cycle reveals. Never
 write an imagined horizontal test batch first. Prioritise critical paths and
@@ -67,7 +73,8 @@ no owning file; a review, audit or documentation pass never justifies one.
 
 Before the next behaviour confirm: public observable contract; witnessed
 right-reason failure; minimal passing code; focused and broader checks green;
-no dirty output; resilience to internal refactoring.
+no dirty output; resilience to internal refactoring. Under a project-deferred
+cadence, report each unwitnessed item as deferred to the gate.
 
 For a bug, reproduce the exact failure as the regression test, watch it fail,
 then repair and watch it pass. If no correct seam reaches the bug, route

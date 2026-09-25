@@ -10,3 +10,4 @@ cases:
   - {id: q232, relation: boundary, prompt: "Checkpoint this multi-session effort and update both the session handoff and its current route leg.", tags: [composition], expected: {primary_skill: session, companion_skills: [work-map]}}
   - {id: q233, relation: boundary, prompt: "Finish the substantial implementation, refresh its recovery checkpoint, and retain only authorised run evidence.", tags: [composition], expected: {primary_skill: implement, companion_skills: [session]}}
   - {id: q234, relation: boundary, prompt: "At session end, archive the retired context document under the project documentation policy.", tags: [composition], expected: {primary_skill: session, companion_skills: [engineering-docs]}}
+  - {id: q923, relation: positive, prompt: "Write the coordinator handoff; project rules give test runs to the lander, so cite its latest result and report the exact diff.", tags: [direct], expected: {primary_skill: session, companion_skills: []}}

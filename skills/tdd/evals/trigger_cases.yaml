@@ -10,3 +10,4 @@ cases:
   - {id: q268, relation: boundary, prompt: "Implement the approved feature end-to-end, using TDD for each changed behaviour.", tags: [composition], expected: {primary_skill: implement, companion_skills: [tdd]}}
   - {id: q269, relation: boundary, prompt: "The bug's root cause is confirmed; implement its repair with a witnessed regression test.", tags: [composition], expected: {primary_skill: implement, companion_skills: [tdd]}}
   - {id: q270, relation: boundary, prompt: "Production code may contain uncommitted user work; add the regression seam without deleting or overwriting it.", tags: [composition], expected: {primary_skill: tdd, companion_skills: [implement]}}
+  - {id: q919, relation: boundary, prompt: "Project rules run tests only at the merged-tree landing gate; write this behaviour's test first and report its red and green runs as deferred.", tags: [composition], expected: {primary_skill: tdd, companion_skills: [implement]}}

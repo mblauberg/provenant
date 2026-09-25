@@ -60,7 +60,9 @@ compaction, revalidate generation, expiry and ownership before reuse.
    time-sensitive memory against its owning source or mark it stale.
    Run `provenant clean` for a dry-run retention plan; apply only its current
    digest when cleanup is authorised.
-3. **Handoff version control:** run project checks; report the exact diff.
+3. **Handoff version control:** run the project checks assigned to this role,
+   or cite the owner's result where project instructions assign them elsewhere;
+   report the exact diff.
    Commit only with user/project authority; never commit another actor's state.
 4. **Signal:** capture only a compact friction pointer in the handoff/state when
    it may recur. `retrospect` owns analysis and process changes after a completed
