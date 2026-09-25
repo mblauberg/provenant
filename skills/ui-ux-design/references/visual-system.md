@@ -21,6 +21,25 @@ universal weight shift. Establish role, measure, line height, and fallback from
 observed needs rather than fixed scales. 16px is a common ergonomic default,
 not a universal minimum.
 
+Use tabular numerals (`font-variant-numeric: tabular-nums` or the face's
+equivalent) wherever digits update in place or align in columns: counters,
+timers, timestamps, currency, and numeric table columns. Align comparable
+figures on the right or the decimal point. Proportional figures can stay in
+running prose. Verify the face actually ships tabular figures.
+
+## Alignment and corners
+
+Measured alignment can look wrong: asymmetric icons such as a play triangle,
+glyph side-bearings, round shapes beside square ones, and icons beside text
+whose cap height sits off the box centre. Correct by eye against real content,
+with small offsets owned by the component rather than one-off nudges, and
+recheck across themes and zoom.
+
+Keep nested corners concentric: the inner radius is the outer radius minus the
+padding between them, not the same value repeated at every level. When the
+padding meets or exceeds the outer radius, the inner corner may be square. Treat
+radius as a token role, not per-component taste.
+
 ## Imagery and expression
 
 Use approved real assets before approximations. Check crop, focal point,
@@ -28,3 +47,5 @@ resolution, contrast, alternative treatment, loading, and small-screen
 behaviour. Apply expressive colour, scale, asymmetry, or texture only when it
 supports the approved identity and surface job. When changing intensity, name
 one axis, preserve meaning, and verify the result in context.
+
+Source: Vercel, [Web Interface Guidelines](https://vercel.com/design/guidelines).

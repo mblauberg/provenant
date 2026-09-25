@@ -47,10 +47,21 @@ The bearer token remains only in private .impeccable/live/server.json state.
 On config_missing, prints:
   { ok: false, error: "config_missing", path }
 
+Create only that returned path. First-run config schema:
+  { "files": ["index.html"], "insertBefore": "</body>", "commentSyntax": "html" }
+files accepts project-relative paths or globs. Use insertBefore or
+insertAfter; commentSyntax is html or jsx. Optional exclude filters
+glob matches. .git and node_modules are always excluded. Do not invent keys;
+rerun this command after creating the config.
+
+server.json is transient bearer-token state; exclude it and sessions/ from
+version control. Annotation output uses a private temporary run directory.
+
 The agent should then:
-  1. If config_missing, create the config within the authorised project paths and re-run
-  2. Optionally open the project's dev/preview URL in the browser (see references/live.md—not serverPort)
-  3. Enter the poll loop: node live-poll.mjs`);
+  1. Optionally open the project's own dev/preview URL (not the helper server port)
+  2. Enter the poll loop: node live-poll.mjs
+
+See references/live.md for agent decision points and the JSON event contract for event handling.`);
     process.exit(0);
   }
 

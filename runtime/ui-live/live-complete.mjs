@@ -27,7 +27,11 @@ function parseArgs(argv) {
 export async function completeCli() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help || !args.id) {
-    console.log(`Usage: node live-complete.mjs --id SESSION_ID [--discarded|--error MESSAGE]\n\nAppend the final durable session acknowledgement. Use after accept/discard cleanup is verified.`);
+    console.log(`Usage: node live-complete.mjs --id SESSION_ID [--discarded|--error MESSAGE]
+
+Append the final durable session acknowledgement after cleanup is verified.
+After accept, acknowledge only once carbonisation is complete. --error explicitly
+abandons carbonisation; the accepted change remains saved.`);
     process.exit(args.help ? 0 : 1);
   }
 

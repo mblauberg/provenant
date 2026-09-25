@@ -1482,6 +1482,11 @@ Commands:
   stop          Stop the server and remove the injected live.js script tag
   stop --keep-inject   Stop the server only (leave the script tag in the HTML entry)
 
+Stop targets only the authenticated server recorded for this project and waits
+for that exact PID. A timeout reports PID, port, and state path. Cleanup failures
+are reported and preserve the matching state record. Verify source/config cleanup
+against the baseline and retain the journal needed for recovery.
+
 Options:
   --background  Start detached, print non-secret process/port JSON, then exit
   --port=PORT   Use a specific port (default: auto-detect starting at 8400)

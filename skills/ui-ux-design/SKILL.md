@@ -29,8 +29,9 @@ review.
 
 For design or changes, start with the approved outcome, canonical local
 components and tokens, rendered pixels and states, supported users, and
-viewports. Classify the work as preserve, extend, or overhaul; preserve is the
-default for an existing product. Load
+viewports. Classify the work as preserve, extend, or overhaul; preserve serves
+the brief by default for an existing product, but never vetoes the stronger
+change a brief asks for. Load
 [reference grounding](references/reference-grounding.md) and
 [design](references/design.md), including its reuse and composition guidance.
 
@@ -39,7 +40,7 @@ Load only the depth the request needs: [surfaces](references/surfaces.md),
 [interaction and states](references/interaction-states.md),
 [responsive accessibility](references/responsive-accessibility.md),
 [motion](references/motion.md), [content and conversion](references/content-conversion.md),
-or [visual QA](references/visual-qa.md).
+[emotional design](references/emotional-design.md), or [visual QA](references/visual-qa.md).
 
 For a change to rendered UI, capture light and dark desktop views of the
 changed surfaces only, adding mobile where layout risk warrants, and look at

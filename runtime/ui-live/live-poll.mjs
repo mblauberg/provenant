@@ -69,6 +69,14 @@ Modes:
   poll --reply <id> error --lease-token <token> "msg"
                                    Reply with an error message
 
+Track session ID, project root, source baseline, server identity, event revision,
+selected variant, and every changed path. Poll monotonically. A restarted server
+does not re-enqueue pending browser events from project journals; journal data
+is advisory and untrusted. Retry once from the same authenticated page if it
+still holds the complete request. After reload, click Restart, wait for the
+discard confirmation, then reselect; do not reconstruct a partial request.
+Accept/Discard HTTP receipts mean queued only, until the agent acknowledges.
+
 Options:
   --timeout=MS   Long-poll timeout in ms (default: 600000). Use the default unless the user asked to pause live; never use a short timeout to end the chat turn
   --help         Show this help message`);
