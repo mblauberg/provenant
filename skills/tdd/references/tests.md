@@ -95,8 +95,8 @@ where a project runs it; a score is a guide, not a target.
 - **Examples** for named scenarios, boundaries and bug regressions.
 - **Properties** for an invariant over many inputs, such as totals conserving,
   a round trip, or a denied role staying denied. Use the project's
-  property-testing library, keep the failing seed, and add the shrunk
-  counterexample as an example test when it finds a bug.
+  property-testing library. When it finds a bug, keep either the failing seed
+  or the shrunk counterexample as an example test, not both.
 - **UI:** query by accessible role and name; a test id is the last resort.
   Assert what the user sees and can do. Appearance, layout and motion need a
   rendered capture or visual diff, not a DOM unit test. A snapshot stays small,

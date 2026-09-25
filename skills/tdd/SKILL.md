@@ -10,9 +10,11 @@ NO NEW OR CHANGED OBSERVABLE BEHAVIOUR WITHOUT A RIGHT-REASON FAILURE FIRST
 ```
 
 Observable behaviour is what a user or caller can depend on: an outcome, a
-returned value, a stored record, a public contract. Every test is code someone
-must maintain, so it must catch a plausible defect that no existing test
-catches. See [When not to write a test](#when-not-to-write-a-test).
+returned value, a stored record, a public contract. Appearance, layout and
+motion are observable too, but their evidence is a rendered capture, not a test
+written first. Every test is code someone must maintain, so it must catch a
+plausible defect that no existing test catches. See
+[When not to write a test](#when-not-to-write-a-test).
 
 Never delete or overwrite unknown, pre-existing or user-authored work to create
 a red state. If this run wrote production code before the test, preserve its
@@ -77,26 +79,37 @@ green, use [deep-modules.md](references/deep-modules.md) and
 
 Write no test, and give this evidence instead, for:
 
-- **Prose, copy and unconsumed configuration:** the diff and review.
+- **Prose, non-contractual copy and unconsumed configuration:** the diff and
+  review. A required disclosure, an accessible name or a documented error
+  message is a contract and keeps its test.
 - **Appearance, layout and motion:** a rendered capture or recording, judged by
   a person or a visual diff; never class, style or DOM-structure assertions.
-- **A behaviour-preserving refactor:** the existing suite staying green.
-- **What types, a schema, a parser or a linter already guarantee:** that check.
+- **A behaviour-preserving refactor:** the existing suite staying green where
+  it covers the change; otherwise the characterisation evidence `refactor`
+  requires.
+- **What types, a schema, a parser or a linter already guarantee:** that check,
+  plus one boundary test proving the real path applies it.
 - **Trivial delegation or wiring with no decision in it:** the caller's test.
 - **A case an existing test already covers, here or at a lower layer:** that
   test. Test a shared unit once where it is owned, not again through each
   consumer.
 - **An exploratory probe or debugging script:** nothing; delete it before
   handoff.
-- **A test for which no plausible defect comes to mind:** nothing.
+- **A test that would fail only on a deliberate rewording, restyle or
+  reordering:** nothing.
+
+Money, authorisation, privacy and data-integrity changes always earn a test.
+Not being able to imagine a defect is never an exemption; the exemption is a
+named existing test or check that already catches it.
 
 ## Existing tests
 
 Agents copy the tests beside them. In a file you touch, rewrite or delete a
 rigid test on the behaviour you are changing rather than adding another like
-it. When a behaviour-preserving change fails a test, the test pinned an
+it. When a change meant to preserve behaviour fails a test, first establish
+whether the public contract still holds. If it does, the test pinned an
 incidental detail: rewrite it to pin behaviour or delete it; never bend
-production code around it. Never weaken, skip or delete a test to make a real
+production code around it. If it does not, the change is a regression. Never weaken, skip or delete a test to make a real
 behaviour change pass, and report every test you remove with its reason. A
 characterisation test that pins current, possibly wrong behaviour is temporary:
 replace it with an intended-behaviour test once the change lands.
