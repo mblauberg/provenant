@@ -36,8 +36,11 @@ present a compact decision packet with 2–3
 choices, a recommendation and parked calls.
 
 Agents decide engineering calls. Business, legal or financial owner calls stay
-parked as open-decision rows; never guess. Put every unresolved branch in
-scope.
+parked as open-decision rows; never guess. Where the owner has explicitly
+authorised assume-and-record in project instructions, an agent may instead take
+the recommended answer on a reversible call, record it for owner confirmation
+and proceed. One-way doors, irreversible actions, promotion and live activation
+stay gated. Put every unresolved branch in scope.
 
 ## Resolve uncertainty
 

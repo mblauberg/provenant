@@ -10,3 +10,4 @@ cases:
   - {id: q178, relation: boundary, prompt: "Scope the feature, using one timeboxed spike only for the remaining library feasibility question.", tags: [composition], expected: {primary_skill: scope, companion_skills: [prototype]}}
   - {id: q179, relation: boundary, prompt: "Build a throwaway interaction prototype to learn what this onboarding UX feels like.", tags: [composition], expected: {primary_skill: prototype, companion_skills: [ui-ux-design]}}
   - {id: q180, relation: boundary, prompt: "Run three independent feasibility spikes in isolated scratch areas and reduce their evidence.", tags: [composition], expected: {primary_skill: orchestrate, companion_skills: [prototype]}}
+  - {id: q922, relation: negative, prompt: "Add a retained side-by-side design-comparison page to the project's prototype register so the owner can pick a layout.", tags: [adjacent], expected: {primary_skill: ui-ux-design, companion_skills: []}}

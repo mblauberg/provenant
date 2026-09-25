@@ -16,7 +16,8 @@ Require:
   disclosure, secrets and external-action constraints;
 - `evaluate` need for stochastic/judgement-bearing behaviour.
 
-If missing, use `scope`; never infer owner decisions.
+If missing, use `scope`; never infer owner decisions beyond the recorded,
+owner-authorised assumptions `scope` allows.
 
 For active service or safety impact, user-approved containment may parallelise
 verification and review. Gates and authority apply; name a
@@ -37,8 +38,10 @@ reconciliation run.
    For a version-sensitive external interface or migration, apply
    [source grounding](references/source-grounding.md) and
    [migration compatibility](references/migration-compatibility.md).
-3. Run deterministic checks; map each criterion to evidence. When required, run
-   `evaluate` and attach its passing receipt.
+3. Run deterministic checks; map each criterion to evidence. When project
+   instructions defer test execution to a later gate, report those tests as
+   deferred and unverified; that gate runs them before merge. When required,
+   run `evaluate` and attach its passing receipt.
 4. Invoke read-only `code-review` under the current `HARNESS.md` risk ladder.
    Record each `adapter/model@effort` route from its attempt receipt and derive
    family. Record omissions and substitutions. Native subagents use the Agent

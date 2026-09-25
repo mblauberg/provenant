@@ -10,3 +10,4 @@ cases:
   - {id: q223, relation: boundary, prompt: "Scope this feature by grilling me one high-leverage decision at a time.", tags: [composition], expected: {primary_skill: scope, companion_skills: [grill-me]}}
   - {id: q224, relation: boundary, prompt: "Resolve the final library feasibility question with a timeboxed spike, then finish the spec.", tags: [composition], expected: {primary_skill: scope, companion_skills: [prototype]}}
   - {id: q225, relation: boundary, prompt: "Use bounded research agents to compare the surviving architecture options before recommending one.", tags: [composition], expected: {primary_skill: scope, companion_skills: [orchestrate]}}
+  - {id: q921, relation: boundary, prompt: "The owner authorised assume-and-record here: take the recommended answer on this reversible business question, record it for confirmation, and keep the one-way door parked.", tags: [adjacent], expected: {primary_skill: scope, companion_skills: []}}
