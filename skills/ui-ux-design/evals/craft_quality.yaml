@@ -28,12 +28,13 @@ cases:
     prompt: "Add an entrance and exit transition to the settings sheet and show evidence that it feels right."
     artifact: The evidence bundle reported for the motion change.
     rubric:
-      - A programmatic check shows the transition end event fires and no animation keeps running after settle.
+      - A programmatic check uses the mechanism's completion signal and verifies the intended final state with no unintended motion after settle; an instant reduced-motion substitute is checked by state, without an end event.
       - One recording at shipped speed shows the trigger and the settled state.
       - A timestamped four-frame strip covers entry, mid-transition, settle, and exit.
       - The viewport, device class, and reduced-motion setting are recorded for each capture.
       - The reduced-motion variant is captured and conveys the same state change.
-      - Frame timestamps show the exit is no slower than the entry.
+      - Recording timestamps or mechanism timings show the exit is no slower than the entry, or the artifact cites project motion tokens or target-surface measurements justifying an override.
+      - Shipped-speed evidence shows continuous movement without unintended jumps or clipping, including exit/re-entry and retargeting under repeated input; the grader cites the relevant moments and labels the assessment judgement.
       - Each item is labelled verified or judgement.
     fail_if:
       - The only visual evidence is a paused or finished-animation screenshot.

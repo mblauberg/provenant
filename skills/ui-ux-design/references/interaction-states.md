@@ -48,8 +48,10 @@ reconciliation, rollback, and stale-response races where applicable.
 ## Keyboard
 
 Design keyboard paths, not just permit them. Keep focus visible and in reading
-order. In lists, tables, and menus, arrow keys move one focus or selection and
-Enter opens; add Home/End and type-ahead for long lists. Escape dismisses only
+order. Preserve native keyboard behaviour in ordinary lists and tables; Tab
+reaches their interactive controls. For composite widgets such as listboxes,
+grids, and menus, follow the pattern's keyboard contract for arrow keys,
+selection, activation, Home/End, and type-ahead. Escape dismisses only
 the topmost layer (tooltip, then menu or popover, then dialog or sheet) and
 restores focus to its invoker; unsaved input survives it as a kept draft or
 undo, as it would a pointer dismissal. Where users repeatedly reach many

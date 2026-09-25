@@ -53,9 +53,11 @@ without animation. Field performance claims require field evidence.
 Run this for every change that adds or alters motion; it is a small fixed set,
 not frame-by-frame analysis.
 
-1. Assert the mechanism first with the browser's own events and performance
-   APIs: the transition or animation end fires, nothing loops unintentionally
-   after settle, and layout and paint cost is sane on the target surface.
+1. Assert completion through the mechanism in use: CSS end events, Web
+   Animations completion, or a spring's completion callback. Verify the intended
+   final state and no unintended motion after settle; an instant reduced-motion
+   substitute needs no end event. Use browser performance evidence to check
+   layout and paint cost on the target surface.
 2. Record once at shipped speed with the trigger and the settled state visible.
 3. Add a timestamped four-frame strip: entry, mid-transition, settle, and exit.
 4. Slow or step through playback only when the recording or strip shows a
