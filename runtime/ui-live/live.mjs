@@ -61,7 +61,7 @@ The agent should then:
   1. Optionally open the project's own dev/preview URL (not the helper server port)
   2. Enter the poll loop: node live-poll.mjs
 
-See references/live.md for agent decision points and the JSON event contract for event handling.`);
+The event contract is in live-poll.mjs --help; references/live.md holds the agent's decision points.`);
     process.exit(0);
   }
 

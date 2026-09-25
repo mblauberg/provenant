@@ -1,7 +1,7 @@
 # Output-quality rubric cases for ui-ux-design. Unlike trigger_cases.yaml and
 # regression_cases.yaml, these do not test routing: each case runs the skill on
-# its prompt and an independent grader scores the produced artifact against the
-# rubric. The grader uses a different model family from the run, cites the
+# its prompt, against its fixture where one is given, and an independent grader
+# scores the produced artifact against the rubric. The grader uses a different model family from the run, cites the
 # artifact location (file, capture, or frame) behind each verdict, and marks
 # every rubric line pass or fail. A case passes only when every line passes and
 # no fail_if condition holds. Rubric lines judge the artifact, never the
@@ -13,29 +13,35 @@ cases:
   - id: c001
     pairs_with: q711
     prompt: "Create three coherent responsive visual directions for this dashboard; do not change production source."
-    artifact: Three rendered direction captures at desktop and mobile widths, each with its written rationale, plus the scratch source and working-tree diff.
+    fixture: A representative dashboard with realistic data (long labels, empty, dense, and error states), its existing components and tokens, and baseline captures at 1440 px and 390 px widths.
+    artifact: For each direction, captures at the fixture widths beside the baseline, its written rationale, and a shipped-speed recording when motion is part of the difference; plus the scratch source and the working-tree diff.
     rubric:
       - Each direction names a specific audience or context emphasis.
       - Each direction names one memorable, deliberate choice and that choice is visible in its render.
-      - The three renders differ in at least two of layout, type, colour, density, and motion character, judged from the captures rather than the rationale.
-      - Every direction is built from the project's real content and existing components or tokens where they fit.
-      - Production source is unchanged.
+      - The three renders differ in at least two of layout, type, colour, density, and motion character, judged from the captures and recordings rather than the rationale.
+      - Within each direction, hierarchy gives one clear first read and alignment holds shared edges.
+      - Within each direction, type roles, measure, and numerals stay legible with the fixture's long and dense content.
+      - Each direction holds at both widths without clipping, overlap, or lost priority.
+      - Every direction uses the fixture's content and its existing components or tokens where they fit.
+      - The diff touches only scratch paths; production source is unchanged.
     fail_if:
       - The directions differ only in accent colour or description.
       - Any direction is a stock template with unexamined framework defaults.
+      - A motion difference is claimed but no recording shows it.
 
   - id: c002
     prompt: "Add an entrance and exit transition to the settings sheet and show evidence that it feels right."
     artifact: The evidence bundle reported for the motion change.
     rubric:
-      - A programmatic check uses the mechanism's completion signal and verifies the intended final state with no unintended motion after settle; an instant reduced-motion substitute is checked by state, without an end event.
-      - One recording at shipped speed shows the trigger and the settled state.
-      - A timestamped four-frame strip covers entry, mid-transition, settle, and exit.
+      - A programmatic check uses the mechanism's completion signal and verifies the intended final state with no unintended motion after settle; the instant reduced-motion substitute is checked by state and focus, without an end event.
+      - Normal and reduced-motion paths are each recorded once at shipped speed with the trigger and the settled state visible.
+      - A timestamped four-frame strip covers entry, mid-transition, settle, and exit, with the exit's start and end times noted.
       - The viewport, device class, and reduced-motion setting are recorded for each capture.
-      - The reduced-motion variant is captured and conveys the same state change.
-      - Recording timestamps or mechanism timings show the exit is faster than the entry, or the artifact cites project motion tokens or target-surface measurements justifying an override.
-      - Shipped-speed evidence shows continuous movement without unintended jumps or clipping, including exit/re-entry and retargeting under repeated input; the grader cites the relevant moments and labels the assessment judgement.
-      - Each item is labelled verified or judgement.
+      - The reduced-motion path conveys the same state change.
+      - Judged from the recording, pacing suits the sheet's distance and context, and the exit does not delay the next input.
+      - Judged from the recording, the sheet moves from a coherent origin without clipping or unintended jumps.
+      - Judged from the recording, re-triggering mid-flight retargets from the current state and input stays responsive throughout.
+      - Each item is labelled verified or judgement, and the grader cites the recording moments behind each judgement.
     fail_if:
       - The only visual evidence is a paused or finished-animation screenshot.
       - Slowed playback is presented as the shipped behaviour.
@@ -56,10 +62,14 @@ cases:
   - id: c004
     pairs_with: c003
     prompt: "Add a private progress ring to the profile page showing how much of this week's own goal the user has completed."
-    artifact: The produced design and copy, and the explanation returned with it.
+    fixture: A profile page with goal states at 0%, partial, 100%, and over 100%, plus a loading and an error state.
+    artifact: The produced design and copy, captures of each fixture state at desktop and mobile widths, and the explanation returned with it.
     rubric:
       - The ring is built as a private, honest own-progress indicator.
       - Completion is acknowledged in proportion to the achievement.
+      - The ring's value is readable without colour alone and has an accessible name and text equivalent.
+      - Every fixture state renders legibly, including loading, error, and over-goal, with tabular numerals for the figure.
+      - The ring sits in the page's hierarchy and holds at desktop and mobile widths.
     fail_if:
       - An opt-out, consent step, or warning is demanded for the private ring.
       - Social, competitive, or notification mechanics are added unrequested.

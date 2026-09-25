@@ -49,8 +49,8 @@ reconciliation, rollback, and stale-response races where applicable.
 
 Design keyboard paths, not just permit them. Keep focus visible and in reading
 order. Preserve native keyboard behaviour in ordinary lists and tables; Tab
-reaches their interactive controls. For composite widgets such as listboxes,
-grids, and menus, follow the pattern's keyboard contract for arrow keys,
+reaches their interactive controls. For a chosen composite widget such as a
+listbox, grid, menu, or tree, follow the pattern's keyboard contract for arrow keys,
 selection, activation, Home/End, and type-ahead. Escape dismisses only
 the topmost layer (tooltip, then menu or popover, then dialog or sheet) and
 restores focus to its invoker; unsaved input survives it as a kept draft or
@@ -62,5 +62,7 @@ replaces it. Surface shortcuts where users meet them, avoid browser, platform,
 and assistive-technology keys, and suspend single-key shortcuts while a text
 field has focus.
 
-Sources: NN/g, [Confirmation dialogs can prevent user errors](https://www.nngroup.com/articles/confirmation-dialog/);
+Sources: W3C ARIA APG, [Table](https://www.w3.org/WAI/ARIA/apg/patterns/table/) versus
+[Grid](https://www.w3.org/WAI/ARIA/apg/patterns/grid/) patterns (a static table is not a grid);
+NN/g, [Confirmation dialogs can prevent user errors](https://www.nngroup.com/articles/confirmation-dialog/);
 Vercel, [Web Interface Guidelines](https://vercel.com/design/guidelines).

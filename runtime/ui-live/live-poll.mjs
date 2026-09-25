@@ -69,6 +69,20 @@ Modes:
   poll --reply <id> error --lease-token <token> "msg"
                                    Reply with an error message
 
+Event contract: each poll prints one JSON event on stdout.
+  generate   { id, action, count (1-8), pageUrl, element, leaseToken,
+               freeformPrompt?, comments?, strokes?, screenshotPath? }
+             Wrap the element with live-wrap.mjs --id <id> --count <count>,
+             write the variants at insertLine, then reply done or error.
+  accept, discard
+             Handled here through live-accept.mjs; read _acceptResult and
+             _completionAck. If _acceptResult.carbonize is true, finish
+             carbonisation and run live-complete.mjs before polling again.
+  prefetch   { pageUrl } optional warm-up hint; no reply.
+  exit       The browser left live mode; stop the server through its run handle.
+  timeout    No event before --timeout; poll again.
+Stop and report on any other type or a malformed event.
+
 Track session ID, project root, source baseline, server identity, event revision,
 selected variant, and every changed path. Poll monotonically. A restarted server
 does not re-enqueue pending browser events from project journals; journal data

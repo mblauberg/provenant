@@ -30,15 +30,16 @@ The user's own goal comes before any engagement metric.
 
 - Honest private progress, such as a progress ring or completion marker, is not
   a coercive mechanic and needs no opt-out.
-- Social, competitive, and notification-driven mechanics can be turned off.
-  Comparative mechanics, such as leaderboards and rankings, default to private
-  or opt-in.
+- Optional engagement notifications, sharing, and social or competitive
+  mechanics are opt-in, and comparative mechanics such as leaderboards and
+  rankings default to private. Task-critical alerts the user relies on, such as
+  security, deadlines, or failures, are not engagement mechanics.
 - No false urgency, fear-of-missing-out framing, or variable or random rewards
   to drive activity.
 - No loss-aversion or shame copy, and no confirmshaming: declining is never
   framed as a loss.
-- Cancelling, downgrading, or deleting an account takes no more effort than
-  signing up.
+- Cancelling, downgrading, or deleting an account adds no friction beyond
+  signing up, except required identity, security, or legal verification.
 - A streak-like mechanic tracks personal consistency only, and allows grace
   before a lapse counts against it.
 

@@ -8,9 +8,10 @@ changes, and output/cache locations. A read-only request never enters live
 setup; use read-only rendered evidence or an authorised isolated prototype.
 
 Enter with `node "$(provenant root)/skills/ui-ux-design/scripts/live.mjs"`.
-Use its `--help`, the help for `live-poll.mjs`, `live-resume.mjs`,
-`live-accept.mjs`, `live-complete.mjs`, and `live-server.mjs`, and the JSON event
-contract for config, polling, recovery, carbonisation, and stop.
+Use its `--help` and the help for `live-poll.mjs`, `live-resume.mjs`,
+`live-accept.mjs`, `live-complete.mjs`, and `live-server.mjs` for config,
+polling, recovery, carbonisation, and stop. The JSON event contract is in
+`live-poll.mjs --help`.
 Keep focus keys as protocol data, not a user interaction model. Stop on
 ambiguity, server loss, stale session identity, malformed events, or an expanded
 write set. Use protocol accept/discard/completion paths, not ad hoc edits.
@@ -41,6 +42,6 @@ the accepted change stays saved.
 ## Exit
 
 Stop only this run's exact background handle, or a run-owned PID matched by
-command and start identity; never kill by broad name or pattern. Verify source/config cleanup against the baseline and keep the recovery
-journal. Remove only run-owned transient output after source and server state
+command and start identity; never kill by broad name or pattern. Verify
+source/config cleanup against the baseline and keep the recovery journal. Remove only run-owned transient output after source and server state
 are verified. If ownership is uncertain, report the residual path and stop.

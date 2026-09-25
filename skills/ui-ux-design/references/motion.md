@@ -25,15 +25,11 @@ on the target surface; the numbers are starting points, not universal law.
   moments.
 - **Fades and colour changes:** easing curves on opacity and colour, usually
   ease-out, about 100-200 ms for feedback and 150-300 ms for surfaces.
-- **Exits** run faster than entries, roughly two-thirds of the entry, and never
-  block the next input.
+- **Exits** are usually a little shorter than entries and never block the next
+  input; set timing by distance, velocity, and context.
 - **Minimum perceptible change:** travel of only a few pixels, or a run under
   about 100 ms, reads as flicker. Give it enough distance and time to be seen,
   or use an opacity or instant state change instead.
-- **Interruption:** every movement retargets from its current position and
-  velocity; a new trigger does not wait for the old animation or jump to its end.
-- **Frequency:** repeated, dense actions get the low end of each range or none;
-  rare moments may use the high end.
 
 Choose the simplest mechanism that remains interruptible and correct. Preserve
 input responsiveness, spatial continuity, exit/re-entry behaviour, and final
@@ -51,23 +47,34 @@ without animation. Field performance claims require field evidence.
 ## Motion evidence
 
 Run this for every change that adds or alters motion; it is a small fixed set,
-not frame-by-frame analysis.
+not frame-by-frame analysis. Cover both the normal and the reduced-motion path.
 
-1. Assert completion through the mechanism in use: CSS end events, Web
-   Animations completion, or a spring's completion callback. Verify the intended
-   final state and no unintended motion after settle; an instant reduced-motion
-   substitute needs no end event. Use browser performance evidence to check
-   layout and paint cost on the target surface.
-2. Record once at shipped speed with the trigger and the settled state visible.
-3. Add a timestamped four-frame strip: entry, mid-transition, settle, and exit.
+1. Assert the mechanism for its motion type with the browser's own events,
+   animation APIs, and performance evidence, including layout and paint cost on
+   the target surface:
+   - **Enter/exit:** completion (a CSS end event, Web Animations `finished`, or
+     the spring's completion callback) reaches the intended final state, and
+     nothing moves after settle.
+   - **Continuous or loading:** runs only while its condition holds and stops
+     or hands off when it clears; there is no end event to wait for.
+   - **Interrupted or cancelled:** a mid-flight trigger retargets from the
+     current state, and cancellation (such as `transitioncancel`) leaves a
+     valid state rather than snapping to a stale end.
+   - **Instant reduced-motion substitute:** check the final state and focus;
+     it has no end event.
+2. Record each path once at shipped speed with the trigger and the settled
+   state visible.
+3. For enter/exit motion, add a timestamped four-frame strip (entry,
+   mid-transition, settle, exit) and note the exit's start and end times.
 4. Slow or step through playback only when the recording or strip shows a
    problem, to isolate continuity, origin, clipping, or retargeting under
    interruption and repeated triggers. The slowed view is a diagnostic, not
    the shipped speed.
-5. Record the viewport, device class, and whether reduced motion was on.
-6. Label the recording and strip `verified` or `judgement`. A frozen or skipped
-   animation is not evidence of motion quality, and a clean assertion does not
-   replace inspecting the recording or its frames.
+5. Record the viewport, device class, and whether reduced motion was on for
+   each capture.
+6. Label each artifact `verified` or `judgement`. A frozen or skipped animation
+   is not evidence of motion quality, and a clean assertion does not replace
+   inspecting the recording or its frames.
 
 Sources: Apple, [Animate with springs](https://developer.apple.com/videos/play/wwdc2023/10158/)
 (WWDC23); Emil Kowalski, [Great animations](https://emilkowal.ski/ui/great-animations);
