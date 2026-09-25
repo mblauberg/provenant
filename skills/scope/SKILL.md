@@ -39,8 +39,10 @@ Agents decide engineering calls. Business, legal or financial owner calls stay
 parked as open-decision rows; never guess. Where the owner has explicitly
 authorised assume-and-record in project instructions, an agent may instead take
 the recommended answer on a reversible call, record it for owner confirmation
-and proceed. One-way doors, irreversible actions, promotion and live activation
-stay gated. Put every unresolved branch in scope.
+and proceed. A blocking one-way door may go to an owner-authorised decision
+process only when its answer is recorded, kept cheap to reverse until
+confirmed, and owed owner confirmation before activation. Irreversible actions,
+promotion and live activation stay gated. Put every unresolved branch in scope.
 
 ## Resolve uncertainty
 
