@@ -33,7 +33,7 @@ cases:
       - A timestamped four-frame strip covers entry, mid-transition, settle, and exit.
       - The viewport, device class, and reduced-motion setting are recorded for each capture.
       - The reduced-motion variant is captured and conveys the same state change.
-      - Recording timestamps or mechanism timings show the exit is no slower than the entry, or the artifact cites project motion tokens or target-surface measurements justifying an override.
+      - Recording timestamps or mechanism timings show the exit is faster than the entry, or the artifact cites project motion tokens or target-surface measurements justifying an override.
       - Shipped-speed evidence shows continuous movement without unintended jumps or clipping, including exit/re-entry and retargeting under repeated input; the grader cites the relevant moments and labels the assessment judgement.
       - Each item is labelled verified or judgement.
     fail_if:

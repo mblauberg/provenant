@@ -8,9 +8,9 @@ changes, and output/cache locations. A read-only request never enters live
 setup; use read-only rendered evidence or an authorised isolated prototype.
 
 Enter with `node "$(provenant root)/skills/ui-ux-design/scripts/live.mjs"`.
-Use its `--help`, the help for `live-poll.mjs`, `live-accept.mjs`,
-`live-complete.mjs`, and `live-server.mjs`, and the JSON event contract for
-config, polling, recovery, carbonisation, and stop.
+Use its `--help`, the help for `live-poll.mjs`, `live-resume.mjs`,
+`live-accept.mjs`, `live-complete.mjs`, and `live-server.mjs`, and the JSON event
+contract for config, polling, recovery, carbonisation, and stop.
 Keep focus keys as protocol data, not a user interaction model. Stop on
 ambiguity, server loss, stale session identity, malformed events, or an expanded
 write set. Use protocol accept/discard/completion paths, not ad hoc edits.
