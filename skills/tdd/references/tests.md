@@ -20,7 +20,7 @@ Characteristics:
 - Uses public API only
 - Survives internal refactors
 - Describes WHAT, not HOW
-- One logical assertion per test
+- One behaviour per test, with as many assertions as that behaviour needs
 
 ## Bad Tests
 
@@ -47,6 +47,12 @@ Red flags:
 - Asserts a constant equals its own literal instead of the behaviour that
   depends on it
 - Would still pass if the feature were deleted and only the document remained
+- Pins a class name, inline style, DOM path or element index
+- Pins a count, order or list that is not itself a contract, or a list that
+  must mirror another list
+- Reads a source file (`.ts`, `.css`, `.html`) as text and matches it
+- Pins exact error or log wording instead of an error class or code
+- Repeats a case an existing test already covers
 
 ```typescript
 // BAD: Bypasses interface to verify
@@ -63,6 +69,45 @@ test("createUser makes user retrievable", async () => {
   expect(retrieved.name).toBe("Alice");
 });
 ```
+
+## What a test may pin
+
+A test pins what a user, a caller or an invariant depends on. Every incidental
+detail it pins turns a harmless change into a test rewrite.
+
+- **Pin:** observable behaviour; public contracts, wire formats and persisted
+  records; money, security, privacy and data invariants; accessible roles and
+  names; error classes and stable codes.
+- **Do not pin:** exact copy or prose (assert the role, key or one fragment
+  that carries meaning); class names, styles or DOM structure; counts of items,
+  tokens, files or tools; ordering that is not a contract; a list that mirrors
+  another list or inventory; exact error or log wording; size or line
+  ceilings; source text; whole-output snapshots; a mock's calls as the only
+  assertion.
+
+Before writing a test, name the defect it catches: a plausible mistake in the
+production code that would make it fail. If no plausible mistake would, or an
+existing test already fails on it, write none. Mutation testing measures this
+where a project runs it; a score is a guide, not a target.
+
+## Choosing the form
+
+- **Examples** for named scenarios, boundaries and bug regressions.
+- **Properties** for an invariant over many inputs, such as totals conserving,
+  a round trip, or a denied role staying denied. Use the project's
+  property-testing library. When it finds a bug, keep either the failing seed
+  or the shrunk counterexample as an example test, not both.
+- **UI:** query by accessible role and name; a test id is the last resort.
+  Assert what the user sees and can do. Appearance, layout and motion need a
+  rendered capture or visual diff, not a DOM unit test. A snapshot stays small,
+  focused and reviewed.
+- **Errors:** assert the class, code or structured fields; assert the message
+  only when that text is a public contract.
+- **Time and randomness:** inject a clock or use fake timers, and seed
+  randomness, so a run is reproducible.
+- **Layer:** test each behaviour at the lowest layer that owns it, then enough
+  integration to prove the real boundaries join. Neither the pyramid nor the
+  trophy is a quota.
 
 ## Not observable behaviour
 
@@ -92,4 +137,17 @@ owning file: a new module, script or entry point. A new file is never justified
 by a review, an audit finding, an issue number or a documentation pass. Those
 add cases to the owning file, or add nothing. Name test files after the
 behaviour they protect, never after the process that prompted them. One test
-asserts one behaviour; if the name needs "and", split it.
+covers one behaviour; if its name joins two behaviours with "and", split it.
+Several assertions that together establish one behaviour stay in one test.
+Prefer plain, explicit test code over clever helpers: a reader should see the
+behaviour without tracing indirection.
+
+## Sources
+
+Kent Beck, [Test Desiderata](https://medium.com/@kentbeck_7670/test-desiderata-94150638a4b3);
+*Software Engineering at Google*, [ch. 12](https://abseil.io/resources/swe-book/html/ch12.html)
+and [ch. 13](https://abseil.io/resources/swe-book/html/ch13.html);
+[Change-detector tests considered harmful](https://testing.googleblog.com/2015/01/testing-on-toilet-change-detector-tests.html);
+Vladimir Khorikov, *Unit Testing Principles, Practices, and Patterns*;
+[Testing Library guiding principles](https://testing-library.com/docs/guiding-principles/);
+[Practical mutation testing at scale](https://research.google/pubs/practical-mutation-testing-at-scale-a-view-from-google/).

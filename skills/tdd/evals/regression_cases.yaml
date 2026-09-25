@@ -1,5 +1,5 @@
-# Regression coverage for the prose exclusion added under issue #761: see
-# "Prose is not a contract" in SKILL.md and "Not observable behaviour" in
+# Regression coverage for the prose and visual-only exclusions: see
+# "Prose is not a contract" and "When not to write a test" in SKILL.md, and "Not observable behaviour" in
 # references/tests.md. Structurally validated by the generic route-fixture
 # harness, but not held to trigger_cases.yaml's fixed 3 positive / 3 negative /
 # 3 boundary distribution or its q262-q270 block.
@@ -31,3 +31,15 @@ cases:
       The requested test can only fail when a maintainer rewords the document,
       so there is no test to write and tdd declines rather than producing a
       change detector. engineering-docs owns the documentation edit itself.
+  - id: r003
+    relation: negative
+    prompt: "Tighten the spacing and soften the border colour on the settings cards, then add unit tests asserting the new utility classes on each card."
+    tags: [adjacent, visual-only, change-detector]
+    expected:
+      primary_skill: ui-ux-design
+      companion_skills: []
+    note: >-
+      A visual-only change is proven by a rendered capture, not by pinning
+      class names; such a test fails on every restyle and catches no defect.
+      tdd declines the requested tests; ui-ux-design owns the change and its
+      visual evidence.

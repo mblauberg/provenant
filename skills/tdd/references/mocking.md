@@ -13,6 +13,10 @@ Don't mock:
 - Internal collaborators
 - Anything you control
 
+Prefer a real implementation or an in-memory fake to a mock wherever it runs
+locally. Assert the resulting state or return value; assert a mock's calls only
+when the call is itself the contract, such as a charge or a sent message.
+
 ## Designing for Mockability
 
 At system boundaries, design interfaces that are easy to mock:
