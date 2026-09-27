@@ -108,7 +108,13 @@ and `cache` directories under its run directory. Shared temp and general user
 caches are not writable. Codex
 uses `-s workspace-write` (or `-c sandbox_mode="workspace-write"`
 on resume), with `-c sandbox_workspace_write.writable_roots=<add_dirs>` and
-`--cd <worktree>` on a fresh run. If OS confinement is unavailable, agy write
+`--cd <worktree>` on a fresh run. Codex keeps a writable root's `.agents/`
+read-only, so a linked-worktree Codex writer also gets the worktree's
+`.agents/` as an `add_dir`; Git can then rebase or merge the integration branch
+over tracked skills. Fabric fails the attempt with
+`protected_instructions_changed` when an `.agents/` path in HEAD, the index or
+on disk ends up matching neither the attempt's starting state nor the primary
+checkout's branch or its upstream. If OS confinement is unavailable, agy write
 dispatch is refused; other wrapped writer receipts warn that writes are
 unconfined. Setting `PROVENANT_NO_OS_CONFINEMENT=1` has the same effect on new
 wrapped attempts.

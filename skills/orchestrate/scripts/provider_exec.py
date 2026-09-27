@@ -7,6 +7,7 @@ import argparse
 from collections import deque
 import ctypes
 import functools
+import hashlib
 import json
 import math
 import os
@@ -14,6 +15,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -48,6 +50,10 @@ CONFINED_STATE = {
     "kiro": {"read_write": (".kiro", ".cache/kiro", ".npm")},
 }
 EXTRA_DENIED_READS = (".claude/projects", ".codex/sessions")
+# Repository agent instructions and skills. Codex protects them inside a writable root.
+INSTRUCTION_DIR = ".agents"
+# Instructions are small text; a larger tree is refused rather than hashed at length.
+INSTRUCTION_BYTES_LIMIT = 256 * 1024 * 1024
 
 
 def now():
@@ -366,6 +372,12 @@ def build_plan(
         )
         if common.returncode == 0 and common.stdout.strip() not in directories:
             directories.append(common.stdout.strip())
+        # Codex's workspace-write sandbox keeps each writable root's .agents read-only, so a
+        # rebase or merge that updates a tracked skill stops half-way. Granting the directory
+        # lets Git rewrite it; execute() then fails a lane that authored a change there.
+        instructions = Path(cwd, INSTRUCTION_DIR)
+        if instructions.is_dir() and not instructions.is_symlink() and str(instructions) not in directories:
+            directories.append(str(instructions))
     model = route.get("resolved_model") or route.get("model") or ""
     effort = route.get("effort_applied", route.get("effort")) or ""
     if effort == "default":
@@ -1594,6 +1606,141 @@ def _observed_model(plan, parsed, env):
     return None, None
 
 
+def _git_output(cwd, *args):
+    # Only object and index reads run here, never a working-tree scan: the lane can write the
+    # repository's config and attributes, so filters, fsmonitor hooks and a lazy fetch through a
+    # configured transport command must not fire.
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    result = subprocess.run(
+        ["git", "-C", str(cwd), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", *args],
+        capture_output=True, text=True, timeout=30, env={**environment, "GIT_NO_LAZY_FETCH": "1"},
+    )
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or f"git {args[0]} failed")
+    return result.stdout
+
+
+def instructions_writable(plan):
+    """Whether this Codex writer was granted its worktree's otherwise protected .agents."""
+    return (plan.get("adapter") == "codex" and plan.get("mode") == "worktree_write"
+            and str(Path(plan["cwd"], INSTRUCTION_DIR)) in plan["applied"]["add_dirs"])
+
+
+def _instruction_path(path):
+    # A tree may spell the directory in any case, and a case-insensitive checkout writes it to
+    # .agents. The spelling is kept, so a variant is a new path rather than shadowing the original.
+    # An entry named .agents itself (a link, file or submodule) counts as well.
+    return path if path.partition("/")[0].casefold() == INSTRUCTION_DIR else None
+
+
+def _instruction_entries(cwd, listing, *, index=False):
+    """Map each .agents path to (mode, object id) from ls-tree or ls-files --stage output."""
+    entries, conflicts = {}, set()
+    for record in _git_output(cwd, *listing).split("\0"):
+        meta, _, path = record.partition("\t")
+        key = _instruction_path(path)
+        if not key:
+            continue
+        fields = meta.split()
+        if index and fields[2] != "0":
+            conflicts.add(key)
+        entries[key] = (fields[0], fields[1] if index else fields[2])
+    return entries, conflicts
+
+
+def instruction_disk_state(cwd, object_format):
+    """Hash every file under .agents, ignored or not, as Git would store it, without running Git.
+
+    The walk works from directory descriptors and never follows a link, so a surviving lane
+    process cannot redirect it by swapping a directory or file for a link, FIFO or device.
+    """
+    root = Path(cwd, INSTRUCTION_DIR)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError(f"{INSTRUCTION_DIR} is no longer a directory")
+    entries, total = {}, 0
+    # fwalk silently skips a directory swapped for a link before it descends, so every real
+    # directory seen must also be visited.
+    expected, visited = {root}, set()
+
+    def unreadable(error):
+        raise error  # A directory the check cannot list could hide a change.
+
+    for directory, subdirectories, files, directory_fd in os.fwalk(root, onerror=unreadable):
+        visited.add(Path(directory))
+        for name in [*files, *subdirectories]:
+            status = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISDIR(status.st_mode):
+                expected.add(Path(directory, name))
+                continue
+            digest = hashlib.new(object_format)
+            if stat.S_ISLNK(status.st_mode):
+                mode, data = "120000", os.fsencode(os.readlink(name, dir_fd=directory_fd))
+                digest.update(b"blob %d\0" % len(data) + data)
+            elif stat.S_ISREG(status.st_mode):
+                mode = "100755" if status.st_mode & 0o100 else "100644"
+                descriptor = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory_fd)
+                with os.fdopen(descriptor, "rb") as handle:
+                    opened = os.fstat(handle.fileno())
+                    if not stat.S_ISREG(opened.st_mode):
+                        raise ValueError(f"{name} changed type during the check")
+                    digest.update(b"blob %d\0" % opened.st_size)
+                    read = 0
+                    while chunk := handle.read(1 << 20):
+                        read += len(chunk)
+                        if total + read > INSTRUCTION_BYTES_LIMIT:
+                            raise ValueError(f"{INSTRUCTION_DIR} exceeds {INSTRUCTION_BYTES_LIMIT} bytes")
+                        digest.update(chunk)
+                    if read != opened.st_size:
+                        raise ValueError(f"{name} changed size during the check")
+                    total += read
+            else:
+                # Never open a FIFO or device: it could block the check. Git cannot store one.
+                relative = Path(directory, name).relative_to(root).as_posix()
+                raise ValueError(f"{INSTRUCTION_DIR}/{relative} is not a file or link")
+            relative = Path(directory, name).relative_to(root).as_posix()
+            entries[f"{INSTRUCTION_DIR}/{relative}"] = (mode, digest.hexdigest())
+    if expected - visited:
+        raise ValueError(f"{INSTRUCTION_DIR} changed during the check")
+    return entries
+
+
+def instruction_snapshot(cwd):
+    head = _git_output(cwd, "rev-parse", "--verify", "HEAD^{commit}").strip()
+    object_format = _git_output(cwd, "rev-parse", "--show-object-format").strip()
+    return {"head": head, "object_format": object_format,
+            "disk": instruction_disk_state(cwd, object_format),
+            "index": _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)[0]}
+
+
+def authored_instruction_changes(cwd, start):
+    """.agents paths the lane changed to content from neither its start nor the integration branch.
+
+    HEAD, the index and the files on disk must each match, path by path, the attempt's starting
+    state or the primary checkout's branch or its upstream, so a rebase or merge from that branch
+    passes and changes the branch already carried are not re-reported. A lane can move local refs,
+    so this catches an ordinary edit, not a forged integration branch.
+    """
+    primary = _git_output(cwd, "worktree", "list", "--porcelain").split("\n\n")[0].splitlines()
+    branch = next((line[len("branch "):] for line in primary if line.startswith("branch ")), "")
+    upstream = _git_output(cwd, "for-each-ref", "--format=%(upstream)", branch).strip() if branch else ""
+    trees = [_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", start["head"]))[0]]
+    for ref in filter(None, (branch, upstream)):
+        try:
+            trees.append(_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", ref))[0])
+        except ValueError:
+            pass  # An unset or unfetched ref cannot vouch for anything.
+    baselines = [start["disk"], start["index"], *trees]
+    index, conflicts = _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)
+    views = [_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", "HEAD"))[0], index,
+             instruction_disk_state(cwd, start["object_format"])]
+    changed = set()
+    for view in views:
+        for key in set(view).union(*baselines):
+            if all(view.get(key) != baseline.get(key) for baseline in baselines):
+                changed.add(key)
+    return sorted(key + (" (unresolved conflict)" if key in conflicts else "") for key in changed | conflicts)
+
+
 def execute(
     plan,
     output_path,
@@ -1638,6 +1785,14 @@ def execute(
     )
     attempt_marker = uuid.uuid4().hex
     environment["PROVENANT_ATTEMPT_MARKER"] = attempt_marker
+    instruction_start = None
+    if instructions_writable(plan):
+        try:
+            instruction_start = instruction_snapshot(plan["cwd"])
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            instruction_start = exc
+        # Running a skill's script must not leave bytecode behind for the check to report.
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
     attempt_dir = Path(plan["run_dir"])
     private_tmp = attempt_dir / "tmp"
@@ -2094,6 +2249,22 @@ def execute(
         "line": line,
     }
     status = parsed["status"]
+    instruction_changes = []
+    if instruction_start is not None:
+        try:
+            if isinstance(instruction_start, Exception):
+                raise instruction_start
+            if descendants and descendants.spared_at_stop:
+                # A lane process still running could change .agents during or after the check.
+                raise ValueError("lane processes were left running")
+            instruction_changes = authored_instruction_changes(plan["cwd"], instruction_start)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            instruction_changes = [f"{INSTRUCTION_DIR} (unverifiable: {exc})"]
+    if instruction_changes:
+        status = "failed"
+        parsed["signature"] = "protected_instructions_changed"
+        warnings.append("lane changed " + INSTRUCTION_DIR + "/ beyond its start and integration branch: "
+                        + ", ".join(instruction_changes))
     if plan["adapter"] == "agy" and status not in {"ok", "input_required", "partial"}:
         parsed["text"] = ""
         stderr = "agy dispatch failed: status=" + status + "\n" + stderr
@@ -2148,6 +2319,9 @@ def execute(
             "rate_limited": "retry after the recorded cooldown",
         }.get(status)
     )
+    if instruction_changes:
+        fix = ("restore " + INSTRUCTION_DIR + "/ to the start commit or the integration branch; "
+               "a Codex lane may carry that branch's instruction changes but not author its own")
     record = {
         **{
             key: route.get(key, "")
@@ -2174,6 +2348,7 @@ def execute(
         "effort": plan["effort"],
         "status": status,
         **({"error": "invalid_input"} if status == "rejected" and parsed["signature"] == "invalid_input" else {}),
+        **({"error": "protected_instructions_changed"} if instruction_changes else {}),
         "reason": parsed["excerpt"],
         "exit": 0
         if status in {"ok", "input_required"} and terminal_at is not None
