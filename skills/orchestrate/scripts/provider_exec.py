@@ -48,6 +48,8 @@ CONFINED_STATE = {
     "kiro": {"read_write": (".kiro", ".cache/kiro", ".npm")},
 }
 EXTRA_DENIED_READS = (".claude/projects", ".codex/sessions")
+# Repository agent instructions and skills. Codex protects them inside a writable root.
+INSTRUCTION_DIR = ".agents"
 
 
 def now():
@@ -366,6 +368,12 @@ def build_plan(
         )
         if common.returncode == 0 and common.stdout.strip() not in directories:
             directories.append(common.stdout.strip())
+        # Codex's workspace-write sandbox keeps each writable root's .agents read-only, so a
+        # rebase or merge that updates a tracked skill stops half-way. Granting the directory
+        # lets Git rewrite it; execute() then fails a lane that authored a change there.
+        instructions = Path(cwd, INSTRUCTION_DIR)
+        if instructions.is_dir() and not instructions.is_symlink() and str(instructions) not in directories:
+            directories.append(str(instructions))
     model = route.get("resolved_model") or route.get("model") or ""
     effort = route.get("effort_applied", route.get("effort")) or ""
     if effort == "default":
@@ -1594,6 +1602,51 @@ def _observed_model(plan, parsed, env):
     return None, None
 
 
+def _git_output(cwd, *args):
+    result = subprocess.run(
+        ["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=30,
+        env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+    )
+    if result.returncode != 0:
+        raise ValueError(result.stderr.strip() or f"git {args[0]} failed")
+    return result.stdout
+
+
+def instructions_writable(plan):
+    """Whether this Codex writer was granted its worktree's otherwise protected .agents."""
+    return (plan.get("adapter") == "codex" and plan.get("mode") == "worktree_write"
+            and str(Path(plan["cwd"], INSTRUCTION_DIR)) in plan["applied"]["add_dirs"])
+
+
+def authored_instruction_changes(cwd, start):
+    """.agents paths the lane changed that match neither its start commit nor the integration branch.
+
+    Each of HEAD, the index and the working tree must match, path by path, either the commit
+    the attempt started on or the primary checkout's branch or its upstream. A rebase or merge
+    from that branch therefore passes, and pre-existing branch changes are not re-reported.
+    """
+    if not start:
+        raise ValueError("no start commit was recorded")
+    primary = _git_output(cwd, "worktree", "list", "--porcelain").split("\n\n")[0].splitlines()
+    branch = next((line[len("branch "):] for line in primary if line.startswith("branch ")), "")
+    upstream = _git_output(cwd, "for-each-ref", "--format=%(upstream)", branch).strip() if branch else ""
+    trusted = [ref for ref in (branch, upstream) if ref]
+
+    def differing(base, view):
+        output = _git_output(cwd, "diff", "--name-only", "-z", "--no-renames", *view(base), "--", INSTRUCTION_DIR)
+        return {name for name in output.split("\0") if name}
+
+    changed = {name for name in _git_output(
+        cwd, "ls-files", "-z", "--others", "--exclude-standard", "--", INSTRUCTION_DIR).split("\0") if name}
+    for view in (lambda base: (base, "HEAD"), lambda base: ("--cached", base), lambda base: (base,)):
+        unmatched = differing(start, view)
+        for ref in trusted:
+            if unmatched:
+                unmatched &= differing(ref, view)
+        changed |= unmatched
+    return sorted(changed)
+
+
 def execute(
     plan,
     output_path,
@@ -1638,6 +1691,12 @@ def execute(
     )
     attempt_marker = uuid.uuid4().hex
     environment["PROVENANT_ATTEMPT_MARKER"] = attempt_marker
+    instruction_start = None
+    if instructions_writable(plan):
+        try:
+            instruction_start = _git_output(plan["cwd"], "rev-parse", "--verify", "HEAD^{commit}").strip()
+        except (OSError, ValueError, subprocess.SubprocessError):
+            instruction_start = ""
     environment["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
     attempt_dir = Path(plan["run_dir"])
     private_tmp = attempt_dir / "tmp"
@@ -2094,6 +2153,17 @@ def execute(
         "line": line,
     }
     status = parsed["status"]
+    instruction_changes = []
+    if instruction_start is not None:
+        try:
+            instruction_changes = authored_instruction_changes(plan["cwd"], instruction_start)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            instruction_changes = [f"{INSTRUCTION_DIR} (unverifiable: {exc})"]
+    if instruction_changes:
+        status = "failed"
+        parsed["signature"] = "protected_instructions_changed"
+        warnings.append("lane changed " + INSTRUCTION_DIR + "/ beyond its start and integration branch: "
+                        + ", ".join(instruction_changes))
     if plan["adapter"] == "agy" and status not in {"ok", "input_required", "partial"}:
         parsed["text"] = ""
         stderr = "agy dispatch failed: status=" + status + "\n" + stderr
@@ -2148,6 +2218,9 @@ def execute(
             "rate_limited": "retry after the recorded cooldown",
         }.get(status)
     )
+    if instruction_changes:
+        fix = ("restore " + INSTRUCTION_DIR + "/ to the start commit or the integration branch; "
+               "a Codex lane may carry that branch's instruction changes but not author its own")
     record = {
         **{
             key: route.get(key, "")
@@ -2174,6 +2247,7 @@ def execute(
         "effort": plan["effort"],
         "status": status,
         **({"error": "invalid_input"} if status == "rejected" and parsed["signature"] == "invalid_input" else {}),
+        **({"error": "protected_instructions_changed"} if instruction_changes else {}),
         "reason": parsed["excerpt"],
         "exit": 0
         if status in {"ok", "input_required"} and terminal_at is not None

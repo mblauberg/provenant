@@ -2557,6 +2557,101 @@ def test_linked_writer_automatically_grants_git_metadata(tmp_path):
     assert "--ephemeral" not in plan["argv"]
 
 
+GIT_FIXTURE = ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+               "-c", "commit.gpgsign=false"]
+SKILL = ".agents/skills/fixture/SKILL.md"
+
+
+def git(root, *args):
+    return subprocess.run(["git", "-C", str(root), *GIT_FIXTURE, *args],
+                          check=True, capture_output=True, text=True).stdout
+
+
+def instruction_lane(tmp_path):
+    """A primary on main with a tracked skill, and a lane worktree cut before main moves."""
+    repo = tmp_path / "repo"
+    git(tmp_path, "init", "-q", "-b", "main", str(repo))
+    (repo / SKILL).parent.mkdir(parents=True)
+    (repo / SKILL).write_text("v1\n")
+    (repo / "app.txt").write_text("app\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "initial")
+    lane = tmp_path / "lane"
+    git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
+    (lane / "app.txt").write_text("lane\n")
+    git(lane, "commit", "-q", "-am", "lane work")
+    (repo / SKILL).write_text("v2\n")
+    git(repo, "commit", "-q", "-am", "main updates the skill")
+    return repo, lane
+
+
+def lane_attempt(tmp_path, lane, script):
+    code = ("import subprocess\n"
+            f"def git(*args): subprocess.run(['git', *{GIT_FIXTURE!r}, *args], check=True)\n"
+            + script
+            + "print('{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}')\n"
+            + "print('{\"type\":\"turn.completed\"}')\n")
+    run_dir = tmp_path / "attempt"
+    run_dir.mkdir()
+    plan = fixture_plan(run_dir, code, mode="worktree_write", worktree=lane)
+    return supervisor().execute(plan, run_dir / "result.md")
+
+
+def test_codex_writer_may_write_worktree_instructions(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    codex = supervisor().build_plan("codex", {"resolved_model": "fixture"}, "hello",
+                                    mode="worktree_write", worktree=lane, workspace_root=tmp_path)
+    claude = supervisor().build_plan("claude", {"resolved_model": "fixture"}, "hello",
+                                     mode="worktree_write", worktree=lane, workspace_root=tmp_path)
+    assert str(lane / ".agents") in codex["applied"]["add_dirs"]
+    roots = next(arg for arg in codex["argv"] if arg.startswith("sandbox_workspace_write.writable_roots="))
+    assert str(lane / ".agents") in json.loads(roots.split("=", 1)[1])
+    assert str(lane / ".agents") not in claude["applied"]["add_dirs"]
+
+
+@pytest.mark.parametrize("refresh", ["git('merge', '-q', '--no-edit', 'main')\n", "git('rebase', '-q', 'main')\n"],
+                         ids=["merge", "rebase"])
+def test_codex_writer_refreshing_from_integration_branch_passes(tmp_path, refresh):
+    _, lane = instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, refresh)
+    assert record["status"] == "ok", record
+    assert "error" not in record
+    assert (lane / SKILL).read_text() == "v2\n"
+
+
+def test_codex_writer_refreshing_from_upstream_passes(tmp_path):
+    repo, lane = instruction_lane(tmp_path)
+    git(repo, "update-ref", "refs/remotes/origin/main", "main")
+    git(repo, "reset", "-q", "--hard", "main~1")
+    git(repo, "remote", "add", "origin", str(tmp_path / "origin.git"))
+    git(repo, "config", "branch.main.remote", "origin")
+    git(repo, "config", "branch.main.merge", "refs/heads/main")
+    record = lane_attempt(tmp_path, lane, "git('merge', '-q', '--no-edit', 'origin/main')\n")
+    assert record["status"] == "ok", record
+
+
+def test_codex_writer_keeps_changes_its_branch_already_carried(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    (lane / SKILL).write_text("branch edit\n")
+    git(lane, "commit", "-q", "-am", "reviewed skill edit")
+    record = lane_attempt(tmp_path, lane, "")
+    assert record["status"] == "ok", record
+
+
+@pytest.mark.parametrize("edit", [
+    f"open({SKILL!r}, 'w').write('lane edit\\n')\n",
+    f"open({SKILL!r}, 'w').write('lane edit\\n'); git('commit', '-q', '-am', 'edit')\n",
+    "open('.agents/skills/fixture/extra.md', 'w').write('new\\n')\n",
+], ids=["uncommitted", "committed", "untracked"])
+def test_codex_writer_authoring_instructions_fails(tmp_path, edit):
+    _, lane = instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, edit)
+    assert record["status"] == "failed"
+    assert record["error"] == "protected_instructions_changed"
+    assert record["evidence"]["signature"] == "protected_instructions_changed"
+    assert any(".agents/skills/fixture/" in warning for warning in record["warnings"])
+
+
 def test_plan_only_honors_read_only_cwd_inside_workspace(tmp_path):
     child = tmp_path / "nested"
     child.mkdir()
