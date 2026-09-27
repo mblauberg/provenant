@@ -1675,7 +1675,12 @@ def instruction_disk_state(cwd, object_format):
                 if total > INSTRUCTION_BYTES_LIMIT:
                     raise ValueError(f"{INSTRUCTION_DIR} exceeds {INSTRUCTION_BYTES_LIMIT} bytes")
                 digest.update(b"blob %d\0" % status.st_size)
-                with path.open("rb") as handle:
+                # The type was read by name; re-check it on the descriptor so a swapped-in FIFO
+                # or link cannot block the check.
+                descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+                with os.fdopen(descriptor, "rb") as handle:
+                    if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+                        raise ValueError(f"{path} changed type during the check")
                     while chunk := handle.read(1 << 20):
                         digest.update(chunk)
             else:

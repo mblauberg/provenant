@@ -88,12 +88,15 @@ Codex writer also gets the worktree's `.agents/` in `add_dirs`. After the
 attempt, each `.agents/` path in HEAD, the index and on disk must match the
 attempt's starting HEAD, index or files, or the primary checkout's branch or its
 upstream. Files on disk are hashed without Git, so ignored, skip-worktree and
-filtered files count, and an unresolved conflict or an unreadable directory
-fails. Otherwise the attempt fails with `protected_instructions_changed` and
+filtered files count. An unresolved conflict, an unreadable directory, a
+special file, a replaced `.agents/` root or a tree over 256 MiB also fails.
+Otherwise the attempt fails with `protected_instructions_changed` and
 lists the paths in its warnings. The check trusts local refs, which the lane can
 move. It also reports a clean three-way merge into a skill the branch already
 changed, a refresh overtaken by a newer integration-branch change to the same
-file, and a refresh under line-ending conversion, which a retry or another
-adapter resolves. Review of the branch diff remains the backstop.
+file, a refresh under line-ending conversion, and any refresh in a repository
+that tracks a case variant such as `.Agents/`. Another adapter can do such a
+refresh, and a retry clears an overtaken one. Review of the branch diff
+remains the backstop.
 
 `model_route.py snapshot --json` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Wrapped writer launches (agy, Claude, Cursor, OpenCode and Kiro) restrict writes to the worktree, declared `add_dirs`, per-worktree Git metadata, common Git objects, refs, logs and packed refs, attempt files, temp paths, devices and provider state. Where protected-path policy applies, its read and write denies take precedence within an `add_dir`; receipts list the writable `add_dirs` in `applied.write_boundary`. Codex writers use its native `workspace-write` sandbox. Unavailable OS confinement refuses agy write dispatches and produces an explicit warning for other wrapped writers.
