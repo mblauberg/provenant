@@ -2693,7 +2693,7 @@ def test_codex_writer_unresolved_instruction_conflict_fails(tmp_path):
     _, lane = instruction_lane(tmp_path)
     (lane / SKILL).write_text("branch edit\n")
     git(lane, "commit", "-q", "-am", "reviewed skill edit")
-    record = lane_attempt(tmp_path, lane, "subprocess.run(['git', 'merge', '-q', 'main'])\n")
+    record = lane_attempt(tmp_path, lane, f"subprocess.run(['git', *{GIT_FIXTURE!r}, 'merge', '-q', 'main'])\n")
     assert record["error"] == "protected_instructions_changed"
     assert any(SKILL + " (unresolved conflict)" in warning for warning in record["warnings"])
 
