@@ -1657,16 +1657,20 @@ def instruction_disk_state(cwd, object_format):
     root = Path(cwd, INSTRUCTION_DIR)
     if root.is_symlink() or not root.is_dir():
         raise ValueError(f"{INSTRUCTION_DIR} is no longer a directory")
-    entries, total, walked = {}, 0, False
+    entries, total = {}, 0
+    # fwalk silently skips a directory swapped for a link before it descends, so every real
+    # directory seen must also be visited.
+    expected, visited = {root}, set()
 
     def unreadable(error):
         raise error  # A directory the check cannot list could hide a change.
 
     for directory, subdirectories, files, directory_fd in os.fwalk(root, onerror=unreadable):
-        walked = True
+        visited.add(Path(directory))
         for name in [*files, *subdirectories]:
             status = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
             if stat.S_ISDIR(status.st_mode):
+                expected.add(Path(directory, name))
                 continue
             digest = hashlib.new(object_format)
             if stat.S_ISLNK(status.st_mode):
@@ -1693,7 +1697,7 @@ def instruction_disk_state(cwd, object_format):
                 mode = "special"  # Never open a FIFO or device: it could block the check.
             relative = Path(directory, name).relative_to(root).as_posix()
             entries[f"{INSTRUCTION_DIR}/{relative}"] = (mode, digest.hexdigest())
-    if not walked:
+    if expected - visited:
         raise ValueError(f"{INSTRUCTION_DIR} changed during the check")
     return entries
 
