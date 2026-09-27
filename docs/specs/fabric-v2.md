@@ -89,7 +89,8 @@ attempt, each `.agents/` path in HEAD, the index and on disk must match the
 attempt's starting HEAD, index or files, or the primary checkout's branch or its
 upstream. Files on disk are hashed without Git, so ignored, skip-worktree and
 filtered files count. An unresolved conflict, an unreadable directory, a
-special file, a replaced `.agents/` root or a tree over 256 MiB also fails.
+special file, a replaced `.agents/` root, a tree over 256 MiB or a lane
+process left running also fails.
 Otherwise the attempt fails with `protected_instructions_changed` and
 lists the paths in its warnings. The check trusts local refs, which the lane can
 move. It also reports a clean three-way merge into a skill the branch already

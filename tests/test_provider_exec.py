@@ -2716,6 +2716,22 @@ def test_codex_writer_hiding_instructions_fails(tmp_path, script):
     assert any("unverifiable" in warning for warning in record["warnings"])
 
 
+def test_instruction_check_refuses_while_lane_processes_run(tmp_path, monkeypatch):
+    module = supervisor()
+    original = module._Descendants.stop
+
+    def stop_sparing_a_process(self, *args, **kwargs):
+        reaped = original(self, *args, **kwargs)
+        self.spared_at_stop.add((999999, "fixture"))
+        return reaped
+
+    monkeypatch.setattr(module._Descendants, "stop", stop_sparing_a_process)
+    _, lane = instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, "")
+    assert record["error"] == "protected_instructions_changed"
+    assert any("left running" in warning for warning in record["warnings"])
+
+
 def test_instruction_check_runs_no_repository_hooks(tmp_path):
     _, lane = instruction_lane(tmp_path)
     marker = tmp_path / "hook-ran"

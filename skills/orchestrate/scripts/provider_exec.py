@@ -1694,7 +1694,9 @@ def instruction_disk_state(cwd, object_format):
                         raise ValueError(f"{name} changed size during the check")
                     total += read
             else:
-                mode = "special"  # Never open a FIFO or device: it could block the check.
+                # Never open a FIFO or device: it could block the check. Git cannot store one.
+                relative = Path(directory, name).relative_to(root).as_posix()
+                raise ValueError(f"{INSTRUCTION_DIR}/{relative} is not a file or link")
             relative = Path(directory, name).relative_to(root).as_posix()
             entries[f"{INSTRUCTION_DIR}/{relative}"] = (mode, digest.hexdigest())
     if expected - visited:
@@ -2252,6 +2254,9 @@ def execute(
         try:
             if isinstance(instruction_start, Exception):
                 raise instruction_start
+            if descendants and descendants.spared_at_stop:
+                # A lane process still running could change .agents during or after the check.
+                raise ValueError("lane processes were left running")
             instruction_changes = authored_instruction_changes(plan["cwd"], instruction_start)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             instruction_changes = [f"{INSTRUCTION_DIR} (unverifiable: {exc})"]
