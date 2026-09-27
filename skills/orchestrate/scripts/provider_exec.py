@@ -1629,8 +1629,8 @@ def instructions_writable(plan):
 def _instruction_path(path):
     # A tree may spell the directory in any case, and a case-insensitive checkout writes it to
     # .agents. The spelling is kept, so a variant is a new path rather than shadowing the original.
-    head, _, rest = path.partition("/")
-    return path if rest and head.casefold() == INSTRUCTION_DIR else None
+    # An entry named .agents itself (a link, file or submodule) counts as well.
+    return path if path.partition("/")[0].casefold() == INSTRUCTION_DIR else None
 
 
 def _instruction_entries(cwd, listing, *, index=False):
@@ -1649,43 +1649,52 @@ def _instruction_entries(cwd, listing, *, index=False):
 
 
 def instruction_disk_state(cwd, object_format):
-    """Hash every file under .agents, ignored or not, as Git would store it, without running Git."""
+    """Hash every file under .agents, ignored or not, as Git would store it, without running Git.
+
+    The walk works from directory descriptors and never follows a link, so a surviving lane
+    process cannot redirect it by swapping a directory or file for a link, FIFO or device.
+    """
     root = Path(cwd, INSTRUCTION_DIR)
     if root.is_symlink() or not root.is_dir():
         raise ValueError(f"{INSTRUCTION_DIR} is no longer a directory")
-    entries, total = {}, 0
+    entries, total, walked = {}, 0, False
 
     def unreadable(error):
         raise error  # A directory the check cannot list could hide a change.
 
-    for directory, subdirectories, files in os.walk(root, onerror=unreadable):
-        for name in [*files, *(item for item in subdirectories if Path(directory, item).is_symlink())]:
-            path = Path(directory, name)
-            status = path.lstat()
+    for directory, subdirectories, files, directory_fd in os.fwalk(root, onerror=unreadable):
+        walked = True
+        for name in [*files, *subdirectories]:
+            status = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            if stat.S_ISDIR(status.st_mode):
+                continue
+            digest = hashlib.new(object_format)
             if stat.S_ISLNK(status.st_mode):
-                mode, data = "120000", os.fsencode(os.readlink(path))
+                mode, data = "120000", os.fsencode(os.readlink(name, dir_fd=directory_fd))
+                digest.update(b"blob %d\0" % len(data) + data)
             elif stat.S_ISREG(status.st_mode):
                 mode = "100755" if status.st_mode & 0o100 else "100644"
-                data = None
-            else:
-                mode, data = "special", b""  # Never open a FIFO or device: it could block the check.
-            digest = hashlib.new(object_format)
-            if data is None:
-                total += status.st_size
-                if total > INSTRUCTION_BYTES_LIMIT:
-                    raise ValueError(f"{INSTRUCTION_DIR} exceeds {INSTRUCTION_BYTES_LIMIT} bytes")
-                digest.update(b"blob %d\0" % status.st_size)
-                # The type was read by name; re-check it on the descriptor so a swapped-in FIFO
-                # or link cannot block the check.
-                descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+                descriptor = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory_fd)
                 with os.fdopen(descriptor, "rb") as handle:
-                    if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
-                        raise ValueError(f"{path} changed type during the check")
+                    opened = os.fstat(handle.fileno())
+                    if not stat.S_ISREG(opened.st_mode):
+                        raise ValueError(f"{name} changed type during the check")
+                    digest.update(b"blob %d\0" % opened.st_size)
+                    read = 0
                     while chunk := handle.read(1 << 20):
+                        read += len(chunk)
+                        if total + read > INSTRUCTION_BYTES_LIMIT:
+                            raise ValueError(f"{INSTRUCTION_DIR} exceeds {INSTRUCTION_BYTES_LIMIT} bytes")
                         digest.update(chunk)
+                    if read != opened.st_size:
+                        raise ValueError(f"{name} changed size during the check")
+                    total += read
             else:
-                digest.update(b"blob %d\0" % len(data) + data)
-            entries[f"{INSTRUCTION_DIR}/{path.relative_to(root).as_posix()}"] = (mode, digest.hexdigest())
+                mode = "special"  # Never open a FIFO or device: it could block the check.
+            relative = Path(directory, name).relative_to(root).as_posix()
+            entries[f"{INSTRUCTION_DIR}/{relative}"] = (mode, digest.hexdigest())
+    if not walked:
+        raise ValueError(f"{INSTRUCTION_DIR} changed during the check")
     return entries
 
 

@@ -2676,6 +2676,19 @@ def test_codex_writer_may_run_instruction_scripts(tmp_path):
     assert record["status"] == "ok", record
 
 
+def test_codex_writer_committing_an_instruction_root_entry_fails(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    git(lane, "rm", "-r", "-q", "--cached", ".agents")
+    git(lane, "commit", "-q", "-m", "untrack instructions")
+    record = lane_attempt(tmp_path, lane, (
+        "blob = subprocess.run(['git', 'hash-object', '-w', '--stdin'], input='/elsewhere', "
+        "capture_output=True, text=True, check=True).stdout.strip()\n"
+        "git('update-index', '--add', '--cacheinfo', '120000,' + blob + ',.agents')\n"
+        "git('commit', '-q', '-m', 'link instructions')\n"))
+    assert record["error"] == "protected_instructions_changed"
+    assert any(warning.endswith(": .agents") for warning in record["warnings"])
+
+
 def test_codex_writer_unresolved_instruction_conflict_fails(tmp_path):
     _, lane = instruction_lane(tmp_path)
     (lane / SKILL).write_text("branch edit\n")
