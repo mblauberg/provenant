@@ -91,7 +91,9 @@ upstream. Files on disk are hashed without Git, so ignored, skip-worktree and
 filtered files count, and an unresolved conflict or an unreadable directory
 fails. Otherwise the attempt fails with `protected_instructions_changed` and
 lists the paths in its warnings. The check trusts local refs, which the lane can
-move, and a clean three-way merge into a skill the branch already changed is
-reported too, so review of the branch diff remains the backstop.
+move. It also reports a clean three-way merge into a skill the branch already
+changed, a refresh overtaken by a newer integration-branch change to the same
+file, and a refresh under line-ending conversion, which a retry or another
+adapter resolves. Review of the branch diff remains the backstop.
 
 `model_route.py snapshot --json` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Wrapped writer launches (agy, Claude, Cursor, OpenCode and Kiro) restrict writes to the worktree, declared `add_dirs`, per-worktree Git metadata, common Git objects, refs, logs and packed refs, attempt files, temp paths, devices and provider state. Where protected-path policy applies, its read and write denies take precedence within an `add_dir`; receipts list the writable `add_dirs` in `applied.write_boundary`. Codex writers use its native `workspace-write` sandbox. Unavailable OS confinement refuses agy write dispatches and produces an explicit warning for other wrapped writers.

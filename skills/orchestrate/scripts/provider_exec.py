@@ -52,6 +52,8 @@ CONFINED_STATE = {
 EXTRA_DENIED_READS = (".claude/projects", ".codex/sessions")
 # Repository agent instructions and skills. Codex protects them inside a writable root.
 INSTRUCTION_DIR = ".agents"
+# Instructions are small text; a larger tree is refused rather than hashed at length.
+INSTRUCTION_BYTES_LIMIT = 256 * 1024 * 1024
 
 
 def now():
@@ -1606,11 +1608,12 @@ def _observed_model(plan, parsed, env):
 
 def _git_output(cwd, *args):
     # Only object and index reads run here, never a working-tree scan: the lane can write the
-    # repository's config and attributes, so filters and fsmonitor hooks must not fire.
+    # repository's config and attributes, so filters, fsmonitor hooks and a lazy fetch through a
+    # configured transport command must not fire.
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     result = subprocess.run(
-        ["git", "-C", str(cwd), "-c", "core.fsmonitor=false", *args],
-        capture_output=True, text=True, timeout=30,
-        env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
+        ["git", "-C", str(cwd), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", *args],
+        capture_output=True, text=True, timeout=30, env={**environment, "GIT_NO_LAZY_FETCH": "1"},
     )
     if result.returncode != 0:
         raise ValueError(result.stderr.strip() or f"git {args[0]} failed")
@@ -1624,9 +1627,10 @@ def instructions_writable(plan):
 
 
 def _instruction_path(path):
-    # A tree may spell the directory in any case; a case-insensitive checkout writes it to .agents.
+    # A tree may spell the directory in any case, and a case-insensitive checkout writes it to
+    # .agents. The spelling is kept, so a variant is a new path rather than shadowing the original.
     head, _, rest = path.partition("/")
-    return f"{INSTRUCTION_DIR}/{rest}" if rest and head.casefold() == INSTRUCTION_DIR else None
+    return path if rest and head.casefold() == INSTRUCTION_DIR else None
 
 
 def _instruction_entries(cwd, listing, *, index=False):
@@ -1647,7 +1651,10 @@ def _instruction_entries(cwd, listing, *, index=False):
 def instruction_disk_state(cwd, object_format):
     """Hash every file under .agents, ignored or not, as Git would store it, without running Git."""
     root = Path(cwd, INSTRUCTION_DIR)
-    entries = {}
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError(f"{INSTRUCTION_DIR} is no longer a directory")
+    entries, total = {}, 0
+
     def unreadable(error):
         raise error  # A directory the check cannot list could hide a change.
 
@@ -1659,11 +1666,21 @@ def instruction_disk_state(cwd, object_format):
                 mode, data = "120000", os.fsencode(os.readlink(path))
             elif stat.S_ISREG(status.st_mode):
                 mode = "100755" if status.st_mode & 0o100 else "100644"
-                data = path.read_bytes()
+                data = None
             else:
                 mode, data = "special", b""  # Never open a FIFO or device: it could block the check.
-            digest = hashlib.new(object_format, b"blob %d\0" % len(data) + data).hexdigest()
-            entries[f"{INSTRUCTION_DIR}/{path.relative_to(root).as_posix()}"] = (mode, digest)
+            digest = hashlib.new(object_format)
+            if data is None:
+                total += status.st_size
+                if total > INSTRUCTION_BYTES_LIMIT:
+                    raise ValueError(f"{INSTRUCTION_DIR} exceeds {INSTRUCTION_BYTES_LIMIT} bytes")
+                digest.update(b"blob %d\0" % status.st_size)
+                with path.open("rb") as handle:
+                    while chunk := handle.read(1 << 20):
+                        digest.update(chunk)
+            else:
+                digest.update(b"blob %d\0" % len(data) + data)
+            entries[f"{INSTRUCTION_DIR}/{path.relative_to(root).as_posix()}"] = (mode, digest.hexdigest())
     return entries
 
 
@@ -1754,6 +1771,8 @@ def execute(
             instruction_start = instruction_snapshot(plan["cwd"])
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             instruction_start = exc
+        # Running a skill's script must not leave bytecode behind for the check to report.
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
     attempt_dir = Path(plan["run_dir"])
     private_tmp = attempt_dir / "tmp"

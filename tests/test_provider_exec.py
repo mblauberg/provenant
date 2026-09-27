@@ -2653,7 +2653,7 @@ def test_codex_writer_keeps_changes_its_branch_already_carried(tmp_path):
     f"git('update-index', '--skip-worktree', {SKILL!r}); open({SKILL!r}, 'w').write('lane edit\\n')\n",
     "blob = subprocess.run(['git', 'hash-object', '-w', '--stdin'], input='x', capture_output=True, "
     "text=True, check=True).stdout.strip()\n"
-    "git('update-index', '--add', '--cacheinfo', '100644,' + blob + ',.Agents/skills/fixture/other.md')\n"
+    "git('update-index', '--add', '--cacheinfo', '100644,' + blob + ',.Agents/skills/fixture/SKILL.md')\n"
     "git('commit', '-q', '-m', 'plumbing')\n",
     "os.mkfifo('.agents/skills/fixture/pipe')\n",
 ], ids=["uncommitted", "committed", "untracked", "ignored", "skip-worktree", "case-variant", "fifo"])
@@ -2663,7 +2663,17 @@ def test_codex_writer_authoring_instructions_fails(tmp_path, edit):
     assert record["status"] == "failed"
     assert record["error"] == "protected_instructions_changed"
     assert record["evidence"]["signature"] == "protected_instructions_changed"
-    assert any(".agents/skills/fixture/" in warning for warning in record["warnings"])
+    assert any(".agents/skills/fixture/" in warning.casefold() for warning in record["warnings"])
+
+
+def test_codex_writer_may_run_instruction_scripts(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    (lane / ".agents/skills/fixture/tool.py").write_text("VALUE = 1\n")
+    git(lane, "add", ".")
+    git(lane, "commit", "-q", "-m", "skill tool")
+    record = lane_attempt(tmp_path, lane, "subprocess.run(['python3', '-c', 'import sys; "
+                          "sys.path.insert(0, \".agents/skills/fixture\"); import tool'], check=True)\n")
+    assert record["status"] == "ok", record
 
 
 def test_codex_writer_unresolved_instruction_conflict_fails(tmp_path):
@@ -2675,14 +2685,20 @@ def test_codex_writer_unresolved_instruction_conflict_fails(tmp_path):
     assert any(SKILL + " (unresolved conflict)" in warning for warning in record["warnings"])
 
 
-def test_codex_writer_hiding_instructions_fails(tmp_path):
+@pytest.mark.parametrize("script", [
+    "os.makedirs('.agents/hidden'); open('.agents/hidden/x', 'w').write('x'); os.chmod('.agents/hidden', 0)\n",
+    "import shutil; shutil.copytree('.agents', '../elsewhere'); shutil.rmtree('.agents'); "
+    "os.symlink('../elsewhere', '.agents')\n",
+    "open('.agents/big', 'wb').truncate(1 << 40)\n",
+], ids=["unreadable", "root-symlink", "oversized"])
+def test_codex_writer_hiding_instructions_fails(tmp_path, script):
     _, lane = instruction_lane(tmp_path)
     hidden = lane / ".agents" / "hidden"
     try:
-        record = lane_attempt(tmp_path, lane, "os.makedirs('.agents/hidden'); "
-                              "open('.agents/hidden/x', 'w').write('x'); os.chmod('.agents/hidden', 0)\n")
+        record = lane_attempt(tmp_path, lane, script)
     finally:
-        hidden.chmod(0o755)
+        if hidden.exists():
+            hidden.chmod(0o755)
     assert record["error"] == "protected_instructions_changed"
     assert any("unverifiable" in warning for warning in record["warnings"])
 
@@ -2693,7 +2709,15 @@ def test_instruction_check_runs_no_repository_hooks(tmp_path):
     hook = tmp_path / "fsmonitor.sh"
     hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
     hook.chmod(0o755)
-    record = lane_attempt(tmp_path, lane, f"git('config', 'core.fsmonitor', {str(hook)!r})\n")
+    record = lane_attempt(tmp_path, lane, (
+        f"git('config', 'core.fsmonitor', {str(hook)!r})\n"
+        "git('config', 'core.repositoryformatversion', '1')\n"
+        "git('config', 'extensions.partialClone', 'origin')\n"
+        "git('config', 'remote.origin.url', 'ssh://example.invalid/repo')\n"
+        "git('config', 'remote.origin.promisor', 'true')\n"
+        f"git('config', 'core.sshCommand', {str(hook)!r})\n"
+        "common = git('rev-parse', '--path-format=absolute', '--git-common-dir')\n"
+        "open(common + '/refs/heads/main', 'w').write('1' * 40 + '\\n')\n"))
     assert record["status"] == "ok", record
     assert not marker.exists()
 
