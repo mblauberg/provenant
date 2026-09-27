@@ -7,6 +7,7 @@ import argparse
 from collections import deque
 import ctypes
 import functools
+import hashlib
 import json
 import math
 import os
@@ -14,6 +15,7 @@ from pathlib import Path
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -1603,8 +1605,11 @@ def _observed_model(plan, parsed, env):
 
 
 def _git_output(cwd, *args):
+    # Only object and index reads run here, never a working-tree scan: the lane can write the
+    # repository's config and attributes, so filters and fsmonitor hooks must not fire.
     result = subprocess.run(
-        ["git", "-C", str(cwd), *args], capture_output=True, text=True, timeout=30,
+        ["git", "-C", str(cwd), "-c", "core.fsmonitor=false", *args],
+        capture_output=True, text=True, timeout=30,
         env={key: value for key, value in os.environ.items() if not key.startswith("GIT_")},
     )
     if result.returncode != 0:
@@ -1618,33 +1623,85 @@ def instructions_writable(plan):
             and str(Path(plan["cwd"], INSTRUCTION_DIR)) in plan["applied"]["add_dirs"])
 
 
-def authored_instruction_changes(cwd, start):
-    """.agents paths the lane changed that match neither its start commit nor the integration branch.
+def _instruction_path(path):
+    # A tree may spell the directory in any case; a case-insensitive checkout writes it to .agents.
+    head, _, rest = path.partition("/")
+    return f"{INSTRUCTION_DIR}/{rest}" if rest and head.casefold() == INSTRUCTION_DIR else None
 
-    Each of HEAD, the index and the working tree must match, path by path, either the commit
-    the attempt started on or the primary checkout's branch or its upstream. A rebase or merge
-    from that branch therefore passes, and pre-existing branch changes are not re-reported.
+
+def _instruction_entries(cwd, listing, *, index=False):
+    """Map each .agents path to (mode, object id) from ls-tree or ls-files --stage output."""
+    entries, conflicts = {}, set()
+    for record in _git_output(cwd, *listing).split("\0"):
+        meta, _, path = record.partition("\t")
+        key = _instruction_path(path)
+        if not key:
+            continue
+        fields = meta.split()
+        if index and fields[2] != "0":
+            conflicts.add(key)
+        entries[key] = (fields[0], fields[1] if index else fields[2])
+    return entries, conflicts
+
+
+def instruction_disk_state(cwd, object_format):
+    """Hash every file under .agents, ignored or not, as Git would store it, without running Git."""
+    root = Path(cwd, INSTRUCTION_DIR)
+    entries = {}
+    def unreadable(error):
+        raise error  # A directory the check cannot list could hide a change.
+
+    for directory, subdirectories, files in os.walk(root, onerror=unreadable):
+        for name in [*files, *(item for item in subdirectories if Path(directory, item).is_symlink())]:
+            path = Path(directory, name)
+            status = path.lstat()
+            if stat.S_ISLNK(status.st_mode):
+                mode, data = "120000", os.fsencode(os.readlink(path))
+            elif stat.S_ISREG(status.st_mode):
+                mode = "100755" if status.st_mode & 0o100 else "100644"
+                data = path.read_bytes()
+            else:
+                mode, data = "special", b""  # Never open a FIFO or device: it could block the check.
+            digest = hashlib.new(object_format, b"blob %d\0" % len(data) + data).hexdigest()
+            entries[f"{INSTRUCTION_DIR}/{path.relative_to(root).as_posix()}"] = (mode, digest)
+    return entries
+
+
+def instruction_snapshot(cwd):
+    head = _git_output(cwd, "rev-parse", "--verify", "HEAD^{commit}").strip()
+    object_format = _git_output(cwd, "rev-parse", "--show-object-format").strip()
+    return {"head": head, "object_format": object_format,
+            "disk": instruction_disk_state(cwd, object_format),
+            "index": _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)[0]}
+
+
+def authored_instruction_changes(cwd, start):
+    """.agents paths the lane changed to content from neither its start nor the integration branch.
+
+    HEAD, the index and the files on disk must each match, path by path, the attempt's starting
+    state or the primary checkout's branch or its upstream, so a rebase or merge from that branch
+    passes and changes the branch already carried are not re-reported. A lane can move local refs,
+    so this catches an ordinary edit, not a forged integration branch.
     """
-    if not start:
-        raise ValueError("no start commit was recorded")
     primary = _git_output(cwd, "worktree", "list", "--porcelain").split("\n\n")[0].splitlines()
     branch = next((line[len("branch "):] for line in primary if line.startswith("branch ")), "")
     upstream = _git_output(cwd, "for-each-ref", "--format=%(upstream)", branch).strip() if branch else ""
-    trusted = [ref for ref in (branch, upstream) if ref]
-
-    def differing(base, view):
-        output = _git_output(cwd, "diff", "--name-only", "-z", "--no-renames", *view(base), "--", INSTRUCTION_DIR)
-        return {name for name in output.split("\0") if name}
-
-    changed = {name for name in _git_output(
-        cwd, "ls-files", "-z", "--others", "--exclude-standard", "--", INSTRUCTION_DIR).split("\0") if name}
-    for view in (lambda base: (base, "HEAD"), lambda base: ("--cached", base), lambda base: (base,)):
-        unmatched = differing(start, view)
-        for ref in trusted:
-            if unmatched:
-                unmatched &= differing(ref, view)
-        changed |= unmatched
-    return sorted(changed)
+    trees = [_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", start["head"]))[0]]
+    for ref in filter(None, (branch, upstream)):
+        try:
+            trees.append(_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", ref))[0])
+        except ValueError:
+            pass  # An unset or unfetched ref cannot vouch for anything.
+    baselines = [start["disk"], start["index"], *trees]
+    index, conflicts = _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)
+    views = [_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", "HEAD"))[0], index,
+             instruction_disk_state(cwd, start["object_format"])]
+    changed = set()
+    for view in views:
+        for key in set(view).union(*baselines):
+            if all(view.get(key) != baseline.get(key) for baseline in baselines):
+                changed.add(key)
+    return sorted(key + (" (unresolved conflict)" if key in conflicts else "") for key in changed | conflicts)
 
 
 def execute(
@@ -1694,9 +1751,9 @@ def execute(
     instruction_start = None
     if instructions_writable(plan):
         try:
-            instruction_start = _git_output(plan["cwd"], "rev-parse", "--verify", "HEAD^{commit}").strip()
-        except (OSError, ValueError, subprocess.SubprocessError):
-            instruction_start = ""
+            instruction_start = instruction_snapshot(plan["cwd"])
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            instruction_start = exc
     environment["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
     attempt_dir = Path(plan["run_dir"])
     private_tmp = attempt_dir / "tmp"
@@ -2156,6 +2213,8 @@ def execute(
     instruction_changes = []
     if instruction_start is not None:
         try:
+            if isinstance(instruction_start, Exception):
+                raise instruction_start
             instruction_changes = authored_instruction_changes(plan["cwd"], instruction_start)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             instruction_changes = [f"{INSTRUCTION_DIR} (unverifiable: {exc})"]

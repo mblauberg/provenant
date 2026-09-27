@@ -112,10 +112,11 @@ on resume), with `-c sandbox_workspace_write.writable_roots=<add_dirs>` and
 read-only, so a linked-worktree Codex writer also gets the worktree's
 `.agents/` as an `add_dir`; Git can then rebase or merge the integration branch
 over tracked skills. Fabric fails the attempt with
-`protected_instructions_changed` when an `.agents/` path ends up matching
-neither the start commit nor the primary checkout's branch or its upstream.
-If OS confinement is unavailable, agy write dispatch is refused; other wrapped
-writer receipts warn that writes are unconfined. Setting `PROVENANT_NO_OS_CONFINEMENT=1` has the same effect on new
+`protected_instructions_changed` when an `.agents/` path in HEAD, the index or
+on disk ends up matching neither the attempt's starting state nor the primary
+checkout's branch or its upstream. If OS confinement is unavailable, agy write
+dispatch is refused; other wrapped writer receipts warn that writes are
+unconfined. Setting `PROVENANT_NO_OS_CONFINEMENT=1` has the same effect on new
 wrapped attempts.
 Protected-path dispatches to training routes still refuse without OS read
 confinement.

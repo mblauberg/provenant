@@ -2586,8 +2586,9 @@ def instruction_lane(tmp_path):
 
 
 def lane_attempt(tmp_path, lane, script):
-    code = ("import subprocess\n"
-            f"def git(*args): subprocess.run(['git', *{GIT_FIXTURE!r}, *args], check=True)\n"
+    code = ("import os, subprocess\n"
+            f"def git(*args): return subprocess.run(['git', *{GIT_FIXTURE!r}, *args], check=True, "
+            "capture_output=True, text=True).stdout.strip()\n"
             + script
             + "print('{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}')\n"
             + "print('{\"type\":\"turn.completed\"}')\n")
@@ -2619,14 +2620,18 @@ def test_codex_writer_refreshing_from_integration_branch_passes(tmp_path, refres
     assert (lane / SKILL).read_text() == "v2\n"
 
 
-def test_codex_writer_refreshing_from_upstream_passes(tmp_path):
+@pytest.mark.parametrize("fetched", [True, False], ids=["upstream", "unfetched-upstream"])
+def test_codex_writer_refreshing_from_upstream_passes(tmp_path, fetched):
     repo, lane = instruction_lane(tmp_path)
-    git(repo, "update-ref", "refs/remotes/origin/main", "main")
-    git(repo, "reset", "-q", "--hard", "main~1")
     git(repo, "remote", "add", "origin", str(tmp_path / "origin.git"))
     git(repo, "config", "branch.main.remote", "origin")
     git(repo, "config", "branch.main.merge", "refs/heads/main")
-    record = lane_attempt(tmp_path, lane, "git('merge', '-q', '--no-edit', 'origin/main')\n")
+    source = "main"
+    if fetched:
+        git(repo, "update-ref", "refs/remotes/origin/main", "main")
+        git(repo, "reset", "-q", "--hard", "main~1")
+        source = "origin/main"
+    record = lane_attempt(tmp_path, lane, f"git('merge', '-q', '--no-edit', {source!r})\n")
     assert record["status"] == "ok", record
 
 
@@ -2642,7 +2647,16 @@ def test_codex_writer_keeps_changes_its_branch_already_carried(tmp_path):
     f"open({SKILL!r}, 'w').write('lane edit\\n')\n",
     f"open({SKILL!r}, 'w').write('lane edit\\n'); git('commit', '-q', '-am', 'edit')\n",
     "open('.agents/skills/fixture/extra.md', 'w').write('new\\n')\n",
-], ids=["uncommitted", "committed", "untracked"])
+    "common = git('rev-parse', '--path-format=absolute', '--git-common-dir')\n"
+    "open(common + '/info/exclude', 'a').write('.agents/skills/fixture/extra.md\\n')\n"
+    "open('.agents/skills/fixture/extra.md', 'w').write('new\\n')\n",
+    f"git('update-index', '--skip-worktree', {SKILL!r}); open({SKILL!r}, 'w').write('lane edit\\n')\n",
+    "blob = subprocess.run(['git', 'hash-object', '-w', '--stdin'], input='x', capture_output=True, "
+    "text=True, check=True).stdout.strip()\n"
+    "git('update-index', '--add', '--cacheinfo', '100644,' + blob + ',.Agents/skills/fixture/other.md')\n"
+    "git('commit', '-q', '-m', 'plumbing')\n",
+    "os.mkfifo('.agents/skills/fixture/pipe')\n",
+], ids=["uncommitted", "committed", "untracked", "ignored", "skip-worktree", "case-variant", "fifo"])
 def test_codex_writer_authoring_instructions_fails(tmp_path, edit):
     _, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, edit)
@@ -2650,6 +2664,38 @@ def test_codex_writer_authoring_instructions_fails(tmp_path, edit):
     assert record["error"] == "protected_instructions_changed"
     assert record["evidence"]["signature"] == "protected_instructions_changed"
     assert any(".agents/skills/fixture/" in warning for warning in record["warnings"])
+
+
+def test_codex_writer_unresolved_instruction_conflict_fails(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    (lane / SKILL).write_text("branch edit\n")
+    git(lane, "commit", "-q", "-am", "reviewed skill edit")
+    record = lane_attempt(tmp_path, lane, "subprocess.run(['git', 'merge', '-q', 'main'])\n")
+    assert record["error"] == "protected_instructions_changed"
+    assert any(SKILL + " (unresolved conflict)" in warning for warning in record["warnings"])
+
+
+def test_codex_writer_hiding_instructions_fails(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    hidden = lane / ".agents" / "hidden"
+    try:
+        record = lane_attempt(tmp_path, lane, "os.makedirs('.agents/hidden'); "
+                              "open('.agents/hidden/x', 'w').write('x'); os.chmod('.agents/hidden', 0)\n")
+    finally:
+        hidden.chmod(0o755)
+    assert record["error"] == "protected_instructions_changed"
+    assert any("unverifiable" in warning for warning in record["warnings"])
+
+
+def test_instruction_check_runs_no_repository_hooks(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    marker = tmp_path / "hook-ran"
+    hook = tmp_path / "fsmonitor.sh"
+    hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+    hook.chmod(0o755)
+    record = lane_attempt(tmp_path, lane, f"git('config', 'core.fsmonitor', {str(hook)!r})\n")
+    assert record["status"] == "ok", record
+    assert not marker.exists()
 
 
 def test_plan_only_honors_read_only_cwd_inside_workspace(tmp_path):
