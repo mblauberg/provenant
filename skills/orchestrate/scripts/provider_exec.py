@@ -198,8 +198,10 @@ def validate_capabilities(value, *, adapter, mode, sandbox, network):
     return capabilities
 
 
-def _sbpl_string(path):
-    value = str(Path(path).expanduser().resolve())
+def _sbpl_string(path, *, keep_leaf=False):
+    # keep_leaf leaves a lane-replaceable final entry unresolved, so a link planted there cannot move the grant.
+    path = Path(path).expanduser()
+    value = str(path.parent.resolve() / path.name) if keep_leaf else str(path.resolve())
     return _sbpl_quote(value)
 
 
@@ -207,18 +209,19 @@ def _sbpl_quote(value):
     return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _sbpl_filter(path):
+def _sbpl_filter(path, *, keep_leaf=False):
     text = str(path)
     if text.endswith("*"):
         pattern = text[:-1]
         regex_metacharacters = set(r'.^$*+?()[]{}|\\"')
         pattern = "".join("\\" + char if char in regex_metacharacters else char for char in pattern)
         return '(regex #"^' + pattern + '[^/]*$")'
-    return "(subpath " + _sbpl_string(path) + ")"
+    return "(subpath " + _sbpl_string(path, keep_leaf=keep_leaf) + ")"
 
 
-def _sbpl_rule(action, operations, paths, *, literal=False):
-    filters = (('(literal ' + _sbpl_string(path) + ')') if literal else _sbpl_filter(path) for path in paths)
+def _sbpl_rule(action, operations, paths, *, literal=False, keep_leaf=False):
+    filters = (('(literal ' + _sbpl_string(path, keep_leaf=keep_leaf) + ')') if literal
+               else _sbpl_filter(path, keep_leaf=keep_leaf) for path in paths)
     return f"({action} {operations} " + " ".join(filters) + ")\n" if paths else ""
 
 
@@ -339,8 +342,8 @@ def os_confinement_profile(plan):
             "(version 1)\n(allow default)\n(deny file-write*)\n"
             + _sbpl_rule("allow", "file-write*", allowed)
             + _sbpl_rule("deny", "file-write*", [common] if common is not None else [])
-            + _sbpl_rule("allow", "file-write*", git_allowed)
-            + _sbpl_rule("allow", "file-write*", literal_files, literal=True)
+            + _sbpl_rule("allow", "file-write*", git_allowed, keep_leaf=True)
+            + _sbpl_rule("allow", "file-write*", literal_files, literal=True, keep_leaf=True)
         )
         if plan.get("adapter") == "codex" and capabilities:
             codex_home = Path(plan["codex_home"])

@@ -127,7 +127,8 @@ caller's `CODEX_HOME`, or `~/.codex`; the profile grants writes to the task
 home and only the literal source `auth.json`. The Git common directory is
 denied and is not a writable root. Git writes use the private worktree Git
 directory plus the narrow common `objects`, `refs`, `logs`, `packed-refs` and
-`packed-refs.lock` paths. The worktree `.git` marker and private Git
+`packed-refs.lock` paths, granted by their own names, so a link planted at one
+never moves a later grant. The worktree `.git` marker and private Git
 directory's `config.worktree`, `commondir` and `gitdir` are not writable;
 Fabric recreates the task home links every attempt and fails a symlinked or
 non-directory task home, while allowing the lane to overwrite the literal

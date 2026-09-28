@@ -142,7 +142,8 @@ attempts. Existing `auth.json`, `AGENTS.md`, `HARNESS.md` and `skills` entries a
 from `CODEX_HOME` supplied by the caller, or `~/.codex`; the profile grants
 writes to the task home and the literal source `auth.json` only. Its Git write
 boundary grants the private worktree Git directory and the common repository's
-`objects`, `refs`, `logs`, `packed-refs` and `packed-refs.lock` paths. The Git
+`objects`, `refs`, `logs`, `packed-refs` and `packed-refs.lock` paths, granted
+by their own names, so a link planted at one never moves a later grant. The Git
 common directory itself is denied and is never added as a writable root.
 The worktree `.git` marker and private Git directory's `config.worktree`,
 `commondir` and `gitdir` are not writable; Fabric recreates the task home links

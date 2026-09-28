@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import socket
 import subprocess
@@ -1236,6 +1237,48 @@ print(attempt(lambda: connect({str(inside_socket)!r})))
             assert not (lane / "config-link").exists()
             assert (home / "auth.json").read_text(encoding="utf-8") == "refreshed"
             assert (private / "index.probe").read_text(encoding="utf-8") == "probe"
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").exists(),
+                    reason="needs macOS sandbox-exec")
+def test_a_linked_git_entry_never_moves_the_writable_git_grant(monkeypatch, tmp_path):
+    mod = supervisor()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    _, lane = instruction_lane(tmp_path)
+    home = (tmp_path / "source-codex-home").resolve()
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
+    outside = (tmp_path / "outside").resolve()
+    outside.mkdir()
+    shutil.rmtree(common / "logs", ignore_errors=True)
+    (common / "logs").symlink_to(outside, target_is_directory=True)
+    (common / "packed-refs").unlink(missing_ok=True)
+    (common / "packed-refs").symlink_to(outside / "packed")
+    run_dir = tmp_path / "runs/task/attempt-001"
+    run_dir.mkdir(parents=True)
+    plan = mod.build_plan(
+        "codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
+        worktree=lane, sandbox="workspace-write", network=True,
+        capabilities=["postgres"], run_dir=run_dir,
+    )
+    profile = mod.os_confinement_profile(plan)
+    assert str(outside) not in profile
+    assert f'(subpath "{common / "logs"}")' in profile
+    script = f"""
+for path in ({str(common / "logs" / "probe")!r}, {str(common / "packed-refs")!r}):
+    try:
+        open(path, "w").write("x")
+        print("ok")
+    except OSError as exc:
+        print(exc.__class__.__name__)
+"""
+    result = subprocess.run(["/usr/bin/sandbox-exec", "-p", profile, sys.executable, "-c", script],
+                            capture_output=True, text=True)
+    if result.returncode and "sandbox_apply" in result.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert result.stdout.split() == ["PermissionError", "PermissionError"], result.stderr
+    assert list(outside.iterdir()) == []
 
 
 @pytest.mark.parametrize(("capabilities", "browser_tmp"), [(["postgres"], None), (["browser"], "tmp")])
