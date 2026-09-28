@@ -1,7 +1,9 @@
 """Process inspection works without executing the setuid system ps."""
 
 import os
+import locale
 from pathlib import Path
+import runpy
 import shlex
 import subprocess
 import sys
@@ -65,6 +67,89 @@ def test_shim_cpu_time_retains_hundredths():
     result = subprocess.run([str(shim), "-o", "time=", "-p", str(os.getpid())],
                             capture_output=True, text=True, check=True)
     assert "." in result.stdout.strip()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS ps locale formatting")
+def test_shim_lstart_matches_system_ps_in_the_user_locale():
+    locales = subprocess.run(["locale", "-a"], capture_output=True, text=True)
+    if locales.returncode != 0 or "en_AU" not in locales.stdout:
+        pytest.skip("en_AU locale is unavailable")
+    env = {**os.environ, "LANG": "en_AU.UTF-8"}
+    env.pop("LC_ALL", None)
+    env.pop("LC_TIME", None)
+    try:
+        system = subprocess.run(
+            ["/bin/ps", "-o", "lstart=", "-p", str(os.getpid())],
+            capture_output=True, text=True, env=env, check=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("setuid /bin/ps cannot execute in this sandbox")
+    shim = subprocess.run(
+        [str(SCRIPTS / "bin/ps"), "-o", "lstart=", "-p", str(os.getpid())],
+        capture_output=True, text=True, env=env, check=True,
+    )
+    assert shim.stdout.strip() == system.stdout.strip()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS KERN_PROC_PID layout")
+def test_darwin_kinfo_layouts_match_the_64_bit_sdk_offsets():
+    expected = {"size": 648, "pid": 40, "uid": 420, "ppid": 560, "pgid": 564}
+    assert process_info._DARWIN_KINFO_LAYOUTS == {"arm64": expected, "x86_64": expected}
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS KERN_PROC_PID layout")
+def test_shim_sysctl_reports_a_live_process_when_libproc_cannot_read_it():
+    shim = runpy.run_path(str(SCRIPTS / "bin/ps"))
+    facts = process_info._darwin_sysctl_process_facts(1)
+    assert facts is not None
+    assert facts["pid"] == 1
+    assert facts["ppid"] >= 0
+    assert facts["pgid"] >= 0
+    assert facts["uid"] >= 0
+    assert facts["start_epoch"] > 0
+    assert facts["elapsed"] != "?"
+    row = shim["unreadable"](1)
+    assert row is not None
+    assert row.pid == facts["pid"]
+    assert row.ppid == facts["ppid"]
+    assert row.pgid == facts["pgid"]
+    assert row.uid == facts["uid"]
+    assert row.start_epoch == facts["start_epoch"]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS KERN_PROC_PID layout")
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read every process")
+def test_shim_sysctl_reports_a_foreign_pid_like_system_ps():
+    shim = runpy.run_path(str(SCRIPTS / "bin/ps"))
+    env = {**os.environ, "LC_ALL": "C", "LANG": "C"}
+    try:
+        system = {}
+        for field in ("ppid", "pgid", "uid", "lstart", "etime"):
+            result = subprocess.run(
+                ["/bin/ps", "-o", f"{field}=", "-p", "1"],
+                capture_output=True, text=True, env=env, check=True,
+            )
+            system[field] = result.stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        pytest.skip("setuid /bin/ps cannot execute in this sandbox")
+    previous_locale = locale.setlocale(locale.LC_ALL)
+    try:
+        locale.setlocale(locale.LC_ALL, "C")
+        row = shim["unreadable"](1)
+        assert row is not None
+        assert row.ppid == int(system["ppid"])
+        assert row.pgid == int(system["pgid"])
+        assert row.uid == int(system["uid"])
+        assert shim["_lstart"](row) == system["lstart"]
+        assert row.elapsed != "?"
+        assert system["etime"] != "?"
+    finally:
+        locale.setlocale(locale.LC_ALL, previous_locale)
+
+
+def test_shim_treats_a_missing_pid_as_gone():
+    shim = runpy.run_path(str(SCRIPTS / "bin/ps"))
+    assert shim["unreadable"](2_000_000_000) is None
 
 
 def test_unavailable_census_is_not_an_empty_process_list(monkeypatch):
@@ -170,7 +255,10 @@ def test_shim_shows_an_unreadable_live_process_rather_than_dropping_it():
     result = subprocess.run([str(shim), "-o", "pid=,stat=", "-p", f"{os.getpid()},1"],
                             capture_output=True, text=True, check=True)
     assert [line.split()[0] for line in result.stdout.splitlines()] == ["1", str(os.getpid())]
-    assert "cannot be read" in result.stderr
+    if sys.platform == "darwin":
+        assert "cannot be read" not in result.stderr
+    else:
+        assert "cannot be read" in result.stderr
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS ps prints unbounded minutes")

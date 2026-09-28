@@ -764,6 +764,9 @@ def build_command(
             command.extend((flag, value))
     if evidence_dir is not None:
         command.extend(("--add-dir", str(evidence_dir)))
+    capabilities = getattr(args, "capabilities", None)
+    if capabilities:
+        command.extend(("--capabilities", json.dumps(capabilities)))
     for flag, value in (("--cwd",getattr(args,"provider_cwd",None)),("--sandbox", getattr(args,"sandbox",None)),("--network",getattr(args,"network",None)),("--resume-session",getattr(args,"resume_session",None))):
         if value is not None: command.extend((flag,str(value)))
     for directory in getattr(args,"add_dirs",[]): command.extend(("--add-dir",str(directory)))
@@ -866,6 +869,7 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
             or args.access_mode != "read_only"
             or args.task_class or args.alias or args.resume or getattr(args, "resume_session", None) or args.worktree
             or args.provider_cwd or args.sandbox or args.network is not None or args.add_dirs
+            or getattr(args, "capabilities", None)
             or args.git_evidence or args.model_override_tier or args.orchestrator_family
             or args.intent != "ordinary" or args.fallback not in (None, False, "false")):
         return None
@@ -1243,6 +1247,20 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                 mode = task.get("access_mode", "read_only")
                 if mode not in ACCESS_MODES:
                     raise PreflightError("access_mode_invalid", "Pass mode read_only or worktree_write.")
+                if "capabilities" in task:
+                    try:
+                        capabilities = provider_exec.capability_values(task["capabilities"])
+                        sandbox = task.get("sandbox") or (
+                            "workspace-write" if mode == "worktree_write" else "read-only"
+                        )
+                        provider_exec.validate_capabilities(
+                            capabilities, adapter=adapter, mode=mode, sandbox=sandbox,
+                            network=task.get("network"),
+                        )
+                    except provider_exec.CapabilityError as exc:
+                        raise PreflightError(exc.code, str(exc)) from exc
+                    except ValueError as exc:
+                        raise PreflightError("capabilities_invalid", str(exc)) from exc
                 if mode == "worktree_write":
                     if adapter not in WORKTREE_WRITE_ADAPTERS:
                         raise PreflightError("worktree_write_adapter_unsupported", "Pass mode read_only or adapter " + ", ".join(sorted(WORKTREE_WRITE_ADAPTERS)) + ".")
@@ -1458,6 +1476,7 @@ def prepare_resume(args):
     args.workspace_root=Path(previous.get("workspace_root") or (previous.get("workspace") or {}).get("root") or Path.cwd()).expanduser().resolve()
     args.sandbox=previous["applied"]["sandbox"];args.network=None if previous["applied"]["network"] is None else str(previous["applied"]["network"]).lower()
     args.add_dirs=previous["applied"]["add_dirs"];args.resume_session=previous["session_id"]
+    args.capabilities=previous["applied"].get("capabilities", [])
     args.fallback="false"
     for field in ("intent", "orchestrator_family", "role", "risk_tier", "model_override_tier", "reviewer_id", "preface"):
         if field in route:
@@ -1639,6 +1658,17 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             return fail(run_dir, "worktree_invalid", str(exc))
     elif args.worktree is not None:
         return fail(run_dir, "worktree_not_applicable", "--worktree requires --access-mode worktree_write")
+    try:
+        sandbox = args.sandbox or (
+            "workspace-write" if args.access_mode == "worktree_write" else "read-only"
+        )
+        network = None if args.network is None else args.network == "true"
+        args.capabilities = provider_exec.validate_capabilities(
+            args.capabilities or [], adapter=args.tool, mode=args.access_mode,
+            sandbox=sandbox, network=network,
+        )
+    except provider_exec.CapabilityError as exc:
+        return fail(run_dir, exc.code, str(exc))
     if not CF_DISPATCH.is_file() or not os.access(CF_DISPATCH, os.X_OK):
         return fail(run_dir, "adapter_unavailable", f"provider adapter is missing or not executable: {CF_DISPATCH}")
 
@@ -2429,6 +2459,7 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--context-ceiling", type=float, help="auto-compaction threshold in tokens, clamped to 100k-1M")
     root.add_argument("--sandbox", choices=("read-only","workspace-write","full"))
     root.add_argument("--network", choices=("true","false"))
+    root.add_argument("--capabilities", type=provider_exec.parse_capabilities_argument)
     root.add_argument("--add-dir", dest="add_dirs", action="append", default=[])
     root.add_argument("--allow-secrets", action="store_true")
     root.add_argument("--no-preface", dest="preface", action="store_false")

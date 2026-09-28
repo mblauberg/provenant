@@ -19,6 +19,8 @@ if (args.includes("--preflight-json")) {
   let text = "";
   for await (const chunk of process.stdin) text += chunk;
   const { tasks } = JSON.parse(text);
+  if (process.env.PROVENANT_FIXTURE_PREFLIGHT_LOG)
+    appendFileSync(process.env.PROVENANT_FIXTURE_PREFLIGHT_LOG, JSON.stringify(tasks) + "\n");
   const errors = tasks.filter((t) => t.prompt_file && (!isAbsolute(t.prompt_file) || !existsSync(t.prompt_file)))
     .map((t) => ({task_id:t.id,error:"prompt_unavailable",fix:"Pass an existing absolute prompt_file."}));
   if (tasks.some((t) => t.access_mode === "worktree_write" && !t.worktree))
@@ -70,6 +72,7 @@ if (owner === "batch_run.py") {
         "--timeout",
         String(task.timeout ?? 3600),
         ...["adapter", "alias", "model", "effort", "cwd", "context_ceiling"].flatMap((key) => task[key] === undefined ? [] : ["--" + key, String(task[key])]),
+        ...(task.capabilities?.length ? ["--capabilities", JSON.stringify(task.capabilities)] : []),
       ],
       { env: { ...process.env, PROVENANT_FIXTURE_OWNER: "dispatch_run.py" }, encoding: "utf8" },
     );
@@ -103,6 +106,9 @@ if (prompt === "crash-before-attempt") process.exit(2);
 if (prompt === "pause-before-attempt") await new Promise((r) => setTimeout(r, 1000));
 const path = join(dir, "tasks", task, `attempt-${String(attempt).padStart(3, "0")}`);
 mkdirSync(path, { recursive: true });
+const priorApplied = attempt > 1
+  ? JSON.parse(readFileSync(join(dir, "tasks", task, `attempt-${String(attempt - 1).padStart(3, "0")}`, "attempt.json"), "utf8")).applied
+  : {};
 const run_id = process.env.PROVENANT_RUN_ID;
 const row = {
   schema: "fabric.attempt.v1",
@@ -121,6 +127,7 @@ const row = {
     sandbox: prompt === "no-controls" ? null : value("--sandbox") ?? "read-only",
     network: prompt === "no-controls" ? null : value("--network") === "false" ? false : true,
     add_dirs: [],
+    capabilities: value("--capabilities") ? JSON.parse(value("--capabilities")) : priorApplied.capabilities ?? [],
   },
   provenance: { requested: { adapter: value("--adapter"), model: value("--model"), alias: value("--alias"), effort: value("--effort") }, line: "Route: codex/fixture@high (openai; observed)" },
   paths: {

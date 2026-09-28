@@ -45,6 +45,7 @@ Options:
   --plan-only                  Print resolved provider argv and controls as JSON.
   --sandbox MODE               read-only, workspace-write, or full.
   --network BOOL               true or false; unsupported controls are warned.
+  --capabilities JSON          Per-dispatch provider capability grants.
   --resume-session ID          Resume a retained provider session.
   --no-preface                 Omit the route attribution preface.
   --access-mode MODE           read_only (default) or worktree_write.
@@ -63,7 +64,7 @@ EOF
 
 TOOL="" MODEL="" EFFORT="" OUT="" RUN_DIR="" PROMPT="" PROMPT_FILE="" ORIGINAL_PROMPT_FILE="" CHAIN="" ORCH_FAMILY="" MODEL_ALIAS="" TASK_CLASS="" ROUTE_ROLE="reviewer" RISK_TIER="" MODEL_OVERRIDE_TIER="" REVIEWER_ID="" INTENT="assurance" DOCTOR=0
 PLAN_ONLY=0
-SANDBOX="" NETWORK="" RESUME_SESSION="" PROVIDER_CWD=""
+SANDBOX="" NETWORK="" CAPABILITIES="" RESUME_SESSION="" PROVIDER_CWD=""
 PREFACE=1
 FALLBACK=""
 ALIAS_EXPLICIT=0
@@ -93,6 +94,7 @@ while [ $# -gt 0 ]; do
     --cwd) need_value "$@"; PROVIDER_CWD="$2"; shift 2;;
     --sandbox) need_value "$@"; SANDBOX="$2"; shift 2;;
     --network) need_value "$@"; NETWORK="$2"; shift 2;;
+    --capabilities) need_value "$@"; CAPABILITIES="$2"; shift 2;;
     --resume-session) need_value "$@"; RESUME_SESSION="$2"; shift 2;;
     --no-preface) PREFACE=0; shift;;
     --tool) need_value "$@"; TOOL="$2"; shift 2;;
@@ -848,6 +850,7 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
         [ -n "$PROVIDER_CWD" ] && supervisor+=(--cwd "$PROVIDER_CWD")
         [ -n "$SANDBOX" ] && supervisor+=(--sandbox "$SANDBOX")
         [ -n "$NETWORK" ] && supervisor+=(--network "$NETWORK")
+        [ -n "$CAPABILITIES" ] && supervisor+=(--capabilities "$CAPABILITIES")
         [ -n "$RESUME_SESSION" ] && supervisor+=(--resume-session "$RESUME_SESSION")
         [ -n "$TIMEOUT_SECONDS" ] && supervisor+=(--timeout-seconds "$TIMEOUT_SECONDS")
         for agy_dir in "${AGY_ADD_DIRS[@]:-}"; do

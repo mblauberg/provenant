@@ -49,6 +49,33 @@ CONFINED_STATE = {
     "cursor": {"read_write": (".cursor", ".cache/cursor", ".npm")},
     "kiro": {"read_write": (".kiro", ".cache/kiro", ".npm")},
 }
+# Codex needs its native broker, configuration and event services under seatbelt.
+CODEX_BASE_MACH_SERVICES = (
+    "com.apple.analyticsd", "com.apple.analyticsd.messagetracer", "com.apple.appsleep",
+    "com.apple.bsd.dirhelper", "com.apple.cfprefsd.agent", "com.apple.cfprefsd.daemon",
+    "com.apple.diagnosticd", "com.apple.FSEvents", "com.apple.logd", "com.apple.logd.events",
+    "com.apple.networkd", "com.apple.ocspd", "com.apple.PowerManagement.control",
+    "com.apple.runningboard", "com.apple.secinitd", "com.apple.SecurityServer",
+    "com.apple.system.DirectoryService.libinfo_v1", "com.apple.system.logger",
+    "com.apple.system.notification_center", "com.apple.system.opendirectoryd.libinfo",
+    "com.apple.system.opendirectoryd.membership", "com.apple.SystemConfiguration.configd",
+    "com.apple.SystemConfiguration.DNSConfiguration", "com.apple.trustd",
+    "com.apple.trustd.agent", "com.apple.xpc.activity.unmanaged",
+)
+# Chrome needs the macOS font, window, launch and privacy services.
+CODEX_BROWSER_MACH_SERVICES = (
+    "com.apple.fonts", "com.apple.coreservices.launchservicesd",
+    "com.apple.windowserver.active", "com.apple.tccd.system",
+    "com.apple.distributed_notifications@Uv3",
+)
+# Chrome and Chromium need to register their sandbox-local rendezvous ports.
+CODEX_BROWSER_MACH_PORT_PREFIXES = (
+    "com.google.Chrome.MachPortRendezvousServer.",
+    "org.chromium.Chromium.MachPortRendezvousServer.",
+)
+# PostgreSQL initialisation needs System V shared memory and semaphores.
+CODEX_POSTGRES_IPC_OPERATIONS = ("ipc-sysv-shm", "ipc-sysv-sem")
+CAPABILITY_VALUES = frozenset({"postgres", "browser"})
 EXTRA_DENIED_READS = (".claude/projects", ".codex/sessions")
 # Repository agent instructions and skills. Codex protects them inside a writable root.
 INSTRUCTION_DIR = ".agents"
@@ -125,24 +152,92 @@ def _sandbox_exec_usable(path):
     return probe.returncode == 0
 
 
-def _sbpl_string(path):
-    value = str(Path(path).expanduser().resolve())
-    return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+class CapabilityError(ValueError):
+    def __init__(self, code, fix):
+        self.code = code
+        self.fix = fix
+        super().__init__(fix)
 
 
-def _sbpl_filter(path):
+def capability_values(value):
+    """Return the canonical capability list, rejecting malformed opt-ins."""
+    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+        raise CapabilityError("capabilities_invalid", "Pass capabilities as a list of distinct postgres or browser values.")
+    if len(value) != len(set(value)) or not set(value) <= CAPABILITY_VALUES:
+        raise CapabilityError("capabilities_invalid", "Pass capabilities as a list of distinct postgres or browser values.")
+    return sorted(value)
+
+
+def parse_capabilities_argument(value):
+    try:
+        decoded = json.loads(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Pass capabilities as a JSON list.") from exc
+    if not isinstance(decoded, list):
+        raise argparse.ArgumentTypeError("Pass capabilities as a JSON list.")
+    return decoded
+
+
+def validate_capabilities(value, *, adapter, mode, sandbox, network):
+    capabilities = capability_values(value)
+    if not capabilities:
+        return capabilities
+    if network is None and adapter == "codex":
+        network = os.environ.get("CF_DISPATCH_CODEX_NETWORK", "1") == "1"
+    checks = (
+        (adapter == "codex", "capabilities_adapter_invalid", "Pass capabilities only with adapter=codex."),
+        (mode == "worktree_write", "capabilities_mode_invalid", "Pass capabilities only with mode=worktree_write."),
+        (sandbox == "workspace-write", "capabilities_sandbox_invalid", "Use sandbox=workspace-write with capabilities."),
+        (sys.platform == "darwin", "capabilities_platform_invalid", "Pass capabilities only on macOS."),
+        (_sandbox_exec_path() is not None, "capabilities_confinement_unavailable", "Use capabilities only with usable sandbox-exec outside another sandbox."),
+        (network is True, "capabilities_network_required", "Pass network=true for Codex capabilities."),
+    )
+    for valid, code, fix in checks:
+        if not valid:
+            raise CapabilityError(code, fix)
+    return capabilities
+
+
+def _sbpl_string(path, *, keep_leaf=False):
+    # keep_leaf leaves a lane-replaceable final entry unresolved, so a link planted there cannot move the grant.
+    path = Path(path).expanduser()
+    value = str(path.parent.resolve() / path.name) if keep_leaf else str(path.resolve())
+    return _sbpl_quote(value)
+
+
+def _sbpl_quote(value):
+    return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _sbpl_filter(path, *, keep_leaf=False):
     text = str(path)
     if text.endswith("*"):
         pattern = text[:-1]
         regex_metacharacters = set(r'.^$*+?()[]{}|\\"')
         pattern = "".join("\\" + char if char in regex_metacharacters else char for char in pattern)
         return '(regex #"^' + pattern + '[^/]*$")'
-    return "(subpath " + _sbpl_string(path) + ")"
+    return "(subpath " + _sbpl_string(path, keep_leaf=keep_leaf) + ")"
 
 
-def _sbpl_rule(action, operations, paths, *, literal=False):
-    filters = (('(literal ' + _sbpl_string(path) + ')') if literal else _sbpl_filter(path) for path in paths)
+def _sbpl_rule(action, operations, paths, *, literal=False, keep_leaf=False):
+    filters = (('(literal ' + _sbpl_string(path, keep_leaf=keep_leaf) + ')') if literal
+               else _sbpl_filter(path, keep_leaf=keep_leaf) for path in paths)
     return f"({action} {operations} " + " ".join(filters) + ")\n" if paths else ""
+
+
+def _sbpl_named_rule(action, operation, names, *, selector="global-name"):
+    return f"({action} {operation} " + " ".join(
+        f"({selector} {_sbpl_quote(name)})" for name in names
+    ) + ")\n" if names else ""
+
+
+def _sbpl_unix_socket_allow(roots):
+    remotes = ['(remote unix-socket (path-literal "/private/var/run/mDNSResponder"))']
+    remotes.extend(
+        "(remote unix-socket (subpath " + _sbpl_string(root) + "))"
+        for root in dict.fromkeys(roots)
+    )
+    return "(allow network-outbound " + " ".join(remotes) + ")\n"
 
 
 def _git_toplevel(path):
@@ -242,13 +337,45 @@ def os_confinement_profile(plan):
             git_allowed.extend(common / path for path in ("objects", "refs", "logs"))
         literal_files = ([common / path for path in ("packed-refs", "packed-refs.lock")]
                          if common is not None else [])
-        return ("(version 1)\n(allow default)\n(deny file-write*)\n"
-                + _sbpl_rule("allow", "file-write*", allowed)
-                + _sbpl_rule("deny", "file-write*", [common] if common is not None else [])
-                + _sbpl_rule("allow", "file-write*", git_allowed)
-                + _sbpl_rule("allow", "file-write*", literal_files, literal=True)
-                + _sbpl_rule("deny", "file-write*", plan.get("protected_paths", []))
-                + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", [])))
+        capabilities = plan.get("applied", {}).get("capabilities", [])
+        profile = (
+            "(version 1)\n(allow default)\n(deny file-write*)\n"
+            + _sbpl_rule("allow", "file-write*", allowed)
+            + _sbpl_rule("deny", "file-write*", [common] if common is not None else [])
+            + _sbpl_rule("allow", "file-write*", git_allowed, keep_leaf=True)
+            + _sbpl_rule("allow", "file-write*", literal_files, literal=True, keep_leaf=True)
+        )
+        if plan.get("adapter") == "codex" and capabilities:
+            codex_home = Path(plan["codex_home"])
+            auth_path = Path(plan["codex_auth_path"])
+            profile += _sbpl_rule("deny", "file-write*", [cwd / ".git"])
+            if private is not None and private != common:
+                for name in ("config.worktree", "commondir", "gitdir"):
+                    profile += _sbpl_rule("deny", "file-write*", [private / name], literal=True)
+            profile += _sbpl_rule("allow", "file-write*", [codex_home])
+            # Quote without resolving, and allow in-place rewrites only, so the lane cannot swap the
+            # entry for a link that would move the next attempt's grant.
+            profile += f"(allow file-write* (literal {_sbpl_quote(auth_path)}))\n"
+            profile += f"(deny file-write-create file-write-unlink (literal {_sbpl_quote(auth_path)}))\n"
+            profile += "(deny mach-lookup)\n"
+            profile += _sbpl_named_rule("allow", "mach-lookup", CODEX_BASE_MACH_SERVICES)
+            profile += ("(deny mach-register)\n(deny signal)\n(allow signal (target same-sandbox))\n"
+                        "(deny ipc-sysv*)\n(deny user-preference-write)\n")
+            if "postgres" in capabilities:
+                profile += "(allow " + " ".join(CODEX_POSTGRES_IPC_OPERATIONS) + ")\n"
+            if "browser" in capabilities:
+                profile += _sbpl_named_rule("allow", "mach-lookup", CODEX_BROWSER_MACH_SERVICES)
+                profile += _sbpl_named_rule("allow", "mach-lookup", CODEX_BROWSER_MACH_PORT_PREFIXES,
+                                            selector="global-name-prefix")
+                profile += _sbpl_named_rule("allow", "mach-register", CODEX_BROWSER_MACH_PORT_PREFIXES,
+                                            selector="global-name-prefix")
+            profile += "(deny network-outbound (remote unix-socket))\n"
+            profile += _sbpl_unix_socket_allow(
+                [cwd, *add_dirs, *([run_dir] if run_dir else []), codex_home]
+            )
+        profile += _sbpl_rule("deny", "file-write*", plan.get("protected_paths", []))
+        profile += _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
+        return profile
     configured_xdg = Path(os.environ.get("XDG_CONFIG_HOME", "")).expanduser()
     xdg_config_home = configured_xdg if configured_xdg.is_absolute() else home / ".config"
     git_config_files = [home / ".gitconfig", xdg_config_home / "git/config"]
@@ -288,6 +415,7 @@ def build_plan(
     sandbox=None,
     network=None,
     add_dirs=(),
+    capabilities=None,
     timeout_seconds=None,
     idle_seconds=None,
     preface=True,
@@ -302,6 +430,7 @@ def build_plan(
     **metadata,
 ):
     metadata = dict(metadata)
+    capabilities = capability_values([] if capabilities is None else capabilities)
     prompt_file = metadata.pop("prompt_file", None)
     original_prompt_file = metadata.pop("original_prompt_file", prompt_file)
     run_dir = metadata.pop("run_dir", None)
@@ -342,15 +471,33 @@ def build_plan(
         raise ValueError("invalid sandbox")
     if network is not None and type(network) is not bool:
         raise ValueError("network must be a boolean")
+    warnings = list(route.get("notes") or []) + list(route.get("warnings") or [])
+    applied_network = network
+    if adapter == "codex":
+        applied_network = (
+            os.environ.get("CF_DISPATCH_CODEX_NETWORK", "1") == "1"
+            if network is None
+            else network
+        )
+    elif network is not None:
+        warnings.append("network control unsupported by " + adapter)
+        applied_network = None
+    if adapter == "codex" and sandbox == "full" and applied_network is False:
+        warnings.append("network denial is unsupported with the full sandbox")
+        applied_network = None
+    capabilities = validate_capabilities(
+        capabilities, adapter=adapter, mode=mode, sandbox=sandbox, network=applied_network,
+    )
     directories = list(dict.fromkeys(
         str((candidate if candidate.is_absolute() else Path(workspace_root) / candidate).resolve())
         for candidate in (Path(p).expanduser() for p in add_dirs)
     ))
-    warnings = list(route.get("notes") or []) + list(route.get("warnings") or [])
     safe_directories = []
     for directory in directories:
         if credential_path(directory) or Path.home().resolve().is_relative_to(Path(directory)):
             warnings.append("credential or authentication add-dir dropped: " + directory)
+        elif capabilities and git_common is not None and Path(directory).resolve() == git_common:
+            warnings.append("Codex capability lane drops Git common directory add-dir: " + directory)
         else:
             safe_directories.append(directory)
     directories = safe_directories
@@ -370,7 +517,7 @@ def build_plan(
             text=True,
             timeout=5,
         )
-        if common.returncode == 0 and common.stdout.strip() not in directories:
+        if not capabilities and common.returncode == 0 and common.stdout.strip() not in directories:
             directories.append(common.stdout.strip())
         # Codex's workspace-write sandbox keeps each writable root's .agents read-only, so a
         # rebase or merge that updates a tracked skill stops half-way. Granting the directory
@@ -409,8 +556,8 @@ def build_plan(
     ):
         guarantee = "best_effort"
     confinement = "none"
-    confinement_requested = bool(guarded) or adapter != "codex"
-    if guarded and adapter == "codex":
+    confinement_requested = bool(guarded) or adapter != "codex" or bool(capabilities)
+    if guarded and adapter == "codex" and not capabilities:
         raise ValueError("protected paths require OS read confinement; fix: use a non-training route")
     if guarded and not _sandbox_exec_path():
         raise ValueError("protected paths require sandbox-exec; fix: use a non-training route")
@@ -425,9 +572,9 @@ def build_plan(
             warnings.append(f"{adapter} read_only writes are unconfined: sandbox-exec unavailable or unusable")
     if mode == "read_only" and adapter == "codex":
         confinement = "provider-native"
-    if mode == "worktree_write" and adapter == "codex" and sandbox == "workspace-write":
+    if mode == "worktree_write" and adapter == "codex" and sandbox == "workspace-write" and not capabilities:
         confinement = "provider-native"
-    elif mode == "worktree_write" and adapter == "codex":
+    elif mode == "worktree_write" and adapter == "codex" and confinement != "sandbox-exec":
         warnings.append("worktree_write writes are unconfined: Codex sandbox is full")
     if mode == "worktree_write" and adapter == "agy" and confinement != "sandbox-exec":
         raise ValueError("agy worktree_write requires usable sandbox-exec")
@@ -448,6 +595,11 @@ def build_plan(
         warnings.append("additional directories unsupported by " + adapter)
         directories = []
     attempt_dir = Path(run_dir or cwd).expanduser().resolve()
+    codex_home = attempt_dir.parent / "codex-home" if capabilities else None
+    codex_auth_path = None
+    if capabilities:
+        source_codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
+        codex_auth_path = source_codex_home / "auth.json"
     if confinement == "sandbox-exec":
         writable_paths = [str(attempt_dir), *(str(Path.home() / path) for path in
                            CONFINED_STATE.get(adapter, {}).get("read_write", ())), "/dev"]
@@ -456,24 +608,13 @@ def build_plan(
                            ("objects", "refs", "logs", "packed-refs", "packed-refs.lock"))]
                          if git_private is not None else [])
             writable_paths = [cwd, *directories, *writable_paths, *git_paths]
+        if codex_home is not None:
+            writable_paths.extend((str(codex_home), str(codex_auth_path)))
         write_boundary = {"kind": "sandbox-exec", "writable_paths": writable_paths}
     elif confinement == "provider-native":
         write_boundary = {"kind": "provider-native", "sandbox": sandbox}
     else:
         write_boundary = {"kind": "none", "writable_paths": None}
-    applied_network = network
-    if adapter == "codex":
-        applied_network = (
-            os.environ.get("CF_DISPATCH_CODEX_NETWORK", "1") == "1"
-            if network is None
-            else network
-        )
-    elif network is not None:
-        warnings.append("network control unsupported by " + adapter)
-        applied_network = None
-    if adapter == "codex" and sandbox == "full" and applied_network is False:
-        warnings.append("network denial is unsupported with the full sandbox")
-        applied_network = None
     applied_sandbox = (
         sandbox
         if adapter == "codex"
@@ -536,7 +677,10 @@ def build_plan(
             "guarantee": guarantee,
             "confinement": confinement,
             "write_boundary": write_boundary,
+            "capabilities": capabilities,
         },
+        **({"codex_home": str(codex_home), "codex_auth_path": str(codex_auth_path)}
+           if codex_home is not None else {}),
         "agy_sandbox": intent == "assurance"
         or os.environ.get("CF_DISPATCH_AGY_SANDBOX", "0") == "1",
         **metadata,
@@ -1606,6 +1750,63 @@ def _observed_model(plan, parsed, env):
     return None, None
 
 
+def _prepare_codex_capability_home(plan, environment):
+    capabilities = plan.get("applied", {}).get("capabilities", [])
+    if plan.get("adapter") != "codex" or not capabilities:
+        return
+    configured_home = Path(os.path.abspath(Path(environment.get("CODEX_HOME") or Path.home() / ".codex").expanduser()))
+    source_home = configured_home.resolve()
+    lane_home = Path(plan["run_dir"]).parent / "codex-home"
+    old_auth = plan.get("codex_auth_path")
+    boundary = plan.get("applied", {}).get("write_boundary", {}).get("writable_paths")
+    # A source home the lane can write, or reach through a symlink, could be swapped before the next attempt.
+    if configured_home != source_home:
+        raise PermissionError(f"codex home must not pass through a symlink: {configured_home}")
+    for root in [plan.get("cwd"), *plan.get("applied", {}).get("add_dirs", []), plan["run_dir"],
+                 str(lane_home), *(boundary if isinstance(boundary, list) else [])]:
+        if root and root != old_auth and source_home.is_relative_to(Path(root).expanduser().resolve()):
+            raise PermissionError(f"codex home lies inside a lane-writable path: {source_home}")
+    try:
+        lane_mode = lane_home.lstat().st_mode
+    except FileNotFoundError:
+        lane_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    else:
+        if stat.S_ISLNK(lane_mode) or not stat.S_ISDIR(lane_mode):
+            raise NotADirectoryError(f"codex capability home is not a directory: {lane_home}")
+    for name in ("auth.json", "AGENTS.md", "HARNESS.md", "skills"):
+        source = source_home / name
+        target = lane_home / name
+        try:
+            target_mode = target.lstat().st_mode
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISDIR(target_mode):
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        if source.exists():
+            target.symlink_to(source, target_is_directory=source.is_dir())
+    # The lane may write this one file, so a symlink planted there must not redirect the grant.
+    auth_path = source_home / "auth.json"
+    if auth_path.is_symlink() or (auth_path.exists() and not auth_path.is_file()):
+        raise PermissionError(f"codex auth store is not a regular file: {auth_path}")
+    plan["codex_home"] = str(lane_home)
+    plan["codex_auth_path"] = str(auth_path)
+    if isinstance(boundary, list):
+        if old_auth in boundary:
+            boundary[boundary.index(old_auth)] = str(auth_path)
+        elif str(auth_path) not in boundary:
+            boundary.append(str(auth_path))
+        if str(lane_home) not in boundary:
+            boundary.append(str(lane_home))
+    environment["CODEX_HOME"] = str(lane_home)
+    if "browser" in capabilities:
+        environment["MAC_CHROMIUM_TMPDIR"] = str(Path(plan["run_dir"]) / "tmp")
+    else:
+        environment.pop("MAC_CHROMIUM_TMPDIR", None)
+
+
 def _git_output(cwd, *args):
     # Only object and index reads run here, never a working-tree scan: the lane can write the
     # repository's config and attributes, so filters, fsmonitor hooks and a lazy fetch through a
@@ -1796,7 +1997,7 @@ def execute(
     environment["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
     attempt_dir = Path(plan["run_dir"])
     private_tmp = attempt_dir / "tmp"
-    private_cache = attempt_dir / "cache"
+    private_cache = private_tmp / "cache"
     private_tmp.mkdir(parents=True, exist_ok=True)
     private_cache.mkdir(parents=True, exist_ok=True)
     environment.update(TMPDIR=str(private_tmp), TMP=str(private_tmp), TEMP=str(private_tmp),
@@ -1940,6 +2141,7 @@ def execute(
     workspace = None
     selector = selectors.DefaultSelector()
     try:
+        _prepare_codex_capability_home(plan, environment)
         if plan["stdin_policy"] == "prompt":
             input_file = tempfile.TemporaryFile(dir=private_tmp)
             input_file.write(plan["prompt"].encode())
@@ -2430,6 +2632,7 @@ def parser():
     p.add_argument("--worktree")
     p.add_argument("--sandbox")
     p.add_argument("--network", choices=["true", "false"])
+    p.add_argument("--capabilities", type=parse_capabilities_argument)
     p.add_argument("--add-dir", action="append", default=[])
     p.add_argument("--timeout-seconds", type=float)
     p.add_argument("--intent", default="ordinary")
@@ -2473,6 +2676,7 @@ def main():
             sandbox=args.sandbox,
             network=None if args.network is None else args.network == "true",
             add_dirs=args.add_dir,
+            capabilities=args.capabilities,
             timeout_seconds=args.timeout_seconds,
             intent=args.intent,
             preface=not args.no_preface,

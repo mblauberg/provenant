@@ -109,7 +109,7 @@ export async function resumeConfiguredProvider(
       access_mode: previous.mode ?? "read_only", worktree: previous.worktree ?? undefined,
       cwd: previous.mode === "worktree_write" ? undefined : executionIdentity.cwd,
       ...Object.fromEntries(Object.entries(previous.applied ?? {}).filter(([key, value]) =>
-        ["sandbox", "network", "add_dirs"].includes(key) && value !== null)),
+        ["sandbox", "network", "add_dirs", "capabilities"].includes(key) && value !== null)),
       ...(input.prompt === undefined ? { prompt_file: path } : { prompt: input.prompt }),
       allow_secrets: input.allow_secrets ?? false,
     }], identity, env, signal);

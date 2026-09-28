@@ -4,10 +4,13 @@ import importlib
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
+import socket
 import subprocess
 import ctypes
 import sys
+import tempfile
 import time
 from types import SimpleNamespace
 
@@ -958,10 +961,508 @@ print(json.dumps({'type':'turn.completed'}))
     plan = fixture_plan(tmp_path, code)
     record = supervisor().execute(plan, tmp_path / "result.md")
     assert record["status"] == "ok"
-    expected = {key: str(tmp_path / ("cache" if key == "XDG_CACHE_HOME" else "tmp"))
+    expected = {key: str(tmp_path / "tmp" / "cache" if key == "XDG_CACHE_HOME" else tmp_path / "tmp")
                 for key in ("TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME")}
-    assert all(path.is_dir() for path in (tmp_path / "tmp", tmp_path / "cache"))
+    assert (tmp_path / "tmp" / "cache").is_dir()
+    assert not (tmp_path / "cache").exists()
     assert json.loads((tmp_path / "result.md").read_text()) == expected
+
+
+def test_codex_capabilities_validate_the_codex_writer_envelope(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, lane = instruction_lane(tmp_path)
+    attempt = tmp_path / "runs/task/attempt-001"
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+
+    plan = mod.build_plan(
+        "codex", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+        mode="worktree_write", worktree=lane, sandbox="workspace-write", network=True,
+        capabilities=["postgres", "browser"], run_dir=attempt,
+    )
+
+    common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+    assert plan["applied"]["capabilities"] == ["browser", "postgres"]
+    assert plan["applied"]["sandbox"] == "workspace-write"
+    assert plan["applied"]["network"] is True
+    assert plan["applied"]["confinement"] == "sandbox-exec"
+    assert plan["applied"]["guarantee"] == "enforced"
+    assert str(lane / ".agents") in plan["applied"]["add_dirs"]
+    assert str(common) not in plan["applied"]["add_dirs"]
+    assert str(common) not in plan["applied"]["write_boundary"]["writable_paths"]
+    assert str(common / "objects") in plan["applied"]["write_boundary"]["writable_paths"]
+    assert str(attempt.parent / "codex-home") in plan["applied"]["write_boundary"]["writable_paths"]
+    explicit_common = mod.build_plan(
+        "codex", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+        mode="worktree_write", worktree=lane, sandbox="workspace-write", network=True,
+        capabilities=["postgres"], run_dir=attempt, add_dirs=[str(common)],
+    )
+    assert str(common) not in explicit_common["applied"]["add_dirs"]
+    assert any("drops Git common directory add-dir" in warning for warning in explicit_common["warnings"])
+
+
+@pytest.mark.parametrize(("field", "value", "expected"), [
+    ("adapter", "claude", "Pass capabilities only with adapter=codex."),
+    ("mode", "read_only", "Pass capabilities only with mode=worktree_write."),
+    ("sandbox", "full", "Use sandbox=workspace-write with capabilities."),
+    ("platform", "linux", "Pass capabilities only on macOS."),
+    ("sandbox_exec", None, "Use capabilities only with usable sandbox-exec outside another sandbox."),
+    ("network", False, "Pass network=true for Codex capabilities."),
+])
+def test_codex_capabilities_fail_closed_on_each_precondition(monkeypatch, tmp_path, field, value, expected):
+    mod = supervisor()
+    _, lane = instruction_lane(tmp_path)
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    options = {
+        "adapter": "codex", "mode": "worktree_write", "sandbox": "workspace-write",
+        "network": True,
+    }
+    if field == "adapter": options["adapter"] = value
+    elif field == "mode":
+        options["mode"] = value
+        options["sandbox"] = "read-only"
+    elif field == "sandbox": options["sandbox"] = value
+    elif field == "platform": monkeypatch.setattr(mod.sys, "platform", value)
+    elif field == "sandbox_exec": monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: value)
+    elif field == "network": options["network"] = value
+    worktree = lane if options["mode"] == "worktree_write" else None
+
+    with pytest.raises(ValueError, match=expected):
+        mod.build_plan(
+            options["adapter"], {"resolved_model": "fixture"}, "hello", cwd=lane,
+            workspace_root=tmp_path, mode=options["mode"], worktree=worktree,
+            sandbox=options["sandbox"], network=options["network"], capabilities=["postgres"],
+        )
+
+
+@pytest.mark.parametrize("capabilities", [["other"], ["browser", "browser"], "browser"])
+def test_codex_capabilities_reject_unknown_duplicate_and_non_list_values(monkeypatch, tmp_path, capabilities):
+    mod = supervisor()
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    with pytest.raises(ValueError, match="list of distinct postgres or browser values"):
+        mod.build_plan("codex", {}, "hello", cwd=tmp_path, workspace_root=tmp_path,
+                       capabilities=capabilities)
+
+
+def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_features(monkeypatch, tmp_path):
+    mod = supervisor()
+    repo, lane = instruction_lane(tmp_path)
+    home = (tmp_path / "source-codex-home").resolve()
+    home.mkdir()
+    (home / "auth.json").write_text("token", encoding="utf-8")
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    attempt = tmp_path / "runs/task/attempt-001"
+    common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+    plan = mod.build_plan("codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
+                          worktree=lane, sandbox="workspace-write", network=True,
+                          capabilities=["postgres"], run_dir=attempt)
+    profile = mod.os_confinement_profile(plan)
+
+    assert '(deny network-outbound (remote unix-socket))' in profile
+    socket_roots = [lane, *plan["applied"]["add_dirs"], attempt, plan["codex_home"]]
+    expected_socket_allow = "(allow network-outbound " + " ".join(
+        ['(remote unix-socket (path-literal "/private/var/run/mDNSResponder"))']
+        + [f'(remote unix-socket (subpath "{Path(root).resolve()}"))' for root in socket_roots]
+    ) + ")"
+    assert expected_socket_allow in profile
+
+    assert f'(deny file-write* (subpath "{common}")' in profile
+    for path in (common / "objects", common / "refs", common / "logs"):
+        assert f'(subpath "{path}")' in profile
+        assert str(path) in plan["applied"]["write_boundary"]["writable_paths"]
+    for path in (common / "packed-refs", common / "packed-refs.lock"):
+        assert f'(literal "{path}")' in profile
+    assert f'(allow file-write* (subpath "{common}")' not in profile
+    assert f'(subpath "{attempt.parent / "codex-home"}")' in profile
+    assert f'(literal "{(home / "auth.json").resolve()}")' in profile
+    assert f'(subpath "{home}")' not in profile
+    assert '(deny mach-lookup)' in profile
+    assert '(deny mach-register)' in profile
+    assert '(deny signal)' in profile
+    assert '(allow signal (target same-sandbox))' in profile
+    assert '(deny user-preference-write)' in profile
+    for service in mod.CODEX_BASE_MACH_SERVICES:
+        assert f'(global-name "{service}")' in profile
+    assert '(allow ipc-sysv-shm ipc-sysv-sem)' in profile
+    assert 'MachPortRendezvousServer.' not in profile
+    private = Path(git(lane, "rev-parse", "--path-format=absolute", "--absolute-git-dir").strip())
+    assert str(private) in plan["applied"]["write_boundary"]["writable_paths"]
+    assert f'(allow file-write* (subpath "{private}")' in profile
+    assert f'(deny file-write* (subpath "{lane / ".git"}"))' in profile
+    for name in ("config.worktree", "commondir", "gitdir"):
+        assert f'(deny file-write* (literal "{private / name}"))' in profile
+
+    for adapter in ("codex", "claude"):
+        without_capabilities = mod.build_plan(
+            adapter, {}, "hello", workspace_root=tmp_path, mode="worktree_write",
+            worktree=lane, sandbox="workspace-write", network=True, run_dir=attempt,
+        )
+        other_profile = mod.os_confinement_profile(without_capabilities)
+        assert "(remote unix-socket" not in other_profile
+        assert f'(deny file-write* (subpath "{lane / ".git"}"))' not in other_profile
+        for name in ("config.worktree", "commondir", "gitdir"):
+            assert f'(deny file-write* (literal "{private / name}"))' not in other_profile
+
+    protected = tmp_path / "protected"
+    plan["protected_paths"] = [str(protected)]
+    protected_profile = mod.os_confinement_profile(plan)
+    assert protected_profile.rstrip().endswith(f'(deny file-read* (subpath "{protected}"))')
+
+    browser = mod.build_plan("codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
+                             worktree=lane, sandbox="workspace-write", network=True,
+                             capabilities=["browser"], run_dir=attempt)
+    browser_profile = mod.os_confinement_profile(browser)
+    for service in mod.CODEX_BASE_MACH_SERVICES + mod.CODEX_BROWSER_MACH_SERVICES:
+        assert f'(global-name "{service}")' in browser_profile
+    for prefix in mod.CODEX_BROWSER_MACH_PORT_PREFIXES:
+        assert f'(global-name-prefix "{prefix}")' in browser_profile
+    assert '(allow mach-register' in browser_profile
+    assert 'ipc-sysv-shm' not in browser_profile
+
+
+def test_codex_writer_argv_preserves_default_and_capability_sandboxes(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, lane = instruction_lane(tmp_path)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+
+    monkeypatch.setattr(mod.sys, "platform", "linux")
+    default_linux = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello",
+                                   workspace_root=tmp_path, mode="worktree_write", worktree=lane)
+    resumed_linux = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello",
+                                   workspace_root=tmp_path, mode="worktree_write", worktree=lane,
+                                   resume_session="saved")
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    default_darwin = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello",
+                                    workspace_root=tmp_path, mode="worktree_write", worktree=lane)
+    resumed_darwin = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello",
+                                    workspace_root=tmp_path, mode="worktree_write", worktree=lane,
+                                    resume_session="saved")
+    for before, after in ((default_linux["argv"], default_darwin["argv"]),
+                          (resumed_linux["argv"], resumed_darwin["argv"])):
+        index = after.index("allow_login_shell=false")
+        assert after[index - 1] == "-c"
+        assert after[:index - 1] + after[index + 1:] == before
+
+    fresh = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello",
+                           workspace_root=tmp_path, mode="worktree_write", worktree=lane,
+                           sandbox="workspace-write", network=True, capabilities=["browser"])
+    resumed = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello",
+                             workspace_root=tmp_path, mode="worktree_write", worktree=lane,
+                             sandbox="workspace-write", network=True, capabilities=["browser"],
+                             resume_session="saved")
+    for plan, sandbox_pair in ((fresh, ["-s", "danger-full-access"]),
+                               (resumed, ["-c", 'sandbox_mode="danger-full-access"'])):
+        argv = plan["argv"]
+        assert any(argv[index:index + 2] == sandbox_pair for index in range(len(argv) - 1))
+        assert not any("sandbox_workspace_write." in value for value in argv)
+    assert fresh["argv"][fresh["argv"].index("--cd") + 1] == str(lane)
+    # codex exec resume rejects --cd; the owner starts it in the worktree.
+    assert "--cd" not in resumed["argv"]
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").exists(),
+                    reason="needs macOS sandbox-exec")
+def test_codex_capability_profile_enforces_git_and_signal_limits(monkeypatch, tmp_path):
+    mod = supervisor()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    _, lane = instruction_lane(tmp_path)
+    home = (tmp_path / "source-codex-home").resolve()
+    home.mkdir()
+    (home / "auth.json").write_text("token", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+    private = Path(git(lane, "rev-parse", "--path-format=absolute", "--absolute-git-dir").strip())
+
+    with tempfile.TemporaryDirectory(dir="/tmp") as outside_root, tempfile.TemporaryDirectory(dir="/tmp") as run_root:
+        run_dir = Path(run_root) / "a"
+        run_dir.mkdir()
+        outside_socket = Path(outside_root) / "o"
+        inside_socket = run_dir / "i"
+        assert len(os.fsencode(outside_socket)) < 104
+        assert len(os.fsencode(inside_socket)) < 104
+        with (socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as outside_listener,
+              socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as inside_listener):
+            outside_listener.bind(str(outside_socket))
+            outside_listener.listen(1)
+            inside_listener.bind(str(inside_socket))
+            inside_listener.listen(1)
+            plan = mod.build_plan(
+                "codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
+                worktree=lane, sandbox="workspace-write", network=True,
+                capabilities=["postgres"], run_dir=run_dir,
+            )
+            script = f"""
+import os
+import socket
+def attempt(action):
+    try:
+        action()
+        return "ok"
+    except OSError as exc:
+        return exc.__class__.__name__
+def connect(path):
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        client.connect(path)
+    finally:
+        client.close()
+print(attempt(lambda: open({str(lane / "note.txt")!r}, "w").write("x")))
+print(attempt(lambda: open({str(lane / ".git")!r}, "a").write("")))
+print(attempt(lambda: open({str(private / "config.worktree")!r}, "a").write("")))
+print(attempt(lambda: open({str(private / "commondir")!r}, "a").write("")))
+print(attempt(lambda: open({str(private / "index.probe")!r}, "w").write("probe")))
+print(attempt(lambda: open({str(common / "config")!r}, "a").write("")))
+print(attempt(lambda: open({str(common / "hooks" / "pre-commit")!r}, "w").write("")))
+print(attempt(lambda: os.link({str(common / "config")!r}, {str(lane / "config-link")!r})))
+print(attempt(lambda: open({str(home / "auth.json")!r}, "w").write("refreshed")))
+print(attempt(lambda: os.unlink({str(home / "auth.json")!r})))
+print(attempt(lambda: os.kill({os.getpid()}, 0)))
+print(attempt(lambda: connect({str(outside_socket)!r})))
+print(attempt(lambda: connect({str(inside_socket)!r})))
+"""
+            result = subprocess.run(["/usr/bin/sandbox-exec", "-p", mod.os_confinement_profile(plan),
+                                     sys.executable, "-c", script], capture_output=True, text=True)
+            if result.returncode and "sandbox_apply" in result.stderr:
+                pytest.skip("sandbox_apply is refused in this test environment")
+            assert result.stdout.split() == [
+                "ok", "PermissionError", "PermissionError", "PermissionError", "ok",
+                "PermissionError", "PermissionError", "PermissionError", "ok", "PermissionError",
+                "PermissionError", "PermissionError", "ok",
+            ], result.stderr
+            assert not (lane / "config-link").exists()
+            assert (home / "auth.json").read_text(encoding="utf-8") == "refreshed"
+            assert (private / "index.probe").read_text(encoding="utf-8") == "probe"
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").exists(),
+                    reason="needs macOS sandbox-exec")
+def test_a_linked_git_entry_never_moves_the_writable_git_grant(monkeypatch, tmp_path):
+    mod = supervisor()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    _, lane = instruction_lane(tmp_path)
+    home = (tmp_path / "source-codex-home").resolve()
+    home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
+    outside = (tmp_path / "outside").resolve()
+    outside.mkdir()
+    shutil.rmtree(common / "logs", ignore_errors=True)
+    (common / "logs").symlink_to(outside, target_is_directory=True)
+    (common / "packed-refs").unlink(missing_ok=True)
+    (common / "packed-refs").symlink_to(outside / "packed")
+    run_dir = tmp_path / "runs/task/attempt-001"
+    run_dir.mkdir(parents=True)
+    plan = mod.build_plan(
+        "codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
+        worktree=lane, sandbox="workspace-write", network=True,
+        capabilities=["postgres"], run_dir=run_dir,
+    )
+    profile = mod.os_confinement_profile(plan)
+    assert str(outside) not in profile
+    assert f'(subpath "{common / "logs"}")' in profile
+    script = f"""
+for path in ({str(common / "logs" / "probe")!r}, {str(common / "packed-refs")!r}):
+    try:
+        open(path, "w").write("x")
+        print("ok")
+    except OSError as exc:
+        print(exc.__class__.__name__)
+"""
+    result = subprocess.run(["/usr/bin/sandbox-exec", "-p", profile, sys.executable, "-c", script],
+                            capture_output=True, text=True)
+    if result.returncode and "sandbox_apply" in result.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert result.stdout.split() == ["PermissionError", "PermissionError"], result.stderr
+    assert list(outside.iterdir()) == []
+
+
+@pytest.mark.parametrize(("capabilities", "browser_tmp"), [(["postgres"], None), (["browser"], "tmp")])
+def test_codex_capability_home_is_seeded_and_browser_tmp_is_opt_in(
+    monkeypatch, tmp_path, capabilities, browser_tmp,
+):
+    mod = supervisor()
+    _, lane = instruction_lane(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    attempt = tmp_path / "runs/task/attempt-001"
+    attempt.mkdir(parents=True)
+    source = tmp_path / "source-codex-home"
+    (source / "skills").mkdir(parents=True)
+    (source / "auth.json").write_text("auth", encoding="utf-8")
+    (source / "AGENTS.md").write_text("instructions", encoding="utf-8")
+    (source / "HARNESS.md").write_text("constitution", encoding="utf-8")
+    (source / "skills/example").mkdir()
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    monkeypatch.setenv("CODEX_HOME", "source-codex-home")
+    plan = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+                          mode="worktree_write", worktree=lane, sandbox="workspace-write",
+                          network=True, capabilities=capabilities, run_dir=attempt)
+    plan["applied"]["confinement"] = "none"
+    code = "import json, os; print(json.dumps({'type':'result','result':json.dumps({k:os.environ.get(k) for k in ('CODEX_HOME','MAC_CHROMIUM_TMPDIR','TMPDIR','XDG_CACHE_HOME')})}))"
+    plan["argv"] = [sys.executable, "-u", "-c", code]
+
+    environment = {**os.environ, "CODEX_HOME": "source-codex-home", "MAC_CHROMIUM_TMPDIR": "ambient-value"}
+    record = mod.execute(plan, attempt / "result.md", env=environment)
+
+    lane_home = attempt.parent / "codex-home"
+    assert record["status"] == "ok"
+    assert json.loads((attempt / "result.md").read_text()) == {
+        "CODEX_HOME": str(lane_home),
+        "MAC_CHROMIUM_TMPDIR": str(attempt / "tmp") if browser_tmp else None,
+        "TMPDIR": str(attempt / "tmp"),
+        "XDG_CACHE_HOME": str(attempt / "tmp/cache"),
+    }
+    for name in ("auth.json", "AGENTS.md", "HARNESS.md", "skills"):
+        assert (lane_home / name).is_symlink()
+        assert (lane_home / name).resolve() == (source / name).resolve()
+
+    resumed_attempt = attempt.parent / "attempt-002"
+    resumed_attempt.mkdir()
+    resumed_plan = mod.build_plan(
+        "codex", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+        mode="worktree_write", worktree=lane, sandbox="workspace-write", network=True,
+        capabilities=capabilities, run_dir=resumed_attempt,
+    )
+    another_source = tmp_path / "another-codex-home"
+    another_source.mkdir()
+    other_auth = another_source / "auth.json"
+    other_auth.write_text("untrusted auth", encoding="utf-8")
+    (lane_home / "auth.json").unlink()
+    (lane_home / "auth.json").symlink_to(other_auth)
+    (lane_home / "AGENTS.md").unlink()
+    (lane_home / "AGENTS.md").write_text("lane-controlled instructions", encoding="utf-8")
+    resumed_environment = {"CODEX_HOME": str(source)}
+    mod._prepare_codex_capability_home(resumed_plan, resumed_environment)
+    assert resumed_environment["CODEX_HOME"] == str(lane_home)
+    auth_path = (source / "auth.json").resolve()
+    assert (lane_home / "auth.json").resolve() == auth_path
+    assert (lane_home / "AGENTS.md").is_symlink()
+    assert (lane_home / "AGENTS.md").resolve() == (source / "AGENTS.md").resolve()
+    assert resumed_plan["codex_auth_path"] == str(auth_path)
+    resumed_profile = mod.os_confinement_profile(resumed_plan)
+    assert f'(literal "{auth_path}")' in resumed_profile
+    untrusted_paths = {str(other_auth), str(other_auth.resolve())}
+    assert not (untrusted_paths & {resumed_plan["codex_auth_path"]})
+    assert not any(path in str(resumed_plan["applied"]["write_boundary"]) for path in untrusted_paths)
+    assert not any(path in resumed_profile for path in untrusted_paths)
+
+
+def test_codex_capability_home_symlink_fails_before_provider_launch(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, lane = instruction_lane(tmp_path)
+    source = tmp_path / "source-codex-home"
+    source.mkdir()
+    (source / "auth.json").write_text("auth", encoding="utf-8")
+    task = tmp_path / "runs/task"
+    attempt = task / "attempt-001"
+    attempt.mkdir(parents=True)
+    outside_home = tmp_path / "outside-codex-home"
+    outside_home.mkdir()
+    lane_home = task / "codex-home"
+    lane_home.symlink_to(outside_home, target_is_directory=True)
+    launched = tmp_path / "provider-launched"
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    monkeypatch.setenv("CODEX_HOME", str(source))
+    plan = mod.build_plan(
+        "codex", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+        mode="worktree_write", worktree=lane, sandbox="workspace-write", network=True,
+        capabilities=["postgres"], run_dir=attempt,
+    )
+    plan["applied"]["confinement"] = "none"
+    plan["argv"] = [
+        sys.executable, "-u", "-c",
+        "from pathlib import Path; import json; "
+        f"Path({str(launched)!r}).write_text('started'); "
+        "print(json.dumps({'type':'result','result':'started'}))",
+    ]
+
+    record = mod.execute(plan, attempt / "result.md", env={**os.environ, "CODEX_HOME": str(source)})
+
+    expected_error = f"codex capability home is not a directory: {lane_home}"
+    assert record["status"] == "failed"
+    assert expected_error in record["reason"]
+    assert expected_error in record["evidence"]["excerpt"]
+    assert not launched.exists()
+
+
+def test_codex_capability_symlinked_source_auth_fails_and_never_widens_the_grant(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, lane = instruction_lane(tmp_path)
+    source = (tmp_path / "source-codex-home").resolve()
+    source.mkdir()
+    (source / "config.toml").write_text("model = 'x'", encoding="utf-8")
+    (source / "auth.json").symlink_to(source / "config.toml")
+    attempt = tmp_path / "runs/task/attempt-001"
+    attempt.mkdir(parents=True)
+    launched = tmp_path / "provider-launched"
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    monkeypatch.setenv("CODEX_HOME", str(source))
+    plan = mod.build_plan(
+        "codex", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+        mode="worktree_write", worktree=lane, sandbox="workspace-write", network=True,
+        capabilities=["postgres"], run_dir=attempt,
+    )
+    profile = mod.os_confinement_profile(plan)
+    assert f'(allow file-write* (literal "{source / "auth.json"}"))' in profile
+    assert f'(deny file-write-create file-write-unlink (literal "{source / "auth.json"}"))' in profile
+    assert str(source / "config.toml") not in profile
+    plan["applied"]["confinement"] = "none"
+    plan["argv"] = [
+        sys.executable, "-u", "-c",
+        f"from pathlib import Path; Path({str(launched)!r}).write_text('started')",
+    ]
+
+    record = mod.execute(plan, attempt / "result.md", env={**os.environ, "CODEX_HOME": str(source)})
+
+    assert record["status"] == "failed"
+    assert f"codex auth store is not a regular file: {source / 'auth.json'}" in record["reason"]
+    assert not launched.exists()
+
+
+@pytest.mark.parametrize("placement", ["inside-lane", "symlink-alias"])
+def test_codex_capability_swappable_source_home_fails_before_launch(monkeypatch, tmp_path, placement):
+    mod = supervisor()
+    _, lane = instruction_lane(tmp_path)
+    home = (tmp_path / "real-codex-home").resolve()
+    home.mkdir()
+    (home / "auth.json").write_text("{}", encoding="utf-8")
+    if placement == "inside-lane":
+        source = (lane / "codex-source").resolve()
+        home.rename(source)
+        reason = f"codex home lies inside a lane-writable path: {source}"
+    else:
+        source = lane / "codex-alias"
+        source.symlink_to(home, target_is_directory=True)
+        reason = f"codex home must not pass through a symlink: {source}"
+    attempt = tmp_path / "runs/task/attempt-001"
+    attempt.mkdir(parents=True)
+    launched = tmp_path / "provider-launched"
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    monkeypatch.setenv("CODEX_HOME", str(source))
+    plan = mod.build_plan(
+        "codex", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+        mode="worktree_write", worktree=lane, sandbox="workspace-write", network=True,
+        capabilities=["browser"], run_dir=attempt,
+    )
+    plan["applied"]["confinement"] = "none"
+    plan["argv"] = [
+        sys.executable, "-u", "-c",
+        f"from pathlib import Path; Path({str(launched)!r}).write_text('started')",
+    ]
+
+    record = mod.execute(plan, attempt / "result.md", env={**os.environ, "CODEX_HOME": str(source)})
+
+    assert record["status"] == "failed"
+    assert reason in record["reason"]
+    assert not launched.exists()
 
 
 def test_claude_adapter_receives_attempt_private_claude_tmpdir(tmp_path):

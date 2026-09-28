@@ -271,7 +271,8 @@ def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
         "status": "ok", "mode": "read_only", "cwd": str(workspace / "src"), "worktree": None,
         "workspace": {"root": str(workspace)}, "session_id": "saved-session",
         "provenance": {"requested": {"adapter": "codex"}, "resolved_model": "fixture", "effort_applied": ""},
-        "applied": {"sandbox": "read-only", "network": None, "add_dirs": []},
+        "applied": {"sandbox": "read-only", "network": None, "add_dirs": [],
+                    "capabilities": ["browser", "postgres"]},
         "paths": {"events": None}, "requested_route": {},
     }
     (attempt_dir / "attempt.json").write_text(json.dumps(previous), encoding="utf-8")
@@ -286,6 +287,7 @@ def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
     module.prepare_resume(args)
 
     assert args.workspace_root == workspace
+    assert args.capabilities == ["browser", "postgres"]
 
 
 def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_path: Path) -> None:
@@ -2386,6 +2388,64 @@ def test_front_door_preflight_rejects_all_invalid_tasks_without_run(tmp_path):
     assert {error['error'] for error in record['errors']} == {'prompt_unavailable'}
     assert all(error['fix'] for error in record['errors'])
     assert not (tmp_path / '.agent-run').exists()
+
+
+@pytest.mark.parametrize(("field", "value", "error"), [
+    ("adapter", "claude", "capabilities_adapter_invalid"),
+    ("access_mode", "read_only", "capabilities_mode_invalid"),
+    ("sandbox", "full", "capabilities_sandbox_invalid"),
+    ("platform", "linux", "capabilities_platform_invalid"),
+    ("sandbox_exec", None, "capabilities_confinement_unavailable"),
+    ("network", False, "capabilities_network_required"),
+])
+def test_front_door_capability_preflight_fails_closed(monkeypatch, tmp_path, field, value, error):
+    module = load_dispatch_module()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    monkeypatch.setattr(module.provider_exec.sys, "platform", "darwin")
+    monkeypatch.setattr(module.provider_exec, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    task = {"id": "capability", "adapter": "codex", "access_mode": "worktree_write",
+            "network": True, "capabilities": ["postgres"], "prompt": "hello"}
+    if field == "adapter": task["adapter"] = value
+    elif field == "access_mode": task["access_mode"] = value
+    elif field == "sandbox": task["sandbox"] = value
+    elif field == "platform": monkeypatch.setattr(module.provider_exec.sys, "platform", value)
+    elif field == "sandbox_exec": monkeypatch.setattr(module.provider_exec, "_sandbox_exec_path", lambda: value)
+    elif field == "network": task["network"] = value
+
+    result = module.preflight_tasks([task], tmp_path)
+
+    assert result["status"] == "rejected"
+    assert result["error"] == error
+    assert result["fix"].strip().endswith(".")
+    assert "\n" not in result["fix"]
+
+
+@pytest.mark.parametrize("capabilities", [["unknown"], ["browser", "browser"], "browser", None])
+def test_front_door_capability_preflight_rejects_malformed_values(monkeypatch, tmp_path, capabilities):
+    module = load_dispatch_module()
+    monkeypatch.chdir(tmp_path)
+    task = {"id": "capability", "adapter": "codex", "access_mode": "worktree_write",
+            "network": True, "capabilities": capabilities, "prompt": "hello"}
+    result = module.preflight_tasks([task], tmp_path)
+    assert result["status"] == "rejected"
+    assert result["error"] == "capabilities_invalid"
+    assert result["fix"].strip().endswith(".")
+
+
+def test_dispatch_command_forwards_capabilities_as_json(tmp_path):
+    module = load_dispatch_module()
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("hello", encoding="utf-8")
+    args = module.parser().parse_args([
+        "--run-dir", str(tmp_path), "--task-id", "caps", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--model", "fixture", "--timeout", "900",
+        "--capabilities", '["browser","postgres"]',
+    ])
+    command = module.build_command(args, prompt, tmp_path / "result.md")
+    index = command.index("--capabilities")
+    assert json.loads(command[index + 1]) == ["browser", "postgres"]
 
 
 def test_secret_in_inline_prompt_is_rejected_before_preflight_route(tmp_path, monkeypatch):

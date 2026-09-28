@@ -10,7 +10,9 @@ from dataclasses import dataclass
 from functools import lru_cache
 import os
 from pathlib import Path
+import platform
 import shlex
+import struct
 import subprocess
 import stat
 import sys
@@ -171,6 +173,7 @@ class ProcessInfo:
     rss: int
     tty: str = "??"
     uid: int = -1
+    start_epoch: float | None = None
 
 
 @lru_cache(maxsize=1)
@@ -210,6 +213,48 @@ def _duration(seconds, *, elapsed=False):
     if hours:
         return f"{hours:02d}:{minutes:02d}:{secs:02d}"
     return f"{minutes:02d}:{secs:02d}"
+
+
+# kinfo_proc offsets from the macOS SDK: arm64 and x86_64 share this layout.
+_DARWIN_KINFO_LAYOUTS = {
+    "arm64": {"size": 648, "pid": 40, "uid": 420, "ppid": 560, "pgid": 564},
+    "x86_64": {"size": 648, "pid": 40, "uid": 420, "ppid": 560, "pgid": 564},
+}
+
+
+def _darwin_sysctl_process_facts(pid):
+    """Read public process identity fields that libproc may hide from a sandbox."""
+    layout = _DARWIN_KINFO_LAYOUTS.get(platform.machine())
+    if layout is None:
+        return None
+    try:
+        mib = (ctypes.c_int * 4)(1, 14, 1, int(pid))  # CTL_KERN, KERN_PROC, KERN_PROC_PID, pid
+        size = ctypes.c_size_t(layout["size"])
+        result = ctypes.create_string_buffer(layout["size"])
+        sysctl = ctypes.CDLL(None, use_errno=True).sysctl
+        sysctl.argtypes = (
+            ctypes.POINTER(ctypes.c_int), ctypes.c_uint, ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_size_t), ctypes.c_void_p, ctypes.c_size_t,
+        )
+        sysctl.restype = ctypes.c_int
+        if sysctl(mib, 4, result, ctypes.byref(size), None, 0) != 0 or size.value < layout["size"]:
+            return None
+        raw = result.raw
+        found_pid = struct.unpack_from("=i", raw, layout["pid"])[0]
+        start_sec, start_usec = struct.unpack_from("=qq", raw, 0)
+        if found_pid != pid or start_sec <= 0:
+            return None
+        epoch = start_sec + start_usec / 1_000_000
+        return {
+            "pid": found_pid,
+            "ppid": struct.unpack_from("=i", raw, layout["ppid"])[0],
+            "pgid": struct.unpack_from("=i", raw, layout["pgid"])[0],
+            "uid": struct.unpack_from("=I", raw, layout["uid"])[0],
+            "start_epoch": epoch,
+            "elapsed": _duration(time.time() - epoch, elapsed=True),
+        }
+    except (AttributeError, OSError, OverflowError, TypeError, ValueError):
+        return None
 
 
 class _DarwinTaskInfo(ctypes.Structure):
@@ -316,7 +361,7 @@ def process(pid):
             return _ps_process(pid)
         return ProcessInfo(pid, row.ppid, row.pgid, _lstart(epoch),
                            _duration(time.time() - epoch, elapsed=True), _duration(cpu),
-                           command, row.command, stat, rss, tty, uid)
+                           command, row.command, stat, rss, tty, uid, epoch)
     except (OSError, ValueError, IndexError, TypeError, AttributeError):
         return None
 
@@ -379,8 +424,13 @@ def _ps_process(pid):
         lstart = _ps_start_time(pid)
         if not lstart:
             return None
+        epoch = None
+        if sys.platform == "darwin":
+            facts = _darwin_sysctl_process_facts(pid)
+            epoch = facts.get("start_epoch") if facts else None
         return ProcessInfo(pid, int(ppid), int(pgid), lstart, elapsed, cpu,
-                           command, Path(command.split()[0]).name, stat, int(rss))
+                           command, Path(command.split()[0]).name, stat, int(rss),
+                           start_epoch=epoch)
     except (OSError, subprocess.SubprocessError, ValueError, IndexError):
         return None
 

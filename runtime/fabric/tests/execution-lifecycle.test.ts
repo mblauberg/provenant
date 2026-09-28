@@ -64,6 +64,22 @@ describe("Fabric input corrections", () => {
     } as any)).toThrow(expect.objectContaining({ code: "model_invalid" }));
   });
 
+  it("normalises opt-in capabilities and forwards them as a JSON list", () => {
+    const catalogue = { adapters: [
+      { name: "codex", models: ["gpt-6-luna"], model_details: [], aliases: { workhorse: ["gpt-6-luna"] } },
+    ] } as any;
+    const route = normaliseRoute({ adapter: "codex", mode: "worktree_write", worktree: "../work",
+      capabilities: ["postgres", "browser"] }, identity, catalogue);
+    expect(route.capabilities).toEqual(["browser", "postgres"]);
+    const args = routeArguments(route);
+    expect(args.slice(args.indexOf("--capabilities"), args.indexOf("--capabilities") + 2))
+      .toEqual(["--capabilities", '["browser","postgres"]']);
+    expect(normaliseRoute({ adapter: "codex", capabilities: [] }, identity, catalogue).capabilities).toBeUndefined();
+    for (const capabilities of [["unknown"], ["browser", "browser"], "browser"])
+      expect(() => normaliseRoute({ adapter: "codex", capabilities } as any, identity, catalogue))
+        .toThrow(expect.objectContaining({ code: "capabilities_invalid" }));
+  });
+
   it("resolves every configured model id to itself", () => {
     const configured = JSON.parse(readFileSync(join(repositoryRoot, "config/model-routing.json"), "utf8"));
     const snapshot = catalogueSnapshot(repositoryRoot);
