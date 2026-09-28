@@ -298,6 +298,8 @@ it.each([false, true])("exposes the default tools within budget (legacy=%s)", as
     const dispatchInput = result.tools.find((tool) => tool.name === "fabric_dispatch")!.inputSchema as any;
     expect(dispatchInput.additionalProperties, JSON.stringify(dispatchInput)).toBe(false);
     expect(dispatchInput.properties.mode.enum).toEqual(["read_only", "worktree_write"]);
+    expect(dispatchInput.properties.capabilities.type).toBe("array");
+    expect(dispatchInput.properties.capabilities.description).toContain("postgres or browser");
     expect(dispatchInput.properties.tasks.items.additionalProperties).toBe(false);
     for (const name of [
         "acknowledge",
@@ -349,6 +351,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
   const { execFileSync } = await import("node:child_process");
   const root = mkdtempSync(join(tmpdir(), "fabric-v2-"));
   const ownerPidLog = join(root, "fixture-pids.jsonl");
+  const preflightLog = join(root, "fixture-preflight.jsonl");
   fixturePidLogs.add(ownerPidLog);
   fixtureRoots.add(root);
   const primary = join(root, "primary"),
@@ -419,6 +422,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
           AGENT_FABRIC_SEAT: "codex",
           AGENT_FABRIC_PRODUCT_ROOT: product,
           PROVENANT_FIXTURE_PID_LOG: ownerPidLog,
+          PROVENANT_FIXTURE_PREFLIGHT_LOG: preflightLog,
           HARNESS_PYTHON: execFileSync("python3", ["-c", "import sys;print(sys.executable)"], {
             encoding: "utf8",
           }).trim(),
@@ -438,6 +442,18 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     }
     const badTimeout = await client.callTool({ name: "fabric_dispatch", arguments: { prompt: "invalid", timeout_seconds: 0 } });
     expect((badTimeout.content as any[])[0].text).toContain("rejected timeout_invalid");
+    for (const capabilities of [["unknown"], ["browser", "browser"], "browser", [1]]) {
+      const invalidCapabilities = await client.callTool({
+        name: "fabric_dispatch", arguments: { prompt: "invalid", capabilities },
+      });
+      expect((invalidCapabilities.content as any[])[0].text)
+        .toBe("rejected capabilities_invalid · fix: Pass capabilities as a list of distinct postgres or browser values.");
+    }
+    const invalidTaskCapability = await client.callTool({
+      name: "fabric_dispatch", arguments: { tasks: [{ id: "invalid", prompt: "invalid", capabilities: "browser" }] },
+    });
+    expect((invalidTaskCapability.content as any[])[0].text)
+      .toBe("rejected capabilities_invalid · fix: Pass capabilities as a list of distinct postgres or browser values.");
     const badConcurrency = await client.callTool({
       name: "fabric_dispatch", arguments: { tasks: [{}], concurrency: 9 },
     });
@@ -485,6 +501,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect(JSON.parse(readFileSync(join(workerRow.run_dir, "_owner", `${workerRow.task_id}-env-1.json`), "utf8")))
       .toMatchObject({ chair: "chair-seat" });
     const batch = await call("dispatch", {
+      capabilities: ["browser"],
       tasks: [
         { id: "one", prompt: "first" },
         { id: "two", prompt: "second" },
@@ -492,6 +509,9 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
       wait_seconds: 5,
     });
     expect((batch.structuredContent as any).runs).toHaveLength(2);
+    expect((batch.structuredContent as any).runs[0].applied.capabilities).toEqual(["browser"]);
+    expect(JSON.parse(readFileSync(join((batch.structuredContent as any).runs[0].run_dir, "_owner", "one-args-1.json"), "utf8")))
+      .toEqual(expect.arrayContaining(["--capabilities", '["browser"]']));
     expect((batch.content as any[])[0].text).toMatch(/^batch mcp-.* 2 tasks: 2 ok/u);
     const partialBatch = await call("dispatch", { tasks: [
       { id: "valid", prompt: "still runs" },
@@ -553,7 +573,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect(routedRows?.[1].provenance.requested).toMatchObject({ adapter: "codex", model: "gpt-6-sol" });
     expect(routedRows?.[1].evidence.timeout).toBe(123);
     const writer = await call("dispatch", {
-      prompt: "writer", mode: "worktree_write", worktree: linked, wait_seconds: 5,
+      prompt: "writer", mode: "worktree_write", worktree: linked, capabilities: ["browser"], wait_seconds: 5,
     });
     const writerRow = writer.structuredContent as any;
     const batchRows = (batch.structuredContent as any).runs as any[];
@@ -564,6 +584,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     for (const id of threeIds) expect((briefThreeStatus.content as any[])[0].text).toContain(id);
     console.log(`FABRIC_REPLY_SIZE three_run_status: ${Buffer.byteLength(JSON.stringify(fullThreeStatus))} -> ${Buffer.byteLength(JSON.stringify(briefThreeStatus))} bytes`);
     expect(writerRow.status).toBe("ok");
+    expect(writerRow.applied.capabilities).toEqual(["browser"]);
     const writerArgs = JSON.parse(
       readFileSync(join(writerRow.run_dir, "_owner", `${writerRow.task_id}-args-1.json`), "utf8"),
     ) as string[];
@@ -573,11 +594,14 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect(writerArgs.slice(writerArgs.indexOf("--worktree"), writerArgs.indexOf("--worktree") + 2)).toEqual([
       "--worktree", linked,
     ]);
+    expect(writerArgs.slice(writerArgs.indexOf("--capabilities"), writerArgs.indexOf("--capabilities") + 2))
+      .toEqual(["--capabilities", '["browser"]']);
     expect(JSON.parse(readFileSync(join(writerRow.run_dir, "_owner", `${writerRow.task_id}-env-1.json`), "utf8")))
       .toMatchObject({ chair: "chair-seat" });
     const rerouted = await call("dispatch", { resume: writerRow.run_id, prompt: "x", adapter: "codex", wait_seconds: 0 });
     expect(rerouted.structuredContent).toMatchObject({ status: "rejected", error: "resume_route_change" });
     expect((rerouted.structuredContent as any).fix).toContain("drop adapter");
+    writeFileSync(preflightLog, "");
     const resumedWriter = await call("dispatch", {
       resume: writerRow.run_id, prompt: "continue writer", timeout_seconds: 900, wait_seconds: 5,
     });
@@ -586,6 +610,10 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
       readFileSync(join(writerRow.run_dir, "_owner", `${writerRow.task_id}-args-2.json`), "utf8"),
     ) as string[];
     expect(resumeArgs[resumeArgs.indexOf("--timeout") + 1]).toBe("900");
+    expect(JSON.parse(readFileSync(preflightLog, "utf8").trim()).find((task: any) => task.id === writerRow.task_id)
+      .capabilities).toEqual(["browser"]);
+    expect(JSON.parse(readFileSync(join(writerRow.run_dir, "tasks", writerRow.task_id, "attempt-002", "attempt.json"), "utf8"))
+      .applied.capabilities).toEqual(["browser"]);
     const nested = join(linked, "nested");
     mkdirSync(nested);
     writeFileSync(join(linked, "question.md"), "question");

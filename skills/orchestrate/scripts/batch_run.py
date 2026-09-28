@@ -73,7 +73,10 @@ CANCEL_DISPATCH_GRACE_SECONDS = 2.0
 DISPATCH_WATCHDOG_GRACE_SECONDS = 5.0
 TERMINAL_TASK_STATUSES = {"blocked", "ok", "failed", "rejected", "timed_out", "cancelled"}
 PREFLIGHT_REJECTION_CODES = {
-    "access_mode_invalid", "allow_secrets_invalid", "credential_or_auth_store_denied",
+    "access_mode_invalid", "allow_secrets_invalid", "capabilities_adapter_invalid",
+    "capabilities_confinement_unavailable", "capabilities_invalid", "capabilities_mode_invalid",
+    "capabilities_network_required", "capabilities_platform_invalid", "capabilities_sandbox_invalid",
+    "credential_or_auth_store_denied",
     "effort_unsupported", "fallback_invalid", "invalid_task_id", "model_routing_unavailable",
     "network_invalid", "prompt_hard_link_denied", "prompt_invalid", "prompt_path_forbidden",
     "prompt_required", "prompt_unavailable", "protected_path_denied", "sandbox_forbidden",
@@ -411,6 +414,8 @@ def _command(task: dict[str, Any], run_dir: Path) -> list[str]:
         if key in task:
             value=task[key]
             command.extend(("--"+key,json.dumps(value) if not isinstance(value,str) else value))
+    if task.get("capabilities"):
+        command.extend(("--capabilities", json.dumps(task["capabilities"])))
     for directory in task.get("add_dirs",[]): command.extend(("--add-dir",directory))
     if task.get("allow_secrets") is True: command.append("--allow-secrets")
     if task.get("preface") is False: command.append("--no-preface")

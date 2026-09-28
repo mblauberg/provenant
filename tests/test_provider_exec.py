@@ -958,10 +958,242 @@ print(json.dumps({'type':'turn.completed'}))
     plan = fixture_plan(tmp_path, code)
     record = supervisor().execute(plan, tmp_path / "result.md")
     assert record["status"] == "ok"
-    expected = {key: str(tmp_path / ("cache" if key == "XDG_CACHE_HOME" else "tmp"))
+    expected = {key: str(tmp_path / "tmp" / "cache" if key == "XDG_CACHE_HOME" else tmp_path / "tmp")
                 for key in ("TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME")}
-    assert all(path.is_dir() for path in (tmp_path / "tmp", tmp_path / "cache"))
+    assert (tmp_path / "tmp" / "cache").is_dir()
+    assert not (tmp_path / "cache").exists()
     assert json.loads((tmp_path / "result.md").read_text()) == expected
+
+
+def test_codex_capabilities_validate_the_codex_writer_envelope(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, lane = instruction_lane(tmp_path)
+    attempt = tmp_path / "runs/task/attempt-001"
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+
+    plan = mod.build_plan(
+        "codex", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+        mode="worktree_write", worktree=lane, sandbox="workspace-write", network=True,
+        capabilities=["postgres", "browser"], run_dir=attempt,
+    )
+
+    common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+    assert plan["applied"]["capabilities"] == ["browser", "postgres"]
+    assert plan["applied"]["sandbox"] == "workspace-write"
+    assert plan["applied"]["network"] is True
+    assert plan["applied"]["confinement"] == "sandbox-exec"
+    assert plan["applied"]["guarantee"] == "enforced"
+    assert str(lane / ".agents") in plan["applied"]["add_dirs"]
+    assert str(common) not in plan["applied"]["add_dirs"]
+    assert str(common) not in plan["applied"]["write_boundary"]["writable_paths"]
+    assert str(common / "objects") in plan["applied"]["write_boundary"]["writable_paths"]
+    assert str(attempt.parent / "codex-home") in plan["applied"]["write_boundary"]["writable_paths"]
+    explicit_common = mod.build_plan(
+        "codex", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+        mode="worktree_write", worktree=lane, sandbox="workspace-write", network=True,
+        capabilities=["postgres"], run_dir=attempt, add_dirs=[str(common)],
+    )
+    assert str(common) not in explicit_common["applied"]["add_dirs"]
+    assert any("drops Git common directory add-dir" in warning for warning in explicit_common["warnings"])
+
+
+@pytest.mark.parametrize(("field", "value", "expected"), [
+    ("adapter", "claude", "Pass capabilities only with adapter=codex."),
+    ("mode", "read_only", "Pass capabilities only with mode=worktree_write."),
+    ("sandbox", "full", "Use sandbox=workspace-write with capabilities."),
+    ("platform", "linux", "Pass capabilities only on macOS."),
+    ("sandbox_exec", None, "Use capabilities only with usable sandbox-exec outside another sandbox."),
+    ("network", False, "Pass network=true for Codex capabilities."),
+])
+def test_codex_capabilities_fail_closed_on_each_precondition(monkeypatch, tmp_path, field, value, expected):
+    mod = supervisor()
+    _, lane = instruction_lane(tmp_path)
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    options = {
+        "adapter": "codex", "mode": "worktree_write", "sandbox": "workspace-write",
+        "network": True,
+    }
+    if field == "adapter": options["adapter"] = value
+    elif field == "mode":
+        options["mode"] = value
+        options["sandbox"] = "read-only"
+    elif field == "sandbox": options["sandbox"] = value
+    elif field == "platform": monkeypatch.setattr(mod.sys, "platform", value)
+    elif field == "sandbox_exec": monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: value)
+    elif field == "network": options["network"] = value
+    worktree = lane if options["mode"] == "worktree_write" else None
+
+    with pytest.raises(ValueError, match=expected):
+        mod.build_plan(
+            options["adapter"], {"resolved_model": "fixture"}, "hello", cwd=lane,
+            workspace_root=tmp_path, mode=options["mode"], worktree=worktree,
+            sandbox=options["sandbox"], network=options["network"], capabilities=["postgres"],
+        )
+
+
+@pytest.mark.parametrize("capabilities", [["other"], ["browser", "browser"], "browser"])
+def test_codex_capabilities_reject_unknown_duplicate_and_non_list_values(monkeypatch, tmp_path, capabilities):
+    mod = supervisor()
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    with pytest.raises(ValueError, match="list of distinct postgres or browser values"):
+        mod.build_plan("codex", {}, "hello", cwd=tmp_path, workspace_root=tmp_path,
+                       capabilities=capabilities)
+
+
+def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_features(monkeypatch, tmp_path):
+    mod = supervisor()
+    repo, lane = instruction_lane(tmp_path)
+    home = (tmp_path / "source-codex-home").resolve()
+    home.mkdir()
+    (home / "auth.json").write_text("token", encoding="utf-8")
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    attempt = tmp_path / "runs/task/attempt-001"
+    common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+    plan = mod.build_plan("codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
+                          worktree=lane, sandbox="workspace-write", network=True,
+                          capabilities=["postgres"], run_dir=attempt)
+    profile = mod.os_confinement_profile(plan)
+
+    assert f'(deny file-write* (subpath "{common}")' in profile
+    for path in (common / "objects", common / "refs", common / "logs"):
+        assert f'(subpath "{path}")' in profile
+        assert str(path) in plan["applied"]["write_boundary"]["writable_paths"]
+    for path in (common / "packed-refs", common / "packed-refs.lock"):
+        assert f'(literal "{path}")' in profile
+    assert f'(allow file-write* (subpath "{common}")' not in profile
+    assert f'(subpath "{attempt.parent / "codex-home"}")' in profile
+    assert f'(literal "{(home / "auth.json").resolve()}")' in profile
+    assert f'(subpath "{home}")' not in profile
+    assert '(deny mach-lookup)' in profile
+    assert '(deny mach-register)' in profile
+    assert '(deny signal)' in profile
+    assert '(allow signal (target same-sandbox))' in profile
+    for service in mod.CODEX_BASE_MACH_SERVICES:
+        assert f'(global-name "{service}")' in profile
+    assert '(allow ipc-sysv-shm ipc-sysv-sem)' in profile
+    assert 'MachPortRendezvousServer.' not in profile
+    private = Path(git(lane, "rev-parse", "--path-format=absolute", "--absolute-git-dir").strip())
+    assert str(private) in plan["applied"]["write_boundary"]["writable_paths"]
+    assert f'(allow file-write* (subpath "{private}")' in profile
+    protected = tmp_path / "protected"
+    plan["protected_paths"] = [str(protected)]
+    protected_profile = mod.os_confinement_profile(plan)
+    assert protected_profile.rstrip().endswith(f'(deny file-read* (subpath "{protected}"))')
+
+    browser = mod.build_plan("codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
+                             worktree=lane, sandbox="workspace-write", network=True,
+                             capabilities=["browser"], run_dir=attempt)
+    browser_profile = mod.os_confinement_profile(browser)
+    for service in mod.CODEX_BASE_MACH_SERVICES + mod.CODEX_BROWSER_MACH_SERVICES:
+        assert f'(global-name "{service}")' in browser_profile
+    for prefix in mod.CODEX_BROWSER_MACH_PORT_PREFIXES:
+        assert f'(global-name-prefix "{prefix}")' in browser_profile
+    assert '(allow mach-register' in browser_profile
+    assert 'ipc-sysv-shm' not in browser_profile
+
+
+def test_codex_writer_argv_preserves_default_and_capability_sandboxes(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, lane = instruction_lane(tmp_path)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+
+    monkeypatch.setattr(mod.sys, "platform", "linux")
+    default_linux = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello",
+                                   workspace_root=tmp_path, mode="worktree_write", worktree=lane)
+    resumed_linux = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello",
+                                   workspace_root=tmp_path, mode="worktree_write", worktree=lane,
+                                   resume_session="saved")
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    default_darwin = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello",
+                                    workspace_root=tmp_path, mode="worktree_write", worktree=lane)
+    resumed_darwin = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello",
+                                    workspace_root=tmp_path, mode="worktree_write", worktree=lane,
+                                    resume_session="saved")
+    for before, after in ((default_linux["argv"], default_darwin["argv"]),
+                          (resumed_linux["argv"], resumed_darwin["argv"])):
+        index = after.index("allow_login_shell=false")
+        assert after[index - 1] == "-c"
+        assert after[:index - 1] + after[index + 1:] == before
+
+    fresh = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello",
+                           workspace_root=tmp_path, mode="worktree_write", worktree=lane,
+                           sandbox="workspace-write", network=True, capabilities=["browser"])
+    resumed = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello",
+                             workspace_root=tmp_path, mode="worktree_write", worktree=lane,
+                             sandbox="workspace-write", network=True, capabilities=["browser"],
+                             resume_session="saved")
+    for plan, sandbox_pair in ((fresh, ["-s", "danger-full-access"]),
+                               (resumed, ["-c", 'sandbox_mode="danger-full-access"'])):
+        argv = plan["argv"]
+        assert any(argv[index:index + 2] == sandbox_pair for index in range(len(argv) - 1))
+        assert "--cd" in argv and argv[argv.index("--cd") + 1] == str(lane)
+        assert not any("sandbox_workspace_write." in value for value in argv)
+
+
+@pytest.mark.parametrize(("capabilities", "browser_tmp"), [(["postgres"], None), (["browser"], "tmp")])
+def test_codex_capability_home_is_seeded_and_browser_tmp_is_opt_in(
+    monkeypatch, tmp_path, capabilities, browser_tmp,
+):
+    mod = supervisor()
+    _, lane = instruction_lane(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    attempt = tmp_path / "runs/task/attempt-001"
+    attempt.mkdir(parents=True)
+    source = tmp_path / "source-codex-home"
+    (source / "skills").mkdir(parents=True)
+    (source / "auth.json").write_text("auth", encoding="utf-8")
+    (source / "AGENTS.md").write_text("instructions", encoding="utf-8")
+    (source / "skills/example").mkdir()
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    monkeypatch.setenv("CODEX_HOME", "source-codex-home")
+    plan = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+                          mode="worktree_write", worktree=lane, sandbox="workspace-write",
+                          network=True, capabilities=capabilities, run_dir=attempt)
+    plan["applied"]["confinement"] = "none"
+    code = "import json, os; print(json.dumps({'type':'result','result':json.dumps({k:os.environ.get(k) for k in ('CODEX_HOME','MAC_CHROMIUM_TMPDIR','TMPDIR','XDG_CACHE_HOME')})}))"
+    plan["argv"] = [sys.executable, "-u", "-c", code]
+
+    environment = {**os.environ, "CODEX_HOME": "source-codex-home", "MAC_CHROMIUM_TMPDIR": "ambient-value"}
+    record = mod.execute(plan, attempt / "result.md", env=environment)
+
+    lane_home = attempt.parent / "codex-home"
+    assert record["status"] == "ok"
+    assert json.loads((attempt / "result.md").read_text()) == {
+        "CODEX_HOME": str(lane_home),
+        "MAC_CHROMIUM_TMPDIR": str(attempt / "tmp") if browser_tmp else None,
+        "TMPDIR": str(attempt / "tmp"),
+        "XDG_CACHE_HOME": str(attempt / "tmp/cache"),
+    }
+    for name in ("auth.json", "AGENTS.md", "skills"):
+        assert (lane_home / name).is_symlink()
+        assert (lane_home / name).resolve() == (source / name).resolve()
+
+    resumed_attempt = attempt.parent / "attempt-002"
+    resumed_attempt.mkdir()
+    resumed_plan = mod.build_plan(
+        "codex", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+        mode="worktree_write", worktree=lane, sandbox="workspace-write", network=True,
+        capabilities=capabilities, run_dir=resumed_attempt,
+    )
+    another_source = tmp_path / "another-codex-home"
+    another_source.mkdir()
+    (another_source / "auth.json").write_text("new auth", encoding="utf-8")
+    resumed_environment = {"CODEX_HOME": str(another_source)}
+    mod._prepare_codex_capability_home(resumed_plan, resumed_environment)
+    assert resumed_environment["CODEX_HOME"] == str(lane_home)
+    auth_path = (source / "auth.json").resolve()
+    assert (lane_home / "auth.json").resolve() == auth_path
+    assert resumed_plan["codex_auth_path"] == str(auth_path)
+    resumed_profile = mod.os_confinement_profile(resumed_plan)
+    assert f'(literal "{auth_path}")' in resumed_profile
+    assert str(another_source / "auth.json") not in resumed_profile
 
 
 def test_claude_adapter_receives_attempt_private_claude_tmpdir(tmp_path):

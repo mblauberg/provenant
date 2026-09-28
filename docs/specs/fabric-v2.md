@@ -12,12 +12,12 @@ The default MCP surface has twelve tools: `fabric_dispatch`, `fabric_status`, `f
 
 | Tool | Registered request |
 |---|---|
-| `fabric_dispatch` | One top-level `prompt` or `prompt_file`, `tasks[]` (1–64, `concurrency` 1–8; above 8 clamps with a warning), `resume` with a new prompt, or `handoff` with a new prompt. Optional route and control fields include `adapter`, `alias`, `model`, `effort`, `mode`, `worktree`, `cwd`, `network`, `sandbox`, `add_dirs`, `fallback`, `allow_secrets`, `context_ceiling`, `task_id`, positive finite `timeout_seconds`, `wait_seconds` (non-negative integer; values above 55 clamp to 55 with a warning), and `detail`. With `resume` or `handoff`, `task_id` selects one task of a batch. |
+| `fabric_dispatch` | One top-level `prompt` or `prompt_file`, `tasks[]` (1–64, `concurrency` 1–8; above 8 clamps with a warning), `resume` with a new prompt, or `handoff` with a new prompt. Optional route and control fields include `adapter`, `alias`, `model`, `effort`, `mode`, `worktree`, `cwd`, `network`, `sandbox`, `capabilities`, `add_dirs`, `fallback`, `allow_secrets`, `context_ceiling`, `task_id`, positive finite `timeout_seconds`, `wait_seconds` (non-negative integer; values above 55 clamp to 55 with a warning), and `detail`. With `resume` or `handoff`, `task_id` selects one task of a batch. |
 | `fabric_status` | `ids[]` of run, task or batch IDs, non-negative integer `wait_seconds` (values above 55 clamp to 55 with a warning), `until: any|all`, and `detail`; `id` is also accepted for one run. One row per run. |
 | `fabric_cancel` | Required `id`, optional `reason`; asks the owner to stop the provider and tracked descendants. |
 | `fabric_output` | Required `id`, optional `part: result|stderr|events|receipt`, `offset`, and `max_bytes` (positive integer; values above 20,000 clamp to 20,000 and warn); returns a bounded chunk and `next_offset`. |
 
-A worker question yields `input_required`; `fabric_dispatch` with `resume` appends an attempt to the same run. `resume` takes a run ID, a run ID plus `task_id` for one task of a batch, or the task's own ID. A `task_id` with no prior attempt is rejected as `resume_task_unknown`. A resume may change `context_ceiling`, the attempt's `timeout_seconds`, and `allow_secrets` for the new prompt; any other route or control change is rejected naming the field, and needs a new dispatch. For a batch, use `fabric_dispatch` with `tasks[]`; wait on returned IDs with `fabric_status`.
+A worker question yields `input_required`; `fabric_dispatch` with `resume` appends an attempt to the same run. `resume` takes a run ID, a run ID plus `task_id` for one task of a batch, or the task's own ID. A `task_id` with no prior attempt is rejected as `resume_task_unknown`. A resume reuses the prior capability list exactly. It may change `context_ceiling`, the attempt's `timeout_seconds`, and `allow_secrets` for the new prompt; any other route or control change is rejected naming the field, and needs a new dispatch. For a batch, use `fabric_dispatch` with `tasks[]`; wait on returned IDs with `fabric_status`.
 
 Dispatch scans prompt text, prompt files and eligible regular files in `add_dirs` before provider launch. A high-signal secret finding rejects with `error: secret_detected` and a one-line removal or `allow_secrets: true` fix. The boolean override applies at the top level or per task, and an attempt records the override and finding names. Directory scans include Git-ignored regular files, skip `.git`, `node_modules`, binary and oversized files, and stop with a receipt warning at 2,000 files or 20 MB.
 
@@ -45,13 +45,16 @@ Each attempt records `context: {context_tokens, input_tokens, output_tokens, cac
 
 The attempt records `applied.context_ceiling` as `enforced`, `provider_default` (the provider's own point is at or below the ceiling, with `applied.context_ceiling_source`) or `unsupported`. It also records `applied.context_ceiling_tokens`, the point in force (`null` when unknown), and `applied.context_ceiling_requested`. A resume inherits the prior requested ceiling unless the call passes a new one.
 
-On macOS, Codex providers in `read-only` and `workspace-write` resolve `ps` to the bundled libproc shim through PATH. The setuid `/bin/ps` cannot execute under seatbelt. The shim covers the forms agents type (`ps aux`, `ps -ef`, `ps ax`, `-p`, `-o`/`-O` with common fields) and names its supported subset when asked for more. Process records keep the C-locale `lstart` value; readers retain inherited-locale compatibility and treat inaccessible process identity as unverifiable. Linux retains `/proc` and normal `ps` behaviour. This PATH adjustment adds no receipt field.
+On macOS, Codex providers in `read-only` and `workspace-write` resolve `ps` to the bundled libproc shim through PATH. The setuid `/bin/ps` cannot execute under seatbelt. The shim covers the forms agents type (`ps aux`, `ps -ef`, `ps ax`, `-p`, `-o`/`-O` with common fields) and names its supported subset when asked for more. Its `lstart` is `strftime("%c", localtime(start))` in the caller's locale, matching `/bin/ps`; when libproc cannot read a live PID, `sysctl(KERN_PROC_PID)` reports its PID, parent, group, user, start and elapsed times. A missing PID remains gone. Linux retains `/proc` and normal `ps` behaviour. This PATH adjustment adds no receipt field.
 
 A resume reads the prior attempt's context. It adds a digest warning when that context exceeds the effective ceiling (the point in force, else the requested ceiling), or when the size is unknown and the adapter has no ceiling control, for example `! resuming a ~620k-token session; fresh: fabric_dispatch{prompt, handoff:"<run id>"}`. The resume still runs. `handoff: <run id>` (with `task_id` for a batch task) is the cheaper alternative. It starts a fresh run whose prompt is prefixed with the prior task's route line and its result tail, at most 8,000 bytes in total. If the call names no adapter, alias or model, the handoff reuses the prior adapter, model and effort, and a prior writer's mode and worktree. The prior task must be terminal.
 
 A terminal digest appends a compact marker to its Route line: `ctx 212k/1M` when observed, `ctx ~19k` when estimated, `ctx 8%` from a percentage, and nothing when unknown. The stored provenance line stays unmarked for trailers and the index. Brief status rows omit `context`; `detail: "full"` includes it.
 
 ## Receipt and provenance
+
+Each attempt records the sorted list in `applied.capabilities`; an omitted or
+empty list is `[]`.
 
 An owner writes `fabric.attempt.v1` at `tasks/<id>/attempt-NNN/attempt.json` and aggregates it into `RUN_RECEIPT.json`. A status row is `fabric.status.v1`: the latest attempt plus attempt history, batch id where relevant, and live worktree ledger fields. The attempt records state, status, mode, cwd, workspace_root, worktree, timing, process group, session id, retry fields, evidence, question, applied sandbox/network/additional directories/confinement/guarantee/context ceiling, context, warnings, provenance, paths and digest. `workspace.cwd` is the provider's actual cwd; `workspace.root` remains the caller workspace root. Dispatch attempts, batch task rows and run receipts write `ok` for success. Readers accept `succeeded` in retained older receipts and present it as `ok`. Unknown fields may be ignored; removals bump the version.
 
@@ -100,4 +103,32 @@ that tracks a case variant such as `.Agents/`. Another adapter can do such a
 refresh, and a retry clears an overtaken one. Review of the branch diff
 remains the backstop.
 
-`model_route.py snapshot --json` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Wrapped writer launches (agy, Claude, Cursor, OpenCode and Kiro) restrict writes to the worktree, declared `add_dirs`, per-worktree Git metadata, common Git objects, refs, logs and packed refs, attempt files, temp paths, devices and provider state. Where protected-path policy applies, its read and write denies take precedence within an `add_dir`; receipts list the writable `add_dirs` in `applied.write_boundary`. Codex writers use its native `workspace-write` sandbox. Unavailable OS confinement refuses agy write dispatches and produces an explicit warning for other wrapped writers.
+`capabilities` is an optional list with distinct values from `postgres` and
+`browser`; an empty list means absent. It is accepted only for a Codex
+`worktree_write` using `sandbox: "workspace-write"` on macOS, with usable
+`sandbox-exec` outside another sandbox and applied `network: true`. The lane
+keeps `applied.sandbox: "workspace-write"` and
+`applied.guarantee: "enforced"`, and runs Codex with its native sandbox
+disabled inside the OS profile. The profile allows Codex's native Mach
+services plus FSEvents, then denies other Mach lookups and registrations,
+denies external signals while allowing same-sandbox signals, and denies System
+V IPC by default. `postgres` adds shared-memory and semaphore IPC. `browser`
+adds the macOS browser services and Chrome/Chromium rendezvous Mach lookup and
+registration prefixes; browser lanes set `MAC_CHROMIUM_TMPDIR` to
+`<attempt>/tmp` for Chrome's process-singleton socket. No network rules are added:
+these capabilities add no network access beyond a Codex writer with network
+enabled. SBPL `(local ip "localhost:*")` matches every local address, so an inbound loopback
+rule would not establish a loopback limit.
+
+Each task uses one `CODEX_HOME` at `<task directory>/codex-home` for all
+attempts. Existing `auth.json`, `AGENTS.md` and `skills` are symlinked from the
+caller's `CODEX_HOME`, or `~/.codex`; the profile grants writes to the task
+home and only the literal source `auth.json`. The Git common directory is
+denied and is not a writable root. Git writes use the private worktree Git
+directory plus the narrow common `objects`, `refs`, `logs`, `packed-refs` and
+`packed-refs.lock` paths. Chrome must use `--no-sandbox` because macOS refuses
+its nested sandbox. PostgreSQL socket paths under lane `TMPDIR` exceed macOS's
+103-byte limit; use TCP or a short socket directory. Attempts set `TMPDIR`,
+`TMP` and `TEMP` to `<attempt>/tmp` and `XDG_CACHE_HOME` to `<attempt>/tmp/cache`.
+
+`model_route.py snapshot --json` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Wrapped writer launches (agy, Claude, Cursor, OpenCode and Kiro) restrict writes to the worktree, declared `add_dirs`, per-worktree Git metadata, common Git objects, refs, logs and packed refs, attempt files, temp paths, devices and provider state. Where protected-path policy applies, its read and write denies take precedence within an `add_dir`; receipts list the writable `add_dirs` in `applied.write_boundary`. Codex writers without capabilities use its native `workspace-write` sandbox. Unavailable OS confinement refuses agy write dispatches and produces an explicit warning for other wrapped writers.

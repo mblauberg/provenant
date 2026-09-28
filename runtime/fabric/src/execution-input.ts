@@ -30,6 +30,8 @@ export const DISPATCH_ADAPTERS = ["agy", "claude", "codex", "copilot", "cursor",
 const SUPPORTED_ADAPTERS = new Set<string>(DISPATCH_ADAPTERS);
 export const ACCESS_MODES = ["read_only", "worktree_write"] as const;
 export type AccessMode = (typeof ACCESS_MODES)[number];
+export const DISPATCH_CAPABILITIES = ["postgres", "browser"] as const;
+export type DispatchCapability = (typeof DISPATCH_CAPABILITIES)[number];
 
 /**
  * The whole routing surface: who runs it, which route, and how much access it
@@ -46,6 +48,7 @@ export interface RouteInput {
   cwd?: string;
   network?: boolean;
   sandbox?: string;
+  capabilities?: DispatchCapability[];
   add_dirs?: string[];
   allow_secrets?: boolean;
   fallback?: boolean | "any" | Array<string | Record<string, unknown>>;
@@ -86,6 +89,7 @@ export interface NormalisedRoute {
   worktree?: string;
   context_ceiling?: number;
   allow_secrets?: boolean;
+  capabilities?: DispatchCapability[];
   warnings?: string[];
 }
 
@@ -172,6 +176,13 @@ function correctSelector(selector: string | undefined, catalogue: CatalogueSnaps
 export function normaliseRoute(input: RouteInput, identity: Identity, catalogue: CatalogueSnapshot): NormalisedRoute {
   input = { ...input, model: input.model || undefined, alias: input.alias || undefined };
   const warnings: string[] = [];
+  if (input.capabilities !== undefined && (
+    !Array.isArray(input.capabilities) ||
+    input.capabilities.some((value) => !DISPATCH_CAPABILITIES.includes(value)) ||
+    new Set(input.capabilities).size !== input.capabilities.length
+  )) {
+    throw new InputError("capabilities_invalid", "Pass capabilities as a list of distinct postgres or browser values.");
+  }
   let selector =
     input.model ?? (input.alias && !["flagship", "workhorse", "scout"].includes(input.alias) ? input.alias : undefined);
   const roleAlias = input.model === undefined && input.alias !== undefined
@@ -234,6 +245,7 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
     access_mode: mode,
     ...(input.worktree === undefined ? {} : { worktree: resolve(identity.cwd, input.worktree) }),
     ...(warnings.length ? { warnings } : {}),
+    ...(input.capabilities?.length ? { capabilities: [...input.capabilities].sort() } : {}),
     ...Object.fromEntries(
       ["cwd", "network", "sandbox", "add_dirs", "fallback", "context_ceiling", "allow_secrets"]
         .filter((key) => input[key as keyof RouteInput] !== undefined)

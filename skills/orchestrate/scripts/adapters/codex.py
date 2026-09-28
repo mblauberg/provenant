@@ -1,4 +1,5 @@
 import json
+import sys
 
 CLI = "codex"
 PROMPT_TRANSPORT = "stdin"
@@ -27,8 +28,16 @@ def argv(p):
         'approval_policy="never"',
     ]
     sandbox, network = p["applied"]["sandbox"], p["applied"]["network"]
+    capabilities = p["applied"].get("capabilities", [])
+    if sys.platform == "darwin" and sandbox != "full":
+        command += ["-c", "allow_login_shell=false"]
     # exec resume inherits its session sandbox; config overrides apply to both forms.
-    if sandbox == "read-only" and network:
+    if capabilities:
+        if p["resume_session"]:
+            command += ["-c", 'sandbox_mode="danger-full-access"']
+        else:
+            command += ["-s", "danger-full-access"]
+    elif sandbox == "read-only" and network:
         command += [
             "-c",
             'default_permissions="provenant-read-only-network"',
@@ -45,7 +54,7 @@ def argv(p):
         ]
     else:
         command += ["-s", "danger-full-access" if sandbox == "full" else sandbox]
-    if sandbox == "workspace-write":
+    if sandbox == "workspace-write" and not capabilities:
         command += [
             "-c",
             "sandbox_workspace_write.network_access=" + str(network).lower(),
@@ -58,8 +67,8 @@ def argv(p):
     if not p["resume_session"]:
         for directory in p["applied"]["add_dirs"]:
             command += ["--add-dir", directory]
-        if p["worktree"]:
-            command += ["--cd", p["worktree"]]
+    if p["worktree"] and (not p["resume_session"] or capabilities):
+        command += ["--cd", p["worktree"]]
     route = p["route"]
     if route.get("endpoint_base_url") and route.get("endpoint_token_env"):
         for key, value in [

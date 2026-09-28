@@ -153,6 +153,9 @@ const route = {
   cwd: str,
   network: z.boolean().optional(),
   sandbox: z.enum(["read-only", "workspace-write", "full"]).optional(),
+  capabilities: z.array(z.enum(["postgres", "browser"])).refine((items) => new Set(items).size === items.length, {
+    message: "Pass capabilities as a list of distinct postgres or browser values.",
+  }).optional(),
   add_dirs: z.array(z.string()).optional(),
   allow_secrets: z.boolean().optional(),
   fallback: z
@@ -212,8 +215,12 @@ function register(
 ) {
   const accepted = { ...schema };
   if (Object.hasOwn(accepted, "mode")) accepted.mode = z.string().optional().meta({ enum: ACCESS_MODES });
+  if (Object.hasOwn(accepted, "capabilities")) accepted.capabilities = z.unknown().optional()
+    .meta({ description: "Array of distinct postgres or browser values.", type: "array", items: { type: "string", enum: ["postgres", "browser"] } }) as unknown as z.ZodRawShape[string];
   if (name === "fabric_dispatch" || name === "fabric_batch") {
     const acceptedTask = { id: str, ...task, mode: z.string().optional().meta({ enum: ACCESS_MODES }) };
+    acceptedTask.capabilities = z.unknown().optional()
+      .meta({ description: "Array of distinct postgres or browser values.", type: "array", items: { type: "string", enum: ["postgres", "browser"] } }) as unknown as typeof acceptedTask.capabilities;
     const acceptedTasks = z.array(z.object(acceptedTask).catchall(z.unknown()).meta({ additionalProperties: false }))
       .min(1).max(64);
     accepted.tasks = name === "fabric_batch" ? acceptedTasks : acceptedTasks.optional();
@@ -230,7 +237,11 @@ function register(
       if (name === "fabric_dispatch") strictFields.tasks = z.array(z.strictObject(taskFields)).min(1).max(64).optional();
       if (name === "fabric_batch") strictFields.tasks = z.array(z.strictObject(taskFields)).min(1).max(64);
       const parsed = z.strictObject(strictFields).safeParse(corrected.value);
-      if (!parsed.success) return reply({ status: "rejected", error: "invalid_input", fix: parsed.error.issues[0]?.message ?? "Check the supplied fields." }, includeStructuredContent);
+      if (!parsed.success) {
+        if (parsed.error.issues.some((issue) => issue.path.includes("capabilities")))
+          return reply({ status: "rejected", error: "capabilities_invalid", fix: "Pass capabilities as a list of distinct postgres or browser values." }, includeStructuredContent);
+        return reply({ status: "rejected", error: "invalid_input", fix: parsed.error.issues[0]?.message ?? "Check the supplied fields." }, includeStructuredContent);
+      }
       const input = parsed.data as any;
       const result = await handler(input, extra) as Record<string, any>;
       const warning = corrected.warnings.length ? [`warning: ${corrected.warnings.join("; ")}`] : [];

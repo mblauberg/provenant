@@ -747,7 +747,7 @@ async function dispatchConfiguredBatchUnchecked(
         return [];
       }
       const defaults = Object.fromEntries(Object.entries(input).filter(([key]) =>
-        ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets"].includes(key)));
+        ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets"].includes(key)));
       return [normaliseTask({ ...defaults, ...task }, index, identity, catalogue)];
     } catch (error) {
       errors.push({ task_id: task.id ?? `task-${index + 1}`, ...rejected(error) });

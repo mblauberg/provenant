@@ -2,14 +2,17 @@
 """Sandbox-safe subset of ps, backed by libproc or /proc."""
 
 import os
+import locale
 import pwd
 import signal
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from process_info import process, processes
+import process_info
 
 def _user(uid):
     try:
@@ -23,13 +26,18 @@ def _visible(text):
     return "".join(char if char.isprintable() else char.encode("unicode_escape").decode() for char in text)
 
 
+def _lstart(row):
+    epoch = getattr(row, "start_epoch", None)
+    return time.strftime("%c", time.localtime(epoch)) if epoch is not None else row.lstart
+
+
 FIELDS = {
     "pid": ("PID", lambda p: str(p.pid)),
     "ppid": ("PPID", lambda p: str(p.ppid)),
     "pgid": ("PGID", lambda p: str(p.pgid)),
     "uid": ("UID", lambda p: str(p.uid)),
     "user": ("USER", lambda p: _user(p.uid)),
-    "lstart": ("STARTED", lambda p: p.lstart),
+    "lstart": ("STARTED", _lstart),
     "etime": ("ELAPSED", lambda p: p.elapsed),
     "time": ("TIME", lambda p: p.cpu),
     "command": ("COMMAND", lambda p: _visible(p.command)),
@@ -123,6 +131,18 @@ def unreadable(pid):
         return None
     except PermissionError:
         pass
+    if sys.platform == "darwin":
+        facts = process_info._darwin_sysctl_process_facts(pid)
+        if facts is not None:
+            return SimpleNamespace(
+                **facts, lstart="?", cpu="?", command="?", comm="?", stat="?", rss="?", tty="?",
+            )
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        except PermissionError:
+            pass
     print(f"ps: {pid}: exists but cannot be read here; fields show ?", file=sys.stderr)
     unknown = dict.fromkeys(("ppid", "pgid", "lstart", "elapsed", "cpu", "command", "comm",
                              "stat", "rss", "tty"), "?")
@@ -130,6 +150,10 @@ def unreadable(pid):
 
 
 def main(argv=None):
+    try:
+        locale.setlocale(locale.LC_ALL, "")
+    except locale.Error:
+        pass
     try:
         selected, fields, all_processes, include_no_tty = parse(sys.argv[1:] if argv is None else argv)
     except ValueError as exc:

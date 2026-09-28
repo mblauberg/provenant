@@ -79,7 +79,7 @@ legacy tools; the default task interface is `fabric_task`.
 
 Dispatch accepts exactly one of `prompt` and `prompt_file`. Route controls are
 `adapter`, `alias`, `model`, `effort`, `mode`, `worktree`, `cwd`, `network`,
-`sandbox`, `add_dirs`, `fallback` and `allow_secrets`. Before dispatch, Fabric scans
+`sandbox`, `capabilities`, `add_dirs`, `fallback` and `allow_secrets`. Before dispatch, Fabric scans
 the prompt and eligible files under `add_dirs` for common live credential shapes.
 A finding rejects with `error: secret_detected` and a location in `fix`; set
 `allow_secrets: true` explicitly to proceed. The attempt records the override
@@ -103,10 +103,10 @@ Wrapped writer runs on macOS (agy, Claude, Cursor, OpenCode and Kiro) use
 per-worktree Git metadata, common Git objects, refs, logs and packed refs,
 attempt files, device nodes and provider state. Where protected-path policy
 applies, its read and write denies still take precedence inside an `add_dir`.
-Each attempt sets `TMPDIR`, `TMP`, `TEMP` and `XDG_CACHE_HOME` to private `tmp`
-and `cache` directories under its run directory. Shared temp and general user
-caches are not writable. Codex
-uses `-s workspace-write` (or `-c sandbox_mode="workspace-write"`
+Each attempt sets `TMPDIR`, `TMP` and `TEMP` to `<attempt>/tmp` and
+`XDG_CACHE_HOME` to `<attempt>/tmp/cache`. Shared temp and general user caches
+are not writable. Codex writers without capabilities use
+`-s workspace-write` (or `-c sandbox_mode="workspace-write"`
 on resume), with `-c sandbox_workspace_write.writable_roots=<add_dirs>` and
 `--cd <worktree>` on a fresh run. Codex keeps a writable root's `.agents/`
 read-only, so a linked-worktree Codex writer also gets the worktree's
@@ -118,9 +118,37 @@ checkout's branch or its upstream. If OS confinement is unavailable, agy write
 dispatch is refused; other wrapped writer receipts warn that writes are
 unconfined. Setting `PROVENANT_NO_OS_CONFINEMENT=1` has the same effect on new
 wrapped attempts.
+Codex writers may opt into `capabilities: ["postgres", "browser"]`, using
+either or both distinct values. The field is valid only for a Codex
+`worktree_write` route with `sandbox: "workspace-write"`, macOS, usable
+`sandbox-exec` outside another sandbox, and applied `network: true`. Empty
+lists mean no capabilities. These lanes keep the writer's enforced guarantee
+and workspace-write receipt value, while running Codex's own sandbox in
+`danger-full-access` inside the OS profile. The profile allows Codex's native
+Mach services plus FSEvents, denies other Mach lookups and registrations,
+denies signals except to processes in the same sandbox, and denies System V
+IPC by default. `postgres` adds shared-memory and semaphore IPC. `browser`
+adds the macOS browser services and the Chrome/Chromium rendezvous Mach lookup
+and registration prefixes; browser lanes set `MAC_CHROMIUM_TMPDIR` to
+`<attempt>/tmp` for Chrome's process-singleton socket. These capabilities add no
+network rules or network access beyond a Codex writer whose network is enabled.
+SBPL's `(local ip "localhost:*")` also matches every local address, so Fabric
+does not claim that an inbound loopback rule limits connections.
+
+Each task keeps one `CODEX_HOME` at `<task directory>/codex-home` across its
+attempts. Existing `auth.json`, `AGENTS.md` and `skills` entries are symlinked
+from `CODEX_HOME` supplied by the caller, or `~/.codex`; the profile grants
+writes to the task home and the literal source `auth.json` only. Its Git write
+boundary grants the private worktree Git directory and the common repository's
+`objects`, `refs`, `logs`, `packed-refs` and `packed-refs.lock` paths. The Git
+common directory itself is denied and is never added as a writable root.
+
+Use Chrome with `--no-sandbox`, because macOS refuses Chrome's nested sandbox
+inside `sandbox-exec`. PostgreSQL socket paths under the lane's `TMPDIR` exceed
+macOS's 103-byte socket-path limit; use TCP or a shorter socket directory.
 Protected-path dispatches to training routes still refuse without OS read
 confinement.
-The receipt records `applied.confinement` as `sandbox-exec`, `provider-native` or `none`;
+The receipt records sorted `applied.capabilities` and `applied.confinement` as `sandbox-exec`, `provider-native` or `none`;
 `applied.write_boundary` records the effective writable paths, including
 declared `add_dirs` for confined writers, or the native sandbox;
 `workspace.cwd` is the provider cwd and `workspace.root` is the caller workspace.
@@ -139,9 +167,12 @@ in every registered worktree; without usable `sandbox-exec`, dispatch is rejecte
 routes keep their usual access.
 
 On macOS, a Codex `read-only` or `workspace-write` provider gets a bundled `ps`
-shim on PATH because seatbelt blocks the setuid `/bin/ps`. Process identity reads
-use libproc and preserve the recorded C-locale start time. Fabric falls back to
-the PATH command when `/bin/ps` cannot execute; unreadable PIDs stay unverifiable.
+shim on PATH because seatbelt blocks the setuid `/bin/ps`. Its `lstart` uses
+`strftime("%c", localtime(start))` in the caller's locale, matching `/bin/ps`;
+when libproc cannot read a live PID, `sysctl(KERN_PROC_PID)` supplies its PID,
+parent, group, user, start and elapsed times. A PID that no longer exists is
+reported as gone. Fabric falls back to the PATH command when `/bin/ps` cannot
+execute.
 
 `tasks` contains 1–64 task objects with the same prompt and route fields plus
 optional `id`; `concurrency` is 1–8. Top-level route controls and timeout apply
@@ -149,7 +180,8 @@ as defaults, with each task taking precedence. Prompt file paths resolve from
 the caller workspace, including when `cwd` selects a subdirectory. Defaults are
 55 seconds of waiting for a single dispatch and zero for a batch. Timeouts default to 3,600 seconds for
 read-only work and 10,800 seconds for writers. `resume` retains the same run ID,
-route and controls; only `context_ceiling`, `timeout_seconds`, and `allow_secrets` may change. Use a new
+route and controls, including the exact prior capability list; only
+`context_ceiling`, `timeout_seconds`, and `allow_secrets` may change. Use a new
 dispatch to change the rest. With `resume`, `task_id` selects one task of a
 batch; a task's own ID also works. `handoff: <run id>` starts a fresh run primed
 with that task's route and result tail, the cheap alternative to resuming a large
