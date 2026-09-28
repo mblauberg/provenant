@@ -159,10 +159,12 @@ export function readProviderRecord(runDir: string, runToken: string): ProviderRe
   };
 }
 
+/** Atomic, so a reader or a failed rewrite never leaves a live run without its record. */
 export function writeOwnerRecord(record: OwnerRecord): void {
-  writeFileSync(join(record.run_dir, OWNER_RECORD_NAME), JSON.stringify(record, null, 2) + "\n", {
-    mode: 0o600,
-  });
+  const path = join(record.run_dir, OWNER_RECORD_NAME);
+  const temporary = `${path}.${process.pid}.tmp`;
+  writeFileSync(temporary, JSON.stringify(record, null, 2) + "\n", { mode: 0o600 });
+  renameSync(temporary, path);
 }
 
 export function removeOwnerRecord(runDir: string): void {
@@ -216,7 +218,11 @@ export function listRecordedRuns(workspace: string): RecordedRun[] {
     const running = processMatches(record.owner_pid, record.owner_started_at);
     const provider = readProviderRecord(runDir, record.run_token);
     const providerRunning = provider !== null && processMatches(provider.provider_pid, provider.provider_started_at);
-    const hostAlive = record.host_started_at !== null && observedAlive(record.host_pid, record.host_started_at); // a failed probe is not death
+    // A failed probe is not death. A self-hosted run lives with its owner,
+    // whose unknown start time is not evidence of death either.
+    const hostAlive = record.host_pid === record.owner_pid
+      ? observedAlive(record.owner_pid, record.owner_started_at)
+      : record.host_started_at !== null && observedAlive(record.host_pid, record.host_started_at);
     runs.push({
       ...record,
       run_id: shortRunId(runDir),
@@ -363,7 +369,14 @@ export async function reapOrphanedRuns(workspace: string): Promise<TerminationOu
     if (readFileSync(path, "utf8") === before) renameSync(tmp, path);
     else unlinkSync(tmp);
   }
-  const orphans = listRecordedRuns(workspace).filter((run) => run.orphaned);
+  // A host may hand its run to the owner between the record read and the host
+  // probe. A dead host cannot write again, so a record that still names it is
+  // a real orphan.
+  const orphans = listRecordedRuns(workspace).filter((run) => {
+    const current = run.orphaned ? readOwnerRecord(run.run_dir) : undefined;
+    return current?.run_token === run.run_token && current.host_pid === run.host_pid &&
+      current.host_started_at === run.host_started_at;
+  });
   return await Promise.all(
     orphans.map(async (run) => {
       const outcome = await terminateRecordedRun(run);

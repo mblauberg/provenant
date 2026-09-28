@@ -29,16 +29,21 @@ afterEach(() => {
   for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
-function recordRun(hostStartedAt: string | null) {
+function recordRun(hostStartedAt: string | null, selfHosted = false) {
   const workspace = realpathSync(mkdtempSync(join(tmpdir(), "fabric-host-")));
   roots.push(workspace);
   const runDir = join(workspace, ".agent-run", "mcp-host");
   mkdirSync(runDir, { recursive: true });
   writeFileSync(join(runDir, "dispatch-owner.json"), JSON.stringify({
     schema_version: 1, kind: "dispatch", run_dir: runDir, workspace, run_token: "host",
-    owner_pid: process.ppid, owner_pgid: process.ppid, owner_started_at: processStartedAt(process.ppid),
-    host_pid: process.pid, host_started_at: hostStartedAt, started_at: new Date().toISOString(),
+    owner_pid: process.ppid, owner_pgid: process.ppid,
+    owner_started_at: selfHosted ? hostStartedAt : processStartedAt(process.ppid),
+    host_pid: selfHosted ? process.ppid : process.pid, host_started_at: hostStartedAt, started_at: new Date().toISOString(),
     owner_stdout: "", owner_stderr: "",
+  }));
+  if (selfHosted) writeFileSync(join(runDir, "dispatch-provider.json"), JSON.stringify({
+    run_token: "host", provider_pid: process.pid, provider_pgid: process.pid,
+    provider_started_at: processStartedAt(process.pid),
   }));
   return workspace;
 }
@@ -73,4 +78,11 @@ it("still orphans a run whose host identity was never recorded", () => {
   const [row] = listRecordedRuns(workspace);
   expect(row?.running).toBe(true);
   expect(row?.orphaned).toBe(true);
+});
+
+it("keeps a self-hosted run while its owner lives, even without its start time", () => {
+  const workspace = recordRun(null, true);
+  const [row] = listRecordedRuns(workspace);
+  expect(row?.provider).not.toBeNull();
+  expect(row?.orphaned).toBe(false);
 });
