@@ -1074,6 +1074,7 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
     assert '(deny mach-register)' in profile
     assert '(deny signal)' in profile
     assert '(allow signal (target same-sandbox))' in profile
+    assert '(deny user-preference-write)' in profile
     for service in mod.CODEX_BASE_MACH_SERVICES:
         assert f'(global-name "{service}")' in profile
     assert '(allow ipc-sysv-shm ipc-sysv-sem)' in profile
@@ -1185,6 +1186,7 @@ def test_codex_capability_home_is_seeded_and_browser_tmp_is_opt_in(
     (source / "skills").mkdir(parents=True)
     (source / "auth.json").write_text("auth", encoding="utf-8")
     (source / "AGENTS.md").write_text("instructions", encoding="utf-8")
+    (source / "HARNESS.md").write_text("constitution", encoding="utf-8")
     (source / "skills/example").mkdir()
     monkeypatch.setattr(mod.sys, "platform", "darwin")
     monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
@@ -1207,7 +1209,7 @@ def test_codex_capability_home_is_seeded_and_browser_tmp_is_opt_in(
         "TMPDIR": str(attempt / "tmp"),
         "XDG_CACHE_HOME": str(attempt / "tmp/cache"),
     }
-    for name in ("auth.json", "AGENTS.md", "skills"):
+    for name in ("auth.json", "AGENTS.md", "HARNESS.md", "skills"):
         assert (lane_home / name).is_symlink()
         assert (lane_home / name).resolve() == (source / name).resolve()
 

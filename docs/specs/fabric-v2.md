@@ -111,8 +111,8 @@ keeps `applied.sandbox: "workspace-write"` and
 `applied.guarantee: "enforced"`, and runs Codex with its native sandbox
 disabled inside the OS profile. The profile allows Codex's native Mach
 services plus FSEvents, then denies other Mach lookups and registrations,
-denies external signals while allowing same-sandbox signals, and denies System
-V IPC by default. `postgres` adds shared-memory and semaphore IPC. `browser`
+denies external signals while allowing same-sandbox signals, denies
+preference writes through `cfprefsd`, and denies System V IPC by default. `postgres` adds shared-memory and semaphore IPC. `browser`
 adds the macOS browser services and Chrome/Chromium rendezvous Mach lookup and
 registration prefixes; browser lanes set `MAC_CHROMIUM_TMPDIR` to
 `<attempt>/tmp` for Chrome's process-singleton socket. No network rules are added:
@@ -121,7 +121,7 @@ enabled. SBPL `(local ip "localhost:*")` matches every local address, so an inbo
 rule would not establish a loopback limit.
 
 Each task uses one `CODEX_HOME` at `<task directory>/codex-home` for all
-attempts. Existing `auth.json`, `AGENTS.md` and `skills` are symlinked from the
+attempts. Existing `auth.json`, `AGENTS.md`, `HARNESS.md` and `skills` are symlinked from the
 caller's `CODEX_HOME`, or `~/.codex`; the profile grants writes to the task
 home and only the literal source `auth.json`. The Git common directory is
 denied and is not a writable root. Git writes use the private worktree Git

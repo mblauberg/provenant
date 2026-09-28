@@ -340,7 +340,8 @@ def os_confinement_profile(plan):
             profile += _sbpl_rule("allow", "file-write*", [auth_path], literal=True)
             profile += "(deny mach-lookup)\n"
             profile += _sbpl_named_rule("allow", "mach-lookup", CODEX_BASE_MACH_SERVICES)
-            profile += "(deny mach-register)\n(deny signal)\n(allow signal (target same-sandbox))\n(deny ipc-sysv*)\n"
+            profile += ("(deny mach-register)\n(deny signal)\n(allow signal (target same-sandbox))\n"
+                        "(deny ipc-sysv*)\n(deny user-preference-write)\n")
             if "postgres" in capabilities:
                 profile += "(allow " + " ".join(CODEX_POSTGRES_IPC_OPERATIONS) + ")\n"
             if "browser" in capabilities:
@@ -1733,7 +1734,7 @@ def _prepare_codex_capability_home(plan, environment):
     source_home = Path(environment.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
     lane_home = Path(plan["run_dir"]).parent / "codex-home"
     lane_home.mkdir(parents=True, exist_ok=True, mode=0o700)
-    for name in ("auth.json", "AGENTS.md", "skills"):
+    for name in ("auth.json", "AGENTS.md", "HARNESS.md", "skills"):
         source = source_home / name
         target = lane_home / name
         if source.exists() and not target.exists() and not target.is_symlink():

@@ -126,8 +126,8 @@ lists mean no capabilities. These lanes keep the writer's enforced guarantee
 and workspace-write receipt value, while running Codex's own sandbox in
 `danger-full-access` inside the OS profile. The profile allows Codex's native
 Mach services plus FSEvents, denies other Mach lookups and registrations,
-denies signals except to processes in the same sandbox, and denies System V
-IPC by default. `postgres` adds shared-memory and semaphore IPC. `browser`
+denies signals except to processes in the same sandbox, denies preference
+writes through `cfprefsd`, and denies System V IPC by default. `postgres` adds shared-memory and semaphore IPC. `browser`
 adds the macOS browser services and the Chrome/Chromium rendezvous Mach lookup
 and registration prefixes; browser lanes set `MAC_CHROMIUM_TMPDIR` to
 `<attempt>/tmp` for Chrome's process-singleton socket. These capabilities add no
@@ -136,7 +136,7 @@ SBPL's `(local ip "localhost:*")` also matches every local address, so Fabric
 does not claim that an inbound loopback rule limits connections.
 
 Each task keeps one `CODEX_HOME` at `<task directory>/codex-home` across its
-attempts. Existing `auth.json`, `AGENTS.md` and `skills` entries are symlinked
+attempts. Existing `auth.json`, `AGENTS.md`, `HARNESS.md` and `skills` entries are symlinked
 from `CODEX_HOME` supplied by the caller, or `~/.codex`; the profile grants
 writes to the task home and the literal source `auth.json` only. Its Git write
 boundary grants the private worktree Git directory and the common repository's
