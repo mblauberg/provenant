@@ -133,7 +133,8 @@ Fabric recreates the task home links every attempt and fails a symlinked or
 non-directory task home, while allowing the lane to overwrite the literal
 source `auth.json` for token refresh, a file it could already read. That grant
 names the unresolved source path, and a symlinked or non-regular source
-`auth.json` fails the attempt before launch. Chrome must
+`auth.json`, or a source Codex home inside a lane-writable path or reached
+through a symlink, fails the attempt before launch. Chrome must
 use `--no-sandbox` because macOS refuses its nested sandbox. PostgreSQL socket
 paths under lane `TMPDIR` exceed macOS's
 103-byte limit; use TCP or a short socket directory. Attempts set `TMPDIR`,

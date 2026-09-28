@@ -1749,8 +1749,18 @@ def _prepare_codex_capability_home(plan, environment):
     capabilities = plan.get("applied", {}).get("capabilities", [])
     if plan.get("adapter") != "codex" or not capabilities:
         return
-    source_home = Path(environment.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
+    configured_home = Path(os.path.abspath(Path(environment.get("CODEX_HOME") or Path.home() / ".codex").expanduser()))
+    source_home = configured_home.resolve()
     lane_home = Path(plan["run_dir"]).parent / "codex-home"
+    old_auth = plan.get("codex_auth_path")
+    boundary = plan.get("applied", {}).get("write_boundary", {}).get("writable_paths")
+    # A source home the lane can write, or reach through a symlink, could be swapped before the next attempt.
+    if configured_home != source_home:
+        raise PermissionError(f"codex home must not pass through a symlink: {configured_home}")
+    for root in [plan.get("cwd"), *plan.get("applied", {}).get("add_dirs", []), plan["run_dir"],
+                 str(lane_home), *(boundary if isinstance(boundary, list) else [])]:
+        if root and root != old_auth and source_home.is_relative_to(Path(root).expanduser().resolve()):
+            raise PermissionError(f"codex home lies inside a lane-writable path: {source_home}")
     try:
         lane_mode = lane_home.lstat().st_mode
     except FileNotFoundError:
@@ -1776,10 +1786,8 @@ def _prepare_codex_capability_home(plan, environment):
     auth_path = source_home / "auth.json"
     if auth_path.is_symlink() or (auth_path.exists() and not auth_path.is_file()):
         raise PermissionError(f"codex auth store is not a regular file: {auth_path}")
-    old_auth = plan.get("codex_auth_path")
     plan["codex_home"] = str(lane_home)
     plan["codex_auth_path"] = str(auth_path)
-    boundary = plan.get("applied", {}).get("write_boundary", {}).get("writable_paths")
     if isinstance(boundary, list):
         if old_auth in boundary:
             boundary[boundary.index(old_auth)] = str(auth_path)

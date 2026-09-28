@@ -1379,6 +1379,45 @@ def test_codex_capability_symlinked_source_auth_fails_and_never_widens_the_grant
     assert not launched.exists()
 
 
+@pytest.mark.parametrize("placement", ["inside-lane", "symlink-alias"])
+def test_codex_capability_swappable_source_home_fails_before_launch(monkeypatch, tmp_path, placement):
+    mod = supervisor()
+    _, lane = instruction_lane(tmp_path)
+    home = (tmp_path / "real-codex-home").resolve()
+    home.mkdir()
+    (home / "auth.json").write_text("{}", encoding="utf-8")
+    if placement == "inside-lane":
+        source = (lane / "codex-source").resolve()
+        home.rename(source)
+        reason = f"codex home lies inside a lane-writable path: {source}"
+    else:
+        source = lane / "codex-alias"
+        source.symlink_to(home, target_is_directory=True)
+        reason = f"codex home must not pass through a symlink: {source}"
+    attempt = tmp_path / "runs/task/attempt-001"
+    attempt.mkdir(parents=True)
+    launched = tmp_path / "provider-launched"
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    monkeypatch.setenv("CODEX_HOME", str(source))
+    plan = mod.build_plan(
+        "codex", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+        mode="worktree_write", worktree=lane, sandbox="workspace-write", network=True,
+        capabilities=["browser"], run_dir=attempt,
+    )
+    plan["applied"]["confinement"] = "none"
+    plan["argv"] = [
+        sys.executable, "-u", "-c",
+        f"from pathlib import Path; Path({str(launched)!r}).write_text('started')",
+    ]
+
+    record = mod.execute(plan, attempt / "result.md", env={**os.environ, "CODEX_HOME": str(source)})
+
+    assert record["status"] == "failed"
+    assert reason in record["reason"]
+    assert not launched.exists()
+
+
 def test_claude_adapter_receives_attempt_private_claude_tmpdir(tmp_path):
     code = """import json, os
 print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({key: os.environ.get(key) for key in ('TMPDIR','CLAUDE_TMPDIR')})}}))
