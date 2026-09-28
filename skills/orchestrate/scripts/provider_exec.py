@@ -228,6 +228,15 @@ def _sbpl_named_rule(action, operation, names, *, selector="global-name"):
     ) + ")\n" if names else ""
 
 
+def _sbpl_unix_socket_allow(roots):
+    remotes = ['(remote unix-socket (path-literal "/private/var/run/mDNSResponder"))']
+    remotes.extend(
+        "(remote unix-socket (subpath " + _sbpl_string(root) + "))"
+        for root in dict.fromkeys(roots)
+    )
+    return "(allow network-outbound " + " ".join(remotes) + ")\n"
+
+
 def _git_toplevel(path):
     result = subprocess.run(["git", "-C", str(path), "rev-parse", "--show-toplevel"],
                             capture_output=True, text=True, timeout=5)
@@ -336,6 +345,10 @@ def os_confinement_profile(plan):
         if plan.get("adapter") == "codex" and capabilities:
             codex_home = Path(plan["codex_home"])
             auth_path = Path(plan["codex_auth_path"])
+            profile += _sbpl_rule("deny", "file-write*", [cwd / ".git"])
+            if private is not None and private != common:
+                for name in ("config.worktree", "commondir", "gitdir"):
+                    profile += _sbpl_rule("deny", "file-write*", [private / name], literal=True)
             profile += _sbpl_rule("allow", "file-write*", [codex_home])
             profile += _sbpl_rule("allow", "file-write*", [auth_path], literal=True)
             profile += "(deny mach-lookup)\n"
@@ -350,6 +363,10 @@ def os_confinement_profile(plan):
                                             selector="global-name-prefix")
                 profile += _sbpl_named_rule("allow", "mach-register", CODEX_BROWSER_MACH_PORT_PREFIXES,
                                             selector="global-name-prefix")
+            profile += "(deny network-outbound (remote unix-socket))\n"
+            profile += _sbpl_unix_socket_allow(
+                [cwd, *add_dirs, *([run_dir] if run_dir else []), codex_home]
+            )
         profile += _sbpl_rule("deny", "file-write*", plan.get("protected_paths", []))
         profile += _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
         return profile
@@ -1733,14 +1750,28 @@ def _prepare_codex_capability_home(plan, environment):
         return
     source_home = Path(environment.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
     lane_home = Path(plan["run_dir"]).parent / "codex-home"
-    lane_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    try:
+        lane_mode = lane_home.lstat().st_mode
+    except FileNotFoundError:
+        lane_home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    else:
+        if stat.S_ISLNK(lane_mode) or not stat.S_ISDIR(lane_mode):
+            raise NotADirectoryError(f"codex capability home is not a directory: {lane_home}")
     for name in ("auth.json", "AGENTS.md", "HARNESS.md", "skills"):
         source = source_home / name
         target = lane_home / name
-        if source.exists() and not target.exists() and not target.is_symlink():
+        try:
+            target_mode = target.lstat().st_mode
+        except FileNotFoundError:
+            pass
+        else:
+            if stat.S_ISDIR(target_mode):
+                shutil.rmtree(target)
+            else:
+                target.unlink()
+        if source.exists():
             target.symlink_to(source, target_is_directory=source.is_dir())
-    auth_target = lane_home / "auth.json"
-    auth_path = auth_target.resolve() if auth_target.is_symlink() else (source_home / "auth.json").resolve()
+    auth_path = (source_home / "auth.json").resolve()
     old_auth = plan.get("codex_auth_path")
     plan["codex_home"] = str(lane_home)
     plan["codex_auth_path"] = str(auth_path)
@@ -1954,7 +1985,6 @@ def execute(
     private_cache.mkdir(parents=True, exist_ok=True)
     environment.update(TMPDIR=str(private_tmp), TMP=str(private_tmp), TEMP=str(private_tmp),
                        XDG_CACHE_HOME=str(private_cache))
-    _prepare_codex_capability_home(plan, environment)
     if plan["adapter"] == "claude":
         private_claude_tmp = private_tmp / "claude"
         private_claude_tmp.mkdir(parents=True, exist_ok=True)
@@ -2094,6 +2124,7 @@ def execute(
     workspace = None
     selector = selectors.DefaultSelector()
     try:
+        _prepare_codex_capability_home(plan, environment)
         if plan["stdin_policy"] == "prompt":
             input_file = tempfile.TemporaryFile(dir=private_tmp)
             input_file.write(plan["prompt"].encode())

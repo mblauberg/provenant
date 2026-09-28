@@ -115,10 +115,11 @@ denies external signals while allowing same-sandbox signals, denies
 preference writes through `cfprefsd`, and denies System V IPC by default. `postgres` adds shared-memory and semaphore IPC. `browser`
 adds the macOS browser services and Chrome/Chromium rendezvous Mach lookup and
 registration prefixes; browser lanes set `MAC_CHROMIUM_TMPDIR` to
-`<attempt>/tmp` for Chrome's process-singleton socket. No network rules are added:
-these capabilities add no network access beyond a Codex writer with network
-enabled. SBPL `(local ip "localhost:*")` matches every local address, so an inbound loopback
-rule would not establish a loopback limit.
+`<attempt>/tmp` for Chrome's process-singleton socket. These capabilities add no
+network access beyond a Codex writer with network enabled; Unix-domain socket
+connects are limited to `cwd`, declared `add_dirs`, the attempt directory, task
+Codex home and mDNSResponder. SBPL `(local ip "localhost:*")` matches every
+local address, so an inbound loopback rule would not establish a loopback limit.
 
 Each task uses one `CODEX_HOME` at `<task directory>/codex-home` for all
 attempts. Existing `auth.json`, `AGENTS.md`, `HARNESS.md` and `skills` are symlinked from the
@@ -126,8 +127,13 @@ caller's `CODEX_HOME`, or `~/.codex`; the profile grants writes to the task
 home and only the literal source `auth.json`. The Git common directory is
 denied and is not a writable root. Git writes use the private worktree Git
 directory plus the narrow common `objects`, `refs`, `logs`, `packed-refs` and
-`packed-refs.lock` paths. Chrome must use `--no-sandbox` because macOS refuses
-its nested sandbox. PostgreSQL socket paths under lane `TMPDIR` exceed macOS's
+`packed-refs.lock` paths. The worktree `.git` marker and private Git
+directory's `config.worktree`, `commondir` and `gitdir` are not writable;
+Fabric recreates the task home links every attempt and fails a symlinked or
+non-directory task home, while allowing the lane to overwrite the literal
+source `auth.json` for token refresh, a file it could already read. Chrome must
+use `--no-sandbox` because macOS refuses its nested sandbox. PostgreSQL socket
+paths under lane `TMPDIR` exceed macOS's
 103-byte limit; use TCP or a short socket directory. Attempts set `TMPDIR`,
 `TMP` and `TEMP` to `<attempt>/tmp` and `XDG_CACHE_HOME` to `<attempt>/tmp/cache`.
 

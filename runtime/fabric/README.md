@@ -131,7 +131,9 @@ writes through `cfprefsd`, and denies System V IPC by default. `postgres` adds s
 adds the macOS browser services and the Chrome/Chromium rendezvous Mach lookup
 and registration prefixes; browser lanes set `MAC_CHROMIUM_TMPDIR` to
 `<attempt>/tmp` for Chrome's process-singleton socket. These capabilities add no
-network rules or network access beyond a Codex writer whose network is enabled.
+network access beyond a Codex writer whose network is enabled; Unix-domain
+socket connects are limited to `cwd`, declared `add_dirs`, the attempt
+directory, task Codex home and mDNSResponder.
 SBPL's `(local ip "localhost:*")` also matches every local address, so Fabric
 does not claim that an inbound loopback rule limits connections.
 
@@ -142,6 +144,11 @@ writes to the task home and the literal source `auth.json` only. Its Git write
 boundary grants the private worktree Git directory and the common repository's
 `objects`, `refs`, `logs`, `packed-refs` and `packed-refs.lock` paths. The Git
 common directory itself is denied and is never added as a writable root.
+The worktree `.git` marker and private Git directory's `config.worktree`,
+`commondir` and `gitdir` are not writable; Fabric recreates the task home links
+every attempt and fails a symlinked or non-directory task home, while allowing
+the lane to overwrite the literal source `auth.json` for token refresh, a file
+it could already read.
 
 Use Chrome with `--no-sandbox`, because macOS refuses Chrome's nested sandbox
 inside `sandbox-exec`. PostgreSQL socket paths under the lane's `TMPDIR` exceed

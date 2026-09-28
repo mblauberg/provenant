@@ -5,9 +5,11 @@ import json
 import os
 from pathlib import Path
 import signal
+import socket
 import subprocess
 import ctypes
 import sys
+import tempfile
 import time
 from types import SimpleNamespace
 
@@ -1060,6 +1062,14 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
                           capabilities=["postgres"], run_dir=attempt)
     profile = mod.os_confinement_profile(plan)
 
+    assert '(deny network-outbound (remote unix-socket))' in profile
+    socket_roots = [lane, *plan["applied"]["add_dirs"], attempt, plan["codex_home"]]
+    expected_socket_allow = "(allow network-outbound " + " ".join(
+        ['(remote unix-socket (path-literal "/private/var/run/mDNSResponder"))']
+        + [f'(remote unix-socket (subpath "{Path(root).resolve()}"))' for root in socket_roots]
+    ) + ")"
+    assert expected_socket_allow in profile
+
     assert f'(deny file-write* (subpath "{common}")' in profile
     for path in (common / "objects", common / "refs", common / "logs"):
         assert f'(subpath "{path}")' in profile
@@ -1082,6 +1092,21 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
     private = Path(git(lane, "rev-parse", "--path-format=absolute", "--absolute-git-dir").strip())
     assert str(private) in plan["applied"]["write_boundary"]["writable_paths"]
     assert f'(allow file-write* (subpath "{private}")' in profile
+    assert f'(deny file-write* (subpath "{lane / ".git"}"))' in profile
+    for name in ("config.worktree", "commondir", "gitdir"):
+        assert f'(deny file-write* (literal "{private / name}"))' in profile
+
+    for adapter in ("codex", "claude"):
+        without_capabilities = mod.build_plan(
+            adapter, {}, "hello", workspace_root=tmp_path, mode="worktree_write",
+            worktree=lane, sandbox="workspace-write", network=True, run_dir=attempt,
+        )
+        other_profile = mod.os_confinement_profile(without_capabilities)
+        assert "(remote unix-socket" not in other_profile
+        assert f'(deny file-write* (subpath "{lane / ".git"}"))' not in other_profile
+        for name in ("config.worktree", "commondir", "gitdir"):
+            assert f'(deny file-write* (literal "{private / name}"))' not in other_profile
+
     protected = tmp_path / "protected"
     plan["protected_paths"] = [str(protected)]
     protected_profile = mod.os_confinement_profile(plan)
@@ -1143,34 +1168,68 @@ def test_codex_writer_argv_preserves_default_and_capability_sandboxes(monkeypatc
                     reason="needs macOS sandbox-exec")
 def test_codex_capability_profile_enforces_git_and_signal_limits(monkeypatch, tmp_path):
     mod = supervisor()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
     _, lane = instruction_lane(tmp_path)
     home = (tmp_path / "source-codex-home").resolve()
     home.mkdir()
     (home / "auth.json").write_text("token", encoding="utf-8")
     monkeypatch.setenv("CODEX_HOME", str(home))
-    attempt = tmp_path / "runs/task/attempt-001"
-    plan = mod.build_plan("codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
-                          worktree=lane, sandbox="workspace-write", network=True,
-                          capabilities=["postgres"], run_dir=attempt)
     common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
-    script = f"""
+    private = Path(git(lane, "rev-parse", "--path-format=absolute", "--absolute-git-dir").strip())
+
+    with tempfile.TemporaryDirectory(dir="/tmp") as outside_root, tempfile.TemporaryDirectory(dir="/tmp") as run_root:
+        run_dir = Path(run_root) / "a"
+        run_dir.mkdir()
+        outside_socket = Path(outside_root) / "o"
+        inside_socket = run_dir / "i"
+        assert len(os.fsencode(outside_socket)) < 104
+        assert len(os.fsencode(inside_socket)) < 104
+        with (socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as outside_listener,
+              socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as inside_listener):
+            outside_listener.bind(str(outside_socket))
+            outside_listener.listen(1)
+            inside_listener.bind(str(inside_socket))
+            inside_listener.listen(1)
+            plan = mod.build_plan(
+                "codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
+                worktree=lane, sandbox="workspace-write", network=True,
+                capabilities=["postgres"], run_dir=run_dir,
+            )
+            script = f"""
 import os
+import socket
 def attempt(action):
     try:
         action()
         return "ok"
     except OSError as exc:
         return exc.__class__.__name__
+def connect(path):
+    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        client.connect(path)
+    finally:
+        client.close()
 print(attempt(lambda: open({str(lane / "note.txt")!r}, "w").write("x")))
+print(attempt(lambda: open({str(lane / ".git")!r}, "a").write("")))
+print(attempt(lambda: open({str(private / "config.worktree")!r}, "a").write("")))
+print(attempt(lambda: open({str(private / "commondir")!r}, "a").write("")))
+print(attempt(lambda: open({str(private / "index.probe")!r}, "w").write("probe")))
 print(attempt(lambda: open({str(common / "config")!r}, "a").write("")))
 print(attempt(lambda: open({str(common / "hooks" / "pre-commit")!r}, "w").write("")))
 print(attempt(lambda: os.kill({os.getpid()}, 0)))
+print(attempt(lambda: connect({str(outside_socket)!r})))
+print(attempt(lambda: connect({str(inside_socket)!r})))
 """
-    result = subprocess.run(["/usr/bin/sandbox-exec", "-p", mod.os_confinement_profile(plan),
-                             sys.executable, "-c", script], capture_output=True, text=True)
-    if result.returncode and "sandbox_apply" in result.stderr:
-        pytest.skip("sandbox_apply is refused in this test environment")
-    assert result.stdout.split() == ["ok", "PermissionError", "PermissionError", "PermissionError"]
+            result = subprocess.run(["/usr/bin/sandbox-exec", "-p", mod.os_confinement_profile(plan),
+                                     sys.executable, "-c", script], capture_output=True, text=True)
+            if result.returncode and "sandbox_apply" in result.stderr:
+                pytest.skip("sandbox_apply is refused in this test environment")
+            assert result.stdout.split() == [
+                "ok", "PermissionError", "PermissionError", "PermissionError", "ok",
+                "PermissionError", "PermissionError", "PermissionError", "PermissionError", "ok",
+            ], result.stderr
+            assert (private / "index.probe").read_text(encoding="utf-8") == "probe"
 
 
 @pytest.mark.parametrize(("capabilities", "browser_tmp"), [(["postgres"], None), (["browser"], "tmp")])
@@ -1222,16 +1281,65 @@ def test_codex_capability_home_is_seeded_and_browser_tmp_is_opt_in(
     )
     another_source = tmp_path / "another-codex-home"
     another_source.mkdir()
-    (another_source / "auth.json").write_text("new auth", encoding="utf-8")
-    resumed_environment = {"CODEX_HOME": str(another_source)}
+    other_auth = another_source / "auth.json"
+    other_auth.write_text("untrusted auth", encoding="utf-8")
+    (lane_home / "auth.json").unlink()
+    (lane_home / "auth.json").symlink_to(other_auth)
+    (lane_home / "AGENTS.md").unlink()
+    (lane_home / "AGENTS.md").write_text("lane-controlled instructions", encoding="utf-8")
+    resumed_environment = {"CODEX_HOME": str(source)}
     mod._prepare_codex_capability_home(resumed_plan, resumed_environment)
     assert resumed_environment["CODEX_HOME"] == str(lane_home)
     auth_path = (source / "auth.json").resolve()
     assert (lane_home / "auth.json").resolve() == auth_path
+    assert (lane_home / "AGENTS.md").is_symlink()
+    assert (lane_home / "AGENTS.md").resolve() == (source / "AGENTS.md").resolve()
     assert resumed_plan["codex_auth_path"] == str(auth_path)
     resumed_profile = mod.os_confinement_profile(resumed_plan)
     assert f'(literal "{auth_path}")' in resumed_profile
-    assert str(another_source / "auth.json") not in resumed_profile
+    untrusted_paths = {str(other_auth), str(other_auth.resolve())}
+    assert not (untrusted_paths & {resumed_plan["codex_auth_path"]})
+    assert not any(path in str(resumed_plan["applied"]["write_boundary"]) for path in untrusted_paths)
+    assert not any(path in resumed_profile for path in untrusted_paths)
+
+
+def test_codex_capability_home_symlink_fails_before_provider_launch(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, lane = instruction_lane(tmp_path)
+    source = tmp_path / "source-codex-home"
+    source.mkdir()
+    (source / "auth.json").write_text("auth", encoding="utf-8")
+    task = tmp_path / "runs/task"
+    attempt = task / "attempt-001"
+    attempt.mkdir(parents=True)
+    outside_home = tmp_path / "outside-codex-home"
+    outside_home.mkdir()
+    lane_home = task / "codex-home"
+    lane_home.symlink_to(outside_home, target_is_directory=True)
+    launched = tmp_path / "provider-launched"
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    monkeypatch.setenv("CODEX_HOME", str(source))
+    plan = mod.build_plan(
+        "codex", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+        mode="worktree_write", worktree=lane, sandbox="workspace-write", network=True,
+        capabilities=["postgres"], run_dir=attempt,
+    )
+    plan["applied"]["confinement"] = "none"
+    plan["argv"] = [
+        sys.executable, "-u", "-c",
+        "from pathlib import Path; import json; "
+        f"Path({str(launched)!r}).write_text('started'); "
+        "print(json.dumps({'type':'result','result':'started'}))",
+    ]
+
+    record = mod.execute(plan, attempt / "result.md", env={**os.environ, "CODEX_HOME": str(source)})
+
+    expected_error = f"codex capability home is not a directory: {lane_home}"
+    assert record["status"] == "failed"
+    assert expected_error in record["reason"]
+    assert expected_error in record["evidence"]["excerpt"]
+    assert not launched.exists()
 
 
 def test_claude_adapter_receives_attempt_private_claude_tmpdir(tmp_path):
