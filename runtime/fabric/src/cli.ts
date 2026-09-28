@@ -14,7 +14,9 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { databasePath, identify, withoutGitRedirects } from "./identity.js";
-import { dispatchConfiguredBatch, dispatchConfiguredProvider, type BatchInput, type DispatchInput } from "./execution.js";
+import {
+  dispatchConfiguredBatch, dispatchConfiguredProvider, hostOwnersInThemselves, type BatchInput, type DispatchInput,
+} from "./execution.js";
 import type { RouteInput } from "./execution-input.js";
 import {
   statusRows, fabricStatus, findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
@@ -288,6 +290,8 @@ if (command === "dispatch") {
       ...(read("cwd") === undefined ? {} : { cwd: read("cwd") }),
     };
     const tasksFile = read("tasks");
+    // This process exits once the wait ends; the run must not depend on it.
+    hostOwnersInThemselves();
     let result: Record<string, unknown>;
     if (tasksFile !== undefined) {
       if (["prompt-file", "id"].some((key) => read(key) !== undefined))

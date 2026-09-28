@@ -48,10 +48,18 @@ Without an MCP connection, `provenant fabric dispatch --adapter A --model M
 --effort E --mode read_only|worktree_write --prompt-file F [--wait]` uses the
 same dispatcher. Add `--worktree P`, `--cwd P` or `--id ID` as needed. Use
 `--tasks F` for a JSON object with `tasks[]` and shared route fields. It prints
-the Fabric run id and status; detached owners remain discoverable after the CLI
-or MCP host exits.
-Batch owners are detached session leaders and survive MCP-host restart; a fresh
-`dispatch list` and `status <run-dir>` resolve them from their run records.
+the Fabric run id and status. `--wait` waits up to 55 seconds; `lanes --wait`
+waits for the finish.
+
+Owners are detached session leaders and outlive the CLI and MCP host. A
+CLI-started owner is recorded as its own host. An MCP host that closes or is
+signalled hands its runs to their owners rather than cancelling them. A fresh
+`dispatch list` and `status <run-dir>` resolve these runs from their records.
+Only a live host sends the inbox notice when a run finishes; `fabric_events` and
+`lanes --wait` report every run.
+The next dispatch reaps a run only when its host is gone and its owner or
+provider still runs: an owner that exited and left its provider behind, or a
+run whose MCP host was killed with SIGKILL.
 
 Fourteen tools are registered by default:
 

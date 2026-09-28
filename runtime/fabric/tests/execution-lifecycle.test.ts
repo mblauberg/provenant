@@ -9,6 +9,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
@@ -922,6 +924,95 @@ describe("orphan reaping", () => {
     expect(next.status).toBe("ok");
     await waitFor(() => !alive(providerPid), "an ordinary dispatch did not reap the orphan");
   }, 40_000);
+
+  it("keeps a CLI-dispatched run alive when a later dispatch reaps orphans", async () => {
+    const promptPath = join(temporaryDirectory, "cli-sleep.md");
+    writeFileSync(promptPath, "sleep with provider");
+    const output = execFileSync(process.execPath, ["--import", tsxLoader, join(packageRoot, "src", "cli.ts"),
+      "dispatch", "--adapter", "codex", "--prompt-file", promptPath, "--id", "cli-sleep"], {
+      cwd: workspace,
+      encoding: "utf8",
+      env: ownerEnvironment,
+    });
+    const runId = output.trim().split(/\s+/u)[0];
+    const run = listRecordedRuns(workspace).find((recorded) => recorded.run_id === runId);
+    expect(run, output).toBeDefined();
+    spawnedPids.push(run!.owner_pid);
+    const providerPid = await waitForPid(join(run!.run_dir, "provider.pid"));
+    // The CLI has exited; the owner is its own host.
+    expect(run).toMatchObject({ host_pid: run!.owner_pid, running: true, orphaned: false });
+
+    const next = await dispatchConfiguredProvider(
+      { adapter: "codex", prompt: "ordinary run", wait_seconds: 5 },
+      identity,
+      new AbortController().signal,
+      ownerEnvironment,
+    );
+    expect(next.status).toBe("ok");
+    await delay(100);
+    expect(alive(run!.owner_pid)).toBe(true);
+    expect(alive(providerPid)).toBe(true);
+    expect(await fabricStatus(workspace, runId!)).toMatchObject({ status: "running" });
+  }, 40_000);
+
+  it("reaps a CLI-dispatched provider once its owner exits", async () => {
+    const promptPath = join(temporaryDirectory, "cli-exit.md");
+    writeFileSync(promptPath, "exit with provider");
+    const output = execFileSync(process.execPath, ["--import", tsxLoader, join(packageRoot, "src", "cli.ts"),
+      "dispatch", "--adapter", "codex", "--prompt-file", promptPath, "--id", "cli-exit"], {
+      cwd: workspace,
+      encoding: "utf8",
+      env: ownerEnvironment,
+    });
+    const runId = output.trim().split(/\s+/u)[0];
+    const run = listRecordedRuns(workspace).find((recorded) => recorded.run_id === runId);
+    expect(run, output).toBeDefined();
+    const providerPid = await waitForPid(join(run!.run_dir, "provider.pid"));
+    await waitFor(() => !alive(run!.owner_pid), "the owner never exited");
+    expect(alive(providerPid)).toBe(true);
+
+    const reaped = await reapOrphanedRuns(workspace);
+    expect(reaped).toHaveLength(1);
+    await waitFor(() => !alive(providerPid), "the provider outlived its self-hosted owner");
+  }, 40_000);
+
+  for (const shutdown of ["close", "SIGTERM"] as const) {
+    it(`hands a run to its owner when the MCP host shuts down by ${shutdown}`, async () => {
+      const transport = new StdioClientTransport({
+        command: process.execPath,
+        args: ["--import", tsxLoader, join(packageRoot, "src", "server.ts")],
+        cwd: workspace,
+        stderr: "ignore",
+        env: { ...ownerEnvironment, NODE_NO_WARNINGS: "1" } as Record<string, string>,
+      });
+      const client = new Client({ name: "host-restart-test", version: "1" });
+      await client.connect(transport);
+      const hostPid = transport.pid!;
+      spawnedPids.push(hostPid);
+      await client.callTool({
+        name: "fabric_dispatch",
+        arguments: { adapter: "codex", prompt: "sleep with provider", task_id: "restart-task", wait_seconds: 0 },
+      });
+      await waitFor(() => listRecordedRuns(workspace).length === 1, "the host never recorded its run");
+      const [started] = listRecordedRuns(workspace);
+      spawnedPids.push(started!.owner_pid);
+      expect(started!.host_pid).toBe(hostPid);
+      const providerPid = await waitForPid(join(started!.run_dir, "provider.pid"));
+
+      if (shutdown === "close") await client.close();
+      else process.kill(hostPid, "SIGTERM");
+      await waitFor(() => !alive(hostPid), "the MCP host never exited");
+
+      await expect(reapOrphanedRuns(workspace)).resolves.toStrictEqual([]);
+      await delay(100);
+      expect(alive(started!.owner_pid)).toBe(true);
+      expect(alive(providerPid)).toBe(true);
+      expect(listRecordedRuns(workspace)).toMatchObject([
+        { host_pid: started!.owner_pid, running: true, orphaned: false },
+      ]);
+      if (shutdown === "SIGTERM") await client.close();
+    }, 40_000);
+  }
 
   it("never reaps a run whose host is still alive", async () => {
     const started = await startSleepingRun("sleep with provider");
