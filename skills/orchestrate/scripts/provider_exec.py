@@ -182,6 +182,8 @@ def validate_capabilities(value, *, adapter, mode, sandbox, network):
     capabilities = capability_values(value)
     if not capabilities:
         return capabilities
+    if network is None and adapter == "codex":
+        network = os.environ.get("CF_DISPATCH_CODEX_NETWORK", "1") == "1"
     checks = (
         (adapter == "codex", "capabilities_adapter_invalid", "Pass capabilities only with adapter=codex."),
         (mode == "worktree_write", "capabilities_mode_invalid", "Pass capabilities only with mode=worktree_write."),
@@ -445,6 +447,7 @@ def build_plan(
         raise ValueError("invalid sandbox")
     if network is not None and type(network) is not bool:
         raise ValueError("network must be a boolean")
+    warnings = list(route.get("notes") or []) + list(route.get("warnings") or [])
     applied_network = network
     if adapter == "codex":
         applied_network = (
@@ -453,8 +456,10 @@ def build_plan(
             else network
         )
     elif network is not None:
+        warnings.append("network control unsupported by " + adapter)
         applied_network = None
     if adapter == "codex" and sandbox == "full" and applied_network is False:
+        warnings.append("network denial is unsupported with the full sandbox")
         applied_network = None
     capabilities = validate_capabilities(
         capabilities, adapter=adapter, mode=mode, sandbox=sandbox, network=applied_network,
@@ -463,7 +468,6 @@ def build_plan(
         str((candidate if candidate.is_absolute() else Path(workspace_root) / candidate).resolve())
         for candidate in (Path(p).expanduser() for p in add_dirs)
     ))
-    warnings = list(route.get("notes") or []) + list(route.get("warnings") or [])
     safe_directories = []
     for directory in directories:
         if credential_path(directory) or Path.home().resolve().is_relative_to(Path(directory)):
@@ -587,19 +591,6 @@ def build_plan(
         write_boundary = {"kind": "provider-native", "sandbox": sandbox}
     else:
         write_boundary = {"kind": "none", "writable_paths": None}
-    applied_network = network
-    if adapter == "codex":
-        applied_network = (
-            os.environ.get("CF_DISPATCH_CODEX_NETWORK", "1") == "1"
-            if network is None
-            else network
-        )
-    elif network is not None:
-        warnings.append("network control unsupported by " + adapter)
-        applied_network = None
-    if adapter == "codex" and sandbox == "full" and applied_network is False:
-        warnings.append("network denial is unsupported with the full sandbox")
-        applied_network = None
     applied_sandbox = (
         sandbox
         if adapter == "codex"

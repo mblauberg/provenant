@@ -1253,14 +1253,9 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                         sandbox = task.get("sandbox") or (
                             "workspace-write" if mode == "worktree_write" else "read-only"
                         )
-                        applied_network = task.get("network")
-                        if adapter == "codex" and applied_network is None:
-                            applied_network = os.environ.get("CF_DISPATCH_CODEX_NETWORK", "1") == "1"
-                        if adapter == "codex" and sandbox == "full" and applied_network is False:
-                            applied_network = None
                         provider_exec.validate_capabilities(
                             capabilities, adapter=adapter, mode=mode, sandbox=sandbox,
-                            network=applied_network,
+                            network=task.get("network"),
                         )
                     except provider_exec.CapabilityError as exc:
                         raise PreflightError(exc.code, str(exc)) from exc
@@ -1668,10 +1663,6 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             "workspace-write" if args.access_mode == "worktree_write" else "read-only"
         )
         network = None if args.network is None else args.network == "true"
-        if args.tool == "codex" and network is None:
-            network = os.environ.get("CF_DISPATCH_CODEX_NETWORK", "1") == "1"
-        if args.tool == "codex" and sandbox == "full" and network is False:
-            network = None
         args.capabilities = provider_exec.validate_capabilities(
             args.capabilities or [], adapter=args.tool, mode=args.access_mode,
             sandbox=sandbox, network=network,

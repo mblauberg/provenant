@@ -1132,8 +1132,44 @@ def test_codex_writer_argv_preserves_default_and_capability_sandboxes(monkeypatc
                                (resumed, ["-c", 'sandbox_mode="danger-full-access"'])):
         argv = plan["argv"]
         assert any(argv[index:index + 2] == sandbox_pair for index in range(len(argv) - 1))
-        assert "--cd" in argv and argv[argv.index("--cd") + 1] == str(lane)
         assert not any("sandbox_workspace_write." in value for value in argv)
+    assert fresh["argv"][fresh["argv"].index("--cd") + 1] == str(lane)
+    # codex exec resume rejects --cd; the owner starts it in the worktree.
+    assert "--cd" not in resumed["argv"]
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").exists(),
+                    reason="needs macOS sandbox-exec")
+def test_codex_capability_profile_enforces_git_and_signal_limits(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, lane = instruction_lane(tmp_path)
+    home = (tmp_path / "source-codex-home").resolve()
+    home.mkdir()
+    (home / "auth.json").write_text("token", encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    attempt = tmp_path / "runs/task/attempt-001"
+    plan = mod.build_plan("codex", {}, "hello", workspace_root=tmp_path, mode="worktree_write",
+                          worktree=lane, sandbox="workspace-write", network=True,
+                          capabilities=["postgres"], run_dir=attempt)
+    common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+    script = f"""
+import os
+def attempt(action):
+    try:
+        action()
+        return "ok"
+    except OSError as exc:
+        return exc.__class__.__name__
+print(attempt(lambda: open({str(lane / "note.txt")!r}, "w").write("x")))
+print(attempt(lambda: open({str(common / "config")!r}, "a").write("")))
+print(attempt(lambda: open({str(common / "hooks" / "pre-commit")!r}, "w").write("")))
+print(attempt(lambda: os.kill({os.getpid()}, 0)))
+"""
+    result = subprocess.run(["/usr/bin/sandbox-exec", "-p", mod.os_confinement_profile(plan),
+                             sys.executable, "-c", script], capture_output=True, text=True)
+    if result.returncode and "sandbox_apply" in result.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert result.stdout.split() == ["ok", "PermissionError", "PermissionError", "PermissionError"]
 
 
 @pytest.mark.parametrize(("capabilities", "browser_tmp"), [(["postgres"], None), (["browser"], "tmp")])

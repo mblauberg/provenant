@@ -67,8 +67,8 @@ def argv(p):
     if not p["resume_session"]:
         for directory in p["applied"]["add_dirs"]:
             command += ["--add-dir", directory]
-    if p["worktree"] and (not p["resume_session"] or capabilities):
-        command += ["--cd", p["worktree"]]
+        if p["worktree"]:
+            command += ["--cd", p["worktree"]]
     route = p["route"]
     if route.get("endpoint_base_url") and route.get("endpoint_token_env"):
         for key, value in [
