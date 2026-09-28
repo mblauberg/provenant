@@ -48,7 +48,6 @@ import {
   pruneDispatchRuns,
   reapOrphanedRuns,
   readProviderRecord,
-  signalRunGroup,
   terminateRecordedRun,
   writeOwnerRecord,
   type OwnerRecord,
@@ -84,6 +83,22 @@ interface CancelSpec {
 
 const activeOwners = new Set<StartedOwner>();
 
+/**
+ * Whether new owners are recorded as their own host. The reaper stops a run
+ * whose host is gone, so a caller that exits before its runs finish, such as
+ * the CLI, must not be the host their liveness depends on.
+ */
+let ownersHostThemselves = false;
+
+export function hostOwnersInThemselves(): void {
+  ownersHostThemselves = true;
+}
+
+/** A self-hosted run is orphaned only once its owner is gone. */
+function selfHosted(record: OwnerRecord): OwnerRecord {
+  return { ...record, host_pid: record.owner_pid, host_started_at: record.owner_started_at };
+}
+
 /** Await bounded owner cancellation before releasing the host. */
 export async function cancelActiveExecutions(): Promise<void> {
   await Promise.allSettled(
@@ -93,13 +108,26 @@ export async function cancelActiveExecutions(): Promise<void> {
   );
 }
 
-/** Synchronous signal path when the host cannot await teardown. */
-export function terminateActiveExecutionGroups(): void {
+/**
+ * Hand every run this host started to its own owner, so the runs outlive a
+ * host restart. The owner is a detached session leader that publishes its own
+ * evidence; status, events and cancel already read it from the run records.
+ * Synchronous, because a signalled host may not survive an await.
+ */
+export function releaseActiveExecutions(): void {
   for (const started of activeOwners) {
     const record = started.record;
-    if (record === undefined) continue;
-    signalRunGroup(record.owner_pid, record.owner_pgid, record.owner_started_at, "SIGTERM");
+    // A run already closed has no record to rewrite; writing one would revive it.
+    if (record !== undefined && readOwnerRecord(record.run_dir)?.run_token === record.run_token) {
+      try {
+        writeOwnerRecord(selfHosted(record));
+      } catch {
+        /* An unwritable record leaves the run to the reaper, as before. */
+      }
+    }
+    started.child.unref();
   }
+  activeOwners.clear();
 }
 
 function canonical(path: string): string {
@@ -400,7 +428,7 @@ export function startOwner(
   };
   const pid = child.pid;
   if (pid !== undefined) {
-    const record: OwnerRecord = {
+    const hosted: OwnerRecord = {
       schema_version: 1,
       kind: identification.kind,
       run_dir: runDir,
@@ -420,6 +448,7 @@ export function startOwner(
         ? { task_id: identification.identifier, ...(identification.batchId ? { batch_id: identification.batchId } : {}) }
         : { batch_id: identification.identifier }),
     };
+    const record = ownersHostThemselves ? selfHosted(hosted) : hosted;
     started.record = record;
     try {
       writeOwnerRecord(record);
