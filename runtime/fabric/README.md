@@ -148,7 +148,8 @@ The worktree `.git` marker and private Git directory's `config.worktree`,
 `commondir` and `gitdir` are not writable; Fabric recreates the task home links
 every attempt and fails a symlinked or non-directory task home, while allowing
 the lane to overwrite the literal source `auth.json` for token refresh, a file
-it could already read.
+it could already read. That grant names the unresolved source path, and a
+symlinked or non-regular source `auth.json` fails the attempt before launch.
 
 Use Chrome with `--no-sandbox`, because macOS refuses Chrome's nested sandbox
 inside `sandbox-exec`. PostgreSQL socket paths under the lane's `TMPDIR` exceed

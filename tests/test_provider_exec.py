@@ -1217,6 +1217,7 @@ print(attempt(lambda: open({str(private / "commondir")!r}, "a").write("")))
 print(attempt(lambda: open({str(private / "index.probe")!r}, "w").write("probe")))
 print(attempt(lambda: open({str(common / "config")!r}, "a").write("")))
 print(attempt(lambda: open({str(common / "hooks" / "pre-commit")!r}, "w").write("")))
+print(attempt(lambda: os.link({str(common / "config")!r}, {str(lane / "config-link")!r})))
 print(attempt(lambda: os.kill({os.getpid()}, 0)))
 print(attempt(lambda: connect({str(outside_socket)!r})))
 print(attempt(lambda: connect({str(inside_socket)!r})))
@@ -1227,8 +1228,10 @@ print(attempt(lambda: connect({str(inside_socket)!r})))
                 pytest.skip("sandbox_apply is refused in this test environment")
             assert result.stdout.split() == [
                 "ok", "PermissionError", "PermissionError", "PermissionError", "ok",
-                "PermissionError", "PermissionError", "PermissionError", "PermissionError", "ok",
+                "PermissionError", "PermissionError", "PermissionError", "PermissionError",
+                "PermissionError", "ok",
             ], result.stderr
+            assert not (lane / "config-link").exists()
             assert (private / "index.probe").read_text(encoding="utf-8") == "probe"
 
 
@@ -1339,6 +1342,40 @@ def test_codex_capability_home_symlink_fails_before_provider_launch(monkeypatch,
     assert record["status"] == "failed"
     assert expected_error in record["reason"]
     assert expected_error in record["evidence"]["excerpt"]
+    assert not launched.exists()
+
+
+def test_codex_capability_symlinked_source_auth_fails_and_never_widens_the_grant(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, lane = instruction_lane(tmp_path)
+    source = (tmp_path / "source-codex-home").resolve()
+    source.mkdir()
+    (source / "config.toml").write_text("model = 'x'", encoding="utf-8")
+    (source / "auth.json").symlink_to(source / "config.toml")
+    attempt = tmp_path / "runs/task/attempt-001"
+    attempt.mkdir(parents=True)
+    launched = tmp_path / "provider-launched"
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    monkeypatch.setenv("CODEX_HOME", str(source))
+    plan = mod.build_plan(
+        "codex", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+        mode="worktree_write", worktree=lane, sandbox="workspace-write", network=True,
+        capabilities=["postgres"], run_dir=attempt,
+    )
+    profile = mod.os_confinement_profile(plan)
+    assert f'(literal "{source / "auth.json"}")' in profile
+    assert str(source / "config.toml") not in profile
+    plan["applied"]["confinement"] = "none"
+    plan["argv"] = [
+        sys.executable, "-u", "-c",
+        f"from pathlib import Path; Path({str(launched)!r}).write_text('started')",
+    ]
+
+    record = mod.execute(plan, attempt / "result.md", env={**os.environ, "CODEX_HOME": str(source)})
+
+    assert record["status"] == "failed"
+    assert f"codex auth store is not a regular file: {source / 'auth.json'}" in record["reason"]
     assert not launched.exists()
 
 

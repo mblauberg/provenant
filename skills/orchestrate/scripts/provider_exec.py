@@ -350,7 +350,8 @@ def os_confinement_profile(plan):
                 for name in ("config.worktree", "commondir", "gitdir"):
                     profile += _sbpl_rule("deny", "file-write*", [private / name], literal=True)
             profile += _sbpl_rule("allow", "file-write*", [codex_home])
-            profile += _sbpl_rule("allow", "file-write*", [auth_path], literal=True)
+            # Quote without resolving: a symlink planted at the auth path must not move the grant.
+            profile += f"(allow file-write* (literal {_sbpl_quote(auth_path)}))\n"
             profile += "(deny mach-lookup)\n"
             profile += _sbpl_named_rule("allow", "mach-lookup", CODEX_BASE_MACH_SERVICES)
             profile += ("(deny mach-register)\n(deny signal)\n(allow signal (target same-sandbox))\n"
@@ -593,7 +594,7 @@ def build_plan(
     codex_auth_path = None
     if capabilities:
         source_codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
-        codex_auth_path = (source_codex_home / "auth.json").resolve()
+        codex_auth_path = source_codex_home / "auth.json"
     if confinement == "sandbox-exec":
         writable_paths = [str(attempt_dir), *(str(Path.home() / path) for path in
                            CONFINED_STATE.get(adapter, {}).get("read_write", ())), "/dev"]
@@ -1771,7 +1772,10 @@ def _prepare_codex_capability_home(plan, environment):
                 target.unlink()
         if source.exists():
             target.symlink_to(source, target_is_directory=source.is_dir())
-    auth_path = (source_home / "auth.json").resolve()
+    # The lane may write this one file, so a symlink planted there must not redirect the grant.
+    auth_path = source_home / "auth.json"
+    if auth_path.is_symlink() or (auth_path.exists() and not auth_path.is_file()):
+        raise PermissionError(f"codex auth store is not a regular file: {auth_path}")
     old_auth = plan.get("codex_auth_path")
     plan["codex_home"] = str(lane_home)
     plan["codex_auth_path"] = str(auth_path)
