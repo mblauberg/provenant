@@ -148,7 +148,8 @@ The worktree `.git` marker and private Git directory's `config.worktree`,
 `commondir` and `gitdir` are not writable; Fabric recreates the task home links
 every attempt and fails a symlinked or non-directory task home, while allowing
 the lane to overwrite the literal source `auth.json` for token refresh, a file
-it could already read. That grant names the unresolved source path, and a
+it could already read. That grant names the unresolved source path and covers
+in-place rewrites only, not deleting, renaming or replacing the entry. A
 symlinked or non-regular source `auth.json`, or a source Codex home inside a
 lane-writable path or reached through a symlink, fails the attempt before launch.
 

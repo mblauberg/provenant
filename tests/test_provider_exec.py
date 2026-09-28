@@ -1218,6 +1218,8 @@ print(attempt(lambda: open({str(private / "index.probe")!r}, "w").write("probe")
 print(attempt(lambda: open({str(common / "config")!r}, "a").write("")))
 print(attempt(lambda: open({str(common / "hooks" / "pre-commit")!r}, "w").write("")))
 print(attempt(lambda: os.link({str(common / "config")!r}, {str(lane / "config-link")!r})))
+print(attempt(lambda: open({str(home / "auth.json")!r}, "w").write("refreshed")))
+print(attempt(lambda: os.unlink({str(home / "auth.json")!r})))
 print(attempt(lambda: os.kill({os.getpid()}, 0)))
 print(attempt(lambda: connect({str(outside_socket)!r})))
 print(attempt(lambda: connect({str(inside_socket)!r})))
@@ -1228,10 +1230,11 @@ print(attempt(lambda: connect({str(inside_socket)!r})))
                 pytest.skip("sandbox_apply is refused in this test environment")
             assert result.stdout.split() == [
                 "ok", "PermissionError", "PermissionError", "PermissionError", "ok",
-                "PermissionError", "PermissionError", "PermissionError", "PermissionError",
-                "PermissionError", "ok",
+                "PermissionError", "PermissionError", "PermissionError", "ok", "PermissionError",
+                "PermissionError", "PermissionError", "ok",
             ], result.stderr
             assert not (lane / "config-link").exists()
+            assert (home / "auth.json").read_text(encoding="utf-8") == "refreshed"
             assert (private / "index.probe").read_text(encoding="utf-8") == "probe"
 
 
@@ -1364,7 +1367,8 @@ def test_codex_capability_symlinked_source_auth_fails_and_never_widens_the_grant
         capabilities=["postgres"], run_dir=attempt,
     )
     profile = mod.os_confinement_profile(plan)
-    assert f'(literal "{source / "auth.json"}")' in profile
+    assert f'(allow file-write* (literal "{source / "auth.json"}"))' in profile
+    assert f'(deny file-write-create file-write-unlink (literal "{source / "auth.json"}"))' in profile
     assert str(source / "config.toml") not in profile
     plan["applied"]["confinement"] = "none"
     plan["argv"] = [

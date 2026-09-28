@@ -350,8 +350,10 @@ def os_confinement_profile(plan):
                 for name in ("config.worktree", "commondir", "gitdir"):
                     profile += _sbpl_rule("deny", "file-write*", [private / name], literal=True)
             profile += _sbpl_rule("allow", "file-write*", [codex_home])
-            # Quote without resolving: a symlink planted at the auth path must not move the grant.
+            # Quote without resolving, and allow in-place rewrites only, so the lane cannot swap the
+            # entry for a link that would move the next attempt's grant.
             profile += f"(allow file-write* (literal {_sbpl_quote(auth_path)}))\n"
+            profile += f"(deny file-write-create file-write-unlink (literal {_sbpl_quote(auth_path)}))\n"
             profile += "(deny mach-lookup)\n"
             profile += _sbpl_named_rule("allow", "mach-lookup", CODEX_BASE_MACH_SERVICES)
             profile += ("(deny mach-register)\n(deny signal)\n(allow signal (target same-sandbox))\n"
