@@ -10,7 +10,7 @@ import type { Identity } from "./identity.js";
 const SCHEMA = resolve(dirname(fileURLToPath(import.meta.url)), "../schema.sql");
 const REQUIRED_TABLES = [
   "agents", "messages", "deliveries", "delivery_claims", "teams", "team_members",
-  "tasks", "task_dependencies", "activity", "work_claims", "landing_leases",
+  "tasks", "task_dependencies", "activity", "work_claims", "landing_leases", "run_observations",
 ];
 const REQUIRED_CLAIM_COLUMNS = [
   "message_id", "project", "recipient_id", "claim_id", "claimed_at", "expires_at",
@@ -565,6 +565,31 @@ export class Store {
     }).immediate(); } finally {this.restoreDefaultBusyTimeout();}
   }
 
+  /** Atomically advance this seat's cursor for lane attempts it is about to report. */
+  reportUnseenLanes(
+    who: Identity,
+    rows: ReadonlyArray<{ runId: string; taskId: string; attempt: number }>,
+  ): number[] {
+    const find = this.#db.prepare(`SELECT attempt FROM run_observations
+      WHERE project = ? AND recipient_id = ? AND run_id = ? AND task_id = ?`);
+    const record = this.#db.prepare(`INSERT INTO run_observations(project, recipient_id, run_id, task_id, attempt)
+      VALUES (?, ?, ?, ?, ?) ON CONFLICT(project, recipient_id, run_id, task_id)
+      DO UPDATE SET attempt = MAX(attempt, excluded.attempt)`);
+    // Attempt 0 is a batch task that terminated before its first attempt.
+    const unseen = (row: (typeof rows)[number]) => {
+      if (!row.runId || !row.taskId || !Number.isSafeInteger(row.attempt) || row.attempt < 0) return false;
+      const previous = find.get(who.project, who.agentId, row.runId, row.taskId) as { attempt: number } | undefined;
+      return previous === undefined || previous.attempt < row.attempt;
+    };
+    // Polls read without a write lock; only a candidate report takes one.
+    if (!rows.some(unseen)) return [];
+    return this.#db.transaction(() => rows.flatMap((row, index) => {
+      if (!unseen(row)) return [];
+      record.run(who.project, who.agentId, row.runId, row.taskId, row.attempt);
+      return [index];
+    })).immediate();
+  }
+
   /** Acknowledge one claimed delivery. Retries with the same token are idempotent. */
   acknowledge(who: Identity, messageId: string, claimId: string): Acknowledgement {
     return this.#db.transaction(() => {
@@ -832,9 +857,6 @@ export class Store {
   }
 
   #ensureMessageLinkColumns(): void {
-    this.#db.exec(`CREATE TABLE IF NOT EXISTS run_observations (
-      project TEXT NOT NULL, recipient_id TEXT NOT NULL, run_id TEXT NOT NULL, task_id TEXT NOT NULL,
-      attempt INTEGER NOT NULL, PRIMARY KEY(project,recipient_id,run_id,task_id))`);
     const columns = new Set(
       (this.#db.pragma("table_info(messages)") as Array<{ name: string }>).map((column) => column.name),
     );

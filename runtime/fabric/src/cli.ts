@@ -21,7 +21,7 @@ import type { RouteInput } from "./execution-input.js";
 import {
   statusRows, fabricStatus, findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
 } from "./run-registry.js";
-import { inspectDatabase, Store } from "./store.js";
+import { inspectDatabase, isSQLiteContention, Store } from "./store.js";
 import { readEvents, readRuns } from "./run-reader.js";
 
 const USAGE = `fabric <command>
@@ -124,45 +124,49 @@ if (command === "lanes") {
   }
   if (wait) {
     const watched = ids.length ? ids : undefined;
-    const snapshot = await readRuns(who.cwd, undefined, 0, undefined, null);
+    const store = new Store(databasePath());
+    store.announce(who);
+    const finish = (code: number): never => {
+      store.close();
+      process.exit(code);
+    };
+    // The registered project, not the raw cwd, owns the runs; the normal
+    // retention window bounds the scan, and no row cap may hide a completion.
+    const snapshot = await readRuns(who.project, watched, 0, undefined, null);
     if (snapshot.status !== "ok") {
       console.error(JSON.stringify(snapshot));
-      process.exit(1);
-    }
-    const selected = watched === undefined ? snapshot : await readRuns(who.cwd, watched, 0, undefined, null);
-    if (selected.status !== "ok") {
-      console.error(JSON.stringify(selected));
-      process.exit(1);
+      finish(1);
     }
     const done = (row: (typeof snapshot.runs)[number]) =>
       row.state === "terminal" || row.state === "input_required" || row.status === "input_required";
-    const laneKey = (row: (typeof snapshot.runs)[number]) => `${row.run_path || row.run_id}:${row.task_id ?? row.id}`;
-    const observed = new Set(snapshot.runs.map(laneKey));
-    const active = new Set(selected.runs.filter((row) => !done(row)).map(laneKey));
-    if (!active.size) {
-      console.log("no lanes are running");
-      process.exit(0);
-    }
-    const reported = new Set<string>();
+    let current = snapshot;
     for (;;) {
-      await new Promise((resolveWait) => setTimeout(resolveWait, 2000));
-      const current = await readRuns(who.cwd, undefined, 0, undefined, null);
-      if (current.status !== "ok") continue;
-      const changed = current.runs.filter((row) => {
-        const key = laneKey(row);
-        if (!observed.has(key)) {
-          observed.add(key);
-          active.add(key);
-        }
-        return active.has(key) && done(row) && !reported.has(key);
-      });
-      if (changed.length) {
-        for (const row of changed) {
-          reported.add(laneKey(row));
+      const completed = current.runs.filter(done);
+      let reportIndexes: number[] = [];
+      try {
+        reportIndexes = store.reportUnseenLanes(who, completed.map((row) => ({
+          runId: row.run_id,
+          taskId: row.task_id ?? row.id,
+          attempt: row.attempt,
+        })));
+      } catch (error) {
+        // A busy mailbox delays the report to the next poll; it never loses it.
+        if (!isSQLiteContention(error)) throw error;
+      }
+      if (reportIndexes.length) {
+        for (const index of reportIndexes) {
+          const row = completed[index]!;
           console.log(`${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${row.result_path ?? "-"}`);
         }
-        process.exit(0);
+        finish(0);
       }
+      if (!current.runs.some((row) => !done(row))) {
+        console.log("no lanes are running");
+        finish(0);
+      }
+      await new Promise((resolveWait) => setTimeout(resolveWait, 2000));
+      const next = await readRuns(who.project, watched, 0, undefined, null);
+      if (next.status === "ok") current = next;
     }
   }
   const result = await readRuns(who.cwd, ids.length ? ids : undefined);

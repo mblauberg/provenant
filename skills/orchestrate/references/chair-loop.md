@@ -60,7 +60,8 @@ code — independently of this lane id.
 ## Waiting
 
 After dispatch, keep one `provenant lanes --wait` running in the background.
-When it exits, read the printed lanes, act, and re-arm it. `provenant lanes` is
+When it exits, read the printed lanes, act, and re-arm it; the next wait reports
+any lane that finished in between. `provenant lanes` is
 the source of truth after compaction or restart. Use `provenant events --follow`
 only for foreground streaming; it replays retained events without a cursor and
 does not exit on its own.
