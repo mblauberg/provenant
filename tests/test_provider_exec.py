@@ -4,6 +4,7 @@ import importlib
 import json
 import os
 from pathlib import Path
+import shlex
 import shutil
 import signal
 import socket
@@ -1586,7 +1587,7 @@ print(json.dumps({{'type':'turn.completed'}}), flush=True)
 """
     plan = fixture_plan(tmp_path, code)
     supervisor().execute(plan, tmp_path / "result.md")
-    assert observed.read_text() == str(SCRIPTS / "bin/ps")
+    assert observed.read_text() == str(tmp_path / "tmp/provenant-shim/bin/ps")
 
 
 def test_unknown_cpu_census_is_not_zero_cpu_progress(monkeypatch):
@@ -4045,7 +4046,7 @@ def test_codex_read_only_writes_its_temp_and_add_dirs_but_not_the_cwd(tmp_path):
         'permissions.provenant-read-only.filesystem={":tmpdir" = "write", ' + json.dumps(str(locks)) + ' = "write"}',
     ]
     assert "-s" not in plan["argv"]
-    assert f"codex read_only add-dir holding cwd stays read-only: {repo}" in plan["warnings"]
+    assert f"codex read_only add-dir stays read-only (it holds cwd or a pattern character): {repo}" in plan["warnings"]
     networked = supervisor().build_plan("codex", {"resolved_model": "fixture"}, "hello", cwd=repo,
                                         workspace_root=repo, network=True, resume_session="saved")
     assert codex_read_only_permissions(networked["argv"])[-1] == "permissions.provenant-read-only.network.enabled=true"
@@ -4138,16 +4139,154 @@ def test_opencode_starts_below_a_repository_config(tmp_path):
     assert '"secrets/**"' in result.stdout
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="macOS refuses setuid ps in any sandbox")
-def test_sandbox_exec_lane_finds_ps_shim_on_path(tmp_path, monkeypatch):
+def confined_read_only_attempt(monkeypatch, tmp_path, script):
+    """Run a shell script as a Claude read-only lane under its real sandbox-exec profile.
+
+    The lane reviews <repo>/runtime/fabric, so the rest of the repository, home (where the
+    product checkout lives) and shared temp are unreadable to it.
+    """
     mod = supervisor()
-    observed = tmp_path / "ps-path.txt"
-    code = f"""import json, pathlib, shutil
-pathlib.Path({str(observed)!r}).write_text(shutil.which('ps') or '')
-print(json.dumps({{'type':'result','result':'done','is_error':False}}), flush=True)
+    if sys.platform != "darwin" or not mod._sandbox_exec_path():
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    if subprocess.run(["/usr/bin/python3", "-c", ""], capture_output=True).returncode:
+        pytest.skip("the system python3 is unavailable")
+    monkeypatch.delenv("PROVENANT_NO_OS_CONFINEMENT", raising=False)
+    repo = tmp_path / "repo"
+    cwd = repo / "runtime/fabric"
+    cwd.mkdir(parents=True)
+    git(tmp_path, "init", "-q", str(repo))
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    plan = mod.build_plan("claude", {"resolved_model": "fixture"}, "hello", cwd=cwd,
+                          workspace_root=repo, run_dir=str(attempt))
+    assert plan["applied"]["confinement"] == "sandbox-exec"
+    plan["argv"] = ["/bin/sh", "-c", script
+                    + "\necho '{\"type\":\"result\",\"result\":\"done\",\"is_error\":false}'"]
+    plan["grace_seconds"] = 0.1
+    probe = subprocess.run([mod._sandbox_exec_path(), "-p", mod.os_confinement_profile(plan), "/usr/bin/true"],
+                           capture_output=True, text=True)
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    # A python3 the profile can read; a uv or pyenv interpreter lives under the denied home.
+    record = mod.execute(plan, attempt / "result.md", env={**os.environ, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
+    return record, repo, cwd, attempt
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS refuses setuid ps in any sandbox")
+def test_confined_read_only_lane_runs_the_ps_shim(monkeypatch, tmp_path):
+    out = tmp_path / "attempt/ps.txt"
+    record, _, _, attempt = confined_read_only_attempt(
+        monkeypatch, tmp_path, f"command -v ps > '{out}' && ps -o pid= -p $$ >> '{out}' 2>&1")
+    assert record["status"] == "ok", record
+    found, pid = out.read_text().splitlines()
+    assert found == str(attempt / "tmp/provenant-shim/bin/ps")
+    assert pid.strip().isdigit()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+def test_confined_read_only_lane_has_writable_tool_caches_but_not_the_workspace(monkeypatch, tmp_path):
+    out = tmp_path / "attempt/caches.json"
+    check = f"""
+import json, os, pathlib, tempfile
+result = {{"tempfile": bool(tempfile.mkstemp()[1])}}
+for key in ("UV_CACHE_DIR", "npm_config_cache", "PYTHONPYCACHEPREFIX", "RUFF_CACHE_DIR", "MYPY_CACHE_DIR",
+            "COREPACK_HOME", "XDG_CACHE_HOME"):
+    path = pathlib.Path(os.environ[key]) / "probe"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("ok")
+    result[key] = str(path.parent)
+try:
+    pathlib.Path(".pytest_cache").mkdir()
+    result["workspace"] = "writable"
+except OSError:
+    result["workspace"] = "read-only"
+result["PYTEST_ADDOPTS"] = os.environ["PYTEST_ADDOPTS"]
+pathlib.Path({str(out)!r}).write_text(json.dumps(result))
 """
-    plan = fixture_plan(tmp_path, code, "claude")
-    plan["applied"]["confinement"] = "sandbox-exec"
-    monkeypatch.setattr(mod, "confinement_command", lambda _plan, command: list(command))
-    mod.execute(plan, tmp_path / "result.md")
-    assert observed.read_text() == str(SCRIPTS / "bin/ps")
+    record, _, cwd, attempt = confined_read_only_attempt(
+        monkeypatch, tmp_path, "/usr/bin/python3 -c " + shlex.quote(check))
+    assert record["status"] == "ok", record
+    result = json.loads(out.read_text())
+    cache = attempt / "tmp/cache"
+    assert result == {
+        "tempfile": True, "workspace": "read-only", "PYTEST_ADDOPTS": "-p no:cacheprovider",
+        "UV_CACHE_DIR": str(cache / "uv"), "npm_config_cache": str(cache / "npm"),
+        "PYTHONPYCACHEPREFIX": str(cache / "pycache"), "RUFF_CACHE_DIR": str(cache / "ruff"),
+        "MYPY_CACHE_DIR": str(cache / "mypy"), "COREPACK_HOME": str(cache / "node/corepack"),
+        "XDG_CACHE_HOME": str(cache),
+    }
+    assert not (cwd / ".pytest_cache").exists()
+
+
+def test_tool_caches_override_inherited_locations(tmp_path, monkeypatch):
+    monkeypatch.setenv("UV_CACHE_DIR", "/denied/uv")
+    monkeypatch.setenv("npm_config_cache", "/denied/npm")
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-q")
+    code = """import json, os
+keys = ('UV_CACHE_DIR','npm_config_cache','PYTEST_ADDOPTS','PYTHONPYCACHEPREFIX')
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({key: os.environ.get(key) for key in keys})}}))
+print(json.dumps({'type':'turn.completed'}))
+"""
+    record = supervisor().execute(fixture_plan(tmp_path, code), tmp_path / "result.md")
+    assert record["status"] == "ok", record
+    assert json.loads((tmp_path / "result.md").read_text()) == {
+        "UV_CACHE_DIR": str(tmp_path / "tmp/cache/uv"), "npm_config_cache": str(tmp_path / "tmp/cache/npm"),
+        "PYTEST_ADDOPTS": "-q -p no:cacheprovider", "PYTHONPYCACHEPREFIX": str(tmp_path / "tmp/cache/pycache"),
+    }
+    (tmp_path / "writer").mkdir()
+    _, lane = instruction_lane(tmp_path / "writer")
+    (tmp_path / "writer/attempt").mkdir()
+    writer = fixture_plan(tmp_path / "writer/attempt", code, mode="worktree_write", worktree=lane)
+    supervisor().execute(writer, tmp_path / "writer/attempt/result.md")
+    # A writer keeps its own pytest cache and bytecode; only the shared caches move.
+    observed = json.loads((tmp_path / "writer/attempt/result.md").read_text())
+    assert observed["PYTEST_ADDOPTS"] == "-q" and observed["PYTHONPYCACHEPREFIX"] is None
+    assert observed["UV_CACHE_DIR"] == str(Path(writer["run_dir"]) / "tmp/cache/uv")
+
+
+@pytest.mark.parametrize("pattern", ["**", "*", "lock?", "[ab]", "{a,b}"])
+def test_codex_read_only_never_grants_a_directory_named_like_a_pattern(tmp_path, pattern):
+    repo = tmp_path / "repo"
+    literal = repo / pattern
+    literal.mkdir(parents=True)
+    plan = supervisor().build_plan("codex", {"resolved_model": "fixture"}, "hello", cwd=repo,
+                                   workspace_root=repo, add_dirs=[str(literal)], network=False)
+    assert codex_read_only_permissions(plan["argv"])[-1] == 'permissions.provenant-read-only.filesystem={":tmpdir" = "write"}'
+    assert any(warning.endswith(str(literal)) and "pattern character" in warning for warning in plan["warnings"])
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("codex"), reason="needs the Codex seatbelt")
+def test_codex_read_only_directory_named_like_a_pattern_leaves_cwd_unwritable(tmp_path):
+    repo = tmp_path / "repo"
+    literal = repo / "**"
+    literal.mkdir(parents=True)
+    temp = tmp_path / "attempt/tmp"
+    temp.mkdir(parents=True)
+    (tmp_path / "codex-home").mkdir()
+    plan = supervisor().build_plan("codex", {"resolved_model": "fixture"}, "hello", cwd=repo,
+                                   workspace_root=repo, add_dirs=[str(literal)], network=False)
+    command = ["codex", "sandbox", "-P", "provenant-read-only", "-C", str(repo)]
+    for value in codex_read_only_permissions(plan["argv"]):
+        command += ["-c", value]
+    # Codex strips a trailing /** from a permission path, so granting <repo>/** would grant <repo>.
+    probe = subprocess.run([*command, "--", "/bin/sh", "-c", f"touch '{repo}/escaped'"],
+                           capture_output=True, text=True, timeout=60,
+                           env={**os.environ, "TMPDIR": str(temp), "CODEX_HOME": str(tmp_path / "codex-home")})
+    assert probe.returncode != 0
+    assert not (repo / "escaped").exists()
+
+
+def test_codex_writer_may_merge_away_the_last_instruction_file(tmp_path):
+    repo, lane = instruction_lane(tmp_path)
+    git(repo, "rm", "-q", "-r", ".agents")
+    git(repo, "commit", "-q", "-m", "main drops its only skill")
+    record = lane_attempt(tmp_path, lane, "git('merge', '-q', '--no-edit', '-X', 'theirs', 'main')\n")
+    assert record["status"] == "ok", record
+    assert not os.path.lexists(lane / ".agents")
+
+
+def test_codex_writer_deleting_instructions_main_keeps_fails(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, "import shutil; shutil.rmtree('.agents')\n")
+    assert record["error"] == "protected_instructions_changed"
+    assert any(SKILL in warning for warning in record["warnings"])

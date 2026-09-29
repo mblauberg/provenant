@@ -107,7 +107,8 @@ paths. OpenCode's profile also reads, by their unresolved names,
 in each directory from `cwd` up to the repository root, since OpenCode loads
 them at startup. Codex read-only uses its native read-only sandbox, which reads
 everywhere and writes only the attempt's `TMPDIR` and `add_dirs` (a shared
-lock directory, say); an `add_dir` holding `cwd` stays read-only and warns.
+lock directory, say). An `add_dir` holding `cwd`, or one whose name has a
+character Codex reads as a pattern (`*?[]{}`), stays read-only and warns.
 Inside another sandbox, where macOS refuses a nested one, the attempt records
 an explicit unconfined-write warning. Without `sandbox-exec` read confinement,
 a non-Codex `cwd` below the root warns that it is not a read boundary.
@@ -118,9 +119,14 @@ attempt files, device nodes and provider state. Where protected-path policy
 applies, its read and write denies still take precedence inside an `add_dir`.
 Each attempt sets `TMPDIR`, `TMP` and `TEMP` to `<attempt>/tmp` and
 `XDG_CACHE_HOME` to `<attempt>/tmp/cache`, and `COREPACK_HOME` to
-`<attempt>/tmp/cache/node/corepack`, replacing inherited values, so gitleaks,
-Corepack and other tool caches write there. Shared temp and general user caches
-are not writable. Codex writers without capabilities use
+`<attempt>/tmp/cache/node/corepack`, `UV_CACHE_DIR` to `<cache>/uv` and
+`npm_config_cache` to `<cache>/npm`, replacing inherited values, so gitleaks,
+Corepack, uv, npm and other tool caches write there. Read-only attempts also
+append `-p no:cacheprovider` to `PYTEST_ADDOPTS` and set `PYTHONPYCACHEPREFIX`,
+`RUFF_CACHE_DIR` and `MYPY_CACHE_DIR` under the cache, so a reviewer can run a
+targeted test while the workspace stays unwritable. Shared temp and general
+user caches are not writable. Where the `ps` shim is on PATH, Fabric stages it
+in `<attempt>/tmp/provenant-shim`, which every lane can read. Codex writers without capabilities use
 `-s workspace-write` (or `-c sandbox_mode="workspace-write"`
 on resume), with `-c sandbox_workspace_write.writable_roots=<add_dirs>`,
 `-c sandbox_workspace_write.exclude_tmpdir_env_var=false` and

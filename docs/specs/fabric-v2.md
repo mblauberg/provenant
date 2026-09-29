@@ -45,7 +45,7 @@ Each attempt records `context: {context_tokens, input_tokens, output_tokens, cac
 
 The attempt records `applied.context_ceiling` as `enforced`, `provider_default` (the provider's own point is at or below the ceiling, with `applied.context_ceiling_source`) or `unsupported`. It also records `applied.context_ceiling_tokens`, the point in force (`null` when unknown), and `applied.context_ceiling_requested`. A resume inherits the prior requested ceiling unless the call passes a new one.
 
-On macOS, Codex providers in `read-only` and `workspace-write`, and every provider under a Fabric `sandbox-exec` profile, resolve `ps` to the bundled libproc shim through PATH. The setuid `/bin/ps` cannot execute under any sandbox. The shim covers the forms agents type (`ps aux`, `ps -ef`, `ps ax`, `-p`, `-o`/`-O` with common fields) and names its supported subset when asked for more. Its `lstart` is `strftime("%c", localtime(start))` in the caller's locale, padded to 28 bytes on macOS, matching `/bin/ps` byte for byte; when libproc cannot read a live PID, `sysctl(KERN_PROC_PID)` reports its PID, parent, group, user, start and elapsed times. A missing PID remains gone. Linux retains `/proc` and normal `ps` behaviour. This PATH adjustment adds no receipt field.
+On macOS, Codex providers in `read-only` and `workspace-write`, and every provider under a Fabric `sandbox-exec` profile, resolve `ps` to the bundled libproc shim through PATH. The shim and `process_info.py` are staged in `<attempt>/tmp/provenant-shim`, because the product checkout may sit below a denied home or outside a read-only lane's `cwd`. The setuid `/bin/ps` cannot execute under any sandbox. The shim covers the forms agents type (`ps aux`, `ps -ef`, `ps ax`, `-p`, `-o`/`-O` with common fields) and names its supported subset when asked for more. Its `lstart` is `strftime("%c", localtime(start))` in the caller's locale, padded to 28 bytes on macOS, matching `/bin/ps` byte for byte; when libproc cannot read a live PID, `sysctl(KERN_PROC_PID)` reports its PID, parent, group, user, start and elapsed times. A missing PID remains gone. Linux retains `/proc` and normal `ps` behaviour. This PATH adjustment adds no receipt field.
 
 A resume reads the prior attempt's context. It adds a digest warning when that context exceeds the effective ceiling (the point in force, else the requested ceiling), or when the size is unknown and the adapter has no ceiling control, for example `! resuming a ~620k-token session; fresh: fabric_dispatch{prompt, handoff:"<run id>"}`. The resume still runs. `handoff: <run id>` (with `task_id` for a batch task) is the cheaper alternative. It starts a fresh run whose prompt is prefixed with the prior task's route line and its result tail, at most 8,000 bytes in total. If the call names no adapter, alias or model, the handoff reuses the prior adapter, model and effort, and a prior writer's mode and worktree. The prior task must be terminal.
 
@@ -95,7 +95,8 @@ attempt's starting HEAD, index or files, or the primary checkout's branch or its
 upstream. Files on disk are hashed without Git, so ignored, skip-worktree and
 filtered files count. An unresolved conflict, an unreadable directory, a
 special file, a replaced `.agents/` root, a tree over 256 MiB or a lane
-process left running also fails.
+process left running also fails. An absent `.agents/` counts as empty, since Git
+removes the directory with its last file; a link or file in its place fails.
 Otherwise the attempt fails with `protected_instructions_changed` and
 lists the paths in its warnings. The check trusts local refs, which the lane can
 move. It also reports a clean three-way merge into a skill the branch already
@@ -142,11 +143,16 @@ through a symlink, fails the attempt before launch. Chrome must use `--no-sandbo
 paths under lane `TMPDIR` exceed macOS's
 103-byte limit; use TCP or a short socket directory. Attempts set `TMPDIR`,
 `TMP` and `TEMP` to `<attempt>/tmp`, `XDG_CACHE_HOME` to `<attempt>/tmp/cache` and
-`COREPACK_HOME` to `<attempt>/tmp/cache/node/corepack`. Codex writers pass
+`COREPACK_HOME` to `<attempt>/tmp/cache/node/corepack`, `UV_CACHE_DIR` to `<cache>/uv`
+and `npm_config_cache` to `<cache>/npm`. Read-only attempts also append
+`-p no:cacheprovider` to `PYTEST_ADDOPTS` and set `PYTHONPYCACHEPREFIX`,
+`RUFF_CACHE_DIR` and `MYPY_CACHE_DIR` under the cache. Codex writers pass
 `sandbox_workspace_write.exclude_tmpdir_env_var=false`, so that `TMPDIR` stays a
 writable root. Codex read-only runs use the permission profile
 `provenant-read-only`, which extends `:read-only` with writes to `:tmpdir` and to
-each `add_dir` that does not hold `cwd`, plus network when applied. OpenCode's
+each `add_dir` that neither holds `cwd` nor contains a character Codex reads as a
+permission pattern (`*?[]{}`; Codex strips a trailing `/**`), plus network when
+applied. OpenCode's
 read-only `sandbox-exec` profile reads the project config OpenCode loads at
 startup (`opencode.json`, `opencode.jsonc`, `AGENTS.md`, `CLAUDE.md`, `.opencode/`)
 between `cwd` and the repository root, granted by unresolved name.

@@ -14,10 +14,17 @@ MODEL_SOURCE = "codex:rollout.turn_context.model"
 SIGNATURES = (("usage_limited", r"usage limit|try again at \d"),)
 
 
+# Codex reads these in a permission path as a pattern (it strips a trailing /** outright), so a
+# directory spelt with them could grant more than itself.
+PERMISSION_PATTERN_CHARACTERS = frozenset("*?[]{}")
+
+
 def read_only_writable_dirs(p):
-    """Read-only add_dirs Codex may write, never one holding the cwd under review."""
+    """Read-only add_dirs Codex may write: never one holding the cwd under review, nor one whose
+    name Codex would read as a pattern."""
     cwd = Path(p["cwd"])
-    return [path for path in p["applied"]["add_dirs"] if not cwd.is_relative_to(path)]
+    return [path for path in p["applied"]["add_dirs"]
+            if not cwd.is_relative_to(path) and not PERMISSION_PATTERN_CHARACTERS.intersection(path)]
 
 
 def argv(p):

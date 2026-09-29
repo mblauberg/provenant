@@ -613,7 +613,8 @@ def build_plan(
         warnings.append(f"{adapter} read_only: cwd is not a read boundary")
     if adapter == "codex" and sandbox == "read-only":
         writable = config.read_only_writable_dirs({"cwd": cwd, "applied": {"add_dirs": directories}})
-        warnings.extend("codex read_only add-dir holding cwd stays read-only: " + directory
+        warnings.extend("codex read_only add-dir stays read-only (it holds cwd or a pattern character): "
+                        + directory
                         for directory in directories if directory not in writable)
     if adapter in {"agy", "kiro"} or (
         mode == "worktree_write" and guarantee != "enforced"
@@ -1886,6 +1887,8 @@ def instruction_disk_state(cwd, object_format):
     process cannot redirect it by swapping a directory or file for a link, FIFO or device.
     """
     root = Path(cwd, INSTRUCTION_DIR)
+    if not os.path.lexists(root):
+        return {}  # Git removes the directory with its last file, as a merge may.
     if root.is_symlink() or not root.is_dir():
         raise ValueError(f"{INSTRUCTION_DIR} is no longer a directory")
     entries, total = {}, 0
@@ -1972,6 +1975,38 @@ def authored_instruction_changes(cwd, start):
     return sorted(key + (" (unresolved conflict)" if key in conflicts else "") for key in changed | conflicts)
 
 
+def tool_cache_environment(plan, cache, inherited):
+    """Point tool caches at the attempt cache, overriding inherited locations a sandbox denies.
+
+    A read-only lane must still run a targeted test, so tools that would write a cache beside
+    the sources it may not change are pointed at the cache or told to skip it.
+    """
+    environment = {"UV_CACHE_DIR": str(cache / "uv"), "npm_config_cache": str(cache / "npm")}
+    if plan["mode"] == "read_only":
+        addopts = inherited.get("PYTEST_ADDOPTS", "")
+        environment.update(
+            PYTEST_ADDOPTS=(addopts + " -p no:cacheprovider").strip(),
+            PYTHONPYCACHEPREFIX=str(cache / "pycache"),
+            RUFF_CACHE_DIR=str(cache / "ruff"),
+            MYPY_CACHE_DIR=str(cache / "mypy"),
+        )
+    return environment
+
+
+def stage_ps_shim(private_tmp):
+    """Copy the ps shim into the attempt's temp, which every sandbox lets the lane read.
+
+    The product checkout may sit below a denied home or outside a read-only lane's cwd.
+    """
+    source = Path(__file__).resolve().parent
+    stage = private_tmp / "provenant-shim"
+    (stage / "bin").mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source / "process_info.py", stage / "process_info.py")
+    shutil.copyfile(source / "bin" / "ps", stage / "bin" / "ps")
+    os.chmod(stage / "bin" / "ps", 0o755)
+    return stage / "bin"
+
+
 def execute(
     plan,
     output_path,
@@ -1991,12 +2026,6 @@ def execute(
     events_path = Path(events_path or output_path.parent / "events.jsonl")
     stderr_path = Path(stderr_path or output_path.parent / "stderr.log")
     environment = dict(os.environ if env is None else env)
-    # macOS refuses to exec the setuid /bin/ps inside any sandbox, native or sandbox-exec.
-    if sys.platform == "darwin" and (
-            (plan["adapter"] == "codex" and plan["applied"]["sandbox"] != "full")
-            or plan["applied"].get("confinement") == "sandbox-exec"):
-        shim_dir = str(Path(__file__).resolve().parent / "bin")
-        environment["PATH"] = shim_dir + os.pathsep + environment.get("PATH", os.defpath)
     for key in list(environment):
         if key.startswith(
             ("GIT_", "PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")
@@ -2043,6 +2072,13 @@ def execute(
     environment.update(TMPDIR=str(private_tmp), TMP=str(private_tmp), TEMP=str(private_tmp),
                        XDG_CACHE_HOME=str(private_cache),
                        COREPACK_HOME=str(private_cache / "node" / "corepack"))
+    environment.update(tool_cache_environment(plan, private_cache, environment))
+    # macOS refuses to exec the setuid /bin/ps inside any sandbox, native or sandbox-exec.
+    if sys.platform == "darwin" and (
+            (plan["adapter"] == "codex" and plan["applied"]["sandbox"] != "full")
+            or plan["applied"].get("confinement") == "sandbox-exec"):
+        shim_dir = str(stage_ps_shim(private_tmp))
+        environment["PATH"] = shim_dir + os.pathsep + environment.get("PATH", os.defpath)
     if plan["adapter"] == "claude":
         private_claude_tmp = private_tmp / "claude"
         private_claude_tmp.mkdir(parents=True, exist_ok=True)
