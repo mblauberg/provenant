@@ -102,24 +102,33 @@ On macOS, non-Codex read-only launches use `sandbox-exec` when available. The
 profile limits writes to the attempt directory and provider state. It denies
 reads of home, shared temp and the workspace outside `cwd` and `add_dirs`, with
 provider sign-in paths re-allowed. Training routes also deny reads of protected
-paths. Codex read-only uses its native read-only sandbox.
+paths. OpenCode's profile also reads, by their unresolved names,
+`opencode.json`, `opencode.jsonc`, `AGENTS.md`, `CLAUDE.md` and `.opencode/`
+in each directory from `cwd` up to the repository root, since OpenCode loads
+them at startup. Codex read-only uses its native read-only sandbox, which reads
+everywhere and writes only the attempt's `TMPDIR` and `add_dirs` (a shared
+lock directory, say); an `add_dir` holding `cwd` stays read-only and warns.
 Inside another sandbox, where macOS refuses a nested one, the attempt records
-an explicit unconfined-write warning. A `cwd` below the root may also warn that
-it is not a read boundary.
+an explicit unconfined-write warning. Without `sandbox-exec` read confinement,
+a non-Codex `cwd` below the root warns that it is not a read boundary.
 Wrapped writer runs on macOS (agy, Claude, Cursor, OpenCode and Kiro) use
 `sandbox-exec` to restrict writes to their worktree, declared `add_dirs`,
 per-worktree Git metadata, common Git objects, refs, logs and packed refs,
 attempt files, device nodes and provider state. Where protected-path policy
 applies, its read and write denies still take precedence inside an `add_dir`.
 Each attempt sets `TMPDIR`, `TMP` and `TEMP` to `<attempt>/tmp` and
-`XDG_CACHE_HOME` to `<attempt>/tmp/cache`. Shared temp and general user caches
+`XDG_CACHE_HOME` to `<attempt>/tmp/cache`, and `COREPACK_HOME` to
+`<attempt>/tmp/cache/node/corepack`, replacing inherited values, so gitleaks,
+Corepack and other tool caches write there. Shared temp and general user caches
 are not writable. Codex writers without capabilities use
 `-s workspace-write` (or `-c sandbox_mode="workspace-write"`
-on resume), with `-c sandbox_workspace_write.writable_roots=<add_dirs>` and
+on resume), with `-c sandbox_workspace_write.writable_roots=<add_dirs>`,
+`-c sandbox_workspace_write.exclude_tmpdir_env_var=false` and
 `--cd <worktree>` on a fresh run. Codex keeps a writable root's `.agents/`
-read-only, so a linked-worktree Codex writer also gets the worktree's
-`.agents/` as an `add_dir`; Git can then rebase or merge the integration branch
-over tracked skills. Fabric fails the attempt with
+read-only even before it exists, so a linked-worktree Codex writer also gets
+the worktree's `.agents/` as an `add_dir` unless it is a file or link. Fabric
+creates an absent one for the attempt and removes it afterwards if still empty.
+Git can then rebase or merge the integration branch over tracked skills. Fabric fails the attempt with
 `protected_instructions_changed` when an `.agents/` path in HEAD, the index or
 on disk ends up matching neither the attempt's starting state nor the primary
 checkout's branch or its upstream. If OS confinement is unavailable, agy write

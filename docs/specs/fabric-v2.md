@@ -45,7 +45,7 @@ Each attempt records `context: {context_tokens, input_tokens, output_tokens, cac
 
 The attempt records `applied.context_ceiling` as `enforced`, `provider_default` (the provider's own point is at or below the ceiling, with `applied.context_ceiling_source`) or `unsupported`. It also records `applied.context_ceiling_tokens`, the point in force (`null` when unknown), and `applied.context_ceiling_requested`. A resume inherits the prior requested ceiling unless the call passes a new one.
 
-On macOS, Codex providers in `read-only` and `workspace-write` resolve `ps` to the bundled libproc shim through PATH. The setuid `/bin/ps` cannot execute under seatbelt. The shim covers the forms agents type (`ps aux`, `ps -ef`, `ps ax`, `-p`, `-o`/`-O` with common fields) and names its supported subset when asked for more. Its `lstart` is `strftime("%c", localtime(start))` in the caller's locale, matching `/bin/ps`; when libproc cannot read a live PID, `sysctl(KERN_PROC_PID)` reports its PID, parent, group, user, start and elapsed times. A missing PID remains gone. Linux retains `/proc` and normal `ps` behaviour. This PATH adjustment adds no receipt field.
+On macOS, Codex providers in `read-only` and `workspace-write`, and every provider under a Fabric `sandbox-exec` profile, resolve `ps` to the bundled libproc shim through PATH. The setuid `/bin/ps` cannot execute under any sandbox. The shim covers the forms agents type (`ps aux`, `ps -ef`, `ps ax`, `-p`, `-o`/`-O` with common fields) and names its supported subset when asked for more. Its `lstart` is `strftime("%c", localtime(start))` in the caller's locale, padded to 28 bytes on macOS, matching `/bin/ps` byte for byte; when libproc cannot read a live PID, `sysctl(KERN_PROC_PID)` reports its PID, parent, group, user, start and elapsed times. A missing PID remains gone. Linux retains `/proc` and normal `ps` behaviour. This PATH adjustment adds no receipt field.
 
 A resume reads the prior attempt's context. It adds a digest warning when that context exceeds the effective ceiling (the point in force, else the requested ceiling), or when the size is unknown and the adapter has no ceiling control, for example `! resuming a ~620k-token session; fresh: fabric_dispatch{prompt, handoff:"<run id>"}`. The resume still runs. `handoff: <run id>` (with `task_id` for a batch task) is the cheaper alternative. It starts a fresh run whose prompt is prefixed with the prior task's route line and its result tail, at most 8,000 bytes in total. If the call names no adapter, alias or model, the handoff reuses the prior adapter, model and effort, and a prior writer's mode and worktree. The prior task must be terminal.
 
@@ -85,9 +85,11 @@ denies reads of those paths in every registered worktree. Non-training routes
 are unaffected. Codex writer confinement is supplied by `-s workspace-write`
 (or `-c sandbox_mode="workspace-write"` on resume),
 `-c sandbox_workspace_write.writable_roots=<add_dirs>` and a fresh run's
-`--cd <worktree>`. Codex keeps a writable root's `.agents/` read-only, which
-stops a rebase or merge that updates a tracked skill, so a linked-worktree
-Codex writer also gets the worktree's `.agents/` in `add_dirs`. After the
+`--cd <worktree>`. Codex keeps a writable root's `.agents/` read-only, even an
+absent one, which stops a rebase or merge that updates a tracked skill, so a
+linked-worktree Codex writer also gets the worktree's `.agents/` in `add_dirs`
+unless it is a file or link; an absent one is created for the attempt and
+removed afterwards if still empty. After the
 attempt, each `.agents/` path in HEAD, the index and on disk must match the
 attempt's starting HEAD, index or files, or the primary checkout's branch or its
 upstream. Files on disk are hashed without Git, so ignored, skip-worktree and
@@ -139,6 +141,14 @@ deleting, renaming or replacing the entry. A symlinked or non-regular source
 through a symlink, fails the attempt before launch. Chrome must use `--no-sandbox` because macOS refuses its nested sandbox. PostgreSQL socket
 paths under lane `TMPDIR` exceed macOS's
 103-byte limit; use TCP or a short socket directory. Attempts set `TMPDIR`,
-`TMP` and `TEMP` to `<attempt>/tmp` and `XDG_CACHE_HOME` to `<attempt>/tmp/cache`.
+`TMP` and `TEMP` to `<attempt>/tmp`, `XDG_CACHE_HOME` to `<attempt>/tmp/cache` and
+`COREPACK_HOME` to `<attempt>/tmp/cache/node/corepack`. Codex writers pass
+`sandbox_workspace_write.exclude_tmpdir_env_var=false`, so that `TMPDIR` stays a
+writable root. Codex read-only runs use the permission profile
+`provenant-read-only`, which extends `:read-only` with writes to `:tmpdir` and to
+each `add_dir` that does not hold `cwd`, plus network when applied. OpenCode's
+read-only `sandbox-exec` profile reads the project config OpenCode loads at
+startup (`opencode.json`, `opencode.jsonc`, `AGENTS.md`, `CLAUDE.md`, `.opencode/`)
+between `cwd` and the repository root, granted by unresolved name.
 
 `model_route.py snapshot --json` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Wrapped writer launches (agy, Claude, Cursor, OpenCode and Kiro) restrict writes to the worktree, declared `add_dirs`, per-worktree Git metadata, common Git objects, refs, logs and packed refs, attempt files, temp paths, devices and provider state. Where protected-path policy applies, its read and write denies take precedence within an `add_dir`; receipts list the writable `add_dirs` in `applied.write_boundary`. Codex writers without capabilities use its native `workspace-write` sandbox. Unavailable OS confinement refuses agy write dispatches and produces an explicit warning for other wrapped writers.

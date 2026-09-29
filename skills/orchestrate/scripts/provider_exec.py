@@ -379,6 +379,7 @@ def os_confinement_profile(plan):
     configured_xdg = Path(os.environ.get("XDG_CONFIG_HOME", "")).expanduser()
     xdg_config_home = configured_xdg if configured_xdg.is_absolute() else home / ".config"
     git_config_files = [home / ".gitconfig", xdg_config_home / "git/config"]
+    project_files, project_directories = _project_config_reads(plan, root)
     return (
         "(version 1)\n(allow default)\n(deny file-write*)\n"
         + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), *state_writes, Path("/dev")])
@@ -390,8 +391,30 @@ def os_confinement_profile(plan):
         + _sbpl_rule("allow", "file-read-data", [
             Path(plan["cwd"]), *add_dirs
         ])
+        # Unresolved, so a link planted under a config name cannot carry the grant elsewhere.
+        + _sbpl_rule("allow", "file-read-data", project_files, literal=True, keep_leaf=True)
+        + _sbpl_rule("allow", "file-read-data", project_directories, keep_leaf=True)
         + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
     )
+
+
+# Project files and directories a provider loads from each directory above its cwd.
+PROJECT_CONFIG = {"opencode": (("opencode.json", "opencode.jsonc", "AGENTS.md", "CLAUDE.md"), (".opencode",))}
+
+
+def _project_config_reads(plan, root):
+    """What a read-only provider loads between its cwd and the repository (or workspace) root.
+
+    OpenCode fails at startup when it can see but not read a config file above its cwd.
+    """
+    files, directories = PROJECT_CONFIG.get(plan.get("adapter"), ((), ()))
+    if not files and not directories:
+        return [], []
+    cwd = Path(plan["cwd"]).resolve()
+    stop = _git_toplevel(cwd) or root
+    parents = [parent for parent in cwd.parents if parent.is_relative_to(stop)]
+    return ([parent / name for parent in parents for name in files],
+            [parent / name for parent in parents for name in directories])
 
 
 def confinement_command(plan, command):
@@ -519,11 +542,13 @@ def build_plan(
         )
         if not capabilities and common.returncode == 0 and common.stdout.strip() not in directories:
             directories.append(common.stdout.strip())
-        # Codex's workspace-write sandbox keeps each writable root's .agents read-only, so a
-        # rebase or merge that updates a tracked skill stops half-way. Granting the directory
-        # lets Git rewrite it; execute() then fails a lane that authored a change there.
+        # Codex's workspace-write sandbox keeps each writable root's .agents read-only, even an
+        # absent one, so a rebase or merge that updates or adds a tracked skill stops half-way.
+        # Granting the directory (execute() creates an absent one) lets Git rewrite it;
+        # execute() then fails a lane that authored a change there.
         instructions = Path(cwd, INSTRUCTION_DIR)
-        if instructions.is_dir() and not instructions.is_symlink() and str(instructions) not in directories:
+        grantable = not os.path.lexists(instructions) or (instructions.is_dir() and not instructions.is_symlink())
+        if grantable and str(instructions) not in directories:
             directories.append(str(instructions))
     model = route.get("resolved_model") or route.get("model") or ""
     effort = route.get("effort_applied", route.get("effort")) or ""
@@ -578,13 +603,18 @@ def build_plan(
         warnings.append("worktree_write writes are unconfined: Codex sandbox is full")
     if mode == "worktree_write" and adapter == "agy" and confinement != "sandbox-exec":
         raise ValueError("agy worktree_write requires usable sandbox-exec")
+    # Codex's native read-only sandbox reads everywhere whatever the cwd, so it gets no warning.
     if (
         mode == "read_only"
         and cwd != workspace_root
-        and adapter in {"codex", "claude", "cursor", "kiro", "agy", "opencode"}
+        and adapter in {"claude", "cursor", "kiro", "agy", "opencode"}
         and confinement != "sandbox-exec"
     ):
         warnings.append(f"{adapter} read_only: cwd is not a read boundary")
+    if adapter == "codex" and sandbox == "read-only":
+        writable = config.read_only_writable_dirs({"cwd": cwd, "applied": {"add_dirs": directories}})
+        warnings.extend("codex read_only add-dir holding cwd stays read-only: " + directory
+                        for directory in directories if directory not in writable)
     if adapter in {"agy", "kiro"} or (
         mode == "worktree_write" and guarantee != "enforced"
     ):
@@ -1961,8 +1991,10 @@ def execute(
     events_path = Path(events_path or output_path.parent / "events.jsonl")
     stderr_path = Path(stderr_path or output_path.parent / "stderr.log")
     environment = dict(os.environ if env is None else env)
-    if (plan["adapter"] == "codex" and sys.platform == "darwin"
-            and plan["applied"]["sandbox"] != "full"):
+    # macOS refuses to exec the setuid /bin/ps inside any sandbox, native or sandbox-exec.
+    if sys.platform == "darwin" and (
+            (plan["adapter"] == "codex" and plan["applied"]["sandbox"] != "full")
+            or plan["applied"].get("confinement") == "sandbox-exec"):
         shim_dir = str(Path(__file__).resolve().parent / "bin")
         environment["PATH"] = shim_dir + os.pathsep + environment.get("PATH", os.defpath)
     for key in list(environment):
@@ -1987,7 +2019,13 @@ def execute(
     attempt_marker = uuid.uuid4().hex
     environment["PROVENANT_ATTEMPT_MARKER"] = attempt_marker
     instruction_start = None
+    created_instructions = None
     if instructions_writable(plan):
+        try:
+            Path(plan["cwd"], INSTRUCTION_DIR).mkdir()
+            created_instructions = Path(plan["cwd"], INSTRUCTION_DIR)
+        except OSError:
+            pass  # Present already; the snapshot fails anything but a real directory.
         try:
             instruction_start = instruction_snapshot(plan["cwd"])
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -2000,8 +2038,11 @@ def execute(
     private_cache = private_tmp / "cache"
     private_tmp.mkdir(parents=True, exist_ok=True)
     private_cache.mkdir(parents=True, exist_ok=True)
+    # Tool caches follow XDG_CACHE_HOME; Corepack is set too, so an inherited COREPACK_HOME
+    # outside the writable roots cannot leak into child pnpm or yarn calls.
     environment.update(TMPDIR=str(private_tmp), TMP=str(private_tmp), TEMP=str(private_tmp),
-                       XDG_CACHE_HOME=str(private_cache))
+                       XDG_CACHE_HOME=str(private_cache),
+                       COREPACK_HOME=str(private_cache / "node" / "corepack"))
     if plan["adapter"] == "claude":
         private_claude_tmp = private_tmp / "claude"
         private_claude_tmp.mkdir(parents=True, exist_ok=True)
@@ -2462,6 +2503,11 @@ def execute(
             instruction_changes = authored_instruction_changes(plan["cwd"], instruction_start)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             instruction_changes = [f"{INSTRUCTION_DIR} (unverifiable: {exc})"]
+    if created_instructions is not None:
+        try:
+            created_instructions.rmdir()  # Only the empty directory this attempt added.
+        except OSError:
+            pass
     if instruction_changes:
         status = "failed"
         parsed["signature"] = "protected_instructions_changed"

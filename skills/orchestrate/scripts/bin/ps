@@ -28,7 +28,14 @@ def _visible(text):
 
 def _lstart(row):
     epoch = getattr(row, "start_epoch", None)
-    return time.strftime("%c", time.localtime(epoch)) if epoch is not None else row.lstart
+    if epoch is None:
+        return row.lstart
+    text = time.strftime("%c", time.localtime(epoch))
+    if sys.platform == "darwin":
+        # macOS ps pads lstart to 28 bytes even as the last column; a lock that recorded an
+        # owner with the system ps compares the whole line.
+        text += " " * max(0, 28 - len(text.encode(locale.getpreferredencoding(False), "replace")))
+    return text
 
 
 FIELDS = {

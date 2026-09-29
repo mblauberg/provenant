@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import sys
 
 CLI = "codex"
@@ -11,6 +12,12 @@ EFFORT_FLAG = "model_reasoning_effort"
 SESSION_KEYS = ("thread_id",)
 MODEL_SOURCE = "codex:rollout.turn_context.model"
 SIGNATURES = (("usage_limited", r"usage limit|try again at \d"),)
+
+
+def read_only_writable_dirs(p):
+    """Read-only add_dirs Codex may write, never one holding the cwd under review."""
+    cwd = Path(p["cwd"])
+    return [path for path in p["applied"]["add_dirs"] if not cwd.is_relative_to(path)]
 
 
 def argv(p):
@@ -37,15 +44,22 @@ def argv(p):
             command += ["-c", 'sandbox_mode="danger-full-access"']
         else:
             command += ["-s", "danger-full-access"]
-    elif sandbox == "read-only" and network:
+    elif sandbox == "read-only":
+        # :read-only reads everywhere; the profile adds writes to the attempt's TMPDIR and to
+        # add_dirs (a shared lock directory, say), so a reviewer can run a targeted test.
+        writable = {":tmpdir": "write", **dict.fromkeys(read_only_writable_dirs(p), "write")}
         command += [
             "-c",
-            'default_permissions="provenant-read-only-network"',
+            'default_permissions="provenant-read-only"',
             "-c",
-            'permissions.provenant-read-only-network.extends=":read-only"',
+            'permissions.provenant-read-only.extends=":read-only"',
             "-c",
-            "permissions.provenant-read-only-network.network.enabled=true",
+            "permissions.provenant-read-only.filesystem={"
+            + ", ".join(json.dumps(path, ensure_ascii=False) + " = " + json.dumps(mode) for path, mode in writable.items())
+            + "}",
         ]
+        if network:
+            command += ["-c", "permissions.provenant-read-only.network.enabled=true"]
     elif p["resume_session"]:
         command += [
             "-c",
@@ -58,6 +72,9 @@ def argv(p):
         command += [
             "-c",
             "sandbox_workspace_write.network_access=" + str(network).lower(),
+            # TMPDIR is the attempt's tmp, which holds XDG_CACHE_HOME and COREPACK_HOME.
+            "-c",
+            "sandbox_workspace_write.exclude_tmpdir_env_var=false",
         ]
         command += [
             "-c",

@@ -678,7 +678,7 @@ def test_agy_read_only_guarantee_tracks_os_confinement(monkeypatch, tmp_path):
     assert any("writes are unconfined" in warning for warning in unconfined["warnings"])
 
 
-@pytest.mark.parametrize("adapter", ["codex", "claude", "cursor", "kiro", "agy", "opencode"])
+@pytest.mark.parametrize("adapter", ["claude", "cursor", "kiro", "agy", "opencode"])
 def test_read_only_cwd_outside_workspace_warns_when_reads_are_unconfined(
     monkeypatch, tmp_path, adapter,
 ):
@@ -694,6 +694,21 @@ def test_read_only_cwd_outside_workspace_warns_when_reads_are_unconfined(
 
     warning = f"{adapter} read_only: cwd is not a read boundary"
     assert plan["warnings"].count(warning) == 1
+
+
+def test_codex_read_only_cwd_below_workspace_does_not_warn(monkeypatch, tmp_path):
+    """Codex's native read-only sandbox reads everywhere, so a cwd bounds nothing whatever it is."""
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    root = tmp_path / "workspace"
+    cwd = root / "sub"
+    cwd.mkdir(parents=True)
+    monkeypatch.setattr(supervisor, "_sandbox_exec_path", lambda: None)
+
+    plan = supervisor.build_plan(
+        "codex", {"resolved_model": "fixture"}, "prompt", cwd=cwd, workspace_root=root,
+    )
+
+    assert not any("read boundary" in warning for warning in plan["warnings"])
 
 
 @pytest.mark.parametrize("adapter", ["agy", "opencode"])
@@ -3897,3 +3912,242 @@ def test_subreaper_is_released_when_attempt_cleanup_raises(tmp_path, monkeypatch
     with pytest.raises(RuntimeError, match="cleanup failed"):
         module.execute(plan, tmp_path / "result.md")
     assert held == ["on", "off"]
+
+
+# Sandbox false reds in lanes (#897).
+
+def test_attempt_points_corepack_at_the_attempt_cache(tmp_path, monkeypatch):
+    monkeypatch.setenv("COREPACK_HOME", str(tmp_path / "outside-the-writable-roots"))
+    code = """import json, os
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({key: os.environ.get(key) for key in ('COREPACK_HOME','XDG_CACHE_HOME')})}}))
+print(json.dumps({'type':'turn.completed'}))
+"""
+    record = supervisor().execute(fixture_plan(tmp_path, code), tmp_path / "result.md")
+    assert record["status"] == "ok", record
+    assert json.loads((tmp_path / "result.md").read_text()) == {
+        "COREPACK_HOME": str(tmp_path / "tmp/cache/node/corepack"),
+        "XDG_CACHE_HOME": str(tmp_path / "tmp/cache"),
+    }
+
+
+def test_codex_writer_keeps_the_attempt_temp_a_writable_root(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    for resume in (None, "saved"):
+        plan = supervisor().build_plan("codex", {"resolved_model": "fixture"}, "hello", mode="worktree_write",
+                                       worktree=lane, workspace_root=tmp_path, resume_session=resume)
+        index = plan["argv"].index("sandbox_workspace_write.exclude_tmpdir_env_var=false")
+        assert plan["argv"][index - 1] == "-c"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+@pytest.mark.parametrize("adapter", ["agy", "claude", "cursor", "kiro", "opencode", "codex"])
+def test_confined_writer_merges_protected_paths_and_fills_its_caches(monkeypatch, tmp_path, adapter):
+    mod = supervisor()
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    _, lane = instruction_lane(tmp_path)
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    # Codex takes the sandbox-exec profile only in a capability lane.
+    controls = {"network": True, "capabilities": ["postgres"]} if adapter == "codex" else {}
+    plan = mod.build_plan(adapter, {"resolved_model": "fixture"}, "hello", mode="worktree_write",
+                          worktree=lane, workspace_root=tmp_path, run_dir=str(attempt), **controls)
+    assert plan["applied"]["confinement"] == "sandbox-exec"
+    cache = attempt / "tmp/cache"
+    script = (f"mkdir -p '{cache}/node/corepack' '{cache}/gitleaks' && "
+              "git " + " ".join(GIT_FIXTURE) + " merge -q --no-edit main")
+    result = subprocess.run([sandbox_exec, "-p", mod.os_confinement_profile(plan), "/bin/sh", "-c", script],
+                            cwd=lane, capture_output=True, text=True)
+    if result.returncode and "sandbox_apply" in result.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert result.returncode == 0, result.stderr
+    assert (lane / SKILL).read_text() == "v2\n"
+    assert (cache / "node/corepack").is_dir()
+
+
+def first_instruction_lane(tmp_path):
+    """A lane cut before main adds the repository's first skill."""
+    repo = tmp_path / "repo"
+    git(tmp_path, "init", "-q", "-b", "main", str(repo))
+    (repo / "app.txt").write_text("app\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "initial")
+    lane = tmp_path / "lane"
+    git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
+    (repo / SKILL).parent.mkdir(parents=True)
+    (repo / SKILL).write_text("v1\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-q", "-m", "main adds a skill")
+    return repo, lane
+
+
+def test_codex_writer_is_granted_an_absent_instruction_directory(tmp_path):
+    _, lane = first_instruction_lane(tmp_path)
+    plan = supervisor().build_plan("codex", {"resolved_model": "fixture"}, "hello",
+                                   mode="worktree_write", worktree=lane, workspace_root=tmp_path)
+    # Codex protects .agents in a writable root even before it exists.
+    assert str(lane / ".agents") in plan["applied"]["add_dirs"]
+    assert not (lane / ".agents").exists()
+
+
+def test_codex_writer_may_merge_in_a_first_instruction_directory(tmp_path):
+    _, lane = first_instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, "git('merge', '-q', '--no-edit', 'main')\n")
+    assert record["status"] == "ok", record
+    assert (lane / SKILL).read_text() == "v1\n"
+
+
+def test_codex_writer_authoring_a_first_instruction_directory_fails(tmp_path):
+    _, lane = first_instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, "open('.agents/own.md', 'w').write('lane\\n')\n")
+    assert record["error"] == "protected_instructions_changed"
+    assert any(".agents/own.md" in warning for warning in record["warnings"])
+
+
+def test_codex_writer_leaves_no_instruction_directory_it_did_not_need(tmp_path):
+    _, lane = first_instruction_lane(tmp_path)
+    observed = tmp_path / "seen"
+    record = lane_attempt(tmp_path, lane, f"open({str(observed)!r}, 'w').write(str(os.path.isdir('.agents')))\n")
+    assert record["status"] == "ok", record
+    assert observed.read_text() == "True"
+    assert not os.path.lexists(lane / ".agents")
+
+
+@pytest.mark.parametrize("entry", ["file", "symlink"])
+def test_codex_writer_is_not_granted_a_non_directory_instruction_entry(tmp_path, entry):
+    _, lane = first_instruction_lane(tmp_path)
+    if entry == "file":
+        (lane / ".agents").write_text("not a directory\n")
+    else:
+        (tmp_path / "elsewhere").mkdir()
+        (lane / ".agents").symlink_to(tmp_path / "elsewhere")
+    plan = supervisor().build_plan("codex", {"resolved_model": "fixture"}, "hello",
+                                   mode="worktree_write", worktree=lane, workspace_root=tmp_path)
+    assert str(lane / ".agents") not in plan["applied"]["add_dirs"]
+
+
+def codex_read_only_permissions(argv):
+    """The -c values that define Codex's read-only permission profile."""
+    return [argv[index + 1] for index, arg in enumerate(argv[:-1])
+            if arg == "-c" and argv[index + 1].startswith(("default_permissions=", "permissions."))]
+
+
+def test_codex_read_only_writes_its_temp_and_add_dirs_but_not_the_cwd(tmp_path):
+    repo = tmp_path / "repo"
+    locks = repo / ".agent-run/locks"
+    locks.mkdir(parents=True)
+    plan = supervisor().build_plan("codex", {"resolved_model": "fixture"}, "hello", cwd=repo,
+                                   workspace_root=repo, add_dirs=[str(locks), str(repo)], network=False)
+    assert codex_read_only_permissions(plan["argv"]) == [
+        'default_permissions="provenant-read-only"',
+        'permissions.provenant-read-only.extends=":read-only"',
+        'permissions.provenant-read-only.filesystem={":tmpdir" = "write", ' + json.dumps(str(locks)) + ' = "write"}',
+    ]
+    assert "-s" not in plan["argv"]
+    assert f"codex read_only add-dir holding cwd stays read-only: {repo}" in plan["warnings"]
+    networked = supervisor().build_plan("codex", {"resolved_model": "fixture"}, "hello", cwd=repo,
+                                        workspace_root=repo, network=True, resume_session="saved")
+    assert codex_read_only_permissions(networked["argv"])[-1] == "permissions.provenant-read-only.network.enabled=true"
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("codex"), reason="needs the Codex seatbelt")
+def test_codex_read_only_profile_writes_only_temp_and_lock_dirs(tmp_path):
+    repo = tmp_path / "repo"
+    locks = repo / ".agent-run/locks"
+    locks.mkdir(parents=True)
+    temp = tmp_path / "attempt/tmp"
+    temp.mkdir(parents=True)
+    (tmp_path / "codex-home").mkdir()
+    plan = supervisor().build_plan("codex", {"resolved_model": "fixture"}, "hello", cwd=repo,
+                                   workspace_root=repo, add_dirs=[str(locks)], network=False)
+    command = ["codex", "sandbox", "-P", "provenant-read-only", "-C", str(repo)]
+    for value in codex_read_only_permissions(plan["argv"]):
+        command += ["-c", value]
+    probe = subprocess.run(
+        [*command, "--", "/bin/sh", "-c",
+         f"touch '{locks}/held' && touch '{temp}/scratch' && ! touch '{repo}/review.txt' 2>/dev/null"],
+        capture_output=True, text=True, timeout=60,
+        env={**os.environ, "TMPDIR": str(temp), "CODEX_HOME": str(tmp_path / "codex-home")},
+    )
+    if probe.returncode and "sandbox" in probe.stderr.lower() and "not permitted" not in probe.stderr:
+        pytest.skip("the Codex seatbelt cannot start here: " + probe.stderr[-200:])
+    assert probe.returncode == 0, probe.stderr
+    assert (locks / "held").exists() and (temp / "scratch").exists()
+    assert not (repo / "review.txt").exists()
+
+
+def opencode_config_repo(tmp_path):
+    repo = tmp_path / "repo"
+    cwd = repo / "packages/app"
+    cwd.mkdir(parents=True)
+    git(tmp_path, "init", "-q", str(repo))
+    (repo / "opencode.json").write_text('{"permission": {"read": {"secrets/**": "deny"}}}\n')
+    (repo / "AGENTS.md").write_text("agents\n")
+    (repo / ".opencode/agent").mkdir(parents=True)
+    (repo / ".opencode/agent/review.md").write_text("agent\n")
+    (repo / ".opencode/.gitignore").write_text("node_modules\n")
+    (repo / "secret.txt").write_text("secret\n")
+    (repo / "opencode.jsonc").symlink_to(repo / "secret.txt")
+    plan = {"adapter": "opencode", "mode": "read_only", "workspace_root": str(repo), "cwd": str(cwd),
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    return repo, cwd, plan
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+def test_opencode_read_only_profile_reads_project_config_above_its_cwd(tmp_path):
+    mod = supervisor()
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    repo, _, plan = opencode_config_repo(tmp_path)
+    profile = mod.os_confinement_profile(plan)
+
+    def cat(path):
+        return subprocess.run([sandbox_exec, "-p", profile, "/bin/cat", str(path)], capture_output=True, text=True)
+
+    probe = cat(repo / "opencode.json")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert probe.returncode == 0, probe.stderr
+    assert cat(repo / "AGENTS.md").returncode == 0
+    assert cat(repo / ".opencode/agent/review.md").returncode == 0
+    assert cat(repo / "secret.txt").returncode != 0
+    # A link under a config name cannot carry the grant to another file.
+    assert cat(repo / "opencode.jsonc").returncode != 0
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("opencode"), reason="needs OpenCode")
+def test_opencode_starts_below_a_repository_config(tmp_path):
+    mod = supervisor()
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    _, cwd, plan = opencode_config_repo(tmp_path)
+    (cwd.parents[1] / "opencode.jsonc").unlink()
+    attempt = tmp_path / "attempt"
+    (attempt / "tmp/cache").mkdir(parents=True)
+    plan["run_dir"] = str(attempt)
+    result = subprocess.run(
+        [sandbox_exec, "-p", mod.os_confinement_profile(plan), "opencode", "debug", "config"],
+        cwd=cwd, capture_output=True, text=True, timeout=180,
+        env={**os.environ, "TMPDIR": str(attempt / "tmp"), "XDG_CACHE_HOME": str(attempt / "tmp/cache")},
+    )
+    assert "FileSystem.readFile" not in result.stdout + result.stderr
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert '"secrets/**"' in result.stdout
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS refuses setuid ps in any sandbox")
+def test_sandbox_exec_lane_finds_ps_shim_on_path(tmp_path, monkeypatch):
+    mod = supervisor()
+    observed = tmp_path / "ps-path.txt"
+    code = f"""import json, pathlib, shutil
+pathlib.Path({str(observed)!r}).write_text(shutil.which('ps') or '')
+print(json.dumps({{'type':'result','result':'done','is_error':False}}), flush=True)
+"""
+    plan = fixture_plan(tmp_path, code, "claude")
+    plan["applied"]["confinement"] = "sandbox-exec"
+    monkeypatch.setattr(mod, "confinement_command", lambda _plan, command: list(command))
+    mod.execute(plan, tmp_path / "result.md")
+    assert observed.read_text() == str(SCRIPTS / "bin/ps")
