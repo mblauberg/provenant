@@ -7,6 +7,7 @@ import fcntl
 import json
 import math
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -105,14 +106,13 @@ def _duration(seconds: float) -> str:
     return f"{int(seconds // 60)}m" if seconds >= 60 else f"{int(seconds)}s"
 
 
-def wait_seconds() -> float:
-    raw = os.environ.get("FABRIC_MEMORY_WAIT_SECONDS", "1800")
+def _wait_budget(timeout_seconds: float) -> float:
     try:
-        value = float(raw)
+        value = float(timeout_seconds)
         if not math.isfinite(value) or value < 0:
             raise ValueError
-    except ValueError as exc:
-        raise ValueError("FABRIC_MEMORY_WAIT_SECONDS must be a non-negative number") from exc
+    except (TypeError, ValueError) as exc:
+        raise ValueError("timeout_seconds must be a non-negative number") from exc
     return value
 
 
@@ -133,6 +133,33 @@ def _lock_file(on_warning: Callable[[str], None]) -> int | None:
         return None
 
 
+def _has_older_queued_attempt(queue_root: Path | None, queued_since: float | None) -> bool:
+    """Check existing queued receipts for a waiter with an earlier monotonic timestamp."""
+    if queue_root is None or queued_since is None:
+        return False
+    if type(queued_since) not in (int, float) or not math.isfinite(queued_since):
+        return False
+    run_dirs = list((queue_root / "runs").glob("*")) + list(queue_root.glob("mcp-*"))
+    for run_dir in run_dirs:
+        if run_dir.is_symlink() or not run_dir.is_dir():
+            continue
+        for receipt in run_dir.glob("tasks/*/attempt-*/attempt.json"):
+            try:
+                metadata = receipt.lstat()
+                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                    continue
+                row = json.loads(receipt.read_text(encoding="utf-8"))
+                timing = row.get("timing", {})
+                earlier_since = timing.get("queued_since")
+                if (row.get("state") == "queued" and row.get("queue_reason") == "memory"
+                        and type(earlier_since) in (int, float)
+                        and math.isfinite(earlier_since) and earlier_since < queued_since):
+                    return True
+            except (OSError, UnicodeError, ValueError, TypeError, AttributeError):
+                continue
+    return False
+
+
 def admit(
     on_wait: Callable[[str], None], cancelled: Callable[[], bool],
     on_warning: Callable[[str], None], probe: Callable[[], tuple[int, int]] | None = None,
@@ -140,19 +167,24 @@ def admit(
     waited_seconds: float = 0.0,
     workspace_root: Path | None = None,
     mode: str = "read_only",
+    *,
+    timeout_seconds: float,
+    queue_root: Path | None = None,
+    queued_since: float | None = None,
 ) -> AdmissionLease | None:
     """Reserve host admission until the caller starts or ends the attempt."""
     floor = floor_percent(workspace_root or Path.cwd(), mode)
     probe = probe or available_memory_mb
     started = time.monotonic()
-    budget = wait_seconds()
+    budget = _wait_budget(timeout_seconds)
     deadline = started + max(0.0, budget - waited_seconds)
-    waited_below_floor = False
+    waited_for_admission = False
+    waiting_for_older = False
     last_lock_report = 0.0
     while True:
         if cancelled():
             return None
-        if waited_below_floor and time.monotonic() >= deadline:
+        if waited_for_admission and time.monotonic() >= deadline:
             raise MemoryUnavailableError("memory admission wait expired")
         if floor == 0:
             return AdmissionLease()
@@ -176,15 +208,30 @@ def admit(
                 if time.monotonic() - last_lock_report >= 1:
                     on_wait(f"waiting for memory admission lock: {waited_seconds + time.monotonic() - started:.1f}s elapsed, {remaining:.1f}s remaining")
                     last_lock_report = time.monotonic()
-                pause(min(0.1, remaining))
+                pause(max(0.0, min(0.1, remaining)))
             except OSError as exc:
                 os.close(fd)
                 on_warning(f"memory admission lock unavailable: {exc}")
                 return AdmissionLease()
-        if (contended or waited_below_floor or waited_seconds > 0) and time.monotonic() >= deadline:
+        if (contended or waited_for_admission or waited_seconds > 0) and time.monotonic() >= deadline:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
             raise MemoryUnavailableError("memory admission wait expired")
+        if _has_older_queued_attempt(queue_root, queued_since):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+            waited_for_admission = True
+            if not waiting_for_older:
+                elapsed = waited_seconds + time.monotonic() - started
+                on_wait(f"waiting for earlier memory admission; {_duration(elapsed)} of {_duration(budget)}")
+                waiting_for_older = True
+            poll_end = min(deadline, time.monotonic() + POLL_SECONDS)
+            while time.monotonic() < poll_end:
+                if cancelled():
+                    return None
+                pause(max(0.0, min(0.1, poll_end - time.monotonic())))
+            continue
+        waiting_for_older = False
         try:
             available, total = probe()
             if total <= 0 or available < 0:
@@ -192,7 +239,7 @@ def admit(
         except (OSError, ValueError, TypeError, subprocess.SubprocessError) as exc:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
-            waited_below_floor = True
+            waited_for_admission = True
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise MemoryUnavailableError("memory admission wait expired") from exc
@@ -204,7 +251,7 @@ def admit(
                     return None
                 pause(max(0.0, min(0.1, poll_end - time.monotonic())))
             continue
-        if (waited_below_floor or contended or waited_seconds > 0) and time.monotonic() >= deadline:
+        if (waited_for_admission or contended or waited_seconds > 0) and time.monotonic() >= deadline:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
             raise MemoryUnavailableError("memory admission wait expired")
@@ -213,7 +260,7 @@ def admit(
             return AdmissionLease(fd)
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
-        waited_below_floor = True
+        waited_for_admission = True
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise MemoryUnavailableError("memory admission wait expired")

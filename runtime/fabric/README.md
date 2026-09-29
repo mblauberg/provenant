@@ -213,8 +213,7 @@ Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, and `detail`.
 New attempts wait when available host memory is below 10% of physical RAM for
 `worktree_write` or 5% for `read_only`; set either percentage from 0 to 100 in
 `<workspace_root>/.agents/fabric-policy.json` as `{"memory_floor_percent":{"worktree_write":10,"read_only":5}}` (either key may be omitted, and 0 disables that mode's floor).
-Queued time does not use the execution timeout, but `FABRIC_MEMORY_WAIT_SECONDS`
-limits each wait (default 1800); expiry fails the attempt as `memory_unavailable`.
+Queued time does not use the execution timeout, and each attempt waits for memory admission up to its own dispatch `timeout_seconds`. Queued attempts are admitted in dispatch order; expiry fails the attempt as `memory_unavailable`.
 Owners serialise admission through a per-user host lock in `$XDG_STATE_HOME/provenant/admission.lock`
 (default `~/.local/state/provenant/admission.lock`) and hold it for up to 20 seconds after provider start; lock creation failure admits with a warning, while probe failure holds and retries until the wait expires. `fabric_status` and `fabric status` show the available percentage, floor and wait budget and allow cancellation.
 

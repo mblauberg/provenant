@@ -13,6 +13,11 @@ def admission_state_home(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
 
 
+def _admit(*args, **kwargs):
+    kwargs.setdefault("timeout_seconds", 3600)
+    return memory_admission.admit(*args, **kwargs)
+
+
 def test_vm_stat_available_pages_use_reported_page_size():
     sample = """Mach Virtual Memory Statistics: (page size of 16384 bytes)
 Pages free: 1024.
@@ -83,12 +88,12 @@ def test_low_memory_waits_then_admits(monkeypatch):
     readings = iter([800, 1300])
     reasons = []
     warnings = []
-    lease = memory_admission.admit(reasons.append, lambda: False, warnings.append,
+    lease = _admit(reasons.append, lambda: False, warnings.append,
                                    probe=lambda: (next(readings), 16384), pause=lambda _: None)
     assert lease is not None
     lease.close()
     assert len(reasons) == 1 and reasons[0].startswith("waiting for memory: 4.9% available (0.78 GB), floor 5% for read_only;")
-    assert "of 30m" in reasons[0]
+    assert "of 60m" in reasons[0]
     assert warnings == []
 
 
@@ -96,7 +101,7 @@ def test_every_low_probe_publishes_fresh_reason(monkeypatch):
     monkeypatch.setattr(memory_admission, "POLL_SECONDS", 0)
     readings = iter([800, 750, 1300])
     reasons = []
-    lease = memory_admission.admit(reasons.append, lambda: False, lambda _: None,
+    lease = _admit(reasons.append, lambda: False, lambda _: None,
                                    probe=lambda: (next(readings), 16384), pause=lambda _: None)
     assert lease is not None
     lease.close()
@@ -110,7 +115,7 @@ def test_separate_attempts_publish_their_first_wait_independently(monkeypatch):
     second_wait = threading.Event()
     cancelled = threading.Event()
     def owner(waited):
-        lease = memory_admission.admit(lambda _: waited.set(), cancelled.is_set, lambda _: None,
+        lease = _admit(lambda _: waited.set(), cancelled.is_set, lambda _: None,
                                        probe=lambda: (800, 16384))
         if lease is not None:
             lease.close()
@@ -138,22 +143,122 @@ def test_probe_failure_holds_then_recovers(monkeypatch):
         if isinstance(reading, Exception):
             raise reading
         return reading
-    lease = memory_admission.admit(reasons.append, lambda: False, lambda _: None,
+    lease = _admit(reasons.append, lambda: False, lambda _: None,
                                    probe=broken_probe, pause=lambda _: None)
     assert lease is not None
     lease.close()
-    assert reasons == ["memory probe failed: unavailable; holding; 0s of 30m"]
+    assert reasons == ["memory probe failed: unavailable; holding; 0s of 60m"]
+
+
+@pytest.mark.parametrize("probe_failure", [False, True])
+def test_wait_continues_when_clock_passes_poll_end_before_pause(monkeypatch, probe_failure):
+    monkeypatch.setattr(memory_admission, "POLL_SECONDS", 1)
+    clock_calls = 0
+    pause_durations = []
+
+    def monotonic():
+        nonlocal clock_calls
+        clock_calls += 1
+        return 2 if clock_calls >= 6 else 0
+
+    def pause(duration):
+        assert duration >= 0
+        pause_durations.append(duration)
+
+    readings = iter([OSError("unavailable"), (1300, 16384)] if probe_failure
+                    else [(800, 16384), (1300, 16384)])
+
+    def probe():
+        reading = next(readings)
+        if isinstance(reading, Exception):
+            raise reading
+        return reading
+
+    monkeypatch.setattr(memory_admission.time, "monotonic", monotonic)
+    lease = _admit(lambda _: None, lambda: False, lambda _: None,
+                                   probe=probe, pause=pause)
+    assert lease is not None
+    lease.close()
+    assert pause_durations == [0]
+
+
+def test_waiting_writer_is_admitted_after_simulated_45_minutes(tmp_path, monkeypatch):
+    class Clock:
+        now = 0.0
+
+        def monotonic(self):
+            return self.now
+
+        def pause(self, _duration):
+            self.now += 45 * 60
+
+    clock = Clock()
+    monkeypatch.setattr(memory_admission.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(memory_admission, "POLL_SECONDS", 1)
+    samples = []
+
+    def probe():
+        samples.append(clock.now)
+        return (800, 16384) if clock.now == 0 else (2048, 16384)
+
+    lease = _admit(lambda _: None, lambda: False, lambda _: None,
+                                   probe=probe, pause=clock.pause,
+                                   workspace_root=tmp_path, mode="worktree_write",
+                                   timeout_seconds=3 * 60 * 60)
+    assert lease is not None
+    lease.close()
+    assert samples == [0, 45 * 60]
+
+
+def test_queued_memory_admissions_follow_fifo_order(tmp_path, monkeypatch):
+    class Clock:
+        now = 100.0
+
+        def monotonic(self):
+            return self.now
+
+        def pause(self, duration):
+            assert duration >= 0
+            if admitted == []:
+                older_receipt.write_text(
+                    '{"state":"running","queue_reason":"memory",'
+                    '"timing":{"queued_since":10}}', encoding="utf-8"
+                )
+                admitted.append("older")
+            self.now += max(duration, 1)
+
+    queue_root = tmp_path / ".agent-run"
+    older_receipt = queue_root / "runs/older/tasks/old/attempt-001/attempt.json"
+    older_receipt.parent.mkdir(parents=True)
+    older_receipt.write_text(
+        '{"state":"queued","queue_reason":"memory",'
+        '"timing":{"queued_since":10}}', encoding="utf-8"
+    )
+    admitted = []
+    clock = Clock()
+    monkeypatch.setattr(memory_admission.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(memory_admission, "POLL_SECONDS", 1)
+    reasons = []
+
+    lease = _admit(reasons.append, lambda: False, lambda _: None,
+                                   probe=lambda: (1300, 16384), pause=clock.pause,
+                                   timeout_seconds=3600, queue_root=queue_root,
+                                   queued_since=20)
+    assert lease is not None
+    admitted.append("newer")
+    lease.close()
+    assert admitted == ["older", "newer"]
+    assert reasons and reasons[0].startswith("waiting for earlier memory admission;")
 
 
 def test_probe_failure_expires(monkeypatch):
-    monkeypatch.setenv("FABRIC_MEMORY_WAIT_SECONDS", "0.01")
     monkeypatch.setattr(memory_admission, "POLL_SECONDS", 0.01)
     reasons = []
     def broken_probe():
         raise OSError("unavailable")
     with pytest.raises(memory_admission.MemoryUnavailableError):
-        memory_admission.admit(reasons.append, lambda: False, lambda _: None,
-                               probe=broken_probe)
+        _admit(reasons.append, lambda: False, lambda _: None,
+               probe=broken_probe, timeout_seconds=0.01)
     assert any("memory probe failed: unavailable; holding" in reason for reason in reasons)
 
 
@@ -163,7 +268,7 @@ def test_zero_floor_skips_the_probe(tmp_path):
     policy.write_text('{"memory_floor_percent":{"read_only":0}}')
     def fail_probe():
         raise AssertionError("probe called")
-    lease = memory_admission.admit(lambda _: None, lambda: False, lambda _: None,
+    lease = _admit(lambda _: None, lambda: False, lambda _: None,
                                    probe=fail_probe, workspace_root=tmp_path)
     assert lease is not None
     lease.close()
@@ -173,7 +278,7 @@ def test_worktree_write_uses_ten_percent_floor(tmp_path, monkeypatch):
     monkeypatch.setattr(memory_admission, "POLL_SECONDS", 0)
     reasons = []
     readings = iter([(1280, 16384), (2048, 16384)])
-    lease = memory_admission.admit(reasons.append, lambda: False, lambda _: None,
+    lease = _admit(reasons.append, lambda: False, lambda _: None,
                                    probe=lambda: next(readings), pause=lambda _: None,
                                    workspace_root=tmp_path, mode="worktree_write")
     assert lease is not None
@@ -185,19 +290,19 @@ def test_wait_reason_shows_elapsed_of_total_budget(monkeypatch):
     monkeypatch.setattr(memory_admission, "POLL_SECONDS", 0)
     reasons = []
     readings = iter([(1280, 16384), (2048, 16384)])
-    lease = memory_admission.admit(reasons.append, lambda: False, lambda _: None,
+    lease = _admit(reasons.append, lambda: False, lambda _: None,
                                    probe=lambda: next(readings), pause=lambda _: None,
                                    waited_seconds=240, mode="worktree_write")
     assert lease is not None
     lease.close()
-    assert reasons[0].endswith("4m of 30m")
+    assert reasons[0].endswith("4m of 60m")
 
 
 def test_cancel_stops_waiting_attempt(monkeypatch):
     cancelled = [False]
     def waiting(_):
         cancelled[0] = True
-    assert memory_admission.admit(waiting, lambda: cancelled[0], lambda _: None,
+    assert _admit(waiting, lambda: cancelled[0], lambda _: None,
                                   probe=lambda: (800, 16384)) is None
 
 
@@ -226,7 +331,7 @@ def test_lock_serializes_owners_through_provider_settle(tmp_path, monkeypatch):
         return (800 if memory_consumed.is_set() else 1300, 16384)
 
     def owner_first():
-        lease = memory_admission.admit(lambda _: None, cancelled.is_set, lambda _: None, probe=probe)
+        lease = _admit(lambda _: None, cancelled.is_set, lambda _: None, probe=probe)
         admitted.append("first")
         first_reserved.set()
         allow_start.wait(1)
@@ -240,7 +345,7 @@ def test_lock_serializes_owners_through_provider_settle(tmp_path, monkeypatch):
             second_waiting.set()
             if "4.9% available" in reason:
                 second_low.set()
-        lease = memory_admission.admit(waiting, cancelled.is_set,
+        lease = _admit(waiting, cancelled.is_set,
                                        lambda _: None, probe=probe)
         if lease is not None:
             admitted.append("second")
@@ -274,7 +379,7 @@ def test_lock_creation_failure_admits_with_warning(tmp_path, monkeypatch):
     blocked.write_text("x")
     monkeypatch.setenv("XDG_STATE_HOME", str(blocked))
     warnings = []
-    lease = memory_admission.admit(lambda _: None, lambda: False, warnings.append,
+    lease = _admit(lambda _: None, lambda: False, warnings.append,
                                    probe=lambda: (1300, 16384))
     assert lease is not None
     lease.close()
@@ -283,12 +388,11 @@ def test_lock_creation_failure_admits_with_warning(tmp_path, monkeypatch):
 
 def test_wait_expiry_and_visible_budget(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
-    monkeypatch.setenv("FABRIC_MEMORY_WAIT_SECONDS", "0.02")
     monkeypatch.setattr(memory_admission, "POLL_SECONDS", 0.01)
     reasons = []
     try:
-        memory_admission.admit(reasons.append, lambda: False, lambda _: None,
-                               probe=lambda: (800, 16384))
+        _admit(reasons.append, lambda: False, lambda _: None,
+               probe=lambda: (800, 16384), timeout_seconds=0.02)
     except memory_admission.MemoryUnavailableError as exc:
         assert exc.code == "memory_unavailable"
     else:
@@ -298,26 +402,24 @@ def test_wait_expiry_and_visible_budget(tmp_path, monkeypatch):
 
 
 def test_recovered_memory_after_wait_deadline_does_not_admit(monkeypatch):
-    monkeypatch.setenv("FABRIC_MEMORY_WAIT_SECONDS", "0.01")
     monkeypatch.setattr(memory_admission, "POLL_SECONDS", 0.01)
     readings = iter([800, 1300])
     with pytest.raises(memory_admission.MemoryUnavailableError):
-        memory_admission.admit(lambda _: None, lambda: False, lambda _: None,
-                               probe=lambda: (next(readings), 16384), pause=lambda _: time.sleep(0.02))
+        _admit(lambda _: None, lambda: False, lambda _: None,
+               probe=lambda: (next(readings), 16384), pause=lambda _: time.sleep(0.02),
+               timeout_seconds=0.01)
 
 
 def test_prior_wait_consumes_the_same_attempt_budget(monkeypatch):
-    monkeypatch.setenv("FABRIC_MEMORY_WAIT_SECONDS", "0.01")
     with pytest.raises(memory_admission.MemoryUnavailableError):
-        memory_admission.admit(lambda _: None, lambda: False, lambda _: None,
-                               probe=lambda: (800, 16384), waited_seconds=0.01)
+        _admit(lambda _: None, lambda: False, lambda _: None,
+               probe=lambda: (800, 16384), waited_seconds=0.01, timeout_seconds=0.01)
 
 
 def test_slow_recovery_probe_cannot_overrun_remaining_budget(monkeypatch):
-    monkeypatch.setenv("FABRIC_MEMORY_WAIT_SECONDS", "0.01")
     def slow_probe():
         time.sleep(0.02)
         return (1300, 16384)
     with pytest.raises(memory_admission.MemoryUnavailableError):
-        memory_admission.admit(lambda _: None, lambda: False, lambda _: None,
-                               probe=slow_probe, waited_seconds=0.005)
+        _admit(lambda _: None, lambda: False, lambda _: None,
+               probe=slow_probe, waited_seconds=0.005, timeout_seconds=0.01)

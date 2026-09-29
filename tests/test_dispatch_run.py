@@ -415,7 +415,12 @@ exit 99
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     module = load_dispatch_module()
     monkeypatch.setattr(module.memory_admission, "available_memory_mb", lambda: (640, 16384))
-    monkeypatch.setenv("FABRIC_MEMORY_WAIT_SECONDS", "0")
+    original_admit = module.memory_admission.admit
+    admission_timeouts = []
+    def track_admission_timeout(*args, **kwargs):
+        admission_timeouts.append(kwargs.get("timeout_seconds"))
+        return original_admit(*args, **kwargs)
+    monkeypatch.setattr(module.memory_admission, "admit", track_admission_timeout)
     monkeypatch.chdir(tmp_path)
     if legacy:
         adapter = tmp_path / "adapter"
@@ -424,12 +429,14 @@ exit 99
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "memory-expiry", "--adapter", "codex",
         "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--timeout-seconds", "0.01",
     ])
     assert module.dispatch(args) == 1
     attempt = json.loads((run_dir / "dispatch/tasks/memory-expiry/attempt-001/attempt.json").read_text())
     state = json.loads((run_dir / "tasks/memory-expiry/attempt-001/attempt.json").read_text())
     assert attempt["status"] == state["status"] == "failed"
     assert attempt["outcome"] == state["error"] == "memory_unavailable"
+    assert admission_timeouts == [0.01]
     assert "lower the mode's memory_floor_percent" in state["fix"]
     assert "memory_unavailable" in state["digest"]
 

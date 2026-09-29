@@ -1775,7 +1775,10 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         try:
             memory_lease = memory_admission.admit(waiting, cancelled_now, warning,
                                                    waited_seconds=admission_queued_seconds,
-                                                   workspace_root=workspace, mode=args.access_mode)
+                                                   workspace_root=workspace, mode=args.access_mode,
+                                                   timeout_seconds=args.timeout_seconds,
+                                                   queue_root=run_root(workspace) / ".agent-run",
+                                                   queued_since=waiting_since)
         except memory_admission.MemoryUnavailableError as exc:
             process_error = exc.code
             memory_lease = None
