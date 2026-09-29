@@ -88,7 +88,7 @@ def make_fixture(tmp_path):
         bin_dir / "provenant",
         """\
         #!/usr/bin/env bash
-        printf '%s\\n' '{"status":"ok","alias":"workhorse","resolved_model":"opus","model_family":"anthropic","endpoint_provider":"anthropic","identity_source":"test","requested_effort":"","effort":"","effort_source":"route-default","effort_capability_source":"test"}'
+        printf '%s\\n' '{"status":"ok","alias":"workhorse","resolved_model":"sonnet","model_family":"anthropic","endpoint_provider":"anthropic","identity_source":"test","requested_effort":"","effort":"","effort_source":"route-default","effort_capability_source":"test"}'
         """,
     )
     env = fabric_free_env()

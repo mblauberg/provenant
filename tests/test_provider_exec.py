@@ -843,7 +843,7 @@ def test_model_families_load_catalog_without_snapshot(monkeypatch):
         "snapshot",
         lambda: (_ for _ in ()).throw(AssertionError("snapshot subprocess called")),
     )
-    assert exec_routing.model_families("claude-sonnet-5") == ("anthropic",)
+    assert exec_routing.model_families("claude-sonnet-5-5") == ("anthropic",)
 
 
 def test_structured_result_and_question_take_precedence_over_prose():
@@ -2656,7 +2656,7 @@ def test_catalogued_observed_substitution_records_answering_family_without_certi
     code = """import json
 events = [
     {"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"},
-    {"type":"assistant","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"DONE"}]}},
+    {"type":"assistant","message":{"model":"claude-sonnet-5-5","content":[{"type":"text","text":"DONE"}]}},
     {"type":"result","result":"DONE","is_error":False,"session_id":"s-1"},
 ]
 for event in events:
@@ -2671,7 +2671,7 @@ for event in events:
     )
     record = supervisor().execute(plan, tmp_path / "result.md")
     assert record["status"] == "ok"
-    assert record["provenance"]["observed_model"] == "claude-sonnet-5"
+    assert record["provenance"]["observed_model"] == "claude-sonnet-5-5"
     assert record["provenance"]["family"] == "anthropic"
     assert record["provenance"]["identity"] == "observed"
     assert "observed family anthropic inferred from catalogue" in record["provenance"]["notes"]
@@ -2693,7 +2693,7 @@ def test_catalogue_lookup_oserror_does_not_fail_finalisation(tmp_path, monkeypat
     code = """import json
 for event in [
     {"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"},
-    {"type":"assistant","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"DONE"}]}},
+    {"type":"assistant","message":{"model":"claude-sonnet-5-5","content":[{"type":"text","text":"DONE"}]}},
     {"type":"result","result":"DONE","is_error":False,"session_id":"s-1"},
 ]:
     print(json.dumps(event), flush=True)
@@ -2893,13 +2893,14 @@ def test_usage_limit_falls_back_as_attempt_two(tmp_path, explicit):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     cli = bindir / "claude"
+    initial_model = "opus" if explicit else "sonnet"
     cli.write_text("""#!/usr/bin/env python3
 import json,sys
 sys.stdin.read()
 model=sys.argv[sys.argv.index('--model')+1]
-print(json.dumps({'type':'result','is_error':model=='opus','result':"You've hit your usage limit" if model=='opus' else 'DONE'}))
-sys.exit(1 if model=='opus' else 0)
-""")
+print(json.dumps({'type':'result','is_error':model=='TARGET_MODEL','result':"You've hit your usage limit" if model=='TARGET_MODEL' else 'DONE'}))
+sys.exit(1 if model=='TARGET_MODEL' else 0)
+""".replace("TARGET_MODEL", initial_model))
     cli.chmod(0o755)
     fallback_cli = bindir / 'opencode'
     fallback_cli.write_text("#!/usr/bin/env python3\nimport json\nprint(json.dumps({'type':'text','part':{'text':'DONE'}}))\n")
@@ -2950,12 +2951,8 @@ sys.exit(1 if model=='opus' else 0)
     assert len({row["run_id"] for row in rows}) == 1
     assert rows[1]["provenance"]["fallback_from"]["status"] == "usage_limited"
     assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "ok"
-    assert (
-        json.loads((tmp_path / "cooldowns.json").read_text())["cooldowns"][
-            "claude/*"
-        ]["source_run"]
-        == rows[0]["run_id"]
-    )
+    cooldowns = json.loads((tmp_path / "cooldowns.json").read_text())["cooldowns"]
+    assert cooldowns["claude/*"]["source_run"] == rows[0]["run_id"]
 
 
 def test_codex_observed_model_comes_from_rollout_turn_context(tmp_path):
@@ -3845,8 +3842,8 @@ def test_kiro_v2_engine_stream_is_parsed_and_auto_is_not_passed():
 def test_claude_reported_ids_match_their_aliases():
     module = supervisor()
     assert module._same_model("claude", "haiku", "claude-haiku-4-5-20251001")
-    assert module._same_model("claude", "sonnet", "claude-sonnet-5")
-    assert not module._same_model("claude", "haiku", "claude-sonnet-5")
+    assert module._same_model("claude", "sonnet", "claude-sonnet-5-5")
+    assert not module._same_model("claude", "haiku", "claude-sonnet-5-5")
 
 
 def test_subreaper_is_held_only_while_attempts_run(tmp_path, monkeypatch):

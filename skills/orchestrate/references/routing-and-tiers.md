@@ -26,11 +26,11 @@ The first configured candidate is the default and later candidates remain
 admissible. `docs/model-dossier.md` records advisory preferences, so prose
 alone does not move a default.
 
-Opus (the `opus` alias, which resolves to Opus 5.5, `claude-opus-5-5`) is
-Claude's default flagship and the standing choice for critical review, synthesis
-and adjudication at every risk tier. It is also the default workhorse at low or
-medium effort, where it tends to beat Sonnet at a higher one. Sonnet stays admissible at workhorse and is the one to reach for
-when the work is genuinely routine. Each catalogue-configured risk tier has one bounded
+Sonnet 5.5 (`claude-sonnet-5-5`, through the `sonnet` alias) is Claude's
+workhorse default for ordinary implementation, UI/frontend work, scoping,
+reviews and legwork. Opus 5.5 (`claude-opus-5-5`, through `opus`) is the
+flagship for chairing, critical review, final design calls and leads of large
+design efforts. Each catalogue-configured risk tier has one bounded
 override occupant. Validation prevents it from being an alias or alias
 candidate. Lifecycle `risk_tier` remains delivery metadata and never selects
 that occupant. Callers must use the separate `--model-override-tier` input,
@@ -58,12 +58,12 @@ and `xhigh` for critical review and for legwork that needs judgement. The
 native Codex CLI reports `max` and `ultra` for Astra and the Responses API
 stops at `max`; those are separate surfaces, only the runtime capability probe
 decides what the adapter can dispatch, and the catalogue defaults to neither.
-Every substitution is recorded. The workhorse alias lists GPT-6 Sol
-(`gpt-6-sol`) first, with GPT-6 Luna (`gpt-6-luna`) as its admissible
-fallback; scout is Luna. Both run at `high` by default and are raised to
-`xhigh` or `max` when a slice warrants it. GPT-5.6 models and Terra are no
-longer catalogue routes. Claude and
-Codex are equal primary families.
+Every substitution is recorded. The Codex workhorse alias contains only GPT-6
+Sol (`gpt-6-sol`); scout is GPT-6 Luna (`gpt-6-luna`). Luna also appears in
+the mechanical, bulk and research task classes for bounded or non-visual
+legwork. Sol and Luna run at `high` by default and can be raised to `xhigh` or
+`max` when a slice warrants it. GPT-5.6 models and Terra are no longer
+catalogue routes. Claude and Codex are equal primary families.
 
 Effort rule: **medium by default**; **high for verification, adversarial, and high-stakes** calls
 (that's where subtle errors hide); reserve the very highest effort for isolated single-shot calls —

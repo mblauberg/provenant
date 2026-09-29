@@ -409,7 +409,7 @@ def test_ok_routing_record_requires_complete_execution_identity():
             assert not invoked.exists(), missing_field
 
 
-def test_claude_other_primary_uses_opus_without_implicit_fable_route():
+def test_claude_other_primary_uses_sonnet_without_implicit_fable_route():
     stub = """\
         #!/usr/bin/env bash
         model=""
@@ -417,20 +417,19 @@ def test_claude_other_primary_uses_opus_without_implicit_fable_route():
           if [ "$1" = "--model" ]; then model="$2"; shift 2; else shift; fi
         done
         cat >/dev/null
-        [ "$model" = "opus" ] || exit 9
-        echo "OPUS OK"
+        [ "$model" = "sonnet" ] || exit 9
+        echo "SONNET OK"
     """
     result, record, output = run_dispatch_with_stub(stub, role="other-primary")
     assert result.returncode == 0, result.output
-    assert record["resolved_model"] == "opus"
-    assert record["requested_model"] == "opus"
-    # The role `other-primary` takes the workhorse default, whose anthropic
-    # candidates are opus then sonnet, so a fallback exists. What this test pins is
-    # that it is not fable: a crucial-tier model must never be reached implicitly.
-    assert record["fallback_model"] == "sonnet"
+    assert record["resolved_model"] == "sonnet"
+    assert record["requested_model"] == "sonnet"
+    # The role `other-primary` takes the workhorse default; Opus remains an
+    # admissible fallback, while Fable is never reached implicitly.
+    assert record["fallback_model"] == "opus"
     assert record["identity_source"] == "dated-catalog"
     assert record["substitution"] == ""
-    assert output.strip() == "OPUS OK"
+    assert output.strip() == "SONNET OK"
 
 
 def test_claude_crucial_synthesis_dispatches_explicit_fable_5_1_override():
@@ -518,7 +517,7 @@ def test_claude_auth_failure_does_not_hide_an_unindexed_retry():
     result, record, output = run_dispatch_with_stub("#!/bin/sh\ncat >/dev/null\necho 'Not logged in' >&2\nexit 1\n", role="other-primary")
     assert result.returncode != 0
     assert record["status"] == "auth_required"
-    assert record["resolved_model"] == "opus"
+    assert record["resolved_model"] == "sonnet"
     assert record["auth_or_quota_error"] is True
     assert record["certification_eligible"] is False
     assert "Not logged in" in output
@@ -573,7 +572,7 @@ def test_claude_tool_not_found_keeps_diagnostic_instead_of_retrying_fallback():
         record = json.loads(result.stdout)
         assert result.returncode != 0
         assert record["status"] == "tool_missing"
-        assert record["fallback_model"] == "sonnet"
+        assert record["fallback_model"] == "opus"
         assert "claude not found. PATH=" in out.read_text(encoding="utf-8")
         assert "model-unavailable" in out.read_text(encoding="utf-8")
 

@@ -116,8 +116,8 @@ def load_secret_scan_module():
 
 
 @pytest.mark.parametrize('name,positive,placeholder', [
-    ('PEM private key', '-----BEGIN RSA PRIVATE KEY-----\n' + 'A' * 64 + '\n-----END RSA PRIVATE KEY-----',
-     '-----BEGIN RSA PRIVATE KEY-----\nEXAMPLE\n-----END RSA PRIVATE KEY-----'),
+    ('PEM private key', '-' * 5 + 'BEGIN RSA ' + 'PRIVATE KEY-----\n' + 'A' * 64 + '\n' + '-' * 5 + 'END RSA PRIVATE KEY-----',
+     '-' * 5 + 'BEGIN RSA PRIVATE KEY-----\nEXAMPLE\n' + '-' * 5 + 'END RSA PRIVATE KEY-----'),
     ('AWS access key ID', 'AKIA' + 'A' * 16, 'AKIA' + 'X' * 12 + 'XXXX'),
     ('AWS access key ID', 'ASIA' + 'A' * 16, '<ASIA' + 'A' * 16 + '>'),
     ('GitHub token', 'ghp_' + 'a' * 36, 'ghp_' + 'a' * 16 + 'EXAMPLE' + 'a' * 12),
@@ -2542,7 +2542,7 @@ def test_stale_instance_routing_uses_fresh_product_and_warns(tmp_path, monkeypat
     }])
 
     assert result['status'] == 'validated'
-    assert result['routes'][0]['resolved_model'] == 'opus'
+    assert result['routes'][0]['resolved_model'] == 'sonnet'
     warning = result['routes'][0]['warnings'][-1]
     assert 'resolved against the fresh product snapshot' in warning
     assert 'scripts/install-harness --platform all --refresh-routing' in warning
