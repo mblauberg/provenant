@@ -276,6 +276,20 @@ async function initialiseRun(
   return runDir;
 }
 
+/** The run a dispatch launched, reported before any wait so a caller that dies waiting still knows it. */
+export interface LaunchObserver {
+  onLaunch?: (launch: { runId: string; taskId: string; attempt: number }) => void;
+}
+
+/** A failing launch observer never costs the run it observes. */
+export function reportLaunch(observer: LaunchObserver, launch: { runId: string; taskId: string; attempt: number }): void {
+  try {
+    observer.onLaunch?.(launch);
+  } catch {
+    /* The run's own records remain authoritative. */
+  }
+}
+
 export interface OwnerIdentification {
   kind: "dispatch" | "batch";
   identifier: string;
@@ -617,7 +631,8 @@ async function dispatchConfiguredProviderUnchecked(
   input: DispatchInput,
   identity: Identity,
   signal: AbortSignal,
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv,
+  launch: LaunchObserver,
 ): Promise<Record<string, unknown>> {
   const workspaceIdentity = identity;
   const root = productRoot(env);
@@ -714,6 +729,7 @@ async function dispatchConfiguredProviderUnchecked(
     },
     input.prompt === undefined ? [] : [promptPath],
   );
+  reportLaunch(launch, { runId: shortRunId(runDir), taskId, attempt: 1 });
   const completion = await observeOwner(
     started,
     Math.max(
@@ -869,9 +885,10 @@ export async function dispatchConfiguredProvider(
   identity: Identity,
   signal: AbortSignal,
   env: NodeJS.ProcessEnv = process.env,
+  launch: LaunchObserver = {},
 ): Promise<Record<string, unknown>> {
   try {
-    return await dispatchConfiguredProviderUnchecked(input, identity, signal, env);
+    return await dispatchConfiguredProviderUnchecked(input, identity, signal, env, launch);
   } catch (error) {
     if (signal.aborted && !(error instanceof InputError)) throw error;
     return rejected(error);

@@ -406,9 +406,11 @@ register(
       if (!input.session) return value;
       // Settle a turn that already finished, so the reply shows where the name now points.
       const session = await reconcileSession(readyStore(), who, input.session);
+      const unsupported = result.error === "continuation_unsupported" ? `\n  fix: ${String(result.fix)}` : "";
       const line = `  session ${input.session} ${result.session_turn}${session?.turnStatus === null ? " active" : ""}`;
       return { ...value, session: input.session, session_turn: result.session_turn,
-        ...(typeof value.digest === "string" ? { digest: `${value.digest}\n${line}` } : {}) };
+        ...(unsupported ? { error: result.error, fix: result.fix } : {}),
+        ...(typeof value.digest === "string" ? { digest: `${value.digest}${unsupported}\n${line}` } : {}) };
     }
     const value = observed.runs ? {
       ...observed,

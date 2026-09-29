@@ -219,13 +219,19 @@ project, resume its provider session through the `resume` path above. Names are
 case-sensitive, one per project. The store keeps only the alias: the actual
 adapter, provider-native session ID and the run, task, attempt and result path
 of the last clean turn (`ok` or `input_required`). A failed or cancelled turn
-leaves that pointer where it was. A name runs one turn at a time; another call
-gets `session_busy` with the active run ID. `fabric_session` with `action:
-inspect`, `list` or `forget` reads or drops a name; `forget` is refused while a
-turn is active and leaves run files and provider history in place. A provider
-without native continuation (Copilot), or a last turn with no provider session
-ID, returns `continuation_unsupported`; `fresh: true` then starts a new session
-primed with the last result, as `handoff` does.
+leaves that pointer where it was, and the next turn resumes from the pointed-to
+attempt and its provider session, not from a later failed attempt. A turn is
+the whole owner invocation, fallback attempts included; the pointer moves to
+the attempt that ended it cleanly. A name runs one turn at a time; another call
+gets `session_busy` with the active run ID. The turn records its run as it
+launches, so a caller that dies while waiting leaves the name busy until the
+run's owner finishes. `fabric_session` with `action: inspect`, `list` or
+`forget` reads or drops a name; `forget` is refused while a turn is active and
+leaves run files and provider history in place. A provider without native
+continuation (Copilot), a last clean turn with no provider session ID, or a
+provider that no longer has the session returns `continuation_unsupported`; a
+named session is never silently relaunched. `fresh: true` then starts a new
+session primed with the last clean result, as `handoff` does.
 
 Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, and `detail`.
 New attempts wait when available host memory is below 10% of physical RAM for

@@ -1464,6 +1464,11 @@ def prepare_resume(args):
     elif len(tasks)>1: raise ResumeError("resume_task_required","resume a batch task: pass task_id")
     previous=max(rows,key=lambda row:row["attempt"])
     if previous["state"]!="terminal": raise ValueError("resume requires a terminal attempt")
+    pinned=getattr(args,"resume_attempt",None)
+    if pinned is not None:
+        # A named session continues from its last clean attempt, not the latest one.
+        previous=next((row for row in rows if row["attempt"]==pinned),None)
+        if previous is None: raise ResumeError("resume_attempt_unknown",f"attempt {pinned} is not recorded in this run")
     route=previous.get("requested_route") or {}
     requested=previous["provenance"]["requested"]
     if (args.tool and args.tool!=requested["adapter"]) or (args.model and args.model!=previous["provenance"]["resolved_model"]):
@@ -1503,10 +1508,17 @@ def prepare_resume(args):
                 if isinstance(event,dict) and event.get("session_id")==args.resume_session:
                     observed_session=True
                     break
+    required=getattr(args,"require_session",None)
+    if required is not None and args.resume_session!=required:
+        raise ResumeError("continuation_unsupported",f"attempt {previous['attempt']} did not record provider session {required}; "
+                          "pass fresh: true to start a new session primed with its last result")
     if not args.resume_session or args.tool=="copilot" or (
         args.tool=="claude" and previous["status"] in {"timed_out","cancelled","stalled","interrupted"}
         and not observed_session
     ):
+        if required is not None:
+            raise ResumeError("continuation_unsupported",f"{args.tool} cannot continue provider session {required}; "
+                              "pass fresh: true to start a new session primed with its last result")
         if (args.tool=="claude" and previous["mode"]=="worktree_write"
             and previous["status"] in {"timed_out","cancelled","stalled","interrupted"}):
             raise ValueError("Claude session unavailable after incomplete writer turn; review worktree changes, then dispatch a new run")
@@ -1911,7 +1923,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     and adapter_record.get("status")=="failed"
                     and re.search(r"no conversation found",adapter_record.get("evidence",{}).get("excerpt") or "",re.I)):
                     previous=args.resume_previous
-                    if (previous["mode"]=="worktree_write" and previous["status"] in {"timed_out","cancelled","stalled","interrupted"}):
+                    if getattr(args,"require_session",None) is not None:
+                        # A named session never silently becomes a new provider session.
+                        adapter_record["status"]="rejected"
+                        adapter_record["error"]="continuation_unsupported"
+                        adapter_record["fix"]="The provider no longer has this session; pass fresh: true to start a new session primed with its last result."
+                        adapter_record["evidence"]["signature"]="continuation_unsupported"
+                    elif (previous["mode"]=="worktree_write" and previous["status"] in {"timed_out","cancelled","stalled","interrupted"}):
                         adapter_record["status"]="rejected"
                         adapter_record["fix"]="Review worktree changes, then dispatch a new run."
                         adapter_record["evidence"]["signature"]="resume_session_missing"
@@ -2456,6 +2474,8 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--batch-id", help=argparse.SUPPRESS)
     root.add_argument("--cwd",dest="provider_cwd",type=Path)
     root.add_argument("--resume", help="resume this run id; inherit route and controls")
+    root.add_argument("--resume-attempt", type=int, help="resume from this attempt instead of the latest")
+    root.add_argument("--require-session", help="continue exactly this provider session; never relaunch a new one")
     root.add_argument("--context-ceiling", type=float, help="auto-compaction threshold in tokens, clamped to 100k-1M")
     root.add_argument("--sandbox", choices=("read-only","workspace-write","full"))
     root.add_argument("--network", choices=("true","false"))

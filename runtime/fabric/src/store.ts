@@ -100,10 +100,12 @@ export interface NamedSession {
   updatedAt: string;
 }
 
-export interface SessionTurn {
-  kind: "start" | "resume" | "fresh";
-  runId?: string;
-  taskId?: string;
+export type SessionTurnKind = "start" | "resume" | "fresh";
+
+/** The run and first attempt a launched turn runs as. */
+export interface SessionLaunch {
+  runId: string;
+  taskId: string;
   attempt: number;
 }
 
@@ -428,32 +430,32 @@ export class Store {
   }
 
   /**
-   * Take the name's one active turn. `expectedRunId` is the last clean turn the
-   * caller planned from; a changed pointer or an active turn returns the row.
+   * Take the name's one active turn. `observedClaim` is the settled turn the
+   * caller planned from (null for no row); any turn claimed since, or an active
+   * turn, returns the row instead. The turn has no run until it launches.
    */
-  claimSessionTurn(who: Identity, name: string, expectedRunId: string | null, turn: SessionTurn, pid: number):
+  claimSessionTurn(who: Identity, name: string, observedClaim: string | null, kind: SessionTurnKind, pid: number):
     { claim: string } | { conflict: NamedSession | undefined } {
     const claim = randomUUID(), now = Date.now();
     return this.#db.transaction(() => {
       const existing = this.session(who.project, name);
-      if (existing ? existing.turnStatus === null || existing.runId !== expectedRunId : expectedRunId !== null)
+      if (existing ? existing.turnStatus === null || existing.turnClaim !== observedClaim : observedClaim !== null)
         return { conflict: existing };
       this.#db.prepare(
         `INSERT INTO sessions(project, name, turn_claim, turn_kind, turn_run_id, turn_task_id, turn_attempt, turn_status,
            turn_pid, created_by, updated_by, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)
+         VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?)
          ON CONFLICT(project, name) DO UPDATE SET turn_claim = excluded.turn_claim, turn_kind = excluded.turn_kind,
            turn_run_id = excluded.turn_run_id, turn_task_id = excluded.turn_task_id, turn_attempt = excluded.turn_attempt,
            turn_status = NULL, turn_pid = excluded.turn_pid, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
-      ).run(who.project, name, claim, turn.kind, turn.runId ?? null, turn.taskId ?? null, turn.attempt, pid,
-        who.agentId, who.agentId, now, now);
-      this.#log(who, "session", `${name} ${turn.kind}${turn.runId ? ` ${turn.runId}` : ""}`);
+      ).run(who.project, name, claim, kind, pid, who.agentId, who.agentId, now, now);
+      this.#log(who, "session", `${name} ${kind}`);
       return { claim };
     }).immediate();
   }
 
-  /** Record the run a launched turn runs in; the launcher's pid no longer matters. */
-  bindSessionTurn(who: Identity, name: string, claim: string, turn: Required<Omit<SessionTurn, "kind">>): void {
+  /** Record the run a launched turn runs in; from here its owner, not the launcher, decides. */
+  bindSessionTurn(who: Identity, name: string, claim: string, turn: SessionLaunch): void {
     this.#db.prepare(`UPDATE sessions SET turn_run_id = ?, turn_task_id = ?, turn_attempt = ?, turn_pid = NULL,
         updated_at = ? WHERE project = ? AND name = ? AND turn_claim = ? AND turn_status IS NULL`)
       .run(turn.runId, turn.taskId, turn.attempt, Date.now(), who.project, name, claim);

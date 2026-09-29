@@ -1,12 +1,22 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import Database from "better-sqlite3";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, expect, it } from "vitest";
+
+import { Store } from "../src/store.js";
+
+async function until<T>(probe: () => Promise<T> | T, done: (value: T) => boolean): Promise<T> {
+  for (let tries = 0; ; tries++) {
+    const value = await probe();
+    if (done(value) || tries > 250) return value;
+    await new Promise((settle) => setTimeout(settle, 40));
+  }
+}
 
 const pidLogs = new Set<string>();
 const roots = new Set<string>();
@@ -116,14 +126,16 @@ it("starts, inspects, resumes across agents, serialises and forgets a named sess
     expect(await chair.call("dispatch", { session: "Review", prompt: "x", adapter: "claude" }))
       .toMatchObject({ status: "rejected", error: "resume_route_change" });
 
-    // Only a clean turn moves the pointer.
-    expect(await chair.call("dispatch", { session: "Review", prompt: "fail", wait_seconds: 5 }))
-      .toMatchObject({ status: "failed", attempt: 3 });
+    // Only a clean turn moves the pointer, and the next turn continues from it.
+    expect(await chair.call("dispatch", { session: "Review", prompt: "fail-new-session", wait_seconds: 5 }))
+      .toMatchObject({ status: "failed", attempt: 3, session_id: "other-3" });
     expect(await chair.call("session", { action: "inspect", name: "Review" })).toMatchObject({
-      attempt: 2, last_turn: { status: "failed", attempt: 3 },
+      attempt: 2, provider_session_id: `fixture-${run}-${task}`, last_turn: { status: "failed", attempt: 3 },
     });
     expect(await chair.call("dispatch", { session: "Review", prompt: "again", wait_seconds: 5 }))
-      .toMatchObject({ status: "ok", attempt: 4, session_turn: "resume" });
+      .toMatchObject({ status: "ok", attempt: 4, session_turn: "resume", session_id: `fixture-${run}-${task}` });
+    expect(JSON.parse(readFileSync(join(started.run_dir, "_owner", `${task}-args-4.json`), "utf8")))
+      .toEqual(expect.arrayContaining(["--resume-attempt", "2", "--require-session", `fixture-${run}-${task}`]));
 
     // One active turn per name: a second caller and forget are refused with the active run.
     const slow = await chair.call("dispatch", { session: "Review", prompt: "slow", wait_seconds: 0 });
@@ -150,7 +162,7 @@ it("starts, inspects, resumes across agents, serialises and forgets a named sess
     await chair.client.close();
     await worker.client.close();
   }
-});
+}, 60_000);
 
 it("reports continuation_unsupported and starts fresh only when asked", async () => {
   const project = fixtureProject();
@@ -169,12 +181,29 @@ it("reports continuation_unsupported and starts fresh only when asked", async ()
       .toMatch(new RegExp(`^Fresh session handed off from Fabric run ${first.run_id}`, "u"));
     expect(await chair.call("session", { action: "inspect", name: "pilot" })).toMatchObject({ run_id: fresh.run_id, adapter: "copilot" });
 
-    // A native adapter whose latest attempt lost its provider session is not silently relaunched.
-    await chair.call("dispatch", { session: "lost", prompt: "first", wait_seconds: 5 });
+    // A failed turn that lost its session does not strand the name: the next
+    // turn continues the last clean attempt's provider session.
+    const lost = await chair.call("dispatch", { session: "lost", prompt: "first", wait_seconds: 5 });
     expect(await chair.call("dispatch", { session: "lost", prompt: "lose-session", wait_seconds: 5 }))
       .toMatchObject({ status: "failed", attempt: 2 });
     expect(await chair.call("dispatch", { session: "lost", prompt: "x", wait_seconds: 5 }))
-      .toMatchObject({ status: "rejected", error: "continuation_unsupported" });
+      .toMatchObject({ status: "ok", attempt: 3, session_id: `fixture-${lost.run_id}-${lost.task_id}` });
+    // A provider that no longer has the session is reported, never silently relaunched.
+    const gone = await chair.call("dispatch", { session: "lost", prompt: "no-conversation", wait_seconds: 5 });
+    expect(gone).toMatchObject({ status: "rejected", error: "continuation_unsupported", attempt: 4 });
+    expect(gone.text).toContain("fresh: true");
+    expect(await chair.call("session", { action: "inspect", name: "lost" })).toMatchObject({
+      attempt: 3, last_turn: { status: "continuation_unsupported", attempt: 4 },
+    });
+
+    // fresh hands off the last clean attempt's result, not a later failed one.
+    const marks = await chair.call("dispatch", { session: "marks", prompt: "mark", wait_seconds: 5 });
+    expect(await chair.call("dispatch", { session: "marks", prompt: "mark-fail", wait_seconds: 5 }))
+      .toMatchObject({ status: "failed", attempt: 2 });
+    const handed = await chair.call("dispatch", { session: "marks", prompt: "next", fresh: true, wait_seconds: 5 });
+    const brief = readFileSync(join(handed.run_dir, "_owner", `${handed.task_id}-prompt-1.md`), "utf8");
+    expect(brief).toContain(`result of ${marks.run_id}/${marks.task_id}#1`);
+    expect(brief).not.toContain(`${marks.task_id}#2`);
     expect(await chair.call("dispatch", { prompt: "x", fresh: true }))
       .toMatchObject({ status: "rejected", error: "dispatch_conflict" });
     expect(await chair.call("dispatch", { session: "x", resume: first.run_id, prompt: "x" }))
@@ -198,7 +227,7 @@ it("reports continuation_unsupported and starts fresh only when asked", async ()
   } finally {
     await chair.client.close();
   }
-});
+}, 60_000);
 
 it("drives a named session from the CLI", async () => {
   const project = fixtureProject();
@@ -215,4 +244,85 @@ it("drives a named session from the CLI", async () => {
   expect(JSON.parse(cli("session", "list").stdout).sessions).toHaveLength(1);
   expect(JSON.parse(cli("session", "forget", "cli").stdout)).toMatchObject({ forgotten: "cli" });
   expect(cli("session", "inspect", "cli").stderr).toContain("no session cli");
+}, 60_000);
+
+it("keeps a turn busy through the owner's fallback and advances to the attempt that succeeded", async () => {
+  const project = fixtureProject();
+  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  const worker = await project.connect(project.primary, "worker-seat", "claude");
+  try {
+    const launched = await chair.call("dispatch", { session: "fb", prompt: "fallback-slow", wait_seconds: 0 });
+    const run = launched.id as string;
+    const status = await until(() => chair.call("status", { ids: [run], detail: "full" }),
+      (value) => value.runs?.[0]?.attempt === 2);
+    const row = status.runs[0];
+    expect(row.attempts[0]).toMatchObject({ attempt: 1, state: "terminal", status: "failed" });
+    // Attempt 1 failed, but the turn is the whole invocation: the fallback still runs.
+    expect(await worker.call("session", { action: "inspect", name: "fb" })).toMatchObject({ active_run_id: run });
+    expect(await worker.call("session", { action: "forget", name: "fb" }))
+      .toMatchObject({ status: "rejected", error: "session_busy", active_run_id: run });
+    expect(await worker.call("dispatch", { session: "fb", prompt: "x" }))
+      .toMatchObject({ status: "rejected", error: "session_busy", active_run_id: run });
+    writeFileSync(join(row.run_dir, "release"), "");
+    await chair.call("status", { ids: [run], wait_seconds: 10 });
+    expect(await until(() => worker.call("session", { action: "inspect", name: "fb" }), (value) => value.active_run_id === null))
+      .toMatchObject({ run_id: run, attempt: 2, active_run_id: null, last_turn: { status: "ok", attempt: 1 } });
+  } finally {
+    await chair.client.close();
+    await worker.client.close();
+  }
+}, 60_000);
+
+it("keeps a CLI turn whose waiting caller was killed after launch", async () => {
+  const project = fixtureProject();
+  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  try {
+    writeFileSync(join(project.linked, "slow.md"), "slow");
+    const waiting = spawn(resolve(import.meta.dirname, "../bin/fabric"),
+      ["dispatch", "--session", "kill", "--prompt-file", "slow.md", "--wait"],
+      { cwd: project.linked, env: project.env(project.linked, "cli-seat", "codex"), stdio: "ignore" });
+    const active = await until(() => chair.call("session", { action: "inspect", name: "kill" }),
+      (value) => typeof value.active_run_id === "string");
+    const run = active.active_run_id as string;
+    expect(run).toMatch(/^mcp-/u);
+    waiting.kill("SIGKILL");
+    await new Promise((settle) => waiting.once("exit", settle));
+    // The detached owner still runs: the name stays busy on owner evidence.
+    expect(await chair.call("session", { action: "inspect", name: "kill" })).toMatchObject({ active_run_id: run });
+    expect(await chair.call("dispatch", { session: "kill", prompt: "x" }))
+      .toMatchObject({ status: "rejected", error: "session_busy", active_run_id: run });
+    await chair.call("cancel", { id: run });
+    expect(await until(() => chair.call("session", { action: "inspect", name: "kill" }), (value) => value.active_run_id === null))
+      .toMatchObject({ active_run_id: null, last_turn: { status: "cancelled", run_id: run } });
+  } finally {
+    await chair.client.close();
+  }
+}, 60_000);
+
+it("refuses a claim planned from a turn another caller has since settled", () => {
+  const root = mkdtempSync(join(tmpdir(), "fabric-session-claim-"));
+  roots.add(root);
+  const store = new Store(join(root, "fabric.db"));
+  const who = { project: root, cwd: root, agentId: "a", provider: "codex" };
+  try {
+    store.announce(who);
+    const first = store.claimSessionTurn(who, "n", null, "start", process.pid);
+    if (!("claim" in first)) throw new Error("first claim refused");
+    store.bindSessionTurn(who, "n", first.claim, { runId: "mcp-one", taskId: "t", attempt: 1 });
+    store.settleSessionTurn(who, "n", first.claim, "ok",
+      { adapter: "codex", providerSessionId: "s", runId: "mcp-one", taskId: "t", attempt: 1, resultPath: null });
+    // Caller A plans attempt 2 from this row...
+    const observed = store.session(root, "n")!.turnClaim;
+    // ...while caller B takes, launches and settles attempt 2 first.
+    const second = store.claimSessionTurn(who, "n", observed, "resume", process.pid);
+    if (!("claim" in second)) throw new Error("second claim refused");
+    store.bindSessionTurn(who, "n", second.claim, { runId: "mcp-one", taskId: "t", attempt: 2 });
+    store.settleSessionTurn(who, "n", second.claim, "ok",
+      { adapter: "codex", providerSessionId: "s", runId: "mcp-one", taskId: "t", attempt: 2, resultPath: null });
+    // The run id is unchanged, but A's plan is stale.
+    expect(store.claimSessionTurn(who, "n", observed, "resume", process.pid)).toMatchObject({ conflict: { attempt: 2 } });
+    expect(store.claimSessionTurn(who, "fresh-name", observed, "start", process.pid)).toMatchObject({ conflict: undefined });
+  } finally {
+    store.close();
+  }
 });

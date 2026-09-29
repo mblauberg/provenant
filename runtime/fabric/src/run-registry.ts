@@ -816,7 +816,7 @@ function v1Rows(runDir: string): Record<string, any>[] {
         attempt_count: attempts.length,
         state: interrupted ? "terminal" : "queued",
         status,
-        ...(interrupted ? { fix, message: metadata?.message } : {}),
+        ...(interrupted ? { fix, message: metadata?.message, ...(status === "rejected" && typeof metadata?.error === "string" ? { error: metadata.error } : {}) } : {}),
         started_at: metadata!.started_at,
         digest: interrupted ? `${status} ${row.run_id} · fix: ${fix}` : `running ${row.run_id} attempt ${metadata!.next_attempt} · fabric_status{ids:["${row.run_id}"],wait_seconds:55}`,
         paths: {},

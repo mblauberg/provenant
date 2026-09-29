@@ -4,13 +4,15 @@
  * module only chooses which, serialises turns per name and moves the alias
  * after a clean turn. Busy state is reconciled from run state on every read.
  */
+import { resolve } from "node:path";
+
 import { InputError, rejected, type DispatchInput } from "./execution-input.js";
 import { dispatchConfiguredProvider } from "./execution.js";
 import type { Identity } from "./identity.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
-import { statusRows } from "./run-registry.js";
+import { findRecordedRun, statusRows } from "./run-registry.js";
 import { canonicalSuccessStatus } from "./success-status.js";
-import type { NamedSession, SessionTurn, Store } from "./store.js";
+import type { NamedSession, SessionLaunch, SessionTurnKind, Store } from "./store.js";
 
 /** The owner relaunches Copilot instead of resuming it (dispatch_run.prepare_resume). */
 const NO_NATIVE_CONTINUATION = new Set(["copilot"]);
@@ -38,31 +40,57 @@ async function taskRow(cwd: string, runId: string, taskId: string | null) {
   return runs.find((row) => row.task_id === taskId) ?? (taskId === null && runs.length === 1 ? runs[0] : undefined);
 }
 
-/** Settle a finished or abandoned turn from run state; return the current row. */
+/**
+ * The attempts one owner invocation made from `first`: the attempt it launched
+ * and each fallback attempt it chained on after a retryable failure.
+ */
+function turnAttempts(task: Record<string, any>, first: number): Record<string, any>[] {
+  const attempts = (task.attempts ?? []) as Record<string, any>[];
+  const chain: Record<string, any>[] = [];
+  let current = attempts.find((attempt) => Number(attempt.attempt) === first);
+  while (current) {
+    const number = Number(current.attempt);
+    // The task row carries the registry's closure of an attempt whose owner died.
+    chain.push(number === Number(task.attempt) ? task : current);
+    current = attempts.find((attempt) =>
+      Number(attempt.attempt) === number + 1 && Number(attempt.provenance?.fallback_from?.attempt) === number);
+  }
+  return chain;
+}
+
+/**
+ * Settle a finished or abandoned turn from run state; return the current row.
+ * Before launch the launcher's pid decides; after it, the run's owner and its
+ * attempts do, so a caller that dies waiting never releases a live turn.
+ */
 export async function reconcileSession(store: Store, who: Identity, name: string): Promise<NamedSession | undefined> {
   const row = store.session(who.project, name);
-  if (!row || row.turnStatus !== null || alive(row.turnPid)) return row;
+  if (!row || row.turnStatus !== null) return row;
   let status = "interrupted",
-    current: Record<string, any> | undefined;
-  if (row.turnRunId !== null) {
+    runDir = "",
+    final: Record<string, any> | undefined;
+  if (row.turnRunId === null) {
+    if (alive(row.turnPid)) return row;
+  } else {
+    if (findRecordedRun(who.cwd, row.turnRunId)?.running) return row;
     const task = await taskRow(who.cwd, row.turnRunId, row.turnTaskId);
-    current = task && (Number(task.attempt) === row.turnAttempt
-      ? task
-      : task.attempts?.find((attempt: Record<string, any>) => Number(attempt.attempt) === row.turnAttempt));
-    // The owner is still creating the attempt it was launched for.
-    if (!current && task && task.state !== "terminal") return row;
-    if (current && current.state !== "terminal") return row;
-    if (current) status = String(canonicalSuccessStatus(current.status) ?? "interrupted");
+    if (task && task.state !== "terminal") return row;
+    runDir = String(task?.run_dir ?? "");
+    final = task && (turnAttempts(task, row.turnAttempt!).at(-1) ??
+      // An owner that rejected the turn before its attempt existed.
+      (Number(task.attempt) === row.turnAttempt ? task : undefined));
+    if (final) status = final.error === "continuation_unsupported"
+      ? "continuation_unsupported" : String(canonicalSuccessStatus(final.status) ?? "interrupted");
   }
-  const clean = current && CLEAN.has(status) && typeof current.task_id === "string";
+  const clean = final && CLEAN.has(status) && typeof final.task_id === "string";
   store.settleSessionTurn(who, name, row.turnClaim, status, clean ? {
-    adapter: current!.provenance?.transport ?? current!.provenance?.requested?.adapter ?? current!.adapter ?? null,
-    providerSessionId: typeof current!.session_id === "string" && current!.session_id ? current!.session_id : null,
+    adapter: final!.provenance?.transport ?? final!.provenance?.requested?.adapter ?? final!.adapter ?? null,
+    providerSessionId: typeof final!.session_id === "string" && final!.session_id ? final!.session_id : null,
     runId: row.turnRunId!,
-    taskId: current!.task_id,
-    attempt: Number(current!.attempt),
-    resultPath: typeof current!.result_path === "string" ? current!.result_path
-      : typeof current!.paths?.result === "string" ? current!.paths.result : null,
+    taskId: final!.task_id,
+    attempt: Number(final!.attempt),
+    resultPath: typeof final!.result_path === "string" ? final!.result_path
+      : typeof final!.paths?.result === "string" ? resolve(runDir, final!.paths.result) : null,
   } : undefined);
   return store.session(who.project, name);
 }
@@ -92,6 +120,15 @@ export function sessionView(row: NamedSession): Record<string, unknown> {
   };
 }
 
+function continuationUnsupported(name: string, reason: string): Record<string, unknown> {
+  return {
+    status: "rejected",
+    error: "continuation_unsupported",
+    session: name,
+    fix: `Session ${name}: ${reason}. Pass fresh: true to start a new session primed with its last clean result.`,
+  };
+}
+
 function busy(name: string, row: NamedSession | undefined): Record<string, unknown> {
   const active = row?.turnStatus === null ? row.turnRunId : null;
   return {
@@ -107,8 +144,9 @@ function busy(name: string, row: NamedSession | undefined): Record<string, unkno
 
 /**
  * One turn of a named session: start it when the name has no clean turn,
- * otherwise resume its provider session, or, only when `fresh` is passed, hand
- * its last result to a new session. The reply is the ordinary run row.
+ * otherwise resume its provider session from the last clean attempt, or, only
+ * when `fresh` is passed, hand that attempt's result to a new session. The
+ * reply is the ordinary run row.
  */
 export async function sessionDispatch(
   input: DispatchInput,
@@ -126,46 +164,36 @@ export async function sessionDispatch(
   const row = await reconcileSession(store, identity, name);
   if (row?.turnStatus === null) return busy(name, row);
   const prior = row?.runId ? row : undefined;
-  let turn: SessionTurn = { kind: "start", attempt: 1 };
-  if (prior && fresh) turn = { kind: "fresh", attempt: 1 };
-  else if (prior) {
-    const task = await taskRow(identity.cwd, prior.runId!, prior.taskId);
-    const latest = task?.attempts?.at(-1);
-    const unsupported = NO_NATIVE_CONTINUATION.has(prior.adapter ?? "")
-      ? `${prior.adapter} has no native session continuation`
-      : !prior.providerSessionId ? "its last turn recorded no provider session id"
-      : latest && !latest.session_id ? "its latest attempt recorded no provider session id" : undefined;
-    if (unsupported)
-      return {
-        status: "rejected",
-        error: "continuation_unsupported",
-        session: name,
-        fix: `Session ${name}: ${unsupported}. Pass fresh: true to start a new session primed with its last result.`,
-      };
-    const attempts = (task?.attempts ?? []).map((attempt: Record<string, any>) => Number(attempt.attempt) || 0);
-    turn = { kind: "resume", runId: prior.runId!, taskId: prior.taskId!, attempt: Math.max(0, ...attempts) + 1 };
+  const kind: SessionTurnKind = !prior ? "start" : fresh ? "fresh" : "resume";
+  if (kind === "resume") {
+    const unsupported = NO_NATIVE_CONTINUATION.has(prior!.adapter ?? "")
+      ? `${prior!.adapter} has no native session continuation`
+      : !prior!.providerSessionId ? "its last clean turn recorded no provider session id" : undefined;
+    if (unsupported) return continuationUnsupported(name, unsupported);
   }
-  const claimed = store.claimSessionTurn(identity, name, prior?.runId ?? null, turn, process.pid);
+  const claimed = store.claimSessionTurn(identity, name, row?.turnClaim ?? null, kind, process.pid);
   if ("conflict" in claimed) return busy(name, claimed.conflict);
-  let result: Record<string, any> | undefined;
+  let launched = false,
+    result: Record<string, any> | undefined;
+  const pin = {
+    attempt: prior?.attempt ?? undefined,
+    onLaunch: (launch: SessionLaunch) => {
+      launched = true;
+      store.bindSessionTurn(identity, name, claimed.claim, launch);
+    },
+  };
   try {
-    result = turn.kind === "resume"
-      ? await resumeConfiguredProvider({ ...rest, resume: prior!.runId!, task_id: prior!.taskId! }, identity, signal)
-      : turn.kind === "fresh"
-        ? await handoffDispatch({ ...rest, handoff: prior!.runId!, task_id: prior!.taskId! }, identity, signal)
-        : await dispatchConfiguredProvider(rest, identity, signal);
+    result = kind === "resume"
+      ? await resumeConfiguredProvider({ ...rest, resume: prior!.runId!, task_id: prior!.taskId! }, identity, signal,
+        process.env, { ...pin, session: prior!.providerSessionId! })
+      : kind === "fresh"
+        ? await handoffDispatch({ ...rest, handoff: prior!.runId!, task_id: prior!.taskId! }, identity, signal, process.env, pin)
+        : await dispatchConfiguredProvider(rest, identity, signal, process.env, pin);
   } finally {
-    const runId = result?.run_id ?? result?.id;
-    if (typeof runId === "string" && result?.status !== "rejected") {
-      store.bindSessionTurn(identity, name, claimed.claim, {
-        runId,
-        taskId: String(result!.task_id ?? turn.taskId),
-        attempt: turn.kind === "resume" ? turn.attempt : 1,
-      });
-    } else if (result === undefined && turn.kind === "resume") {
-      // Interrupted mid-launch: the run's own state decides whether the turn started.
-      store.bindSessionTurn(identity, name, claimed.claim, { runId: turn.runId!, taskId: turn.taskId!, attempt: turn.attempt });
-    } else store.settleSessionTurn(identity, name, claimed.claim, "rejected");
+    // A launched turn is settled from its run; one that never launched ends here.
+    if (!launched) store.settleSessionTurn(identity, name, claimed.claim, "rejected");
   }
-  return { ...result, session: name, session_turn: turn.kind };
+  if (result.error === "continuation_unsupported")
+    return { ...result, session: name, session_turn: kind, fix: continuationUnsupported(name, "the provider no longer has its session").fix };
+  return { ...result, session: name, session_turn: kind };
 }

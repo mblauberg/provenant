@@ -64,12 +64,16 @@ prompts, results, transcripts or provider processes.
 
 A turn is an ordinary `fabric_dispatch`: a fresh dispatch for a new name, the
 existing `resume` path for a known one, or `handoff` when the caller passes
-`fresh: true`. The dispatch and run owners keep sole ownership of processes,
-attempts, cancellation and result files. Only a clean turn (`ok` or
-`input_required`) moves the alias. One turn per name is active; a concurrent
-caller gets `session_busy`. The active pointer is reconciled from run state, or
-from the launching process being gone, whenever the name is read; there is no
-lease timer, heartbeat, queue, expiry or cleanup daemon. A provider without
-native continuation reports `continuation_unsupported` rather than falling back.
+`fresh: true`, each continuing from the alias's last clean attempt. The
+dispatch and run owners keep sole ownership of processes, attempts,
+cancellation and result files. Only a clean turn (`ok` or `input_required`)
+moves the alias, to the attempt that ended the owner invocation. One turn per
+name is active; a concurrent caller gets `session_busy`. A turn records its run
+when the owner launches; from then on the run's owner and attempts decide
+whether it is active, and before then the launching process does. This is
+reconciled whenever the name is read; there is no lease timer, heartbeat,
+queue, expiry or cleanup daemon. A provider without native continuation, or one
+that no longer has the session, reports `continuation_unsupported` rather than
+falling back to a new session.
 `fabric_session` inspects, lists and forgets names; forgetting deletes only the
 alias once no turn is active.
