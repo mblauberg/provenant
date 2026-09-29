@@ -193,14 +193,14 @@ def _older_waiter_floors(queue_root: Path | None, queued_since: float | None) ->
     """
     if queue_root is None or not _finite(queued_since):
         return []
-    now = time.time()
-    fresh_after = now - FRESH_POLLS * POLL_SECONDS
     floors = []
     for receipt in queued_receipts(queue_root):
         try:
             metadata = receipt.lstat()
+            now = time.time()
             if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
-                    or not fresh_after <= metadata.st_mtime <= now + FUTURE_SLACK_SECONDS):
+                    or not now - FRESH_POLLS * POLL_SECONDS <= metadata.st_mtime
+                    <= now + FUTURE_SLACK_SECONDS):
                 continue
             row = json.loads(receipt.read_text(encoding="utf-8"))
             if row.get("state") != "queued" or row.get("queue_reason") != "memory":

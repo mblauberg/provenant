@@ -445,6 +445,16 @@ def test_queued_receipt_is_published_where_admission_scans(tmp_path, monkeypatch
     run_dir = make_run(tmp_path, "runs/20260930-1200-dispatch-queue")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("hello\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_executable(bin_dir / "codex", '''#!/usr/bin/env bash
+if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+  printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+  exit 0
+fi
+exit 99
+''')
+    monkeypatch.setenv("PATH", f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     module = load_dispatch_module()
     admission = module.memory_admission
