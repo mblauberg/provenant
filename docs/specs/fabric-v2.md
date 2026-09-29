@@ -72,9 +72,16 @@ Project `CLAUDE.md` keeps both `@AGENTS.md` and `@HARNESS.md`. `scripts/install-
 
 ## Routing and authority
 
+A read-only `cwd` or a `prompt_file` outside the caller's directory must lie in
+a registered Fabric project; otherwise the rejection names registering that
+project or dispatching from it. Fabric passes each such directory to the owner
+as a read root, which the owner accepts beside its workspace, records in the
+attempt as `read_roots` and restores on resume. The run stays in the caller's
+run root.
+
 `.agents/fabric-policy.json` declares `protected_paths` relative to the
 directory containing `.agents/`; Fabric discovers it at the workspace root and
-the Git toplevels of workspace, cwd and worktree, plus immediate child
+the Git toplevels of workspace, cwd, worktree and read roots, plus immediate child
 repository toplevels of a non-Git workspace, and mirrors repository paths into
 every registered worktree. Routes resolve `trains_on_prompts` from the model,
 then the adapter; an unresolved value counts as training. A training route is

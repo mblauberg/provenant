@@ -127,6 +127,7 @@ if (owner === "run_controls.py") {
 }
 
 if (owner === "dispatch_run.py") {
+  if (process.env.FIXTURE_ARGV_PATH) writeFileSync(process.env.FIXTURE_ARGV_PATH, JSON.stringify(process.argv.slice(2)));
   const taskId = value("--task-id");
   const prompt = readFileSync(value("--prompt-file"), "utf8");
   if (prompt === "sleep without provider") {

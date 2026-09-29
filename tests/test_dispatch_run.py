@@ -270,6 +270,7 @@ def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
         "run_id": "resume-me", "task_id": "task-1", "attempt": 1, "state": "terminal",
         "status": "ok", "mode": "read_only", "cwd": str(workspace / "src"), "worktree": None,
         "workspace": {"root": str(workspace)}, "session_id": "saved-session",
+        "read_roots": [str(tmp_path / "other-project")],
         "provenance": {"requested": {"adapter": "codex"}, "resolved_model": "fixture", "effort_applied": ""},
         "applied": {"sandbox": "read-only", "network": None, "add_dirs": [],
                     "capabilities": ["browser", "postgres"]},
@@ -287,6 +288,7 @@ def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
     module.prepare_resume(args)
 
     assert args.workspace_root == workspace
+    assert args.read_roots == [str(tmp_path / "other-project")]
     assert args.capabilities == ["browser", "postgres"]
 
 
@@ -2472,6 +2474,68 @@ def test_preflight_secret_file_rejects_and_explicit_override_accepts(tmp_path, m
     assert rejected['error'] == 'secret_detected'
     assert f'{prompt}:2' in rejected['fix']
     assert module.preflight_tasks([{**task, 'allow_secrets': True}])['status'] == 'validated'
+
+
+def test_preflight_accepts_a_prompt_file_only_inside_a_read_root(tmp_path, monkeypatch):
+    workspace = tmp_path / 'caller'
+    other = tmp_path / 'other-project'
+    workspace.mkdir()
+    other.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    module = load_dispatch_module()
+    prompt = other / 'brief.md'
+    prompt.write_text('read the other project')
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt)}
+
+    rejected = module.preflight_tasks([task], workspace)
+    assert rejected['error'] == 'prompt_path_forbidden'
+    assert 'registered Fabric project' in rejected['fix']
+    assert 'dispatch from it' in rejected['fix']
+    assert module.preflight_tasks([{**task, 'read_roots': [str(other)]}], workspace)['status'] == 'validated'
+
+
+def test_preflight_scans_a_read_root_prompt_for_secrets(tmp_path, monkeypatch):
+    workspace = tmp_path / 'caller'
+    other = tmp_path / 'other-project'
+    workspace.mkdir()
+    other.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    module = load_dispatch_module()
+    prompt = other / 'brief.md'
+    prompt.write_text('hello\n' + 'AKIA' + 'A' * 16)
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt),
+            'read_roots': [str(other)]}
+    assert module.preflight_tasks([task], workspace)['error'] == 'secret_detected'
+
+
+def test_read_only_dispatch_runs_in_a_read_root_outside_the_workspace(tmp_path, monkeypatch):
+    code = '''import json,os,sys
+sys.stdin.read()
+print(json.dumps({"type":"result","result":os.getcwd()}))
+'''
+    workspace = tmp_path / 'caller'
+    other = tmp_path / 'other-project'
+    workspace.mkdir()
+    (other / 'src').mkdir(parents=True)
+    run, prompt, command = real_owner_fixture(workspace, monkeypatch, code)
+    brief = other / 'brief.md'
+    brief.write_text('read the other project')
+    command[command.index(str(prompt))] = str(brief)
+    command += ['--cwd', str(other / 'src'), '--no-preface']
+
+    refused = subprocess.run(command, cwd=workspace, capture_output=True, text=True)
+    assert refused.returncode != 0
+    assert 'read root' in refused.stdout + refused.stderr
+
+    result = subprocess.run([*command, '--read-root', str(other)], cwd=workspace, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    row = json.loads(next(run.glob('tasks/*/attempt-*/attempt.json')).read_text())
+    assert row['status'] == 'ok'
+    assert row['cwd'] == str((other / 'src').resolve())
+    assert row['read_roots'] == [str(other)]
+    assert (run / row['paths']['result']).read_text().strip() == str((other / 'src').resolve())
 
 
 def test_preflight_secret_in_add_dirs_rejects_and_override_accepts(tmp_path, monkeypatch):
