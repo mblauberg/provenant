@@ -164,10 +164,13 @@ between `cwd` and the repository root, granted by unresolved name. Every read-on
   `.python-version` above `cwd`.
 
 A candidate is granted only if it resolves to a regular executable named
-`python`, `python3*` or `node`. The file must sit in the `bin` of a prefix
-holding `lib/python3.*` or `lib/node_modules`. That prefix must be neither home
-nor an ancestor of home, and must not pass `credential_path`. Only the prefix is
-granted. A resolved `uv`/`uvx` binary is granted alone. `credential_path` also
+`python`, `python3`, `python3.N` or `node`, each Python name optionally with
+the free-threaded `t` suffix. The file must sit in the `bin` of a prefix
+holding `lib/python3.N[t]` or `lib/node_modules`. That prefix must be neither
+home nor an ancestor of home, and must not pass `credential_path`. Only the
+executable and the prefix's real (unlinked) `lib`, `include` and `libexec` are
+granted, never the prefix itself, and the profile emits the canonical paths it
+checked without resolving them again. A resolved `uv`/`uvx` binary is granted alone. `credential_path` also
 covers `.git-credentials`, `.pypirc`, `.pgpass`, `.vault-token`,
 `.password-store`, `.boto`, `.s3cfg`, `.terraform.d`, Cargo and Gem credentials,
 `.config/git/credentials`, `.config/hub` and `.config/op`.

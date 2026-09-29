@@ -4308,6 +4308,11 @@ def fake_toolchain_home(tmp_path, monkeypatch):
     (home / ".nvm/versions/node/v24.0.0/lib/node_modules").mkdir(parents=True)
     (home / ".nvm/versions/node/v24.0.0/lib/runtime.js").write_text("runtime\n")
     (home / ".pyenv/versions/3.13.0/lib/python3.13").mkdir(parents=True)
+    (home / ".pyenv/versions/3.13.0/include/python3.13").mkdir(parents=True)
+    (home / ".pyenv/versions/3.13.0/include/python3.13/Python.h").write_text("header\n")
+    # A sibling of the runtime directories: an install prefix grant would expose it.
+    (home / ".pyenv/versions/3.13.0/auth.json").write_text("secret\n")
+    (home / ".nvm/versions/node/v24.0.0/auth.json").write_text("secret\n")
     links = home / "links"
     links.mkdir()
     (links / "python3").symlink_to(tools["python3"])  # as pyenv-style or uv-style links are
@@ -4325,14 +4330,19 @@ def fake_toolchain_home(tmp_path, monkeypatch):
     return home, tools, search_path
 
 
-def test_toolchain_reads_resolve_path_commands_to_their_install_prefixes(tmp_path, monkeypatch):
+def test_toolchain_reads_resolve_path_commands_to_their_runtime_components(tmp_path, monkeypatch):
     home, tools, search_path = fake_toolchain_home(tmp_path, monkeypatch)
     repo = tmp_path / "repo"
     repo.mkdir()
     plan = {"adapter": "claude", "mode": "read_only", "cwd": str(repo), "applied": {"add_dirs": []}}
     files, _, directories = supervisor()._toolchain_reads(plan, repo, search_path)
-    assert home / ".nvm/versions/node/v24.0.0" in directories
-    assert home / ".pyenv/versions/3.13.0" in directories
+    node, python = home / ".nvm/versions/node/v24.0.0", home / ".pyenv/versions/3.13.0"
+    assert tools["node"] in files and tools["python3"] in files
+    assert sorted(directories) == sorted([node / "lib", python / "lib", python / "include"])
+    # The prefix itself, and so a sibling like auth.json, is never granted.
+    for prefix in (node, python):
+        assert prefix not in directories
+        assert not any((prefix / "auth.json").is_relative_to(granted) for granted in [*files, *directories])
     # ~/.local holds a credential store, so only the uv executable is granted.
     assert home / ".local/bin/uv" in files
     for granted in [*files, *directories]:
@@ -4352,7 +4362,8 @@ def test_toolchain_reads_follow_a_workspace_venv_to_its_base_interpreter(tmp_pat
     plan = {"adapter": "claude", "mode": "read_only", "cwd": str(cwd), "applied": {"add_dirs": []}}
     files, project_files, directories = supervisor()._toolchain_reads(plan, repo, "/usr/bin:/bin")
     assert repo.resolve() / ".venv" in directories
-    assert home / ".pyenv/versions/3.13.0" in directories
+    assert home / ".pyenv/versions/3.13.0/lib" in directories
+    assert tools["python3"] in files
     assert not project_files  # no uv on PATH
 
 
@@ -4381,7 +4392,10 @@ def test_confined_read_only_lane_runs_home_toolchains_but_not_credentials(tmp_pa
     assert run("node && cat " + shlex.quote(str(home / ".nvm/versions/node/v24.0.0/lib/runtime.js"))).stdout \
         == "node-ran\nruntime\n"
     assert run("uv").stdout == "uv-ran\n"
-    for secret in (home / ".ssh/id_ed25519", home / ".local/share/opencode/auth.json", home / "notes.txt"):
+    assert run("cat " + shlex.quote(str(home / ".pyenv/versions/3.13.0/include/python3.13/Python.h"))).stdout \
+        == "header\n"
+    for secret in (home / ".ssh/id_ed25519", home / ".local/share/opencode/auth.json", home / "notes.txt",
+                   home / ".pyenv/versions/3.13.0/auth.json", home / ".nvm/versions/node/v24.0.0/auth.json"):
         assert run("cat " + shlex.quote(str(secret))).returncode != 0, secret
     # A tool in a credential store is not granted even when PATH names it.
     planted = mod.os_confinement_profile(plan, str(home / ".ssh/bin"))
@@ -4483,12 +4497,43 @@ def test_interpreter_installed_directly_in_home_grants_nothing(tmp_path, monkeyp
     assert granted_outside(repo, supervisor()._toolchain_reads(plan, repo, str(home / "bin"))) == []
 
 
-def test_venv_link_to_a_real_install_grants_its_prefix(tmp_path, monkeypatch):
+def test_venv_link_to_a_real_install_grants_its_runtime_components(tmp_path, monkeypatch):
     home, tools, _ = fake_toolchain_home(tmp_path, monkeypatch)
     repo, plan = venv_repo(tmp_path, python_target=tools["python3"], home_line=str(tools["python3"].parent))
+    prefix = home / ".pyenv/versions/3.13.0"
     assert granted_outside(repo, supervisor()._toolchain_reads(plan, repo, "/nonexistent")) == [
-        home / ".pyenv/versions/3.13.0"
+        tools["python3"], prefix / "lib", prefix / "include"
     ]
+
+
+@pytest.mark.parametrize("name", ["python3.14t", "python3t", "python3.13"])
+def test_free_threaded_interpreter_is_a_toolchain(tmp_path, monkeypatch, name):
+    home, _, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    prefix = home / ".local/share/uv/python/cpython-3.14.0t-macos-aarch64-none"
+    interpreter = fake_executable(prefix / "bin" / name)
+    (prefix / "lib/python3.14t").mkdir(parents=True)
+    assert supervisor()._toolchain_grant(interpreter) == ([interpreter], [prefix / "lib"])
+
+
+def test_linked_runtime_directory_is_not_granted(tmp_path, monkeypatch):
+    home, tools, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    prefix = home / ".pyenv/versions/3.13.0"
+    shutil.rmtree(prefix / "include")
+    (prefix / "include").symlink_to(home / ".ssh")
+    assert supervisor()._toolchain_grant(tools["python3"]) == ([tools["python3"]], [prefix / "lib"])
+
+
+def test_toolchain_rules_emit_the_validated_path_without_resolving_again(tmp_path):
+    mod = supervisor()
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    link = tmp_path / "lib"
+    link.symlink_to(target)
+    assert mod._sbpl_rule("allow", "file-read-data", [link], canonical=True) \
+        == f'(allow file-read-data (subpath "{link}"))\n'
+    assert mod._sbpl_rule("allow", "file-read-data", [link], literal=True, canonical=True) \
+        == f'(allow file-read-data (literal "{link}"))\n'
+    assert str(target.resolve()) in mod._sbpl_rule("allow", "file-read-data", [link])
 
 
 @pytest.mark.parametrize("secret", [

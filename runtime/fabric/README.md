@@ -111,11 +111,13 @@ provider's PATH, plus each `.venv` between `cwd` and the repository root, its
 `bin/python` link and the interpreter its `pyvenv.cfg` names. Repository
 content only names candidates; it never grants a path itself. A candidate is
 granted only when it resolves to a real install. That means a regular
-executable with a toolchain name, in the `bin` of a prefix with that
-toolchain's `lib/python3.*` or `lib/node_modules`. The prefix must not be home
-or above it, and must not be or hold a credential store. Only that prefix is
-granted, such as a uv, pyenv, nvm or Homebrew version. A resolved `uv` binary
-is granted alone. When it is present, `pyproject.toml`, `uv.toml`, `uv.lock`
+executable with a toolchain name, free-threaded `python3.14t` included, in
+the `bin` of a prefix with that toolchain's `lib/python3.*` or
+`lib/node_modules`. The prefix must not be home or above it, and must not be or
+hold a credential store. Only the resolved executable and the prefix's
+`lib`, `include` and `libexec` are granted, never the prefix itself, so a file
+beside them stays unreadable. Each is emitted as the canonical path checked. A
+resolved `uv` binary is granted alone. When it is present, `pyproject.toml`, `uv.toml`, `uv.lock`
 and `.python-version` above `cwd` are readable by unresolved name. Nothing is
 written, and nothing is run to find these paths. Codex read-only uses its native read-only sandbox, which reads
 everywhere and writes only the attempt's `TMPDIR` and `add_dirs` (a shared

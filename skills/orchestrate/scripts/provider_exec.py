@@ -203,9 +203,12 @@ def validate_capabilities(value, *, adapter, mode, sandbox, network):
     return capabilities
 
 
-def _sbpl_string(path, *, keep_leaf=False):
+def _sbpl_string(path, *, keep_leaf=False, canonical=False):
     # keep_leaf leaves a lane-replaceable final entry unresolved, so a link planted there cannot move the grant.
+    # canonical emits a path already resolved and validated, so a link swapped in since cannot move it.
     path = Path(path).expanduser()
+    if canonical:
+        return _sbpl_quote(str(path))
     value = str(path.parent.resolve() / path.name) if keep_leaf else str(path.resolve())
     return _sbpl_quote(value)
 
@@ -214,19 +217,19 @@ def _sbpl_quote(value):
     return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _sbpl_filter(path, *, keep_leaf=False):
+def _sbpl_filter(path, *, keep_leaf=False, canonical=False):
     text = str(path)
     if text.endswith("*"):
         pattern = text[:-1]
         regex_metacharacters = set(r'.^$*+?()[]{}|\\"')
         pattern = "".join("\\" + char if char in regex_metacharacters else char for char in pattern)
         return '(regex #"^' + pattern + '[^/]*$")'
-    return "(subpath " + _sbpl_string(path, keep_leaf=keep_leaf) + ")"
+    return "(subpath " + _sbpl_string(path, keep_leaf=keep_leaf, canonical=canonical) + ")"
 
 
-def _sbpl_rule(action, operations, paths, *, literal=False, keep_leaf=False):
-    filters = (('(literal ' + _sbpl_string(path, keep_leaf=keep_leaf) + ')') if literal
-               else _sbpl_filter(path, keep_leaf=keep_leaf) for path in paths)
+def _sbpl_rule(action, operations, paths, *, literal=False, keep_leaf=False, canonical=False):
+    filters = (('(literal ' + _sbpl_string(path, keep_leaf=keep_leaf, canonical=canonical) + ')') if literal
+               else _sbpl_filter(path, keep_leaf=keep_leaf, canonical=canonical) for path in paths)
     return f"({action} {operations} " + " ".join(filters) + ")\n" if paths else ""
 
 
@@ -400,9 +403,9 @@ def os_confinement_profile(plan, search_path=None):
         # Unresolved, so a link planted under a config name cannot carry the grant elsewhere.
         + _sbpl_rule("allow", "file-read-data", project_files, literal=True, keep_leaf=True)
         + _sbpl_rule("allow", "file-read-data", project_directories, keep_leaf=True)
-        + _sbpl_rule("allow", "file-read-data", toolchain_files, literal=True)
+        + _sbpl_rule("allow", "file-read-data", toolchain_files, literal=True, canonical=True)
         + _sbpl_rule("allow", "file-read-data", uv_project_files, literal=True, keep_leaf=True)
-        + _sbpl_rule("allow", "file-read-data", toolchain_directories)
+        + _sbpl_rule("allow", "file-read-data", toolchain_directories, canonical=True)
         + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
     )
 
@@ -438,32 +441,47 @@ def _executable_file(path):
     return path.is_file() and not path.is_symlink() and os.access(path, os.X_OK)
 
 
+# CPython interpreter and library names, free-threaded (t) builds included.
+PYTHON_EXECUTABLE = re.compile(r"python(3(\.\d+)?t?)?")
+PYTHON_LIBRARY = re.compile(r"python3\.\d+t?")
+# Runtime directories of an install prefix. Anything else beside them, such as a stray auth.json,
+# stays unreadable.
+TOOLCHAIN_RUNTIME_DIRS = ("lib", "include", "libexec")
+
+
 def _toolchain_grant(executable):
-    """What a resolved toolchain executable may be read through, or None.
+    """Canonical (files, directories) a resolved toolchain executable may be read through.
 
     Only a real install counts: a regular executable with a toolchain name, in the `bin` of a
     prefix with that toolchain's library layout (lib/python3.* or lib/node_modules), which is not
-    home, not above it and holds no credential store. uv is a single binary and is granted alone.
+    home, not above it and holds no credential store. The grant is the executable and the
+    prefix's runtime directories, never the prefix itself; uv is a single binary granted alone.
     Repository content (a .venv link, a pyvenv.cfg) can name a candidate, never a grant.
     """
     resolved = executable.resolve()
     if not _executable_file(resolved) or credential_path(resolved):
-        return None
+        return [], []
     if re.fullmatch(r"uvx?", resolved.name):
-        return resolved
+        return [resolved], []
     prefix = resolved.parent.parent
     if resolved.parent.name != "bin":
-        return None
-    if re.fullmatch(r"python(3(\.\d+)?)?", resolved.name):
-        layout = any(path.is_dir() for path in prefix.glob("lib/python3*"))
+        return [], []
+    library = prefix / "lib"
+    if library.is_symlink() or not library.is_dir():
+        return [], []
+    if PYTHON_EXECUTABLE.fullmatch(resolved.name):
+        layout = any(PYTHON_LIBRARY.fullmatch(path.name) and path.is_dir() for path in library.iterdir())
     elif resolved.name == "node":
-        layout = (prefix / "lib/node_modules").is_dir()
+        layout = (library / "node_modules").is_dir()
     else:
-        return None
+        return [], []
     home = Path.home().resolve()
     if not layout or home.is_relative_to(prefix) or credential_path(prefix):
-        return None
-    return prefix
+        return [], []
+    # Linked runtime directories are left out: they are canonical only if not links.
+    directories = [prefix / name for name in TOOLCHAIN_RUNTIME_DIRS
+                   if (prefix / name).is_dir() and not (prefix / name).is_symlink()]
+    return [resolved], directories
 
 
 def _toolchain_reads(plan, root, search_path=None):
@@ -492,10 +510,9 @@ def _toolchain_reads(plan, root, search_path=None):
             candidates.extend(Path(base) / name for name in ("python3", "python"))
     files = []
     for candidate in candidates:
-        grant = _toolchain_grant(candidate)
-        if grant is None:
-            continue
-        (directories if grant.is_dir() else files).append(grant)
+        granted_files, granted_directories = _toolchain_grant(candidate)
+        files.extend(granted_files)
+        directories.extend(granted_directories)
     project_files = ([parent / name for parent in cwd.parents for name in UV_PROJECT_FILES]
                      if any(path.name.startswith("uv") for path in files) else [])
     return list(dict.fromkeys(files)), project_files, list(dict.fromkeys(directories))
