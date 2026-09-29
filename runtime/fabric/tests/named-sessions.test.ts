@@ -326,3 +326,51 @@ it("refuses a claim planned from a turn another caller has since settled", () =>
     store.close();
   }
 });
+
+it("keeps a turn busy between fallback attempts when the owner's start time is unknown", async () => {
+  const project = fixtureProject();
+  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  try {
+    const run = (await chair.call("dispatch", { session: "gap", prompt: "fallback-gap", wait_seconds: 0 })).id as string;
+    const row = (await until(() => chair.call("status", { ids: [run], detail: "full" }),
+      (value) => value.runs?.[0]?.status === "failed")).runs[0];
+    // Every attempt so far is terminal and the owner's identity cannot be verified.
+    const recordPath = join(row.run_dir, "dispatch-owner.json");
+    const record = JSON.parse(readFileSync(recordPath, "utf8"));
+    writeFileSync(recordPath, JSON.stringify({ ...record, owner_started_at: null }));
+    expect(await chair.call("session", { action: "inspect", name: "gap" })).toMatchObject({ active_run_id: run });
+    expect(await chair.call("session", { action: "forget", name: "gap" }))
+      .toMatchObject({ status: "rejected", error: "session_busy", active_run_id: run });
+    writeFileSync(join(row.run_dir, "release"), "");
+    await chair.call("status", { ids: [run], wait_seconds: 10 });
+    expect(await until(() => chair.call("session", { action: "inspect", name: "gap" }), (value) => value.active_run_id === null))
+      .toMatchObject({ run_id: run, attempt: 2, last_turn: { status: "ok" } });
+  } finally {
+    await chair.client.close();
+  }
+}, 60_000);
+
+it("reports a launch it could not record, keeps the name busy and records it on a later read", async () => {
+  const project = fixtureProject();
+  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  try {
+    const db = new Database((await chair.call("whoami")).database as string);
+    db.exec(`CREATE TRIGGER refuse_bind BEFORE UPDATE OF turn_run_id ON sessions
+      WHEN NEW.turn_run_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'bind refused'); END`);
+    const reply = await chair.call("dispatch", { session: "unbound", prompt: "first", wait_seconds: 5 });
+    expect(reply).toMatchObject({ status: "ok", session_turn: "start" });
+    expect(reply.session_error).toContain(`could not record run ${reply.run_id}`);
+    expect(reply.text).toContain("could not record run");
+    // The launcher is alive and still owes the binding: the name is not free.
+    expect((await chair.call("session", { action: "inspect", name: "unbound" })).text).toContain("busy start launching");
+    expect(await chair.call("dispatch", { session: "unbound", prompt: "x" }))
+      .toMatchObject({ status: "rejected", error: "session_busy" });
+    db.exec("DROP TRIGGER refuse_bind");
+    db.close();
+    expect(await chair.call("session", { action: "inspect", name: "unbound" })).toMatchObject({
+      run_id: reply.run_id, attempt: 1, active_run_id: null, last_turn: { status: "ok", run_id: reply.run_id },
+    });
+  } finally {
+    await chair.client.close();
+  }
+}, 60_000);

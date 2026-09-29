@@ -113,7 +113,7 @@ if (value("--require-session") !== undefined && prior.session_id !== value("--re
   console.log(JSON.stringify({schema_version:1,status:"rejected",error:"continuation_unsupported",
     message:"no provider session; pass fresh: true"})); process.exit(2);
 }
-if (prompt === "fallback-slow") {
+if (prompt === "fallback-slow" || prompt === "fallback-gap") {
   // A retryable first attempt, then the owner's fallback attempt in the same invocation.
   mkdirSync(attemptDir(attempt), { recursive: true });
   writeFileSync(join(attemptDir(attempt), "attempt.json"), JSON.stringify({
@@ -122,6 +122,8 @@ if (prompt === "fallback-slow") {
     started_at: new Date().toISOString(), ended_at: new Date().toISOString(), paths: {},
   }));
   attempt += 1;
+  // The owner is alive between attempts, with every attempt so far terminal.
+  while (prompt === "fallback-gap" && !existsSync(join(dir, "release"))) await new Promise((r) => setTimeout(r, 20));
 }
 const path = attemptDir(attempt);
 mkdirSync(path, { recursive: true });
@@ -150,7 +152,7 @@ const row = {
     capabilities: value("--capabilities") ? JSON.parse(value("--capabilities")) : priorApplied.capabilities ?? [],
   },
   provenance: { requested: { adapter: value("--adapter"), model: value("--model"), alias: value("--alias"), effort: value("--effort") }, transport: value("--adapter") ?? prior.provenance?.transport ?? "codex", line: "Route: codex/fixture@high (openai; observed)",
-    ...(prompt === "fallback-slow" ? { fallback_from: { attempt: attempt - 1, status: "failed" } } : {}) },
+    ...(prompt.startsWith("fallback-") ? { fallback_from: { attempt: attempt - 1, status: "failed" } } : {}) },
   paths: {
     result: join(path, "result.md"),
     stderr: join(path, "stderr.log"),

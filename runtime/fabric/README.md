@@ -56,8 +56,11 @@ Owners are detached session leaders and outlive the CLI and MCP host. A
 CLI-started owner is recorded as its own host. An MCP host that closes or is
 signalled hands its runs to their owners rather than cancelling them. A fresh
 `dispatch list` and `status <run-dir>` resolve these runs from their records.
-Only a live host sends the inbox notice when a run finishes; `fabric_events` and
-`lanes --wait` report every run.
+Only a live host sends the inbox notice when a run finishes. `fabric_events`
+exposes retained task-state events. `lanes --wait` reports each terminal or
+input-required lane of the registered project, finished within the last day,
+once per seat, including lanes that finished between waits; named ids narrow it
+to those lanes, and a batch id to its tasks.
 The next dispatch reaps a run only when its host is gone and its owner or
 provider still runs: an owner that exited and left its provider behind, or a
 run whose MCP host was killed with SIGKILL.
@@ -225,7 +228,9 @@ the whole owner invocation, fallback attempts included; the pointer moves to
 the attempt that ended it cleanly. A name runs one turn at a time; another call
 gets `session_busy` with the active run ID. The turn records its run as it
 launches, so a caller that dies while waiting leaves the name busy until the
-run's owner finishes. `fabric_session` with `action: inspect`, `list` or
+run's owner finishes; an owner whose identity cannot be verified counts as
+alive. If recording the launch fails, the reply carries `session_error` and the
+name stays busy while the launching process retries. `fabric_session` with `action: inspect`, `list` or
 `forget` reads or drops a name; `forget` is refused while a turn is active and
 leaves run files and provider history in place. A provider without native
 continuation (Copilot), a last clean turn with no provider session ID, or a

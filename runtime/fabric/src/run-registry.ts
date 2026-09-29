@@ -487,7 +487,8 @@ export function pruneDispatchRuns(workspace: string, env: NodeJS.ProcessEnv): st
   return pruned;
 }
 
-function observedAlive(pid: number, startedAt: string | null): boolean {
+/** Liveness for exclusion: an unknown process identity counts as alive. Signalling uses processMatches. */
+export function observedAlive(pid: number, startedAt: string | null): boolean {
   if (!positiveInteger(pid)) return false;
   try {
     process.kill(pid, 0);

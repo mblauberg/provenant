@@ -10,7 +10,7 @@ import { InputError, rejected, type DispatchInput } from "./execution-input.js";
 import { dispatchConfiguredProvider } from "./execution.js";
 import type { Identity } from "./identity.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
-import { findRecordedRun, statusRows } from "./run-registry.js";
+import { findRecordedRun, observedAlive, statusRows } from "./run-registry.js";
 import { canonicalSuccessStatus } from "./success-status.js";
 import type { NamedSession, SessionLaunch, SessionTurnKind, Store } from "./store.js";
 
@@ -18,6 +18,24 @@ import type { NamedSession, SessionLaunch, SessionTurnKind, Store } from "./stor
 const NO_NATIVE_CONTINUATION = new Set(["copilot"]);
 /** A turn the provider ended cleanly; `input_required` waits for its answer by resume. */
 const CLEAN = new Set(["ok", "input_required"]);
+
+/**
+ * Launches this process could not record yet, by turn claim. The launcher
+ * retries on each reconcile, and its live pid keeps the name busy meanwhile.
+ */
+const unbound = new Map<string, SessionLaunch>();
+
+function bind(store: Store, who: Identity, name: string, claim: string): boolean {
+  const launch = unbound.get(claim);
+  if (!launch) return false;
+  try {
+    store.bindSessionTurn(who, name, claim, launch);
+    unbound.delete(claim);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 function alive(pid: number | null): boolean {
   if (pid === null) return false;
@@ -69,10 +87,14 @@ export async function reconcileSession(store: Store, who: Identity, name: string
   let status = "interrupted",
     runDir = "",
     final: Record<string, any> | undefined;
+  if (row.turnRunId === null && bind(store, who, name, row.turnClaim)) return reconcileSession(store, who, name);
   if (row.turnRunId === null) {
+    // A dead launcher with no recorded run leaves nothing to protect.
     if (alive(row.turnPid)) return row;
   } else {
-    if (findRecordedRun(who.cwd, row.turnRunId)?.running) return row;
+    // Exclusion errs towards a live owner: an unknown process identity is not death.
+    const owner = findRecordedRun(who.cwd, row.turnRunId);
+    if (owner && observedAlive(owner.owner_pid, owner.owner_started_at)) return row;
     const task = await taskRow(who.cwd, row.turnRunId, row.turnTaskId);
     if (task && task.state !== "terminal") return row;
     runDir = String(task?.run_dir ?? "");
@@ -179,7 +201,8 @@ export async function sessionDispatch(
     attempt: prior?.attempt ?? undefined,
     onLaunch: (launch: SessionLaunch) => {
       launched = true;
-      store.bindSessionTurn(identity, name, claimed.claim, launch);
+      unbound.set(claimed.claim, launch);
+      bind(store, identity, name, claimed.claim);
     },
   };
   try {
@@ -193,6 +216,13 @@ export async function sessionDispatch(
     // A launched turn is settled from its run; one that never launched ends here.
     if (!launched) store.settleSessionTurn(identity, name, claimed.claim, "rejected");
   }
+  for (let tries = 0; unbound.has(claimed.claim) && tries < 3; tries++) {
+    await new Promise((settle) => setTimeout(settle, 100 * (tries + 1)));
+    bind(store, identity, name, claimed.claim);
+  }
+  if (unbound.has(claimed.claim))
+    result = { ...result, session_error: `Session ${name} could not record run ${unbound.get(claimed.claim)!.runId}; ` +
+      "it stays busy while this process retries on each read, and the run itself is unaffected." };
   if (result.error === "continuation_unsupported")
     return { ...result, session: name, session_turn: kind, fix: continuationUnsupported(name, "the provider no longer has its session").fix };
   return { ...result, session: name, session_turn: kind };

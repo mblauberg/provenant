@@ -65,6 +65,17 @@ CREATE TABLE IF NOT EXISTS delivery_claims (
 CREATE INDEX IF NOT EXISTS delivery_claims_expiry
   ON delivery_claims(project, recipient_id, expires_at);
 
+-- Per-seat cursor over lane attempts this seat has seen reported, advanced by
+-- fabric_status on a terminal row and by lanes --wait when it reports a lane.
+CREATE TABLE IF NOT EXISTS run_observations (
+  project     TEXT NOT NULL,
+  recipient_id TEXT NOT NULL,
+  run_id      TEXT NOT NULL,
+  task_id     TEXT NOT NULL,
+  attempt     INTEGER NOT NULL,
+  PRIMARY KEY(project, recipient_id, run_id, task_id)
+);
+
 CREATE TABLE IF NOT EXISTS teams (
   project    TEXT NOT NULL,
   team_id    TEXT NOT NULL,
