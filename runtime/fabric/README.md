@@ -87,7 +87,12 @@ legacy tools; the default task interface is `fabric_task`.
 
 Dispatch accepts exactly one of `prompt` and `prompt_file`. Route controls are
 `adapter`, `alias`, `model`, `effort`, `mode`, `worktree`, `cwd`, `network`,
-`sandbox`, `capabilities`, `add_dirs`, `fallback` and `allow_secrets`. Before dispatch, Fabric scans
+`sandbox`, `capabilities`, `add_dirs`, `fallback` and `allow_secrets`. Pool
+controls `route`, `rotate`, `council`, `models` and `confidential` pick the
+adapter and model from a global route pool instead of `alias` or `model`; a
+council runs as a batch with one task per member (CLI: `--route`, `--rotate`,
+`--council N`, `--models a/m@e,b/m`, `--confidential`). See the orchestrate
+routing reference. Before dispatch, Fabric scans
 the prompt and eligible files under `add_dirs` for common live credential shapes.
 A finding rejects with `error: secret_detected` and a location in `fix`; set
 `allow_secrets: true` explicitly to proceed. The attempt records the override

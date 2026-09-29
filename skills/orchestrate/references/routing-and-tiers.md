@@ -12,6 +12,17 @@ Take the returned run id and call `fabric_status` with `ids: [id]` and `wait_sec
 
 Task class selects `flagship`, `workhorse` or `scout` when no explicit model is chosen. The configured catalogue determines candidates; the receipt is authoritative for the applied route. A cooling explicit model still runs with a warning; alias routes skip cooling candidates. An account-level usage limit cools the whole adapter, except on agy, which meters each hosted model separately. Automatic fallback stays within permitted paid non-training routes unless the caller opts into `fallback: "any"` or an explicit list.
 
+## Route pools
+
+`route: "strong" | "bulk" | "design" | "writing"` picks from a weighted pool that spans adapters (`config/model-routing.json` `routes`; the user overlay may reorder or reweight). Weights are `high`, `normal`, `sparing` or `off`, or a number. An entry's `effort` band clamps the caller's effort. Every mode skips a model that is not installed, is cooling down, or whose adapter is disabled, and names the skip in the warnings:
+
+- default: the highest-weight available model, first listed on a tie;
+- `rotate: true`: weighted round-robin per project (`route-rotation.json` under the Fabric state root);
+- `council: N` (1–8): N runs as one batch (`<id>-1`…`<id>-N`), new families first, weights as odds;
+- `models: ["adapter/model@effort", …]`: an ad-hoc council that bypasses routes.
+
+Free or prompt-training models (`model_traits`) stay in the pool with a warning; `confidential: true` skips them. Task classes and the tier aliases map onto routes through `route_synonyms` (`review` → `strong`, `scout` → `bulk`), and `route` cannot be combined with `alias` or `model`. The route line names the pick, for example `Route: opencode/deepseek-v4.1-flash (deepseek; observed; design council 2/3)`. `provenant routes` prints every pool with live availability.
+
 ## Tiers (relative, family-agnostic)
 
 | Tier | Use for | Reasoning effort |

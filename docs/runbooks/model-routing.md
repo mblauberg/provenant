@@ -26,6 +26,18 @@ Fabric records the 20 latest outcomes per adapter, model and task class in
 The health view also includes the active cooldown from `cooldowns.json`; expired
 cooldown markers are ignored even when an old marker remains on disk.
 
+Global route pools (`routes`: `strong`, `bulk`, `design`, `writing`) sit
+beside the task classes. Each entry names `adapter/model`, a `weight` (`high`,
+`normal`, `sparing`, `off` or a number) and an optional two-value `effort`
+band; `model_traits` flags free or prompt-training models, and
+`route_synonyms` maps task classes and tier aliases onto a pool. In the overlay a
+`routes.<name>` list merges by `model`: listed entries come first in overlay
+order and take the overlay's fields, and unlisted product entries follow. So
+`[{"model": "claude/claude-opus-5-5", "weight": "off"}]` drops one model
+without restating the rest. `provenant routes` (or `routes --json`) prints each
+pool with live availability; the rotation cursor lives in
+`route-rotation.json` under the same state root.
+
 Use `provenant help routes` to inspect configured task classes and current
 route health. `AGENT_FABRIC_STATE_ROOT` relocates both health and cooldown
 records; tests may override the health file with

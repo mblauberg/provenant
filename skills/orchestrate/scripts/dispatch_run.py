@@ -1362,6 +1362,13 @@ def run_identity(run_dir, receipt=None):
     return os.environ.get("PROVENANT_RUN_ID") or (receipt or {}).get("run_id") or (run_dir.name if run_dir.name.startswith("mcp-") else "mcp-"+run_dir.name.rsplit("-",1)[-1])
 
 
+def with_pick_reason(line, reason):
+    """Name why a route pool picked this model inside the Route line's parentheses."""
+    if not reason or not line.endswith(")") or line.endswith("; " + reason + ")"):
+        return line
+    return line[:-1] + "; " + reason + ")"
+
+
 def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     route=plan.get("route",{})
     model=plan.get("model") or route.get("resolved_model") or args.model or ""
@@ -1374,7 +1381,9 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         "resolved_model":model,"observed_model":None,"observed_source":None,"identity":identity,
         "provider":route.get("endpoint_provider") or args.tool,"transport":args.tool,"family":family,
         "effort_requested":args.effort,"effort_applied":effort,"cli_version":route.get("cli_version"),
-        "fallback_from":getattr(args,"fallback_from",None),"notes":[],"line":f"Route: {label} ({family}; {identity})"}
+        "fallback_from":getattr(args,"fallback_from",None),"notes":[],
+        "line":with_pick_reason(f"Route: {label} ({family}; {identity})",getattr(args,"pick_reason",None))}
+    if getattr(args,"pick_reason",None): provenance["pick_reason"]=args.pick_reason
     return {"schema":"fabric.attempt.v1","run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
         "attempt":number,"state":"running","status":None,"mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
         "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
@@ -1409,6 +1418,10 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     if status not in TERMINAL_STATUSES: status="failed"
     for field in ("session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","warnings","reaped","spared","provenance","pgid","last_progress_at"):
         if field in adapter: row[field]=adapter[field]
+    reason=getattr(args,"pick_reason",None)
+    if reason and isinstance(row.get("provenance"),dict) and isinstance(row["provenance"].get("line"),str):
+        row["provenance"]["line"]=with_pick_reason(row["provenance"]["line"],reason)
+        row["provenance"]["pick_reason"]=reason
     row["warnings"] = list(dict.fromkeys(
         list(row.get("warnings", [])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", []))
         + list(getattr(args, "_memory_warnings", [])) + list(getattr(args, "_branch_warnings", []))))
@@ -2464,6 +2477,7 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--allow-secrets", action="store_true")
     root.add_argument("--no-preface", dest="preface", action="store_false")
     root.add_argument("--fallback", default=None, help="false, true, any, or JSON route list")
+    root.add_argument("--pick-reason", help="why a route pool picked this model; appended to the Route line")
     return root
 
 

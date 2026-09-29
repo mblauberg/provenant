@@ -53,6 +53,14 @@ export interface RouteInput {
   allow_secrets?: boolean;
   fallback?: boolean | "any" | Array<string | Record<string, unknown>>;
   context_ceiling?: number;
+  /** A global weighted pool (strong, bulk, design, writing) or a task-class/alias synonym. */
+  route?: string;
+  rotate?: boolean;
+  council?: number;
+  models?: string[];
+  confidential?: boolean;
+  /** Why the pool picked this model; set by the pool expansion, shown on the Route line. */
+  pick_reason?: string;
 }
 
 export interface DispatchInput extends RouteInput {
@@ -90,6 +98,7 @@ export interface NormalisedRoute {
   context_ceiling?: number;
   allow_secrets?: boolean;
   capabilities?: DispatchCapability[];
+  pick_reason?: string;
   warnings?: string[];
 }
 
@@ -247,7 +256,7 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
     ...(warnings.length ? { warnings } : {}),
     ...(input.capabilities?.length ? { capabilities: [...input.capabilities].sort() } : {}),
     ...Object.fromEntries(
-      ["cwd", "network", "sandbox", "add_dirs", "fallback", "context_ceiling", "allow_secrets"]
+      ["cwd", "network", "sandbox", "add_dirs", "fallback", "context_ceiling", "allow_secrets", "pick_reason"]
         .filter((key) => input[key as keyof RouteInput] !== undefined)
         .map((key) => [key, input[key as keyof RouteInput]]),
     ),

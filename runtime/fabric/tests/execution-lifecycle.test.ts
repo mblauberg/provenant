@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
 import { normaliseRoute, routeArguments, workingIdentity } from "../src/execution-input.js";
 import { databasePath } from "../src/identity.js";
+import { expandPools } from "../src/pools.js";
 import { catalogueSnapshot } from "../src/catalogue.js";
 import { psOutput } from "../src/ps.mjs";
 import { Store } from "../src/store.js";
@@ -1164,6 +1165,86 @@ describe("front door model selection", () => {
       identity, new AbortController().signal, ownerEnvironment);
     expect(done).toMatchObject({ status: "completed", counts: { failed: 1 }, tasks: [{ status: "failed", outcome: "empty_output" }] });
   });
+});
+
+/** Pools see codex and claude installed, nothing cooling and no user overlay, on any machine. */
+function poolEnvironment(): NodeJS.ProcessEnv {
+  const bin = join(temporaryDirectory, "pool-bin");
+  mkdirSync(bin, { recursive: true });
+  for (const name of ["codex", "claude"]) {
+    writeFileSync(join(bin, name), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(bin, name), 0o755);
+  }
+  const instance = join(temporaryDirectory, "empty-instance");
+  mkdirSync(instance, { recursive: true });
+  return { ...ownerEnvironment, PATH: `${bin}:${process.env.PATH}`, AGENT_FABRIC_INSTANCE_ROOT: instance,
+    AGENT_FABRIC_STATE_ROOT: join(temporaryDirectory, "pool-state") };
+}
+
+describe("route pools", () => {
+  it("expands single, council and ad-hoc models into concrete tasks with a pick reason", async () => {
+    const env = poolEnvironment();
+    const expanded = await expandPools([
+      { id: "one", prompt: "p", route: "strong", adapter: "claude" },
+      { id: "pair", prompt: "p", route: "strong", council: 2 },
+      { id: "adhoc", prompt: "p", models: ["codex/gpt-6-luna@low", "claude/haiku"] },
+      { id: "plain", prompt: "p", adapter: "codex" },
+      { id: "both", prompt: "p", route: "bulk", model: "gpt-6-luna" },
+      { id: "nope", prompt: "p", route: "fastest" },
+    ], fixturePython, product, identity, env, new AbortController().signal);
+    expect(expanded.errors.map((error) => [error.task_id, error.error])).toEqual([
+      ["both", "route_conflict"], ["nope", "route_invalid"]]);
+    const byId = Object.fromEntries(expanded.tasks.map((task) => [task.id, task]));
+    expect(byId.one).toMatchObject({ adapter: "claude", model: "claude-opus-5-5", pick_reason: "strong top" });
+    expect(byId.one).not.toHaveProperty("route");
+    expect([byId["pair-1"]?.pick_reason, byId["pair-2"]?.pick_reason]).toEqual(["strong council 1/2", "strong council 2/2"]);
+    expect(new Set([byId["pair-1"]?.adapter, byId["pair-2"]?.adapter])).toEqual(new Set(["claude", "codex"]));
+    expect(byId["adhoc-1"]).toMatchObject({ adapter: "codex", model: "gpt-6-luna", effort: "low", pick_reason: "ad-hoc council 1/2" });
+    expect(byId["adhoc-2"]).toMatchObject({ adapter: "claude", model: "haiku", pick_reason: "ad-hoc council 2/2" });
+    expect(byId.plain).toEqual({ id: "plain", prompt: "p", adapter: "codex" });
+  });
+
+  it("dispatches route as one pick and forwards the reason to the owner", async () => {
+    const done = await dispatchConfiguredProvider({ route: "bulk", adapter: "codex", prompt: "ordinary run", wait_seconds: 5 },
+      identity, new AbortController().signal, poolEnvironment());
+    expect(done).toMatchObject({ status: "ok", route: { resolved_model: "gpt-6-luna" } });
+    expect(routeArguments({ adapter: "codex", role: "worker", access_mode: "read_only", pick_reason: "bulk top" }))
+      .toEqual(expect.arrayContaining(["--pick-reason", "bulk top"]));
+  });
+
+  it("runs a council as a batch of one task per member", async () => {
+    const done = await dispatchConfiguredProvider({ models: ["codex/gpt-6-luna@low", "claude/haiku"], prompt: "sleep with provider",
+      wait_seconds: 0 }, identity, new AbortController().signal, poolEnvironment());
+    expect(done.status, JSON.stringify(done)).toBe("running");
+    spawnedPids.push(Number(done.pid));
+    const runDir = String((done.paths as Record<string, unknown>).run_dir);
+    const manifest = JSON.parse(readFileSync(join(runDir, "_owner", "task-manifest.json"), "utf8"));
+    expect(manifest.tasks.map((task: Record<string, unknown>) => [task.id, task.adapter, task.model, task.pick_reason])).toEqual([
+      ["council-1", "codex", "gpt-6-luna", "ad-hoc council 1/2"], ["council-2", "claude", "haiku", "ad-hoc council 2/2"]]);
+  });
+
+  it("rejects a pool alongside an explicit model", async () => {
+    const done = await dispatchConfiguredProvider({ route: "strong", model: "gpt-6-luna", adapter: "codex", prompt: "p" },
+      identity, new AbortController().signal, poolEnvironment());
+    expect(done).toMatchObject({ status: "rejected", error: "route_conflict" });
+  });
+
+  it("accepts --route, --rotate, --council and --models on the CLI", () => {
+    const promptPath = join(temporaryDirectory, "pool-prompt.md");
+    writeFileSync(promptPath, "empty batch");
+    const cliPath = join(packageRoot, "src", "cli.ts");
+    const cli = (args: string[]) => spawnSync(process.execPath, ["--import", tsxLoader, cliPath, "dispatch",
+      "--prompt-file", promptPath, ...args], { cwd: workspace, encoding: "utf8", env: poolEnvironment() });
+    for (const args of [["--route", "bulk", "--adapter", "codex", "--rotate"], ["--route", "strong", "--council", "2", "--confidential"],
+      ["--models", "codex/gpt-6-luna@low,claude/haiku"]]) {
+      const run = cli(args);
+      expect(run.stderr, args.join(" ")).not.toMatch(/unknown option|route_|models_|council/u);
+      expect(run.stdout.trim(), args.join(" ")).not.toBe("");
+    }
+    const bad = cli(["--route", "strong", "--council", "9"]);
+    expect(bad.status).not.toBe(0);
+    expect(bad.stderr + bad.stdout).toMatch(/council/u);
+  }, 60_000);
 });
 
 describe("status list bounds", () => {
