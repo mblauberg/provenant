@@ -261,20 +261,48 @@ def workspace_identity(workspace: Path, provider_cwd: Path | None = None) -> dic
     return identity
 
 
-def writer_worktree_state(cwd: str) -> tuple[str, bytes] | None:
-    """HEAD and porcelain status of a writer's worktree, or None when Git cannot say."""
+# Ignored paths a launch itself churns; an edit under them is not writer work.
+STARTUP_SNAPSHOT_SKIP = {".agent-run", "node_modules", ".venv", "__pycache__", ".pytest_cache", "dist", "build"}
+
+
+def writer_worktree_state(cwd: str) -> tuple[str, bytes, tuple[Any, ...]] | None:
+    """HEAD, porcelain status and an ignored-file fingerprint of a writer's worktree.
+
+    None when Git cannot say. Ignored files are fingerprinted by size and mtime,
+    so a silent edit to an ignored config still counts as a change.
+    """
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     try:
-        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd, env=env, capture_output=True,
-                              text=True, timeout=10, check=True).stdout.strip()
-        status = subprocess.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=normal"],
-                                cwd=cwd, env=env, capture_output=True, timeout=10, check=True).stdout
-    except (OSError, subprocess.SubprocessError):
+        root, head = subprocess.run(["git", "rev-parse", "--show-toplevel", "HEAD"], cwd=cwd, env=env,
+                                    capture_output=True, text=True, timeout=10, check=True).stdout.splitlines()
+        listing = subprocess.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all",
+                                  "--ignored=matching"],
+                                 cwd=cwd, env=env, capture_output=True, timeout=10, check=True).stdout
+    except (OSError, subprocess.SubprocessError, ValueError):
         return None
-    return head, status
+    status, ignored = [], []
+    entries = iter(listing.split(b"\0"))
+    for entry in entries:
+        if not entry:
+            continue
+        if b"R" in entry[:2] or b"C" in entry[:2]:  # a rename or copy carries its source as the next field
+            entry += b"\0" + next(entries, b"")
+        if not entry.startswith(b"!! "):
+            status.append(entry)
+            continue
+        path = os.fsdecode(entry[3:])
+        parts = path.rstrip("/").split("/")
+        if STARTUP_SNAPSHOT_SKIP.intersection(parts) or path.endswith(".pyc"):
+            continue
+        try:
+            metadata = os.lstat(Path(root) / path)
+            ignored.append((path, metadata.st_mtime_ns, metadata.st_size))
+        except OSError:
+            ignored.append((path, None, None))
+    return head, b"\0".join(status), tuple(ignored)
 
 
-def guard_writer_startup_timeout(record: dict[str, Any], start: tuple[str, bytes] | None, cwd: str) -> None:
+def guard_writer_startup_timeout(record: dict[str, Any], start: tuple[Any, ...] | None, cwd: str) -> None:
     """A silent writer may still have edited files; fall back only over a provably untouched worktree."""
     if record.get("status") != "startup_timeout":
         return

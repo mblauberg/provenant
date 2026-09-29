@@ -2952,17 +2952,30 @@ def test_startup_timeout_falls_back_when_the_dispatch_allows(tmp_path, monkeypat
     assert second['provenance']['fallback_from']['status'] == 'startup_timeout'
 
 
-@pytest.mark.parametrize('edits', [False, True])
+@pytest.mark.parametrize('edits', [None, 'partial.txt', 'config/installation.json'])
 def test_writer_startup_timeout_falls_back_only_over_an_untouched_worktree(tmp_path, monkeypatch, edits):
     run, prompt, command = real_owner_fixture(
         tmp_path, monkeypatch,
         'import sys,json,time\nfrom pathlib import Path\nsys.stdin.read()\n'
         'if "opus" in sys.argv:\n'
-        + ('    Path("partial.txt").write_text("half done")\n' if edits else '')
-        + '    time.sleep(60)\n'
+        + (f'    Path({edits!r}).write_text("half done")\n' if edits else '')
+        + '    Path("node_modules/launch.lock").write_text("launch churn")\n'
+        '    time.sleep(60)\n'
         'print(json.dumps({"type":"result","result":"DONE"}))\n',
     )
     worktree = make_worktree(tmp_path)
+    # An ignored config the writer may rewrite, and an ignored cache it may churn.
+    (worktree / 'config').mkdir()
+    (worktree / 'config/installation.json').write_text('{}')
+    (worktree / 'node_modules').mkdir()
+    (worktree / 'node_modules/cache').write_text('')
+    exclude = Path(subprocess.check_output(['git', '-C', str(worktree), 'rev-parse', '--git-path', 'info/exclude'],
+                                           text=True).strip())
+    exclude = exclude if exclude.is_absolute() else worktree / exclude
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text('config/installation.json\nnode_modules/\n')
+    old = time.time() - 60
+    os.utime(worktree / 'config/installation.json', (old, old))
     isolate_fabric_plan_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv('CF_DISPATCH_STARTUP_SECONDS', '1')
@@ -2977,7 +2990,7 @@ def test_writer_startup_timeout_falls_back_only_over_an_untouched_worktree(tmp_p
         assert len(attempts) == 1
         assert attempts[0]['retryable'] is False
         assert attempts[0]['fix'].startswith('inspect the worktree')
-        assert (worktree / 'partial.txt').read_text() == 'half done'
+        assert (worktree / edits).read_text() == 'half done'
     else:
         assert [row['status'] for row in attempts] == ['startup_timeout', 'ok']
 
