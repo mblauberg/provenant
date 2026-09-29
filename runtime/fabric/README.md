@@ -55,8 +55,11 @@ Owners are detached session leaders and outlive the CLI and MCP host. A
 CLI-started owner is recorded as its own host. An MCP host that closes or is
 signalled hands its runs to their owners rather than cancelling them. A fresh
 `dispatch list` and `status <run-dir>` resolve these runs from their records.
-Only a live host sends the inbox notice when a run finishes; `fabric_events` and
-`lanes --wait` report every run.
+Only a live host sends the inbox notice when a run finishes. `fabric_events`
+exposes retained task-state events. `lanes --wait` reports each terminal or
+input-required lane of the registered project, finished within the last day,
+once per seat, including lanes that finished between waits; named ids narrow it
+to those lanes, and a batch id to its tasks.
 The next dispatch reaps a run only when its host is gone and its owner or
 provider still runs: an owner that exited and left its provider behind, or a
 run whose MCP host was killed with SIGKILL.
@@ -234,8 +237,7 @@ Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, and `detail`.
 New attempts wait when available host memory is below 10% of physical RAM for
 `worktree_write` or 5% for `read_only`; set either percentage from 0 to 100 in
 `<workspace_root>/.agents/fabric-policy.json` as `{"memory_floor_percent":{"worktree_write":10,"read_only":5}}` (either key may be omitted, and 0 disables that mode's floor).
-Queued time does not use the execution timeout, but `FABRIC_MEMORY_WAIT_SECONDS`
-limits each wait (default 1800); expiry fails the attempt as `memory_unavailable`.
+Queued time does not use the execution timeout, and each attempt waits for memory admission up to its own dispatch `timeout_seconds`. Within a project, queued attempts are admitted in order of queue entry, but an attempt waits only for an earlier waiter that is live, has republished within three polls and whose floor is currently met; expiry fails the attempt as `memory_unavailable`.
 Owners serialise admission through a per-user host lock in `$XDG_STATE_HOME/provenant/admission.lock`
 (default `~/.local/state/provenant/admission.lock`) and hold it for up to 20 seconds after provider start; lock creation failure admits with a warning, while probe failure holds and retries until the wait expires. `fabric_status` and `fabric status` show the available percentage, floor and wait budget and allow cancellation.
 
