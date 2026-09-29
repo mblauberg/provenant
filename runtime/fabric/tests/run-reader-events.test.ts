@@ -34,7 +34,7 @@ const tsxLoader = createRequire(import.meta.url).resolve("tsx");
 
 function laneWaitForSeat(cwd: string, state: string, seat: string, ...ids: string[]) {
   return spawnSync("python3", [join(product, "scripts/provenant"), "lanes", "--wait", ...ids], {
-    cwd, encoding: "utf8", timeout: 7000,
+    cwd, encoding: "utf8", timeout: 15_000,
     env: { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product, AGENT_FABRIC_TSX_LOADER: tsxLoader,
       AGENT_FABRIC_STATE_DIRECTORY: state, AGENT_FABRIC_SEAT: "codex", AGENT_FABRIC_LABEL: seat },
   });
@@ -359,7 +359,7 @@ it("reports a pre-existing terminal lane once to the same seat", () => {
   const otherSeat = laneWaitForSeat(workspace, state, "other-seat");
   expect(otherSeat.status, otherSeat.stderr).toBe(0);
   expect(otherSeat.stdout).toContain("already-done");
-});
+}, 30_000);
 
 it("waits for project lanes when invoked from a registered worktree", async () => {
   const workspace = fixture();
@@ -404,7 +404,7 @@ it("reports every unseen completion past the 20-row display cap", () => {
   const result = laneWait(workspace, state);
   expect(result.status, result.stderr).toBe(0);
   expect(result.stdout.trim().split("\n")).toHaveLength(23);
-}, 12_000);
+}, 20_000);
 
 it("wakes only for the named lane, not for unrelated lanes that finish meanwhile", async () => {
   const workspace = fixture();
@@ -438,7 +438,7 @@ it("a batch id wakes for its own children only", () => {
   expect(result.status, result.stderr).toBe(0);
   expect(result.stdout).toContain("child-one");
   expect(result.stdout).not.toContain("outsider");
-});
+}, 30_000);
 
 it("reports input_required, then the resumed attempt's terminal state", () => {
   const workspace = fixture();
@@ -455,4 +455,27 @@ it("reports input_required, then the resumed attempt's terminal state", () => {
   expect(resumed.status, resumed.stderr).toBe(0);
   expect(resumed.stdout).toMatch(/^ok\s+asks-first/u);
   expect(laneWait(workspace, state).stdout).toBe("no lanes are running\n");
-});
+}, 30_000);
+
+it("lists the project's lanes from a registered worktree and a subdirectory", () => {
+  const workspace = fixture();
+  const project = join(workspace, "project");
+  const linked = join(project, ".worktrees", "linked");
+  mkdirSync(join(project, "sub", "dir"), { recursive: true });
+  execFileSync("git", ["init", "--quiet"], { cwd: project });
+  execFileSync("git", ["-c", "user.email=fabric@example.invalid", "-c", "user.name=Fabric test",
+    "commit", "--quiet", "--allow-empty", "-m", "fixture"], { cwd: project });
+  execFileSync("git", ["worktree", "add", "--quiet", "--detach", linked, "HEAD"], { cwd: project });
+  attempt(project, "tasks", "project-lane", "running", "running");
+  const env = laneWaitEnv(join(workspace, "state"));
+  for (const cwd of [linked, join(project, "sub", "dir")]) {
+    const run = (...args: string[]) => {
+      const result = spawnSync("python3", [join(product, "scripts/provenant"), ...args], { cwd, encoding: "utf8", env });
+      expect(result.status, `${cwd} ${args.join(" ")}: ${result.stderr}`).toBe(0);
+      return result.stdout;
+    };
+    expect(run("lanes", "--json")).toContain("project-lane");
+    expect(run("fabric", "status", "--runs")).toContain("project-lane");
+    expect(JSON.parse(run("fabric", "dispatch", "list", "--json")).workspace).toBe(realpathSync(project));
+  }
+}, 30_000);

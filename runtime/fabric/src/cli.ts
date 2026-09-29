@@ -169,7 +169,7 @@ if (command === "lanes") {
       if (next.status === "ok") current = next;
     }
   }
-  const result = await readRuns(who.cwd, ids.length ? ids : undefined);
+  const result = await readRuns(who.project, ids.length ? ids : undefined);
   if (json) {
     console.log(JSON.stringify(result, null, 2));
   } else if (result.status === "ok") {
@@ -201,7 +201,7 @@ if (command === "status") {
       throw new Error("usage: fabric status [id] [--wait-seconds N] [--json]");
     }
     if (rest[0] !== undefined || argv.includes("--runs") || wait !== undefined) {
-      console.log(JSON.stringify(await fabricStatus(who.cwd, rest[0], wait === undefined ? 0 : Number(wait)), null, 2));
+      console.log(JSON.stringify(await fabricStatus(who.project, rest[0], wait === undefined ? 0 : Number(wait)), null, 2));
       process.exit(0);
     }
   } catch (error) {
@@ -223,10 +223,10 @@ if (command === "dispatch") {
       console.error("fabric: usage: fabric dispatch list [--json]");
       process.exit(2);
     }
-    const runs = listRecordedRuns(who.cwd);
+    const runs = listRecordedRuns(who.project);
     if (json) {
       console.log(JSON.stringify({
-        workspace: who.cwd,
+        workspace: who.project,
         retention_hours: retentionHours(process.env),
         runs,
       }, null, 2));
@@ -247,7 +247,7 @@ if (command === "dispatch") {
       console.error("fabric: usage: fabric dispatch kill <run-id|run-dir> [--json]");
       process.exit(2);
     }
-    const run = findRecordedRun(who.cwd, reference);
+    const run = findRecordedRun(who.project, reference);
     if (run === undefined) {
       console.error(`fabric: no recorded dispatch run: ${reference}`);
       process.exit(1);
@@ -560,7 +560,7 @@ try {
     if(ids.some(id=>id.startsWith("--"))) throw new Error("usage: fabric watch [ids…] [--interval N]");
     const seen=new Map<string,string>();
     for(;;) {
-      const result=await statusRows(who.cwd,ids.length ? ids : undefined);
+      const result=await statusRows(who.project,ids.length ? ids : undefined);
       if(!result.runs) throw new Error(digest(result));
       for(const row of result.runs) {
         const key=`${row.run_id}:${row.task_id}`;
@@ -583,12 +583,12 @@ try {
     if (argv.length !== 1 || (untilIdle && !follow)) throw new Error("usage: fabric events [--follow [--until-idle]]");
     let cursor: string | undefined;
     do {
-      const snapshot = await readEvents(who.cwd, cursor, store.inbox(who, { peek: true, limit: 100 }));
+      const snapshot = await readEvents(who.project, cursor, store.inbox(who, { peek: true, limit: 100 }));
       if (snapshot.status !== "ok") throw new Error(String(snapshot.error));
       cursor = snapshot.cursor;
       for (const event of snapshot.events) console.log(JSON.stringify(event));
       if (untilIdle && snapshot.events.length === 0) {
-        const runs = await readRuns(who.cwd);
+        const runs = await readRuns(who.project);
         if (runs.status !== "ok") throw new Error(String(runs.error));
         if (runs.runs.every((run) => run.state === "terminal" || run.state === "input_required")) break;
       }
