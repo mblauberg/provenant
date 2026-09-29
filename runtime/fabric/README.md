@@ -55,8 +55,11 @@ Owners are detached session leaders and outlive the CLI and MCP host. A
 CLI-started owner is recorded as its own host. An MCP host that closes or is
 signalled hands its runs to their owners rather than cancelling them. A fresh
 `dispatch list` and `status <run-dir>` resolve these runs from their records.
-Only a live host sends the inbox notice when a run finishes; `fabric_events` and
-`lanes --wait` report every run.
+Only a live host sends the inbox notice when a run finishes. `fabric_events`
+exposes retained task-state events. `lanes --wait` reports each terminal or
+input-required lane of the registered project, finished within the last day,
+once per seat, including lanes that finished between waits; named ids narrow it
+to those lanes, and a batch id to its tasks.
 The next dispatch reaps a run only when its host is gone and its owner or
 provider still runs: an owner that exited and left its provider behind, or a
 run whose MCP host was killed with SIGKILL.
