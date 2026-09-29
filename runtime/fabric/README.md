@@ -175,7 +175,8 @@ Read-only macOS launches can read `~/.gitconfig` and
 `$XDG_CONFIG_HOME/git/config` (default `~/.config/git/config`) so `git status`
 works. Other home-directory reads remain denied apart from provider state and
 sign-in files listed by the adapter profile (for Claude and agy, the login
-keychain). Claude lanes get `CLAUDE_CODE_TMPDIR` in the attempt's `tmp`, so they
+keychain; for Kiro, `~/Library/Application Support/kiro-cli`, writable so its
+token can refresh, and its `~/.local/bin` launcher links). Claude lanes get `CLAUDE_CODE_TMPDIR` in the attempt's `tmp`, so they
 never touch `/tmp/claude-<uid>`.
 Projects declare protected paths in `.agents/fabric-policy.json`, relative to
 the directory holding `.agents/`. Fabric checks the workspace root and the Git
@@ -240,7 +241,9 @@ must fail only where the receipt's `applied.protected_paths` covers it, which
 means a training or unresolved route; a non-training route reports
 `protected_read_expected: true`. Kiro runs its own `auto` model, because the
 catalogue has no Kiro alias, and OpenCode runs a free training route, so both
-exercise the protected-read denial. A missing executable or a provider
+exercise the protected-read denial; agy runs `gemini-3.8-flash` by name. Each
+row records the probe `method`: a read-only Claude lane has file tools but no
+shell, so its writes fail for want of a tool. A missing executable or a provider
 reporting a usage, rate, sign-in or model limit is reported as `skipped` with
 its reason; the command exits nonzero only when a row fails. It prints JSON
 containing each adapter, mode, resolved `Route:` line, confinement, warnings

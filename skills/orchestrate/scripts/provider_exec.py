@@ -51,7 +51,12 @@ CONFINED_STATE = {
         "read": ("Library/Keychains/login.keychain-db",),
     },
     "cursor": {"read_write": (".cursor", ".cache/cursor", ".npm")},
-    "kiro": {"read_write": (".kiro", ".cache/kiro", ".npm")},
+    "kiro": {
+        # kiro-cli keeps its sign-in and refreshed tokens in data.sqlite3 here, beside its engine.
+        "read_write": (".kiro", ".cache/kiro", ".npm", "Library/Application Support/kiro-cli"),
+        # Its engine finds its app bundle through the launcher links in ~/.local/bin.
+        "read": (".local/bin",),
+    },
 }
 # Codex needs its native broker, configuration and event services under seatbelt.
 CODEX_BASE_MACH_SERVICES = (

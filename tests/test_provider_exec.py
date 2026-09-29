@@ -577,6 +577,25 @@ def test_claude_read_only_profile_reads_login_keychain_but_not_other_keychains(m
     assert f'(subpath "{home / "Library/Keychains"}")' not in allow
 
 
+@pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
+def test_kiro_profile_keeps_its_sign_in_database_and_launcher_links(monkeypatch, tmp_path, mode):
+    mod = supervisor()
+    home = tmp_path / "home"
+    workspace = home / "repo"
+    workspace.mkdir(parents=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    plan = {"adapter": "kiro", "mode": mode, "workspace_root": str(workspace), "cwd": str(workspace),
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    profile = mod.os_confinement_profile(plan)
+    writes = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-write* "))
+    # Without it, kiro-cli cannot refresh its token and asks for a browser sign-in.
+    assert f'(subpath "{home / "Library/Application Support/kiro-cli"}")' in writes
+    if mode == "read_only":
+        reads = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-read-data "))
+        assert f'(subpath "{home / ".local/bin"}")' in reads
+        assert f'(subpath "{home / "Library/Application Support/kiro-cli"}")' in reads
+
+
 def test_sbpl_filter_star_escapes_regex_without_resolving_symlink_target(tmp_path):
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
     target = tmp_path / "target with [regex].json"
@@ -3822,11 +3841,12 @@ def test_agy_nested_result_failure_keeps_provider_error():
     assert "quota" in parsed["excerpt"].lower()
 
 
-def test_kiro_stream_json_selects_the_v2_engine():
+def test_kiro_stream_json_selects_the_v3_engine():
     from adapters import kiro
     command = kiro.argv({"mode": "read_only", "resume_session": None, "model": "auto",
                          "effort": None, "boundary_prompt": "B", "prompt": "P"})
-    assert command[command.index("--agent-engine") + 1] == "v2"
+    # kiro-cli 2.23's v2 engine never finishes a headless turn; v3 emits the same stream.
+    assert command[command.index("--agent-engine") + 1] == "v3"
     assert command.index("--agent-engine") < command.index("--output-format")
 
 
