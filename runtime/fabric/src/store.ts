@@ -25,6 +25,13 @@ export const isSQLiteContention = (error: unknown): boolean => {
   return cause !== undefined && cause !== error && isSQLiteContention(cause);
 };
 
+/** One lane attempt as the per-seat run_observations cursor keys it. */
+export interface LaneAttempt { runId: string; taskId: string; attempt: number }
+
+/** A legacy run without a task id is keyed by its run id in every cursor writer. */
+export const laneTaskId = (row: { run_id?: unknown; task_id?: unknown }): string =>
+  typeof row.task_id === "string" && row.task_id ? row.task_id : String(row.run_id);
+
 export interface Message {
   messageId: string;
   from: string;
@@ -551,13 +558,13 @@ export class Store {
 
   /** Status observation consumes only this seat's matching terminal notices. */
   acknowledgeTerminal(who:Identity,row:Record<string,any>,busyTimeoutMs=5000):void {
-    const prefix=`${row.run_id}:${row.task_id}:`, attempt=Number(row.attempt ?? row.attempt_count);
+    const taskId=laneTaskId(row), prefix=`${row.run_id}:${taskId}:`, attempt=Number(row.attempt ?? row.attempt_count);
     if(!Number.isInteger(busyTimeoutMs) || busyTimeoutMs<1 || busyTimeoutMs>5000) throw new Error("invalid notice busy timeout");
     this.#db.pragma(`busy_timeout = ${busyTimeoutMs}`);
     try { this.#db.transaction(()=> {
       this.#db.prepare(`INSERT INTO run_observations(project,recipient_id,run_id,task_id,attempt) VALUES (?,?,?,?,?)
         ON CONFLICT(project,recipient_id,run_id,task_id) DO UPDATE SET attempt=max(attempt,excluded.attempt)`)
-        .run(who.project,who.agentId,String(row.run_id),String(row.task_id),attempt);
+        .run(who.project,who.agentId,String(row.run_id),taskId,attempt);
       this.#db.prepare(`UPDATE deliveries SET read_at = ? WHERE project = ? AND recipient_id = ? AND read_at IS NULL
         AND message_id IN (SELECT message_id FROM messages WHERE project = ? AND kind = 'run_terminal'
         AND ((substr(output_path,1,?) = ? AND CAST(substr(output_path,?) AS INTEGER) <= ?) OR output_path = ?))`)
@@ -565,29 +572,26 @@ export class Store {
     }).immediate(); } finally {this.restoreDefaultBusyTimeout();}
   }
 
-  /** Atomically advance this seat's cursor for lane attempts it is about to report. */
-  reportUnseenLanes(
-    who: Identity,
-    rows: ReadonlyArray<{ runId: string; taskId: string; attempt: number }>,
-  ): number[] {
+  /** Indexes of lane attempts this seat has not yet been told about. */
+  unseenLanes(who: Identity, rows: ReadonlyArray<LaneAttempt>): number[] {
     const find = this.#db.prepare(`SELECT attempt FROM run_observations
       WHERE project = ? AND recipient_id = ? AND run_id = ? AND task_id = ?`);
+    // Attempt 0 is a batch task that terminated before its first attempt.
+    return rows.flatMap((row, index) => {
+      if (!row.runId || !row.taskId || !Number.isSafeInteger(row.attempt) || row.attempt < 0) return [];
+      const previous = find.get(who.project, who.agentId, row.runId, row.taskId) as { attempt: number } | undefined;
+      return previous === undefined || previous.attempt < row.attempt ? [index] : [];
+    });
+  }
+
+  /** Advance this seat's cursor once the lanes have been reported. */
+  markLanesSeen(who: Identity, rows: ReadonlyArray<LaneAttempt>): void {
     const record = this.#db.prepare(`INSERT INTO run_observations(project, recipient_id, run_id, task_id, attempt)
       VALUES (?, ?, ?, ?, ?) ON CONFLICT(project, recipient_id, run_id, task_id)
       DO UPDATE SET attempt = MAX(attempt, excluded.attempt)`);
-    // Attempt 0 is a batch task that terminated before its first attempt.
-    const unseen = (row: (typeof rows)[number]) => {
-      if (!row.runId || !row.taskId || !Number.isSafeInteger(row.attempt) || row.attempt < 0) return false;
-      const previous = find.get(who.project, who.agentId, row.runId, row.taskId) as { attempt: number } | undefined;
-      return previous === undefined || previous.attempt < row.attempt;
-    };
-    // Polls read without a write lock; only a candidate report takes one.
-    if (!rows.some(unseen)) return [];
-    return this.#db.transaction(() => rows.flatMap((row, index) => {
-      if (!unseen(row)) return [];
-      record.run(who.project, who.agentId, row.runId, row.taskId, row.attempt);
-      return [index];
-    })).immediate();
+    this.#db.transaction(() => {
+      for (const row of rows) record.run(who.project, who.agentId, row.runId, row.taskId, row.attempt);
+    }).immediate();
   }
 
   /** Acknowledge one claimed delivery. Retries with the same token are idempotent. */

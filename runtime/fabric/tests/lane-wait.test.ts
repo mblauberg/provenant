@@ -1,0 +1,94 @@
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, expect, it } from "vitest";
+
+import type { Identity } from "../src/identity.js";
+import { waitForLanes } from "../src/lane-wait.js";
+import type { RunRead } from "../src/run-reader.js";
+import { Store } from "../src/store.js";
+
+const roots: string[] = [];
+const stores: Store[] = [];
+afterEach(() => {
+  for (const store of stores.splice(0)) store.close();
+  for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true });
+});
+
+const who: Identity = { project: "/project", cwd: "/project", agentId: "wait-seat", provider: "codex" };
+
+function store() {
+  const root = mkdtempSync(join(tmpdir(), "fabric-lane-wait-"));
+  roots.push(root);
+  const opened = new Store(join(root, "fabric.sqlite3"));
+  stores.push(opened);
+  opened.announce(who);
+  return opened;
+}
+
+function lane(id: string, state = "terminal", status: string | null = "ok", taskId: string | null = id): RunRead {
+  return { id, run_id: `mcp-${id}`, task_id: taskId, run_path: `runs/${id}`, state, status, route: null, model: null,
+    started_at: null, last_progress_at: null, pgid: null, pgid_alive: null, result_path: null, receipt_path: null,
+    writer: false, worktree: null, attempt: 1 };
+}
+
+const busy = () => Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+
+function run(opened: Pick<Store, "unseenLanes" | "markLanesSeen">, runs: RunRead[][], write?: (text: string) => Promise<void>) {
+  const output: string[] = [];
+  let reads = 0;
+  return {
+    output,
+    code: waitForLanes({
+      who, store: opened,
+      read: async () => ({ schema: "fabric.runs.v1", status: "ok", runs: runs[Math.min(reads++, runs.length - 1)]! }),
+      write: write ?? (async (text) => { output.push(text); }),
+      fail: (text) => { throw new Error(text); },
+      sleep: async () => undefined,
+    }),
+  };
+}
+
+it("retries contention instead of reporting no running lanes", async () => {
+  const opened = store();
+  let failures = 1;
+  const flaky = {
+    unseenLanes: (...args: Parameters<Store["unseenLanes"]>) => {
+      if (failures-- > 0) throw busy();
+      return opened.unseenLanes(...args);
+    },
+    markLanesSeen: (...args: Parameters<Store["markLanesSeen"]>) => opened.markLanesSeen(...args),
+  };
+  const waiter = run(flaky, [[lane("only-done")]]);
+  expect(await waiter.code).toBe(0);
+  expect(waiter.output.join("")).toContain("only-done");
+  expect(waiter.output.join("")).not.toContain("no lanes are running");
+});
+
+it("advances the cursor only after the report is written", async () => {
+  const opened = store();
+  let markFailures = 1;
+  const flaky = {
+    unseenLanes: (...args: Parameters<Store["unseenLanes"]>) => opened.unseenLanes(...args),
+    markLanesSeen: (...args: Parameters<Store["markLanesSeen"]>) => {
+      if (markFailures-- > 0) throw busy();
+      return opened.markLanesSeen(...args);
+    },
+  };
+  const failed = run(opened, [[lane("kept")]], async () => { throw new Error("EPIPE"); });
+  await expect(failed.code).rejects.toThrow("EPIPE");
+  const retried = run(flaky, [[lane("kept")]]);
+  expect(await retried.code).toBe(0);
+  expect(retried.output.join("")).toContain("kept");
+  const again = run(opened, [[lane("kept")]]);
+  expect(await again.code).toBe(0);
+  expect(again.output.join("")).toBe("no lanes are running\n");
+});
+
+it("keys a legacy lane without a task id the same way as fabric_status", async () => {
+  const opened = store();
+  opened.acknowledgeTerminal(who, { run_id: "mcp-legacy", attempt: 1, run_dir: "/project/.agent-run/mcp-legacy" });
+  const waiter = run(opened, [[lane("legacy-display-id", "terminal", "ok", null)].map((row) => ({ ...row, run_id: "mcp-legacy" }))]);
+  expect(await waiter.code).toBe(0);
+  expect(waiter.output.join("")).toBe("no lanes are running\n");
+});

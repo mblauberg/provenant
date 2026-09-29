@@ -479,3 +479,18 @@ it("lists the project's lanes from a registered worktree and a subdirectory", ()
     expect(JSON.parse(run("fabric", "dispatch", "list", "--json")).workspace).toBe(realpathSync(project));
   }
 }, 30_000);
+
+it("writes a report larger than the pipe buffer in full before advancing the cursor", () => {
+  const workspace = fixture();
+  const state = join(workspace, "state");
+  // Long task ids keep the lane count, and so the scan, small under load.
+  for (let index = 0; index < 250; index += 1) attempt(workspace, "tasks", `pipe-${"x".repeat(90)}-${String(index).padStart(4, "0")}`, "terminal", "ok");
+  const wait = () => spawnSync("python3", [join(product, "scripts/provenant"), "lanes", "--wait"], {
+    cwd: workspace, encoding: "utf8", timeout: 55_000, env: laneWaitEnv(state),
+  });
+  const first = wait();
+  expect(first.status, `${first.signal} ${first.error} ${first.stderr}`).toBe(0);
+  expect(first.stdout.length).toBeGreaterThan(65_536);
+  expect(first.stdout.trim().split("\n")).toHaveLength(250);
+  expect(wait().stdout).toBe("no lanes are running\n");
+}, 120_000);
