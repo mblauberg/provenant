@@ -1,0 +1,5 @@
+cases:
+  - prompt: A lane-completion wake fires; reconcile shows the same lanes running, nothing landed, no new blocker and no decision due.
+    expected: Checkpoint the state file and re-arm the wait without sending the owner a message.
+  - prompt: A wake fires after a lane's pull request merged and one lane reports a new blocker.
+    expected: Land and prune, then send one owner message naming the landing and the blocker.

@@ -11,7 +11,7 @@ may name the path. One row per decision or assumption the owner has not yet
 confirmed:
 
 ```markdown
-- [ ] A12 2026-09-24 Use option B for the export format. Basis: council (claude/opus, codex/gpt-6-sol, agy/gemini-3.8-flash). Reversal: one migration. Refs: #412
+- [ ] A12 2026-09-24 Use option B for the export format. Basis: council (claude/opus, codex/gpt-6.1-sol, agy/gemini-3.8-flash). Reversal: one migration. Refs: #412
 - [x] A11 2026-09-23 Keep weekly digests. Confirmed by owner 2026-09-24.
 - [x] A9 2026-09-22 Drop the legacy import. Overturned by owner 2026-09-24: keep it; follow-up #418.
 ```
