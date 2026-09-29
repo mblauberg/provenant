@@ -441,6 +441,44 @@ exit 99
     assert "memory_unavailable" in state["digest"]
 
 
+def test_queued_receipt_is_published_where_admission_scans(tmp_path, monkeypatch):
+    run_dir = make_run(tmp_path, "runs/20260930-1200-dispatch-queue")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("hello\n", encoding="utf-8")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    module = load_dispatch_module()
+    admission = module.memory_admission
+    monkeypatch.setattr(admission, "available_memory_mb", lambda: (640, 16384))
+    original_admit = admission.admit
+    published = []
+
+    def observe_queue(on_wait, *args, **kwargs):
+        def waiting(reason):
+            on_wait(reason)
+            published.extend((path, json.loads(path.read_text()), kwargs["queued_since"])
+                             for path in admission.queued_receipts(kwargs["queue_root"]))
+        return original_admit(waiting, *args, **kwargs)
+
+    monkeypatch.setattr(admission, "admit", observe_queue)
+    monkeypatch.chdir(tmp_path)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "queue-wiring", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--timeout-seconds", "0.01",
+    ])
+    assert module.dispatch(args) == 1
+    assert published
+    path, row, queued_since = published[0]
+    assert path == run_dir / "tasks/queue-wiring/attempt-001/attempt.json"
+    assert row["state"] == "queued" and row["queue_reason"] == "memory"
+    assert row["timing"]["queued_since"] == queued_since
+    assert row["admission"] == {
+        "owner_pid": os.getpid(),
+        "owner_started_at": admission.process_info.start_time(os.getpid()),
+        "floor_percent": admission.floor_percent(tmp_path, args.access_mode),
+    }
+
+
 def test_opencode_explicit_model_receipt_drops_implied_alias(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path, "opencode-explicit-model")
     prompt = tmp_path / "prompt.md"

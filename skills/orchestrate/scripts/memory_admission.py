@@ -15,6 +15,9 @@ import time
 from pathlib import Path
 from typing import Callable
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import process_info
+
 POLL_SECONDS = 15
 SETTLE_SECONDS = 20
 
@@ -133,31 +136,76 @@ def _lock_file(on_warning: Callable[[str], None]) -> int | None:
         return None
 
 
-def _has_older_queued_attempt(queue_root: Path | None, queued_since: float | None) -> bool:
-    """Check existing queued receipts for a waiter with an earlier monotonic timestamp."""
-    if queue_root is None or queued_since is None:
-        return False
-    if type(queued_since) not in (int, float) or not math.isfinite(queued_since):
-        return False
+def queue_entry(workspace_root: Path, mode: str) -> dict:
+    """Owner identity and floor a queued attempt publishes for later waiters."""
+    pid = os.getpid()
+    entry: dict = {"owner_pid": pid, "owner_started_at": process_info.start_time(pid)}
+    try:
+        entry["floor_percent"] = floor_percent(workspace_root, mode)
+    except ValueError:
+        pass
+    return entry
+
+
+def queued_receipts(queue_root: Path) -> list[Path]:
+    """Attempt receipts of this project's runs, where queued waiters publish."""
     run_dirs = list((queue_root / "runs").glob("*")) + list(queue_root.glob("mcp-*"))
-    for run_dir in run_dirs:
-        if run_dir.is_symlink() or not run_dir.is_dir():
-            continue
-        for receipt in run_dir.glob("tasks/*/attempt-*/attempt.json"):
-            try:
-                metadata = receipt.lstat()
-                if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
-                    continue
-                row = json.loads(receipt.read_text(encoding="utf-8"))
-                timing = row.get("timing", {})
-                earlier_since = timing.get("queued_since")
-                if (row.get("state") == "queued" and row.get("queue_reason") == "memory"
-                        and type(earlier_since) in (int, float)
-                        and math.isfinite(earlier_since) and earlier_since < queued_since):
-                    return True
-            except (OSError, UnicodeError, ValueError, TypeError, AttributeError):
+    return [receipt for run_dir in run_dirs if not run_dir.is_symlink() and run_dir.is_dir()
+            for receipt in run_dir.glob("tasks/*/attempt-*/attempt.json")]
+
+
+def _finite(value: object) -> bool:
+    return type(value) in (int, float) and math.isfinite(value)
+
+
+def _owner_alive(pid: object, started: object) -> bool:
+    # This owner admits one attempt at a time, so its own queued receipts are stale.
+    if type(pid) is not int or pid <= 0 or pid == os.getpid() or not isinstance(started, str) or not started:
+        return False
+    try:
+        os.kill(pid, 0)
+    except PermissionError:
+        pass
+    except OSError:
+        return False
+    # A reused pid, including one after a reboot, has a different start identity.
+    return process_info.start_time(pid) == started
+
+
+def _older_waiter_floors(queue_root: Path | None, queued_since: float | None) -> list[float]:
+    """Floors of live waiters that entered this project's queue before this one.
+
+    A receipt with no owner identity, a dead owner or a reused pid does not hold the queue.
+    """
+    if queue_root is None or not _finite(queued_since):
+        return []
+    floors = []
+    for receipt in queued_receipts(queue_root):
+        try:
+            metadata = receipt.lstat()
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
                 continue
-    return False
+            row = json.loads(receipt.read_text(encoding="utf-8"))
+            if row.get("state") != "queued" or row.get("queue_reason") != "memory":
+                continue
+            since = row.get("timing", {}).get("queued_since")
+            entry = row.get("admission", {})
+            floor = entry.get("floor_percent")
+            if (_finite(since) and since < queued_since and _finite(floor)
+                    and _owner_alive(entry.get("owner_pid"), entry.get("owner_started_at"))):
+                floors.append(floor)
+        except (OSError, UnicodeError, ValueError, TypeError, AttributeError):
+            continue
+    return floors
+
+
+def _hold(poll_end: float, cancelled: Callable[[], bool], pause: Callable[[float], None]) -> bool:
+    """Pause until the next poll; False when the attempt was cancelled meanwhile."""
+    while time.monotonic() < poll_end:
+        if cancelled():
+            return False
+        pause(max(0.0, min(0.1, poll_end - time.monotonic())))
+    return True
 
 
 def admit(
@@ -172,14 +220,18 @@ def admit(
     queue_root: Path | None = None,
     queued_since: float | None = None,
 ) -> AdmissionLease | None:
-    """Reserve host admission until the caller starts or ends the attempt."""
+    """Reserve host admission until the caller starts or ends the attempt.
+
+    Within a project, an attempt yields to live waiters that entered the queue earlier
+    and could be admitted at the current reading; a waiter whose floor is not met does
+    not hold back a newer one whose floor is.
+    """
     floor = floor_percent(workspace_root or Path.cwd(), mode)
     probe = probe or available_memory_mb
     started = time.monotonic()
     budget = _wait_budget(timeout_seconds)
     deadline = started + max(0.0, budget - waited_seconds)
     waited_for_admission = False
-    waiting_for_older = False
     last_lock_report = 0.0
     while True:
         if cancelled():
@@ -188,6 +240,8 @@ def admit(
             raise MemoryUnavailableError("memory admission wait expired")
         if floor == 0:
             return AdmissionLease()
+        # Scan before taking the host lock so reading receipts never extends its hold.
+        older_floors = _older_waiter_floors(queue_root, queued_since)
         fd = _lock_file(on_warning)
         if fd is None:
             return AdmissionLease()
@@ -217,21 +271,6 @@ def admit(
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
             raise MemoryUnavailableError("memory admission wait expired")
-        if _has_older_queued_attempt(queue_root, queued_since):
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
-            waited_for_admission = True
-            if not waiting_for_older:
-                elapsed = waited_seconds + time.monotonic() - started
-                on_wait(f"waiting for earlier memory admission; {_duration(elapsed)} of {_duration(budget)}")
-                waiting_for_older = True
-            poll_end = min(deadline, time.monotonic() + POLL_SECONDS)
-            while time.monotonic() < poll_end:
-                if cancelled():
-                    return None
-                pause(max(0.0, min(0.1, poll_end - time.monotonic())))
-            continue
-        waiting_for_older = False
         try:
             available, total = probe()
             if total <= 0 or available < 0:
@@ -245,18 +284,16 @@ def admit(
                 raise MemoryUnavailableError("memory admission wait expired") from exc
             elapsed = waited_seconds + time.monotonic() - started
             on_wait(f"memory probe failed: {exc}; holding; {_duration(elapsed)} of {_duration(budget)}")
-            poll_end = min(deadline, time.monotonic() + POLL_SECONDS)
-            while time.monotonic() < poll_end:
-                if cancelled():
-                    return None
-                pause(max(0.0, min(0.1, poll_end - time.monotonic())))
+            if not _hold(min(deadline, time.monotonic() + POLL_SECONDS), cancelled, pause):
+                return None
             continue
         if (waited_for_admission or contended or waited_seconds > 0) and time.monotonic() >= deadline:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
             raise MemoryUnavailableError("memory admission wait expired")
         percent = available / total * 100
-        if percent >= floor:
+        yielding = any(older <= percent for older in older_floors)
+        if percent >= floor and not yielding:
             return AdmissionLease(fd)
         fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
@@ -264,11 +301,13 @@ def admit(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise MemoryUnavailableError("memory admission wait expired")
+        # The scan predates any wait for the lock; retry at once if the earlier waiter has gone.
+        if percent >= floor and not any(
+                older <= percent for older in _older_waiter_floors(queue_root, queued_since)):
+            continue
         elapsed = waited_seconds + time.monotonic() - started
-        on_wait(f"waiting for memory: {percent:.1f}% available ({available / 1024:.2f} GB), "
+        state ="waiting for earlier memory admission" if percent >= floor else "waiting for memory"
+        on_wait(f"{state}: {percent:.1f}% available ({available / 1024:.2f} GB), "
                 f"floor {floor:g}% for {mode}; {_duration(elapsed)} of {_duration(budget)}")
-        poll_end = min(deadline, time.monotonic() + POLL_SECONDS)
-        while time.monotonic() < poll_end:
-            if cancelled():
-                return None
-            pause(max(0.0, min(0.1, poll_end - time.monotonic())))
+        if not _hold(min(deadline, time.monotonic() + POLL_SECONDS), cancelled, pause):
+            return None

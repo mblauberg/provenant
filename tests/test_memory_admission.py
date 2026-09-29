@@ -1,10 +1,12 @@
 """Focused checks for provider admission and its visible waiting state."""
 
+import json
+import subprocess
 import threading
 import time
 import pytest
 
-from skills.orchestrate.scripts import memory_admission
+from skills.orchestrate.scripts import memory_admission, process_info
 from skills.orchestrate.scripts.fabric_records import render_digest
 
 
@@ -152,14 +154,23 @@ def test_probe_failure_holds_then_recovers(monkeypatch):
 
 @pytest.mark.parametrize("probe_failure", [False, True])
 def test_wait_continues_when_clock_passes_poll_end_before_pause(monkeypatch, probe_failure):
+    class Clock:
+        now = 0.0
+        waiting = False
+
+    clock = Clock()
     monkeypatch.setattr(memory_admission, "POLL_SECONDS", 1)
-    clock_calls = 0
     pause_durations = []
 
-    def monotonic():
-        nonlocal clock_calls
-        clock_calls += 1
-        return 2 if clock_calls >= 6 else 0
+    def on_wait(_reason):
+        clock.waiting = True
+
+    def cancelled():
+        # Inside the poll loop, after its clock check: jump past poll_end before the pause.
+        if clock.waiting:
+            clock.now += 2
+            clock.waiting = False
+        return False
 
     def pause(duration):
         assert duration >= 0
@@ -174,9 +185,8 @@ def test_wait_continues_when_clock_passes_poll_end_before_pause(monkeypatch, pro
             raise reading
         return reading
 
-    monkeypatch.setattr(memory_admission.time, "monotonic", monotonic)
-    lease = _admit(lambda _: None, lambda: False, lambda _: None,
-                                   probe=probe, pause=pause)
+    monkeypatch.setattr(memory_admission.time, "monotonic", lambda: clock.now)
+    lease = _admit(on_wait, cancelled, lambda _: None, probe=probe, pause=pause)
     assert lease is not None
     lease.close()
     assert pause_durations == [0]
@@ -210,45 +220,120 @@ def test_waiting_writer_is_admitted_after_simulated_45_minutes(tmp_path, monkeyp
     assert samples == [0, 45 * 60]
 
 
-def test_queued_memory_admissions_follow_fifo_order(tmp_path, monkeypatch):
-    class Clock:
-        now = 100.0
+@pytest.fixture
+def live_owner():
+    process = subprocess.Popen(["sleep", "60"])
+    try:
+        yield process.pid, process_info.start_time(process.pid)
+    finally:
+        process.kill()
+        process.wait()
 
-        def monotonic(self):
-            return self.now
 
-        def pause(self, duration):
-            assert duration >= 0
-            if admitted == []:
-                older_receipt.write_text(
-                    '{"state":"running","queue_reason":"memory",'
-                    '"timing":{"queued_since":10}}', encoding="utf-8"
-                )
-                admitted.append("older")
-            self.now += max(duration, 1)
+def _queued_receipt(queue_root, name, *, since, floor, pid, started, state="queued"):
+    receipt = queue_root / f"runs/{name}/tasks/task/attempt-001/attempt.json"
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    admission = {"floor_percent": floor}
+    if pid is not None:
+        admission.update(owner_pid=pid, owner_started_at=started)
+    receipt.write_text(json.dumps({"state": state, "queue_reason": "memory",
+                                   "timing": {"queued_since": since}, "admission": admission}),
+                       encoding="utf-8")
+    return receipt
 
+
+class _Clock:
+    def __init__(self, on_pause=None):
+        self.now = 100.0
+        self.on_pause = on_pause or (lambda: None)
+
+    def monotonic(self):
+        return self.now
+
+    def pause(self, duration):
+        assert duration >= 0
+        self.on_pause()
+        self.now += max(duration, 1)
+
+
+def test_queued_memory_admissions_follow_queue_entry_order(tmp_path, monkeypatch, live_owner):
     queue_root = tmp_path / ".agent-run"
-    older_receipt = queue_root / "runs/older/tasks/old/attempt-001/attempt.json"
-    older_receipt.parent.mkdir(parents=True)
-    older_receipt.write_text(
-        '{"state":"queued","queue_reason":"memory",'
-        '"timing":{"queued_since":10}}', encoding="utf-8"
-    )
+    pid, started = live_owner
+    older = _queued_receipt(queue_root, "older", since=10, floor=5, pid=pid, started=started)
     admitted = []
-    clock = Clock()
+
+    def older_admitted():
+        if admitted == []:
+            _queued_receipt(queue_root, "older", since=10, floor=5, pid=pid, started=started,
+                            state="running")
+            admitted.append("older")
+
+    clock = _Clock(older_admitted)
     monkeypatch.setattr(memory_admission.time, "monotonic", clock.monotonic)
     monkeypatch.setattr(memory_admission, "POLL_SECONDS", 1)
     reasons = []
 
     lease = _admit(reasons.append, lambda: False, lambda _: None,
-                                   probe=lambda: (1300, 16384), pause=clock.pause,
-                                   timeout_seconds=3600, queue_root=queue_root,
-                                   queued_since=20)
+                   probe=lambda: (1300, 16384), pause=clock.pause,
+                   queue_root=queue_root, queued_since=20)
     assert lease is not None
     admitted.append("newer")
     lease.close()
+    assert older.exists()
     assert admitted == ["older", "newer"]
-    assert reasons and reasons[0].startswith("waiting for earlier memory admission;")
+    assert reasons and reasons[0].startswith("waiting for earlier memory admission: 7.9% available")
+
+
+def _must_not_wait(reason):
+    raise AssertionError(f"newer waiter held: {reason}")
+
+
+def _dead_pid():
+    process = subprocess.Popen(["true"])
+    process.wait()
+    return process.pid
+
+
+@pytest.mark.parametrize("owner", ["dead", "reused", "missing"])
+def test_stale_queued_receipt_does_not_block_newer_waiter(tmp_path, owner, live_owner):
+    queue_root = tmp_path / ".agent-run"
+    pid, started = {"dead": (_dead_pid(), "Wed Sep 30 00:00:00 2026"),
+                    "reused": (live_owner[0], "Thu Jan  1 00:00:00 1970"),
+                    "missing": (None, None)}[owner]
+    _queued_receipt(queue_root, "stale", since=10, floor=5, pid=pid, started=started)
+    lease = _admit(_must_not_wait, lambda: False, lambda _: None,
+                   probe=lambda: (1300, 16384), queue_root=queue_root, queued_since=20)
+    assert lease is not None
+    lease.close()
+
+
+def test_older_waiter_below_its_floor_does_not_block_newer_reviewer(tmp_path, live_owner):
+    queue_root = tmp_path / ".agent-run"
+    pid, started = live_owner
+    _queued_receipt(queue_root, "writer", since=10, floor=10, pid=pid, started=started)
+    lease = _admit(_must_not_wait, lambda: False, lambda _: None,
+                   probe=lambda: (1147, 16384), mode="read_only",
+                   queue_root=queue_root, queued_since=20)
+    assert lease is not None
+    lease.close()
+
+
+def test_wait_behind_earlier_waiter_can_be_cancelled_or_expire(tmp_path, monkeypatch, live_owner):
+    queue_root = tmp_path / ".agent-run"
+    pid, started = live_owner
+    _queued_receipt(queue_root, "older", since=10, floor=5, pid=pid, started=started)
+    monkeypatch.setattr(memory_admission, "POLL_SECONDS", 1)
+    clock = _Clock()
+    monkeypatch.setattr(memory_admission.time, "monotonic", clock.monotonic)
+    reasons = []
+    assert _admit(reasons.append, lambda: bool(reasons), lambda _: None,
+                  probe=lambda: (1300, 16384), pause=clock.pause,
+                  queue_root=queue_root, queued_since=20) is None
+    assert len(reasons) == 1
+    with pytest.raises(memory_admission.MemoryUnavailableError):
+        _admit(lambda _: None, lambda: False, lambda _: None,
+               probe=lambda: (1300, 16384), pause=clock.pause, timeout_seconds=3,
+               queue_root=queue_root, queued_since=20)
 
 
 def test_probe_failure_expires(monkeypatch):
