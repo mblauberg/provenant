@@ -419,6 +419,7 @@ def _command(task: dict[str, Any], run_dir: Path) -> list[str]:
         command.extend(("--capabilities", json.dumps(task["capabilities"])))
     for directory in task.get("add_dirs",[]): command.extend(("--add-dir",directory))
     if task.get("allow_secrets") is True: command.append("--allow-secrets")
+    if task.get("confidential") is True: command.append("--confidential")
     if task.get("preface") is False: command.append("--no-preface")
     return command
 

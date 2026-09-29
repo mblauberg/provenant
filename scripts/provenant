@@ -91,8 +91,9 @@ Thin front door; each command delegates to its existing owner:
   root           print the resolved product checkout
   route ...      scripts/model-route ... (low-level resolver; capability-bound
                  aliases need a fresh snapshot, normally supplied by dispatch)
-  routes [--json]
-                 each global route pool with live availability
+  routes [--json] [--health]
+                 each global route pool with live availability; --health adds
+                 task-class routes and recent health (same as `help routes`)
   capabilities ...
                  skills/orchestrate/scripts/capabilities.py ...
   worktree ...   scripts/worktree ...
@@ -300,7 +301,7 @@ def main(arguments: list[str]) -> int:
     if command == "routes":
         command, command_arguments = "route", ["routes", *command_arguments]
     elif command == "help" and command_arguments == ["routes"]:
-        command, command_arguments = "route", ["health", "--json"]
+        command, command_arguments = "route", ["routes", "--health"]
     elif command in {"help", "-h", "--help"}:
         if command_arguments:
             usage()

@@ -3,7 +3,8 @@ import { randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
-import { preflight, validatePrompt, rejected, timeoutSeconds, InputError, type DispatchInput } from "./execution-input.js";
+import { preflight, validatePrompt, rejected, timeoutSeconds, InputError, type DispatchInput, type RouteInput } from "./execution-input.js";
+import { usesPool } from "./pools.js";
 import {
   dispatchConfiguredProvider,
   executableOwner,
@@ -226,6 +227,11 @@ export function handoffBrief(previous: Record<string, any>): string {
 }
 
 /** A fresh session primed with the prior result tail: the cheap alternative to a large resume. */
+/** A handoff keeps the previous route unless the caller names any selector, pool selectors included. */
+export function inheritsPreviousRoute(input: RouteInput): boolean {
+  return input.adapter === undefined && input.alias === undefined && input.model === undefined && !usesPool(input);
+}
+
 export async function handoffDispatch(
   input: DispatchInput,
   identity: Identity,
@@ -250,7 +256,7 @@ export async function handoffDispatch(
     }
     const brief = handoffBrief(previous);
     const requested = previous.provenance?.requested ?? {};
-    const inherit = rest.adapter === undefined && rest.alias === undefined && rest.model === undefined;
+    const inherit = inheritsPreviousRoute(rest);
     const writer = rest.mode === undefined && rest.worktree === undefined && rest.cwd === undefined &&
       previous.mode === "worktree_write" && typeof previous.worktree === "string";
     return await dispatchConfiguredProvider({

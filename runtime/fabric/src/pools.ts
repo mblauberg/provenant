@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { withoutGitRedirects, type Identity } from "./identity.js";
 import { InputError, type BatchTaskInput, type RouteInput } from "./execution-input.js";
 
-export const POOL_FIELDS = ["route", "rotate", "council", "models", "confidential"] as const;
+export const POOL_FIELDS = ["route", "rotate", "council", "models"] as const;
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 export interface Pick {
@@ -21,7 +21,7 @@ type PickResult =
   | { status: "rejected"; error: string; fix: string };
 
 export function usesPool(input: RouteInput): boolean {
-  return POOL_FIELDS.some((field) => input[field] !== undefined && input[field] !== false);
+  return input.route !== undefined || input.models !== undefined || input.council !== undefined || input.rotate === true;
 }
 
 function withoutPool<T extends RouteInput>(input: T): T {
@@ -29,13 +29,32 @@ function withoutPool<T extends RouteInput>(input: T): T {
     !(POOL_FIELDS as readonly string[]).includes(key))) as T;
 }
 
-function validate(input: RouteInput): void {
-  if (input.model !== undefined || input.alias !== undefined)
-    throw new InputError("route_conflict", "Pass route or models, or pass alias/model, not both.");
-  if (input.route === undefined && input.models === undefined)
-    throw new InputError("route_required", "Pass route with rotate, council or confidential.");
-  if (input.models !== undefined && (!Array.isArray(input.models) || input.models.some((item) => typeof item !== "string")))
-    throw new InputError("models_invalid", "Pass models as a list of adapter/model[@effort] strings.");
+/**
+ * Settle mixed selectors by precedence instead of rejecting them: models beats
+ * route, alias and model; an explicit model beats route, rotate and council;
+ * route beats alias; an alias without a route ignores rotate and council.
+ * Every ignored field is named in a warning. `confidential` is not a selector:
+ * it filters whatever the selectors resolve to.
+ */
+function settle<T extends RouteInput>(input: T): { task: T; warnings: string[] } {
+  const warnings: string[] = [];
+  const ignored = (fields: string[], winner: string) => {
+    const named = fields.filter((field) => input[field as keyof RouteInput] !== undefined && input[field as keyof RouteInput] !== false);
+    if (named.length) warnings.push(`${named.join(", ")} ignored: ${winner}`);
+    return Object.fromEntries(Object.entries(input).filter(([key]) => !named.includes(key))) as T;
+  };
+  if (input.models !== undefined) {
+    if (!Array.isArray(input.models) || input.models.some((item) => typeof item !== "string"))
+      throw new InputError("models_invalid", "Pass models as a list of adapter/model[@effort] strings.");
+    return { task: ignored(["alias", "model", "council", "rotate"], "models names the council"), warnings };
+  }
+  if (input.model !== undefined)
+    return { task: ignored(["route", "council", "rotate"], `model ${input.model} was named explicitly`), warnings };
+  if (input.alias !== undefined && input.route !== undefined)
+    return { task: ignored(["alias"], `route ${input.route} was named`), warnings };
+  if (input.alias !== undefined)
+    return { task: ignored(["council", "rotate"], `alias ${input.alias} names one model; pass route for a pool`), warnings };
+  return { task: input, warnings };
 }
 
 /** Ask the Python router for picks: one call for every request in a dispatch or batch. */
@@ -68,6 +87,8 @@ async function pick(
 
 export interface Expanded {
   tasks: BatchTaskInput[];
+  /** True when any task became a council of several members. */
+  council: boolean;
   errors: Record<string, unknown>[];
   warnings: string[];
 }
@@ -86,26 +107,35 @@ export async function expandPools(
   signal: AbortSignal,
 ): Promise<Expanded> {
   const errors: Record<string, unknown>[] = [];
-  const pending: Array<{ index: number; request: Record<string, unknown> }> = [];
-  tasks.forEach((task, index) => {
-    if (!usesPool(task)) return;
+  const warnings: string[] = [];
+  const settled = tasks.map((task, index) => {
+    if (!usesPool(task)) return task;
     try {
-      validate(task);
-      pending.push({ index, request: {
-        ...Object.fromEntries(POOL_FIELDS.filter((field) => task[field] !== undefined).map((field) => [field, task[field]])),
-        ...(task.adapter === undefined ? {} : { adapter: task.adapter }),
-        ...(task.effort === undefined ? {} : { effort: task.effort }),
-        project: identity.project,
-      } });
+      const result = settle(task);
+      warnings.push(...result.warnings);
+      return result.task;
     } catch (error) {
       if (!(error instanceof InputError)) throw error;
       errors.push({ task_id: task.id ?? `task-${index + 1}`, error: error.code, fix: error.fix });
+      return undefined;
     }
+  });
+  const pending: Array<{ index: number; request: Record<string, unknown> }> = [];
+  settled.forEach((task, index) => {
+    if (task === undefined || !usesPool(task)) return;
+    pending.push({ index, request: {
+      ...Object.fromEntries(POOL_FIELDS.filter((field) => task[field] !== undefined).map((field) => [field, task[field]])),
+      ...(task.adapter === undefined ? {} : { adapter: task.adapter }),
+      ...(task.effort === undefined ? {} : { effort: task.effort }),
+      ...(task.confidential === true ? { confidential: true } : {}),
+      project: identity.project,
+    } });
   });
   const results = pending.length ? await pick(python, root, pending.map((item) => item.request), identity, env, signal) : [];
   const answers = new Map(pending.map((item, position) => [item.index, results[position]!]));
-  const warnings: string[] = [];
-  const expanded = tasks.flatMap((task, index): BatchTaskInput[] => {
+  let council = false;
+  const expanded = settled.flatMap((task, index): BatchTaskInput[] => {
+    if (task === undefined) return [];
     if (!usesPool(task)) return [task];
     const answer = answers.get(index);
     if (answer === undefined) return [];
@@ -115,15 +145,17 @@ export async function expandPools(
       return [];
     }
     warnings.push(...answer.warnings);
-    const council = task.council !== undefined || task.models !== undefined;
+    const members = task.council !== undefined || task.models !== undefined;
+    council ||= members;
+    const { alias: _alias, ...rest } = withoutPool(task);
     return answer.picks.map((choice, member) => ({
-      ...withoutPool(task),
-      id: council ? `${id}-${member + 1}` : id,
+      ...rest,
+      id: members ? `${id}-${member + 1}` : id,
       adapter: choice.adapter,
       model: choice.model,
       ...(choice.effort === undefined ? {} : { effort: choice.effort }),
       pick_reason: choice.reason,
     }));
   });
-  return { tasks: expanded, errors, warnings: [...new Set(warnings)] };
+  return { tasks: expanded, council, errors, warnings: [...new Set(warnings)] };
 }

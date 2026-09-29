@@ -632,11 +632,11 @@ async function dispatchConfiguredProviderUnchecked(
       const error = expanded.errors[0]!;
       return { status: "rejected", error: error.error, fix: error.fix };
     }
-    if (input.council !== undefined || input.models !== undefined) {
+    if (expanded.council) {
       const { task_id: _task, wait_seconds, ...controls } = input;
       const result = await dispatchConfiguredBatchUnchecked({
         ...Object.fromEntries(Object.entries(controls).filter(([key]) =>
-          !["prompt", "prompt_file", "resume", "handoff", ...POOL_FIELDS].includes(key))),
+          !["prompt", "prompt_file", "resume", "handoff", "adapter", "alias", "model", "effort", "confidential", ...POOL_FIELDS].includes(key))),
         tasks: expanded.tasks,
         concurrency: Math.min(8, expanded.tasks.length),
         wait_seconds: wait_seconds ?? DEFAULT_WAIT_SECONDS,
@@ -645,9 +645,9 @@ async function dispatchConfiguredProviderUnchecked(
         ? { ...result, warnings: [...((result.warnings as string[] | undefined) ?? []), `warning: ${expanded.warnings.join("; ")}`] }
         : result;
     }
+    // A single pick, or a selector that won precedence, replaces the request's own selectors.
     const { id: _id, ...picked } = expanded.tasks[0]!;
-    input = { ...input, ...picked };
-    for (const field of POOL_FIELDS) delete input[field];
+    input = { ...(picked as DispatchInput), ...(input.task_id === undefined ? {} : { task_id: input.task_id }) };
     poolWarnings = expanded.warnings;
   }
   const snapshotStarted = performance.now(), catalogue = catalogueSnapshot(root, env);
@@ -786,8 +786,7 @@ async function dispatchConfiguredBatchUnchecked(
 ): Promise<Record<string, unknown>> {
   if (input.tasks.length < 1 || input.tasks.length > 64)
     throw new InputError("invalid_input", "tasks must contain 1-64 items");
-  const concurrency = input.concurrency ?? Math.min(4, input.tasks.length);
-  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) {
+  if (input.concurrency !== undefined && (!Number.isInteger(input.concurrency) || input.concurrency < 1 || input.concurrency > 8)) {
     throw new InputError("invalid_input", "concurrency must be an integer from 1 to 8");
   }
   if (!Number.isInteger(input.wait_seconds ?? 0) || (input.wait_seconds ?? 0) < 0 || (input.wait_seconds ?? 0) > 55) {
@@ -798,7 +797,7 @@ async function dispatchConfiguredBatchUnchecked(
   const catalogue = catalogueSnapshot(root, env);
   const errors: Record<string, unknown>[] = [];
   const defaults = Object.fromEntries(Object.entries(input).filter(([key]) =>
-    ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", ...POOL_FIELDS].includes(key)));
+    ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", ...POOL_FIELDS].includes(key)));
   let merged: BatchTaskInput[] = input.tasks.flatMap((task, index) => {
     const taskError = (task as BatchTaskInput & { _fabric_error?: Record<string, unknown> })._fabric_error;
     if (taskError) {
@@ -813,13 +812,17 @@ async function dispatchConfiguredBatchUnchecked(
     return [{ ...own, ...task, id: task.id ?? `task-${index + 1}` }];
   });
   const poolWarnings: string[] = [];
+  let councils = false;
   if (merged.some(usesPool)) {
     const expanded = await expandPools(merged, await pythonOwner(root, identity, env), root, identity, env, signal);
     errors.push(...expanded.errors);
     poolWarnings.push(...expanded.warnings);
     merged = expanded.tasks;
+    councils = expanded.council;
     if (merged.length > 64) throw new InputError("invalid_input", "tasks must contain 1-64 items after councils expand");
   }
+  // Size the default after councils expand, so a nested council does not run serially; an explicit limit stands.
+  const concurrency = input.concurrency ?? Math.max(1, Math.min(councils ? 8 : 4, merged.length));
   const tasks = merged.flatMap((task, index) => {
     try {
       return [normaliseTask(task, index, identity, catalogue)];

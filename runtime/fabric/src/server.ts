@@ -156,11 +156,11 @@ const route = {
   fallback: z
     .union([z.boolean(), z.literal("any"), z.array(z.union([z.string(), z.record(z.string(), z.unknown())]))])
     .optional(),
-  route: z.string().optional().meta({ description: "Global pool: strong, bulk, design or writing (task classes and flagship/workhorse/scout map onto these)." }),
-  rotate: z.boolean().optional().meta({ description: "Cycle the route's pool across calls in this project." }),
-  council: z.number().int().min(1).max(8).optional().meta({ description: "Run N members from the route, families spread first; returns N result paths." }),
-  models: z.array(z.string()).min(1).max(8).optional().meta({ description: "Explicit council of adapter/model[@effort] entries; bypasses routes." }),
-  confidential: z.boolean().optional().meta({ description: "Skip free and prompt-training models." }),
+  route: z.string().optional().meta({ description: "Global pool: strong, bulk, design or writing; task classes and flagship/workhorse/scout map onto these. adapter narrows the pool; an explicit model wins over route." }),
+  rotate: z.boolean().optional().meta({ description: "Cycle the route's pool per project instead of taking its top model; ignored with council." }),
+  council: z.number().int().min(1).max(8).optional().meta({ description: "Run 1-8 members from the route as one batch, families spread first; members repeat when fewer are available." }),
+  models: z.array(z.string()).min(1).max(8).optional().meta({ description: "Ad-hoc council of adapter/model[@effort] entries; bypasses route and adapter." }),
+  confidential: z.boolean().optional().meta({ description: "Never use a free or prompt-training model, fallbacks included; works with any selector." }),
 };
 const task = { prompt: str, prompt_file: str, timeout_seconds: optionalNumber, ...route };
 const taskFields = { id: str, ...task };

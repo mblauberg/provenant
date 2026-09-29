@@ -1885,8 +1885,13 @@ def parser() -> argparse.ArgumentParser:
     _preferences.add_selection_parser(
         commands, INSTANCE_ROOT / "config" / "model-preferences.json",
     )
-    routes = commands.add_parser("routes", help="print each route pool with live availability")
-    routes.add_argument("--json", action="store_true")
+    routes = commands.add_parser(
+        "routes", help="print each route pool with live availability",
+        description="Print every global route pool (strong, bulk, design, writing) with each model's weight, "
+                    "effort band, caveats and live availability.")
+    routes.add_argument("--json", action="store_true", help="print one fabric.routes.v1 JSON document")
+    routes.add_argument("--health", action="store_true",
+                        help="also print task-class routes and recent route health (the `route health` view)")
     pick = commands.add_parser("pick", help="pick models from route pools; JSON requests on stdin")
     pick.add_argument("--seed", type=int, help=argparse.SUPPRESS)
     return root
@@ -1897,6 +1902,24 @@ def _router() -> Any:
     import types
 
     return sys.modules.get(__name__) or types.SimpleNamespace(**globals())
+
+
+def _health_record(catalog: dict[str, Any]) -> dict[str, Any]:
+    """Task-class routes plus the recent outcome health Fabric records."""
+    record = {"schema": "fabric.route-health.v1", "task_class_routes": catalog.get("task_class_routes", {})}
+    try:
+        path = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts" / "fabric_records.py"
+        spec = importlib.util.spec_from_file_location(
+            "provenant_fabric_records", path, submodule_search_locations=[str(path.parent)]
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        record["routes"] = module.read_route_health()
+    except (ImportError, OSError, AttributeError, TypeError, ValueError):
+        record["routes"] = {}
+    return record
 
 
 def route_pick(requests: Any, seed: int | None = None) -> dict[str, Any]:
@@ -1926,27 +1949,22 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(record, sort_keys=True))
         return 0
     if args.command == "health":
-        catalog = load_catalog()
-        record = {"schema": "fabric.route-health.v1", "task_class_routes": catalog.get("task_class_routes", {})}
-        try:
-            path = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts" / "fabric_records.py"
-            spec = importlib.util.spec_from_file_location(
-                "provenant_fabric_records", path, submodule_search_locations=[str(path.parent)]
-            )
-            assert spec is not None and spec.loader is not None
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[spec.name] = module
-            spec.loader.exec_module(module)
-            record["routes"] = module.read_route_health()
-        except (ImportError, OSError, AttributeError, TypeError, ValueError):
-            record["routes"] = {}
+        record = _health_record(load_catalog())
         print(json.dumps(record, sort_keys=True) if args.json else json.dumps(record, indent=2, sort_keys=True))
         return 0
     if args.command == "routes":
         catalog = load_catalog()
         document = _pools.describe(
             _router(), catalog, _pools.Availability(_router(), catalog), EFFORT_ORDER)
-        print(json.dumps(document, sort_keys=True) if args.json else _pools.render(document))
+        if args.health:
+            document["health"] = _health_record(catalog)
+        if args.json:
+            print(json.dumps(document, sort_keys=True))
+        else:
+            print(_pools.render(document))
+            if args.health:
+                print("\ntask-class routes and recent health (route health --json):")
+                print(json.dumps(document["health"], indent=2, sort_keys=True))
         return 0
     if args.command == "pick":
         try:

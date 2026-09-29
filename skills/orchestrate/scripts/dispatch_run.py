@@ -1231,6 +1231,8 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                     raise PreflightError("prompt_invalid", "Pass prompt as text.")
                 if "allow_secrets" in task and type(task["allow_secrets"]) is not bool:
                     raise PreflightError("allow_secrets_invalid", "Pass allow_secrets: true or false.")
+                if "confidential" in task and type(task["confidential"]) is not bool:
+                    raise PreflightError("confidential_invalid", "Pass confidential: true or false.")
                 prompt_bytes = (read_prompt_input(Path(task["prompt_file"]), workspace, workspace)
                                 if task.get("prompt_file") is not None else task["prompt"].encode())
                 try:
@@ -1336,6 +1338,10 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                     if "effort" in code:
                         fix = "Omit effort, or pass a supported level: low, medium, high, xhigh, max, ultra."
                     raise PreflightError(code, fixes.get(code, fix))
+                if task.get("confidential") is True:
+                    risk = confidential_refusal(adapter, route.get("resolved_model") or task.get("model"), route)
+                    if risk:
+                        raise PreflightError("confidential_route", risk)
                 protected = provider_exec.check_protected_inputs(
                     route, workspace, worktree if mode == "worktree_write" else task.get("cwd") or workspace,
                     worktree=worktree if mode == "worktree_write" else None,
@@ -1356,6 +1362,13 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                                "fix": prompt_fixes.get(exc.code, str(exc)) if isinstance(exc, PreflightError) else str(exc) if isinstance(exc, ValueError) else "Pass a readable prompt and registered Git worktree; check adapter availability."})
     return ({"status": "rejected", "error": errors[0]["error"], "fix": errors[0]["fix"], "errors": errors}
             if errors else {"status": "validated", "routes": routes})
+
+
+def confidential_refusal(adapter, model, route):
+    """The fix for a confidential task whose resolved route may train on its prompt."""
+    risk = exec_routing.disclosure_risk(adapter, model, route)
+    return (f"{adapter}/{model} {risk}; fix: pass a paid non-training model, alias or route, "
+            "or drop confidential") if risk else None
 
 
 def run_identity(run_dir, receipt=None):
@@ -1605,7 +1618,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     "cwd": str(provider_cwd), "prompt_file": str(args.prompt_file) if args.prompt_file else None,
                     "add_dirs": args.add_dirs, "alias": args.alias, "model": args.model,
                     "effort": args.effort, "fallback": args.fallback,
-                    "role": args.role, "task_class": args.task_class}
+                    "role": args.role, "task_class": args.task_class,
+                    "confidential": bool(getattr(args, "confidential", False))}
             if args.prompt_file is None:
                 task.pop("prompt_file")
                 task["prompt"] = "protected input preflight"
@@ -1825,6 +1839,10 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 planning = subprocess.run([*command,"--plan-only"],cwd=workspace,env=plan_environment,capture_output=True,text=True,timeout=30)
             args._phase_timings["route_plan"] = round((time.monotonic() - plan_started) * 1000, 3)
             plan = fast_plan if fast_plan is not None else planner_result(planning)
+            if getattr(args, "confidential", False) and plan.get("schema") == "fabric.exec-plan.v1":
+                refusal = confidential_refusal(plan.get("adapter", args.tool), plan.get("model"), plan.get("route"))
+                if refusal:
+                    plan = {**router_failure("confidential_route", args.tool), "fix": refusal}
             if plan.get("schema") == "fabric.exec-plan.v1":
                 old_run_dir = plan.get("run_dir")
                 plan["run_dir"] = str(attempt_dir)
@@ -1844,7 +1862,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     if args.model:
                         plan["warnings"].append("explicit model is cooling until "+cooling["cooling_until"])
                     else:
-                        for candidate in exec_routing.candidates(plan,True):
+                        for candidate in exec_routing.candidates(plan,True,confidential=getattr(args,"confidential",False)):
                             if exec_routing.cooling(candidate["adapter"],candidate["model"]): continue
                             alternate=argparse.Namespace(**vars(args))
                             alternate.tool=candidate["adapter"];alternate.model=candidate["model"];alternate.alias=None;alternate.task_class=None;alternate.effort=candidate.get("effort")
@@ -2378,7 +2396,7 @@ def execute_attempt_sequence(args,custody=None):
     previous=getattr(args,"_last_row",None)
     plan=getattr(args,"_last_plan",None)
     if plan and previous and previous["retryable"] and not args.resume:
-        for candidate in exec_routing.candidates(plan,args.fallback):
+        for candidate in exec_routing.candidates(plan,args.fallback,confidential=getattr(args,"confidential",False)):
             remaining=sequence_budget-(time.monotonic()-sequence_start-getattr(args,"_queued_seconds",0.0))
             if remaining<=0: break
             args.timeout_seconds=remaining
@@ -2477,6 +2495,8 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--allow-secrets", action="store_true")
     root.add_argument("--no-preface", dest="preface", action="store_false")
     root.add_argument("--fallback", default=None, help="false, true, any, or JSON route list")
+    root.add_argument("--confidential", action="store_true",
+                      help="never route this task, or any fallback, to a free or prompt-training model")
     root.add_argument("--pick-reason", help="why a route pool picked this model; appended to the Route line")
     return root
 

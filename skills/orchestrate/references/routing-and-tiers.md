@@ -14,14 +14,27 @@ Task class selects `flagship`, `workhorse` or `scout` when no explicit model is 
 
 ## Route pools
 
-`route: "strong" | "bulk" | "design" | "writing"` picks from a weighted pool that spans adapters (`config/model-routing.json` `routes`; the user overlay may reorder or reweight). Weights are `high`, `normal`, `sparing` or `off`, or a number. An entry's `effort` band clamps the caller's effort. Every mode skips a model that is not installed, is cooling down, or whose adapter is disabled, and names the skip in the warnings:
+`route: "strong" | "bulk" | "design" | "writing"` picks from a weighted pool that spans adapters (`config/model-routing.json` `routes`; the user overlay may reorder or reweight). Weights are `high` (8), `normal` (4), `sparing` (1) or `off` (0), or any non-negative number on the same scale. An entry's `effort` band clamps the caller's effort in either direction, raising a low request or lowering a high one, and a warning names each move. Every mode skips a model that is not installed, is cooling down, whose adapter is disabled, or whose adapter cannot run it (the adapter-compatibility family and model gates), and names the skip in the warnings:
 
 - default: the highest-weight available model, first listed on a tie;
 - `rotate: true`: weighted round-robin per project (`route-rotation.json` under the Fabric state root);
-- `council: N` (1–8): N runs as one batch (`<id>-1`…`<id>-N`), new families first, weights as odds;
-- `models: ["adapter/model@effort", …]`: an ad-hoc council that bypasses routes.
+- `council: N` (1–8): N runs as one batch (`<id>-1`…`<id>-N`), new families first, weights as odds; when fewer than N models are available, members repeat and a warning says so;
+- `models: ["adapter/model@effort", …]`: an ad-hoc council that bypasses routes. An unknown adapter prefix is rejected (`models_invalid`, naming the adapters); a model the catalogue does not register passes to its adapter as given, with a warning.
 
-Free or prompt-training models (`model_traits`) stay in the pool with a warning; `confidential: true` skips them. Task classes and the tier aliases map onto routes through `route_synonyms` (`review` → `strong`, `scout` → `bulk`), and `route` cannot be combined with `alias` or `model`. The route line names the pick, for example `Route: opencode/deepseek-v4.1-flash (deepseek; observed; design council 2/3)`. `provenant routes` prints every pool with live availability.
+Mixed selectors settle by precedence rather than rejection, and a warning names every ignored field: `models` beats `route`, `alias`, `model`, `council` and `rotate`; an explicit `model` beats `route`, `council` and `rotate`; `route` beats `alias`; `council` beats `rotate`; an `alias` without a `route` ignores `council` and `rotate`. `adapter` with `route` narrows the pool to that adapter's entries.
+
+`confidential: true` is a disclosure filter, not a selector: it works with a route, alias, model, adapter alone or task class, and removes every free or prompt-training model (`model_traits`, a zero plan cap, a `-free` id) from the resolved candidates, fallbacks included, even under `fallback: "any"`. Only when nothing safe remains does dispatch refuse, with a fix. Without it, such models stay in the pool; the warning appears only when one is actually selected. Task classes and the tier aliases map onto routes through `route_synonyms` (`review` → `strong`, `scout` → `bulk`). The route line names the pick, for example `Route: opencode/deepseek-v4.1-flash (deepseek; observed; design council 2/3)`. `provenant routes` prints every pool with live availability; `--health` adds task-class routes and recent health (the same view as `provenant help routes`).
+
+To add a model, list it in the user overlay (`~/.agents/config/model-routing.json`); unlisted product entries keep their place after the listed ones:
+
+```json
+{"routes": {"design": [
+  {"model": "agy/gemini-3.8-flash", "weight": "high"},
+  {"model": "opencode/opencode/mimo-v2.6-flash-free", "weight": "off"}
+]}}
+```
+
+This puts Gemini first in `design` and switches one free model off. A spelling alias (`codex/gpt-6-sol` for `codex/gpt-6.1-sol`) addresses the same entry.
 
 ## Tiers (relative, family-agnostic)
 

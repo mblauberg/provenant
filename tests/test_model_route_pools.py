@@ -91,6 +91,10 @@ def test_route_effort_band_clamps_the_callers_effort(tmp_path):
     assert pick({"route": "strong", "effort": "max"}, tmp_path, cooling=cooling)["picks"][0]["effort"] == "xhigh"
     assert pick({"route": "strong", "effort": "xhigh"}, tmp_path, cooling=cooling)["picks"][0]["effort"] == "xhigh"
     assert pick({"route": "strong", "effort": "medium"}, tmp_path)["picks"][0]["effort"] == "medium"
+    raised = pick({"route": "strong", "effort": "low"}, tmp_path, cooling=cooling)
+    assert "effort low raised to high by the strong band for codex/gpt-6.1-sol" in raised["warnings"]
+    lowered = pick({"route": "strong", "effort": "max"}, tmp_path, cooling=cooling)
+    assert "effort max lowered to xhigh by the strong band for codex/gpt-6.1-sol" in lowered["warnings"]
 
 
 def test_council_spreads_families_first_and_names_each_member(tmp_path):
@@ -149,9 +153,48 @@ def test_explicit_models_bypass_routes_and_keep_their_effort(tmp_path):
     assert [item["reason"] for item in result["picks"]] == ["ad-hoc council 1/2", "ad-hoc council 2/2"]
     assert models(pick({"models": ["opencode/mimo-v2.6-flash-free"]}, tmp_path)) == [
         "opencode/opencode/mimo-v2.6-flash-free"]
+    mixed = pick({"models": ["codex/gpt-6-luna"], "route": "bulk", "adapter": "claude"}, tmp_path)
+    assert models(mixed) == ["codex/gpt-6-luna"]
+    assert any(warning.startswith("route bulk ignored: models bypasses routes") for warning in mixed["warnings"])
+    assert any(warning.startswith("adapter claude ignored") for warning in mixed["warnings"])
+
+
+def test_models_rejects_only_an_unknown_adapter_and_passes_unregistered_ids_with_a_warning(tmp_path):
     with pytest.raises(pools.PoolError) as error:
-        pick({"models": ["codex/gpt-6-luna"], "route": "bulk"}, tmp_path)
-    assert error.value.code == "route_conflict"
+        pick({"models": ["nosuch/gpt-6-luna"]}, tmp_path)
+    assert error.value.code == "models_invalid"
+    assert "codex" in error.value.fix and "claude" in error.value.fix
+    passed = pick({"models": ["codex/gpt-6-nova"]}, tmp_path)
+    assert models(passed) == ["codex/gpt-6-nova"]
+    assert any("not in the catalogue" in warning for warning in passed["warnings"])
+
+
+def test_precedence_warns_instead_of_rejecting(tmp_path):
+    both = pick({"route": "strong", "council": 2, "rotate": True}, tmp_path)
+    assert len(both["picks"]) == 2
+    assert any(warning.startswith("rotate ignored") for warning in both["warnings"])
+    with pytest.raises(pools.PoolError) as error:
+        pick({"rotate": True}, tmp_path)
+    assert error.value.code == "route_required" and "strong" in error.value.fix
+
+
+def test_spelling_aliases_collapse_so_an_overlay_switches_the_seed_off(tmp_path):
+    catalog = json.loads(json.dumps(CATALOG))
+    catalog["routes"]["strong"] = [{"model": "codex/gpt-6-sol", "weight": "off"}, *catalog["routes"]["strong"]]
+    entries = pools.pool(router, catalog, "strong", router.EFFORT_ORDER)
+    canonical = [entry for entry in entries if entry["key"] == "codex/gpt-6.1-sol"]
+    assert len(canonical) == 1 and canonical[0]["weight"] == 0
+    assert models(pick({"route": "strong", "adapter": "codex"}, tmp_path, catalog=catalog)) == ["codex/gpt-6-astra"]
+
+
+def test_availability_skips_entries_the_adapter_cannot_run(tmp_path):
+    catalog = json.loads(json.dumps(CATALOG))
+    catalog["routes"]["bulk"] = [{"model": "agy/gpt-6.1-sol", "weight": "high"}, {"model": "codex/gpt-6-luna"}]
+    checked = pools.Availability(router, catalog, installed=lambda adapter: True, cooldowns={})
+    result = pick({"route": "bulk"}, tmp_path, catalog=catalog, available=checked)
+    assert models(result) == ["codex/gpt-6-luna"]
+    assert any("agy/gpt-6.1-sol" in warning and "cannot run the openai family" in warning
+               for warning in result["warnings"])
 
 
 def test_task_classes_and_aliases_map_onto_routes(tmp_path):
@@ -311,3 +354,71 @@ def test_refresh_routing_carries_new_route_keys_and_keeps_instance_reweighting(t
     assert refreshed["routes"]["writing"] == [{"model": "agy/gemini-3.8-flash", "weight": "high"}]
     assert refreshed["model_traits"] == CATALOG["model_traits"]
 
+    # Both sides edit one pool: the instance switches one entry off (under a
+    # spelling alias) while the product reweights another; both edits survive.
+    changed = json.loads(source.read_text())
+    changed["adapters"] = CATALOG["adapters"]
+    source.write_text(json.dumps(changed))
+    run("refresh-routing")
+    installed = json.loads(target.read_text())
+    installed["routes"]["strong"] = [{**entry, "model": "codex/gpt-6-sol", "weight": "off"} if entry["model"] == "codex/gpt-6.1-sol"
+                                     else entry for entry in installed["routes"]["strong"]]
+    target.write_text(json.dumps(installed))
+    changed["routes"]["strong"] = [{**entry, "weight": "high"} if entry["model"] == "codex/gpt-6-astra" else entry
+                                   for entry in changed["routes"]["strong"]]
+    source.write_text(json.dumps(changed))
+    result = run("refresh-routing")
+    strong = json.loads(target.read_text())["routes"]["strong"]
+    assert [(entry["model"], entry["weight"]) for entry in strong] == [
+        ("claude/claude-opus-5-5", "high"), ("codex/gpt-6-sol", "off"), ("codex/gpt-6-astra", "high")], result.stdout
+    assert strong[1]["effort"] == ["high", "xhigh"]
+
+
+
+def exec_routing_module():
+    sys.path.insert(0, str(ROOT / "skills" / "orchestrate" / "scripts"))
+    return load("pools_exec_routing_under_test", ROOT / "skills/orchestrate/scripts/exec_routing.py")
+
+
+def test_confidential_filters_every_fallback_even_under_fallback_any():
+    exec_routing = exec_routing_module()
+    plan = {"adapter": "codex", "model": "gpt-6.1-sol", "route": {"fallback_candidates": [
+        {"adapter": "opencode", "model": "opencode/mimo-v2.6-flash-free"},
+        {"adapter": "opencode", "model": "opencode-go/deepseek-v4.1-flash", "trains_on_prompts": True},
+        {"adapter": "codex", "model": "gpt-6-luna"}]}}
+    catalogue = {"adapters": {}, "models": {}}
+    everything = exec_routing.candidates(plan, "any", catalogue)
+    assert len(everything) == 3, "fallback any keeps free and training routes for ordinary work"
+    private = exec_routing.candidates(plan, "any", catalogue, confidential=True)
+    assert [item["model"] for item in private] == ["gpt-6-luna"]
+    assert exec_routing.disclosure_risk("codex", "gpt-6-luna", {}) is None
+    assert exec_routing.disclosure_risk("opencode", "x", {"plan_cap_usd": 0})
+
+
+def test_confidential_refuses_a_resolved_route_that_trains_and_names_the_fix():
+    sys.path.insert(0, str(ROOT / "skills" / "orchestrate" / "scripts"))
+    dispatch_run = load("pools_dispatch_confidential_under_test", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
+    refusal = dispatch_run.confidential_refusal("opencode", "opencode/mimo-v2.6-flash-free", {})
+    assert refusal.startswith("opencode/opencode/mimo-v2.6-flash-free is a free tier")
+    assert "fix:" in refusal
+    assert dispatch_run.confidential_refusal("codex", "gpt-6-luna", {"trains_on_prompts": False}) is None
+    args = dispatch_run.parser().parse_args(["--run-dir", "/tmp/run", "--prompt-file", "p.md", "--adapter", "codex",
+                                             "--confidential"])
+    assert args.confidential is True
+    batch_run = load("pools_batch_confidential_under_test", ROOT / "skills/orchestrate/scripts/batch_run.py")
+    command = batch_run._command({"id": "c", "adapter": "codex", "prompt_file": "p.md", "role": "worker",
+                                  "timeout": 60, "model": "gpt-6-luna", "confidential": True}, Path("/tmp/run"))
+    assert "--confidential" in command
+
+
+def test_routes_health_and_help_routes_print_the_same_view(tmp_path):
+    env = overlay_environment(tmp_path, {})
+    plain = model_route(env, "routes", "--json", "--health")
+    assert plain.returncode == 0, plain.stderr
+    document = json.loads(plain.stdout)
+    assert {"routes", "health"} <= set(document)
+    helped = subprocess.run([sys.executable, str(ROOT / "scripts" / "provenant"), "help", "routes"],
+                            text=True, capture_output=True, check=False, env=env)
+    assert helped.returncode == 0, helped.stderr
+    assert "strong" in helped.stdout and "route health --json" in helped.stdout
+    assert "--json" in model_route(env, "routes", "--help").stdout
