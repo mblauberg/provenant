@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import re
 import signal
 import socket
 import subprocess
@@ -188,8 +189,8 @@ def test_writer_confinement_selection_and_degraded_warning(monkeypatch, tmp_path
     codex = mod.build_plan("codex", {}, "hello", cwd=tmp_path, mode="worktree_write")
     assert claude["applied"]["confinement"] == "sandbox-exec"
     assert codex["applied"]["confinement"] == "provider-native"
-    assert 'default_permissions="provenant-worktree-write"' in codex["argv"]
-    assert 'permissions.provenant-worktree-write.extends=":workspace"' in codex["argv"]
+    name, overrides = codex_profile(codex)
+    assert f'permissions.{name}.extends=":workspace"' in overrides
     monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None)
     degraded = mod.build_plan("claude", {}, "hello", cwd=tmp_path, mode="worktree_write")
     assert degraded["applied"]["confinement"] == "none"
@@ -1143,8 +1144,12 @@ def test_codex_writer_argv_preserves_default_and_capability_sandboxes(monkeypatc
     resumed_darwin = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello",
                                     workspace_root=tmp_path, mode="worktree_write", worktree=lane,
                                     resume_session="saved")
-    for before, after in ((default_linux["argv"], default_darwin["argv"]),
-                          (resumed_linux["argv"], resumed_darwin["argv"])):
+    def argv(plan):
+        # Each plan names its own permissions profile; compare the rest.
+        return [arg.replace(plan["applied"]["write_boundary"]["profile"], "profile") for arg in plan["argv"]]
+
+    for before, after in ((argv(default_linux), argv(default_darwin)),
+                          (argv(resumed_linux), argv(resumed_darwin))):
         index = after.index("allow_login_shell=false")
         assert after[index - 1] == "-c"
         assert after[:index - 1] + after[index + 1:] == before
@@ -3017,13 +3022,24 @@ def test_capture_is_bounded_but_result_is_complete(tmp_path, monkeypatch):
     assert path.read_bytes() == b"A" * 50 + b"B" * 50
 
 
-CODEX_WRITER_PROFILE = "permissions.provenant-worktree-write."
+def codex_profile(plan):
+    """The permissions profile a Codex plan selects, and the config overrides that build it."""
+    argv = plan["argv"]
+    selected = [argv[index + 1] for index, arg in enumerate(argv) if arg == "-c"
+                and argv[index + 1].startswith("default_permissions=")]
+    assert len(selected) == 1, argv
+    name = json.loads(selected[0].split("=", 1)[1])
+    overrides = [argv[index + 1] for index, arg in enumerate(argv) if arg == "-c"
+                 and argv[index + 1].startswith("permissions.")]
+    assert all(item.startswith("permissions." + name + ".") for item in overrides), overrides
+    return name, overrides
 
 
 def codex_filesystem(plan):
     """The filesystem table of the Codex permissions profile a writer plan passes."""
-    prefix = CODEX_WRITER_PROFILE + "filesystem="
-    value = next(arg for arg in plan["argv"] if arg.startswith(prefix))
+    name, overrides = codex_profile(plan)
+    prefix = "permissions." + name + ".filesystem="
+    value = next(item for item in overrides if item.startswith(prefix))
     return {Path(path): access for path, access in tomllib.loads("t = " + value[len(prefix):])["t"].items()}
 
 
@@ -3033,45 +3049,116 @@ def codex_access(table, path):
     return table[max(entries, key=lambda entry: len(entry.parts))] if entries else None
 
 
-@pytest.mark.parametrize("resume", [None, "thread-1"], ids=["fresh", "resume"])
-def test_codex_writer_gets_the_wrapped_writer_git_boundary(tmp_path, resume):
+def nested_lanes(tmp_path):
+    """This repository's layout: linked worktrees nested at <repo>/.worktrees/<name>."""
     repo = tmp_path / "repo"
     git(tmp_path, "init", "-q", "-b", "main", str(repo))
     git(repo, "commit", "-q", "--allow-empty", "-m", "initial")
-    lane, other = tmp_path / "lane", tmp_path / "other"
+    lane, other = repo / ".worktrees/lane", repo / ".worktrees/other"
     git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
     git(repo, "worktree", "add", "-q", "-b", "other", str(other))
+    return repo, lane, other
+
+
+def codex_writer_plan(lane, workspace, resume=None, **controls):
+    return supervisor().build_plan(
+        "codex", {"resolved_model": "fixture"}, "hello", mode="worktree_write",
+        worktree=lane, workspace_root=workspace, resume_session=resume, **controls,
+    )
+
+
+@pytest.mark.parametrize("resume", [None, "thread-1"], ids=["fresh", "resume"])
+def test_codex_writer_gets_the_wrapped_writer_git_boundary(tmp_path, resume):
+    repo, lane, other = nested_lanes(tmp_path)
     common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
     private = Path(git(lane, "rev-parse", "--absolute-git-dir").strip()).resolve()
     sibling = Path(git(other, "rev-parse", "--absolute-git-dir").strip()).resolve()
 
-    plan = supervisor().build_plan(
-        "codex", {"resolved_model": "fixture"}, "hello", mode="worktree_write",
-        worktree=lane, workspace_root=tmp_path, network=False, resume_session=resume,
-        add_dirs=[str(common)],
-    )
+    plan = codex_writer_plan(lane, tmp_path, resume, network=False, add_dirs=[str(common)])
 
     argv = plan["argv"]
+    name, overrides = codex_profile(plan)
     table = codex_filesystem(plan)
     add_dirs = {Path(path) for path in plan["applied"]["add_dirs"]}
     add_dirs |= {Path(argv[index + 1]) for index, arg in enumerate(argv) if arg == "--add-dir"}
-    assert 'default_permissions="provenant-worktree-write"' in argv
-    assert CODEX_WRITER_PROFILE + 'extends=":workspace"' in argv
-    assert CODEX_WRITER_PROFILE + "network.enabled=false" in argv
+    assert f"permissions.{name}.extends=\":workspace\"" in overrides
+    assert f"permissions.{name}.network.enabled=false" in overrides
     assert "-s" not in argv and not any("sandbox_mode" in arg or "sandbox_workspace_write" in arg for arg in argv)
     assert plan["applied"]["write_boundary"]["filesystem"] == {str(path): access for path, access in table.items()}
-    for granted in (private, private / "index", private / "HEAD", private / "logs/HEAD",
+    for granted in (private, private / "index", private / "index.lock", private / "HEAD",
+                    private / "ORIG_HEAD", private / "logs/HEAD",
                     common / "objects", common / "refs/heads/lane", common / "logs/refs/heads/lane",
                     common / "packed-refs", common / "packed-refs.lock", common / "packed-refs.new"):
         assert codex_access(table, granted) == "write", granted
     for denied in (common, common / "hooks", common / "hooks/pre-commit", common / "config",
                    common / "info/exclude", common / "worktrees", sibling, sibling / "HEAD",
-                   private / "config.worktree", private / "commondir", private / "gitdir"):
+                   private / "config.worktree", private / "commondir", private / "gitdir", lane / ".git"):
         assert codex_access(table, denied) == "read", denied
         assert not any(denied == root or denied.is_relative_to(root) for root in add_dirs), denied
+    assert table[lane.resolve() / ".git"] == "read"
     assert common not in add_dirs
     assert any("drops Git common directory add-dir" in warning for warning in plan["warnings"])
     assert "--ephemeral" not in argv
+
+
+def test_codex_permissions_profile_name_is_unique_to_each_plan(tmp_path):
+    # Codex merges config tables, so a fixed name would inherit grants a system config adds under it.
+    _, lane, _ = nested_lanes(tmp_path)
+    names = {codex_profile(codex_writer_plan(lane, tmp_path, resume))[0] for resume in (None, None, "thread-1")}
+    names.add(codex_profile(supervisor().build_plan(
+        "codex", {"resolved_model": "fixture"}, "hello", cwd=tmp_path, network=True))[0])
+    assert len(names) == 4
+    assert all(re.fullmatch(r"provenant-[0-9a-f]{32}", name) for name in names), names
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or shutil.which("codex") is None,
+                    reason="needs the codex CLI's macOS sandbox")
+@pytest.mark.parametrize("resume", [None, "thread-1"], ids=["fresh", "resume"])
+def test_codex_sandbox_commits_in_nested_lane_and_ignores_inherited_grants(tmp_path, resume):
+    """Run the generated policy with `codex sandbox` (no model call) against a config that
+    grants the common hooks and config under the profile names Provenant has used."""
+    _, lane, other = nested_lanes(tmp_path)
+    common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
+    plan = codex_writer_plan(lane, tmp_path, resume, network=False)
+    name, overrides = codex_profile(plan)
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    (codex_home / "config.toml").write_text("".join(
+        f'[permissions.{inherited}.filesystem]\n{json.dumps(str(common / "hooks"))} = "write"\n'
+        f'{json.dumps(str(common / "config"))} = "write"\n'
+        for inherited in ("provenant-worktree-write", "provenant-read-only-network")))
+    command = ["codex", "sandbox", "-P", name, "-C", str(lane)]
+    for item in overrides:
+        command += ["-c", item]
+    probe = (f"echo a > f && git add f && git {' '.join(GIT_FIXTURE)} commit -q -m lane && echo commit=ok; "
+             f"echo x > {common / 'hooks/pre-commit'} || echo hooks=denied; "
+             f"git config --file {common / 'config'} probe.key 1 || echo config=denied; "
+             f"echo x > {common / 'worktrees' / other.name / 'probe'} || echo sibling=denied; "
+             f"echo x >> {lane / '.git'} || echo marker=denied")
+    result = subprocess.run([*command, "--", "/bin/sh", "-c", probe], cwd=lane, capture_output=True,
+                            text=True, timeout=60, env={**os.environ, "CODEX_HOME": str(codex_home)})
+    if "commit=ok" not in result.stdout and "sandbox_apply" in result.stderr:
+        pytest.skip("macOS refuses a nested sandbox here")
+    assert result.stdout.split() == ["commit=ok", "hooks=denied", "config=denied", "sibling=denied",
+                                     "marker=denied"], result.stdout + result.stderr
+    assert git(lane, "log", "-1", "--format=%s").strip() == "lane"
+    assert not (common / "hooks/pre-commit").exists()
+
+
+def test_writer_attempt_disables_git_writes_to_the_common_directory(tmp_path):
+    code = """import json, os
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({key: value for key, value in os.environ.items() if key.startswith('GIT_CONFIG')})}}))
+print(json.dumps({'type':'turn.completed'}))
+"""
+    plan = fixture_plan(tmp_path, code, mode="worktree_write")
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok", record
+    assert json.loads((tmp_path / "result.md").read_text()) == {
+        "GIT_CONFIG_COUNT": "3",
+        "GIT_CONFIG_KEY_0": "gc.auto", "GIT_CONFIG_VALUE_0": "0",
+        "GIT_CONFIG_KEY_1": "maintenance.auto", "GIT_CONFIG_VALUE_1": "false",
+        "GIT_CONFIG_KEY_2": "rerere.enabled", "GIT_CONFIG_VALUE_2": "false",
+    }
 
 
 GIT_FIXTURE = ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",

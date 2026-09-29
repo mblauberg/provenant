@@ -84,6 +84,8 @@ GIT_COMMON_WRITE_DIRS = ("objects", "refs", "logs")
 # Git rewrites packed-refs through the lock and a .new file renamed over it.
 GIT_COMMON_WRITE_FILES = ("packed-refs", "packed-refs.lock", "packed-refs.new")
 GIT_PRIVATE_READ_ONLY = ("config.worktree", "commondir", "gitdir")
+# Automatic gc and rerere write gc.pid, gc.log and rr-cache in the read-only common directory.
+WRITER_GIT_CONFIG = (("gc.auto", "0"), ("maintenance.auto", "false"), ("rerere.enabled", "false"))
 # Repository agent instructions and skills. Codex protects them inside a writable root.
 INSTRUCTION_DIR = ".agents"
 # Instructions are small text; a larger tree is refused rather than hashed at length.
@@ -606,6 +608,8 @@ def build_plan(
         write_boundary = {"kind": "sandbox-exec", "writable_paths": writable_paths}
     elif confinement == "provider-native":
         write_boundary = {"kind": "provider-native", "sandbox": sandbox}
+        if adapter == "codex":
+            write_boundary["profile"] = "provenant-" + uuid.uuid4().hex
         if mode == "worktree_write" and sandbox == "workspace-write":
             # Codex applies the nearest entry, so the common directory reads as read-only below
             # any add_dir while the named Git paths inside it stay writable.
@@ -617,6 +621,7 @@ def build_plan(
                     filesystem[str(path)] = "write"
                 for name in GIT_PRIVATE_READ_ONLY:
                     filesystem[str(git_private / name)] = "read"
+                filesystem[str(Path(cwd, ".git"))] = "read"
             write_boundary["filesystem"] = filesystem
     else:
         write_boundary = {"kind": "none", "writable_paths": None}
@@ -2007,6 +2012,12 @@ def execute(
     private_cache.mkdir(parents=True, exist_ok=True)
     environment.update(TMPDIR=str(private_tmp), TMP=str(private_tmp), TEMP=str(private_tmp),
                        XDG_CACHE_HOME=str(private_cache))
+    if plan["mode"] == "worktree_write":
+        # Inherited GIT_ variables were dropped above, so this list is the whole command-line scope.
+        environment["GIT_CONFIG_COUNT"] = str(len(WRITER_GIT_CONFIG))
+        for index, (key, value) in enumerate(WRITER_GIT_CONFIG):
+            environment[f"GIT_CONFIG_KEY_{index}"] = key
+            environment[f"GIT_CONFIG_VALUE_{index}"] = value
     if plan["adapter"] == "claude":
         private_claude_tmp = private_tmp / "claude"
         private_claude_tmp.mkdir(parents=True, exist_ok=True)

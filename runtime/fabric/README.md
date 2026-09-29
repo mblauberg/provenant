@@ -115,7 +115,13 @@ directory, including `hooks`, `config`, `info` and other lanes'
 the primary checkout and every lane. A Codex writer's `add_dir` at or inside
 the common directory is dropped with a warning. Codex writers also keep the
 worktree `.git` marker and the private Git directory's `config.worktree`,
-`commondir` and `gitdir` read-only.
+`commondir` and `gitdir` read-only. Writer attempts set `gc.auto=0`,
+`maintenance.auto=false` and `rerere.enabled=false` through
+`GIT_CONFIG_COUNT`, since those would write to the common directory. The
+shared `config` is read-only, so a lane cannot record an upstream,
+add a remote or add a worktree. `git push -u` still pushes but prints a
+config-lock error; push with `git push origin HEAD` and open the pull request
+with `gh pr create --head <branch>`.
 Wrapped writer runs on macOS (agy, Claude, Cursor, OpenCode and Kiro) use
 `sandbox-exec` to restrict writes to their worktree, declared `add_dirs`,
 the Git write boundary, attempt files, device nodes and provider state. Where
@@ -124,11 +130,14 @@ inside an `add_dir`.
 Each attempt sets `TMPDIR`, `TMP` and `TEMP` to `<attempt>/tmp` and
 `XDG_CACHE_HOME` to `<attempt>/tmp/cache`. Shared temp and general user caches
 are not writable. Codex writers without capabilities use Codex's native
-sandbox through a per-run permissions profile,
-`-c default_permissions="provenant-worktree-write"`, which extends
-`:workspace`, sets `network.enabled` and passes a `filesystem` table granting
-`add_dirs` and the Git write boundary with the common directory read-only.
-Codex applies the nearest entry, and the same flags apply on resume. A fresh
+sandbox through a permissions profile named for that plan,
+`-c default_permissions="provenant-<random>"`, which extends `:workspace`,
+sets `network.enabled` and passes a `filesystem` table. The table grants
+`add_dirs` and the Git write boundary and leaves the common directory and the
+`.git` marker read-only. Codex applies the nearest entry, and the same flags
+apply on resume. Codex merges config tables, so the unique name keeps a system
+config's grants under a known profile name out of the lane's policy; the
+read-only network profile is named the same way. A fresh
 run also passes `--add-dir` for each `add_dir` and `--cd <worktree>`. Codex
 refuses to launch with a symlinked grant path, so a link planted at one stops
 the next attempt rather than moving its grant. Codex keeps a writable root's
@@ -180,8 +189,8 @@ Protected-path dispatches to training routes still refuse without OS read
 confinement.
 The receipt records sorted `applied.capabilities` and `applied.confinement` as `sandbox-exec`, `provider-native` or `none`;
 `applied.write_boundary` records the effective writable paths, including
-declared `add_dirs` for confined writers, or the native sandbox and, for a
-Codex writer, its permissions `filesystem` table;
+declared `add_dirs` for confined writers, or the native sandbox and, for
+Codex, its permissions `profile` name and a writer's `filesystem` table;
 `workspace.cwd` is the provider cwd and `workspace.root` is the caller workspace.
 Read-only macOS launches can read `~/.gitconfig` and
 `$XDG_CONFIG_HOME/git/config` (default `~/.config/git/config`) so `git status`
