@@ -47,7 +47,7 @@ def test_claude_sonnet_is_the_workhorse_default_and_opus_remains_flagship():
     sonnet = next(model for model in claude["models"] if model["id"] == "claude-sonnet-5-5")
     opus = next(model for model in claude["models"] if model["id"] == "claude-opus-5-5")
     assert sonnet["default"] is True
-    assert {"sonnet", "claude-sonnet-5-5"} <= set(sonnet["names"])
+    assert {"sonnet", "claude-sonnet-5-5", "claude-sonnet-5"} <= set(sonnet["names"])
     assert opus["default"] is False
     anthropic = CATALOG["families"]["anthropic"]
     assert anthropic["aliases"]["workhorse"] == ["sonnet", "opus"]
@@ -2815,6 +2815,7 @@ def test_task_class_uses_ordered_exact_models_from_catalogue(tmp_path):
     [
         (name, route["models"]["claude"][0])
         for name, route in CATALOG["task_class_routes"].items()
+        if route.get("models", {}).get("claude")
     ],
 )
 def test_claude_task_classes_resolve_the_first_catalogued_model(

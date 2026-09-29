@@ -221,8 +221,10 @@ decider.
 ### Cheap bulk and scouting
 
 Reach for the cheapest *diverse* family (Luna, Gemini Flash, or the open models
-behind `kiro`) and confine it to objective fields. Cheap minds are worth their
-price on extraction and classification and are a poor bet on judgement.
+behind `kiro`) and confine it to objective fields. The catalogue also maps
+Anthropic's `bulk` class to Sonnet 5.5 at low effort; use that route when the
+Anthropic lane is required, while the cheaper families remain the cost-first
+choice for objective extraction and classification.
 
 ### Human-facing final polish
 
