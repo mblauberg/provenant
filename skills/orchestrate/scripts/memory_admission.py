@@ -25,6 +25,8 @@ SETTLE_SECONDS = 20
 FRESH_POLLS = 3
 START_TOLERANCE_SECONDS = 2
 RESCAN_PAUSE_SECONDS = 0.1
+# A receipt dated further ahead than this was written before the wall clock went back.
+FUTURE_SLACK_SECONDS = 5
 
 
 class MemoryUnavailableError(Exception):
@@ -191,13 +193,14 @@ def _older_waiter_floors(queue_root: Path | None, queued_since: float | None) ->
     """
     if queue_root is None or not _finite(queued_since):
         return []
-    fresh_after = time.time() - FRESH_POLLS * POLL_SECONDS
+    now = time.time()
+    fresh_after = now - FRESH_POLLS * POLL_SECONDS
     floors = []
     for receipt in queued_receipts(queue_root):
         try:
             metadata = receipt.lstat()
             if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
-                    or metadata.st_mtime < fresh_after):
+                    or not fresh_after <= metadata.st_mtime <= now + FUTURE_SLACK_SECONDS):
                 continue
             row = json.loads(receipt.read_text(encoding="utf-8"))
             if row.get("state") != "queued" or row.get("queue_reason") != "memory":
@@ -254,40 +257,46 @@ def admit(
             raise MemoryUnavailableError("memory admission wait expired")
         if floor == 0:
             return AdmissionLease()
-        # Scan before taking the host lock so reading receipts never extends its hold.
+        # Receipts are only ever scanned without the host lock, so a scan never extends its hold.
         older_floors = _older_waiter_floors(queue_root, queued_since)
-        fd = _lock_file(on_warning)
-        if fd is None:
-            return AdmissionLease()
-        contended = False
+        contended = rescanned = False
         while True:
-            if cancelled():
-                os.close(fd)
-                return None
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                break
-            except BlockingIOError:
-                contended = True
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    os.close(fd)
-                    raise MemoryUnavailableError("memory admission wait expired")
-                if time.monotonic() - last_lock_report >= 1:
-                    on_wait(f"waiting for memory admission lock: {waited_seconds + time.monotonic() - started:.1f}s elapsed, {remaining:.1f}s remaining")
-                    last_lock_report = time.monotonic()
-                pause(max(0.0, min(0.1, remaining)))
-            except OSError as exc:
-                os.close(fd)
-                on_warning(f"memory admission lock unavailable: {exc}")
+            fd = _lock_file(on_warning)
+            if fd is None:
                 return AdmissionLease()
+            waited_for_lock = False
+            while True:
+                if cancelled():
+                    os.close(fd)
+                    return None
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    contended = waited_for_lock = True
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        os.close(fd)
+                        raise MemoryUnavailableError("memory admission wait expired")
+                    if time.monotonic() - last_lock_report >= 1:
+                        on_wait(f"waiting for memory admission lock: {waited_seconds + time.monotonic() - started:.1f}s elapsed, {remaining:.1f}s remaining")
+                        last_lock_report = time.monotonic()
+                    pause(max(0.0, min(0.1, remaining)))
+                except OSError as exc:
+                    os.close(fd)
+                    on_warning(f"memory admission lock unavailable: {exc}")
+                    return AdmissionLease()
+            if not waited_for_lock or rescanned:
+                break
+            # An earlier waiter may have queued during the lock wait: release, rescan, retake once.
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+            older_floors = _older_waiter_floors(queue_root, queued_since)
+            rescanned = True
         if (contended or waited_for_admission or waited_seconds > 0) and time.monotonic() >= deadline:
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
             raise MemoryUnavailableError("memory admission wait expired")
-        if contended:
-            # An earlier waiter may have queued while this one waited for the lock.
-            older_floors = _older_waiter_floors(queue_root, queued_since)
         try:
             available, total = probe()
             if total <= 0 or available < 0:
@@ -319,14 +328,13 @@ def admit(
         if remaining <= 0:
             raise MemoryUnavailableError("memory admission wait expired")
         # Retry promptly if the earlier waiter has been admitted or gone since the scan.
-        if percent >= floor and not any(
-                older <= percent for older in _older_waiter_floors(queue_root, queued_since)):
-            if not _hold(time.monotonic() + RESCAN_PAUSE_SECONDS, cancelled, pause):
-                return None
-            continue
+        cleared = percent >= floor and not any(
+            older <= percent for older in _older_waiter_floors(queue_root, queued_since))
         elapsed = waited_seconds + time.monotonic() - started
-        state ="waiting for earlier memory admission" if percent >= floor else "waiting for memory"
+        state = "waiting for earlier memory admission" if percent >= floor else "waiting for memory"
+        # Every wait republishes the receipt, which keeps this waiter's place fresh.
         on_wait(f"{state}: {percent:.1f}% available ({available / 1024:.2f} GB), "
                 f"floor {floor:g}% for {mode}; {_duration(elapsed)} of {_duration(budget)}")
-        if not _hold(min(deadline, time.monotonic() + POLL_SECONDS), cancelled, pause):
+        hold = RESCAN_PAUSE_SECONDS if cleared else POLL_SECONDS
+        if not _hold(min(deadline, time.monotonic() + hold), cancelled, pause):
             return None

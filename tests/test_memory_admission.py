@@ -352,6 +352,17 @@ def test_zombie_owner_holds_no_place_once_its_receipt_goes_quiet(tmp_path, monke
         zombie.wait()
 
 
+def test_receipt_dated_ahead_after_a_backward_clock_jump_holds_no_place(tmp_path, monkeypatch, live_owner):
+    queue_root = tmp_path / ".agent-run"
+    pid, started = live_owner
+    _queued_receipt(queue_root, "older", since=10, floor=5, pid=pid, started=started)
+    assert memory_admission._older_waiter_floors(queue_root, 20) == [5]
+    jumped_back = time.time() - 3600
+    with monkeypatch.context() as clock:
+        clock.setattr(memory_admission.time, "time", lambda: jumped_back)
+        assert memory_admission._older_waiter_floors(queue_root, 20) == []
+
+
 def test_waiter_that_queued_during_lock_contention_keeps_its_place(tmp_path, monkeypatch, live_owner):
     queue_root = tmp_path / ".agent-run"
     pid, started = live_owner
@@ -375,12 +386,27 @@ def test_waiter_that_queued_during_lock_contention_keeps_its_place(tmp_path, mon
     clock = _Clock(on_pause)
     monkeypatch.setattr(memory_admission.time, "monotonic", clock.monotonic)
     monkeypatch.setattr(memory_admission, "POLL_SECONDS", 1)
+    held, scans = set(), []
+    flock, scan = memory_admission.fcntl.flock, memory_admission._older_waiter_floors
+
+    def tracked_flock(fd, operation):
+        flock(fd, operation)
+        (held.discard if operation == memory_admission.fcntl.LOCK_UN else held.add)(fd)
+
+    def unlocked_scan(*args):
+        assert not held, "receipt scan ran under the host lock"
+        scans.append(args)
+        return scan(*args)
+
+    monkeypatch.setattr(memory_admission.fcntl, "flock", tracked_flock)
+    monkeypatch.setattr(memory_admission, "_older_waiter_floors", unlocked_scan)
     reasons = []
     lease = _admit(reasons.append, lambda: False, lambda _: None,
                    probe=lambda: (1300, 16384), pause=clock.pause,
                    queue_root=queue_root, queued_since=20)
     assert lease is not None
     lease.close()
+    assert len(scans) >= 3
     assert events == ["older queued", "older admitted"]
     assert reasons[0].startswith("waiting for memory admission lock")
     assert reasons[-1].startswith("waiting for earlier memory admission: 7.9% available")
@@ -404,10 +430,13 @@ def test_earlier_waiter_admitted_during_probe_is_not_waited_for(tmp_path, monkey
         pauses.append(duration)
         clock.pause(duration)
 
-    lease = _admit(_must_not_wait, lambda: False, lambda _: None, probe=probe, pause=pause,
+    reasons = []
+    lease = _admit(reasons.append, lambda: False, lambda _: None, probe=probe, pause=pause,
                    queue_root=queue_root, queued_since=20)
     assert lease is not None
     lease.close()
+    # One brief retry that still republishes the receipt, then admission.
+    assert len(reasons) == 1 and reasons[0].startswith("waiting for earlier memory admission")
     assert pauses == [pytest.approx(memory_admission.RESCAN_PAUSE_SECONDS)]
 
 
