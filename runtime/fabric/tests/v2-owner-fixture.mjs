@@ -138,6 +138,8 @@ const row = {
   },
   digest: `running ${run_id} codex/fixture@high`,
 };
+const readRoots = args.filter((_, index) => args[index - 1] === "--read-root");
+if (readRoots.length) row.read_roots = readRoots;
 const write = () => writeFileSync(join(path, "attempt.json"), JSON.stringify(row));
 write();
 writeFileSync(join(path, "stderr.log"), "fixture stderr");

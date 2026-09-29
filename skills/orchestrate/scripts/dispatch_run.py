@@ -1245,6 +1245,7 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                     raise PreflightError("read_roots_invalid", "Pass read_roots as a list of absolute directories.")
                 if any(provider_exec.credential_path(root) for root in read_roots):
                     raise PreflightError("credential_or_auth_store_denied", "Read roots must exclude credential stores.")
+                read_roots = [str(Path(root).resolve()) for root in read_roots]
                 prompt_bytes = (read_prompt_input(Path(task["prompt_file"]), workspace, workspace, read_roots)
                                 if task.get("prompt_file") is not None else task["prompt"].encode())
                 try:
@@ -2402,6 +2403,8 @@ def execute_attempt_sequence(args,custody=None):
 
 def dispatch(args: argparse.Namespace) -> int:
     """Run one attempt while serialising standalone run-ledger mutation."""
+    # Canonical before first use, so the saved roots are what resume re-checks strictly.
+    args.read_roots = [str(Path(root).expanduser().resolve()) for root in getattr(args, "read_roots", None) or []]
     if args.timeout_seconds is None:
         args.timeout_seconds = 10800.0 if args.access_mode == "worktree_write" else DEFAULT_TIMEOUT_SECONDS
     run_dir = args.run_dir.resolve()

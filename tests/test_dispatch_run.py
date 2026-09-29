@@ -2578,13 +2578,20 @@ print(json.dumps({"type":"result","result":os.getcwd()}))
     assert refused.returncode != 0
     assert 'read root' in refused.stdout + refused.stderr
 
-    result = subprocess.run([*command, '--read-root', str(other)], cwd=workspace, capture_output=True, text=True)
+    # A non-canonical root is resolved before use and saved canonical, so resume accepts it.
+    result = subprocess.run([*command, '--read-root', str(other / 'src' / '..')], cwd=workspace,
+                            capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
-    row = json.loads(next(run.glob('tasks/*/attempt-*/attempt.json')).read_text())
+    row = json.loads(next(run.glob('tasks/*/attempt-001/attempt.json')).read_text())
     assert row['status'] == 'ok'
     assert row['cwd'] == str((other / 'src').resolve())
-    assert row['read_roots'] == [str(other)]
+    assert row['read_roots'] == [str(other.resolve())]
     assert (run / row['paths']['result']).read_text().strip() == str((other / 'src').resolve())
+    resumed = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', row['run_id'],
+                              '--prompt-file', str(brief)], cwd=workspace, capture_output=True, text=True)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    second = json.loads(next(run.glob('tasks/*/attempt-002/attempt.json')).read_text())
+    assert (second['status'], second['read_roots']) == ('ok', [str(other.resolve())])
 
 
 def test_preflight_secret_in_add_dirs_rejects_and_override_accepts(tmp_path, monkeypatch):
