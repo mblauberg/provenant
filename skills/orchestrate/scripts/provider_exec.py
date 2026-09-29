@@ -45,7 +45,11 @@ CONFINED_STATE = {
         "read_write": (".local/share/opencode", ".local/state/opencode", ".cache/opencode"),
         "read": (".config/opencode",),
     },
-    "claude": {"read_write": (".claude", ".claude.json*", ".cache/claude", ".npm")},
+    "claude": {
+        "read_write": (".claude", ".claude.json*", ".cache/claude", ".npm"),
+        # Claude Code keeps its sign-in in the login keychain; a read-only lane is signed out without it.
+        "read": ("Library/Keychains/login.keychain-db",),
+    },
     "cursor": {"read_write": (".cursor", ".cache/cursor", ".npm")},
     "kiro": {"read_write": (".kiro", ".cache/kiro", ".npm")},
 }
@@ -678,6 +682,7 @@ def build_plan(
             "confinement": confinement,
             "write_boundary": write_boundary,
             "capabilities": capabilities,
+            "protected_paths": [str(path) for path in guarded],
         },
         **({"codex_home": str(codex_home), "codex_auth_path": str(codex_auth_path)}
            if codex_home is not None else {}),
@@ -2006,6 +2011,8 @@ def execute(
         private_claude_tmp = private_tmp / "claude"
         private_claude_tmp.mkdir(parents=True, exist_ok=True)
         environment["CLAUDE_TMPDIR"] = str(private_claude_tmp)
+        # Otherwise Claude Code opens /tmp/claude-<uid>, which the read-only profile denies.
+        environment["CLAUDE_CODE_TMPDIR"] = str(private_claude_tmp)
     route = plan["route"]
     if (
         plan["adapter"] == "claude"

@@ -368,9 +368,12 @@ def test_protected_profile_covers_registered_worktrees_and_non_training_route(mo
     for root in (repo, sibling):
         assert f'(subpath "{root / "private"}")' in deny
     assert plan["applied"]["confinement"] == "sandbox-exec"
+    assert plan["applied"]["protected_paths"] == plan["protected_paths"]
+    assert str(repo / "private") in plan["applied"]["protected_paths"]
     safe = mod.build_plan("claude", {"trains_on_prompts": False}, "hello",
                           cwd=repo / "safe", workspace_root=repo)
     assert safe["protected_paths"] == []
+    assert safe["applied"]["protected_paths"] == []
     assert safe["applied"]["confinement"] == "sandbox-exec"
 
 
@@ -557,6 +560,21 @@ def test_read_only_profile_denies_writes_outside_attempt_and_provider_state(monk
     assert '(subpath "/dev")' in allow
     for path in (workspace, add_dir, home, tmp_path / "T", Path("/private/tmp")):
         assert f'(subpath "{path}")' not in allow
+
+
+def test_claude_read_only_profile_reads_login_keychain_but_not_other_keychains(monkeypatch, tmp_path):
+    mod = supervisor()
+    home = tmp_path / "home"
+    workspace = home / "repo"
+    workspace.mkdir(parents=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    plan = {"adapter": "claude", "mode": "read_only", "workspace_root": str(workspace),
+            "cwd": str(workspace), "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    profile = mod.os_confinement_profile(plan)
+    allow = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-read-data "))
+    # Claude Code reads its sign-in from the login keychain; without it a read-only lane is signed out.
+    assert f'(subpath "{home / "Library/Keychains/login.keychain-db"}")' in allow
+    assert f'(subpath "{home / "Library/Keychains"}")' not in allow
 
 
 def test_sbpl_filter_star_escapes_regex_without_resolving_symlink_target(tmp_path):
@@ -1467,7 +1485,7 @@ def test_codex_capability_swappable_source_home_fails_before_launch(monkeypatch,
 
 def test_claude_adapter_receives_attempt_private_claude_tmpdir(tmp_path):
     code = """import json, os
-print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({key: os.environ.get(key) for key in ('TMPDIR','CLAUDE_TMPDIR')})}}))
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({key: os.environ.get(key) for key in ('TMPDIR','CLAUDE_TMPDIR','CLAUDE_CODE_TMPDIR')})}}))
 print(json.dumps({'type':'turn.completed'}))
 """
     plan = fixture_plan(tmp_path, code, adapter="claude")
@@ -1476,6 +1494,8 @@ print(json.dumps({'type':'turn.completed'}))
     paths = json.loads((tmp_path / "result.md").read_text())
     assert paths["TMPDIR"] == str(tmp_path / "tmp")
     assert paths["CLAUDE_TMPDIR"] == str(tmp_path / "tmp/claude")
+    # Claude Code otherwise opens /tmp/claude-<uid>, which a read-only profile cannot read.
+    assert paths["CLAUDE_CODE_TMPDIR"] == str(tmp_path / "tmp/claude")
     assert (tmp_path / "tmp/claude").is_dir()
 
 
