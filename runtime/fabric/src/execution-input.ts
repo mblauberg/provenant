@@ -60,6 +60,8 @@ export interface DispatchInput extends RouteInput {
   prompt_file?: string;
   resume?: string;
   handoff?: string;
+  session?: string;
+  fresh?: boolean;
   task_id?: string;
   timeout_seconds?: number;
   wait_seconds?: number;

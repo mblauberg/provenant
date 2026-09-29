@@ -40,7 +40,8 @@ controls.
 Fabric does not gain a provider adapter, scheduler, daemon, session database,
 transcript copy, fallback policy, delivery receipt, universal hashes or
 model-family permission gate. Direct CLI execution remains supported. Persistent
-provider sessions and richer task correlation are separate work items.
+provider sessions and richer task correlation are separate work items; the
+amendment below narrows the session-database exclusion for named sessions only.
 
 ## Consequences
 
@@ -48,3 +49,27 @@ Agents get one low-friction MCP surface for coordination and ordinary fan-out,
 including cheap batches, while the orchestration scripts remain the sole owners
 of route resolution, provider processes, attempts and batch evidence. The
 façade adds no maintenance service or parallel lifecycle state.
+
+## Amendment: named sessions
+
+**Accepted 2026-09-30** (issue [#726](https://github.com/mblauberg/provenant/issues/726)).
+
+Cross-agent continuation needs one project-shared mapping from a name to a
+provider session, and the existing Fabric SQLite store is already the
+project-shared state. It gains one `sessions` table holding only the alias: a
+case-sensitive name per project, the actual adapter, the provider-native session
+ID, the run, task, attempt and result path of the last clean turn, and the
+latest turn's run, attempt, status and launching process ID. It holds no
+prompts, results, transcripts or provider processes.
+
+A turn is an ordinary `fabric_dispatch`: a fresh dispatch for a new name, the
+existing `resume` path for a known one, or `handoff` when the caller passes
+`fresh: true`. The dispatch and run owners keep sole ownership of processes,
+attempts, cancellation and result files. Only a clean turn (`ok` or
+`input_required`) moves the alias. One turn per name is active; a concurrent
+caller gets `session_busy`. The active pointer is reconciled from run state, or
+from the launching process being gone, whenever the name is read; there is no
+lease timer, heartbeat, queue, expiry or cleanup daemon. A provider without
+native continuation reports `continuation_unsupported` rather than falling back.
+`fabric_session` inspects, lists and forgets names; forgetting deletes only the
+alias once no turn is active.

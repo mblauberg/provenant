@@ -106,9 +106,10 @@ if (prompt === "crash-before-attempt") process.exit(2);
 if (prompt === "pause-before-attempt") await new Promise((r) => setTimeout(r, 1000));
 const path = join(dir, "tasks", task, `attempt-${String(attempt).padStart(3, "0")}`);
 mkdirSync(path, { recursive: true });
-const priorApplied = attempt > 1
-  ? JSON.parse(readFileSync(join(dir, "tasks", task, `attempt-${String(attempt - 1).padStart(3, "0")}`, "attempt.json"), "utf8")).applied
+const prior = attempt > 1
+  ? JSON.parse(readFileSync(join(dir, "tasks", task, `attempt-${String(attempt - 1).padStart(3, "0")}`, "attempt.json"), "utf8"))
   : {};
+const priorApplied = prior.applied ?? {};
 const run_id = process.env.PROVENANT_RUN_ID;
 const row = {
   schema: "fabric.attempt.v1",
@@ -118,6 +119,8 @@ const row = {
   state: "running",
   status: null,
   cwd: value("--cwd") ?? process.cwd(),
+  // A resume keeps the provider session; "lose-session" models a turn that recorded none.
+  session_id: prompt === "lose-session" ? null : prior.session_id ?? `fixture-${process.env.PROVENANT_RUN_ID}-${task}`,
   mode: args.includes("--access-mode") ? value("--access-mode") : "read_only",
   worktree: args.includes("--worktree") ? value("--worktree") : null,
   started_at: new Date().toISOString(),
@@ -129,7 +132,7 @@ const row = {
     add_dirs: [],
     capabilities: value("--capabilities") ? JSON.parse(value("--capabilities")) : priorApplied.capabilities ?? [],
   },
-  provenance: { requested: { adapter: value("--adapter"), model: value("--model"), alias: value("--alias"), effort: value("--effort") }, line: "Route: codex/fixture@high (openai; observed)" },
+  provenance: { requested: { adapter: value("--adapter"), model: value("--model"), alias: value("--alias"), effort: value("--effort") }, transport: value("--adapter") ?? prior.provenance?.transport ?? "codex", line: "Route: codex/fixture@high (openai; observed)" },
   paths: {
     result: join(path, "result.md"),
     stderr: join(path, "stderr.log"),
@@ -159,7 +162,7 @@ if (prompt === "slow") {
   }
 }
 row.state = "terminal";
-row.status ??= prompt === "question" ? "input_required" : "ok";
+row.status ??= prompt === "question" ? "input_required" : prompt === "fail" || prompt === "lose-session" ? "failed" : "ok";
 row.ended_at = new Date().toISOString();
 row.question = row.status === "input_required" ? "Which branch?" : null;
 row.digest = `${row.status} ${run_id} codex/fixture@high · result ${row.paths.result}\n  ${row.provenance.line}`;

@@ -132,3 +132,32 @@ CREATE TABLE IF NOT EXISTS landing_leases (
   pushing_until INTEGER,
   released_at INTEGER
 );
+
+-- Named provider sessions (ADR 0022 amendment). Only the alias lives here: one
+-- case-sensitive name per project, the actual adapter and provider-native id of
+-- its last clean turn, and that turn's run/task/attempt and result path. Run
+-- owners keep processes, attempts and full results. The turn_* columns hold the
+-- latest turn; turn_status NULL means it is still active, which makes the name
+-- busy. Staleness is reconciled from run state, never from a timer.
+CREATE TABLE IF NOT EXISTS sessions (
+  project             TEXT NOT NULL,
+  name                TEXT NOT NULL,
+  adapter             TEXT,
+  provider_session_id TEXT,
+  run_id              TEXT,
+  task_id             TEXT,
+  attempt             INTEGER,
+  result_path         TEXT,
+  turn_claim          TEXT NOT NULL,
+  turn_kind           TEXT NOT NULL,
+  turn_run_id         TEXT,
+  turn_task_id        TEXT,
+  turn_attempt        INTEGER,
+  turn_status         TEXT,
+  turn_pid            INTEGER,
+  created_by          TEXT NOT NULL,
+  updated_by          TEXT NOT NULL,
+  created_at          INTEGER NOT NULL,
+  updated_at          INTEGER NOT NULL,
+  PRIMARY KEY (project, name)
+);
