@@ -17,7 +17,7 @@ import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProv
 import { normaliseRoute, routeArguments, workingIdentity } from "../src/execution-input.js";
 import { databasePath } from "../src/identity.js";
 import { expandPools } from "../src/pools.js";
-import { inheritsPreviousRoute } from "../src/resume.js";
+import { inheritedConfidential, inheritsPreviousRoute } from "../src/resume.js";
 import { catalogueSnapshot } from "../src/catalogue.js";
 import { psOutput } from "../src/ps.mjs";
 import { Store } from "../src/store.js";
@@ -1265,6 +1265,9 @@ describe("route pools", () => {
     expect(inheritsPreviousRoute({ route: "strong" })).toBe(false);
     expect(inheritsPreviousRoute({ models: ["codex/gpt-6-luna"] })).toBe(false);
     expect(inheritsPreviousRoute({ adapter: "codex" })).toBe(false);
+    expect(inheritedConfidential({}, { confidential: true })).toEqual({ confidential: true });
+    expect(inheritedConfidential({ confidential: false }, { confidential: true })).toEqual({});
+    expect(inheritedConfidential({}, {})).toEqual({});
   });
 
   it("dispatches route as one pick and forwards the reason to the owner", async () => {

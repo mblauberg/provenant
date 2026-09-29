@@ -155,6 +155,26 @@ def disclosure_risk(adapter, model, meta=None):
     return None
 
 
+def confidential_alternatives(adapter, model, alias, catalog=None):
+    """Members of the alias the router resolved that are safe for a confidential task.
+
+    Alias order is kept; the unsafe pick, members that may train on prompts and
+    cooling members are left out. The caller re-resolves each to confirm it.
+    """
+    try:
+        catalog = catalog if catalog is not None else _model_route_module().load_catalog()
+    except (OSError, ValueError, AttributeError, TypeError, KeyError, ImportError):
+        return []
+    entry = catalog.get("adapters", {}).get(adapter, {}) if isinstance(catalog, dict) else {}
+    aliases = entry.get("aliases") if isinstance(entry, dict) else None
+    if not aliases and isinstance(entry, dict) and entry.get("fixed_model_family"):
+        aliases = catalog.get("families", {}).get(entry["fixed_model_family"], {}).get("aliases")
+    members = aliases.get(alias or "workhorse", []) if isinstance(aliases, dict) else []
+    return [member for member in members
+            if isinstance(member, str) and member != model
+            and not disclosure_risk(adapter, member, {}) and not cooling(adapter, member)]
+
+
 def candidates(plan, policy=None, catalogue=None, confidential=False):
     """Return ordered route requests. Explicit lists may opt into training/free routes,
     except for a confidential task, whose every candidate must be paid and non-training."""

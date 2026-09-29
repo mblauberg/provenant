@@ -1340,6 +1340,19 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                     raise PreflightError(code, fixes.get(code, fix))
                 if task.get("confidential") is True:
                     risk = confidential_refusal(adapter, route.get("resolved_model") or task.get("model"), route)
+                    if risk and not task.get("model"):
+                        # An alias or task class may still hold a safe member: step to it before refusing.
+                        selector = [part for index, part in enumerate(command)
+                                    if part not in {"--alias", "--task-class"}
+                                    and (index == 0 or command[index - 1] not in {"--alias", "--task-class"})]
+                        for alternative in exec_routing.confidential_alternatives(
+                                adapter, route.get("resolved_model"), route.get("alias")):
+                            command = [*selector, "--model", alternative]
+                            candidate = resolve_route()
+                            if candidate.get("status") == "ok" and not confidential_refusal(
+                                    adapter, candidate.get("resolved_model") or alternative, candidate):
+                                route, risk = candidate, None
+                                break
                     if risk:
                         raise PreflightError("confidential_route", risk)
                 protected = provider_exec.check_protected_inputs(
@@ -1397,6 +1410,8 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         "fallback_from":getattr(args,"fallback_from",None),"notes":[],
         "line":with_pick_reason(f"Route: {label} ({family}; {identity})",getattr(args,"pick_reason",None))}
     if getattr(args,"pick_reason",None): provenance["pick_reason"]=args.pick_reason
+    # Recorded so a resume or handoff keeps the task off free and prompt-training models.
+    if getattr(args,"confidential",False): provenance["requested"]["confidential"]=True
     return {"schema":"fabric.attempt.v1","run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
         "attempt":number,"state":"running","status":None,"mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
         "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
@@ -1504,6 +1519,7 @@ def prepare_resume(args):
     args.add_dirs=previous["applied"]["add_dirs"];args.resume_session=previous["session_id"]
     args.capabilities=previous["applied"].get("capabilities", [])
     args.fallback="false"
+    args.confidential=bool(getattr(args,"confidential",False) or requested.get("confidential") is True)
     for field in ("intent", "orchestrator_family", "role", "risk_tier", "model_override_tier", "reviewer_id", "preface"):
         if field in route:
             setattr(args, field, route[field])
@@ -1841,6 +1857,25 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             plan = fast_plan if fast_plan is not None else planner_result(planning)
             if getattr(args, "confidential", False) and plan.get("schema") == "fabric.exec-plan.v1":
                 refusal = confidential_refusal(plan.get("adapter", args.tool), plan.get("model"), plan.get("route"))
+                if refusal and not args.model:
+                    # Step to the alias's first safe member before refusing; the preflight made the same choice.
+                    route_record = plan.get("route") if isinstance(plan.get("route"), dict) else {}
+                    for alternative in exec_routing.confidential_alternatives(
+                            args.tool, plan.get("model"), route_record.get("alias") or args.alias):
+                        alternate = argparse.Namespace(**vars(args))
+                        alternate.model, alternate.alias, alternate.task_class = alternative, None, None
+                        resolved = subprocess.run([*build_command(alternate, prompt_path, result_path, evidence_dir), "--plan-only"],
+                                                  cwd=workspace, env=routing_environment(), capture_output=True, text=True, timeout=30)
+                        try:
+                            replacement = json.loads(resolved.stdout)
+                        except ValueError:
+                            continue
+                        if (replacement.get("schema") == "fabric.exec-plan.v1" and not confidential_refusal(
+                                args.tool, replacement.get("model"), replacement.get("route"))):
+                            replacement.setdefault("warnings", []).append(
+                                f"confidential: skipped {args.tool}/{plan.get('model')}; using {alternative}")
+                            plan, refusal = replacement, None
+                            break
                 if refusal:
                     plan = {**router_failure("confidential_route", args.tool), "fix": refusal}
             if plan.get("schema") == "fabric.exec-plan.v1":

@@ -113,6 +113,7 @@ export async function resumeConfiguredProvider(
         ["sandbox", "network", "add_dirs", "capabilities"].includes(key) && value !== null)),
       ...(input.prompt === undefined ? { prompt_file: path } : { prompt: input.prompt }),
       allow_secrets: input.allow_secrets ?? false,
+      ...(requested.confidential === true ? { confidential: true } : {}),
     }], identity, env, signal);
     if (checked.status === "rejected") return { status: "rejected", error: checked.error, fix: checked.fix };
     if (input.prompt !== undefined) writeFileSync(path, input.prompt, { mode: 0o600, flag: "wx" });
@@ -232,6 +233,11 @@ export function inheritsPreviousRoute(input: RouteInput): boolean {
   return input.adapter === undefined && input.alias === undefined && input.model === undefined && !usesPool(input);
 }
 
+/** A handoff copies the previous result into its prompt, so a confidential run stays confidential unless the caller sets it. */
+export function inheritedConfidential(input: RouteInput, requested: { confidential?: unknown }): { confidential?: true } {
+  return input.confidential === undefined && requested.confidential === true ? { confidential: true } : {};
+}
+
 export async function handoffDispatch(
   input: DispatchInput,
   identity: Identity,
@@ -269,6 +275,7 @@ export async function handoffDispatch(
           }
         : {}),
       ...(writer ? { mode: "worktree_write" as const, worktree: previous.worktree } : {}),
+      ...inheritedConfidential(rest, requested),
       prompt: brief + prompt,
       prompt_file: undefined,
     }, identity, signal, env);

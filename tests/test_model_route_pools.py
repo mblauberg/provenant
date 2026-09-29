@@ -409,6 +409,44 @@ def test_confidential_refuses_a_resolved_route_that_trains_and_names_the_fix():
     command = batch_run._command({"id": "c", "adapter": "codex", "prompt_file": "p.md", "role": "worker",
                                   "timeout": 60, "model": "gpt-6-luna", "confidential": True}, Path("/tmp/run"))
     assert "--confidential" in command
+    args.task_id, args.access_mode, args.worktree = "task-1", "read_only", None
+    args.model = "gpt-6-luna"
+    row = dispatch_run.contract_row(args, Path("/tmp/run"), 1, Path("/tmp/run/a"),
+                                    {"model": "gpt-6-luna", "route": {"model_family": "openai"}}, "now")
+    assert row["provenance"]["requested"]["confidential"] is True, "resume and handoff read it back"
+
+
+MIXED_SCOUT = {"adapters": {"opencode": {"aliases": {"scout": [
+    "opencode/mimo-v2.6-flash-free", "opencode-go/deepseek-v4.1-flash"]}}}}
+
+
+def test_confidential_alias_steps_to_its_first_safe_member():
+    exec_routing = exec_routing_module()
+    catalog = json.loads(json.dumps(CATALOG))
+    catalog["adapters"]["opencode"]["aliases"]["scout"] = MIXED_SCOUT["adapters"]["opencode"]["aliases"]["scout"]
+    assert exec_routing.confidential_alternatives(
+        "opencode", "opencode/mimo-v2.6-flash-free", "scout", catalog) == ["opencode-go/deepseek-v4.1-flash"]
+    assert exec_routing.confidential_alternatives("opencode", "x", "nosuch", catalog) == []
+
+
+def test_confidential_preflight_uses_a_mixed_alias_and_refuses_only_when_nothing_safe_remains(tmp_path, monkeypatch):
+    instance = tmp_path / "instance"
+    (instance / "config").mkdir(parents=True)
+    (instance / "config" / "model-routing.json").write_text(json.dumps(MIXED_SCOUT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(instance))
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
+    monkeypatch.chdir(tmp_path)
+    sys.path.insert(0, str(ROOT / "skills" / "orchestrate" / "scripts"))
+    dispatch_run = load("pools_dispatch_mixed_alias_under_test", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
+    task = {"id": "t", "adapter": "opencode", "alias": "scout", "prompt": "hi"}
+    ordinary = dispatch_run.preflight_tasks([task], tmp_path)
+    assert ordinary["routes"][0]["resolved_model"] == "opencode/mimo-v2.6-flash-free", "the alias leads with the free model"
+    private = dispatch_run.preflight_tasks([{**task, "confidential": True}], tmp_path)
+    assert private["status"] == "validated", private
+    assert private["routes"][0]["resolved_model"] == "opencode-go/deepseek-v4.1-flash"
+    refused = dispatch_run.preflight_tasks([{**task, "alias": None, "model": "opencode/mimo-v2.6-flash-free",
+                                             "confidential": True}], tmp_path)
+    assert refused["error"] == "confidential_route" and "fix:" in refused["fix"]
 
 
 def test_routes_health_and_help_routes_print_the_same_view(tmp_path):
