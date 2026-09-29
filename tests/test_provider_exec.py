@@ -3843,6 +3843,7 @@ def test_claude_reported_ids_match_their_aliases():
     module = supervisor()
     assert module._same_model("claude", "haiku", "claude-haiku-4-5-20251001")
     assert module._same_model("claude", "sonnet", "claude-sonnet-5-5")
+    assert module._same_model("claude", "claude-sonnet-5-5", "claude-sonnet-5")
     assert not module._same_model("claude", "haiku", "claude-sonnet-5-5")
 
 
