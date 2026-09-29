@@ -308,10 +308,10 @@ def test_cancel_stops_waiting_attempt(monkeypatch):
 
 def test_queued_digest_shows_current_numbers():
     row = {"run_id": "mcp-example", "state": "queued", "attempt": 1,
-           "provenance": {"requested": {"adapter": "codex"}, "resolved_model": "gpt-6-sol"},
+           "provenance": {"requested": {"adapter": "codex"}, "resolved_model": "gpt-6.1-sol"},
            "reason": "waiting for memory: 4.9% available (0.78 GB), floor 5% for read_only"}
     assert render_digest(row) == (
-        "queued mcp-example codex/gpt-6-sol · waiting for memory: 4.9% available (0.78 GB), floor 5% for read_only"
+        "queued mcp-example codex/gpt-6.1-sol · waiting for memory: 4.9% available (0.78 GB), floor 5% for read_only"
     )
 
 
