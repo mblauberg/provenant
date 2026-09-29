@@ -11,6 +11,7 @@ EFFORT_FLAG = "model_reasoning_effort"
 SESSION_KEYS = ("thread_id",)
 MODEL_SOURCE = "codex:rollout.turn_context.model"
 SIGNATURES = (("usage_limited", r"usage limit|try again at \d"),)
+WRITER_PROFILE = "provenant-worktree-write"
 
 
 def argv(p):
@@ -46,6 +47,22 @@ def argv(p):
             "-c",
             "permissions.provenant-read-only-network.network.enabled=true",
         ]
+    elif sandbox == "workspace-write":
+        # A permissions profile names single Git paths inside the common directory, which
+        # sandbox_workspace_write.writable_roots cannot; the nearest entry wins.
+        filesystem = p["applied"].get("write_boundary", {}).get("filesystem") or {}
+        command += [
+            "-c",
+            'default_permissions="' + WRITER_PROFILE + '"',
+            "-c",
+            "permissions." + WRITER_PROFILE + '.extends=":workspace"',
+            "-c",
+            "permissions." + WRITER_PROFILE + ".network.enabled=" + str(bool(network)).lower(),
+            "-c",
+            "permissions." + WRITER_PROFILE + ".filesystem={"
+            + ", ".join(json.dumps(path) + " = " + json.dumps(access) for path, access in filesystem.items())
+            + "}",
+        ]
     elif p["resume_session"]:
         command += [
             "-c",
@@ -54,16 +71,6 @@ def argv(p):
         ]
     else:
         command += ["-s", "danger-full-access" if sandbox == "full" else sandbox]
-    if sandbox == "workspace-write" and not capabilities:
-        command += [
-            "-c",
-            "sandbox_workspace_write.network_access=" + str(network).lower(),
-        ]
-        command += [
-            "-c",
-            "sandbox_workspace_write.writable_roots="
-            + json.dumps(p["applied"]["add_dirs"]),
-        ]
     if not p["resume_session"]:
         for directory in p["applied"]["add_dirs"]:
             command += ["--add-dir", directory]

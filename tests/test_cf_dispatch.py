@@ -2640,14 +2640,15 @@ def test_codex_worktree_writer_route_uses_the_workspace_write_sandbox():
     record = json.loads(result.output.splitlines()[-1])
     assert record["access_mode"] == "worktree_write"
     assert record["read_only_guarantee"] == "none"
-    assert "-s\nworkspace-write" in recorded
+    assert 'default_permissions="provenant-worktree-write"' in recorded
+    assert 'permissions.provenant-worktree-write.extends=":workspace"' in recorded
     assert f"--cd\n{worktree}" in recorded
     assert "read-only" not in recorded
     # A linked worktree keeps its Git metadata outside the worktree root.
-    assert "sandbox_workspace_write.writable_roots=" in recorded
+    assert "permissions.provenant-worktree-write.filesystem={" in recorded
     # --ignore-user-config drops the user's own network setting, so the arm
     # grants the lane network itself: gh, git push and installs need it.
-    assert "sandbox_workspace_write.network_access=true" in recorded
+    assert "permissions.provenant-worktree-write.network.enabled=true" in recorded
     assert record["provider_network"] is True
 
 
@@ -2658,7 +2659,7 @@ def test_codex_worktree_writer_network_can_be_disabled():
     )
     assert result.returncode == 0, result.output
     record = json.loads(result.output.splitlines()[-1])
-    assert "sandbox_workspace_write.network_access=false" in recorded
+    assert "permissions.provenant-worktree-write.network.enabled=false" in recorded
     assert record["provider_network"] is False
 
 

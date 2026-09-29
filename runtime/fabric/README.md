@@ -106,20 +106,35 @@ paths. Codex read-only uses its native read-only sandbox.
 Inside another sandbox, where macOS refuses a nested one, the attempt records
 an explicit unconfined-write warning. A `cwd` below the root may also warn that
 it is not a read boundary.
+Every writer, Codex included, has the same Git write boundary: its own
+per-worktree Git directory (`git rev-parse --absolute-git-dir`) plus the
+common directory's `objects`, `refs` and `logs` and its `packed-refs`,
+`packed-refs.lock` and `packed-refs.new` files. The rest of the common
+directory, including `hooks`, `config`, `info` and other lanes'
+`worktrees/<name>`, is never writable, because Git later runs what it names in
+the primary checkout and every lane. A Codex writer's `add_dir` at or inside
+the common directory is dropped with a warning. Codex writers also keep the
+worktree `.git` marker and the private Git directory's `config.worktree`,
+`commondir` and `gitdir` read-only.
 Wrapped writer runs on macOS (agy, Claude, Cursor, OpenCode and Kiro) use
 `sandbox-exec` to restrict writes to their worktree, declared `add_dirs`,
-per-worktree Git metadata, common Git objects, refs, logs and packed refs,
-attempt files, device nodes and provider state. Where protected-path policy
-applies, its read and write denies still take precedence inside an `add_dir`.
+the Git write boundary, attempt files, device nodes and provider state. Where
+protected-path policy applies, its read and write denies still take precedence
+inside an `add_dir`.
 Each attempt sets `TMPDIR`, `TMP` and `TEMP` to `<attempt>/tmp` and
 `XDG_CACHE_HOME` to `<attempt>/tmp/cache`. Shared temp and general user caches
-are not writable. Codex writers without capabilities use
-`-s workspace-write` (or `-c sandbox_mode="workspace-write"`
-on resume), with `-c sandbox_workspace_write.writable_roots=<add_dirs>` and
-`--cd <worktree>` on a fresh run. Codex keeps a writable root's `.agents/`
-read-only, so a linked-worktree Codex writer also gets the worktree's
-`.agents/` as an `add_dir`; Git can then rebase or merge the integration branch
-over tracked skills. Fabric fails the attempt with
+are not writable. Codex writers without capabilities use Codex's native
+sandbox through a per-run permissions profile,
+`-c default_permissions="provenant-worktree-write"`, which extends
+`:workspace`, sets `network.enabled` and passes a `filesystem` table granting
+`add_dirs` and the Git write boundary with the common directory read-only.
+Codex applies the nearest entry, and the same flags apply on resume. A fresh
+run also passes `--add-dir` for each `add_dir` and `--cd <worktree>`. Codex
+refuses to launch with a symlinked grant path, so a link planted at one stops
+the next attempt rather than moving its grant. Codex keeps a writable root's
+`.agents/` read-only, so a linked-worktree Codex writer also gets the
+worktree's `.agents/` as an `add_dir`; Git can then rebase or merge the
+integration branch over tracked skills. Fabric fails the attempt with
 `protected_instructions_changed` when an `.agents/` path in HEAD, the index or
 on disk ends up matching neither the attempt's starting state nor the primary
 checkout's branch or its upstream. If OS confinement is unavailable, agy write
@@ -148,13 +163,9 @@ does not claim that an inbound loopback rule limits connections.
 Each task keeps one `CODEX_HOME` at `<task directory>/codex-home` across its
 attempts. Existing `auth.json`, `AGENTS.md`, `HARNESS.md` and `skills` entries are symlinked
 from `CODEX_HOME` supplied by the caller, or `~/.codex`; the profile grants
-writes to the task home and the literal source `auth.json` only. Its Git write
-boundary grants the private worktree Git directory and the common repository's
-`objects`, `refs`, `logs`, `packed-refs` and `packed-refs.lock` paths, granted
-by their own names, so a link planted at one never moves a later grant. The Git
-common directory itself is denied and is never added as a writable root.
-The worktree `.git` marker and private Git directory's `config.worktree`,
-`commondir` and `gitdir` are not writable; Fabric recreates the task home links
+writes to the task home and the literal source `auth.json` only. It grants
+each Git write boundary path by its own name, so a link planted at one never
+moves a later grant. Fabric recreates the task home links
 every attempt and fails a symlinked or non-directory task home, while allowing
 the lane to overwrite the literal source `auth.json` for token refresh, a file
 it could already read. That grant names the unresolved source path and covers
@@ -169,7 +180,8 @@ Protected-path dispatches to training routes still refuse without OS read
 confinement.
 The receipt records sorted `applied.capabilities` and `applied.confinement` as `sandbox-exec`, `provider-native` or `none`;
 `applied.write_boundary` records the effective writable paths, including
-declared `add_dirs` for confined writers, or the native sandbox;
+declared `add_dirs` for confined writers, or the native sandbox and, for a
+Codex writer, its permissions `filesystem` table;
 `workspace.cwd` is the provider cwd and `workspace.root` is the caller workspace.
 Read-only macOS launches can read `~/.gitconfig` and
 `$XDG_CONFIG_HOME/git/config` (default `~/.config/git/config`) so `git status`

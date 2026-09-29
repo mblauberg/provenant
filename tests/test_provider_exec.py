@@ -12,6 +12,7 @@ import ctypes
 import sys
 import tempfile
 import time
+import tomllib
 from types import SimpleNamespace
 
 import pytest
@@ -138,7 +139,7 @@ def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_pat
     assert f'(subpath "{common}")' not in allow
     for path in (common / "objects", common / "refs", common / "logs"):
         assert f'(subpath "{path}")' in profile
-    for path in (common / "packed-refs", common / "packed-refs.lock"):
+    for path in (common / "packed-refs", common / "packed-refs.lock", common / "packed-refs.new"):
         assert f'(literal "{path}")' in profile
     for path in (common / "config", common / "hooks", common / "HEAD", common / "index"):
         assert f'(subpath "{path}")' not in profile
@@ -187,8 +188,8 @@ def test_writer_confinement_selection_and_degraded_warning(monkeypatch, tmp_path
     codex = mod.build_plan("codex", {}, "hello", cwd=tmp_path, mode="worktree_write")
     assert claude["applied"]["confinement"] == "sandbox-exec"
     assert codex["applied"]["confinement"] == "provider-native"
-    assert "-s" in codex["argv"] and "workspace-write" in codex["argv"]
-    assert any("sandbox_workspace_write.writable_roots=" in arg for arg in codex["argv"])
+    assert 'default_permissions="provenant-worktree-write"' in codex["argv"]
+    assert 'permissions.provenant-worktree-write.extends=":workspace"' in codex["argv"]
     monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None)
     degraded = mod.build_plan("claude", {}, "hello", cwd=tmp_path, mode="worktree_write")
     assert degraded["applied"]["confinement"] == "none"
@@ -1075,7 +1076,7 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
     for path in (common / "objects", common / "refs", common / "logs"):
         assert f'(subpath "{path}")' in profile
         assert str(path) in plan["applied"]["write_boundary"]["writable_paths"]
-    for path in (common / "packed-refs", common / "packed-refs.lock"):
+    for path in (common / "packed-refs", common / "packed-refs.lock", common / "packed-refs.new"):
         assert f'(literal "{path}")' in profile
     assert f'(allow file-write* (subpath "{common}")' not in profile
     assert f'(subpath "{attempt.parent / "codex-home"}")' in profile
@@ -3016,46 +3017,61 @@ def test_capture_is_bounded_but_result_is_complete(tmp_path, monkeypatch):
     assert path.read_bytes() == b"A" * 50 + b"B" * 50
 
 
-def test_linked_writer_automatically_grants_git_metadata(tmp_path):
+CODEX_WRITER_PROFILE = "permissions.provenant-worktree-write."
+
+
+def codex_filesystem(plan):
+    """The filesystem table of the Codex permissions profile a writer plan passes."""
+    prefix = CODEX_WRITER_PROFILE + "filesystem="
+    value = next(arg for arg in plan["argv"] if arg.startswith(prefix))
+    return {Path(path): access for path, access in tomllib.loads("t = " + value[len(prefix):])["t"].items()}
+
+
+def codex_access(table, path):
+    """The access Codex applies to a path: the nearest enclosing table entry decides."""
+    entries = [entry for entry in table if path == entry or path.is_relative_to(entry)]
+    return table[max(entries, key=lambda entry: len(entry.parts))] if entries else None
+
+
+@pytest.mark.parametrize("resume", [None, "thread-1"], ids=["fresh", "resume"])
+def test_codex_writer_gets_the_wrapped_writer_git_boundary(tmp_path, resume):
     repo = tmp_path / "repo"
-    repo.mkdir()
-    subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
-    subprocess.run(
-        [
-            "git",
-            "-C",
-            str(repo),
-            "-c",
-            "user.name=Fixture",
-            "-c",
-            "user.email=fixture@example.invalid",
-            "commit",
-            "--allow-empty",
-            "-m",
-            "initial",
-        ],
-        check=True,
-        capture_output=True,
-    )
-    lane = tmp_path / "lane"
-    subprocess.run(
-        ["git", "-C", str(repo), "worktree", "add", "-b", "lane", str(lane)],
-        check=True,
-        capture_output=True,
-    )
+    git(tmp_path, "init", "-q", "-b", "main", str(repo))
+    git(repo, "commit", "-q", "--allow-empty", "-m", "initial")
+    lane, other = tmp_path / "lane", tmp_path / "other"
+    git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
+    git(repo, "worktree", "add", "-q", "-b", "other", str(other))
+    common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
+    private = Path(git(lane, "rev-parse", "--absolute-git-dir").strip()).resolve()
+    sibling = Path(git(other, "rev-parse", "--absolute-git-dir").strip()).resolve()
+
     plan = supervisor().build_plan(
-        "codex",
-        {"resolved_model": "fixture"},
-        "hello",
-        mode="worktree_write",
-        worktree=lane,
-        workspace_root=tmp_path,
-        network=False,
+        "codex", {"resolved_model": "fixture"}, "hello", mode="worktree_write",
+        worktree=lane, workspace_root=tmp_path, network=False, resume_session=resume,
+        add_dirs=[str(common)],
     )
-    assert str(repo / ".git") in plan["applied"]["add_dirs"]
-    assert plan["applied"]["network"] is False
-    assert "sandbox_workspace_write.network_access=false" in plan["argv"]
-    assert "--ephemeral" not in plan["argv"]
+
+    argv = plan["argv"]
+    table = codex_filesystem(plan)
+    add_dirs = {Path(path) for path in plan["applied"]["add_dirs"]}
+    add_dirs |= {Path(argv[index + 1]) for index, arg in enumerate(argv) if arg == "--add-dir"}
+    assert 'default_permissions="provenant-worktree-write"' in argv
+    assert CODEX_WRITER_PROFILE + 'extends=":workspace"' in argv
+    assert CODEX_WRITER_PROFILE + "network.enabled=false" in argv
+    assert "-s" not in argv and not any("sandbox_mode" in arg or "sandbox_workspace_write" in arg for arg in argv)
+    assert plan["applied"]["write_boundary"]["filesystem"] == {str(path): access for path, access in table.items()}
+    for granted in (private, private / "index", private / "HEAD", private / "logs/HEAD",
+                    common / "objects", common / "refs/heads/lane", common / "logs/refs/heads/lane",
+                    common / "packed-refs", common / "packed-refs.lock", common / "packed-refs.new"):
+        assert codex_access(table, granted) == "write", granted
+    for denied in (common, common / "hooks", common / "hooks/pre-commit", common / "config",
+                   common / "info/exclude", common / "worktrees", sibling, sibling / "HEAD",
+                   private / "config.worktree", private / "commondir", private / "gitdir"):
+        assert codex_access(table, denied) == "read", denied
+        assert not any(denied == root or denied.is_relative_to(root) for root in add_dirs), denied
+    assert common not in add_dirs
+    assert any("drops Git common directory add-dir" in warning for warning in plan["warnings"])
+    assert "--ephemeral" not in argv
 
 
 GIT_FIXTURE = ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
@@ -3106,8 +3122,7 @@ def test_codex_writer_may_write_worktree_instructions(tmp_path):
     claude = supervisor().build_plan("claude", {"resolved_model": "fixture"}, "hello",
                                      mode="worktree_write", worktree=lane, workspace_root=tmp_path)
     assert str(lane / ".agents") in codex["applied"]["add_dirs"]
-    roots = next(arg for arg in codex["argv"] if arg.startswith("sandbox_workspace_write.writable_roots="))
-    assert str(lane / ".agents") in json.loads(roots.split("=", 1)[1])
+    assert codex_filesystem(codex)[lane / ".agents"] == "write"
     assert str(lane / ".agents") not in claude["applied"]["add_dirs"]
 
 
