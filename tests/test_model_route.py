@@ -216,13 +216,13 @@ def test_training_flag_survives_model_overlay_and_free_override(tmp_path, monkey
     (instance / "config").mkdir(parents=True)
     (instance / "config/model-routing.json").write_text(json.dumps({"adapters": {
         "claude": {"models": [{"id": "claude-opus-5-5", "names": ["overlay-opus"]}]},
-        "codex": {"models": [{"id": "gpt-6-sol", "names": ["overlay-sol"]}]},
+        "codex": {"models": [{"id": "gpt-6.1-sol", "names": ["overlay-sol"]}]},
         "agy": {"models": [{"id": "gemini-3.8-flash", "names": ["overlay-flash"]}]},
         "opencode": {"models": [{"id": "opencode/mimo-v2.6-flash-free", "names": ["overlay-free"]}]},
     }}))
     monkeypatch.setattr(router, "CATALOG_PATH", instance / "config/model-routing.json")
     catalog = router.catalogue_snapshot()["catalogue"]
-    for adapter, model in (("claude", "claude-opus-5-5"), ("codex", "gpt-6-sol"),
+    for adapter, model in (("claude", "claude-opus-5-5"), ("codex", "gpt-6.1-sol"),
                            ("agy", "gemini-3.8-flash")):
         entry = next(item for item in catalog["adapters"][adapter]["models"] if item["id"] == model)
         assert router.training_flag(catalog["adapters"][adapter], entry) is False
@@ -321,7 +321,7 @@ def test_account_wide_cooldown_warns_on_explicit_model(tmp_path):
     (tmp_path / "cooldowns.json").write_text(json.dumps({"cooldowns": {
         "codex/*": {"cooling_until": until},
     }}))
-    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "codex", "--model", "gpt-6-sol",
+    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "codex", "--model", "gpt-6.1-sol",
                           "--role", "worker"], capture_output=True, text=True,
                          env={**os.environ, "HARNESS_PYTHON": sys.executable,
                               "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
@@ -332,8 +332,8 @@ def test_account_wide_cooldown_warns_on_explicit_model(tmp_path):
 
 def test_fallback_false_and_default_explicit_routes_have_no_candidates():
     for args in (("--alias", "workhorse", "--fallback", "false"),
-                 ("--model", "gpt-6-sol", "--fallback", "false"),
-                 ("--model", "gpt-6-sol")):
+                 ("--model", "gpt-6.1-sol", "--fallback", "false"),
+                 ("--model", "gpt-6.1-sol")):
         result, route = resolve("--adapter", "codex", *args, "--role", "worker")
         assert result.returncode == 0, result.stderr
         assert route["fallback_candidates"] == []
@@ -605,7 +605,7 @@ def test_malformed_cooldown_time_cannot_break_routing(tmp_path):
 def test_codex_tier_returns_paid_fallbacks_and_skips_cooling_candidate(tmp_path):
     until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
     (tmp_path / "cooldowns.json").write_text(json.dumps({"cooldowns": {
-        "codex/gpt-6-sol": {"cooling_until": until},
+        "codex/gpt-6.1-sol": {"cooling_until": until},
     }}))
     capability = write_codex_capability_snapshot(tmp_path)
     result = subprocess.run([str(SCRIPT), "resolve", "--adapter", "codex", "--alias",
@@ -648,9 +648,9 @@ def test_unknown_effort_on_tier_routes_as_nearest_supported(tmp_path):
 def test_tier_alias_and_explicit_model_keeps_model_with_note(tmp_path):
     capability = write_codex_capability_snapshot(tmp_path)
     result, route = resolve("--adapter", "codex", "--alias", "scout", "--model",
-                            "gpt-6-sol", "--role", "worker", "--capabilities-file", str(capability))
+                            "gpt-6.1-sol", "--role", "worker", "--capabilities-file", str(capability))
     assert result.returncode == 0, route
-    assert route["resolved_model"] == "gpt-6-sol"
+    assert route["resolved_model"] == "gpt-6.1-sol"
     assert any("model won" in note for note in route["notes"])
 
 
@@ -793,14 +793,14 @@ def test_codex_json_model_map_probe_records_ids(tmp_path):
     cli = tmp_path / "codex"
     cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 1.0; exit; fi\n"
                    "if [ \"$1\" = --help ]; then exit; fi\n"
-                   "echo '{\"models\":{\"gpt-6-luna\":{},\"gpt-6-sol\":{}}}'\n")
+                   "echo '{\"models\":{\"gpt-6-luna\":{},\"gpt-6.1-sol\":{}}}'\n")
     cli.chmod(0o755)
     result = subprocess.run([str(SCRIPT), "probe", "--adapter", "codex",
                              "--executable", str(cli), "--json"], capture_output=True, text=True,
                             env={**os.environ, "HARNESS_PYTHON": sys.executable,
                                  "AGENT_FABRIC_STATE_ROOT": str(tmp_path)})
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["models"] == ["gpt-6-luna", "gpt-6-sol"]
+    assert json.loads(result.stdout)["models"] == ["gpt-6-luna", "gpt-6.1-sol"]
 
 
 def test_ambiguous_name_chooses_newest_when_no_default(tmp_path):
@@ -890,8 +890,8 @@ def write_codex_capability_snapshot(tmp_path, *, observed_at=None, models=None):
                 "resolved_model": "gpt-5.6-luna",
                 "supported_efforts": ["low", "medium", "high", "xhigh", "max"],
             },
-            "gpt-6-sol": {
-                "resolved_model": "gpt-6-sol",
+            "gpt-6.1-sol": {
+                "resolved_model": "gpt-6.1-sol",
                 "supported_efforts": ["low", "medium", "high", "xhigh", "max", "ultra"],
             },
             "gpt-6-luna": {
@@ -2643,7 +2643,7 @@ def test_malformed_override_fails_closed_without_a_fixed_model_family(
 def test_account_default_aliases_resolve_to_account_default_dispatch(tmp_path):
     expected = {
         "flagship": "gpt-6-astra",
-        "workhorse": "gpt-6-sol",
+        "workhorse": "gpt-6.1-sol",
         "scout": "gpt-6-luna",
     }
     catalog = write_account_default_catalog(tmp_path)
@@ -2725,7 +2725,7 @@ def test_codex_aliases_supply_proportionate_default_effort(tmp_path):
     ("task_class", "alias", "effort", "resolved_model"),
     (
         ("mechanical", "scout", "low", "gpt-6-luna"),
-        ("legwork", "workhorse", "medium", "gpt-6-sol"),
+        ("legwork", "workhorse", "medium", "gpt-6.1-sol"),
         ("critical-review", "flagship", "high", "gpt-6-astra"),
         ("orchestration", "flagship", "high", "gpt-6-astra"),
     ),
@@ -2761,21 +2761,21 @@ def test_task_class_uses_ordered_exact_models_from_catalogue(tmp_path):
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
     catalog["task_class_routes"]["implementation"] = {
         "alias": "workhorse", "effort": "high", "role": "worker",
-        "models": {"codex": ["gpt-6-astra", "gpt-6-sol"]},
+        "models": {"codex": ["gpt-6-astra", "gpt-6.1-sol"]},
     }
     catalog_path = tmp_path / "catalog.json"
     catalog_path.write_text(json.dumps(catalog))
     capabilities = tmp_path / "caps.json"
     capabilities.write_text(json.dumps(capability_snapshot({
-        "gpt-6-sol": {"resolved_model": "gpt-6-sol", "supported_efforts": ["high"]},
+        "gpt-6.1-sol": {"resolved_model": "gpt-6.1-sol", "supported_efforts": ["high"]},
     })))
     result, route = resolve(
         "--adapter", "codex", "--task-class", "implementation", "--role", "worker",
         "--catalog", str(catalog_path), "--capabilities-file", str(capabilities),
     )
     assert result.returncode == 0
-    assert route["resolved_model"] == "gpt-6-sol"
-    assert route["configured_models"] == ["gpt-6-astra", "gpt-6-sol"]
+    assert route["resolved_model"] == "gpt-6.1-sol"
+    assert route["configured_models"] == ["gpt-6-astra", "gpt-6.1-sol"]
 
 
 def test_task_class_rejects_adapter_alias_instead_of_exact_model_id(tmp_path):
@@ -2793,7 +2793,7 @@ def test_task_class_rejects_adapter_alias_instead_of_exact_model_id(tmp_path):
 
 def test_failed_review_route_gets_one_exact_alternate(tmp_path, monkeypatch):
     catalog = json.loads((ROOT / "config" / "model-routing.json").read_text())
-    catalog["task_class_routes"]["critical-review"]["models"]["codex"] = ["gpt-6-astra", "gpt-6-sol"]
+    catalog["task_class_routes"]["critical-review"]["models"]["codex"] = ["gpt-6-astra", "gpt-6.1-sol"]
     catalog_path = tmp_path / "catalog.json"
     catalog_path.write_text(json.dumps(catalog))
     state = tmp_path / "state"
@@ -2802,7 +2802,7 @@ def test_failed_review_route_gets_one_exact_alternate(tmp_path, monkeypatch):
     caps = tmp_path / "caps.json"
     caps.write_text(json.dumps(capability_snapshot({
         "gpt-6-astra": {"resolved_model": "gpt-6-astra", "supported_efforts": ["high"]},
-        "gpt-6-sol": {"resolved_model": "gpt-6-sol", "supported_efforts": ["high"]},
+        "gpt-6.1-sol": {"resolved_model": "gpt-6.1-sol", "supported_efforts": ["high"]},
     })))
     first, initial = resolve(
         "--adapter", "codex", "--task-class", "critical-review", "--role", "critical-review",
@@ -2810,7 +2810,7 @@ def test_failed_review_route_gets_one_exact_alternate(tmp_path, monkeypatch):
     )
     assert first.returncode == 0
     assert initial["resolved_model"] == "gpt-6-astra"
-    assert initial["fallback_candidates"] == [{"adapter": "codex", "model": "gpt-6-sol", "effort": "high"}]
+    assert initial["fallback_candidates"] == [{"adapter": "codex", "model": "gpt-6.1-sol", "effort": "high"}]
     (state / "route-health.json").write_text(json.dumps({
         "schema": "fabric.route-health.v1",
         "routes": {"codex|gpt-6-astra|critical-review": {
@@ -2823,14 +2823,14 @@ def test_failed_review_route_gets_one_exact_alternate(tmp_path, monkeypatch):
         "--catalog", str(catalog_path), "--capabilities-file", str(caps),
     )
     assert result.returncode == 0
-    assert route["resolved_model"] == "gpt-6-sol"
-    assert route["configured_models"] == ["gpt-6-astra", "gpt-6-sol"]
+    assert route["resolved_model"] == "gpt-6.1-sol"
+    assert route["configured_models"] == ["gpt-6-astra", "gpt-6.1-sol"]
 
 
 @pytest.mark.parametrize(
     ("adapter", "models"),
     [
-        ("codex", ["gpt-6-astra", "gpt-6-sol"]),
+        ("codex", ["gpt-6-astra", "gpt-6.1-sol"]),
         ("agy", ["gemini-3.8-flash"]),
     ],
 )

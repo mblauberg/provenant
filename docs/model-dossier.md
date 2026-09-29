@@ -127,7 +127,7 @@ not read an absent `Watch out for` as an endorsement.
   exposes `low` through `ultra`; the Responses API supports through `max`.
   Treat those as separate surfaces and probe the CLI before dispatch.
 
-### GPT-6 Sol (OpenAI workhorse)
+### GPT-6.1 Sol (OpenAI workhorse)
 
 - **Good at:** medium tasks: ordinary implementation, research legwork, review
   and drafting that need more judgement than bulk extraction but do not justify
@@ -255,7 +255,7 @@ actual task before relying on it.
 
 ## Current preferences
 
-**Token-heavy and medium work goes to OpenAI: GPT-6 Sol for medium tasks,
+**Token-heavy and medium work goes to OpenAI: GPT-6.1 Sol for medium tasks,
 GPT-6 Luna for bulk.** Both arrived on 2026-09-23 and are very cheap for their
 strength. Reading a lot to produce a report, exhaustive inventories and
 mechanical sweeps go to Luna (`scout`); ordinary implementation, legwork that
