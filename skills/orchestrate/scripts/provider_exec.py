@@ -308,7 +308,7 @@ def check_protected_inputs(route, workspace_root, cwd, *, worktree=None, prompt_
     return paths
 
 
-def os_confinement_profile(plan):
+def os_confinement_profile(plan, search_path=None):
     """Apply the provider's read and write boundary to this attempt.
 
     SBPL applies the last matching rule, so each later rule narrows or widens the one before.
@@ -380,6 +380,7 @@ def os_confinement_profile(plan):
     xdg_config_home = configured_xdg if configured_xdg.is_absolute() else home / ".config"
     git_config_files = [home / ".gitconfig", xdg_config_home / "git/config"]
     project_files, project_directories = _project_config_reads(plan, root)
+    toolchain_files, uv_project_files, toolchain_directories = _toolchain_reads(plan, root, search_path)
     return (
         "(version 1)\n(allow default)\n(deny file-write*)\n"
         + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), *state_writes, Path("/dev")])
@@ -394,6 +395,9 @@ def os_confinement_profile(plan):
         # Unresolved, so a link planted under a config name cannot carry the grant elsewhere.
         + _sbpl_rule("allow", "file-read-data", project_files, literal=True, keep_leaf=True)
         + _sbpl_rule("allow", "file-read-data", project_directories, keep_leaf=True)
+        + _sbpl_rule("allow", "file-read-data", toolchain_files, literal=True)
+        + _sbpl_rule("allow", "file-read-data", uv_project_files, literal=True, keep_leaf=True)
+        + _sbpl_rule("allow", "file-read-data", toolchain_directories)
         + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
     )
 
@@ -417,13 +421,61 @@ def _project_config_reads(plan, root):
             [parent / name for parent in parents for name in directories])
 
 
-def confinement_command(plan, command):
+# Toolchain commands a read-only lane runs tests with, looked up on the provider's PATH.
+TOOLCHAIN_COMMANDS = ("python3", "python", "uv", "node", "npm", "npx", "pnpm", "corepack")
+# uv looks for its project and workspace in every directory above cwd and stops on a file it
+# can see but not read.
+UV_PROJECT_FILES = ("pyproject.toml", "uv.toml", "uv.lock", ".python-version")
+
+
+def _toolchain_reads(plan, root, search_path=None):
+    """Files and install prefixes of the toolchain a read-only lane finds, which may sit in home.
+
+    Returns (files, unresolved project files, directories). Each command on PATH, and each .venv
+    between cwd and the root, is resolved to its real
+    location. An install prefix (the directory above a real `bin`) is granted whole so an
+    interpreter can load its standard library; where that prefix is home or holds a credential
+    store (as ~/.local does), only the executable itself is. Nothing is run to find them, so a
+    planted interpreter cannot act outside the sandbox.
+    """
+    search_path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
+    cwd = Path(plan["cwd"]).resolve()
+    stop = _git_toplevel(cwd) or root
+    home = Path.home().resolve()
+    executables = [Path(found) for name in TOOLCHAIN_COMMANDS if (found := shutil.which(name, path=search_path))]
+    directories = []
+    for parent in (cwd, *(parent for parent in cwd.parents if parent.is_relative_to(stop))):
+        venv = parent / ".venv"
+        config = venv / "pyvenv.cfg"
+        if venv.is_symlink() or not config.is_file():
+            continue
+        directories.append(venv)
+        base = next((line.partition("=")[2].strip() for line in config.read_text(errors="replace").splitlines()
+                     if line.partition("=")[0].strip() == "home"), "")
+        if base:
+            executables.append(Path(base) / "python3")
+        executables.append(venv / "bin" / "python")
+    files = []
+    for executable in executables:
+        resolved = executable.resolve()
+        prefix = resolved.parent.parent if resolved.parent.name == "bin" else None
+        if prefix is not None and prefix != home and not credential_path(prefix):
+            directories.append(prefix)
+        elif resolved.exists() and not credential_path(resolved):
+            files.append(resolved)
+    project_files = ([parent / name for parent in cwd.parents for name in UV_PROJECT_FILES]
+                     if any(executable.name == "uv" for executable in executables) else [])
+    return (list(dict.fromkeys(files)), project_files,
+            [directory for directory in dict.fromkeys(directories) if not credential_path(directory)])
+
+
+def confinement_command(plan, command, search_path=None):
     if plan.get("applied", {}).get("confinement") != "sandbox-exec":
         return list(command)
     sandbox_exec = _sandbox_exec_path()
     if not sandbox_exec:
         raise RuntimeError("sandbox-exec is unavailable for a confined provider launch")
-    return [sandbox_exec, "-p", os_confinement_profile(plan), *command]
+    return [sandbox_exec, "-p", os_confinement_profile(plan, search_path), *command]
 
 
 def build_plan(
@@ -2246,7 +2298,7 @@ def execute(
             command[0] = (
                 shutil.which(command[0], path=environment.get("PATH")) or command[0]
             )
-            command = confinement_command(plan, command)
+            command = confinement_command(plan, command, environment.get("PATH"))
             subreaper = _enable_subreaper()
             process = subprocess.Popen(
                 command,

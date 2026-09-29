@@ -4167,7 +4167,7 @@ def confined_read_only_attempt(monkeypatch, tmp_path, script):
                            capture_output=True, text=True)
     if probe.returncode and "sandbox_apply" in probe.stderr:
         pytest.skip("sandbox_apply is refused in this test environment")
-    # A python3 the profile can read; a uv or pyenv interpreter lives under the denied home.
+    # A fixed PATH keeps the lane independent of the host toolchain, covered separately below.
     record = mod.execute(plan, attempt / "result.md", env={**os.environ, "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
     return record, repo, cwd, attempt
 
@@ -4290,3 +4290,135 @@ def test_codex_writer_deleting_instructions_main_keeps_fails(tmp_path):
     record = lane_attempt(tmp_path, lane, "import shutil; shutil.rmtree('.agents')\n")
     assert record["error"] == "protected_instructions_changed"
     assert any(SKILL in warning for warning in record["warnings"])
+
+
+def fake_toolchain_home(tmp_path, monkeypatch):
+    """A home holding toolchains in the usual places, plus credential stores beside them."""
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    tools = {
+        "node": home / ".nvm/versions/node/v24.0.0/bin/node",
+        "python3": home / ".pyenv/versions/3.13.0/bin/python3.13",
+        "uv": home / ".local/bin/uv",
+    }
+    for name, path in tools.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f"#!/bin/sh\necho {name}-ran\n")
+        path.chmod(0o755)
+    (home / ".nvm/versions/node/v24.0.0/lib").mkdir()
+    (home / ".nvm/versions/node/v24.0.0/lib/runtime.js").write_text("runtime\n")
+    links = home / "links"
+    links.mkdir()
+    (links / "python3").symlink_to(tools["python3"])  # as pyenv-style or uv-style links are
+    (home / ".ssh").mkdir()
+    (home / ".ssh/id_ed25519").write_text("secret\n")
+    (home / ".ssh/bin").mkdir()
+    (home / ".ssh/bin/npm").write_text("#!/bin/sh\necho planted\n")
+    (home / ".ssh/bin/npm").chmod(0o755)
+    (home / ".local/share/opencode").mkdir(parents=True)
+    (home / ".local/share/opencode/auth.json").write_text("secret\n")
+    (home / "notes.txt").write_text("private\n")
+    search_path = os.pathsep.join([str(links), str(tools["node"].parent), str(tools["uv"].parent),
+                                   str(home / ".ssh/bin"), "/usr/bin", "/bin"])
+    return home, tools, search_path
+
+
+def test_toolchain_reads_resolve_path_commands_to_their_install_prefixes(tmp_path, monkeypatch):
+    home, tools, search_path = fake_toolchain_home(tmp_path, monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    plan = {"adapter": "claude", "mode": "read_only", "cwd": str(repo), "applied": {"add_dirs": []}}
+    files, _, directories = supervisor()._toolchain_reads(plan, repo, search_path)
+    assert home / ".nvm/versions/node/v24.0.0" in directories
+    assert home / ".pyenv/versions/3.13.0" in directories
+    # ~/.local holds a credential store, so only the uv executable is granted.
+    assert home / ".local/bin/uv" in files
+    for granted in [*files, *directories]:
+        assert granted != home and not supervisor().credential_path(granted)
+        assert not (home / ".local").is_relative_to(granted)
+
+
+def test_toolchain_reads_follow_a_workspace_venv_to_its_base_interpreter(tmp_path, monkeypatch):
+    home, tools, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    repo = tmp_path / "repo"
+    cwd = repo / "packages/app"
+    cwd.mkdir(parents=True)
+    git(tmp_path, "init", "-q", str(repo))
+    (repo / ".venv/bin").mkdir(parents=True)
+    (repo / ".venv/pyvenv.cfg").write_text(f"home = {tools['python3'].parent}\n")
+    (repo / ".venv/bin/python").symlink_to(tools["python3"])
+    plan = {"adapter": "claude", "mode": "read_only", "cwd": str(cwd), "applied": {"add_dirs": []}}
+    files, project_files, directories = supervisor()._toolchain_reads(plan, repo, "/usr/bin:/bin")
+    assert repo.resolve() / ".venv" in directories
+    assert home / ".pyenv/versions/3.13.0" in directories
+    assert not project_files  # no uv on PATH
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+def test_confined_read_only_lane_runs_home_toolchains_but_not_credentials(tmp_path, monkeypatch):
+    mod = supervisor()
+    if not mod._sandbox_exec_path():
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    home, tools, search_path = fake_toolchain_home(tmp_path, monkeypatch)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    plan = {"adapter": "claude", "mode": "read_only", "cwd": str(repo), "workspace_root": str(repo),
+            "run_dir": str(attempt), "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    profile = mod.os_confinement_profile(plan, search_path)
+
+    def run(command):
+        return subprocess.run([mod._sandbox_exec_path(), "-p", profile, "/bin/sh", "-c", command], cwd=repo,
+                              capture_output=True, text=True, env={**os.environ, "PATH": search_path})
+
+    probe = run("true")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert run("python3").stdout == "python3-ran\n"
+    assert run("node && cat " + shlex.quote(str(home / ".nvm/versions/node/v24.0.0/lib/runtime.js"))).stdout \
+        == "node-ran\nruntime\n"
+    assert run("uv").stdout == "uv-ran\n"
+    for secret in (home / ".ssh/id_ed25519", home / ".local/share/opencode/auth.json", home / "notes.txt"):
+        assert run("cat " + shlex.quote(str(secret))).returncode != 0, secret
+    # A tool planted in a credential store is not granted through PATH.
+    assert run("npm").returncode != 0
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("uv"), reason="needs sandbox-exec and uv")
+def test_confined_read_only_lane_runs_uv_with_a_home_interpreter(tmp_path):
+    mod = supervisor()
+    if not mod._sandbox_exec_path():
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    base = Path(sys.base_prefix).resolve()
+    if not base.is_relative_to(Path.home().resolve()):
+        pytest.skip("this interpreter is not installed under home")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pyproject.toml").write_text('[project]\nname = "probe"\nversion = "0"\nrequires-python = ">=3.9"\n'
+                                         "dependencies = []\n")
+    environment = {**os.environ, "UV_PYTHON": str(Path(sys.base_prefix) / "bin/python3"),
+                   "UV_CACHE_DIR": str(tmp_path / "uv-cache")}
+    environment.pop("VIRTUAL_ENV", None)
+    subprocess.run(["uv", "sync", "--offline", "-q"], cwd=repo, env=environment, check=True, timeout=120)
+    attempt = tmp_path / "attempt"
+    (attempt / "tmp/cache").mkdir(parents=True)
+    plan = {"adapter": "claude", "mode": "read_only", "cwd": str(repo), "workspace_root": str(repo),
+            "run_dir": str(attempt), "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    lane_path = os.pathsep.join([str(Path(shutil.which("uv")).parent), "/usr/bin", "/bin"])
+    profile = mod.os_confinement_profile(plan, lane_path)
+    result = subprocess.run(
+        [mod._sandbox_exec_path(), "-p", profile, "uv", "run", "--frozen", "--offline", "python", "-c", "print(1)"],
+        cwd=repo, capture_output=True, text=True, timeout=120,
+        env={**environment, "PATH": lane_path, "UV_CACHE_DIR": str(attempt / "tmp/cache/uv"),
+             "TMPDIR": str(attempt / "tmp")},
+    )
+    if result.returncode and "sandbox_apply" in result.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "1\n"
+    ssh = Path.home() / ".ssh"
+    if ssh.is_dir():
+        listing = subprocess.run([mod._sandbox_exec_path(), "-p", profile, "/bin/ls", str(ssh)],
+                                 capture_output=True, text=True)
+        assert listing.returncode != 0

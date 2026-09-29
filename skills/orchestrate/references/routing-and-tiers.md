@@ -130,7 +130,10 @@ runs keep bash declared for Zen but deny every real command. Fabric honours
 read-only `cwd` for OpenCode file access. On macOS, read-only OpenCode and agy
 runs are confined by `sandbox-exec` to `cwd`, `add_dirs` and their own state:
 home, shared temp and the rest of the workspace are unreadable. OpenCode may
-also read the project config it loads between `cwd` and the repository root. Use `opencode models`
+also read the project config it loads between `cwd` and the repository root.
+Every read-only profile reads the Python, uv and Node toolchain on PATH or in a
+`.venv` between `cwd` and the repository root, including one installed under
+home, but never home itself or a credential store. Use `opencode models`
 to discover a live slug when overriding with `--model`.
 Nested vendor ids attribute as that vendor; unparseable Zen free ids fall back
 to `generic-open` (worker only, not assurance). See
