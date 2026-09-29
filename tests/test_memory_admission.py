@@ -1,12 +1,13 @@
 """Focused checks for provider admission and its visible waiting state."""
 
 import json
+import os
 import subprocess
 import threading
 import time
 import pytest
 
-from skills.orchestrate.scripts import memory_admission, process_info
+from skills.orchestrate.scripts import memory_admission
 from skills.orchestrate.scripts.fabric_records import render_digest
 
 
@@ -224,7 +225,7 @@ def test_waiting_writer_is_admitted_after_simulated_45_minutes(tmp_path, monkeyp
 def live_owner():
     process = subprocess.Popen(["sleep", "60"])
     try:
-        yield process.pid, process_info.start_time(process.pid)
+        yield process.pid, memory_admission._start_epoch(process.pid)
     finally:
         process.kill()
         process.wait()
@@ -235,7 +236,7 @@ def _queued_receipt(queue_root, name, *, since, floor, pid, started, state="queu
     receipt.parent.mkdir(parents=True, exist_ok=True)
     admission = {"floor_percent": floor}
     if pid is not None:
-        admission.update(owner_pid=pid, owner_started_at=started)
+        admission.update(owner_pid=pid, owner_start_epoch=started)
     receipt.write_text(json.dumps({"state": state, "queue_reason": "memory",
                                    "timing": {"queued_since": since}, "admission": admission}),
                        encoding="utf-8")
@@ -297,8 +298,8 @@ def _dead_pid():
 @pytest.mark.parametrize("owner", ["dead", "reused", "missing"])
 def test_stale_queued_receipt_does_not_block_newer_waiter(tmp_path, owner, live_owner):
     queue_root = tmp_path / ".agent-run"
-    pid, started = {"dead": (_dead_pid(), "Wed Sep 30 00:00:00 2026"),
-                    "reused": (live_owner[0], "Thu Jan  1 00:00:00 1970"),
+    pid, started = {"dead": (_dead_pid(), live_owner[1]),
+                    "reused": (live_owner[0], live_owner[1] - 3600),
                     "missing": (None, None)}[owner]
     _queued_receipt(queue_root, "stale", since=10, floor=5, pid=pid, started=started)
     lease = _admit(_must_not_wait, lambda: False, lambda _: None,
@@ -316,6 +317,98 @@ def test_older_waiter_below_its_floor_does_not_block_newer_reviewer(tmp_path, li
                    queue_root=queue_root, queued_since=20)
     assert lease is not None
     lease.close()
+
+
+def _age(receipt, polls):
+    old = time.time() - polls * memory_admission.POLL_SECONDS
+    os.utime(receipt, (old, old))
+
+
+def test_silent_live_owner_does_not_block_newer_waiter(tmp_path, live_owner):
+    queue_root = tmp_path / ".agent-run"
+    pid, started = live_owner
+    receipt = _queued_receipt(queue_root, "stuck", since=10, floor=5, pid=pid, started=started)
+    _age(receipt, memory_admission.FRESH_POLLS + 1)
+
+    lease = _admit(_must_not_wait, lambda: False, lambda _: None,
+                   probe=lambda: (1300, 16384), queue_root=queue_root, queued_since=20)
+    assert lease is not None
+    lease.close()
+
+
+def test_zombie_owner_holds_no_place_once_its_receipt_goes_quiet(tmp_path, monkeypatch):
+    zombie = subprocess.Popen(["true"])
+    try:
+        time.sleep(0.1)  # exited but unreaped: signal 0 still reaches it
+        # A zombie can still report its start identity; only freshness excludes it.
+        monkeypatch.setattr(memory_admission, "_start_epoch", lambda pid: 1000.0)
+        queue_root = tmp_path / ".agent-run"
+        receipt = _queued_receipt(queue_root, "zombie", since=10, floor=5,
+                                  pid=zombie.pid, started=1000.5)
+        assert memory_admission._older_waiter_floors(queue_root, 20) == [5]
+        _age(receipt, memory_admission.FRESH_POLLS + 1)
+        assert memory_admission._older_waiter_floors(queue_root, 20) == []
+    finally:
+        zombie.wait()
+
+
+def test_waiter_that_queued_during_lock_contention_keeps_its_place(tmp_path, monkeypatch, live_owner):
+    queue_root = tmp_path / ".agent-run"
+    pid, started = live_owner
+    path = memory_admission.lock_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    holder = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    memory_admission.fcntl.flock(holder, memory_admission.fcntl.LOCK_EX)
+    events = []
+
+    def on_pause():
+        if not events:
+            # While this waiter waits for the lock, an earlier one queues and releases it.
+            _queued_receipt(queue_root, "older", since=10, floor=5, pid=pid, started=started)
+            os.close(holder)
+            events.append("older queued")
+        elif events == ["older queued"]:
+            _queued_receipt(queue_root, "older", since=10, floor=5, pid=pid, started=started,
+                            state="running")
+            events.append("older admitted")
+
+    clock = _Clock(on_pause)
+    monkeypatch.setattr(memory_admission.time, "monotonic", clock.monotonic)
+    monkeypatch.setattr(memory_admission, "POLL_SECONDS", 1)
+    reasons = []
+    lease = _admit(reasons.append, lambda: False, lambda _: None,
+                   probe=lambda: (1300, 16384), pause=clock.pause,
+                   queue_root=queue_root, queued_since=20)
+    assert lease is not None
+    lease.close()
+    assert events == ["older queued", "older admitted"]
+    assert reasons[0].startswith("waiting for memory admission lock")
+    assert reasons[-1].startswith("waiting for earlier memory admission: 7.9% available")
+
+
+def test_earlier_waiter_admitted_during_probe_is_not_waited_for(tmp_path, monkeypatch, live_owner):
+    queue_root = tmp_path / ".agent-run"
+    pid, started = live_owner
+    _queued_receipt(queue_root, "older", since=10, floor=5, pid=pid, started=started)
+
+    def probe():
+        _queued_receipt(queue_root, "older", since=10, floor=5, pid=pid, started=started,
+                        state="running")
+        return (1300, 16384)
+
+    clock = _Clock()
+    monkeypatch.setattr(memory_admission.time, "monotonic", clock.monotonic)
+    pauses = []
+
+    def pause(duration):
+        pauses.append(duration)
+        clock.pause(duration)
+
+    lease = _admit(_must_not_wait, lambda: False, lambda _: None, probe=probe, pause=pause,
+                   queue_root=queue_root, queued_since=20)
+    assert lease is not None
+    lease.close()
+    assert pauses == [pytest.approx(memory_admission.RESCAN_PAUSE_SECONDS)]
 
 
 def test_wait_behind_earlier_waiter_can_be_cancelled_or_expire(tmp_path, monkeypatch, live_owner):

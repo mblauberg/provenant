@@ -20,6 +20,11 @@ import process_info
 
 POLL_SECONDS = 15
 SETTLE_SECONDS = 20
+# A waiter republishes its receipt at least once per poll; one silent for three polls
+# (a zombie, a suspended or stuck owner) no longer holds a place in the queue.
+FRESH_POLLS = 3
+START_TOLERANCE_SECONDS = 2
+RESCAN_PAUSE_SECONDS = 0.1
 
 
 class MemoryUnavailableError(Exception):
@@ -139,7 +144,7 @@ def _lock_file(on_warning: Callable[[str], None]) -> int | None:
 def queue_entry(workspace_root: Path, mode: str) -> dict:
     """Owner identity and floor a queued attempt publishes for later waiters."""
     pid = os.getpid()
-    entry: dict = {"owner_pid": pid, "owner_started_at": process_info.start_time(pid)}
+    entry: dict = {"owner_pid": pid, "owner_start_epoch": _start_epoch(pid)}
     try:
         entry["floor_percent"] = floor_percent(workspace_root, mode)
     except ValueError:
@@ -158,9 +163,14 @@ def _finite(value: object) -> bool:
     return type(value) in (int, float) and math.isfinite(value)
 
 
+def _start_epoch(pid: int) -> float | None:
+    info = process_info.process(pid)
+    return info.start_epoch if info is not None else None
+
+
 def _owner_alive(pid: object, started: object) -> bool:
     # This owner admits one attempt at a time, so its own queued receipts are stale.
-    if type(pid) is not int or pid <= 0 or pid == os.getpid() or not isinstance(started, str) or not started:
+    if type(pid) is not int or pid <= 0 or pid == os.getpid() or not _finite(started):
         return False
     try:
         os.kill(pid, 0)
@@ -169,21 +179,25 @@ def _owner_alive(pid: object, started: object) -> bool:
     except OSError:
         return False
     # A reused pid, including one after a reboot, has a different start identity.
-    return process_info.start_time(pid) == started
+    observed = _start_epoch(pid)
+    return _finite(observed) and abs(observed - started) <= START_TOLERANCE_SECONDS
 
 
 def _older_waiter_floors(queue_root: Path | None, queued_since: float | None) -> list[float]:
     """Floors of live waiters that entered this project's queue before this one.
 
-    A receipt with no owner identity, a dead owner or a reused pid does not hold the queue.
+    A receipt with no owner identity, a dead owner, a reused pid or no republish within
+    FRESH_POLLS polls does not hold the queue: ordering is best effort and liveness wins.
     """
     if queue_root is None or not _finite(queued_since):
         return []
+    fresh_after = time.time() - FRESH_POLLS * POLL_SECONDS
     floors = []
     for receipt in queued_receipts(queue_root):
         try:
             metadata = receipt.lstat()
-            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            if (not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1
+                    or metadata.st_mtime < fresh_after):
                 continue
             row = json.loads(receipt.read_text(encoding="utf-8"))
             if row.get("state") != "queued" or row.get("queue_reason") != "memory":
@@ -192,7 +206,7 @@ def _older_waiter_floors(queue_root: Path | None, queued_since: float | None) ->
             entry = row.get("admission", {})
             floor = entry.get("floor_percent")
             if (_finite(since) and since < queued_since and _finite(floor)
-                    and _owner_alive(entry.get("owner_pid"), entry.get("owner_started_at"))):
+                    and _owner_alive(entry.get("owner_pid"), entry.get("owner_start_epoch"))):
                 floors.append(floor)
         except (OSError, UnicodeError, ValueError, TypeError, AttributeError):
             continue
@@ -271,6 +285,9 @@ def admit(
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
             raise MemoryUnavailableError("memory admission wait expired")
+        if contended:
+            # An earlier waiter may have queued while this one waited for the lock.
+            older_floors = _older_waiter_floors(queue_root, queued_since)
         try:
             available, total = probe()
             if total <= 0 or available < 0:
@@ -301,9 +318,11 @@ def admit(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise MemoryUnavailableError("memory admission wait expired")
-        # The scan predates any wait for the lock; retry at once if the earlier waiter has gone.
+        # Retry promptly if the earlier waiter has been admitted or gone since the scan.
         if percent >= floor and not any(
                 older <= percent for older in _older_waiter_floors(queue_root, queued_since)):
+            if not _hold(time.monotonic() + RESCAN_PAUSE_SECONDS, cancelled, pause):
+                return None
             continue
         elapsed = waited_seconds + time.monotonic() - started
         state ="waiting for earlier memory admission" if percent >= floor else "waiting for memory"

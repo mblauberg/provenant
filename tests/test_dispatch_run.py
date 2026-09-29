@@ -474,7 +474,7 @@ def test_queued_receipt_is_published_where_admission_scans(tmp_path, monkeypatch
     assert row["timing"]["queued_since"] == queued_since
     assert row["admission"] == {
         "owner_pid": os.getpid(),
-        "owner_started_at": admission.process_info.start_time(os.getpid()),
+        "owner_start_epoch": admission._start_epoch(os.getpid()),
         "floor_percent": admission.floor_percent(tmp_path, args.access_mode),
     }
 
