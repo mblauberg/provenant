@@ -777,6 +777,10 @@ def build_command(
     return command
 
 
+# Statuses whose provider turn ended before a result, so its session may be missing.
+INCOMPLETE_TURN_STATUSES = {"timed_out", "cancelled", "stalled", "startup_timeout", "interrupted"}
+
+
 FAST_PLAN_SHELL_ENV_READS = {
     "CF_DISPATCH_IDLE_SECONDS", "CF_DISPATCH_AGY_ADD_DIR", "CF_DISPATCH_ENABLE_KIRO",
     "CF_DISPATCH_ENABLE_COPILOT", "CF_DISPATCH_CURSOR_MODEL", "CF_DISPATCH_KIRO_MODEL",
@@ -1483,7 +1487,7 @@ def prepare_resume(args):
             setattr(args, field, route[field])
     args.resume_previous=previous
     observed_session=False
-    if args.tool=="claude" and previous["status"] in {"timed_out","cancelled","stalled","interrupted"}:
+    if args.tool=="claude" and previous["status"] in INCOMPLETE_TURN_STATUSES:
         events=previous["paths"].get("events")
         if events:
             retained=retained_path(args.run_dir,events)
@@ -1504,11 +1508,11 @@ def prepare_resume(args):
                     observed_session=True
                     break
     if not args.resume_session or args.tool=="copilot" or (
-        args.tool=="claude" and previous["status"] in {"timed_out","cancelled","stalled","interrupted"}
+        args.tool=="claude" and previous["status"] in INCOMPLETE_TURN_STATUSES
         and not observed_session
     ):
         if (args.tool=="claude" and previous["mode"]=="worktree_write"
-            and previous["status"] in {"timed_out","cancelled","stalled","interrupted"}):
+            and previous["status"] in INCOMPLETE_TURN_STATUSES):
             raise ValueError("Claude session unavailable after incomplete writer turn; review worktree changes, then dispatch a new run")
         args.resume_session=None
         args.resume_relaunch=resume_relaunch_context(args.run_dir,previous)
@@ -1911,7 +1915,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     and adapter_record.get("status")=="failed"
                     and re.search(r"no conversation found",adapter_record.get("evidence",{}).get("excerpt") or "",re.I)):
                     previous=args.resume_previous
-                    if (previous["mode"]=="worktree_write" and previous["status"] in {"timed_out","cancelled","stalled","interrupted"}):
+                    if (previous["mode"]=="worktree_write" and previous["status"] in INCOMPLETE_TURN_STATUSES):
                         adapter_record["status"]="rejected"
                         adapter_record["fix"]="Review worktree changes, then dispatch a new run."
                         adapter_record["evidence"]["signature"]="resume_session_missing"

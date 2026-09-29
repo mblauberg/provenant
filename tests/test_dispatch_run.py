@@ -2926,6 +2926,32 @@ def test_fallback_reentry_does_not_charge_front_door_phases_again(tmp_path, monk
                ('validate', 'run_dir_init', 'snapshot', 'owner_setup'))
 
 
+def test_startup_timeout_falls_back_when_the_dispatch_allows(tmp_path, monkeypatch):
+    run, prompt, command = real_owner_fixture(
+        tmp_path, monkeypatch,
+        'import sys,json,time\nsys.stdin.read()\n'
+        'if "opus" in sys.argv: time.sleep(60)\n'
+        'print(json.dumps({"type":"result","result":"DONE"}))\n',
+    )
+    isolate_fabric_plan_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('CF_DISPATCH_STARTUP_SECONDS', '1')
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
+    args.fallback = json.dumps(['claude/sonnet'])
+    assert mod.dispatch(args) == 0
+    attempts = sorted(run.glob('tasks/*/attempt-*/attempt.json'))
+    first, second = (json.loads(path.read_text()) for path in attempts)
+    assert first['status'] == 'startup_timeout'
+    assert first['retryable'] is True
+    assert first['evidence']['signature'] == 'startup_watchdog'
+    assert first['digest'].startswith('startup_timeout ')
+    assert 're-route to another model or adapter' in first['digest']
+    assert second['status'] == 'ok'
+    assert second['provenance']['fallback_from']['status'] == 'startup_timeout'
+
+
 def test_finalize_phase_includes_receipt_publication(tmp_path, monkeypatch):
     run, prompt, command = real_owner_fixture(
         tmp_path, monkeypatch,
