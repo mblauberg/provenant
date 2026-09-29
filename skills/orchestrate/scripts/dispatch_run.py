@@ -1446,6 +1446,9 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     if status not in TERMINAL_STATUSES: status="failed"
     for field in ("session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","warnings","reaped","spared","provenance","pgid","last_progress_at"):
         if field in adapter: row[field]=adapter[field]
+    # The provider's provenance replaces the recorded one; keep the confidential request so resume and handoff honour it.
+    if getattr(args,"confidential",False) and isinstance(row.get("provenance"),dict):
+        row["provenance"]["requested"]={**(row["provenance"].get("requested") or {}),"confidential":True}
     reason=getattr(args,"pick_reason",None)
     if reason and isinstance(row.get("provenance"),dict) and isinstance(row["provenance"].get("line"),str):
         row["provenance"]["line"]=with_pick_reason(row["provenance"]["line"],reason)
