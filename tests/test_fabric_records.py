@@ -74,7 +74,7 @@ def test_cooldown_normalizes_registered_id_and_preserves_origin(tmp_path, monkey
     path = tmp_path / 'cooldowns.json'
     records().write_cooldown(row, path=path)
     first = json.loads(path.read_text())['cooldowns']
-    assert 'codex/gpt-6-sol' in first
+    assert 'codex/gpt-6.1-sol' in first
     row['run_id'] = 'synthetic'
     row['evidence']['signature'] = 'cooldown_active'
     records().write_cooldown(row, path=path)
@@ -127,7 +127,7 @@ def test_route_health_tracks_recent_outcomes_and_expires_stale_cooldowns(tmp_pat
     row = json.loads((FIX / "attempt.json").read_text())
     row.update(status="failed", task_class="review", run_id="run-1")
     row["provenance"]["requested"]["adapter"] = "codex"
-    row["provenance"]["resolved_model"] = "gpt-6-sol"
+    row["provenance"]["resolved_model"] = "gpt-6.1-sol"
     module.write_route_health(row, at=datetime(2026, 9, 23, tzinfo=UTC))
     row.update(status="ok", run_id="run-2")
     module.write_route_health(row, at=datetime(2026, 9, 24, tzinfo=UTC))
@@ -135,10 +135,10 @@ def test_route_health_tracks_recent_outcomes_and_expires_stale_cooldowns(tmp_pat
     module.write_route_health(row, at=datetime(2026, 9, 24, 1, tzinfo=UTC))
     cooldowns = tmp_path / "cooldowns.json"
     cooldowns.write_text(json.dumps({"schema": "fabric.cooldowns.v1", "cooldowns": {
-        "codex/gpt-6-sol": {"cooling_until": "2026-09-23T01:00:00Z", "status": "rate_limited"},
+        "codex/gpt-6.1-sol": {"cooling_until": "2026-09-23T01:00:00Z", "status": "rate_limited"},
     }}))
     health = module.read_route_health(at=datetime(2026, 9, 24, 1, tzinfo=UTC))
-    item = health["codex|gpt-6-sol|review"]
+    item = health["codex|gpt-6.1-sol|review"]
     assert [entry["status"] for entry in item["recent"]] == ["rate_limited", "ok", "failed"]
     assert item["recent_failures"] == 1
     assert item["rate_limits"] == 1
