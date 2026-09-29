@@ -261,6 +261,30 @@ def workspace_identity(workspace: Path, provider_cwd: Path | None = None) -> dic
     return identity
 
 
+def writer_worktree_state(cwd: str) -> tuple[str, bytes] | None:
+    """HEAD and porcelain status of a writer's worktree, or None when Git cannot say."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    try:
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd, env=env, capture_output=True,
+                              text=True, timeout=10, check=True).stdout.strip()
+        status = subprocess.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+                                cwd=cwd, env=env, capture_output=True, timeout=10, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return head, status
+
+
+def guard_writer_startup_timeout(record: dict[str, Any], start: tuple[str, bytes] | None, cwd: str) -> None:
+    """A silent writer may still have edited files; fall back only over a provably untouched worktree."""
+    if record.get("status") != "startup_timeout":
+        return
+    if start is not None and not start[1] and writer_worktree_state(cwd) == start:
+        return
+    record["retryable"] = False
+    record["fix"] = ("inspect the worktree: it changed or was dirty when the silent writer timed out; "
+                     "then dispatch again on another model or adapter")
+
+
 def valid_regular_result(run_dir: Path, path: Path) -> bool:
     try:
         contained_regular_path(run_dir, path.relative_to(run_dir), "retained evidence")
@@ -1887,6 +1911,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 def cancellation():
                     return owner_cancel[0] or cancellation_marker_present(run_dir,attempt_dir) or (batch_dir is not None and cancellation_marker_present(run_dir,batch_dir))
                 admitted = admit_attempt(active, cancellation)
+                writer_start = (writer_worktree_state(plan["cwd"])
+                                if admitted and plan["mode"] == "worktree_write" else None)
                 spawn_started = time.monotonic()
                 if not admitted:
                     plan["warnings"] = active["warnings"]
@@ -1943,6 +1969,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 if hasattr(args,"resume_relaunch") and not relaunch_skipped:
                     adapter_record["provenance"]["notes"].append("resumed_by_relaunch")
                     adapter_record["warnings"].append("resume: relaunched")
+                if admitted and plan["mode"] == "worktree_write":
+                    guard_writer_startup_timeout(adapter_record, writer_start, plan["cwd"])
                 args._last_plan=plan
             else:
                 adapter_record=plan

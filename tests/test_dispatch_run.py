@@ -2952,6 +2952,36 @@ def test_startup_timeout_falls_back_when_the_dispatch_allows(tmp_path, monkeypat
     assert second['provenance']['fallback_from']['status'] == 'startup_timeout'
 
 
+@pytest.mark.parametrize('edits', [False, True])
+def test_writer_startup_timeout_falls_back_only_over_an_untouched_worktree(tmp_path, monkeypatch, edits):
+    run, prompt, command = real_owner_fixture(
+        tmp_path, monkeypatch,
+        'import sys,json,time\nfrom pathlib import Path\nsys.stdin.read()\n'
+        'if "opus" in sys.argv:\n'
+        + ('    Path("partial.txt").write_text("half done")\n' if edits else '')
+        + '    time.sleep(60)\n'
+        'print(json.dumps({"type":"result","result":"DONE"}))\n',
+    )
+    worktree = make_worktree(tmp_path)
+    isolate_fabric_plan_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('CF_DISPATCH_STARTUP_SECONDS', '1')
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:] + ['--access-mode', 'worktree_write', '--worktree', str(worktree)])
+    args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
+    args.fallback = json.dumps(['claude/sonnet'])
+    mod.dispatch(args)
+    attempts = [json.loads(path.read_text()) for path in sorted(run.glob('tasks/*/attempt-*/attempt.json'))]
+    assert attempts[0]['status'] == 'startup_timeout'
+    if edits:
+        assert len(attempts) == 1
+        assert attempts[0]['retryable'] is False
+        assert attempts[0]['fix'].startswith('inspect the worktree')
+        assert (worktree / 'partial.txt').read_text() == 'half done'
+    else:
+        assert [row['status'] for row in attempts] == ['startup_timeout', 'ok']
+
+
 def test_finalize_phase_includes_receipt_publication(tmp_path, monkeypatch):
     run, prompt, command = real_owner_fixture(
         tmp_path, monkeypatch,
