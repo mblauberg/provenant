@@ -1773,7 +1773,7 @@ def test_unwritable_output_path_cannot_certify_success():
             bin_dir / "codex",
             """#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{"models":[{"slug":"gpt-6-sol","supported_reasoning_levels":[{"effort":"high"},{"effort":"max"},{"effort":"ultra"}]}]}'
+              printf '%s\n' '{"models":[{"slug":"gpt-6.1-sol","supported_reasoning_levels":[{"effort":"high"},{"effort":"max"},{"effort":"ultra"}]}]}'
               exit 0
             fi
             echo OK
