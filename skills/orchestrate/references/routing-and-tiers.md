@@ -58,8 +58,8 @@ and `xhigh` for critical review and for legwork that needs judgement. The
 native Codex CLI reports `max` and `ultra` for Astra and the Responses API
 stops at `max`; those are separate surfaces, only the runtime capability probe
 decides what the adapter can dispatch, and the catalogue defaults to neither.
-Every substitution is recorded. The workhorse alias lists GPT-6 Sol
-(`gpt-6-sol`) first, with GPT-6 Luna (`gpt-6-luna`) as its admissible
+Every substitution is recorded. The workhorse alias lists GPT-6.1 Sol
+(`gpt-6.1-sol`) first, with GPT-6 Luna (`gpt-6-luna`) as its admissible
 fallback; scout is Luna. Both run at `high` by default and are raised to
 `xhigh` or `max` when a slice warrants it. GPT-5.6 models and Terra are no
 longer catalogue routes. Claude and
