@@ -138,6 +138,15 @@ def test_code_review_discipline_cases_have_prompt_and_expected_behaviour():
         assert case["expected"].strip()
 
 
+def test_orchestrate_discipline_cases_cover_the_silent_no_change_wake():
+    data = load(ROOT / "skills" / "orchestrate" / "evals" / "discipline_cases.yaml")
+    for case in data["cases"]:
+        assert set(case) == {"prompt", "expected"}
+        assert case["prompt"].strip()
+        assert case["expected"].strip()
+    assert any("without sending the owner a message" in case["expected"] for case in data["cases"])
+
+
 def test_current_portfolio_routing_plan_matches_the_live_catalogue_and_has_no_result():
     root = ROOT / "docs" / "evals" / "skill-portfolio-2026"
     skills = sorted(path.parent.name for path in (ROOT / "skills").glob("*/SKILL.md"))

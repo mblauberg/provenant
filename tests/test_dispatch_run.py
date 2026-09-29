@@ -1044,7 +1044,7 @@ def test_nonzero_provider_exit_is_recorded_without_substitution(tmp_path: Path) 
         bin_dir / "codex",
         """#!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-6-sol","supported_reasoning_levels":[{"effort":"high"}]},{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6.1-sol","supported_reasoning_levels":[{"effort":"high"}]},{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
         fi
         cat >/dev/null
