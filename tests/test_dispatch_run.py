@@ -2952,34 +2952,38 @@ def test_startup_timeout_falls_back_when_the_dispatch_allows(tmp_path, monkeypat
     assert second['provenance']['fallback_from']['status'] == 'startup_timeout'
 
 
-@pytest.mark.parametrize('edits', [None, 'partial.txt', 'config/installation.json'])
+@pytest.mark.parametrize('edits', [None, 'partial.txt', 'config/installation.json', 'local-config/settings.json', 'cap'])
 def test_writer_startup_timeout_falls_back_only_over_an_untouched_worktree(tmp_path, monkeypatch, edits):
+    path = edits if edits not in {None, 'cap'} else None
     run, prompt, command = real_owner_fixture(
         tmp_path, monkeypatch,
         'import sys,json,time\nfrom pathlib import Path\nsys.stdin.read()\n'
         'if "opus" in sys.argv:\n'
-        + (f'    Path({edits!r}).write_text("half done")\n' if edits else '')
-        + '    Path("node_modules/launch.lock").write_text("launch churn")\n'
+        + (f'    Path({path!r}).write_text("half done")\n' if path else '')
+        # Churn under skipped directories never blocks fallback.
+        + '    for churn in ("node_modules/launch.lock", "pkg/__pycache__/mod.pyc", ".pytest_cache/v"):\n'
+        '        Path(churn).write_text("launch churn")\n'
         '    time.sleep(60)\n'
         'print(json.dumps({"type":"result","result":"DONE"}))\n',
     )
     worktree = make_worktree(tmp_path)
-    # An ignored config the writer may rewrite, and an ignored cache it may churn.
-    (worktree / 'config').mkdir()
-    (worktree / 'config/installation.json').write_text('{}')
-    (worktree / 'node_modules').mkdir()
-    (worktree / 'node_modules/cache').write_text('')
+    # An ignored file, a file inside an ignored directory, and ignored caches.
+    for name in ('config/installation.json', 'local-config/settings.json', 'node_modules/cache',
+                 'pkg/__pycache__/old.pyc', '.pytest_cache/v'):
+        (worktree / name).parent.mkdir(parents=True, exist_ok=True)
+        (worktree / name).write_text('{}')
     exclude = Path(subprocess.check_output(['git', '-C', str(worktree), 'rev-parse', '--git-path', 'info/exclude'],
                                            text=True).strip())
     exclude = exclude if exclude.is_absolute() else worktree / exclude
     exclude.parent.mkdir(parents=True, exist_ok=True)
-    exclude.write_text('config/installation.json\nnode_modules/\n')
-    old = time.time() - 60
-    os.utime(worktree / 'config/installation.json', (old, old))
+    exclude.write_text('config/installation.json\nlocal-config/\nnode_modules/\npkg/\n.pytest_cache/\n')
+    time.sleep(1.2)  # setup must predate the launch tolerance
     isolate_fabric_plan_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv('CF_DISPATCH_STARTUP_SECONDS', '1')
     mod = load_dispatch_module()
+    if edits == 'cap':
+        monkeypatch.setattr(mod, 'STARTUP_WALK_MAX_ENTRIES', 2)
     args = mod.parser().parse_args(command[2:] + ['--access-mode', 'worktree_write', '--worktree', str(worktree)])
     args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
     args.fallback = json.dumps(['claude/sonnet'])
@@ -2990,9 +2994,10 @@ def test_writer_startup_timeout_falls_back_only_over_an_untouched_worktree(tmp_p
         assert len(attempts) == 1
         assert attempts[0]['retryable'] is False
         assert attempts[0]['fix'].startswith('inspect the worktree')
-        assert (worktree / edits).read_text() == 'half done'
     else:
         assert [row['status'] for row in attempts] == ['startup_timeout', 'ok']
+    if path:
+        assert (worktree / path).read_text() == 'half done'
 
 
 def test_finalize_phase_includes_receipt_publication(tmp_path, monkeypatch):

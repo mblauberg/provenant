@@ -261,52 +261,63 @@ def workspace_identity(workspace: Path, provider_cwd: Path | None = None) -> dic
     return identity
 
 
-# Ignored paths a launch itself churns; an edit under them is not writer work.
-STARTUP_SNAPSHOT_SKIP = {".agent-run", "node_modules", ".venv", "__pycache__", ".pytest_cache", "dist", "build"}
+# Directories a launch itself churns, or Git owns; edits under them are not writer work.
+STARTUP_WALK_SKIP = {".git", ".agent-run", "node_modules", ".venv", "__pycache__", ".pytest_cache", "dist", "build"}
+STARTUP_WALK_MAX_ENTRIES = 200_000
+STARTUP_WALK_MAX_SECONDS = 5.0
 
 
-def writer_worktree_state(cwd: str) -> tuple[str, bytes, tuple[Any, ...]] | None:
-    """HEAD, porcelain status and an ignored-file fingerprint of a writer's worktree.
-
-    None when Git cannot say. Ignored files are fingerprinted by size and mtime,
-    so a silent edit to an ignored config still counts as a change.
-    """
+def writer_worktree_state(cwd: str) -> tuple[str, bytes] | None:
+    """HEAD and porcelain status of a writer's worktree, or None when Git cannot say."""
     env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     try:
-        root, head = subprocess.run(["git", "rev-parse", "--show-toplevel", "HEAD"], cwd=cwd, env=env,
-                                    capture_output=True, text=True, timeout=10, check=True).stdout.splitlines()
-        listing = subprocess.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=all",
-                                  "--ignored=matching"],
-                                 cwd=cwd, env=env, capture_output=True, timeout=10, check=True).stdout
-    except (OSError, subprocess.SubprocessError, ValueError):
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd, env=env, capture_output=True,
+                              text=True, timeout=10, check=True).stdout.strip()
+        status = subprocess.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+                                cwd=cwd, env=env, capture_output=True, timeout=10, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
         return None
-    status, ignored = [], []
-    entries = iter(listing.split(b"\0"))
-    for entry in entries:
-        if not entry:
-            continue
-        if b"R" in entry[:2] or b"C" in entry[:2]:  # a rename or copy carries its source as the next field
-            entry += b"\0" + next(entries, b"")
-        if not entry.startswith(b"!! "):
-            status.append(entry)
-            continue
-        path = os.fsdecode(entry[3:])
-        parts = path.rstrip("/").split("/")
-        if STARTUP_SNAPSHOT_SKIP.intersection(parts) or path.endswith(".pyc"):
-            continue
+    return head, status
+
+
+def modified_since(cwd: str, since: float) -> bool:
+    """Whether any entry under cwd, ignored files included, changed at or after since.
+
+    Hitting the entry or time cap, or an unreadable directory, counts as changed.
+    """
+    deadline = time.monotonic() + STARTUP_WALK_MAX_SECONDS
+    visited = 0
+    pending = [cwd]
+    while pending:
+        directory = pending.pop()
         try:
-            metadata = os.lstat(Path(root) / path)
-            ignored.append((path, metadata.st_mtime_ns, metadata.st_size))
+            metadata = os.lstat(directory)
+            if max(metadata.st_mtime, metadata.st_ctime) >= since:
+                return True  # a created, renamed or deleted child
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    visited += 1
+                    if visited > STARTUP_WALK_MAX_ENTRIES or time.monotonic() > deadline:
+                        return True
+                    if entry.is_dir(follow_symlinks=False):
+                        if entry.name not in STARTUP_WALK_SKIP:
+                            pending.append(entry.path)
+                        continue
+                    metadata = entry.stat(follow_symlinks=False)
+                    if max(metadata.st_mtime, metadata.st_ctime) >= since:
+                        return True
         except OSError:
-            ignored.append((path, None, None))
-    return head, b"\0".join(status), tuple(ignored)
+            return True
+    return False
 
 
 def guard_writer_startup_timeout(record: dict[str, Any], start: tuple[Any, ...] | None, cwd: str) -> None:
     """A silent writer may still have edited files; fall back only over a provably untouched worktree."""
     if record.get("status") != "startup_timeout":
         return
-    if start is not None and not start[1] and writer_worktree_state(cwd) == start:
+    state, launched = start or (None, 0.0)
+    if (state is not None and not state[1] and writer_worktree_state(cwd) == state
+            and not modified_since(cwd, launched - 1.0)):
         return
     record["retryable"] = False
     record["fix"] = ("inspect the worktree: it changed or was dirty when the silent writer timed out; "
@@ -1939,7 +1950,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 def cancellation():
                     return owner_cancel[0] or cancellation_marker_present(run_dir,attempt_dir) or (batch_dir is not None and cancellation_marker_present(run_dir,batch_dir))
                 admitted = admit_attempt(active, cancellation)
-                writer_start = (writer_worktree_state(plan["cwd"])
+                # Snapshot before launch: the timeout walk compares mtimes with this wall time.
+                writer_start = ((writer_worktree_state(plan["cwd"]), time.time())
                                 if admitted and plan["mode"] == "worktree_write" else None)
                 spawn_started = time.monotonic()
                 if not admitted:
