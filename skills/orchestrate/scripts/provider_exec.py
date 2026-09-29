@@ -93,6 +93,9 @@ def credential_path(path):
     stores = [home / name for name in (
         '.ssh', '.aws', '.azure', '.gnupg', '.codex', '.claude',
         '.gemini', '.cursor', '.kiro', '.docker', '.kube', '.netrc', '.npmrc',
+        '.git-credentials', '.pypirc', '.pgpass', '.vault-token', '.password-store', '.boto',
+        '.s3cfg', '.terraform.d', '.cargo/credentials', '.cargo/credentials.toml',
+        '.gem/credentials', '.config/git/credentials', '.config/hub', '.config/op',
         '.config/gh', '.config/gcloud', '.config/claude', '.config/codex',
         '.config/openai', '.config/opencode', '.local/share/opencode', 'Library/Keychains',
         'Library/Application Support',
@@ -102,7 +105,9 @@ def credential_path(path):
     parts = [part.lower() for part in candidate.parts]
     return (
         bool(set(parts) & {".ssh", ".aws", ".azure", ".gnupg", ".codex", ".claude",
-                           ".gemini", ".cursor", ".kiro", ".docker", ".kube", ".netrc", ".npmrc"})
+                           ".gemini", ".cursor", ".kiro", ".docker", ".kube", ".netrc", ".npmrc",
+                           ".git-credentials", ".pypirc", ".pgpass", ".vault-token",
+                           ".password-store"})
         or any(
             part
             in {
@@ -421,52 +426,83 @@ def _project_config_reads(plan, root):
             [parent / name for parent in parents for name in directories])
 
 
-# Toolchain commands a read-only lane runs tests with, looked up on the provider's PATH.
-TOOLCHAIN_COMMANDS = ("python3", "python", "uv", "node", "npm", "npx", "pnpm", "corepack")
+# Toolchain commands a read-only lane runs tests with, looked up on the provider's PATH. npm, npx
+# and corepack ship inside node's prefix.
+TOOLCHAIN_COMMANDS = ("python3", "python", "uv", "node")
 # uv looks for its project and workspace in every directory above cwd and stops on a file it
 # can see but not read.
 UV_PROJECT_FILES = ("pyproject.toml", "uv.toml", "uv.lock", ".python-version")
 
 
-def _toolchain_reads(plan, root, search_path=None):
-    """Files and install prefixes of the toolchain a read-only lane finds, which may sit in home.
+def _executable_file(path):
+    return path.is_file() and not path.is_symlink() and os.access(path, os.X_OK)
 
-    Returns (files, unresolved project files, directories). Each command on PATH, and each .venv
-    between cwd and the root, is resolved to its real
-    location. An install prefix (the directory above a real `bin`) is granted whole so an
-    interpreter can load its standard library; where that prefix is home or holds a credential
-    store (as ~/.local does), only the executable itself is. Nothing is run to find them, so a
-    planted interpreter cannot act outside the sandbox.
+
+def _toolchain_grant(executable):
+    """What a resolved toolchain executable may be read through, or None.
+
+    Only a real install counts: a regular executable with a toolchain name, in the `bin` of a
+    prefix with that toolchain's library layout (lib/python3.* or lib/node_modules), which is not
+    home, not above it and holds no credential store. uv is a single binary and is granted alone.
+    Repository content (a .venv link, a pyvenv.cfg) can name a candidate, never a grant.
+    """
+    resolved = executable.resolve()
+    if not _executable_file(resolved) or credential_path(resolved):
+        return None
+    if re.fullmatch(r"uvx?", resolved.name):
+        return resolved
+    prefix = resolved.parent.parent
+    if resolved.parent.name != "bin":
+        return None
+    if re.fullmatch(r"python(3(\.\d+)?)?", resolved.name):
+        layout = any(path.is_dir() for path in prefix.glob("lib/python3*"))
+    elif resolved.name == "node":
+        layout = (prefix / "lib/node_modules").is_dir()
+    else:
+        return None
+    home = Path.home().resolve()
+    if not layout or home.is_relative_to(prefix) or credential_path(prefix):
+        return None
+    return prefix
+
+
+def _toolchain_reads(plan, root, search_path=None):
+    """Files, unresolved project files and directories of the toolchain a read-only lane uses.
+
+    Commands on the provider PATH, and each .venv between cwd and the repository root with the
+    interpreter it links to or its pyvenv.cfg names, are candidates; each is granted only through
+    _toolchain_grant. Nothing is run to find them, so a planted interpreter cannot act outside
+    the sandbox, and nothing is writable.
     """
     search_path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
     cwd = Path(plan["cwd"]).resolve()
     stop = _git_toplevel(cwd) or root
-    home = Path.home().resolve()
-    executables = [Path(found) for name in TOOLCHAIN_COMMANDS if (found := shutil.which(name, path=search_path))]
+    candidates = [Path(found) for name in TOOLCHAIN_COMMANDS if (found := shutil.which(name, path=search_path))]
     directories = []
     for parent in (cwd, *(parent for parent in cwd.parents if parent.is_relative_to(stop))):
         venv = parent / ".venv"
         config = venv / "pyvenv.cfg"
-        if venv.is_symlink() or not config.is_file():
+        if venv.is_symlink() or not venv.is_dir() or not _plain_file(config) or credential_path(venv):
             continue
-        directories.append(venv)
+        directories.append(venv)  # Workspace content, readable to a lane whose cwd holds it.
+        candidates.append(venv / "bin" / "python")
         base = next((line.partition("=")[2].strip() for line in config.read_text(errors="replace").splitlines()
                      if line.partition("=")[0].strip() == "home"), "")
-        if base:
-            executables.append(Path(base) / "python3")
-        executables.append(venv / "bin" / "python")
+        if base and Path(base).is_absolute():
+            candidates.extend(Path(base) / name for name in ("python3", "python"))
     files = []
-    for executable in executables:
-        resolved = executable.resolve()
-        prefix = resolved.parent.parent if resolved.parent.name == "bin" else None
-        if prefix is not None and prefix != home and not credential_path(prefix):
-            directories.append(prefix)
-        elif resolved.exists() and not credential_path(resolved):
-            files.append(resolved)
+    for candidate in candidates:
+        grant = _toolchain_grant(candidate)
+        if grant is None:
+            continue
+        (directories if grant.is_dir() else files).append(grant)
     project_files = ([parent / name for parent in cwd.parents for name in UV_PROJECT_FILES]
-                     if any(executable.name == "uv" for executable in executables) else [])
-    return (list(dict.fromkeys(files)), project_files,
-            [directory for directory in dict.fromkeys(directories) if not credential_path(directory)])
+                     if any(path.name.startswith("uv") for path in files) else [])
+    return list(dict.fromkeys(files)), project_files, list(dict.fromkeys(directories))
+
+
+def _plain_file(path):
+    return path.is_file() and not path.is_symlink()
 
 
 def confinement_command(plan, command, search_path=None):

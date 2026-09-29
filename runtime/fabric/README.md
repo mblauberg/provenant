@@ -106,15 +106,18 @@ paths. OpenCode's profile also reads, by their unresolved names,
 `opencode.json`, `opencode.jsonc`, `AGENTS.md`, `CLAUDE.md` and `.opencode/`
 in each directory from `cwd` up to the repository root, since OpenCode loads
 them at startup. Every read-only profile also reads the toolchain a lane runs
-tests with. That covers the real locations of `python3`, `python`, `uv`, `node`,
-`npm`, `npx`, `pnpm` and `corepack` on the provider's PATH, and each `.venv`
-between `cwd` and the repository root with the interpreter its `pyvenv.cfg`
-names. An install prefix (the directory above a real `bin`, such as a uv,
-pyenv or nvm version) is readable whole. Only the executable is readable where
-the prefix is home or holds a credential store, as `~/.local` does. When `uv`
-is present, `pyproject.toml`, `uv.toml`, `uv.lock` and `.python-version` above
-`cwd` are readable by unresolved name. Nothing is written, nothing is run to
-find these paths, and credential stores are never granted. Codex read-only uses its native read-only sandbox, which reads
+tests with. Candidates are `python3`, `python`, `uv` and `node` on the
+provider's PATH, plus each `.venv` between `cwd` and the repository root, its
+`bin/python` link and the interpreter its `pyvenv.cfg` names. Repository
+content only names candidates; it never grants a path itself. A candidate is
+granted only when it resolves to a real install. That means a regular
+executable with a toolchain name, in the `bin` of a prefix with that
+toolchain's `lib/python3.*` or `lib/node_modules`. The prefix must not be home
+or above it, and must not be or hold a credential store. Only that prefix is
+granted, such as a uv, pyenv, nvm or Homebrew version. A resolved `uv` binary
+is granted alone. When it is present, `pyproject.toml`, `uv.toml`, `uv.lock`
+and `.python-version` above `cwd` are readable by unresolved name. Nothing is
+written, and nothing is run to find these paths. Codex read-only uses its native read-only sandbox, which reads
 everywhere and writes only the attempt's `TMPDIR` and `add_dirs` (a shared
 lock directory, say). An `add_dir` holding `cwd`, or one whose name has a
 character Codex reads as a pattern (`*?[]{}`), stays read-only and warns.

@@ -86,7 +86,7 @@ def test_read_only_os_confinement_profile_and_argv(monkeypatch, tmp_path):
     )
     assert git_config_rule in profile
     assert '(allow file-read-data (subpath "' + str(cwd) + '") (subpath "' + str(add_dir) + '"))' in profile
-    monkeypatch.setattr(supervisor, "os_confinement_profile", lambda _plan: "(version 1)")
+    monkeypatch.setattr(supervisor, "os_confinement_profile", lambda _plan, _search_path=None: "(version 1)")
     assert supervisor.confinement_command(plan, ["/bin/cat", "file"]) == [
         "/usr/bin/sandbox-exec", "-p", "(version 1)", "/bin/cat", "file",
     ]
@@ -4305,21 +4305,23 @@ def fake_toolchain_home(tmp_path, monkeypatch):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(f"#!/bin/sh\necho {name}-ran\n")
         path.chmod(0o755)
-    (home / ".nvm/versions/node/v24.0.0/lib").mkdir()
+    (home / ".nvm/versions/node/v24.0.0/lib/node_modules").mkdir(parents=True)
     (home / ".nvm/versions/node/v24.0.0/lib/runtime.js").write_text("runtime\n")
+    (home / ".pyenv/versions/3.13.0/lib/python3.13").mkdir(parents=True)
     links = home / "links"
     links.mkdir()
     (links / "python3").symlink_to(tools["python3"])  # as pyenv-style or uv-style links are
     (home / ".ssh").mkdir()
     (home / ".ssh/id_ed25519").write_text("secret\n")
     (home / ".ssh/bin").mkdir()
-    (home / ".ssh/bin/npm").write_text("#!/bin/sh\necho planted\n")
-    (home / ".ssh/bin/npm").chmod(0o755)
+    (home / ".ssh/lib/node_modules").mkdir(parents=True)
+    (home / ".ssh/bin/node").write_text("#!/bin/sh\necho planted\n")
+    (home / ".ssh/bin/node").chmod(0o755)
     (home / ".local/share/opencode").mkdir(parents=True)
     (home / ".local/share/opencode/auth.json").write_text("secret\n")
     (home / "notes.txt").write_text("private\n")
     search_path = os.pathsep.join([str(links), str(tools["node"].parent), str(tools["uv"].parent),
-                                   str(home / ".ssh/bin"), "/usr/bin", "/bin"])
+                                   "/usr/bin", "/bin"])
     return home, tools, search_path
 
 
@@ -4381,8 +4383,11 @@ def test_confined_read_only_lane_runs_home_toolchains_but_not_credentials(tmp_pa
     assert run("uv").stdout == "uv-ran\n"
     for secret in (home / ".ssh/id_ed25519", home / ".local/share/opencode/auth.json", home / "notes.txt"):
         assert run("cat " + shlex.quote(str(secret))).returncode != 0, secret
-    # A tool planted in a credential store is not granted through PATH.
-    assert run("npm").returncode != 0
+    # A tool in a credential store is not granted even when PATH names it.
+    planted = mod.os_confinement_profile(plan, str(home / ".ssh/bin"))
+    blocked = subprocess.run([mod._sandbox_exec_path(), "-p", planted, str(home / ".ssh/bin/node")],
+                             capture_output=True, text=True)
+    assert blocked.returncode != 0 and "planted" not in blocked.stdout
 
 
 @pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("uv"), reason="needs sandbox-exec and uv")
@@ -4422,3 +4427,77 @@ def test_confined_read_only_lane_runs_uv_with_a_home_interpreter(tmp_path):
         listing = subprocess.run([mod._sandbox_exec_path(), "-p", profile, "/bin/ls", str(ssh)],
                                  capture_output=True, text=True)
         assert listing.returncode != 0
+
+
+def venv_repo(tmp_path, python_target=None, home_line=None):
+    """A repository with a .venv whose interpreter link and pyvenv.cfg the repository controls."""
+    repo = tmp_path / "repo"
+    (repo / ".venv/bin").mkdir(parents=True)
+    git(tmp_path, "init", "-q", str(repo))
+    (repo / ".venv/pyvenv.cfg").write_text(f"home = {home_line}\n" if home_line else "version = 3.13\n")
+    if python_target is not None:
+        (repo / ".venv/bin/python").symlink_to(python_target)
+    return repo, {"adapter": "claude", "mode": "read_only", "cwd": str(repo), "applied": {"add_dirs": []}}
+
+
+def fake_executable(path, text="#!/bin/sh\necho ran\n"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    path.chmod(0o755)
+    return path
+
+
+def granted_outside(repo, reads):
+    files, _, directories = reads
+    return [path for path in [*files, *directories] if not path.is_relative_to(repo.resolve())]
+
+
+def test_pyvenv_home_naming_a_home_folder_grants_nothing(tmp_path, monkeypatch):
+    home, _, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    fake_executable(home / "Documents/bin/python3")
+    (home / "Documents/taxes.pdf").write_text("private\n")
+    repo, plan = venv_repo(tmp_path, home_line=str(home / "Documents/bin"))
+    assert granted_outside(repo, supervisor()._toolchain_reads(plan, repo, "/nonexistent")) == []
+
+
+def test_venv_link_to_a_credential_file_grants_nothing(tmp_path, monkeypatch):
+    home, _, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    secret = fake_executable(home / ".git-credentials", "https://user:token@example.invalid\n")
+    repo, plan = venv_repo(tmp_path, python_target=secret)
+    assert supervisor().credential_path(secret)
+    assert granted_outside(repo, supervisor()._toolchain_reads(plan, repo, "/nonexistent")) == []
+
+
+def test_venv_link_to_a_non_toolchain_folder_grants_nothing(tmp_path, monkeypatch):
+    home, _, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    target = fake_executable(home / "Documents/project/bin/python3")  # no lib/python3.* beside it
+    repo, plan = venv_repo(tmp_path, python_target=target)
+    assert granted_outside(repo, supervisor()._toolchain_reads(plan, repo, "/nonexistent")) == []
+
+
+def test_interpreter_installed_directly_in_home_grants_nothing(tmp_path, monkeypatch):
+    home, _, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    target = fake_executable(home / "bin/python3")
+    (home / "lib/python3.13").mkdir(parents=True)
+    repo, plan = venv_repo(tmp_path, python_target=target, home_line=str(home / "bin"))
+    assert granted_outside(repo, supervisor()._toolchain_reads(plan, repo, str(home / "bin"))) == []
+
+
+def test_venv_link_to_a_real_install_grants_its_prefix(tmp_path, monkeypatch):
+    home, tools, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    repo, plan = venv_repo(tmp_path, python_target=tools["python3"], home_line=str(tools["python3"].parent))
+    assert granted_outside(repo, supervisor()._toolchain_reads(plan, repo, "/nonexistent")) == [
+        home / ".pyenv/versions/3.13.0"
+    ]
+
+
+@pytest.mark.parametrize("secret", [
+    ".git-credentials", ".netrc", ".npmrc", ".pypirc", ".pgpass", ".vault-token", ".docker/config.json",
+    ".kube/config", ".aws/credentials", ".config/gh/hosts.yml", ".config/gcloud/credentials.db",
+    ".azure/accessTokens.json", ".gnupg/private-keys-v1.d", ".ssh/id_ed25519", ".password-store/a.gpg",
+    ".cargo/credentials.toml", ".gem/credentials", ".config/git/credentials", ".terraform.d/credentials.tfrc.json",
+    ".boto", ".s3cfg", ".config/hub", ".config/op/config",
+])
+def test_credential_path_covers_common_host_secrets(tmp_path, monkeypatch, secret):
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    assert supervisor().credential_path(tmp_path / "home" / secret)

@@ -157,15 +157,19 @@ read-only `sandbox-exec` profile reads the project config OpenCode loads at
 startup (`opencode.json`, `opencode.jsonc`, `AGENTS.md`, `CLAUDE.md`, `.opencode/`)
 between `cwd` and the repository root, granted by unresolved name. Every read-only
 `sandbox-exec` profile reads the lane's toolchain, found without running it:
-- the resolved `python3`, `python`, `uv`, `node`, `npm`, `npx`, `pnpm` and
-  `corepack` on the provider PATH;
-- each `.venv` between `cwd` and the repository root, and the interpreter its
-  `pyvenv.cfg` names;
-- with `uv`, `pyproject.toml`, `uv.toml`, `uv.lock` and `.python-version` above
-  `cwd`.
+- `python3`, `python`, `uv` and `node` on the provider PATH;
+- each `.venv` between `cwd` and the repository root, its `bin/python` link and
+  the interpreter its `pyvenv.cfg` names, all treated as candidates only;
+- with a granted `uv`, `pyproject.toml`, `uv.toml`, `uv.lock` and
+  `.python-version` above `cwd`.
 
-The install prefix above a real `bin` is granted whole unless it is home or
-holds a credential store (`credential_path`); then only the executable is
-granted.
+A candidate is granted only if it resolves to a regular executable named
+`python`, `python3*` or `node`. The file must sit in the `bin` of a prefix
+holding `lib/python3.*` or `lib/node_modules`. That prefix must be neither home
+nor an ancestor of home, and must not pass `credential_path`. Only the prefix is
+granted. A resolved `uv`/`uvx` binary is granted alone. `credential_path` also
+covers `.git-credentials`, `.pypirc`, `.pgpass`, `.vault-token`,
+`.password-store`, `.boto`, `.s3cfg`, `.terraform.d`, Cargo and Gem credentials,
+`.config/git/credentials`, `.config/hub` and `.config/op`.
 
 `model_route.py snapshot --json` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Wrapped writer launches (agy, Claude, Cursor, OpenCode and Kiro) restrict writes to the worktree, declared `add_dirs`, per-worktree Git metadata, common Git objects, refs, logs and packed refs, attempt files, temp paths, devices and provider state. Where protected-path policy applies, its read and write denies take precedence within an `add_dir`; receipts list the writable `add_dirs` in `applied.write_boundary`. Codex writers without capabilities use its native `workspace-write` sandbox. Unavailable OS confinement refuses agy write dispatches and produces an explicit warning for other wrapped writers.
