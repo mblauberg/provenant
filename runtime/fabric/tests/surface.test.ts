@@ -64,10 +64,10 @@ it("keeps legacy route and result path in the brief digest", async () => {
     status: "ok",
     run_id: "mcp-wave1",
     adapter: "codex",
-    model: "gpt-6-sol",
+    model: "gpt-6.1-sol",
     result_path: ".agent-run/old/result.md",
   });
-  expect(digest(brief)).toContain("codex/gpt-6-sol");
+  expect(digest(brief)).toContain("codex/gpt-6.1-sol");
   expect(digest(brief)).toContain("result .agent-run/old/result.md");
 });
 
@@ -113,10 +113,10 @@ it("reads adapter cooldowns from the configured state root and explicit override
   const root = mkdtempSync(join(tmpdir(), "fabric-cooldowns-"));
   const oldRoot = process.env.AGENT_FABRIC_STATE_ROOT;
   const oldPath = process.env.FABRIC_COOLDOWNS_PATH;
-  const snapshot = { adapters: [{ name: "codex", models: ["gpt-6-sol"], aliases: { workhorse: ["gpt-6-sol"] } }], endpoints: {} } as any;
+  const snapshot = { adapters: [{ name: "codex", models: ["gpt-6.1-sol"], aliases: { workhorse: ["gpt-6.1-sol"] } }], endpoints: {} } as any;
   try {
     writeFileSync(join(root, "cooldowns.json"), JSON.stringify({ cooldowns: { one: {
-      adapter: "codex", model: "gpt-6-sol", cooling_until: "2999-01-01T00:00:00Z",
+      adapter: "codex", model: "gpt-6.1-sol", cooling_until: "2999-01-01T00:00:00Z",
     } } }));
     process.env.AGENT_FABRIC_STATE_ROOT = root;
     delete process.env.FABRIC_COOLDOWNS_PATH;
@@ -570,7 +570,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect(routedRows?.[0].notes).toContain("alias and model both supplied; model won");
     expect(routedRows?.[0].evidence.timeout).toBe(4321);
     expect(routedRows?.[0].cwd).toContain("/nested-batch");
-    expect(routedRows?.[1].provenance.requested).toMatchObject({ adapter: "codex", model: "gpt-6-sol" });
+    expect(routedRows?.[1].provenance.requested).toMatchObject({ adapter: "codex", model: "gpt-6.1-sol" });
     expect(routedRows?.[1].evidence.timeout).toBe(123);
     const writer = await call("dispatch", {
       prompt: "writer", mode: "worktree_write", worktree: linked, capabilities: ["browser"], wait_seconds: 5,

@@ -23,6 +23,10 @@ wake, in this order:
    its steward mode instead of doing it inline.
 6. **Checkpoint** the state file, then arm the wait.
 
+A wake that changes nothing stays silent. If reconcile shows no state change and
+no decision is due, checkpoint and re-arm without an owner-facing message. A
+landing, a new blocker, a due decision or an owner question still gets one.
+
 Keep a wake short. Anything longer than a few commands goes to a lane.
 
 ## Frontier hook

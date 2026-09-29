@@ -3543,12 +3543,12 @@ def test_plan_uses_router_applied_effort(tmp_path):
 
 def test_fallback_uses_router_candidates_and_parses_explicit_routes():
     mod = importlib.import_module('skills.orchestrate.scripts.exec_routing')
-    plan = {'adapter':'claude','model':'opus','effort':'high','route':{'fallback_candidates':[{'adapter':'codex','model':'gpt-6-sol','effort_applied':'medium'}]}}
-    assert mod.candidates(plan, True, {}) == [{'adapter':'codex','model':'gpt-6-sol','effort':'medium'}]
-    assert mod.candidates(plan, ['codex/gpt-6-sol@low'], {}) == [{'adapter':'codex','model':'gpt-6-sol','effort':'low'}]
+    plan = {'adapter':'claude','model':'opus','effort':'high','route':{'fallback_candidates':[{'adapter':'codex','model':'gpt-6.1-sol','effort_applied':'medium'}]}}
+    assert mod.candidates(plan, True, {}) == [{'adapter':'codex','model':'gpt-6.1-sol','effort':'medium'}]
+    assert mod.candidates(plan, ['codex/gpt-6.1-sol@low'], {}) == [{'adapter':'codex','model':'gpt-6.1-sol','effort':'low'}]
 
 
-@pytest.mark.parametrize('policy', ['yes', 'codex/gpt-6-sol', 3, {}, [''], [3], [{'adapter': [], 'model': 'sol'}]])
+@pytest.mark.parametrize('policy', ['yes', 'codex/gpt-6.1-sol', 3, {}, [''], [3], [{'adapter': [], 'model': 'sol'}]])
 def test_invalid_fallback_rejected_during_preflight(tmp_path, monkeypatch, policy):
     mod = importlib.import_module('skills.orchestrate.scripts.dispatch_run')
     monkeypatch.chdir(tmp_path)
@@ -3816,7 +3816,7 @@ def test_kiro_stream_json_selects_the_v2_engine():
         ("claude", "opus", "claude-opus-5-5", True),
         ("cursor", "grok-4.7", "Grok 4.7 256K High Fast", True),
         ("cursor", "auto", "Auto", True),
-        ("codex", "gpt-6-luna", "gpt-6-sol", False),
+        ("codex", "gpt-6-luna", "gpt-6.1-sol", False),
         ("agy", "gemini-3.8-flash", "claude-opus-4-6", False),
         ("agy", "claude-opus-4-6", "claude-opus-4-6-thinking", False),
     ],
