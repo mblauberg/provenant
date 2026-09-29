@@ -1,7 +1,7 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync,
-  rmSync, utimesSync, writeFileSync,
+  renameSync, rmSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -14,7 +14,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
-import { normaliseRoute, readRoots, routeArguments, workingIdentity } from "../src/execution-input.js";
+import { normaliseRoute, readRoots, routeArguments, savedReadRoots, workingIdentity } from "../src/execution-input.js";
+import { resumeConfiguredProvider } from "../src/resume.js";
 import { databasePath } from "../src/identity.js";
 import { catalogueSnapshot } from "../src/catalogue.js";
 import { psOutput } from "../src/ps.mjs";
@@ -1468,6 +1469,30 @@ it('runs a read-only dispatch in another registered project and records it for t
  expect(realpathSync(path)).toContain(realpathSync(join(workspace,'.agent-run/runs')));
  expect(await fabricStatus(workspace,String(result.id))).toMatchObject({status:'ok'});
  expect(JSON.parse(fabricCli(['lanes','--json',String(result.id)])).runs).toEqual([expect.objectContaining({run_id:result.id,task_id:'cross-project',status:'ok'})]);
+});
+
+it('resumes a cross-project run with its saved read roots, and refuses one whose root has moved', async () => {
+ const other=realpathSync(mkdtempSync(join(temporaryDirectory,'resume-other-')));mkdirSync(join(other,'src'));
+ const brief=join(other,'brief.md');writeFileSync(brief,'continue');
+ const caller={...identity,registeredProjects:[workspace,other]};
+ const dir=join(workspace,'.agent-run/mcp-resume-cross');
+ const path=join(dir,'tasks/task-1/attempt-001');mkdirSync(path,{recursive:true});
+ const row=JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
+ Object.assign(row,{run_id:'mcp-resume-cross',cwd:join(other,'src'),read_roots:[join(other,'src'),other]});
+ writeFileSync(join(path,'attempt.json'),JSON.stringify(row));
+ writeFileSync(join(dir,'dispatch-status.json'),JSON.stringify({task_id:'task-1',status:'ok',finished_at:new Date().toISOString()}));
+ const log=join(temporaryDirectory,'resume-preflight.json');
+ const env={...ownerEnvironment,FIXTURE_PREFLIGHT_LOG:log};
+ const resumed=await resumeConfiguredProvider({resume:row.run_id,prompt_file:brief,wait_seconds:0},caller,new AbortController().signal,env);
+ expect(resumed).toMatchObject({status:'rejected',error:'fixture_logged'});
+ expect(JSON.parse(readFileSync(log,'utf8'))[0]).toMatchObject({cwd:join(other,'src'),prompt_file:brief,read_roots:[join(other,'src'),other]});
+ expect(()=>savedReadRoots(caller,row.read_roots,row.cwd,[workspace])).toThrow(/registered Fabric project/u);
+ const elsewhere=mkdtempSync(join(temporaryDirectory,'resume-elsewhere-'));mkdirSync(join(elsewhere,'src'));
+ renameSync(other,`${other}-moved`);symlinkSync(elsewhere,other);
+ rmSync(log,{force:true});
+ const moved=await resumeConfiguredProvider({resume:row.run_id,prompt:'continue',wait_seconds:0},caller,new AbortController().signal,env);
+ expect(moved).toMatchObject({status:'rejected',error:'resume_read_root_changed'});
+ expect(existsSync(log)).toBe(false);
 });
 
 it('keeps non-Git cwd dispatches in the caller run root', async () => {

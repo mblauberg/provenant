@@ -76,8 +76,11 @@ A read-only `cwd` or a `prompt_file` outside the caller's directory must lie in
 a registered Fabric project; otherwise the rejection names registering that
 project or dispatching from it. Fabric passes each such directory to the owner
 as a read root, which the owner accepts beside its workspace, records in the
-attempt as `read_roots` and restores on resume. The run stays in the caller's
-run root.
+attempt as `read_roots` and restores on resume. A resume refuses
+(`resume_read_root_changed`) when a saved root or its cwd now resolves elsewhere
+or, in Fabric, has left every registered project. The run stays in the caller's
+run root. A prompt path the credential-store rule matches is refused in any
+root.
 
 `.agents/fabric-policy.json` declares `protected_paths` relative to the
 directory containing `.agents/`; Fabric discovers it at the workspace root and

@@ -102,7 +102,9 @@ registered project. A project is registered once any Fabric command, such as
 route or the alternative of dispatching from the other project. For a
 directory outside the caller's, Fabric passes the owner a read root, so the run
 stays in the caller's run root, where `lanes` and `status` find it, and the
-secret scan still covers the prompt. The Python owner validates provider capabilities and
+secret scan still covers the prompt. A prompt in a credential or authentication
+store is refused wherever it sits. A resume reuses the saved read roots only
+while each still resolves to the same directory in a registered project. The Python owner validates provider capabilities and
 applies controls; Fabric does not claim a stronger guarantee than its receipt.
 On macOS, non-Codex read-only launches use `sandbox-exec` when available. The
 profile limits writes to the attempt directory and provider state. It denies

@@ -21,6 +21,11 @@ if (process.argv.includes("--preflight-json")) {
     process.exit(0);
   }
   const tasks = JSON.parse(input).tasks;
+  if (process.env.FIXTURE_PREFLIGHT_LOG) {
+    writeFileSync(process.env.FIXTURE_PREFLIGHT_LOG, JSON.stringify(tasks));
+    process.stdout.write(JSON.stringify({ status: "rejected", error: "fixture_logged", fix: "fixture" }));
+    process.exit(0);
+  }
   if (process.env.FIXTURE_PREFLIGHT_PID) {
     writeFileSync(process.env.FIXTURE_PREFLIGHT_PID, String(process.pid));
     while (!existsSync(process.env.FIXTURE_PREFLIGHT_RELEASE)) {

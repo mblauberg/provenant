@@ -1145,7 +1145,9 @@ def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path, read_ro
             part == ".config" and index + 1 < len(parts) and parts[index + 1] in config_auth_dirs
             for index, part in enumerate(parts)
         )
-        if sensitive_roots.intersection(parts) or prompt_source.name.casefold() in sensitive_files or config_auth:
+        # credential_path resolves the whole path, so a link into a store is refused too.
+        if (sensitive_roots.intersection(parts) or prompt_source.name.casefold() in sensitive_files or config_auth
+                or provider_exec.credential_path(prompt_source)):
             raise PreflightError("credential_or_auth_store_denied", "prompt path is a credential or authentication store")
         try:
             prompt_bytes = _read_prompt_once(prompt_root, prompt_source)
@@ -1490,6 +1492,10 @@ def prepare_resume(args):
     args.sandbox=previous["applied"]["sandbox"];args.network=None if previous["applied"]["network"] is None else str(previous["applied"]["network"]).lower()
     args.add_dirs=previous["applied"]["add_dirs"];args.resume_session=previous["session_id"]
     args.read_roots=previous.get("read_roots") or []
+    # A read root was canonical when granted; a directory since swapped for a link is not that grant.
+    bound=[*args.read_roots,*([args.provider_cwd] if args.read_roots and args.provider_cwd else [])]
+    if any(Path(path).resolve()!=Path(path) for path in bound):
+        raise ResumeError("resume_read_root_changed","a read root or cwd now resolves elsewhere; dispatch a new run")
     args.capabilities=previous["applied"].get("capabilities", [])
     args.fallback="false"
     for field in ("intent", "orchestrator_family", "role", "risk_tier", "model_override_tier", "reviewer_id", "preface"):

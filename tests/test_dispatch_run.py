@@ -2510,6 +2510,55 @@ def test_preflight_scans_a_read_root_prompt_for_secrets(tmp_path, monkeypatch):
     assert module.preflight_tasks([task], workspace)['error'] == 'secret_detected'
 
 
+def test_preflight_refuses_a_credential_store_prompt_in_any_root(tmp_path, monkeypatch):
+    workspace = tmp_path / 'caller'
+    other = tmp_path / 'other-project'
+    (workspace / 'notes').mkdir(parents=True)
+    (other / '.codex').mkdir(parents=True)
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    module = load_dispatch_module()
+    auth = other / '.codex' / 'auth.json'
+    auth.write_text('{"tokens": {"opaque": "value"}}')
+    local = workspace / 'notes' / 'auth.json'
+    local.write_text('{"opaque": "value"}')
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse'}
+    for prompt, roots in ((auth, [str(other)]), (local, [])):
+        result = module.preflight_tasks([{**task, 'prompt_file': str(prompt), 'read_roots': roots}], workspace)
+        assert result['error'] == 'credential_or_auth_store_denied', prompt
+
+
+def test_prepare_resume_refuses_a_read_root_that_now_resolves_elsewhere(tmp_path: Path):
+    module = load_dispatch_module()
+    run_dir = make_run(tmp_path, "resume-moved")
+    attempt_dir = run_dir / "tasks/task-1/attempt-001"
+    attempt_dir.mkdir(parents=True)
+    other, elsewhere = tmp_path / "other-project", tmp_path / "elsewhere"
+    (other / "src").mkdir(parents=True)
+    (elsewhere / "src").mkdir(parents=True)
+    previous = {
+        "run_id": "resume-me", "task_id": "task-1", "attempt": 1, "state": "terminal",
+        "status": "ok", "mode": "read_only", "cwd": str(other / "src"), "worktree": None,
+        "workspace": {"root": str(tmp_path)}, "session_id": "saved-session",
+        "read_roots": [str(other / "src")],
+        "provenance": {"requested": {"adapter": "codex"}, "resolved_model": "fixture", "effort_applied": ""},
+        "applied": {"sandbox": "read-only", "network": None, "add_dirs": []},
+        "paths": {"events": None}, "requested_route": {},
+    }
+    (attempt_dir / "attempt.json").write_text(json.dumps(previous), encoding="utf-8")
+    fresh = lambda: SimpleNamespace(
+        run_dir=run_dir, resume="resume-me", task_id=None, tool=None, model=None, effort=None,
+        access_mode=None, worktree=None, provider_cwd=None, sandbox=None, network=None,
+        add_dirs=[], resume_session=None, fallback=None, context_ceiling=None,
+    )
+    module.prepare_resume(fresh())
+    other.rename(tmp_path / "moved")
+    other.symlink_to(elsewhere)
+    with pytest.raises(module.ResumeError) as refused:
+        module.prepare_resume(fresh())
+    assert refused.value.code == "resume_read_root_changed"
+
+
 def test_read_only_dispatch_runs_in_a_read_root_outside_the_workspace(tmp_path, monkeypatch):
     code = '''import json,os,sys
 sys.stdin.read()

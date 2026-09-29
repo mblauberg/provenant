@@ -341,6 +341,25 @@ export function readRoots(
   return roots;
 }
 
+/**
+ * The read roots and cwd a resume reuses. Each was canonical when granted; one
+ * that now resolves elsewhere, or has left every registered project, is refused.
+ */
+export function savedReadRoots(
+  identity: Identity,
+  roots: unknown,
+  cwd: unknown,
+  projectRoots: string[] = registeredRoots(identity),
+): string[] {
+  if (roots === undefined || roots === null || (Array.isArray(roots) && roots.length === 0)) return [];
+  const bound = Array.isArray(roots) ? [...roots, ...(typeof cwd === "string" ? [cwd] : [])] : [roots];
+  if (!bound.every((path) => typeof path === "string" && isAbsolute(path) && canonical(path) === path &&
+      inRegisteredProject(path, projectRoots)))
+    throw new InputError("resume_read_root_changed",
+      "Dispatch a new run; a saved read root or cwd has moved or left every registered Fabric project.");
+  return roots as string[];
+}
+
 export class InputError extends Error {
   constructor(
     readonly code: string,
