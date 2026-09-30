@@ -54,9 +54,11 @@ CONFINED_STATE = {
     },
     "cursor": {"read_write": (".cursor", ".cache/cursor", ".npm")},
     "kiro": {
-        # kiro-cli keeps its sign-in and refreshed tokens in data.sqlite3. The rest of its support
-        # directory holds shell hooks the user's shell sources and binaries it runs, so stays read-only.
-        "read_write": (".kiro", ".cache/kiro", ".npm", "Library/Application Support/kiro-cli/data.sqlite3*"),
+        # kiro-cli keeps its sign-in and refreshed tokens in data.sqlite3, guarded by .refresh.lock,
+        # which it opens for writing before reading the token. The rest of its support directory holds
+        # shell hooks the user's shell sources and binaries it runs, so stays read-only.
+        "read_write": (".kiro", ".cache/kiro", ".npm", "Library/Application Support/kiro-cli/data.sqlite3*",
+                       "Library/Application Support/kiro-cli/.refresh.lock"),
         "read": ("Library/Application Support/kiro-cli",),
         # Its engine finds its app bundle through the launcher links in ~/.local/bin.
         "read_literal": (".local/bin", ".local/bin/kiro-cli", ".local/bin/kiro-cli-chat",
@@ -419,8 +421,22 @@ def os_confinement_profile(plan):
         ])
         # After every allow, since a state grant such as ~/.claude would otherwise reopen them.
         + _sbpl_rule("deny", "file-read-data", [home / path for path in EXTRA_DENIED_READS])
+        # A Claude lane resumes from its own project's transcripts, and only those reopen.
+        + (f"(allow file-read-data {_claude_project_filter(home, plan['cwd'])})\n"
+           if plan.get("adapter") == "claude" else "")
         + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
     )
+
+
+def _claude_project_filter(home, cwd):
+    """Match Claude Code's transcript directory for cwd, which it names after the resolved path."""
+    name = re.sub(r"[^A-Za-z0-9]", "-", str(Path(cwd).resolve()))
+    projects = Path(home) / ".claude/projects"
+    if len(name) <= 200:
+        return "(subpath " + _sbpl_quote(projects / name) + ")"
+    # Claude truncates a longer name to 200 characters and appends a hash of the full path.
+    escaped = "".join("\\" + char if char in set(r'.^$*+?()[]{}|\\"') else char for char in str(projects))
+    return '(regex #"^' + escaped + "/" + name[:200] + '-[^/]*(/|$)")'
 
 
 def _uses_api_key(plan):

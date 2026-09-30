@@ -607,7 +607,7 @@ def test_kiro_profile_writes_only_its_sign_in_state_not_shell_hooks_or_executabl
     workspace = home / "repo"
     workspace.mkdir(parents=True)
     support = home / KIRO_SUPPORT
-    for relative in (*KIRO_EXECUTABLES, "data.sqlite3"):
+    for relative in (*KIRO_EXECUTABLES, "data.sqlite3", ".refresh.lock"):
         (support / relative).parent.mkdir(parents=True, exist_ok=True)
         (support / relative).write_text("original\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(workspace)], check=True)
@@ -637,6 +637,8 @@ def test_kiro_profile_writes_only_its_sign_in_state_not_shell_hooks_or_executabl
     if probe.returncode and "sandbox_apply" in probe.stderr:
         pytest.skip("sandbox_apply is refused in this test environment")
     assert probe.returncode == 0, probe.stderr
+    # kiro-cli opens this lock for writing before it reads its token, or reports the token expired.
+    assert run(f"printf x > '{support}/.refresh.lock'").returncode == 0
     for relative in KIRO_EXECUTABLES:
         assert run(f"printf hijack > '{support}/{relative}'").returncode != 0, relative
         assert (support / relative).read_text(encoding="utf-8") == "original\n", relative
@@ -685,7 +687,11 @@ def test_read_only_transcript_denies_follow_every_state_allow(monkeypatch, tmp_p
     denied = [f'(subpath "{home / path}")' for path in mod.EXTRA_DENIED_READS]
     last_deny = max(index for index, line in enumerate(lines)
                     if line.startswith("(deny file-read-data ") and all(rule in line for rule in denied))
-    assert not any(line.startswith("(allow file-read") for line in lines[last_deny + 1:])
+    later = [line for line in lines[last_deny + 1:] if line.startswith("(allow file-read")]
+    # Only a Claude lane's own project transcripts reopen, so that it can resume its session.
+    own = str(home / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(workspace.resolve())))
+    assert all(own in line for line in later)
+    assert bool(later) is (adapter == "claude")
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
@@ -700,6 +706,9 @@ def test_claude_read_only_lane_cannot_read_other_projects_transcripts(monkeypatc
     (home / ".claude/settings.json").write_text("{}\n", encoding="utf-8")
     workspace = tmp_path / "repo"
     workspace.mkdir()
+    own = home / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(workspace.resolve()))
+    own.mkdir(parents=True)
+    (own / "session.jsonl").write_text("mine\n", encoding="utf-8")
     monkeypatch.setattr(mod.Path, "home", lambda: home)
     plan = {"adapter": "claude", "mode": "read_only", "route": {}, "workspace_root": str(workspace),
             "cwd": str(workspace), "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
@@ -714,6 +723,20 @@ def test_claude_read_only_lane_cannot_read_other_projects_transcripts(monkeypatc
         pytest.skip("sandbox_apply is refused in this test environment")
     assert probe.stdout == "{}\n"
     assert run(f"cat '{home}/.claude/projects/other/session.jsonl'").returncode != 0
+    # Its own project's transcripts stay readable, so the lane can resume.
+    assert run(f"cat '{own}/session.jsonl'").stdout == "mine\n"
+
+
+def test_claude_project_transcript_dir_matches_claude_naming_including_long_paths(tmp_path):
+    mod = supervisor()
+    home = Path("/Users/someone")
+    short = mod._claude_project_filter(home, "/Users/someone/Repos/my_app.v2")
+    assert short == '(subpath "/Users/someone/.claude/projects/-Users-someone-Repos-my-app-v2")'
+    long_cwd = "/Users/someone/" + "a" * 220
+    long_rule = mod._claude_project_filter(home, long_cwd)
+    prefix = re.sub(r"[^A-Za-z0-9]", "-", long_cwd)[:200]
+    # Claude truncates a long name to 200 characters and appends a hash.
+    assert long_rule == f'(regex #"^/Users/someone/\\.claude/projects/{prefix}-[^/]*(/|$)")'
 
 
 def test_sbpl_filter_star_escapes_regex_without_resolving_symlink_target(tmp_path):
