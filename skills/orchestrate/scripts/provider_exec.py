@@ -58,9 +58,10 @@ CONFINED_STATE = {
         # kiro-cli keeps its sign-in and refreshed tokens in data.sqlite3, guarded by .refresh.lock,
         # which it opens for writing before reading the token. The rest of its support directory holds
         # shell hooks the user's shell sources and binaries it runs, so stays read-only.
-        "read_write": (".kiro", ".cache/kiro", ".npm",
-                       *(f"Library/Application Support/kiro-cli/data.sqlite3-{suffix}"
-                         for suffix in ("wal", "shm", "journal"))),
+        "read_write": (".kiro", ".cache/kiro", ".npm"),
+        # SQLite creates and removes these sidecars; each is one file at its own name.
+        "write_literal": tuple(f"Library/Application Support/kiro-cli/data.sqlite3-{suffix}"
+                               for suffix in ("wal", "shm", "journal")),
         # Rewritten in place only: a lane cannot swap either for a link its unconfined CLI would follow.
         "write_in_place": ("Library/Application Support/kiro-cli/data.sqlite3",
                            "Library/Application Support/kiro-cli/.refresh.lock"),
@@ -483,10 +484,14 @@ def _state_paths(home, entries):
 def _state_write_guards(home, state):
     """Rewrite-in-place grants, and no links a lane could plant for the provider's unconfined CLI."""
     in_place = _state_paths(home, state.get("write_in_place", ()))
-    rules = _sbpl_rule("allow", "file-write*", in_place, literal=True, canonical=True)
+    rules = _sbpl_rule("allow", "file-write*", _state_paths(home, state.get("write_literal", ())),
+                       literal=True, canonical=True)
+    rules += _sbpl_rule("allow", "file-write*", in_place, literal=True, canonical=True)
     rules += _sbpl_rule("deny", "file-write-create file-write-unlink", in_place, literal=True, canonical=True)
     for path in state.get("no_links", ()):
-        rules += f"(deny file-write-create (require-all {_sbpl_filter(home / path)} (vnode-type SYMLINK)))\n"
+        # Nor a directory or FIFO at a file grant, which would hold or block what the CLI opens.
+        rules += (f"(deny file-write-create (require-all {_sbpl_filter(home / path)} (require-any "
+                  "(vnode-type SYMLINK) (vnode-type DIRECTORY) (vnode-type FIFO))))\n")
     return rules
 
 
@@ -909,7 +914,8 @@ def build_plan(
     if confinement == "sandbox-exec":
         state = CONFINED_STATE.get(adapter, {})
         writable_paths = [str(attempt_dir), *(str(Path.home() / path) for path in
-                           (*state.get("read_write", ()), *state.get("write_in_place", ()))), "/dev"]
+                           (*state.get("read_write", ()), *state.get("write_literal", ()),
+                            *state.get("write_in_place", ()))), "/dev"]
         if mode == "worktree_write":
             git_paths = ([str(git_private), *(str(git_common / path) for path in
                            GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)]

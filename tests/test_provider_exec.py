@@ -649,6 +649,10 @@ def test_kiro_profile_writes_only_its_sign_in_state_not_shell_hooks_or_executabl
     writes = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-write* "))
     assert f'(subpath "{support}")' not in writes
     assert "data\\.sqlite3[^/]*$" not in writes
+    # SQLite's sidecars are files at fixed names, never directories a lane could fill.
+    for name in ("data.sqlite3-wal", "data.sqlite3-shm", "data.sqlite3-journal"):
+        assert f'(subpath "{support / name}")' not in writes, name
+        assert f'(literal "{support / name}")' in writes, name
     if mode == "read_only":
         reads = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-read-data "))
         assert f'(subpath "{support}")' in reads
@@ -681,6 +685,9 @@ def test_kiro_profile_writes_only_its_sign_in_state_not_shell_hooks_or_executabl
     assert run(f"printf x > '{support}/shell/new.zsh'").returncode != 0
     assert run(f"printf x > '{support}/kas/2.24.0-new'").returncode != 0
     assert run(f"printf x > '{support}/data.sqlite3-evil'").returncode != 0
+    assert run(f"mkdir '{support}/data.sqlite3-wal'").returncode != 0
+    assert run(f"mkfifo '{support}/data.sqlite3-shm'").returncode != 0
+    assert not (support / "data.sqlite3-wal").exists() and not (support / "data.sqlite3-shm").exists()
     # No link that the user's unconfined kiro-cli would later follow into a shell hook.
     hook = support / "shell/zshrc.pre.zsh"
     for name in ("data.sqlite3-wal", "data.sqlite3-journal", ".refresh.lock", "data.sqlite3"):
@@ -704,7 +711,7 @@ def test_kiro_profile_writes_only_its_sign_in_state_not_shell_hooks_or_executabl
 STATE_WRITE_ENTRIES = [
     (adapter, entry)
     for adapter, state in importlib.import_module("skills.orchestrate.scripts.provider_exec").CONFINED_STATE.items()
-    for entry in (*state.get("read_write", ()), *state.get("write_in_place", ()))
+    for entry in (*state.get("read_write", ()), *state.get("write_literal", ()), *state.get("write_in_place", ()))
     if not entry.endswith("*")
 ]
 
