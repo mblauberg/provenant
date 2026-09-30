@@ -53,6 +53,15 @@ export interface RouteInput {
   allow_secrets?: boolean;
   fallback?: boolean | "any" | Array<string | Record<string, unknown>>;
   context_ceiling?: number;
+  /** A global weighted pool (strong, bulk, design, writing) or a task-class/alias synonym. */
+  route?: string;
+  rotate?: boolean;
+  council?: number;
+  models?: string[];
+  /** Never route this task, or a fallback, to a free or prompt-training model; works with any selector. */
+  confidential?: boolean;
+  /** Why the pool picked this model; set by the pool expansion, shown on the Route line. */
+  pick_reason?: string;
 }
 
 export interface DispatchInput extends RouteInput {
@@ -92,6 +101,8 @@ export interface NormalisedRoute {
   context_ceiling?: number;
   allow_secrets?: boolean;
   capabilities?: DispatchCapability[];
+  confidential?: boolean;
+  pick_reason?: string;
   read_roots?: string[];
   warnings?: string[];
 }
@@ -250,7 +261,7 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
     ...(warnings.length ? { warnings } : {}),
     ...(input.capabilities?.length ? { capabilities: [...input.capabilities].sort() } : {}),
     ...Object.fromEntries(
-      ["cwd", "network", "sandbox", "add_dirs", "fallback", "context_ceiling", "allow_secrets"]
+      ["cwd", "network", "sandbox", "add_dirs", "fallback", "context_ceiling", "allow_secrets", "confidential", "pick_reason"]
         .filter((key) => input[key as keyof RouteInput] !== undefined)
         .map((key) => [key, input[key as keyof RouteInput]]),
     ),
@@ -266,8 +277,8 @@ export function routeArguments(route: NormalisedRoute): string[] {
       for (const dir of value as string[]) args.push("--add-dir", dir);
     } else if (key === "read_roots") {
       for (const dir of value as string[]) args.push("--read-root", dir);
-    } else if (key === "allow_secrets") {
-      if (value === true) args.push("--allow-secrets");
+    } else if (key === "allow_secrets" || key === "confidential") {
+      if (value === true) args.push(`--${key.replaceAll("_", "-")}`);
     } else args.push(`--${key.replaceAll("_", "-")}`, typeof value === "string" ? value : JSON.stringify(value));
   }
   return args;

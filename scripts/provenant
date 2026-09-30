@@ -80,7 +80,7 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|root|route|capabilities|worktree|clean|check|gate|fabric|lanes|events|dispatch|batch|run> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|check|gate|fabric|lanes|events|dispatch|batch|run> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
@@ -91,6 +91,9 @@ Thin front door; each command delegates to its existing owner:
   root           print the resolved product checkout
   route ...      scripts/model-route ... (low-level resolver; capability-bound
                  aliases need a fresh snapshot, normally supplied by dispatch)
+  routes [--json] [--health]
+                 each global route pool with live availability; --health adds
+                 task-class routes and recent health (same as `help routes`)
   capabilities ...
                  skills/orchestrate/scripts/capabilities.py ...
   worktree ...   scripts/worktree ...
@@ -295,8 +298,10 @@ def main(arguments: list[str]) -> int:
     if command in {"lanes", "events"}:
         command_arguments = [command, *command_arguments]
         command = "fabric"
-    if command == "help" and command_arguments == ["routes"]:
-        command, command_arguments = "route", ["health", "--json"]
+    if command == "routes":
+        command, command_arguments = "route", ["routes", *command_arguments]
+    elif command == "help" and command_arguments == ["routes"]:
+        command, command_arguments = "route", ["routes", "--health"]
     elif command in {"help", "-h", "--help"}:
         if command_arguments:
             usage()
