@@ -108,6 +108,8 @@ export function laneLine(row: Record<string, any>): string {
 }
 export function lanesDigest(result: Record<string, any>): string {
   if (!Array.isArray(result.runs)) return digest(result);
+  // A failed read must not look like an empty list.
+  if (result.status !== undefined && result.status !== "ok") return `${result.status} ${result.error ?? "run_read_failed"}`;
   const lines = result.runs.map(laneLine);
   if (result.omitted) lines.push(`${result.omitted} more omitted; raise limit or pass ids`);
   return lines.join("\n") || "no runs";

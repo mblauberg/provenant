@@ -63,6 +63,8 @@ export async function waitForLanes(deps: LaneWaitDependencies): Promise<number> 
           return expired && pending.length ? 124 : 0;
         } catch (error) {
           if (!isSQLiteContention(error)) throw error;
+          // Unmarked lanes are reported again next wait; contention must not outlast the deadline.
+          if (now() >= deadline) return 124;
           await sleep(deps.pollMs ?? 2000);
         }
       }

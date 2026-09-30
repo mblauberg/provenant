@@ -144,7 +144,7 @@ if (command === "lanes") {
   const ids = args.filter((value) => !["--json", "--wait", "--all"].includes(value));
   if (["--json", "--wait", "--all"].some((name) => args.filter((value) => value === name).length > 1) ||
       (json && wait) || ((all || timeout !== undefined) && !wait) || ids.some((value) => value.startsWith("--")) ||
-      (timeoutSeconds !== undefined && !(timeoutSeconds > 0))) {
+      (timeoutSeconds !== undefined && !(timeoutSeconds >= 0))) {
     console.error("fabric: usage: fabric lanes [--json] [--project P] [id…] | lanes --wait [--all] [--timeout N] [id…]");
     process.exit(2);
   }

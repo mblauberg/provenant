@@ -989,6 +989,17 @@ export async function cancelConfiguredRun(
     const failure = await cancelBatchTask(task, identity, env);
     return failure ?? { ...(await statusRows(identity.cwd, [id])), ...(reason ? { reason } : {}) };
   }
+  // A manifest task with no published attempt resolves to a legacy run row; it is still a task.
+  const unresolved = rows.runs.find((row) => {
+    if (row.run_id === id || row.task_id === id || typeof row.run_dir !== "string") return false;
+    try {
+      const metadata = JSON.parse(readFileSync(join(row.run_dir, "dispatch-status.json"), "utf8"));
+      return Array.isArray(metadata.task_ids) && metadata.batch_id && metadata.task_ids.includes(id);
+    } catch { return false; }
+  });
+  if (unresolved)
+    return { status: "rejected", error: "task_not_started",
+      fix: `Task ${id} has not started; cancel the whole batch with its run id ${unresolved.run_id}.` };
   const row = rows.runs[0]!;
   if (rows.runs.every((row) => row.state === "terminal")) return rows;
   const started = [...activeOwners].find((owner) => owner.runDir === row.run_dir);

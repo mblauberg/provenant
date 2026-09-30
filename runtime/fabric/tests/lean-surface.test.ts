@@ -1,6 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { appendFileSync, chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { createRequire } from "node:module";
@@ -102,6 +102,21 @@ describe("lean surface over the fixture owners", () => {
     }
   }, 120_000);
 
+  it("propagates nested task alias warnings with the task index", async () => {
+    const { client, call } = await connect();
+    try {
+      const reply = await call("fabric_dispatch", { tasks: [
+        { id: "plain", prompt: "quick", adapter: "codex", model: "fixture" },
+        { task_id: "aliased", prompt: "quick", adapter: "codex", model: "fixture", timeout_seconds: "60" },
+      ], wait_seconds: 20 });
+      expect(reply.text).toContain("tasks[1]: corrected task_id to id");
+      expect(reply.text).toContain('tasks[1]: read timeout_seconds "60" as a number');
+      expect(reply.text).not.toContain("tasks[0]:");
+    } finally {
+      await client.close();
+    }
+  }, 120_000);
+
   it("filters runs by state and limit and keeps the default reply small", async () => {
     const { client, call } = await connect();
     try {
@@ -169,6 +184,7 @@ describe("lean views", () => {
     expect(lanesDigest({ runs: [{ id: "a", state: "terminal", status: "ok", route: "codex/x@high", result_path: "r.md" }], omitted: 3 }))
       .toBe("ok  a  codex/x@high  r.md\n3 more omitted; raise limit or pass ids");
     expect(lanesDigest({ runs: [] })).toBe("no runs");
+    expect(lanesDigest({ status: "unknown", error: "run_read_failed", runs: [] })).toBe("unknown run_read_failed");
     const rows = Array.from({ length: 6 }, (_, n) => ({ run_id: "mcp-b", task_id: `t${n}`, status: n < 2 ? "cancelled" : "ok", digest: `row ${n}` }));
     expect(cancelDigest({ runs: rows })).toBe("mcp-b 6 tasks: 2 cancelled 4 ok");
     expect(cancelDigest({ runs: rows.slice(0, 2) })).toContain("row 0");
@@ -210,4 +226,29 @@ describe("task-level cancel", () => {
     expect(result.runs.map((row: any) => row.task_id)).toEqual(["two"]);
     expect(result.reason).toBe("not needed");
   }, 60_000);
+
+  it("never widens a task cancel to the run when the task has not started", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fabric-lean-queued-"));
+    roots.push(root);
+    const workspace = join(root, "workspace"), product = join(root, "product");
+    mkdirSync(workspace);
+    installFixtureOwners(product);
+    const log = join(root, "controls.jsonl");
+    writeFileSync(join(product, "skills/orchestrate/scripts/run_controls.py"),
+      `#!/usr/bin/env python3\nimport json,sys\nopen(${JSON.stringify(log)},'a').write(json.dumps(sys.argv[1:])+'\\n')\n`);
+    const runDir = join(workspace, ".agent-run", "mcp-queuedx");
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ id: "mcp-queuedx", batch_id: "batch-001", task_ids: ["one", "two"],
+      started_at: new Date().toISOString(), status: "running" }));
+    const env = { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product,
+      HARNESS_PYTHON: execFileSync("python3", ["-c", "import sys;print(sys.executable)"], { encoding: "utf8" }).trim() };
+    const identity = { project: workspace, cwd: workspace, agentId: "lean", provider: "codex" };
+    const result = await cancelConfiguredRun("two", identity, undefined, env) as any;
+    expect(result).toMatchObject({ status: "rejected", error: "task_not_started" });
+    expect(result.fix).toContain("mcp-queuedx");
+    expect(existsSync(log)).toBe(false);
+    const unknown = await cancelConfiguredRun("three", identity, undefined, env) as any;
+    expect(unknown.status).toBe("rejected");
+  }, 60_000);
 });
+

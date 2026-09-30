@@ -38,4 +38,6 @@ it("rejects --all and --timeout without --wait, and a bad timeout", () => {
   expect(lanes(root, "--all").code).toBe(2);
   expect(lanes(root, "--timeout", "5").code).toBe(2);
   expect(lanes(root, "--wait", "--timeout", "abc").code).toBe(2);
+  expect(lanes(root, "--wait", "--timeout", "-1").code).toBe(2);
+  expect(lanes(root, "--wait", "--timeout", "0").code).toBe(0);
 });

@@ -149,3 +149,33 @@ it("--all --timeout still reports lanes that finished before the deadline", asyn
   expect(later.output.join("")).toContain("  b  ");
   expect(later.output.join("")).not.toContain("  a  ");
 });
+
+it("bounds cursor retries under contention by the deadline and leaves the lane for redelivery", async () => {
+  const opened = store();
+  const stuck = {
+    unseenLanes: (...args: Parameters<Store["unseenLanes"]>) => opened.unseenLanes(...args),
+    markLanesSeen: () => { throw busy(); },
+  };
+  const output: string[] = [];
+  let clock = 0;
+  const code = await waitForLanes({
+    who, store: stuck, timeoutSeconds: 6,
+    read: async () => ({ schema: "fabric.runs.v1", status: "ok", runs: [lane("kept")] }),
+    write: async (text) => { output.push(text); },
+    fail: (text) => { throw new Error(text); },
+    sleep: async (ms) => { clock += ms; },
+    now: () => clock,
+  });
+  expect(code).toBe(124);
+  expect(clock).toBeLessThanOrEqual(8000);
+  // Nothing was marked seen, so the lane is reported again.
+  const again = run(opened, [[lane("kept")]]);
+  expect(await again.code).toBe(0);
+  expect(again.output.join("")).toContain("kept");
+});
+
+it("--timeout 0 polls once", async () => {
+  const waiter = timed(store(), [[lane("a", "running", null)]], { timeoutSeconds: 0 });
+  expect(await waiter.code).toBe(124);
+  expect(waiter.output.join("")).toBe("timeout after 0s; still running: a\n");
+});

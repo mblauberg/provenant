@@ -64,7 +64,7 @@ input-required lane of the registered project, finished within the last day,
 once per seat, including lanes that finished between waits; named ids narrow it
 to those lanes, and a batch id to its tasks. `lanes --wait --all` holds the report
 until every listed lane is terminal or needs input, and `--timeout N` ends the
-wait with exit 124 naming the lanes still running. `lanes --project P` reads
+wait with exit 124 naming the lanes still running (`--timeout 0` polls once; contention on the seen-cursor is bounded by it too, and unmarked lanes are reported again next wait). An unknown id fails the wait at once with the read error (exit 1) rather than being skipped. `lanes --project P` reads
 another project; an empty listing says which project the cwd resolved to.
 The next dispatch reaps a run only when its host is gone and its owner or
 provider still runs: an owner that exited and left its provider behind, or a

@@ -188,10 +188,12 @@ function coerceInput(input: Record<string, any>, warnings: string[]): Record<str
   };
   for (const key of NUMERIC_FIELDS) number(result, key);
   if (Array.isArray(result.tasks))
-    result.tasks = result.tasks.map((item: unknown) => {
+    result.tasks = result.tasks.map((item: unknown, index: number) => {
       if (!item || typeof item !== "object" || Array.isArray(item)) return item;
       const copy = { ...(item as Record<string, any>) };
+      const before = warnings.length;
       number(copy, "timeout_seconds");
+      for (let at = before; at < warnings.length; at++) warnings[at] = `tasks[${index}]: ${warnings[at]}`;
       return copy;
     });
   if (result.until !== undefined && result.until !== "any" && result.until !== "all") {
@@ -234,7 +236,11 @@ function normaliseInputKeys(name: string, input: Record<string, any>, fields: st
       if (!item || typeof item !== "object" || Array.isArray(item))
         return { id: `task-${index + 1}`, prompt: "", prompt_file: "" };
       const rawTask = item as Record<string, any>;
-      try { return normaliseInputKeys(name, rawTask, ["id", ...Object.keys(task)], true).value; }
+      try {
+        const nested = normaliseInputKeys(name, rawTask, ["id", ...Object.keys(task)], true);
+        warnings.push(...nested.warnings.map((text) => `tasks[${index}]: ${text}`));
+        return nested.value;
+      }
       catch {
         const id = rawTask.id ?? rawTask.task_id ?? rawTask.task;
         return { id: typeof id === "string" ? id : `task-${index + 1}`, prompt: "", prompt_file: "" };
