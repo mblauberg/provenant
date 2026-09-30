@@ -1745,35 +1745,39 @@ print(json.dumps({{'type':'turn.completed'}}), flush=True)
                 pass
 
 
+def started_sleeper(argv, environment):
+    """A sleeping Python child that has finished exec and runs user code.
+
+    Popen returns once exec has closed its error pipe, which on Linux is before the kernel sets
+    the new image's environment bounds, so /proc/<pid>/environ can still read empty. The child's
+    first output line proves exec is complete; the marker scan only ever sees such processes on
+    later censuses.
+    """
+    child = subprocess.Popen(argv, env=environment, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    ready = child.stdout.readline()
+    child.stdout.close()  # the child writes nothing more
+    assert ready == b"ready\n"
+    return child
+
+
 def test_attempt_marker_matches_inherited_environment_only():
     marker = "fixture-marker-123"
+    sleeper = "import sys, time; print('ready', flush=True); time.sleep(30)"
     environment = dict(os.environ)
     environment.pop("PROVENANT_ATTEMPT_MARKER", None)
-    child = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(30)",
-         "PROVENANT_ATTEMPT_MARKER=" + marker],
-        env=environment,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    child = started_sleeper([sys.executable, "-c", sleeper, "PROVENANT_ATTEMPT_MARKER=" + marker], environment)
     try:
         assert not supervisor()._has_attempt_marker(child.pid, marker)
     finally:
         child.terminate()
         child.wait(timeout=3)
     environment["PROVENANT_ATTEMPT_MARKER"] = marker
-    child = subprocess.Popen(
-        [sys.executable, "-c", "import time; time.sleep(30)"],
-        env=environment,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    child = started_sleeper([sys.executable, "-c", sleeper], environment)
     try:
         assert supervisor()._has_attempt_marker(child.pid, marker)
     finally:
         child.terminate()
         child.wait(timeout=3)
-
 
 def _live_process(pid):
     try:
