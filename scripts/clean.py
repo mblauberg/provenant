@@ -257,8 +257,9 @@ def _run_verdict(path: Path, kind: str, age: float, refs: str | None, pr_unknown
         retention = 30
     elif kind == "mission":
         retention = 7
-    elif status in {"failed", "partial", "stalled", "timed_out", "interrupted", "rejected", "tool_missing",
-                    "usage_limited", "rate_limited", "auth_required", "model_unavailable", "permission_blocked"}:
+    elif status in {"failed", "partial", "stalled", "startup_timeout", "timed_out", "interrupted", "rejected",
+                    "tool_missing", "usage_limited", "rate_limited", "auth_required", "model_unavailable",
+                    "permission_blocked"}:
         retention = 14
     elif status in {"active", "running", "queued", ""}:
         if kind not in {"dispatch", "batch"} or not any((path / name).is_file() for name in (
