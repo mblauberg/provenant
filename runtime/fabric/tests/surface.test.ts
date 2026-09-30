@@ -665,7 +665,11 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     const duplicate = await call("dispatch", { resume: row.run_id, prompt: "duplicate", wait_seconds: 0 });
     expect(duplicate.structuredContent).toMatchObject({ status: "rejected" });
     await call("status", { ids: [row.run_id], wait_seconds: 5 });
-    const interrupted = await call("dispatch", { resume: row.run_id, prompt: "crash-before-attempt", wait_seconds: 5 });
+    // Status reads the attempt terminal from its receipt while the owner may still be exiting, and
+    // resume refuses a live owner. The completion callback stamps finished_at once the owner closed.
+    await expect.poll(() => JSON.parse(readFileSync(join(row.run_dir, "dispatch-status.json"), "utf8")).finished_at,
+      { timeout: 10_000 }).toBeDefined();
+    const interrupted =await call("dispatch", { resume: row.run_id, prompt: "crash-before-attempt", wait_seconds: 5 });
     expect(interrupted.structuredContent).toMatchObject({
       state: "terminal",
       status: "interrupted",
