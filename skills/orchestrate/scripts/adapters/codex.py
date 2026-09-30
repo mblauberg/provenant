@@ -1,5 +1,6 @@
 import json
 import sys
+import uuid
 
 CLI = "codex"
 PROMPT_TRANSPORT = "stdin"
@@ -11,6 +12,24 @@ EFFORT_FLAG = "model_reasoning_effort"
 SESSION_KEYS = ("thread_id",)
 MODEL_SOURCE = "codex:rollout.turn_context.model"
 SIGNATURES = (("usage_limited", r"usage limit|try again at \d"),)
+
+
+def permissions_profile(p, extends, network, filesystem=None):
+    """Select a per-plan permissions profile built only from these overrides.
+
+    Codex merges config tables, so a fixed profile name would inherit any filesystem grant a
+    system or user config adds under that name; a name unique to the plan has none to inherit.
+    """
+    name = p["applied"].get("write_boundary", {}).get("profile") or "provenant-" + uuid.uuid4().hex
+    command = [
+        "-c", "default_permissions=" + json.dumps(name),
+        "-c", "permissions." + name + ".extends=" + json.dumps(extends),
+        "-c", "permissions." + name + ".network.enabled=" + str(bool(network)).lower(),
+    ]
+    if filesystem is not None:
+        command += ["-c", "permissions." + name + ".filesystem={" + ", ".join(
+            json.dumps(path) + " = " + json.dumps(access) for path, access in filesystem.items()) + "}"]
+    return command
 
 
 def argv(p):
@@ -38,14 +57,12 @@ def argv(p):
         else:
             command += ["-s", "danger-full-access"]
     elif sandbox == "read-only" and network:
-        command += [
-            "-c",
-            'default_permissions="provenant-read-only-network"',
-            "-c",
-            'permissions.provenant-read-only-network.extends=":read-only"',
-            "-c",
-            "permissions.provenant-read-only-network.network.enabled=true",
-        ]
+        command += permissions_profile(p, ":read-only", True)
+    elif sandbox == "workspace-write":
+        # A permissions profile names single Git paths inside the common directory, which
+        # sandbox_workspace_write.writable_roots cannot; the nearest entry wins.
+        filesystem = p["applied"].get("write_boundary", {}).get("filesystem") or {}
+        command += permissions_profile(p, ":workspace", network, filesystem)
     elif p["resume_session"]:
         command += [
             "-c",
@@ -54,16 +71,6 @@ def argv(p):
         ]
     else:
         command += ["-s", "danger-full-access" if sandbox == "full" else sandbox]
-    if sandbox == "workspace-write" and not capabilities:
-        command += [
-            "-c",
-            "sandbox_workspace_write.network_access=" + str(network).lower(),
-        ]
-        command += [
-            "-c",
-            "sandbox_workspace_write.writable_roots="
-            + json.dumps(p["applied"]["add_dirs"]),
-        ]
     if not p["resume_session"]:
         for directory in p["applied"]["add_dirs"]:
             command += ["--add-dir", directory]

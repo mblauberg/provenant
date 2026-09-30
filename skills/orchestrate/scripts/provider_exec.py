@@ -77,6 +77,15 @@ CODEX_BROWSER_MACH_PORT_PREFIXES = (
 CODEX_POSTGRES_IPC_OPERATIONS = ("ipc-sysv-shm", "ipc-sysv-sem")
 CAPABILITY_VALUES = frozenset({"postgres", "browser"})
 EXTRA_DENIED_READS = (".claude/projects", ".codex/sessions")
+# Every writer's Git write boundary: its private worktree Git directory plus these common paths.
+# The rest of the common directory (hooks, config, info, other worktrees) runs code or holds state
+# for every checkout, so it stays read-only. Codex writers also keep GIT_PRIVATE_READ_ONLY.
+GIT_COMMON_WRITE_DIRS = ("objects", "refs", "logs")
+# Git rewrites packed-refs through the lock and a .new file renamed over it.
+GIT_COMMON_WRITE_FILES = ("packed-refs", "packed-refs.lock", "packed-refs.new")
+GIT_PRIVATE_READ_ONLY = ("config.worktree", "commondir", "gitdir")
+# Automatic gc and rerere write gc.pid, gc.log and rr-cache in the read-only common directory.
+WRITER_GIT_CONFIG = (("gc.auto", "0"), ("maintenance.auto", "false"), ("rerere.enabled", "false"))
 # Repository agent instructions and skills. Codex protects them inside a writable root.
 INSTRUCTION_DIR = ".agents"
 # A provider that has written nothing to stdout this long after launch is failed
@@ -337,8 +346,8 @@ def os_confinement_profile(plan):
         if private is not None and private != common:
             git_allowed.append(private)
         if common is not None:
-            git_allowed.extend(common / path for path in ("objects", "refs", "logs"))
-        literal_files = ([common / path for path in ("packed-refs", "packed-refs.lock")]
+            git_allowed.extend(common / path for path in GIT_COMMON_WRITE_DIRS)
+        literal_files = ([common / path for path in GIT_COMMON_WRITE_FILES]
                          if common is not None else [])
         capabilities = plan.get("applied", {}).get("capabilities", [])
         profile = (
@@ -351,9 +360,10 @@ def os_confinement_profile(plan):
         if plan.get("adapter") == "codex" and capabilities:
             codex_home = Path(plan["codex_home"])
             auth_path = Path(plan["codex_auth_path"])
+            # Codex's native sandbox keeps these read-only, so a capability lane keeps them too.
             profile += _sbpl_rule("deny", "file-write*", [cwd / ".git"])
             if private is not None and private != common:
-                for name in ("config.worktree", "commondir", "gitdir"):
+                for name in GIT_PRIVATE_READ_ONLY:
                     profile += _sbpl_rule("deny", "file-write*", [private / name], literal=True)
             profile += _sbpl_rule("allow", "file-write*", [codex_home])
             # Quote without resolving, and allow in-place rewrites only, so the lane cannot swap the
@@ -500,29 +510,14 @@ def build_plan(
     for directory in directories:
         if credential_path(directory) or Path.home().resolve().is_relative_to(Path(directory)):
             warnings.append("credential or authentication add-dir dropped: " + directory)
-        elif capabilities and git_common is not None and Path(directory).resolve() == git_common:
-            warnings.append("Codex capability lane drops Git common directory add-dir: " + directory)
+        elif adapter == "codex" and git_common is not None and Path(directory).is_relative_to(git_common):
+            warnings.append("Codex writer drops Git common directory add-dir: " + directory)
         else:
             safe_directories.append(directory)
     directories = safe_directories
     if any(not Path(p).is_dir() for p in directories):
         raise ValueError("add-dir must be a readable directory")
-    if mode == "worktree_write" and adapter == "codex" and Path(cwd, ".git").is_file():
-        common = subprocess.run(
-            [
-                "git",
-                "-C",
-                cwd,
-                "rev-parse",
-                "--path-format=absolute",
-                "--git-common-dir",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if not capabilities and common.returncode == 0 and common.stdout.strip() not in directories:
-            directories.append(common.stdout.strip())
+    if mode == "worktree_write" and adapter == "codex" and git_private is not None:
         # Codex's workspace-write sandbox keeps each writable root's .agents read-only, so a
         # rebase or merge that updates a tracked skill stops half-way. Granting the directory
         # lets Git rewrite it; execute() then fails a lane that authored a change there.
@@ -609,7 +604,7 @@ def build_plan(
                            CONFINED_STATE.get(adapter, {}).get("read_write", ())), "/dev"]
         if mode == "worktree_write":
             git_paths = ([str(git_private), *(str(git_common / path) for path in
-                           ("objects", "refs", "logs", "packed-refs", "packed-refs.lock"))]
+                           GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)]
                          if git_private is not None else [])
             writable_paths = [cwd, *directories, *writable_paths, *git_paths]
         if codex_home is not None:
@@ -617,6 +612,21 @@ def build_plan(
         write_boundary = {"kind": "sandbox-exec", "writable_paths": writable_paths}
     elif confinement == "provider-native":
         write_boundary = {"kind": "provider-native", "sandbox": sandbox}
+        if adapter == "codex":
+            write_boundary["profile"] = "provenant-" + uuid.uuid4().hex
+        if mode == "worktree_write" and sandbox == "workspace-write":
+            # Codex applies the nearest entry, so the common directory reads as read-only below
+            # any add_dir while the named Git paths inside it stay writable.
+            filesystem = {directory: "write" for directory in directories}
+            if git_private is not None:
+                filesystem[str(git_common)] = "read"
+                for path in (git_private, *(git_common / name for name in
+                                            GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)):
+                    filesystem[str(path)] = "write"
+                for name in GIT_PRIVATE_READ_ONLY:
+                    filesystem[str(git_private / name)] = "read"
+                filesystem[str(Path(cwd, ".git"))] = "read"
+            write_boundary["filesystem"] = filesystem
     else:
         write_boundary = {"kind": "none", "writable_paths": None}
     applied_sandbox = (
@@ -2012,6 +2022,12 @@ def execute(
     private_cache.mkdir(parents=True, exist_ok=True)
     environment.update(TMPDIR=str(private_tmp), TMP=str(private_tmp), TEMP=str(private_tmp),
                        XDG_CACHE_HOME=str(private_cache))
+    if plan["mode"] == "worktree_write":
+        # Inherited GIT_ variables were dropped above, so this list is the whole command-line scope.
+        environment["GIT_CONFIG_COUNT"] = str(len(WRITER_GIT_CONFIG))
+        for index, (key, value) in enumerate(WRITER_GIT_CONFIG):
+            environment[f"GIT_CONFIG_KEY_{index}"] = key
+            environment[f"GIT_CONFIG_VALUE_{index}"] = value
     if plan["adapter"] == "claude":
         private_claude_tmp = private_tmp / "claude"
         private_claude_tmp.mkdir(parents=True, exist_ok=True)

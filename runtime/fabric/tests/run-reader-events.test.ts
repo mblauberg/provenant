@@ -1,5 +1,5 @@
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { spawn, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -28,6 +28,42 @@ function attempt(workspace: string, tree: string, taskId: string, state: string,
   writeFileSync(join(dir, "result.md"), "result");
   return { row, run };
 }
+
+const product = resolve(import.meta.dirname, "../../..");
+const tsxLoader = createRequire(import.meta.url).resolve("tsx");
+
+function laneWaitForSeat(cwd: string, state: string, seat: string, ...ids: string[]) {
+  return spawnSync("python3", [join(product, "scripts/provenant"), "lanes", "--wait", ...ids], {
+    cwd, encoding: "utf8", timeout: 15_000,
+    env: { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product, AGENT_FABRIC_TSX_LOADER: tsxLoader,
+      AGENT_FABRIC_STATE_DIRECTORY: state, AGENT_FABRIC_SEAT: "codex", AGENT_FABRIC_LABEL: seat },
+  });
+}
+
+function laneWait(cwd: string, state: string, ...ids: string[]) {
+  return laneWaitForSeat(cwd, state, "wait-seat", ...ids);
+}
+
+function laneWaitEnv(state: string, seat = "wait-seat") {
+  return { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product, AGENT_FABRIC_TSX_LOADER: tsxLoader,
+    AGENT_FABRIC_STATE_DIRECTORY: state, AGENT_FABRIC_SEAT: "codex", AGENT_FABRIC_LABEL: seat };
+}
+
+function startWait(cwd: string, state: string, ...ids: string[]) {
+  const child = spawn("python3", [join(product, "scripts/provenant"), "lanes", "--wait", ...ids], {
+    cwd, env: laneWaitEnv(state), stdio: ["ignore", "pipe", "pipe"],
+  });
+  const output = { stdout: "", stderr: "", code: undefined as number | null | undefined };
+  child.stdout.setEncoding("utf8").on("data", (chunk: string) => { output.stdout += chunk; });
+  child.stderr.setEncoding("utf8").on("data", (chunk: string) => { output.stderr += chunk; });
+  const exited = new Promise<number | null>((resolveExit, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => { output.code = code; resolveExit(code); });
+  });
+  return { output, exited };
+}
+
+const pause = (ms: number) => new Promise((resolvePause) => setTimeout(resolvePause, ms));
 
 it("reads both receipt layouts through one versioned root-relative run interface", async () => {
   const workspace = fixture();
@@ -245,11 +281,10 @@ it("waits for a running lane to become terminal and prints one compact row", asy
   writeFileSync(join(workspace, ".agent-run", "runs", olderRun, "tasks", "wait-for-it", "attempt-001", "attempt.json"), JSON.stringify(older));
   const { row, run } = attempt(workspace, "tasks", "wait-for-it", "running", "running");
   const resultFile = join(workspace, ".agent-run", "runs", run, "tasks", "wait-for-it", "attempt-001", "attempt.json");
-  const product = resolve(import.meta.dirname, "../../..");
+  const state = join(workspace, "state");
   const child = spawn("python3", [join(product, "scripts/provenant"), "lanes", "--wait", "wait-for-it"], {
     cwd: workspace,
-    env: { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product,
-      AGENT_FABRIC_TSX_LOADER: createRequire(import.meta.url).resolve("tsx") },
+    env: laneWaitEnv(state),
     stdio: ["ignore", "pipe", "pipe"],
   });
   let stdout = "";
@@ -267,20 +302,195 @@ it("waits for a running lane to become terminal and prints one compact row", asy
   expect(await exited).toBe(0);
   expect(stderr).toBe("");
   expect(stdout).toContain("wait-for-it");
-  expect(stdout).toContain("newly-finished");
+  expect(stdout).not.toContain("newly-finished");
   expect(stdout).not.toContain("pre-existing-done");
   expect(stdout).toContain("result.md");
 }, 12_000);
 
-it("returns a note immediately when no lane is running", () => {
+it("reports lanes completed between waits once, then keeps the no-running message", async () => {
   const workspace = fixture();
-  attempt(workspace, "tasks", "already-done", "terminal", "ok");
-  const product = resolve(import.meta.dirname, "../../..");
-  const result = spawnSync("python3", [join(product, "scripts/provenant"), "lanes", "--wait"], {
-    cwd: workspace, encoding: "utf8", timeout: 5000,
-    env: { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product,
-      AGENT_FABRIC_TSX_LOADER: createRequire(import.meta.url).resolve("tsx") },
+  const state = join(workspace, "state");
+  const { row, run } = attempt(workspace, "tasks", "first-done", "running", "running");
+  const firstReceipt = join(workspace, ".agent-run", "runs", run,
+    "tasks", "first-done", "attempt-001", "attempt.json");
+  const child = spawn("python3", [join(product, "scripts/provenant"), "lanes", "--wait"], {
+    cwd: workspace, env: laneWaitEnv(state), stdio: ["ignore", "pipe", "pipe"],
   });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+  child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+  const exited = new Promise<number | null>((resolveExit, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => resolveExit(code));
+  });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  writeFileSync(firstReceipt, JSON.stringify({ ...row, state: "terminal", status: "ok" }));
+  expect(await exited).toBe(0);
+  expect(stderr).toBe("");
+  expect(stdout).toContain("first-done");
+
+  attempt(workspace, "tasks", "between-waits", "terminal", "ok");
+  const next = laneWait(workspace, state);
+  expect(next.status, next.stderr).toBe(0);
+  expect(next.stdout).toContain("between-waits");
+  expect(next.stdout).not.toContain("first-done");
+}, 12_000);
+
+it("reports a pre-existing terminal lane once to the same seat", () => {
+  const workspace = fixture();
+  const state = join(workspace, "state");
+  attempt(workspace, "tasks", "already-done", "terminal", "ok");
+  // Retention bounds the scan: a first wait does not replay lanes older than a day.
+  const { row, run } = attempt(workspace, "tasks", "long-retired", "terminal", "ok");
+  row.started_at = "2020-01-01T00:00:00.000Z";
+  row.ended_at = "2020-01-01T00:00:01.000Z";
+  writeFileSync(join(workspace, ".agent-run", "runs", run,
+    "tasks", "long-retired", "attempt-001", "attempt.json"), JSON.stringify(row));
+  const first = laneWait(workspace, state);
+  expect(first.status, first.stderr).toBe(0);
+  expect(first.stdout).toContain("already-done");
+  expect(first.stdout).not.toContain("long-retired");
+
+  const second = laneWait(workspace, state);
+  expect(second.status, second.stderr).toBe(0);
+  expect(second.stdout).toBe("no lanes are running\n");
+
+  const otherSeat = laneWaitForSeat(workspace, state, "other-seat");
+  expect(otherSeat.status, otherSeat.stderr).toBe(0);
+  expect(otherSeat.stdout).toContain("already-done");
+}, 30_000);
+
+it("waits for project lanes when invoked from a registered worktree", async () => {
+  const workspace = fixture();
+  const project = join(workspace, "project");
+  const linked = join(project, ".worktrees", "linked");
+  mkdirSync(project, { recursive: true });
+  execFileSync("git", ["init", "--quiet"], { cwd: project });
+  execFileSync("git", ["config", "user.email", "fabric@example.invalid"], { cwd: project });
+  execFileSync("git", ["config", "user.name", "Fabric test"], { cwd: project });
+  writeFileSync(join(project, "README"), "fixture\n");
+  execFileSync("git", ["add", "README"], { cwd: project });
+  execFileSync("git", ["commit", "--quiet", "-m", "fixture"], { cwd: project });
+  mkdirSync(join(project, ".worktrees"), { recursive: true });
+  execFileSync("git", ["worktree", "add", "--quiet", "--detach", linked, "HEAD"], { cwd: project });
+
+  const { row, run } = attempt(project, "tasks", "linked-wait", "running", "running");
+  const receipt = join(project, ".agent-run", "runs", run,
+    "tasks", "linked-wait", "attempt-001", "attempt.json");
+  const state = join(workspace, "state");
+  const child = spawn("python3", [join(product, "scripts/provenant"), "lanes", "--wait"], {
+    cwd: linked, env: laneWaitEnv(state), stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  child.stdout.setEncoding("utf8").on("data", (chunk: string) => { stdout += chunk; });
+  child.stderr.setEncoding("utf8").on("data", (chunk: string) => { stderr += chunk; });
+  const exited = new Promise<number | null>((resolveExit, reject) => {
+    child.once("error", reject);
+    child.once("exit", (code) => resolveExit(code));
+  });
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  writeFileSync(receipt, JSON.stringify({ ...row, state: "input_required", status: "input_required" }));
+  expect(await exited).toBe(0);
+  expect(stderr).toBe("");
+  expect(stdout).toContain("linked-wait");
+}, 12_000);
+
+it("reports every unseen completion past the 20-row display cap", () => {
+  const workspace = fixture();
+  const state = join(workspace, "state");
+  for (let index = 0; index < 23; index += 1) attempt(workspace, "tasks", `bulk-${String(index).padStart(3, "0")}`, "terminal", "ok");
+  const result = laneWait(workspace, state);
   expect(result.status, result.stderr).toBe(0);
-  expect(result.stdout).toBeTruthy();
-});
+  expect(result.stdout.trim().split("\n")).toHaveLength(23);
+}, 20_000);
+
+it("wakes only for the named lane, not for unrelated lanes that finish meanwhile", async () => {
+  const workspace = fixture();
+  const state = join(workspace, "state");
+  attempt(workspace, "tasks", "unrelated-old", "terminal", "ok");
+  const { row, run } = attempt(workspace, "tasks", "named-lane", "running", "running");
+  const waiter = startWait(workspace, state, row.run_id);
+  // Let the waiter take its first snapshot so the unrelated lane appears mid-wait.
+  await pause(3000);
+  attempt(workspace, "tasks", "smoke-848-1", "terminal", "ok");
+  await pause(2600);
+  expect(waiter.output.code, waiter.output.stdout + waiter.output.stderr).toBeUndefined();
+  writeFileSync(join(workspace, ".agent-run", "runs", run, "tasks", "named-lane", "attempt-001", "attempt.json"),
+    JSON.stringify({ ...row, state: "terminal", status: "ok" }));
+  expect(await waiter.exited).toBe(0);
+  expect(waiter.output.stdout).toContain("named-lane");
+  expect(waiter.output.stdout).not.toContain("smoke-848-1");
+  expect(waiter.output.stdout).not.toContain("unrelated-old");
+}, 20_000);
+
+it("a batch id wakes for its own children only", () => {
+  const workspace = fixture();
+  const state = join(workspace, "state");
+  const batchRun = "20260924-1012-dispatch-batch-fixture";
+  attempt(workspace, "tasks", "child-one", "terminal", "ok", batchRun);
+  attempt(workspace, "tasks", "child-two", "running", "running", batchRun);
+  writeFileSync(join(workspace, ".agent-run", "runs", batchRun, "dispatch-status.json"),
+    JSON.stringify({ batch_id: "batch-fixture", started_at: new Date().toISOString() }));
+  attempt(workspace, "tasks", "outsider", "terminal", "ok");
+  const result = laneWait(workspace, state, "batch-fixture");
+  expect(result.status, result.stderr).toBe(0);
+  expect(result.stdout).toContain("child-one");
+  expect(result.stdout).not.toContain("outsider");
+}, 30_000);
+
+it("reports input_required, then the resumed attempt's terminal state", () => {
+  const workspace = fixture();
+  const state = join(workspace, "state");
+  const { row, run } = attempt(workspace, "tasks", "asks-first", "terminal", "input_required");
+  const first = laneWait(workspace, state);
+  expect(first.status, first.stderr).toBe(0);
+  expect(first.stdout).toMatch(/^input_required\s+asks-first/u);
+  const second = join(workspace, ".agent-run", "runs", run, "tasks", "asks-first", "attempt-002");
+  mkdirSync(second, { recursive: true });
+  writeFileSync(join(second, "attempt.json"), JSON.stringify({ ...row, attempt: 2, status: "ok",
+    paths: { result: "tasks/asks-first/attempt-002/result.md" } }));
+  const resumed = laneWait(workspace, state);
+  expect(resumed.status, resumed.stderr).toBe(0);
+  expect(resumed.stdout).toMatch(/^ok\s+asks-first/u);
+  expect(laneWait(workspace, state).stdout).toBe("no lanes are running\n");
+}, 30_000);
+
+it("lists the project's lanes from a registered worktree and a subdirectory", () => {
+  const workspace = fixture();
+  const project = join(workspace, "project");
+  const linked = join(project, ".worktrees", "linked");
+  mkdirSync(join(project, "sub", "dir"), { recursive: true });
+  execFileSync("git", ["init", "--quiet"], { cwd: project });
+  execFileSync("git", ["-c", "user.email=fabric@example.invalid", "-c", "user.name=Fabric test",
+    "commit", "--quiet", "--allow-empty", "-m", "fixture"], { cwd: project });
+  execFileSync("git", ["worktree", "add", "--quiet", "--detach", linked, "HEAD"], { cwd: project });
+  attempt(project, "tasks", "project-lane", "running", "running");
+  const env = laneWaitEnv(join(workspace, "state"));
+  for (const cwd of [linked, join(project, "sub", "dir")]) {
+    const run = (...args: string[]) => {
+      const result = spawnSync("python3", [join(product, "scripts/provenant"), ...args], { cwd, encoding: "utf8", env });
+      expect(result.status, `${cwd} ${args.join(" ")}: ${result.stderr}`).toBe(0);
+      return result.stdout;
+    };
+    expect(run("lanes", "--json")).toContain("project-lane");
+    expect(run("fabric", "status", "--runs")).toContain("project-lane");
+    expect(JSON.parse(run("fabric", "dispatch", "list", "--json")).workspace).toBe(realpathSync(project));
+  }
+}, 30_000);
+
+it("writes a report larger than the pipe buffer in full before advancing the cursor", () => {
+  const workspace = fixture();
+  const state = join(workspace, "state");
+  // Long task ids keep the lane count, and so the scan, small under load.
+  for (let index = 0; index < 250; index += 1) attempt(workspace, "tasks", `pipe-${"x".repeat(90)}-${String(index).padStart(4, "0")}`, "terminal", "ok");
+  const wait = () => spawnSync("python3", [join(product, "scripts/provenant"), "lanes", "--wait"], {
+    cwd: workspace, encoding: "utf8", timeout: 55_000, env: laneWaitEnv(state),
+  });
+  const first = wait();
+  expect(first.status, `${first.signal} ${first.error} ${first.stderr}`).toBe(0);
+  expect(first.stdout.length).toBeGreaterThan(65_536);
+  expect(first.stdout.trim().split("\n")).toHaveLength(250);
+  expect(wait().stdout).toBe("no lanes are running\n");
+}, 120_000);
