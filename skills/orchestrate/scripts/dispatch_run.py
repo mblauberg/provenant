@@ -261,6 +261,69 @@ def workspace_identity(workspace: Path, provider_cwd: Path | None = None) -> dic
     return identity
 
 
+# Directories a launch itself churns, or Git owns; edits under them are not writer work.
+STARTUP_WALK_SKIP = {".git", ".agent-run", "node_modules", ".venv", "__pycache__", ".pytest_cache", "dist", "build"}
+STARTUP_WALK_MAX_ENTRIES = 200_000
+STARTUP_WALK_MAX_SECONDS = 5.0
+
+
+def writer_worktree_state(cwd: str) -> tuple[str, bytes] | None:
+    """HEAD and porcelain status of a writer's worktree, or None when Git cannot say."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    try:
+        head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=cwd, env=env, capture_output=True,
+                              text=True, timeout=10, check=True).stdout.strip()
+        status = subprocess.run(["git", "status", "--porcelain=v1", "-z", "--untracked-files=normal"],
+                                cwd=cwd, env=env, capture_output=True, timeout=10, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return head, status
+
+
+def modified_since(cwd: str, since: float) -> bool:
+    """Whether any entry under cwd, ignored files included, changed at or after since.
+
+    Hitting the entry or time cap, or an unreadable directory, counts as changed.
+    """
+    deadline = time.monotonic() + STARTUP_WALK_MAX_SECONDS
+    visited = 0
+    pending = [cwd]
+    while pending:
+        directory = pending.pop()
+        try:
+            metadata = os.lstat(directory)
+            if max(metadata.st_mtime, metadata.st_ctime) >= since:
+                return True  # a created, renamed or deleted child
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    visited += 1
+                    if visited > STARTUP_WALK_MAX_ENTRIES or time.monotonic() > deadline:
+                        return True
+                    if entry.is_dir(follow_symlinks=False):
+                        if entry.name not in STARTUP_WALK_SKIP:
+                            pending.append(entry.path)
+                        continue
+                    metadata = entry.stat(follow_symlinks=False)
+                    if max(metadata.st_mtime, metadata.st_ctime) >= since:
+                        return True
+        except OSError:
+            return True
+    return False
+
+
+def guard_writer_startup_timeout(record: dict[str, Any], start: tuple[Any, ...] | None, cwd: str) -> None:
+    """A silent writer may still have edited files; fall back only over a provably untouched worktree."""
+    if record.get("status") != "startup_timeout":
+        return
+    state, launched = start or (None, 0.0)
+    if (state is not None and not state[1] and writer_worktree_state(cwd) == state
+            and not modified_since(cwd, launched - 1.0)):
+        return
+    record["retryable"] = False
+    record["fix"] = ("inspect the worktree: it changed or was dirty when the silent writer timed out; "
+                     "then dispatch again on another model or adapter")
+
+
 def valid_regular_result(run_dir: Path, path: Path) -> bool:
     try:
         contained_regular_path(run_dir, path.relative_to(run_dir), "retained evidence")
@@ -775,6 +838,10 @@ def build_command(
     if policy is not None:
         command.extend(("--fallback", "true" if isinstance(policy, list) else json.dumps(policy) if type(policy) is bool else policy))
     return command
+
+
+# Statuses whose provider turn ended before a result, so its session may be missing.
+INCOMPLETE_TURN_STATUSES = {"timed_out", "cancelled", "stalled", "startup_timeout", "interrupted"}
 
 
 FAST_PLAN_SHELL_ENV_READS = {
@@ -1483,7 +1550,7 @@ def prepare_resume(args):
             setattr(args, field, route[field])
     args.resume_previous=previous
     observed_session=False
-    if args.tool=="claude" and previous["status"] in {"timed_out","cancelled","stalled","interrupted"}:
+    if args.tool=="claude" and previous["status"] in INCOMPLETE_TURN_STATUSES:
         events=previous["paths"].get("events")
         if events:
             retained=retained_path(args.run_dir,events)
@@ -1504,11 +1571,11 @@ def prepare_resume(args):
                     observed_session=True
                     break
     if not args.resume_session or args.tool=="copilot" or (
-        args.tool=="claude" and previous["status"] in {"timed_out","cancelled","stalled","interrupted"}
+        args.tool=="claude" and previous["status"] in INCOMPLETE_TURN_STATUSES
         and not observed_session
     ):
         if (args.tool=="claude" and previous["mode"]=="worktree_write"
-            and previous["status"] in {"timed_out","cancelled","stalled","interrupted"}):
+            and previous["status"] in INCOMPLETE_TURN_STATUSES):
             raise ValueError("Claude session unavailable after incomplete writer turn; review worktree changes, then dispatch a new run")
         args.resume_session=None
         args.resume_relaunch=resume_relaunch_context(args.run_dir,previous)
@@ -1889,6 +1956,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 def cancellation():
                     return owner_cancel[0] or cancellation_marker_present(run_dir,attempt_dir) or (batch_dir is not None and cancellation_marker_present(run_dir,batch_dir))
                 admitted = admit_attempt(active, cancellation)
+                # Snapshot before launch: the timeout walk compares mtimes with this wall time.
+                writer_start = ((writer_worktree_state(plan["cwd"]), time.time())
+                                if admitted and plan["mode"] == "worktree_write" else None)
                 spawn_started = time.monotonic()
                 if not admitted:
                     plan["warnings"] = active["warnings"]
@@ -1917,7 +1987,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     and adapter_record.get("status")=="failed"
                     and re.search(r"no conversation found",adapter_record.get("evidence",{}).get("excerpt") or "",re.I)):
                     previous=args.resume_previous
-                    if (previous["mode"]=="worktree_write" and previous["status"] in {"timed_out","cancelled","stalled","interrupted"}):
+                    if (previous["mode"]=="worktree_write" and previous["status"] in INCOMPLETE_TURN_STATUSES):
                         adapter_record["status"]="rejected"
                         adapter_record["fix"]="Review worktree changes, then dispatch a new run."
                         adapter_record["evidence"]["signature"]="resume_session_missing"
@@ -1945,6 +2015,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 if hasattr(args,"resume_relaunch") and not relaunch_skipped:
                     adapter_record["provenance"]["notes"].append("resumed_by_relaunch")
                     adapter_record["warnings"].append("resume: relaunched")
+                if admitted and plan["mode"] == "worktree_write":
+                    guard_writer_startup_timeout(adapter_record, writer_start, plan["cwd"])
                 args._last_plan=plan
             else:
                 adapter_record=plan
