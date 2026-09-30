@@ -3772,6 +3772,22 @@ def test_quarantine_restores_each_starting_view(tmp_path):
     assert (lane / SKILL).read_text() == "lane edit\n"
 
 
+@pytest.mark.parametrize("script", [
+    "os.remove('.agents/local/notes.md')\n",
+    "import shutil; shutil.rmtree('.agents/local'); os.symlink('/tmp', '.agents/local')\n",
+], ids=["removed", "link-swapped"])
+def test_quarantine_restores_and_reports_an_untracked_start_file_the_lane_removed(tmp_path, script):
+    _, lane = instruction_lane(tmp_path)
+    notes = ".agents/local/notes.md"
+    (lane / notes).parent.mkdir()
+    (lane / notes).write_text("start notes\n")  # untracked at the start
+    record = lane_attempt(tmp_path, lane, script)
+    assert record["status"] == "ok", record
+    assert not (lane / ".agents/local").is_symlink()
+    assert (lane / notes).read_text() == "start notes\n"
+    assert any("quarantined" in warning and notes in warning for warning in record["warnings"]), record["warnings"]
+
+
 def test_quarantine_archives_a_staged_change_the_disk_no_longer_shows(tmp_path):
     _, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('staged lane\\n'); git('add', {SKILL!r})\n"

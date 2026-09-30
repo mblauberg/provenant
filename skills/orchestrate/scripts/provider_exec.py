@@ -2290,6 +2290,9 @@ def authored_instruction_changes(cwd, start):
         for key in set(view).union(*baselines):
             if all(view.get(key) != baseline.get(key) for baseline in baselines):
                 changed.add(key)
+    # No branch tracks a starting untracked file, so only the lane can have removed one.
+    changed.update(key for key in start["disk"].keys() - start["tree"].keys() - start["index"].keys()
+                   if key not in views[2])
     # A path the lane took in from an integration branch must keep that branch's version, so a
     # merge that discards it (git merge -s ours) is caught too.
     restore = _restore_views(cwd, start)
