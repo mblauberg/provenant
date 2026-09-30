@@ -30,6 +30,7 @@ from adapters import profile
 from adapters import claude as claude_adapter
 from output_custody import install, verify, CustodyError
 import fabric_policy
+import layout
 import context_usage
 import process_info
 
@@ -905,6 +906,19 @@ def build_plan(
     ):
         warnings.append("additional directories unsupported by " + adapter)
         directories = []
+    if mode == "worktree_write":
+        # Every write-confined lane may take the project's lock files, which live at the run root
+        # (the primary checkout) outside its worktree. Grant only locks/, never sessions/ or scratch/.
+        locks = layout.run_root(cwd) / ".agent-run" / "locks"
+        try:
+            locks.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        if locks.is_dir() and not locks.is_symlink() and not locks.parent.is_symlink():
+            if str(locks) not in directories:
+                directories.append(str(locks))
+        else:
+            warnings.append(f"project locks directory is not grantable: {locks}")
     attempt_dir = Path(run_dir or cwd).expanduser().resolve()
     codex_home = attempt_dir.parent / "codex-home" if capabilities and adapter == "codex" else None
     codex_auth_path = None
