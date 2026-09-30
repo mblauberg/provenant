@@ -148,8 +148,9 @@ describe("Fabric input corrections", () => {
       expect(route.warnings ?? [], model).toEqual([]);
     }
     expect(normaliseRoute({ adapter: "codex", alias: "gpt-sol" }, identity, on).model).toBe("gpt-sol");
-    expect(() => normaliseRoute({ adapter: "codex", model: "gpt-sol" }, identity, { adapters: [entry(false)] } as any))
-      .toThrow(expect.objectContaining({ code: "model_invalid" }));
+    // Without latest_aliases the name is unknown here: forwarded with a warning for the router to judge.
+    expect(normaliseRoute({ adapter: "codex", model: "gpt-sol" }, identity, { adapters: [entry(false)] } as any).warnings?.join(" "))
+      .toContain("not in the codex catalogue");
     expect(normaliseRoute({ adapter: "codex", model: "gpt-6.1-sol" }, identity, on).model).toBe("gpt-6.1-sol");
     const real = catalogueSnapshot(repositoryRoot);
     expect(normaliseRoute({ adapter: "claude", model: "claude-opus" }, identity, real).model).toBe("claude-opus");
