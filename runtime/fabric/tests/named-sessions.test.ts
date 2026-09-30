@@ -502,6 +502,40 @@ it("releases a finished turn whose retained provider record names a reused pid w
   }
 }, 60_000);
 
+it("keeps an MCP turn busy while its orphan provider with no start time outlives the owner's closure", async () => {
+  const project = fixtureProject();
+  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  try {
+    const run = (await chair.call("dispatch", { session: "orphan-mcp", prompt: "orphan-provider", wait_seconds: 0 })).id as string;
+    // The owner exits and the MCP completion callback closes the run's metadata, but
+    // cannot signal a provider whose start time is unknown, so the provider survives.
+    const row = (await until(() => chair.call("status", { ids: [run], detail: "full" }),
+      (value) => {
+        const dir = value.runs?.[0]?.run_dir;
+        if (typeof dir !== "string") return false;
+        try { return JSON.parse(readFileSync(join(dir, "dispatch-status.json"), "utf8")).finished_at !== undefined; }
+        catch { return false; }
+      })).runs[0];
+    const provider = JSON.parse(readFileSync(join(row.run_dir, "dispatch-provider.json"), "utf8")).provider_pid as number;
+    expect(() => process.kill(provider, 0)).not.toThrow();
+    // Status synthesises the closure; the persisted attempt still reads running.
+    expect((await chair.call("status", { ids: [run], detail: "full" })).runs[0]).toMatchObject({ state: "terminal" });
+    expect(JSON.parse(readFileSync(join(row.run_dir, "tasks", row.task_id, "attempt-001", "attempt.json"), "utf8")))
+      .toMatchObject({ state: "running" });
+    expect(await chair.call("session", { action: "forget", name: "orphan-mcp" }))
+      .toMatchObject({ status: "rejected", error: "session_busy", active_run_id: run });
+    expect(await chair.call("dispatch", { session: "orphan-mcp", prompt: "fast", wait_seconds: 0 }))
+      .toMatchObject({ status: "rejected", error: "session_busy", active_run_id: run });
+    // Once the provider ends, the name is released.
+    writeFileSync(join(row.run_dir, "release"), "");
+    await until(() => { try { process.kill(provider, 0); return false; } catch { return true; } }, (gone) => gone);
+    expect(await until(() => chair.call("session", { action: "inspect", name: "orphan-mcp" }), (value) => value.active_run_id === null))
+      .toMatchObject({ active_run_id: null, last_turn: { status: "interrupted", run_id: run } });
+  } finally {
+    await chair.client.close();
+  }
+}, 60_000);
+
 it("keeps a named session's line in a running turn's rebuilt text", () => {
   const text = digest({ state: "running", run_id: "mcp-abc123", digest: "stale",
     session_digest: "\n  session s resume active" });

@@ -537,10 +537,13 @@ function liveness(runDir: string, owners: ProcessIdentity[], timedProviders = fa
 
 /**
  * Whether a run whose attempts all read terminal may still be acting: its owner
- * (between fallback attempts) or a provider with a recorded start time.
+ * (between fallback attempts) or a provider. A provider record with no start
+ * time is ignored only once the attempt's own receipt reads terminal; a closure
+ * status synthesised for a dead owner is no evidence its provider ended.
  */
-export function runProcessAlive(runDir: string): boolean {
-  const live = liveness(runDir, runOwners(readOwnerRecord(runDir), readJson(join(runDir, "dispatch-status.json"))), true);
+export function runProcessAlive(runDir: string, attemptPersistedTerminal: boolean): boolean {
+  const live = liveness(runDir, runOwners(readOwnerRecord(runDir), readJson(join(runDir, "dispatch-status.json"))),
+    attemptPersistedTerminal);
   return live.owner || live.provider;
 }
 
