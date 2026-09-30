@@ -2599,6 +2599,13 @@ CODEX_ARGV_STUB = """\
 """
 
 
+def recorded_codex_profile(recorded):
+    """The per-plan Codex permissions profile a recorded argv selects."""
+    names = re.findall(r'^default_permissions="(provenant-[0-9a-f]{32})"$', recorded, re.MULTILINE)
+    assert len(names) == 1, recorded
+    return names[0]
+
+
 def test_claude_worktree_writer_route_runs_inside_the_owned_worktree():
     result, recorded, worktree = run_worktree_dispatch("claude", CLAUDE_ARGV_STUB, worktree="make")
     assert result.returncode == 0, result.output
@@ -2640,14 +2647,15 @@ def test_codex_worktree_writer_route_uses_the_workspace_write_sandbox():
     record = json.loads(result.output.splitlines()[-1])
     assert record["access_mode"] == "worktree_write"
     assert record["read_only_guarantee"] == "none"
-    assert "-s\nworkspace-write" in recorded
+    profile = recorded_codex_profile(recorded)
+    assert f'permissions.{profile}.extends=":workspace"' in recorded
     assert f"--cd\n{worktree}" in recorded
     assert "read-only" not in recorded
     # A linked worktree keeps its Git metadata outside the worktree root.
-    assert "sandbox_workspace_write.writable_roots=" in recorded
+    assert f"permissions.{profile}.filesystem={{" in recorded
     # --ignore-user-config drops the user's own network setting, so the arm
     # grants the lane network itself: gh, git push and installs need it.
-    assert "sandbox_workspace_write.network_access=true" in recorded
+    assert f"permissions.{profile}.network.enabled=true" in recorded
     assert record["provider_network"] is True
 
 
@@ -2658,7 +2666,7 @@ def test_codex_worktree_writer_network_can_be_disabled():
     )
     assert result.returncode == 0, result.output
     record = json.loads(result.output.splitlines()[-1])
-    assert "sandbox_workspace_write.network_access=false" in recorded
+    assert f"permissions.{recorded_codex_profile(recorded)}.network.enabled=false" in recorded
     assert record["provider_network"] is False
 
 
@@ -2672,9 +2680,9 @@ def test_codex_read_only_route_denies_writes_but_keeps_network():
     # `-s` would override the profile and drop network again.
     assert "-s\nread-only" not in recorded
     assert "workspace-write" not in recorded
-    assert 'default_permissions="provenant-read-only"' in recorded
-    assert 'permissions.provenant-read-only.extends=":read-only"' in recorded
-    assert "permissions.provenant-read-only.network.enabled=true" in recorded
+    profile = recorded_codex_profile(recorded)
+    assert f'permissions.{profile}.extends=":read-only"' in recorded
+    assert f"permissions.{profile}.network.enabled=true" in recorded
     assert "--skip-git-repo-check" in recorded
 
 
@@ -2686,9 +2694,9 @@ def test_codex_read_only_route_without_network_writes_only_its_temp():
     record = json.loads(result.output.splitlines()[-1])
     assert record["provider_network"] is False
     assert "-s\nread-only" not in recorded
-    assert 'default_permissions="provenant-read-only"' in recorded
-    assert 'permissions.provenant-read-only.filesystem={":tmpdir" = "write"}' in recorded
-    assert "network.enabled" not in recorded
+    profile = recorded_codex_profile(recorded)
+    assert f'permissions.{profile}.filesystem={{":tmpdir" = "write"}}' in recorded
+    assert f"permissions.{profile}.network.enabled=false" in recorded
     assert "workspace-write" not in recorded
 
 

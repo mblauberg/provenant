@@ -23,7 +23,7 @@ Dispatch scans prompt text, prompt files and eligible regular files in `add_dirs
 
 A run has `queued`, `running` and attempt-terminal states. Terminal statuses are `ok`, `partial`, `failed`, `usage_limited`, `rate_limited`, `auth_required`, `model_unavailable`, `permission_blocked`, `stalled`, `timed_out`, `cancelled`, `interrupted`, `rejected`, `tool_missing`, and `input_required`. Structured provider events take precedence over text signatures. Fallback creates another attempt under the same run id. Alias routes default to fallback through allowed paid non-training routes; an explicit model defaults to no fallback. Free or prompt-training routes require explicit opt-in.
 
-Before each new attempt starts its provider, the owner compares available host memory with total physical RAM: free, inactive and speculative pages from macOS `vm_stat` using its reported page size against `sysctl -n hw.memsize`, or Linux `MemAvailable` against `MemTotal`. The default floors are 10% for `worktree_write` and 5% for `read_only`; `<workspace_root>/.agents/fabric-policy.json` may set either value under `memory_floor_percent` to a number from 0 to 100, with 0 disabling that mode's floor. Below the floor, the attempt remains `queued` and is checked every 15 seconds. Owners serialise this decision with a per-user host lock at `$XDG_STATE_HOME/provenant/admission.lock` (default `~/.local/state/provenant/admission.lock`), held until 20 seconds after provider start or attempt end; lock creation failure admits with a warning, while a failed or unknown probe holds and retries. `fabric_status` and `fabric status` show available percentage, floor and elapsed/total wait, which is bounded by `FABRIC_MEMORY_WAIT_SECONDS` (default 1800). On expiry, the attempt fails with error code `memory_unavailable` and a fix. Queued time does not count against execution timeout; cancellation remains available. The parent also excludes published queued time from its child-owner watchdog. An invalid floor records a failed attempt with a one-line fix. Admission only affects new attempts and does not stop running providers.
+Before each new attempt starts its provider, the owner compares available host memory with total physical RAM: free, inactive and speculative pages from macOS `vm_stat` using its reported page size against `sysctl -n hw.memsize`, or Linux `MemAvailable` against `MemTotal`. The default floors are 10% for `worktree_write` and 5% for `read_only`; `<workspace_root>/.agents/fabric-policy.json` may set either value under `memory_floor_percent` to a number from 0 to 100, with 0 disabling that mode's floor. Below the floor, the attempt remains `queued` and is checked every 15 seconds. Owners serialise this decision with a per-user host lock at `$XDG_STATE_HOME/provenant/admission.lock` (default `~/.local/state/provenant/admission.lock`), held until 20 seconds after provider start or attempt end; lock creation failure admits with a warning, while a failed or unknown probe holds and retries. Within a project, queued attempts are admitted in order of queue entry: each queued receipt publishes its `queued_since` time, floor and owner identity, and an attempt yields only to an earlier live waiter whose floor the current reading meets. Waiters republish at least once per poll. Ordering is best effort and liveness wins: a receipt holds no place when its owner has exited, its process start time no longer matches (for example after a reboot), or it has not been republished for three polls (a zombie, suspended or stuck owner) or is dated more than a few seconds ahead of the clock. Receipts are scanned only while the host lock is not held. `fabric_status` and `fabric status` show available percentage, floor and elapsed/total wait, which is bounded by that attempt's `timeout_seconds`. On expiry, the attempt fails with error code `memory_unavailable` and a fix. Queued time does not count against execution timeout; cancellation remains available. The parent also excludes published queued time from its child-owner watchdog. An invalid floor records a failed attempt with a one-line fix. Admission only affects new attempts and does not stop running providers.
 
 ## Session context
 
@@ -82,14 +82,17 @@ rejected when its prompt file or additional directory overlaps a protected
 path, its cwd lies inside one, or OS read confinement is unavailable. Its
 `sandbox-exec` profile
 denies reads of those paths in every registered worktree. Non-training routes
-are unaffected. Codex writer confinement is supplied by `-s workspace-write`
-(or `-c sandbox_mode="workspace-write"` on resume),
-`-c sandbox_workspace_write.writable_roots=<add_dirs>` and a fresh run's
-`--cd <worktree>`. Codex keeps a writable root's `.agents/` read-only, even an
-absent one, which stops a rebase or merge that updates a tracked skill, so a
-linked-worktree Codex writer also gets the worktree's `.agents/` in `add_dirs`
-unless it is a file or link; an absent one is created for the attempt and
-removed afterwards if still empty. After the
+are unaffected. Codex writer confinement is supplied by a permissions
+profile named uniquely for each plan (`-c default_permissions="provenant-<random>"`,
+extending `:workspace`, on fresh runs and resumes), because Codex merges config
+tables and a fixed name would inherit a system config's grants. Its
+`filesystem` table grants `:tmpdir`, `add_dirs` and the Git write boundary below
+and keeps the common directory and the worktree `.git` marker read-only; a fresh
+run also passes `--add-dir` and `--cd <worktree>`. Codex keeps a writable root's
+`.agents/` read-only, even an absent one, which stops a rebase or merge that
+updates or adds a tracked skill, so a linked-worktree Codex writer also gets the
+worktree's `.agents/` in `add_dirs` unless it is a file or link; an absent one
+is created for the attempt and removed afterwards if still empty. After the
 attempt, each `.agents/` path in HEAD, the index and on disk must match the
 attempt's starting HEAD, index or files, or the primary checkout's branch or its
 upstream. Files on disk are hashed without Git, so ignored, skip-worktree and
@@ -127,13 +130,9 @@ local address, so an inbound loopback rule would not establish a loopback limit.
 Each task uses one `CODEX_HOME` at `<task directory>/codex-home` for all
 attempts. Existing `auth.json`, `AGENTS.md`, `HARNESS.md` and `skills` are symlinked from the
 caller's `CODEX_HOME`, or `~/.codex`; the profile grants writes to the task
-home and only the literal source `auth.json`. The Git common directory is
-denied and is not a writable root. Git writes use the private worktree Git
-directory plus the narrow common `objects`, `refs`, `logs`, `packed-refs` and
-`packed-refs.lock` paths, granted by their own names, so a link planted at one
-never moves a later grant. The worktree `.git` marker and private Git
-directory's `config.worktree`, `commondir` and `gitdir` are not writable;
-Fabric recreates the task home links every attempt and fails a symlinked or
+home and only the literal source `auth.json`. It grants each Git write
+boundary path by its own name, so a link planted at one never moves a later
+grant. Fabric recreates the task home links every attempt and fails a symlinked or
 non-directory task home, while allowing the lane to overwrite the literal
 source `auth.json` for token refresh, a file it could already read. That grant
 names the unresolved source path and covers in-place rewrites only, not
@@ -146,13 +145,13 @@ paths under lane `TMPDIR` exceed macOS's
 `COREPACK_HOME` to `<attempt>/tmp/cache/node/corepack`, `UV_CACHE_DIR` to `<cache>/uv`
 and `npm_config_cache` to `<cache>/npm`. Read-only attempts also append
 `-p no:cacheprovider` to `PYTEST_ADDOPTS` and set `PYTHONPYCACHEPREFIX`,
-`RUFF_CACHE_DIR` and `MYPY_CACHE_DIR` under the cache. Codex writers pass
-`sandbox_workspace_write.exclude_tmpdir_env_var=false`, so that `TMPDIR` stays a
-writable root. Codex read-only runs use the permission profile
-`provenant-read-only`, which extends `:read-only` with writes to `:tmpdir` and to
+`RUFF_CACHE_DIR` and `MYPY_CACHE_DIR` under the cache. A Codex writer's
+permissions profile grants `:tmpdir`, so `TMPDIR` stays writable. Codex
+read-only runs use a per-plan permissions profile named the same way, which
+extends `:read-only` with writes to `:tmpdir` and to
 each `add_dir` that neither holds `cwd` nor contains a character Codex reads as a
-permission pattern (`*?[]{}`; Codex strips a trailing `/**`), plus network when
-applied. OpenCode's
+permission pattern (`*?[]{}`; Codex strips a trailing `/**`), and sets
+`network.enabled` to the applied network. OpenCode's
 read-only `sandbox-exec` profile reads the project config OpenCode loads at
 startup (`opencode.json`, `opencode.jsonc`, `AGENTS.md`, `CLAUDE.md`, `.opencode/`)
 between `cwd` and the repository root, granted by unresolved name. Every read-only
@@ -175,4 +174,4 @@ covers `.git-credentials`, `.pypirc`, `.pgpass`, `.vault-token`,
 `.password-store`, `.boto`, `.s3cfg`, `.terraform.d`, Cargo and Gem credentials,
 `.config/git/credentials`, `.config/hub` and `.config/op`.
 
-`model_route.py snapshot --json` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Wrapped writer launches (agy, Claude, Cursor, OpenCode and Kiro) restrict writes to the worktree, declared `add_dirs`, per-worktree Git metadata, common Git objects, refs, logs and packed refs, attempt files, temp paths, devices and provider state. Where protected-path policy applies, its read and write denies take precedence within an `add_dir`; receipts list the writable `add_dirs` in `applied.write_boundary`. Codex writers without capabilities use its native `workspace-write` sandbox. Unavailable OS confinement refuses agy write dispatches and produces an explicit warning for other wrapped writers.
+`model_route.py snapshot --json` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Every writer, Codex included, has one Git write boundary: its per-worktree Git directory (`--absolute-git-dir`) plus the common directory's `objects`, `refs`, `logs`, `packed-refs`, `packed-refs.lock` and `packed-refs.new`; the rest of the common directory (`hooks`, `config`, `info`, other lanes' `worktrees/<name>`) is never writable, and a Codex writer drops an `add_dir` at or inside it with a warning. Codex writers also keep the worktree `.git` marker and the private directory's `config.worktree`, `commondir` and `gitdir` read-only; Codex refuses to launch with a symlinked grant path. Writer attempts set `gc.auto=0`, `maintenance.auto=false` and `rerere.enabled=false` through `GIT_CONFIG_COUNT`. Because the shared `config` is read-only, a lane pushes with `git push origin HEAD` and opens its pull request with `gh pr create --head <branch>`; `git push -u` pushes but cannot record the upstream. Wrapped writer launches (agy, Claude, Cursor, OpenCode and Kiro) restrict writes to the worktree, declared `add_dirs`, the Git write boundary, attempt files, temp paths, devices and provider state. Where protected-path policy applies, its read and write denies take precedence within an `add_dir`; receipts list the writable `add_dirs` in `applied.write_boundary`. Codex writers without capabilities use its native sandbox with that permissions profile, recorded as `applied.write_boundary.filesystem`. Unavailable OS confinement refuses agy write dispatches and produces an explicit warning for other wrapped writers.
