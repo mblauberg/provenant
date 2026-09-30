@@ -168,9 +168,10 @@ not read an absent `Watch out for` as an endorsement.
 
 ### OpenCode models
 
-- **Good at:** `opencode-go/deepseek-v4.1-flash` is the go-to (main allowance);
-  `opencode-go/glm-5.3-flash` has a smaller monthly allowance, so use it
-  sparingly. Both suit reviews, small implementations and design opinions.
+- **Good at:** `opencode-go/deepseek-v4.1-flash` is the preferred go-to and
+  `opencode-go/glm-5.3-flash` the second. Both draw on one small monthly quota,
+  so use both sparingly. They suit reviews, small implementations and design
+  opinions.
 - **Watch out for:** free models (any `opencode/*-free`) rotate often and may
   train on prompts; keep sensitive, private or client data off them
   (`confidential: true` skips them).
@@ -314,8 +315,8 @@ review legs and is reachable at `-high`, `-medium` and `-low`. Use
 
 **Route pools carry these preferences as weights** (`provenant routes` prints
 them). `strong`: Opus high, Sonnet and Sol normal, Astra sparing. `bulk`: Luna
-high; Gemini Flash, Sonnet and DeepSeek normal; Sol and GLM sparing. `design`:
-Sonnet high; Opus and DeepSeek normal; GLM, Astra and the free models sparing.
+high; Gemini Flash and Sonnet normal; Sol, DeepSeek and GLM sparing. `design`:
+Sonnet high; Opus normal; DeepSeek, GLM, Astra and the free models sparing.
 `writing`: Gemini Flash high, then Opus. When a preference here changes, change
 the pool weights in `config/model-routing.json` in the same edit.
 

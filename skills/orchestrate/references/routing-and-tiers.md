@@ -148,8 +148,8 @@ infers one (`family_source: slug-inferred`); stealth/unknown broker ids stay
 stealth models into alias tables; pick the slug at dispatch time.
 
 OpenCode is an ordinary implemented broker for its catalogue (`opencode/<model>`).
-`opencode-go/deepseek-v4.1-flash` is the go-to; `opencode-go/glm-5.3-flash` has a
-smaller monthly allowance, so it is used sparingly. Any registered or unregistered
+`opencode-go/deepseek-v4.1-flash` is the preferred go-to and `opencode-go/glm-5.3-flash`
+the second; both share one small monthly quota, so both are `sparing` in the pools. Any registered or unregistered
 model whose id matches the adapter's `free_pattern` (`-free$`) is free and may
 train on prompts: it is warned on and skipped by `confidential: true`. Free models
 rotate, so adding or removing one is a single line in the adapter's `models` list

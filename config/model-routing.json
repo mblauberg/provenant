@@ -42,7 +42,7 @@
       },
       {
         "model": "opencode/opencode-go/deepseek-v4.1-flash",
-        "weight": "normal"
+        "weight": "sparing"
       },
       {
         "model": "codex/gpt-6.1-sol",
@@ -68,7 +68,7 @@
       },
       {
         "model": "opencode/opencode-go/deepseek-v4.1-flash",
-        "weight": "normal"
+        "weight": "sparing"
       },
       {
         "model": "opencode/opencode-go/glm-5.3-flash",
