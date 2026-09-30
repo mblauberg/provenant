@@ -117,10 +117,34 @@ On macOS, non-Codex read-only launches use `sandbox-exec` when available. The
 profile limits writes to the attempt directory and provider state. It denies
 reads of home, shared temp and the workspace outside `cwd` and `add_dirs`, with
 provider sign-in paths re-allowed. Training routes also deny reads of protected
-paths. Codex read-only uses its native read-only sandbox.
+paths. OpenCode's profile also reads, by their unresolved names,
+`opencode.json`, `opencode.jsonc`, `AGENTS.md`, `CLAUDE.md` and `.opencode/`
+in each directory from `cwd` up to the repository root, since OpenCode loads
+them at startup. Every read-only profile also reads the toolchain a lane runs
+tests with. Candidates are `python3`, `python`, `uv` and `node` on the
+provider's PATH, plus each `.venv` between `cwd` and the repository root, its
+`bin/python` link and the interpreter its `pyvenv.cfg` names. Repository
+content only names candidates; it never grants a path itself. A candidate is
+granted only when it resolves to a real install. That means a regular
+executable with a toolchain name, free-threaded `python3.14t` included, in
+the `bin` of a prefix with that toolchain's `lib/python3.*` or
+`lib/node_modules`. The prefix must not be home or above it, and must not be or
+hold a credential store. Only the resolved executable and the prefix's
+`lib`, `include` and `libexec` are granted, never the prefix itself, so a file
+beside them stays unreadable. A framework build's prefix
+(`Python.framework/Versions/X.Y`) also grants its `Python` library, which dyld
+opens at launch, and `Resources`. Every component must be a real entry, not a
+link, strictly below the prefix, so a link to `.` cannot grant the prefix.
+Each is emitted as the canonical path checked. A
+resolved `uv` binary is granted alone. When it is present, `pyproject.toml`, `uv.toml`, `uv.lock`
+and `.python-version` above `cwd` are readable by unresolved name. Nothing is
+written, and nothing is run to find these paths. Codex read-only uses its native read-only sandbox, which reads
+everywhere and writes only the attempt's `TMPDIR` and `add_dirs` (a shared
+lock directory, say). An `add_dir` holding `cwd`, or one whose name has a
+character Codex reads as a pattern (`*?[]{}`), stays read-only and warns.
 Inside another sandbox, where macOS refuses a nested one, the attempt records
-an explicit unconfined-write warning. A `cwd` below the root may also warn that
-it is not a read boundary.
+an explicit unconfined-write warning. Without `sandbox-exec` read confinement,
+a non-Codex `cwd` below the root warns that it is not a read boundary.
 Every writer, Codex included, has the same Git write boundary: its own
 per-worktree Git directory (`git rev-parse --absolute-git-dir`) plus the
 common directory's `objects`, `refs` and `logs` and its `packed-refs`,
@@ -143,22 +167,31 @@ the Git write boundary, attempt files, device nodes and provider state. Where
 protected-path policy applies, its read and write denies still take precedence
 inside an `add_dir`.
 Each attempt sets `TMPDIR`, `TMP` and `TEMP` to `<attempt>/tmp` and
-`XDG_CACHE_HOME` to `<attempt>/tmp/cache`. Shared temp and general user caches
-are not writable. Codex writers without capabilities use Codex's native
-sandbox through a permissions profile named for that plan,
-`-c default_permissions="provenant-<random>"`, which extends `:workspace`,
-sets `network.enabled` and passes a `filesystem` table. The table grants
-`add_dirs` and the Git write boundary and leaves the common directory and the
-`.git` marker read-only. Codex applies the nearest entry, and the same flags
-apply on resume. Codex merges config tables, so the unique name keeps a system
-config's grants under a known profile name out of the lane's policy; the
-read-only network profile is named the same way. A fresh
-run also passes `--add-dir` for each `add_dir` and `--cd <worktree>`. Codex
-refuses to launch with a symlinked grant path, so a link planted at one stops
-the next attempt rather than moving its grant. Codex keeps a writable root's
-`.agents/` read-only, so a linked-worktree Codex writer also gets the
-worktree's `.agents/` as an `add_dir`; Git can then rebase or merge the
-integration branch over tracked skills. Fabric fails the attempt with
+`XDG_CACHE_HOME` to `<attempt>/tmp/cache`, and `COREPACK_HOME` to
+`<attempt>/tmp/cache/node/corepack`, `UV_CACHE_DIR` to `<cache>/uv` and
+`npm_config_cache` to `<cache>/npm`, replacing inherited values, so gitleaks,
+Corepack, uv, npm and other tool caches write there. Read-only attempts also
+append `-p no:cacheprovider` to `PYTEST_ADDOPTS` and set `PYTHONPYCACHEPREFIX`,
+`RUFF_CACHE_DIR` and `MYPY_CACHE_DIR` under the cache, so a reviewer can run a
+targeted test while the workspace stays unwritable. Shared temp and general
+user caches are not writable. Where the `ps` shim is on PATH, Fabric stages it
+in `<attempt>/tmp/provenant-shim`, which every lane can read. Codex writers
+without capabilities use Codex's native sandbox through a permissions profile
+named for that plan, `-c default_permissions="provenant-<random>"`, which
+extends `:workspace`, sets `network.enabled` and passes a `filesystem` table.
+The table grants `:tmpdir` (the attempt's `TMPDIR`), `add_dirs` and the Git
+write boundary and leaves the common directory and the `.git` marker
+read-only. Codex applies the nearest entry, and the same flags apply on resume.
+Codex merges config tables, so the unique name keeps a system config's grants
+under a known profile name out of the lane's policy; the read-only profile is
+named the same way. A fresh run also passes `--add-dir` for each `add_dir` and
+`--cd <worktree>`. Codex refuses to launch with a symlinked grant path, so a
+link planted at one stops the next attempt rather than moving its grant. Codex
+keeps a writable root's `.agents/` read-only even before it exists, so a
+linked-worktree Codex writer also gets the worktree's `.agents/` as an
+`add_dir` unless it is a file or link. Fabric creates an absent one for the
+attempt and removes it afterwards if still empty. Git can then rebase or merge
+the integration branch over tracked skills. Fabric fails the attempt with
 `protected_instructions_changed` when an `.agents/` path in HEAD, the index or
 on disk ends up matching neither the attempt's starting state nor the primary
 checkout's branch or its upstream. If OS confinement is unavailable, agy write

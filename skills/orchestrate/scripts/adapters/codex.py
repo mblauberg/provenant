@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import sys
 import uuid
 
@@ -12,6 +13,19 @@ EFFORT_FLAG = "model_reasoning_effort"
 SESSION_KEYS = ("thread_id",)
 MODEL_SOURCE = "codex:rollout.turn_context.model"
 SIGNATURES = (("usage_limited", r"usage limit|try again at \d"),)
+
+
+# Codex reads these in a permission path as a pattern (it strips a trailing /** outright), so a
+# directory spelt with them could grant more than itself.
+PERMISSION_PATTERN_CHARACTERS = frozenset("*?[]{}")
+
+
+def read_only_writable_dirs(p):
+    """Read-only add_dirs Codex may write: never one holding the cwd under review, nor one whose
+    name Codex would read as a pattern."""
+    cwd = Path(p["cwd"])
+    return [path for path in p["applied"]["add_dirs"]
+            if not cwd.is_relative_to(path) and not PERMISSION_PATTERN_CHARACTERS.intersection(path)]
 
 
 def permissions_profile(p, extends, network, filesystem=None):
@@ -56,8 +70,11 @@ def argv(p):
             command += ["-c", 'sandbox_mode="danger-full-access"']
         else:
             command += ["-s", "danger-full-access"]
-    elif sandbox == "read-only" and network:
-        command += permissions_profile(p, ":read-only", True)
+    elif sandbox == "read-only":
+        # :read-only reads everywhere; the profile adds writes to the attempt's TMPDIR and to
+        # add_dirs (a shared lock directory, say), so a reviewer can run a targeted test.
+        writable = {":tmpdir": "write", **dict.fromkeys(read_only_writable_dirs(p), "write")}
+        command += permissions_profile(p, ":read-only", network, writable)
     elif sandbox == "workspace-write":
         # A permissions profile names single Git paths inside the common directory, which
         # sandbox_workspace_write.writable_roots cannot; the nearest entry wins.
