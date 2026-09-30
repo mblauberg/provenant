@@ -19,24 +19,6 @@ const NO_NATIVE_CONTINUATION = new Set(["copilot"]);
 /** A turn the provider ended cleanly; `input_required` waits for its answer by resume. */
 const CLEAN = new Set(["ok", "input_required"]);
 
-/**
- * Launches this process could not record yet, by turn claim. The launcher
- * retries on each reconcile, and its live pid keeps the name busy meanwhile.
- */
-const unbound = new Map<string, SessionLaunch>();
-
-function bind(store: Store, who: Identity, name: string, claim: string): boolean {
-  const launch = unbound.get(claim);
-  if (!launch) return false;
-  try {
-    store.bindSessionTurn(who, name, claim, launch);
-    unbound.delete(claim);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 function alive(pid: number | null): boolean {
   if (pid === null) return false;
   try {
@@ -78,8 +60,8 @@ function turnAttempts(task: Record<string, any>, first: number): Record<string, 
 
 /**
  * Settle a finished or abandoned turn from run state; return the current row.
- * Before launch the launcher's pid decides; after it, the run's owner and its
- * attempts do, so a caller that dies waiting never releases a live turn.
+ * The run is recorded before its owner starts, so a turn is busy while its
+ * launcher lives, its run's owner lives, or an attempt of its run is still open.
  */
 export async function reconcileSession(store: Store, who: Identity, name: string): Promise<NamedSession | undefined> {
   const row = store.session(who.project, name);
@@ -87,11 +69,10 @@ export async function reconcileSession(store: Store, who: Identity, name: string
   let status = "interrupted",
     runDir = "",
     final: Record<string, any> | undefined;
-  if (row.turnRunId === null && bind(store, who, name, row.turnClaim)) return reconcileSession(store, who, name);
-  if (row.turnRunId === null) {
-    // A dead launcher with no recorded run leaves nothing to protect.
-    if (alive(row.turnPid)) return row;
-  } else {
+  // The launcher is still recording, starting or watching its run.
+  if (alive(row.turnPid)) return row;
+  // A dead launcher with no recorded run launched nothing.
+  if (row.turnRunId !== null) {
     // Exclusion errs towards a live owner: an unknown process identity is not death.
     const owner = findRecordedRun(who.cwd, row.turnRunId);
     if (owner && observedAlive(owner.owner_pid, owner.owner_started_at)) return row;
@@ -195,14 +176,19 @@ export async function sessionDispatch(
   }
   const claimed = store.claimSessionTurn(identity, name, row?.turnClaim ?? null, kind, process.pid);
   if ("conflict" in claimed) return busy(name, claimed.conflict);
-  let launched = false,
-    result: Record<string, any> | undefined;
+  let recorded = false,
+    result: Record<string, any>;
   const pin = {
     attempt: prior?.attempt ?? undefined,
+    // Record the run before its owner starts; if that fails, nothing launches.
     onLaunch: (launch: SessionLaunch) => {
-      launched = true;
-      unbound.set(claimed.claim, launch);
-      bind(store, identity, name, claimed.claim);
+      try {
+        store.bindSessionTurn(identity, name, claimed.claim, launch);
+      } catch (error) {
+        throw new InputError("session_unrecorded", `Session ${name} could not record its run, so nothing was launched ` +
+          `(${error instanceof Error ? error.message : String(error)}); retry.`);
+      }
+      recorded = true;
     },
   };
   try {
@@ -213,16 +199,17 @@ export async function sessionDispatch(
         ? await handoffDispatch({ ...rest, handoff: prior!.runId!, task_id: prior!.taskId! }, identity, signal, process.env, pin)
         : await dispatchConfiguredProvider(rest, identity, signal, process.env, pin);
   } finally {
-    // A launched turn is settled from its run; one that never launched ends here.
-    if (!launched) store.settleSessionTurn(identity, name, claimed.claim, "rejected");
+    // A recorded turn is settled from its run; one that recorded nothing ends here.
+    if (!recorded) store.settleSessionTurn(identity, name, claimed.claim, "rejected");
+    else {
+      try {
+        store.releaseSessionLauncher(identity, name, claimed.claim);
+      } catch {
+        /* Fails closed: the name stays busy while this process lives. */
+      }
+    }
   }
-  for (let tries = 0; unbound.has(claimed.claim) && tries < 3; tries++) {
-    await new Promise((settle) => setTimeout(settle, 100 * (tries + 1)));
-    bind(store, identity, name, claimed.claim);
-  }
-  if (unbound.has(claimed.claim))
-    result = { ...result, session_error: `Session ${name} could not record run ${unbound.get(claimed.claim)!.runId}; ` +
-      "it stays busy while this process retries on each read, and the run itself is unaffected." };
+  if (result.error === "session_unrecorded") return { ...result, session: name, session_turn: kind, session_error: result.fix };
   if (result.error === "continuation_unsupported")
     return { ...result, session: name, session_turn: kind, fix: continuationUnsupported(name, "the provider no longer has its session").fix };
   return { ...result, session: name, session_turn: kind };

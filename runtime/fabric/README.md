@@ -226,11 +226,11 @@ leaves that pointer where it was, and the next turn resumes from the pointed-to
 attempt and its provider session, not from a later failed attempt. A turn is
 the whole owner invocation, fallback attempts included; the pointer moves to
 the attempt that ended it cleanly. A name runs one turn at a time; another call
-gets `session_busy` with the active run ID. The turn records its run as it
-launches, so a caller that dies while waiting leaves the name busy until the
-run's owner finishes; an owner whose identity cannot be verified counts as
-alive. If recording the launch fails, the reply carries `session_error` and the
-name stays busy while the launching process retries. `fabric_session` with `action: inspect`, `list` or
+gets `session_busy` with the active run ID. The turn records its run before
+the owner starts, so a caller that exits or dies while waiting leaves the name
+busy until the run's owner finishes; an owner whose identity cannot be verified
+counts as alive. If that record cannot be written, nothing is launched and the
+reply carries `session_unrecorded` and `session_error`. `fabric_session` with `action: inspect`, `list` or
 `forget` reads or drops a name; `forget` is refused while a turn is active and
 leaves run files and provider history in place. A provider without native
 continuation (Copilot), a last clean turn with no provider session ID, or a

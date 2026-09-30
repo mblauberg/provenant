@@ -285,6 +285,9 @@ it("keeps a CLI turn whose waiting caller was killed after launch", async () => 
       (value) => typeof value.active_run_id === "string");
     const run = active.active_run_id as string;
     expect(run).toMatch(/^mcp-/u);
+    // The turn records its run before the owner starts; kill the caller once the owner runs.
+    await until(() => chair.call("status", { ids: [run], detail: "full" }),
+      (value) => existsSync(join(String(value.runs?.[0]?.run_dir), "dispatch-owner.json")));
     waiting.kill("SIGKILL");
     await new Promise((settle) => waiting.once("exit", settle));
     // The detached owner still runs: the name stays busy on owner evidence.
@@ -350,26 +353,32 @@ it("keeps a turn busy between fallback attempts when the owner's start time is u
   }
 }, 60_000);
 
-it("reports a launch it could not record, keeps the name busy and records it on a later read", async () => {
+it("never runs a second turn on a name after a launch it could not record", async () => {
   const project = fixtureProject();
   const chair = await project.connect(project.linked, "chair-seat", "codex");
+  const cli = (...args: string[]) => spawnSync(resolve(import.meta.dirname, "../bin/fabric"), args, {
+    cwd: project.linked, env: project.env(project.linked, "cli-seat", "codex"), encoding: "utf8",
+  });
+  const live = () => (JSON.parse(cli("dispatch", "list", "--json").stdout).runs as { running: boolean }[])
+    .filter((run) => run.running).length;
   try {
     const db = new Database((await chair.call("whoami")).database as string);
     db.exec(`CREATE TRIGGER refuse_bind BEFORE UPDATE OF turn_run_id ON sessions
       WHEN NEW.turn_run_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'bind refused'); END`);
-    const reply = await chair.call("dispatch", { session: "unbound", prompt: "first", wait_seconds: 5 });
-    expect(reply).toMatchObject({ status: "ok", session_turn: "start" });
-    expect(reply.session_error).toContain(`could not record run ${reply.run_id}`);
-    expect(reply.text).toContain("could not record run");
-    // The launcher is alive and still owes the binding: the name is not free.
-    expect((await chair.call("session", { action: "inspect", name: "unbound" })).text).toContain("busy start launching");
-    expect(await chair.call("dispatch", { session: "unbound", prompt: "x" }))
-      .toMatchObject({ status: "rejected", error: "session_busy" });
+    writeFileSync(join(project.linked, "slow.md"), "slow");
+    // The CLI launcher cannot record its turn and then exits.
+    const first = cli("dispatch", "--session", "unrec", "--prompt-file", "slow.md");
     db.exec("DROP TRIGGER refuse_bind");
     db.close();
-    expect(await chair.call("session", { action: "inspect", name: "unbound" })).toMatchObject({
-      run_id: reply.run_id, attempt: 1, active_run_id: null, last_turn: { status: "ok", run_id: reply.run_id },
-    });
+    const second = await chair.call("dispatch", { session: "unrec", prompt: "slow", wait_seconds: 0 });
+    // One active turn per name: a second turn may start only if the first launched nothing.
+    expect(live(), `${first.stdout}${first.stderr}`).toBeLessThanOrEqual(1);
+    expect(first.stdout).toContain("session_unrecorded");
+    expect(first.stdout).toContain("nothing was launched");
+    expect(second).toMatchObject({ status: "running", session_turn: "start" });
+    expect(await chair.call("dispatch", { session: "unrec", prompt: "x" }))
+      .toMatchObject({ status: "rejected", error: "session_busy", active_run_id: second.id });
+    await chair.call("cancel", { id: second.id });
   } finally {
     await chair.client.close();
   }

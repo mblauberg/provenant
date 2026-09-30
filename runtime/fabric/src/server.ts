@@ -400,8 +400,9 @@ register(
     const observed = await statusRows(who.project, [String(runId)], 0, "all", signal, input.detail);
     if ((input.resume || input.session) && result.task_id) observed.runs = observed.runs?.filter((row) => row.task_id === result.task_id);
     acknowledgeRuns(observed);
-    if (observed.runs?.length === 1) {
-      const row = observed.runs[0]!;
+    // A named turn keeps its session line even when a concurrent rewrite hides its row.
+    const row = observed.runs?.length === 1 ? observed.runs[0]! : input.session ? {} : undefined;
+    if (row) {
       const value = runView(withWarnings({ ...result, ...row, paths: { ...(result.paths as object), ...row.paths } }, waitResult.warnings), input.detail);
       if (!input.session) return value;
       // Settle a turn that already finished, so the reply shows where the name now points.

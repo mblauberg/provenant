@@ -276,18 +276,12 @@ async function initialiseRun(
   return runDir;
 }
 
-/** The run a dispatch launched, reported before any wait so a caller that dies waiting still knows it. */
+/**
+ * The run a dispatch is about to launch, reported before the owner starts. A
+ * throwing observer stops the launch: nothing runs that its caller could not record.
+ */
 export interface LaunchObserver {
   onLaunch?: (launch: { runId: string; taskId: string; attempt: number }) => void;
-}
-
-/** A failing launch observer never costs the run it observes. */
-export function reportLaunch(observer: LaunchObserver, launch: { runId: string; taskId: string; attempt: number }): void {
-  try {
-    observer.onLaunch?.(launch);
-  } catch {
-    /* The run's own records remain authoritative. */
-  }
 }
 
 export interface OwnerIdentification {
@@ -695,6 +689,12 @@ async function dispatchConfiguredProviderUnchecked(
     String(timeout),
     ...routeArguments(route),
   ];
+  try {
+    launch.onLaunch?.({ runId: shortRunId(runDir), taskId, attempt: 1 });
+  } catch (error) {
+    rmSync(runDir, { recursive: true, force: true });
+    throw error;
+  }
   const started = startOwner(
     python,
     [owner, ...args],
@@ -729,7 +729,6 @@ async function dispatchConfiguredProviderUnchecked(
     },
     input.prompt === undefined ? [] : [promptPath],
   );
-  reportLaunch(launch, { runId: shortRunId(runDir), taskId, attempt: 1 });
   const completion = await observeOwner(
     started,
     Math.max(

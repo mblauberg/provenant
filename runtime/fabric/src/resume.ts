@@ -1,6 +1,6 @@
 /** Continue a provider session, or hand its result to a fresh session. */
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { preflight, validatePrompt, rejected, timeoutSeconds, InputError, type DispatchInput } from "./execution-input.js";
@@ -10,7 +10,6 @@ import {
   observeOwner,
   productRoot,
   pythonOwner,
-  reportLaunch,
   stagingPath,
   startOwner,
   type LaunchObserver,
@@ -144,6 +143,12 @@ export async function resumeConfiguredProvider(
     const routes = batch
       ? taskIds.map((id, index) => (id === taskId ? (checked.routes as unknown[])?.[0] : batch.routes?.[index]))
       : checked.routes;
+    try {
+      pin.onLaunch?.({ runId: String(previous.run_id), taskId, attempt: next });
+    } catch (error) {
+      if (input.prompt !== undefined) rmSync(path, { force: true });
+      throw error;
+    }
     const started = startOwner(
       python,
       [
@@ -199,7 +204,6 @@ export async function resumeConfiguredProvider(
       [lockPath, ...(input.prompt === undefined ? [] : [path])],
     );
     launched = true;
-    reportLaunch(pin, { runId: String(previous.run_id), taskId, attempt: next });
     await observeOwner(started, input.wait_seconds ?? 55, signal);
     const status = await fabricStatus(identity.cwd, String(previous.run_id));
     return Array.isArray(status.runs) ? status.runs.find((row: Record<string, any>) => row.task_id === taskId) ?? status : status;
