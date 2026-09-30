@@ -488,21 +488,32 @@ def _toolchain_grant(executable):
     home = Path.home().resolve()
     if not layout or home.is_relative_to(prefix) or credential_path(prefix):
         return [], []
-    # Linked runtime directories are left out: they are canonical only if not links.
-    directories = [prefix / name for name in TOOLCHAIN_RUNTIME_DIRS
-                   if (prefix / name).is_dir() and not (prefix / name).is_symlink()]
+    directories = [path for name in TOOLCHAIN_RUNTIME_DIRS if (path := _runtime_component(prefix, name, directory=True))]
     files = [resolved]
     if resolved.name != "node" and prefix.parent.name == "Versions" and prefix.parent.parent.suffix == ".framework":
         # A framework build's interpreter loads <prefix>/<framework name>, the library dyld opens
-        # at launch, and may re-exec Resources/Python.app. Each is granted by its canonical path,
-        # and only if it stays inside the prefix.
-        library_file = (prefix / prefix.parent.parent.stem).resolve()
-        if library_file.is_relative_to(prefix) and _plain_file(library_file) and not credential_path(library_file):
+        # at launch, and may re-exec Resources/Python.app.
+        if library_file := _runtime_component(prefix, prefix.parent.parent.stem, directory=False):
             files.append(library_file)
-        resources = (prefix / "Resources").resolve()
-        if resources.is_relative_to(prefix) and resources.is_dir() and not credential_path(resources):
+        if resources := _runtime_component(prefix, "Resources", directory=True):
             directories.append(resources)
     return files, directories
+
+
+def _runtime_component(prefix, name, *, directory):
+    """<prefix>/<name> as a canonical grant, or None.
+
+    It must be a real entry of the expected kind, not a link, so it can neither name the prefix
+    itself (a link to `.`) nor reach outside it; it must lie strictly below the prefix and hold
+    no credential store.
+    """
+    path = prefix / name
+    if path.is_symlink() or not (path.is_dir() if directory else path.is_file()):
+        return None
+    canonical = path.resolve()
+    if canonical != path or canonical == prefix or not canonical.is_relative_to(prefix) or credential_path(canonical):
+        return None
+    return canonical
 
 
 def _toolchain_reads(plan, root, search_path=None):

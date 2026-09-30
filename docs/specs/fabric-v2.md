@@ -169,7 +169,8 @@ holding `lib/python3.N[t]` or `lib/node_modules`. That prefix must be neither
 home nor an ancestor of home, and must not pass `credential_path`. Only the
 executable and the prefix's real (unlinked) `lib`, `include` and `libexec` are
 granted, never the prefix itself; a framework prefix (`<Name>.framework/Versions/X.Y`)
-adds its `<Name>` library and `Resources` when they resolve inside it. The profile emits the canonical paths it
+adds its `<Name>` library and `Resources`. Each component must be a real entry,
+not a link, strictly below the prefix, so a link to `.` cannot grant it. The profile emits the canonical paths it
 checked without resolving them again. A resolved `uv`/`uvx` binary is granted alone. `credential_path` also
 covers `.git-credentials`, `.pypirc`, `.pgpass`, `.vault-token`,
 `.password-store`, `.boto`, `.s3cfg`, `.terraform.d`, Cargo and Gem credentials,

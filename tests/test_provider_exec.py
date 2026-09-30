@@ -4654,11 +4654,54 @@ def test_framework_python_library_or_resources_linked_out_of_the_prefix_is_not_g
     (prefix / "Resources").symlink_to(home / ".ssh")
     assert supervisor()._toolchain_grant(interpreter) == (
         [interpreter], [prefix / "lib", prefix / "include"])
-    # A link that stays inside the prefix is granted by its canonical target.
+    # Even a link that stays inside the prefix is left out: only a real entry is canonical.
     (prefix / "Python").unlink()
     (prefix / "lib/Python").write_bytes(b"dylib")
     (prefix / "Python").symlink_to(prefix / "lib/Python")
-    assert supervisor()._toolchain_grant(interpreter)[0] == [interpreter, prefix / "lib/Python"]
+    assert supervisor()._toolchain_grant(interpreter)[0] == [interpreter]
+
+
+@pytest.mark.parametrize("component", ["Resources", "include", "libexec"])
+def test_runtime_directory_linked_to_the_prefix_itself_is_not_granted(tmp_path, monkeypatch, component):
+    home, _, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    prefix, interpreter = fake_framework_python(home)
+    if (prefix / component).exists():
+        shutil.rmtree(prefix / component)
+    (prefix / component).symlink_to(".")
+    assert (prefix / component).resolve() == prefix
+    files, directories = supervisor()._toolchain_grant(interpreter)
+    assert prefix not in [*files, *directories]
+    assert (prefix / component) not in directories
+    assert not any((prefix / "auth.json").is_relative_to(granted) for granted in [*files, *directories])
+    assert prefix / "lib" in directories
+
+
+@pytest.mark.parametrize("install", ["pyenv", "framework"])
+def test_lib_linked_to_the_prefix_itself_grants_nothing(tmp_path, monkeypatch, install):
+    home, tools, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    if install == "framework":
+        prefix, interpreter = fake_framework_python(home)
+    else:
+        prefix, interpreter = home / ".pyenv/versions/3.13.0", tools["python3"]
+    shutil.rmtree(prefix / "lib")
+    (prefix / "python3.13").mkdir()  # so lib/python3.13 still exists through the link
+    (prefix / "lib").symlink_to(".")
+    assert (prefix / "lib/python3.13").is_dir()
+    assert supervisor()._toolchain_grant(interpreter) == ([], [])
+
+
+def test_runtime_component_must_lie_strictly_inside_the_prefix(tmp_path):
+    mod = supervisor()
+    prefix = tmp_path / "prefix"
+    (prefix / "lib").mkdir(parents=True)
+    (prefix / "Python").write_bytes(b"dylib")
+    (prefix / "Resources").symlink_to(".")
+    (prefix / "include").symlink_to(tmp_path)
+    assert mod._runtime_component(prefix, "lib", directory=True) == prefix / "lib"
+    assert mod._runtime_component(prefix, "Python", directory=False) == prefix / "Python"
+    for name in ("Resources", "include", ".", ""):
+        assert mod._runtime_component(prefix, name, directory=True) is None, name
+    assert mod._runtime_component(prefix, "lib", directory=False) is None
 
 
 @pytest.mark.skipif(sys.platform != "darwin" or not all(map(shutil.which, ("install_name_tool", "codesign", "otool"))),

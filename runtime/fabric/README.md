@@ -121,7 +121,8 @@ hold a credential store. Only the resolved executable and the prefix's
 `lib`, `include` and `libexec` are granted, never the prefix itself, so a file
 beside them stays unreadable. A framework build's prefix
 (`Python.framework/Versions/X.Y`) also grants its `Python` library, which dyld
-opens at launch, and `Resources`, each only if it resolves inside the prefix.
+opens at launch, and `Resources`. Every component must be a real entry, not a
+link, strictly below the prefix, so a link to `.` cannot grant the prefix.
 Each is emitted as the canonical path checked. A
 resolved `uv` binary is granted alone. When it is present, `pyproject.toml`, `uv.toml`, `uv.lock`
 and `.python-version` above `cwd` are readable by unresolved name. Nothing is
