@@ -1306,8 +1306,6 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                     raise PreflightError("prompt_invalid", "Pass prompt as text.")
                 if "allow_secrets" in task and type(task["allow_secrets"]) is not bool:
                     raise PreflightError("allow_secrets_invalid", "Pass allow_secrets: true or false.")
-                if "confidential" in task and type(task["confidential"]) is not bool:
-                    raise PreflightError("confidential_invalid", "Pass confidential: true or false.")
                 read_roots = task.get("read_roots") or []
                 if not isinstance(read_roots, list) or not all(
                         isinstance(root, str) and Path(root).is_absolute() for root in read_roots):
@@ -1315,6 +1313,8 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                 if any(provider_exec.credential_path(root) for root in read_roots):
                     raise PreflightError("credential_or_auth_store_denied", "Read roots must exclude credential stores.")
                 read_roots = [str(Path(root).resolve()) for root in read_roots]
+                if "confidential" in task and type(task["confidential"]) is not bool:
+                    raise PreflightError("confidential_invalid", "Pass confidential: true or false.")
                 prompt_bytes = (read_prompt_input(Path(task["prompt_file"]), workspace, workspace, read_roots)
                                 if task.get("prompt_file") is not None else task["prompt"].encode())
                 try:
