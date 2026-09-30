@@ -576,6 +576,12 @@ it("releases a resume that failed before spawning despite a finished turn's stal
       (value) => value.runs?.[0]?.state === "terminal")).runs[0];
     expect(first).toMatchObject({ status: "ok", attempt: 1 });
     expect(existsSync(join(first.run_dir, "dispatch-owner.json"))).toBe(true);
+    // A real owner also writes its legacy terminal envelope, which carries no state field.
+    const legacy = join(first.run_dir, "dispatch", "tasks", first.task_id, "attempt-001");
+    mkdirSync(legacy, { recursive: true });
+    writeFileSync(join(legacy, "attempt.json"), JSON.stringify({ schema_version: 1, record_type: "dispatch-attempt",
+      run_id: first.run_id, task_id: first.task_id, attempt_id: "attempt-001", status: "ok", outcome: "ok",
+      started_at: first.started_at, finished_at: new Date().toISOString() }));
     // It also left a provider record with no start time; its pid now belongs to another process.
     const token = JSON.parse(readFileSync(join(first.run_dir, "dispatch-status.json"), "utf8")).run_token as string;
     writeFileSync(join(first.run_dir, "dispatch-provider.json"), JSON.stringify({

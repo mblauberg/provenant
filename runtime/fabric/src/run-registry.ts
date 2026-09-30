@@ -536,6 +536,20 @@ function liveness(runDir: string, owners: ProcessIdentity[], timedProviders = fa
 }
 
 /**
+ * Whether an attempt's own receipt reads terminal, or undefined with no receipt.
+ * The canonical `tasks` receipt decides when present; only without it does the
+ * owner's legacy `dispatch/tasks` envelope, written once the attempt ends and
+ * carrying no state field, count as terminal evidence.
+ */
+function receiptTerminal(runDir: string, taskId: string, name: string): boolean | undefined {
+  const canonical = readJson(join(runDir, "tasks", taskId, name, "attempt.json"));
+  if (canonical !== undefined) return canonical.state === "terminal";
+  const legacy = readJson(join(runDir, "dispatch", "tasks", taskId, name, "attempt.json"));
+  if (legacy === undefined) return undefined;
+  return legacy.record_type === "dispatch-attempt" && typeof legacy.finished_at === "string";
+}
+
+/**
  * Whether an attempt's own evidence says no provider of its can still run: its
  * receipt reads terminal, or it never launched. An unlaunched attempt has no
  * directory, its run status announced it with no owner stamped, and every
@@ -546,19 +560,20 @@ function attemptSettled(runDir: string, taskId: string, attempt: number): boolea
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(taskId) || !Number.isInteger(attempt) || attempt < 1) return false;
   const name = `attempt-${String(attempt).padStart(3, "0")}`;
   const trees = ["tasks", "dispatch/tasks"].map((tree) => join(runDir, tree, taskId));
-  const receipt = trees.map((tree) => readJson(join(tree, name, "attempt.json"))).find((row) => row !== undefined);
-  if (receipt !== undefined) return receipt.state === "terminal";
+  const own = receiptTerminal(runDir, taskId, name);
+  if (own !== undefined) return own;
   if (trees.some((tree) => existsSync(join(tree, name)))) return false;
   const status = readJson(join(runDir, "dispatch-status.json"));
   if (Number(status?.next_attempt) !== attempt || status?.owner_pid !== undefined) return false;
-  return trees.every((tree) => {
+  const earlier = new Set<string>();
+  for (const tree of trees) {
     try {
-      return readdirSync(tree).filter((entry) => /^attempt-\d+$/u.test(entry))
-        .every((entry) => readJson(join(tree, entry, "attempt.json"))?.state === "terminal");
+      for (const entry of readdirSync(tree)) if (/^attempt-\d+$/u.test(entry)) earlier.add(entry);
     } catch (error) {
-      return (error as NodeJS.ErrnoException).code === "ENOENT";
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
     }
-  });
+  }
+  return [...earlier].every((entry) => receiptTerminal(runDir, taskId, entry) === true);
 }
 
 /**
