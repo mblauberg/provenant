@@ -405,6 +405,7 @@ def _command(task: dict[str, Any], run_dir: Path) -> list[str]:
                        ("model_override_tier", "--model-override-tier"),
                        ("reviewer_id", "--reviewer-id"),
                        ("effort", "--effort"), ("retry_of", "--retry-of"),
+                       ("pick_reason", "--pick-reason"),
                        ("access_mode", "--access-mode"), ("worktree", "--worktree")):
         if task.get(name):
             command.extend((flag, str(task[name])))
@@ -421,6 +422,7 @@ def _command(task: dict[str, Any], run_dir: Path) -> list[str]:
     for directory in task.get("add_dirs",[]): command.extend(("--add-dir",directory))
     for root in task.get("read_roots",[]): command.extend(("--read-root",root))
     if task.get("allow_secrets") is True: command.append("--allow-secrets")
+    if task.get("confidential") is True: command.append("--confidential")
     if task.get("preface") is False: command.append("--no-preface")
     return command
 

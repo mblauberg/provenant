@@ -308,6 +308,14 @@ review legs and is reachable at `-high`, `-medium` and `-low`. Use
 and design opinions.** Their contributor tier may train on prompts, so do not
 send sensitive, private or client data.
 
+**Route pools carry these preferences as weights.** `strong` favours Opus 5.5,
+then Sol at `high`–`xhigh`, with Astra sparing; `bulk` favours Luna, then Gemini
+3.8 Flash, with Sol sparing; `design` spreads evenly over Opus, DeepSeek V4.1
+Flash and two free OpenCode models, with Astra sparing; `writing` favours Gemini
+3.8 Flash, then Opus. The free OpenCode models may train on prompts, so pass
+`confidential: true` to keep them out. When a preference here changes, change the
+pool weights in `config/model-routing.json` in the same edit.
+
 **Critical review has no fixed family.** The cross-family obligation is relative
 to whoever chairs the run, so the right second family depends on the first. Do
 not write a standing preference here; pick the family that is *not* the author's
