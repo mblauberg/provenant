@@ -755,6 +755,25 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect((closed.structuredContent as any).status ?? (closed.structuredContent as any).runs?.[0]?.status).toBe("cancelled");
     expect(((await call("inbox")).structuredContent as any).messages).toEqual([]);
     expect(readFileSync(join(primary, ".git/info/exclude"), "utf8")).toContain("/.agent-run/");
+    // A cross-project read-only run resumes through MCP: the other project is registered by its own seat.
+    const other = join(root, "other-project");
+    mkdirSync(other);
+    const otherSeat = new Client({ name: "v2-other", version: "1" });
+    const { GIT_DIR: _gitDir, GIT_WORK_TREE: _gitWorkTree, ...otherEnv } = process.env as Record<string, string>;
+    await otherSeat.connect(new StdioClientTransport({
+      command: resolve(import.meta.dirname, "../bin/fabric-mcp"), args: [], cwd: other,
+      env: { ...otherEnv, FABRIC_NODE: process.execPath, AGENT_FABRIC_TSX_LOADER: createRequire(import.meta.url).resolve("tsx"),
+        AGENT_FABRIC_STATE_DIRECTORY: join(root, "state"), AGENT_FABRIC_LABEL: "other-seat", AGENT_FABRIC_SEAT: "claude",
+        AGENT_FABRIC_PRODUCT_ROOT: product },
+      stderr: "pipe",
+    }));
+    try { await otherSeat.callTool({ name: "fabric_whoami", arguments: {} }); } finally { await otherSeat.close(); }
+    const crossRun = (await call("dispatch", { prompt: "cross project", cwd: other, wait_seconds: 5 })).structuredContent as any;
+    expect(crossRun, JSON.stringify(crossRun)).toMatchObject({ status: "ok" });
+    const crossResumed = await call("dispatch", { resume: crossRun.run_id, prompt: "again", wait_seconds: 5 });
+    expect(crossResumed.structuredContent, JSON.stringify(crossResumed.structuredContent)).toMatchObject({ status: "ok", attempt: 2 });
+    const crossArgs = JSON.parse(readFileSync(join(crossRun.run_dir, "_owner", `${crossRun.task_id}-args-1.json`), "utf8")) as string[];
+    expect(crossArgs[crossArgs.indexOf("--read-root") + 1]).toBe(realpathSync(other));
   } finally {
     await peer.close();
     await client.close();

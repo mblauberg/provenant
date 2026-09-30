@@ -4,6 +4,8 @@ import {
   routeArguments,
   validatePrompt,
   timeoutSeconds,
+  ownerPromptPath,
+  readRoots,
   workingIdentity,
   rejected,
   InputError,
@@ -655,10 +657,12 @@ async function dispatchConfiguredProviderUnchecked(
   input = { ...input, mode: initialRoute.access_mode };
   const providerIdentity = workingIdentity(input, identity);
   input = { ...input, ...(input.cwd === undefined ? {} : { cwd: providerIdentity.cwd }),
-    ...(input.prompt_file === undefined ? {} : { prompt_file: resolve(identity.cwd, input.prompt_file) }) };
+    ...(input.prompt_file === undefined ? {} : { prompt_file: ownerPromptPath(identity, input.prompt_file) }) };
   const route = normaliseRoute(input, identity, catalogue);
   route.warnings = [...new Set([...(initialRoute.warnings ?? []), ...(route.warnings ?? []), ...poolWarnings])];
   validatePrompt(input.prompt, input.prompt_file);
+  const roots = readRoots(identity, input.cwd, input.prompt_file);
+  if (roots.length) route.read_roots = roots;
   if (
     !Number.isInteger(input.wait_seconds ?? DEFAULT_WAIT_SECONDS) ||
     (input.wait_seconds ?? 0) < 0 ||
@@ -770,9 +774,11 @@ function normaliseTask(
   task = { ...task, ...(task.cwd === undefined ? {} : { cwd: providerIdentity.cwd }) };
   const route = normaliseRoute(task, identity, catalogue);
   route.warnings = [...new Set([...(initialRoute.warnings ?? []), ...(route.warnings ?? [])])];
+  const roots = readRoots(identity, task.cwd, task.prompt_file);
+  if (roots.length) route.read_roots = roots;
   return {
     id: task.id ?? `task-${index + 1}`,
-    ...(task.prompt === undefined ? { prompt_file: resolve(identity.cwd, task.prompt_file!) } : { prompt: task.prompt }),
+    ...(task.prompt === undefined ? { prompt_file: ownerPromptPath(identity, task.prompt_file!) } : { prompt: task.prompt }),
     timeout: timeoutSeconds(task.timeout_seconds, task.mode),
     ...route,
   };

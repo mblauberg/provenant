@@ -17,7 +17,7 @@ For direct Agy calls, the prompt is passed as one argument. Keep the instruction
 and question concise, and give Agy access to workspace files for large source
 material instead of embedding that material in the prompt.
 
-Classify usage limit, rate limit, authentication, unavailable model, permission denial, stall, timeout, cancellation and partial result separately. Do not silently retry a write or relaunch beside a detached live owner. A `QUESTION:` response requires chair input; resume the saved provider session when supported. See [worker-liveness.md](worker-liveness.md) for a detached direct process.
+Classify usage limit, rate limit, authentication, unavailable model, permission denial, stall, startup timeout (no provider output after launch), timeout, cancellation and partial result separately. Do not silently retry a write or relaunch beside a detached live owner. A `QUESTION:` response requires chair input; resume the saved provider session when supported. See [worker-liveness.md](worker-liveness.md) for a detached direct process.
 
 ## Reporting
 

@@ -313,6 +313,13 @@ it('closes an abandoned active receipt as interrupted and keeps protected runs',
  expect(pruneDispatchRuns(workspace,{AGENT_FABRIC_RUN_RETENTION_HOURS:'0'})).not.toContain(run);
 });
 
+it('prunes a startup_timeout v2 run like other failures after fourteen days', () => {
+ const dir=join(workspace,'.agent-run/runs/20260915-1010-dispatch-silent-abcdef');mkdirSync(dir,{recursive:true});
+ const when=new Date(Date.now()-15*86400000);
+ const receipt=join(dir,'RUN_RECEIPT.json');writeFileSync(receipt,JSON.stringify({status:'startup_timeout'}));utimesSync(receipt,when,when);utimesSync(dir,when,when);
+ expect(pruneDispatchRuns(workspace,{})).toHaveLength(1);expect(existsSync(dir)).toBe(false);
+});
+
 it('retains failed v2 runs for fourteen days and unknown receipts for triage', () => {
  const root=join(workspace,'.agent-run/runs');const when=new Date(Date.now()-8*86400000);
  for(const status of ['failed','mystery']) {
