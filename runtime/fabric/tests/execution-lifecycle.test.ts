@@ -17,6 +17,8 @@ import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProv
 import { normaliseRoute, readRoots, routeArguments, savedReadRoots, workingIdentity } from "../src/execution-input.js";
 import { resumeConfiguredProvider } from "../src/resume.js";
 import { databasePath } from "../src/identity.js";
+import { expandPools } from "../src/pools.js";
+import { inheritedConfidential, inheritsPreviousRoute } from "../src/resume.js";
 import { catalogueSnapshot } from "../src/catalogue.js";
 import { psOutput } from "../src/ps.mjs";
 import { Store } from "../src/store.js";
@@ -1216,6 +1218,152 @@ describe("front door model selection", () => {
       identity, new AbortController().signal, ownerEnvironment);
     expect(done).toMatchObject({ status: "completed", counts: { failed: 1 }, tasks: [{ status: "failed", outcome: "empty_output" }] });
   });
+});
+
+/** Pools see codex and claude installed, nothing cooling and no user overlay, on any machine. */
+function poolEnvironment(): NodeJS.ProcessEnv {
+  const bin = join(temporaryDirectory, "pool-bin");
+  mkdirSync(bin, { recursive: true });
+  for (const name of ["codex", "claude"]) {
+    writeFileSync(join(bin, name), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(bin, name), 0o755);
+  }
+  const instance = join(temporaryDirectory, "empty-instance");
+  mkdirSync(instance, { recursive: true });
+  return { ...ownerEnvironment, PATH: `${bin}:${process.env.PATH}`, AGENT_FABRIC_INSTANCE_ROOT: instance,
+    AGENT_FABRIC_STATE_ROOT: join(temporaryDirectory, "pool-state") };
+}
+
+describe("route pools", () => {
+  it("expands single, council and ad-hoc models into concrete tasks with a pick reason", async () => {
+    const env = poolEnvironment();
+    const expanded = await expandPools([
+      { id: "one", prompt: "p", route: "strong", adapter: "claude" },
+      { id: "pair", prompt: "p", route: "strong", council: 2 },
+      { id: "adhoc", prompt: "p", models: ["codex/gpt-6-luna@low", "claude/haiku"] },
+      { id: "plain", prompt: "p", adapter: "codex" },
+      { id: "both", prompt: "p", route: "bulk", model: "gpt-6-luna" },
+      { id: "nope", prompt: "p", route: "fastest" },
+    ], fixturePython, product, identity, env, new AbortController().signal);
+    expect(expanded.errors.map((error) => [error.task_id, error.error])).toEqual([["nope", "route_invalid"]]);
+    const byId = Object.fromEntries(expanded.tasks.map((task) => [task.id, task]));
+    expect(byId.one).toMatchObject({ adapter: "claude", model: "claude-sonnet-5-5", pick_reason: "strong top" });
+    expect(byId.one).not.toHaveProperty("route");
+    expect([byId["pair-1"]?.pick_reason, byId["pair-2"]?.pick_reason]).toEqual(["strong council 1/2", "strong council 2/2"]);
+    expect(new Set([byId["pair-1"]?.adapter, byId["pair-2"]?.adapter])).toEqual(new Set(["claude", "codex"]));
+    expect(byId["adhoc-1"]).toMatchObject({ adapter: "codex", model: "gpt-6-luna", effort: "low", pick_reason: "ad-hoc council 1/2" });
+    expect(byId["adhoc-2"]).toMatchObject({ adapter: "claude", model: "haiku", pick_reason: "ad-hoc council 2/2" });
+    expect(byId.plain).toEqual({ id: "plain", prompt: "p", adapter: "codex" });
+    expect(byId.both).toEqual({ id: "both", prompt: "p", model: "gpt-6-luna" });
+    expect(expanded.warnings).toContain("route ignored: model gpt-6-luna was named explicitly");
+    expect(expanded.council).toBe(true);
+  });
+
+  it("settles mixed selectors by precedence and names what it ignored", async () => {
+    const expanded = await expandPools([
+      { id: "models", prompt: "p", models: ["codex/gpt-6-luna"], route: "strong", alias: "workhorse", council: 3 },
+      { id: "route", prompt: "p", route: "bulk", alias: "workhorse", adapter: "codex" },
+      { id: "alias", prompt: "p", alias: "workhorse", rotate: true },
+      { id: "secret", prompt: "p", route: "bulk", adapter: "codex", confidential: true },
+      { id: "plain", prompt: "p", alias: "workhorse", confidential: true },
+    ], fixturePython, product, identity, poolEnvironment(), new AbortController().signal);
+    expect(expanded.errors).toEqual([]);
+    const byId = Object.fromEntries(expanded.tasks.map((task) => [task.id, task]));
+    expect(byId["models-1"]).toMatchObject({ adapter: "codex", model: "gpt-6-luna" });
+    expect(byId["models-1"]).not.toHaveProperty("alias");
+    expect(byId.route).toMatchObject({ adapter: "codex", model: "gpt-6-luna" });
+    expect(byId.route).not.toHaveProperty("alias");
+    expect(byId.alias).toEqual({ id: "alias", prompt: "p", alias: "workhorse" });
+    expect(byId.secret).toMatchObject({ adapter: "codex", confidential: true });
+    expect(byId.plain).toEqual({ id: "plain", prompt: "p", alias: "workhorse", confidential: true });
+    expect(expanded.warnings).toEqual(expect.arrayContaining([
+      "alias, council ignored: models names the council",
+      expect.stringMatching(/^route strong ignored: models bypasses routes/u),
+      "alias ignored: route bulk was named",
+      "rotate ignored: alias workhorse names one model; pass route for a pool",
+    ]));
+  });
+
+  it("passes confidential to the owner for any selector, not only a pool", async () => {
+    const env = { ...poolEnvironment(), FIXTURE_ARGV_LOG: "1" };
+    const done = await dispatchConfiguredProvider({ adapter: "codex", model: "gpt-6-luna", confidential: true,
+      prompt: "ordinary run", wait_seconds: 5 }, identity, new AbortController().signal, env);
+    expect(done.status, JSON.stringify(done)).toBe("ok");
+    const runDir = String((done.paths as Record<string, unknown>).run_dir);
+    expect(JSON.parse(readFileSync(join(runDir, "dispatch_run.py.argv.json"), "utf8"))).toContain("--confidential");
+    expect(routeArguments({ adapter: "codex", role: "worker", access_mode: "read_only", confidential: false }))
+      .not.toContain("--confidential");
+  });
+
+  it("sizes batch concurrency after a nested council expands and keeps an explicit limit", async () => {
+    const env = { ...poolEnvironment(), FIXTURE_ARGV_LOG: "1" };
+    const concurrency = async (extra: Record<string, unknown>) => {
+      const done = await dispatchConfiguredBatch({ tasks: [{ id: "c", prompt: "sleep with provider", route: "strong", council: 2 }],
+        wait_seconds: 0, ...extra }, identity, new AbortController().signal, env);
+      expect(done.status, JSON.stringify(done)).toBe("running");
+      spawnedPids.push(Number(done.pid));
+      const log = join(String((done.paths as Record<string, unknown>).run_dir), "batch_run.py.argv.json");
+      for (let tries = 0; tries < 100 && !existsSync(log); tries += 1) await delay(50);
+      const argv = JSON.parse(readFileSync(log, "utf8"));
+      return argv[argv.indexOf("--concurrency") + 1];
+    };
+    expect(await concurrency({})).toBe("2");
+    expect(await concurrency({ concurrency: 1 })).toBe("1");
+  });
+
+  it("hands off on the previous route unless any selector, pool selectors included, is named", () => {
+    expect(inheritsPreviousRoute({})).toBe(true);
+    expect(inheritsPreviousRoute({ confidential: true })).toBe(true);
+    expect(inheritsPreviousRoute({ route: "strong" })).toBe(false);
+    expect(inheritsPreviousRoute({ models: ["codex/gpt-6-luna"] })).toBe(false);
+    expect(inheritsPreviousRoute({ adapter: "codex" })).toBe(false);
+    expect(inheritedConfidential({}, { confidential: true })).toEqual({ confidential: true });
+    expect(inheritedConfidential({ confidential: false }, { confidential: true })).toEqual({});
+    expect(inheritedConfidential({}, {})).toEqual({});
+  });
+
+  it("dispatches route as one pick and forwards the reason to the owner", async () => {
+    const done = await dispatchConfiguredProvider({ route: "bulk", adapter: "codex", prompt: "ordinary run", wait_seconds: 5 },
+      identity, new AbortController().signal, poolEnvironment());
+    expect(done).toMatchObject({ status: "ok", route: { resolved_model: "gpt-6-luna" } });
+    expect(routeArguments({ adapter: "codex", role: "worker", access_mode: "read_only", pick_reason: "bulk top" }))
+      .toEqual(expect.arrayContaining(["--pick-reason", "bulk top"]));
+  });
+
+  it("runs a council as a batch of one task per member", async () => {
+    const done = await dispatchConfiguredProvider({ models: ["codex/gpt-6-luna@low", "claude/haiku"], prompt: "sleep with provider",
+      wait_seconds: 0 }, identity, new AbortController().signal, poolEnvironment());
+    expect(done.status, JSON.stringify(done)).toBe("running");
+    spawnedPids.push(Number(done.pid));
+    const runDir = String((done.paths as Record<string, unknown>).run_dir);
+    const manifest = JSON.parse(readFileSync(join(runDir, "_owner", "task-manifest.json"), "utf8"));
+    expect(manifest.tasks.map((task: Record<string, unknown>) => [task.id, task.adapter, task.model, task.pick_reason])).toEqual([
+      ["council-1", "codex", "gpt-6-luna", "ad-hoc council 1/2"], ["council-2", "claude", "haiku", "ad-hoc council 2/2"]]);
+  });
+
+  it("lets an explicit model win over a pool, with a warning", async () => {
+    const done = await dispatchConfiguredProvider({ route: "strong", model: "gpt-6-luna", adapter: "codex", prompt: "ordinary run",
+      wait_seconds: 5 }, identity, new AbortController().signal, poolEnvironment());
+    expect(done).toMatchObject({ status: "ok", route: { resolved_model: "gpt-6-luna" } });
+    expect(JSON.stringify(done)).toContain("route ignored: model gpt-6-luna was named explicitly");
+  });
+
+  it("accepts --route, --rotate, --council and --models on the CLI", () => {
+    const promptPath = join(temporaryDirectory, "pool-prompt.md");
+    writeFileSync(promptPath, "empty batch");
+    const cliPath = join(packageRoot, "src", "cli.ts");
+    const cli = (args: string[]) => spawnSync(process.execPath, ["--import", tsxLoader, cliPath, "dispatch",
+      "--prompt-file", promptPath, ...args], { cwd: workspace, encoding: "utf8", env: poolEnvironment() });
+    for (const args of [["--route", "bulk", "--adapter", "codex", "--rotate"], ["--route", "strong", "--council", "2", "--confidential"],
+      ["--models", "codex/gpt-6-luna@low,claude/haiku"]]) {
+      const run = cli(args);
+      expect(run.stderr, args.join(" ")).not.toMatch(/unknown option|route_|models_|council/u);
+      expect(run.stdout.trim(), args.join(" ")).not.toBe("");
+    }
+    const bad = cli(["--route", "strong", "--council", "9"]);
+    expect(bad.status).not.toBe(0);
+    expect(bad.stderr + bad.stdout).toMatch(/council/u);
+  }, 60_000);
 });
 
 describe("status list bounds", () => {

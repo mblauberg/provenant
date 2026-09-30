@@ -12,6 +12,30 @@ Take the returned run id and call `fabric_status` with `ids: [id]` and `wait_sec
 
 Task class selects `flagship`, `workhorse` or `scout` when no explicit model is chosen. The configured catalogue determines candidates; the receipt is authoritative for the applied route. A cooling explicit model still runs with a warning; alias routes skip cooling candidates. An account-level usage limit cools the whole adapter, except on agy, which meters each hosted model separately. Automatic fallback stays within permitted paid non-training routes unless the caller opts into `fallback: "any"` or an explicit list. A lane whose provider produces no output within five minutes of launch ends as `startup_timeout`: treat it as a re-route signal, not a reason to retry the same route. It is retryable, so a dispatch that allows fallback moves to its next candidate automatically; with fallback off, dispatch again at once on another model or adapter. A writer falls back only when its worktree was clean and is unchanged; otherwise the receipt is not retryable and its fix says to inspect the worktree first.
 
+## Route pools
+
+`route: "strong" | "bulk" | "design" | "writing"` picks from a weighted pool that spans adapters (`config/model-routing.json` `routes`; the user overlay may reorder or reweight). Weights are `high` (8), `normal` (4), `sparing` (1) or `off` (0), or any non-negative number on the same scale. An entry's `effort` band clamps the caller's effort in either direction, raising a low request or lowering a high one, and a warning names each move. Every mode skips a model that is not installed, is cooling down, whose adapter is disabled, or whose adapter cannot run it (the adapter-compatibility family and model gates), and names the skip in the warnings:
+
+- default: the highest-weight available model, first listed on a tie;
+- `rotate: true`: weighted round-robin per project (`route-rotation.json` under the Fabric state root);
+- `council: N` (1–8): N runs as one batch (`<id>-1`…`<id>-N`), new families first, weights as odds; when fewer than N models are available, members repeat and a warning says so;
+- `models: ["adapter/model@effort", …]`: an ad-hoc council that bypasses routes. An unknown adapter prefix is rejected (`models_invalid`, naming the adapters); a model the catalogue does not register passes to its adapter as given, with a warning.
+
+Mixed selectors settle by precedence rather than rejection, and a warning names every ignored field: `models` beats `route`, `alias`, `model`, `council` and `rotate`; an explicit `model` beats `route`, `council` and `rotate`; `route` beats `alias`; `council` beats `rotate`; an `alias` without a `route` ignores `council` and `rotate`. `adapter` with `route` narrows the pool to that adapter's entries.
+
+`confidential: true` is a disclosure filter, not a selector: it works with a route, alias, model, adapter alone or task class, and removes every free or prompt-training model (`model_traits`, a zero plan cap, a `free_pattern` id) from the resolved candidates, fallbacks included, even under `fallback: "any"`. An alias or task class whose first member is unsafe steps to its first safe member; dispatch refuses, with a fix, only when nothing safe remains. A resume or handoff of a confidential run stays confidential unless the caller passes `confidential: false`. Without it, such models stay in the pool; the warning appears only when one is actually selected. Task classes and the tier aliases map onto routes through `route_synonyms` (`review` → `strong`, `scout` → `bulk`). The route line names the pick, for example `Route: opencode/deepseek-v4.1-flash (deepseek; observed; design council 2/3)`. `provenant routes` prints every pool with live availability; `--health` adds task-class routes and recent health (the same view as `provenant help routes`).
+
+To add a model, list it in the user overlay (`~/.agents/config/model-routing.json`); unlisted product entries keep their place after the listed ones:
+
+```json
+{"routes": {"design": [
+  {"model": "agy/gemini-3.8-flash", "weight": "high"},
+  {"model": "opencode/opencode/mimo-v2.6-flash-free", "weight": "off"}
+]}}
+```
+
+This puts Gemini first in `design` and switches one free model off. A spelling alias (`codex/gpt-6-sol` for `codex/gpt-6.1-sol`) addresses the same entry.
+
 ## Tiers (relative, family-agnostic)
 
 | Tier | Use for | Reasoning effort |
@@ -26,11 +50,11 @@ The first configured candidate is the default and later candidates remain
 admissible. `docs/model-dossier.md` records advisory preferences, so prose
 alone does not move a default.
 
-Opus (the `opus` alias, which resolves to Opus 5.5, `claude-opus-5-5`) is
-Claude's default flagship and the standing choice for critical review, synthesis
-and adjudication at every risk tier. It is also the default workhorse at low or
-medium effort, where it tends to beat Sonnet at a higher one. Sonnet stays admissible at workhorse and is the one to reach for
-when the work is genuinely routine. Each catalogue-configured risk tier has one bounded
+Sonnet 5.5 (`claude-sonnet-5-5`, through `sonnet`) is Claude's default: it leads
+the workhorse, implementation, research, screenshots, second-opinion and
+ui-taste candidates. Opus 5.5 (`claude-opus-5-5`, through `opus`) leads
+critical-review, orchestration and crucial or terminal work, and stays a review
+candidate. Each catalogue-configured risk tier has one bounded
 override occupant. Validation prevents it from being an alias or alias
 candidate. Lifecycle `risk_tier` remains delivery metadata and never selects
 that occupant. Callers must use the separate `--model-override-tier` input,
@@ -124,8 +148,12 @@ infers one (`family_source: slug-inferred`); stealth/unknown broker ids stay
 stealth models into alias tables; pick the slug at dispatch time.
 
 OpenCode is an ordinary implemented broker for its catalogue (`opencode/<model>`).
-Its free models include `mimo-free`, `muse` and `nemotron-free`; they may train
-on prompts during the free period, so do not send sensitive content. Read-only
+`opencode-go/deepseek-v4.1-flash` is the preferred go-to and `opencode-go/glm-5.3-flash`
+the second; both share one small monthly quota, so both are `sparing` in the pools. Any registered or unregistered
+model whose id matches the adapter's `free_pattern` (`-free$`) is free and may
+train on prompts: it is warned on and skipped by `confidential: true`. Free models
+rotate, so adding or removing one is a single line in the adapter's `models` list
+(or none, for a passed-through id); pools may weight it separately. Read-only
 runs keep bash declared for Zen but deny every real command. Fabric honours
 read-only `cwd` for OpenCode file access. On macOS, read-only OpenCode and agy
 runs are confined by `sandbox-exec` to `cwd`, `add_dirs` and their own state:

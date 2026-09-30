@@ -35,7 +35,7 @@ def test_cooldown_locked_merge_expiry_and_defaults(tmp_path):
     row["provenance"]["resolved_model"] = "sonnet"
     row.update(status="rate_limited", retry_after=30)
     module.write_cooldown(row, path=path, at=at + timedelta(hours=2))
-    assert set(json.loads(path.read_text())["cooldowns"]) == {"claude/sonnet"}
+    assert set(json.loads(path.read_text())["cooldowns"]) == {"claude/claude-sonnet-5-5"}
     assert (tmp_path / "cooldowns.lock").is_file()
 
 
