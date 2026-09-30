@@ -127,7 +127,7 @@ current claim -> owner -> evidence in at most three hops.
 
 At closure, run `provenant clean` to classify run artifacts under
 `.agent-run/runs/`, sessions and scratch. The command prints a dry-run plan and
-requires `--apply --plan <digest>` to remove eligible paths. Legacy flat
+requires `--apply --plan <digest>` to remove the approved paths still eligible. Legacy flat
 `.agent-run/` and `.work/wf/` paths remain visible for triage.
 
 For durable context, classify every run artifact:

@@ -58,8 +58,9 @@ compaction, revalidate generation, expiry and ownership before reuse.
    manifest-classified ephemeral files after proving no live pointer needs them.
    Never delete unknown, pre-existing or user-owned untracked files. Revalidate
    time-sensitive memory against its owning source or mark it stale.
-   Run `provenant clean` for a dry-run retention plan; apply only its current
-   digest when cleanup is authorised.
+   Run `provenant clean` for a dry-run retention plan; apply its digest with
+   `--apply --plan` when cleanup is authorised, within a day of the plan; rows that dropped out are
+   skipped and new ones are left for the next plan.
 3. **Handoff version control:** run the project checks assigned to this role,
    or cite the owner's result where project instructions assign them elsewhere;
    report the exact diff.
