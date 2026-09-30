@@ -26,6 +26,13 @@ if _process_info_spec is None or _process_info_spec.loader is None:  # pragma: n
 process_info = importlib.util.module_from_spec(_process_info_spec)
 sys.modules[_process_info_spec.name] = process_info  # dataclasses resolve their module here
 _process_info_spec.loader.exec_module(process_info)
+_STORAGE = Path(__file__).resolve().parents[1] / "skills/orchestrate/scripts/attempt_storage.py"
+_storage_spec = importlib.util.spec_from_file_location("provenant_attempt_storage", _STORAGE)
+if _storage_spec is None or _storage_spec.loader is None:  # pragma: no cover - defensive
+    raise ModuleNotFoundError(f"attempt storage helper is missing: {_STORAGE}")
+attempt_storage = importlib.util.module_from_spec(_storage_spec)
+sys.modules[_storage_spec.name] = attempt_storage
+_storage_spec.loader.exec_module(attempt_storage)
 
 
 RUN_NAME = re.compile(r"^\d{8}-\d{4}-(dispatch|batch|orch|delivery|mission|review|wf)-[A-Za-z0-9-]+-[A-Za-z0-9]{6}$")
@@ -35,6 +42,11 @@ LEGACY_SIBLING = re.compile(r"^(mcp-[A-Za-z0-9_-]+)-(?:owner\.(?:stdout\.jsonl|s
 DEFAULT_INCLUDE = frozenset({"runs", "scratch", "worktrees"})
 KINDS = frozenset({"runs", "scratch", "worktrees", "sessions"})
 DAY = 86400
+# Bulky per-attempt dirs go early; receipts, results and logs stay for the run's retention.
+ATTEMPT_BULK = ("tmp", "cache")
+BULK_OK_DAYS = 1.0
+BULK_OTHER_DAYS = 7.0
+OK_STATUSES = frozenset({"succeeded", "ok", "complete", "completed"})
 
 
 class CleanError(ValueError):
@@ -70,21 +82,7 @@ def _json(path: Path) -> dict[str, Any] | None:
 
 
 def _size(path: Path) -> int:
-    if path.is_symlink():
-        return 0
-    if path.is_file():
-        return path.stat().st_size
-    size = 0
-    for base, directories, files in os.walk(path, followlinks=False):
-        directories[:] = [name for name in directories if not (Path(base) / name).is_symlink()]
-        for name in files:
-            child = Path(base) / name
-            if not child.is_symlink():
-                try:
-                    size += child.stat().st_size
-                except OSError:
-                    pass
-    return size
+    return attempt_storage.tree_bytes(path)
 
 
 def _age(path: Path, now: datetime) -> float:
@@ -285,6 +283,29 @@ def _row(root: Path, path: Path, kind: str, verdict: str, now: datetime) -> dict
             "size_bytes": _size(path), "verdict": verdict, "_identity": [stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size]}
 
 
+def _bulk_rows(root: Path, run: Path, ok: bool, older_than: float | None, now: datetime) -> list[dict[str, Any]]:
+    """Old attempt tmp/cache of a retained terminal run; symlinked path parts are never entered."""
+    threshold = max(BULK_OK_DAYS if ok else BULK_OTHER_DAYS, older_than or 0)
+    rows: list[dict[str, Any]] = []
+    tasks = run / "dispatch" / "tasks"
+    for parent in (run / "dispatch", tasks):
+        if parent.is_symlink() or not parent.is_dir():
+            return rows
+    for task in sorted(tasks.iterdir()):
+        if task.is_symlink() or not task.is_dir():
+            continue
+        for attempt in sorted(task.glob("attempt-*")):
+            if attempt.is_symlink() or not attempt.is_dir():
+                continue
+            for name in ATTEMPT_BULK:
+                path = attempt / name
+                if path.is_symlink() or not path.is_dir():
+                    continue
+                if _activity_age(path, now) >= threshold:
+                    rows.append(_row(root, path, "attempt-bulk", "delete", now))
+    return rows
+
+
 def _registered_worktrees(root: Path) -> set[Path]:
     result = _command("git", "worktree", "list", "--porcelain", "-z", cwd=root)
     if result.returncode != 0:
@@ -483,6 +504,10 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
             if "runs" not in include and verdict in {"delete", "abandon"}:
                 verdict = "keep:excluded"
             rows.append(_row(root, path, kind, verdict, now))
+            if "runs" in include and verdict.startswith("keep:retention") and kind in {"dispatch", "batch"}:
+                receipt = _json(path / "RUN_RECEIPT.json") or {}
+                status = str(receipt.get("status") or receipt.get("state") or "").lower()
+                rows.extend(_bulk_rows(root, path, status in OK_STATUSES, older_than, now))
             if not canonical:
                 run_verdicts[path.name] = verdict
             owner = path / "_owner"
@@ -559,7 +584,7 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
         digest_data["merged_since_revision"] = since_revision
     digest = "sha256:" + hashlib.sha256(json.dumps(digest_data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     total = sum(row["size_bytes"] for row in rows if row["verdict"] == "delete")
-    all_size = sum(row["size_bytes"] for row in rows if row["kind"] not in {"owner-log", "index"})
+    all_size = sum(row["size_bytes"] for row in rows if row["kind"] not in {"owner-log", "index", "attempt-bulk"})
     result: dict[str, Any] = {"root": str(root), "rows": rows, "reclaimable_bytes": total, "plan_sha256": digest,
                               "warnings": (["GitHub PR state unavailable; run deletion held, merged worktrees use Git proof"]
                                            if pr_bodies is None else [])}
@@ -570,7 +595,7 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
         result["merged_since_revision"] = since_revision
     if all_size > 500 * 1024 * 1024:
         result["warning"] = {"message": "run artifacts exceed 500 MB", "largest": sorted(
-            [{"path": row["path"], "size_bytes": row["size_bytes"]} for row in rows if row["kind"] not in {"owner-log", "index"}],
+            [{"path": row["path"], "size_bytes": row["size_bytes"]} for row in rows if row["kind"] not in {"owner-log", "index", "attempt-bulk"}],
             key=lambda row: row["size_bytes"], reverse=True)[:5]}
     return result
 
@@ -627,6 +652,11 @@ def _apply_plan(current: dict[str, Any], approved_plan: str) -> list[str]:
                 raise CleanError(f"worktree removal failed for {path}: {result.stderr.strip()}")
             if result.stderr:
                 print(result.stderr, end="", file=sys.stderr)
+        elif row["kind"] == "attempt-bulk":
+            # Same never-follow rule as plan: refuse when any parent below root became a link.
+            if any(parent.is_symlink() for parent in path.parents if parent != root and root in parent.parents):
+                raise CleanError(f"path changed during cleanup: {path}")
+            attempt_storage.remove_tree(path)
         elif path.is_dir():
             shutil.rmtree(path)
         else:

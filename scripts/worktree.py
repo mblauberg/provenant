@@ -672,6 +672,27 @@ def create(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
+def active_lanes(root: Path, target: Path) -> list[str]:
+    """Live non-terminal attempts whose cwd or worktree is the target (or inside it)."""
+    policy = clean_policy()
+    found: list[str] = []
+    # A nested repo's lanes may be recorded by an enclosing project's registry.
+    registries = [base / ".agent-run" / "runs" for base in (root, *root.parents)
+                  if (base / ".agent-run" / "runs").is_dir()]
+    for path in sorted(p for registry in registries for p in registry.glob("*/tasks/*/attempt-*/attempt.json")):
+        record = policy._json(path)
+        if not record or record.get("state") == "terminal" or not policy._pid_alive(record.get("pgid"), None):
+            continue
+        for key in ("worktree", "cwd", "workspace_root"):
+            value = record.get(key)
+            if isinstance(value, str) and value:
+                place = Path(value).resolve()
+                if place == target or target in place.parents:
+                    found.append(f"{record.get('run_id')}/{record.get('task_id')}")
+                    break
+    return found
+
+
 def remove(args: argparse.Namespace) -> dict[str, object]:
     validate_name(args.name)
     root = primary_root(args.repo)
@@ -686,6 +707,11 @@ def remove(args: argparse.Namespace) -> dict[str, object]:
     }
     if target.resolve() not in registered:
         raise PolicyError(f"not a registered project worktree: {target}")
+    lanes = [] if args.force else active_lanes(root, target.resolve())
+    if lanes:
+        raise PolicyError(
+            f"worktree has an active lane ({', '.join(lanes)}); wait for it or cancel it "
+            "(fabric_cancel), then retry, or pass --force to remove it anyway")
     dirty = git(target, "status", "--porcelain=v1", "--untracked-files=all").stdout
     if dirty:
         raise PolicyError("worktree is dirty; preserve or hand off its changes before removal")
@@ -839,6 +865,8 @@ def parser() -> argparse.ArgumentParser:
     remove_parser = sub.add_parser("remove")
     remove_parser.add_argument("name")
     remove_parser.add_argument("--repo", type=Path, default=Path.cwd())
+    remove_parser.add_argument("--force", action="store_true",
+                               help="remove even if a live writer lane still runs in it")
     remove_parser.set_defaults(handler=remove)
     return result
 

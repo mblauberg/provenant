@@ -2893,7 +2893,8 @@ else:
     assert (tmp_path / 'provider-instance.txt').read_text() == expected_instance
     assert not (tmp_path / 'chair-state').exists()
     scratch = Path((tmp_path / 'provider-tmp.txt').read_text())
-    assert scratch.is_dir()  # Full provider diagnostics now live in the attempt, not a removed tmp directory.
+    # The provider tmp lives inside its attempt and is pruned once the attempt is terminal.
+    assert scratch.is_relative_to(run_dir.resolve()) and not scratch.exists()
     assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'ok'
 
 
@@ -3553,3 +3554,54 @@ def test_provider_exec_failures_are_not_router_refusals():
     assert mod.route_refusal({"status": "ok"}, "codex") is None
     assert mod.route_refusal({"schema": "fabric.exec-plan.v1", "status": "odd"}, "codex") is None
     assert mod.route_refusal({"status": "unknown_alias"}, "codex")["status"] == "rejected"
+
+
+def _run_fake_codex(tmp_path: Path, name: str, body: str, extra_env: dict[str, str] | None = None):
+    run_dir = make_run(tmp_path, name)
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("Reply exactly OK\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_executable(
+        bin_dir / "codex",
+        """#!/usr/bin/env bash
+        if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+          printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          exit 0
+        fi
+        cat >/dev/null
+        """ + body,
+    )
+    env = os.environ.copy()
+    env["PATH"] = f"{bin_dir}:{ROOT / 'scripts'}:{env['PATH']}"
+    env.update(extra_env or {})
+    result = subprocess.run(
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "task-1", "--adapter", "codex",
+         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "workhorse",
+         "--role", "worker"],
+        cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    return run_dir / "dispatch/tasks/task-1/attempt-001", result
+
+
+def test_terminal_ok_attempt_prunes_private_tmp_but_keeps_records(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep\n")
+    attempt, result = _run_fake_codex(
+        tmp_path, "prune",
+        f"""head -c 65536 /dev/zero > "$TMPDIR/scratch.bin"
+        ln -s {outside} "$TMPDIR/link"
+        ln -s {tmp_path} "$TMPDIR/dirlink"
+        printf 'OK\\n'
+        """)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert not (attempt / "tmp").exists()
+    assert (attempt / "attempt.json").is_file() and (attempt / "result.md").is_file()
+    assert outside.read_text() == "keep\n" and (tmp_path / "prompt.md").is_file()
+
+
+def test_keep_attempt_tmp_env_retains_private_tmp(tmp_path: Path) -> None:
+    attempt, result = _run_fake_codex(
+        tmp_path, "keep", 'echo x > "$TMPDIR/note"\nprintf \'OK\\n\'\n',
+        {"PROVENANT_KEEP_ATTEMPT_TMP": "1"})
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert (attempt / "tmp/note").is_file()
