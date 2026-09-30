@@ -3336,8 +3336,8 @@ def test_usage_limit_falls_back_as_attempt_two(tmp_path, explicit):
 import json,sys
 sys.stdin.read()
 model=sys.argv[sys.argv.index('--model')+1]
-print(json.dumps({'type':'result','is_error':model=='TARGET_MODEL','result':"You've hit your usage limit" if model=='TARGET_MODEL' else 'DONE'}))
-sys.exit(1 if model=='TARGET_MODEL' else 0)
+print(json.dumps({'type':'result','is_error':'TARGET_MODEL' in model,'result':"You've hit your usage limit" if 'TARGET_MODEL' in model else 'DONE'}))
+sys.exit(1 if 'TARGET_MODEL' in model else 0)
 """.replace("TARGET_MODEL", initial_model))
     cli.chmod(0o755)
     fallback_cli = bindir / 'opencode'

@@ -543,3 +543,54 @@ def test_confidential_pick_skips_an_unregistered_free_model_at_high_weight(tmp_p
     for seed in range(10):
         private = pick({"route": "private", "confidential": True}, tmp_path, catalog=catalog, seed=seed)
         assert models(private) == ["codex/gpt-6-luna"]
+
+
+def test_confidential_pick_keeps_the_privacy_of_a_newer_live_family_model(tmp_path, monkeypatch):
+    import copy
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    (tmp_path / "capabilities.json").write_text(json.dumps({"codex": {
+        "observed_at": datetime.now(timezone.utc).isoformat(), "models": ["gpt-6.2-sol"]}}))
+    catalog = copy.deepcopy(CATALOG)
+    sol = next(item for item in catalog["adapters"]["codex"]["models"] if item["id"] == "gpt-6.1-sol")
+    sol.update(trains_on_prompts=True, plan_cap_usd=0)
+    catalog["model_traits"] = {"codex/sol": ["free"]}
+    assert {"free", "trains-on-prompts"} <= set(pools.model_traits(router, catalog, "codex", "gpt-6.2-sol"))
+    with pytest.raises(pools.PoolError):
+        pick({"models": ["codex/sol"], "confidential": True}, tmp_path, catalog=catalog)
+    assert models(pick({"models": ["codex/sol"]}, tmp_path, catalog=catalog)) == ["codex/gpt-6.2-sol"]
+
+
+def test_direct_confidential_dispatch_treats_a_live_family_model_like_its_catalogue_family(tmp_path, monkeypatch):
+    import copy
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    (tmp_path / "capabilities.json").write_text(json.dumps({"codex": {
+        "observed_at": datetime.now(timezone.utc).isoformat(), "models": ["gpt-6.2-sol"]}}))
+    catalog = copy.deepcopy(CATALOG)
+    catalog["model_traits"] = {"codex/gpt-6.1-sol": ["trains-on-prompts"]}
+    exec_routing = exec_routing_module()
+    monkeypatch.setattr(router, "load_catalog", lambda *args, **kwargs: catalog)
+    monkeypatch.setattr(exec_routing, "_model_route_module", lambda: router)
+    assert exec_routing.disclosure_risk("codex", "gpt-6.1-sol", {})
+    assert exec_routing.disclosure_risk("codex", "gpt-6.2-sol", {})
+
+
+def test_confidential_pick_of_an_effort_suffixed_live_id_keeps_its_family_traits(tmp_path, monkeypatch):
+    import copy
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    (tmp_path / "capabilities.json").write_text(json.dumps({"agy": {
+        "observed_at": datetime.now(timezone.utc).isoformat(), "models": ["gemini-3.9-flash-high"]}}))
+    catalog = copy.deepcopy(CATALOG)
+    next(item for item in catalog["adapters"]["agy"]["models"] if item["id"] == "gemini-3.8-flash")["trains_on_prompts"] = True
+    assert "trains-on-prompts" in pools.model_traits(router, catalog, "agy", "gemini-3.9-flash-high")
+    with pytest.raises(pools.PoolError):
+        pick({"models": ["agy/gemini-3.9-flash-high"], "confidential": True}, tmp_path, catalog=catalog)
+
+
+def test_pool_pick_of_a_suffixed_live_id_keeps_the_effort_its_suffix_names(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    (tmp_path / "capabilities.json").write_text(json.dumps({"agy": {
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "models": ["gemini-3.9-flash-low", "gemini-3.9-flash-high"]}}))
+    low = pick({"models": ["agy/gemini-3.9-flash-low"]}, tmp_path)["picks"][0]
+    assert (low["model"], low.get("effort")) == ("gemini-3.9-flash", "low")
+    assert pick({"models": ["agy/gemini-3.9-flash-low@high"]}, tmp_path)["picks"][0]["effort"] == "high"

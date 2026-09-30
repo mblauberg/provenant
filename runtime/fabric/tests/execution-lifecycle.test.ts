@@ -98,7 +98,8 @@ describe("Fabric input corrections", () => {
     const expectedOpus = snapshot.adapters.find((adapter) => adapter.name === "claude")
       ?.model_details.find((model) => model.names?.includes("opus"))?.id;
     expect(expectedOpus).toBeDefined();
-    expect(normaliseRoute({ adapter: "claude", alias: "opus" }, identity, snapshot).model).toBe(expectedOpus);
+    // A version-free name is left for model_route.py, which also considers newer live models.
+    expect(normaliseRoute({ adapter: "claude", alias: "opus" }, identity, snapshot).model).toBe("opus");
   });
 
   it("corrects a model typo but never changes its version", () => {
@@ -134,6 +135,34 @@ describe("Fabric input corrections", () => {
     expect(route("opencode/mimo-v2.6-flash-free")).toBe("opencode opencode/mimo-v2.6-flash-free");
     expect(() => normaliseRoute({ model: "mystery-model-9" }, agent, snapshot))
       .toThrow(expect.objectContaining({ code: "adapter_required" }));
+  });
+
+  it("passes version-free family names through for model_route.py to resolve to the latest model", () => {
+    const entry = (latest: boolean) => ({ name: "codex", latest_aliases: latest, aliases: {},
+      models: ["gpt-6.1-sol", "gpt-6-luna"],
+      model_details: [{ id: "gpt-6.1-sol", names: ["sol"] }, { id: "gpt-6-luna", names: ["luna"] }] });
+    const on = { adapters: [entry(true)] } as any;
+    for (const model of ["gpt-sol", "sol", "GPT_SOL", "luna"]) {
+      const route = normaliseRoute({ adapter: "codex", model }, identity, on);
+      expect(route.model, model).toBe(model);
+      expect((route.warnings ?? []).filter((warning) => !warning.startsWith("NATIVE:")), model).toEqual([]);
+    }
+    expect(normaliseRoute({ adapter: "codex", alias: "gpt-sol" }, identity, on).model).toBe("gpt-sol");
+    // Without latest_aliases the name is unknown here: forwarded with a warning for the router to judge.
+    expect(normaliseRoute({ adapter: "codex", model: "gpt-sol" }, identity, { adapters: [entry(false)] } as any).warnings?.join(" "))
+      .toContain("not in the codex catalogue");
+    expect(normaliseRoute({ adapter: "codex", model: "gpt-6.1-sol" }, identity, on).model).toBe("gpt-6.1-sol");
+    const real = catalogueSnapshot(repositoryRoot);
+    expect(normaliseRoute({ adapter: "claude", model: "claude-opus" }, identity, real).model).toBe("claude-opus");
+  });
+
+  it("forwards a well-formed model the catalogue lacks, as a handoff of a resolved live model does", () => {
+    const snapshot = { adapters: [{ name: "codex", latest_aliases: true, aliases: {}, models: ["gpt-6.1-sol"],
+      model_details: [{ id: "gpt-6.1-sol", names: ["sol"] }] }] } as any;
+    const route = normaliseRoute({ adapter: "codex", model: "gpt-6.2-sol" }, identity, snapshot);
+    expect(route.model).toBe("gpt-6.2-sol");
+    expect(route.warnings?.join(" ")).toContain("not in the codex catalogue");
+    expect(normaliseRoute({ adapter: "codex", model: "s_o_l" }, identity, snapshot).model).toBe("s_o_l");
   });
 
   it("resolves relative read-only cwd against the caller directory", () => {
@@ -1222,14 +1251,15 @@ describe("front door model selection", () => {
     expect(routeArguments(route)).toContain("--allow-secrets");
     expect(routeArguments({ ...route, allow_secrets: false })).not.toContain("--allow-secrets");
   });
-  it("resolves exact model aliases to their canonical model IDs", async () => {
+  it("leaves version-free model names for model_route.py to resolve to the canonical, latest model ID", async () => {
     copyFileSync(join(repositoryRoot, "config", "model-routing.json"), join(product, "config", "model-routing.json"));
     const snapshot = catalogueSnapshot(repositoryRoot, { ...ownerEnvironment, AGENT_FABRIC_INSTANCE_ROOT: product });
     const codex = snapshot.adapters.find((adapter) => adapter.name === "codex");
     for (const name of ["luna", "sol", "astra"]) {
       const modelId = codex?.model_details.find((model) => model.names?.includes(name))?.id;
       expect(modelId).toBeDefined();
-      expect(normaliseRoute({ adapter: "codex", alias: name }, identity, snapshot).model).toBe(modelId);
+      expect(normaliseRoute({ adapter: "codex", alias: name }, identity, snapshot).model).toBe(name);
+      expect(normaliseRoute({ adapter: "codex", model: modelId }, identity, snapshot).model).toBe(modelId);
     }
   });
   it("treats an empty model as omitted and keeps the alias", async () => {

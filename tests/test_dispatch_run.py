@@ -3195,7 +3195,7 @@ def test_fallback_reentry_does_not_charge_front_door_phases_again(tmp_path, monk
     run, prompt, command = real_owner_fixture(
         tmp_path, monkeypatch,
         'import sys,json\nsys.stdin.read()\n'
-        'if "opus" in sys.argv: print("rate limit", file=sys.stderr); sys.exit(1)\n'
+        'if any("opus" in item for item in sys.argv): print("rate limit", file=sys.stderr); sys.exit(1)\n'
         'print(json.dumps({"type":"result","result":"DONE"}))\n',
     )
     isolate_fabric_plan_env(monkeypatch)
@@ -3220,7 +3220,7 @@ def test_startup_timeout_falls_back_when_the_dispatch_allows(tmp_path, monkeypat
     run, prompt, command = real_owner_fixture(
         tmp_path, monkeypatch,
         'import sys,json,time\nsys.stdin.read()\n'
-        'if "opus" in sys.argv: time.sleep(60)\n'
+        'if any("opus" in item for item in sys.argv): time.sleep(60)\n'
         'print(json.dumps({"type":"result","result":"DONE"}))\n',
     )
     isolate_fabric_plan_env(monkeypatch)
@@ -3248,7 +3248,7 @@ def test_writer_startup_timeout_falls_back_only_over_an_untouched_worktree(tmp_p
     run, prompt, command = real_owner_fixture(
         tmp_path, monkeypatch,
         'import sys,json,time\nfrom pathlib import Path\nsys.stdin.read()\n'
-        'if "opus" in sys.argv:\n'
+        'if any("opus" in item for item in sys.argv):\n'
         + (f'    Path({path!r}).write_text("half done")\n' if path else '')
         # Churn under skipped directories never blocks fallback.
         + '    for churn in ("node_modules/launch.lock", "pkg/__pycache__/mod.pyc", ".pytest_cache/v"):\n'

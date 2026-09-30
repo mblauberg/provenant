@@ -582,7 +582,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect(routedRows?.[0].notes).toContain("alias and model both supplied; model won");
     expect(routedRows?.[0].evidence.timeout).toBe(4321);
     expect(routedRows?.[0].cwd).toContain("/nested-batch");
-    expect(routedRows?.[1].provenance.requested).toMatchObject({ adapter: "codex", model: "gpt-6.1-sol" });
+    expect(routedRows?.[1].provenance.requested).toMatchObject({ adapter: "codex", model: "sol" });
     expect(routedRows?.[1].evidence.timeout).toBe(123);
     const writer = await call("dispatch", {
       adapter: "codex", prompt: "writer", mode: "worktree_write", worktree: linked, capabilities: ["browser"], wait_seconds: 5,

@@ -169,6 +169,16 @@ export function editDistance(left: string, right: string): number {
   return row[right.length]!;
 }
 
+/** True when a latest_aliases adapter knows this version-free name; model_route.py resolves it to the newest model. */
+function isFamilySelector(entry: CatalogueSnapshot["adapters"][number], key: string): boolean {
+  if (entry.latest_aliases !== true || /\d/u.test(key)) return false;
+  return (entry.model_details ?? []).some((model) => {
+    const family = String(model.id).split(/[-_\s]+/u).filter((part) => !/^v?\d+(\.\d+)*$/u.test(part));
+    return [family.join(""), family[family.length - 1] ?? "", ...(Array.isArray(model.names) ? model.names : [])]
+      .some((name) => routeKey(String(name)) === key);
+  });
+}
+
 function correctSelector(selector: string | undefined, catalogue: CatalogueSnapshot, adapter?: string, field = "model"):
   { value?: string; warning?: string; unknown?: true } {
   if (!selector) return {};
@@ -180,6 +190,8 @@ function correctSelector(selector: string | undefined, catalogue: CatalogueSnaps
     ...(entry.model_details ?? []).flatMap((model) => [model.id, ...(Array.isArray(model.names) ? model.names : [])]),
   ]).filter((item): item is string => typeof item === "string"))];
   const key = routeKey(selector);
+  // model_route.py resolves these to the newest model (catalogue or live listing) and applies every gate.
+  if (entries.some((entry) => isFamilySelector(entry, key))) return { value: selector };
   const matches = new Map<string, string>();
   for (const entry of entries) {
     const modelId = (value: string) => (entry.model_details ?? []).find((item) =>
@@ -276,6 +288,7 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
           return (
             entry.models.includes(selector) ||
             Object.hasOwn(entry.aliases ?? {}, selector) ||
+            isFamilySelector(entry, routeKey(selector)) ||
             details.some((model) => model.id === selector || (Array.isArray(model.names) && model.names.includes(selector))) ||
             entry.models.some((model) =>
               model

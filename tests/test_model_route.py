@@ -1849,7 +1849,7 @@ def test_retargeting_override_occupant_ungates_previous_occupant(
     route = json.loads(capsys.readouterr().out)
     assert result == 0
     assert route["status"] == "ok"
-    assert route["resolved_model"] == "fable"
+    assert route["resolved_model"] == "claude-fable-5-1"
 
 
 def test_retargeting_one_tier_keeps_occupant_gated_by_another_tier(
@@ -4651,3 +4651,103 @@ def test_informational_routes_add_no_warning_notes(tmp_path, adapter, model, abs
     assert result.returncode == 0 and route["status"] == "ok", result.stdout
     assert route["resolved_model"]
     assert not any(absent in note for note in route["notes"] + route["warnings"])
+
+
+def _live_cache(state, adapter, models, age=timedelta(0)):
+    (state / "capabilities.json").write_text(json.dumps({adapter: {
+        "observed_at": (datetime.now(timezone.utc) - age).isoformat(), "models": models}}))
+
+
+def test_family_keys_resolve_to_the_highest_catalogue_version(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    catalog = router.load_catalog()
+    for adapter, requested, expected in (
+            ("codex", "gpt-sol", "gpt-6.1-sol"), ("codex", "sol", "gpt-6.1-sol"),
+            ("claude", "claude-sonnet", "claude-sonnet-5-5"), ("claude", "claude-opus", "claude-opus-5-5"),
+            ("claude", "sonnet", "claude-sonnet-5-5"), ("agy", "sonnet", "claude-sonnet-4-6")):
+        entry, notes = router._registered_match(adapter, requested, catalog)
+        assert entry and entry["id"] == expected and not notes, (adapter, requested)
+    # Explicit versions stay exact, and adapters that do not opt in are untouched.
+    assert router._registered_match("claude", "claude-sonnet-5", catalog)[0]["id"] == "claude-sonnet-5-5"
+    catalog["adapters"]["codex"]["latest_aliases"] = False
+    assert router._registered_match("codex", "gpt-sol", catalog)[0] is None
+
+
+def test_family_alias_picks_a_newer_live_model_with_a_note_and_never_upgrades_explicit_ids(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    _live_cache(tmp_path, "codex", ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6.2-luna"])
+    catalog = router.load_catalog()
+    for requested in ("gpt-sol", "sol"):
+        entry, notes = router._registered_match("codex", requested, catalog)
+        assert entry["id"] == "gpt-6.2-sol"
+        assert notes == ["gpt-6.2-sol is newer than the catalogue; run provenant refresh-routing "
+                         "or add it to config/model-routing.json"]
+    base = next(item for item in catalog["adapters"]["codex"]["models"] if item["id"] == "gpt-6.1-sol")
+    assert entry["efforts"] == base["efforts"]
+    assert router._registered_match("codex", "gpt-6.1-sol", catalog)[0]["id"] == "gpt-6.1-sol"
+    _live_cache(tmp_path, "codex", ["gpt-6.2-sol"], age=timedelta(days=2))
+    assert router._registered_match("codex", "sol", catalog)[0]["id"] == "gpt-6.1-sol"
+    _live_cache(tmp_path, "codex", ["gpt-6.1-sol"])
+    assert router._registered_match("codex", "sol", catalog)[1] == []
+
+
+def test_resolve_applies_effort_and_cooldown_gates_to_a_live_family_pick(tmp_path):
+    _live_cache(tmp_path, "codex", ["gpt-6.2-sol"])
+    env = {**os.environ, "HARNESS_PYTHON": sys.executable, "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
+           "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT), "AGENT_FABRIC_STATE_ROOT": str(tmp_path)}
+    def route():
+        run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "codex", "--model", "gpt-sol",
+                              "--effort", "high", "--role", "worker"], capture_output=True, text=True, env=env)
+        assert run.returncode == 0, run.stderr
+        return json.loads(run.stdout)
+    result = route()
+    assert result["resolved_model"] == "gpt-6.2-sol", result
+    assert result["requested_model"] == "gpt-sol"
+    assert any("newer than the catalogue" in note for note in result["notes"]), result
+    until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    (tmp_path / "cooldowns.json").write_text(json.dumps({"cooldowns": {"codex/gpt-6.2-sol": {"cooling_until": until}}}))
+    assert any("cooling" in warning for warning in route()["warnings"])
+
+
+def _resolve_env(state):
+    return {**os.environ, "HARNESS_PYTHON": sys.executable, "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
+            "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT), "AGENT_FABRIC_STATE_ROOT": str(state)}
+
+
+@pytest.mark.parametrize("adapter,model,expected", [
+    ("codex", "gpt-sol", "gpt-6.2-sol"), ("codex", "sol", "gpt-6.2-sol"), ("codex", "GPT_SOL", "gpt-6.2-sol"),
+    ("codex", "s_o_l", "gpt-6.2-sol"), ("codex", "gpt-6.2-sol", "gpt-6.2-sol"),
+    ("claude", "claude-sonnet", "claude-sonnet-5-6"), ("claude", "sonnet", "claude-sonnet-5-6")])
+def test_implied_alias_beside_a_family_model_still_resolves_to_a_concrete_id(tmp_path, adapter, model, expected):
+    (tmp_path / "capabilities.json").write_text(json.dumps({
+        "codex": {"observed_at": datetime.now(timezone.utc).isoformat(), "models": ["gpt-6.2-sol"]},
+        "claude": {"observed_at": datetime.now(timezone.utc).isoformat(), "models": ["claude-sonnet-5-6"]}}))
+    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", adapter, "--model", model, "--alias", "flagship",
+                          "--role", "worker"], capture_output=True, text=True,
+                         env={**_resolve_env(tmp_path), "FABRIC_ALIAS_IMPLIED": "1"})
+    route = json.loads(run.stdout)
+    assert run.returncode == 0 and route["resolved_model"] == expected, route
+
+
+def test_spelling_variants_of_a_family_name_resolve_like_gpt_sol(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    catalog = router.load_catalog()
+    for spelling in ("GPT_SOL", "s_o_l", "Gpt Sol", "SOL"):
+        assert router._registered_match("codex", spelling, catalog)[0]["id"] == "gpt-6.1-sol", spelling
+
+
+def _agy_live(state, models):
+    (state / "capabilities.json").write_text(json.dumps({"agy": {
+        "observed_at": datetime.now(timezone.utc).isoformat(), "models": models}}))
+
+
+@pytest.mark.parametrize("model", ["flash", "gemini-flash", "gemini-3.9-flash-high", "gemini-3.9-flash"])
+def test_agy_effort_suffixed_live_ids_match_their_family_and_keep_the_dispatch_id(tmp_path, model):
+    _agy_live(tmp_path, ["gemini-3.9-flash-low", "gemini-3.9-flash-high", "gemini-3.8-flash-high"])
+    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "agy", "--model", model, "--effort", "high",
+                          "--role", "worker"], capture_output=True, text=True, env=_resolve_env(tmp_path))
+    route = json.loads(run.stdout)
+    assert run.returncode == 0 and route["resolved_model"] == "gemini-3.9-flash-high", route

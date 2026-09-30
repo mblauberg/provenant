@@ -64,7 +64,7 @@ def test_opus_with_high_effort_is_unchanged(tmp_path):
     assert not any("ignored" in note for note in route["notes"])
     plan = planned("claude", route, tmp_path, requested_effort="high")
     assert plan["argv"][plan["argv"].index("--effort") + 1] == "high"
-    assert plan["route_label"] == "claude/opus@high"
+    assert plan["route_label"] == "claude/claude-opus-5-5@high"
 
 
 def test_registered_claude_efforts_bound_what_is_sent(tmp_path):
