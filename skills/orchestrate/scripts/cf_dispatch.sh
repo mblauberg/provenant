@@ -42,6 +42,7 @@ Options:
   --effort EFFORT              Optional effort passed to adapter.
   --timeout-seconds N          Supervisor wall clock deadline, all adapters.
   --add-dir PATH               Additional provider directory; repeatable.
+  --read-root PATH             Outside directory a read-only cwd may use; repeatable.
   --plan-only                  Print resolved provider argv and controls as JSON.
   --sandbox MODE               read-only, workspace-write, or full.
   --network BOOL               true or false; unsupported controls are warned.
@@ -74,6 +75,7 @@ INSTALLED_OUTPUT_DIGEST=""
 INSTALLED_OUTPUT_DEVICE=""
 INSTALLED_OUTPUT_INODE=""
 AGY_ADD_DIRS=()
+READ_ROOTS=()
 AGY_SANDBOX_JSON=null
 # Effective outbound network of the provider sandbox, where the arm controls it:
 # true or false for codex, null where the adapter does not expose the switch.
@@ -102,6 +104,7 @@ while [ $# -gt 0 ]; do
     --model) need_value "$@"; MODEL="$2"; shift 2;;
     --effort) need_value "$@"; EFFORT="$2"; shift 2;;
     --add-dir) need_value "$@"; AGY_ADD_DIRS+=("$2"); shift 2;;
+    --read-root) need_value "$@"; READ_ROOTS+=("$2"); shift 2;;
     --access-mode) need_value "$@"; ACCESS_MODE="$2"; shift 2;;
     --timeout-seconds) need_value "$@"; TIMEOUT_SECONDS="$2"; shift 2;;
     --worktree) need_value "$@"; WORKTREE="$2"; shift 2;;
@@ -697,7 +700,7 @@ PY
 }
 
 run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/1
-  local tool="$1" model="$2" effort="$3" route_effort_input="$3" tmpdir="$4" raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier route_model_override_tier route_alias route_reason endpoint_profile endpoint_base_url endpoint_token_env endpoint_wire_api agy_status agy_dir agy_prompt_bytes
+  local tool="$1" model="$2" effort="$3" route_effort_input="$3" tmpdir="$4" raw diag combined clean rc status opath guarantee family endpoint identity effort_substitution substitution requested_model requested_effort effort_source effort_capability_source route_json route_rc capabilities_file fallback_model primary_model catalog_model model_selection policy_override route_risk_tier route_model_override_tier route_alias route_reason endpoint_profile endpoint_base_url endpoint_token_env endpoint_wire_api agy_status agy_dir agy_prompt_bytes read_root
   local model_pin="$2"
   model="$(resolve_model "$tool" "$model")"
   raw="$tmpdir/raw"
@@ -855,6 +858,9 @@ run_one() {  # $1 tool $2 model $3 effort $4 private tempdir -> JSON, returns 0/
         [ -n "$TIMEOUT_SECONDS" ] && supervisor+=(--timeout-seconds "$TIMEOUT_SECONDS")
         for agy_dir in "${AGY_ADD_DIRS[@]:-}"; do
           [ -n "$agy_dir" ] && supervisor+=(--add-dir "$agy_dir")
+        done
+        for read_root in "${READ_ROOTS[@]:-}"; do
+          [ -n "$read_root" ] && supervisor+=(--read-root "$read_root")
         done
         if [ -z "$CHAIN" ]; then
           exec "${supervisor[@]}" --cleanup-dir "$tmpdir" --cleanup-prompt

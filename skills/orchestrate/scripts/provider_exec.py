@@ -88,6 +88,9 @@ GIT_PRIVATE_READ_ONLY = ("config.worktree", "commondir", "gitdir")
 WRITER_GIT_CONFIG = (("gc.auto", "0"), ("maintenance.auto", "false"), ("rerere.enabled", "false"))
 # Repository agent instructions and skills. Codex protects them inside a writable root.
 INSTRUCTION_DIR = ".agents"
+# A provider that has written nothing to stdout this long after launch is failed
+# as startup_timeout so the chair can re-route instead of waiting out the run.
+STARTUP_SECONDS = 300.0
 # Instructions are small text; a larger tree is refused rather than hashed at length.
 INSTRUCTION_BYTES_LIMIT = 256 * 1024 * 1024
 
@@ -263,10 +266,10 @@ def _git_toplevel(path):
     return Path(result.stdout.strip()).resolve() if result.returncode == 0 and result.stdout.strip() else None
 
 
-def protected_paths(workspace_root, cwd=None, worktree=None):
+def protected_paths(workspace_root, cwd=None, worktree=None, read_roots=()):
     workspace = Path(workspace_root).expanduser().resolve()
     owners = [workspace]
-    roots = [_git_toplevel(path) for path in (workspace, cwd, worktree) if path is not None]
+    roots = [_git_toplevel(path) for path in (workspace, cwd, worktree, *read_roots) if path is not None]
     if roots[0] is None:
         for child in sorted(workspace.iterdir()):
             if child.is_dir() and _git_toplevel(child) == child.resolve():
@@ -307,11 +310,11 @@ def protected_paths(workspace_root, cwd=None, worktree=None):
     return list(dict.fromkeys(protected))
 
 
-def check_protected_inputs(route, workspace_root, cwd, *, worktree=None, prompt_file=None, add_dirs=()):
+def check_protected_inputs(route, workspace_root, cwd, *, worktree=None, prompt_file=None, add_dirs=(), read_roots=()):
     if route.get("trains_on_prompts") is False:
         return []
     workspace = Path(workspace_root).expanduser().resolve()
-    paths = protected_paths(workspace, cwd, worktree)
+    paths = protected_paths(workspace, cwd, worktree, read_roots)
     if not paths:
         return []
     for candidate, reject_parent in ((prompt_file, True), (cwd, False), *((path, True) for path in add_dirs)):
@@ -563,6 +566,18 @@ def confinement_command(plan, command, search_path=None):
     return [sandbox_exec, "-p", os_confinement_profile(plan, search_path), *command]
 
 
+def read_boundary(workspace_root, read_roots=()):
+    """The workspace plus the roots a caller authorised for a read cwd or prompt.
+
+    Fabric passes a read root for a directory it has matched to a registered project, so a
+    read-only dispatch can work in another project while its run stays in the caller's.
+    """
+    roots = [Path(root).expanduser().resolve() for root in read_roots]
+    if any(credential_path(root) for root in roots):
+        raise ValueError("read roots must exclude credential and authentication stores")
+    return [Path(workspace_root).expanduser().resolve(), *roots]
+
+
 def build_plan(
     adapter,
     route,
@@ -570,6 +585,7 @@ def build_plan(
     *,
     cwd=None,
     workspace_root=None,
+    read_roots=(),
     mode="read_only",
     worktree=None,
     sandbox=None,
@@ -578,6 +594,7 @@ def build_plan(
     capabilities=None,
     timeout_seconds=None,
     idle_seconds=None,
+    startup_seconds=None,
     preface=True,
     run_id="",
     chair="",
@@ -599,7 +616,8 @@ def build_plan(
     if not selected_cwd.is_dir():
         raise ValueError("cwd must be a readable directory")
     # A writer's worktree may sit outside the caller's tree; only a read cwd is bounded here.
-    if workspace_root and not worktree and not selected_cwd.is_relative_to(Path(workspace_root).expanduser().resolve()):
+    if workspace_root and not worktree and not any(
+            selected_cwd.is_relative_to(root) for root in read_boundary(workspace_root, read_roots)):
         raise ValueError("cwd must be inside the workspace")
     workspace_root = str(Path(workspace_root or selected_cwd).expanduser().resolve())
     cwd = str(selected_cwd)
@@ -618,10 +636,11 @@ def build_plan(
         git_private = git_dirs[0]
         git_common = git_dirs[1]
     guarded = check_protected_inputs(route, workspace_root, cwd, worktree=worktree,
-                                     prompt_file=original_prompt_file, add_dirs=add_dirs)
+                                     prompt_file=original_prompt_file, add_dirs=add_dirs,
+                                     read_roots=read_roots)
     if prompt_file is not None and prompt_file != original_prompt_file:
         check_protected_inputs(route, workspace_root, cwd, worktree=worktree,
-                               prompt_file=prompt_file, add_dirs=add_dirs)
+                               prompt_file=prompt_file, add_dirs=add_dirs, read_roots=read_roots)
     sandbox = sandbox or (
         "workspace-write" if mode == "worktree_write" else "read-only"
     )
@@ -799,7 +818,12 @@ def build_plan(
         or os.environ.get("CF_DISPATCH_IDLE_SECONDS")
         or (config.IDLE_WRITE if mode == "worktree_write" else config.IDLE_READ)
     )
-    if not all(math.isfinite(value) and value > 0 for value in (timeout, idle)):
+    startup = float(
+        startup_seconds
+        or os.environ.get("CF_DISPATCH_STARTUP_SECONDS")
+        or STARTUP_SECONDS
+    )
+    if not all(math.isfinite(value) and value > 0 for value in (timeout, idle, startup)):
         raise ValueError("timeouts must be finite positive numbers")
     boundary = f"Workspace root: {cwd}\nResolve relative paths against this root. " + (
         "Write, run commands and commit only inside this owned worktree. Do not push or change other checkouts."
@@ -825,6 +849,7 @@ def build_plan(
         "original_prompt_file": original_path,
         "timeout_seconds": timeout,
         "idle_seconds": idle,
+        "startup_seconds": startup,
         "grace_seconds": 5.0,
         "session_id": session_id
         or (str(uuid.uuid4()) if adapter == "claude" else None),
@@ -2263,6 +2288,7 @@ def execute(
     diagnostics = BoundedCapture(stderr_path)
     started_at, started = now(), time.monotonic()
     last_progress, last_progress_at = started, started_at
+    launched, produced = started, False
     process = None
     descendants = None
     subreaper = False
@@ -2401,6 +2427,7 @@ def execute(
                 stderr=subprocess.PIPE,
                 start_new_session=True,
             )
+            launched = time.monotonic()
             descendants = _Descendants(process, attempt_marker)
             descendants.sample()
             if on_start:
@@ -2429,6 +2456,7 @@ def execute(
                         selector.unregister(key.fileobj)
                         continue
                     if key.data == "stdout":
+                        produced = True
                         raw.write(data)
                         consume(data)
                     else:
@@ -2460,6 +2488,10 @@ def execute(
                     break
                 if current - started >= plan["timeout_seconds"]:
                     forced = "timed_out"
+                    break
+                # Only provider stdout counts: a banner on stderr is not a started turn.
+                if not produced and current - launched >= plan.get("startup_seconds", STARTUP_SECONDS):
+                    forced = "startup_timeout"
                     break
                 if current >= next_sample:
                     next_sample = current + 1
@@ -2541,6 +2573,11 @@ def execute(
         )
     elif forced == "timed_out":
         diagnostics.write(b"wall clock deadline exceeded\n")
+    elif forced == "startup_timeout":
+        diagnostics.write(
+            f"no provider output within {plan.get('startup_seconds', STARTUP_SECONDS):g}s of launch; "
+            "re-route to another model or adapter\n".encode()
+        )
     stdout, stderr = (
         raw.text(),
         diagnostics.text(),
@@ -2579,6 +2616,7 @@ def execute(
         parsed["status"] = forced
         parsed["signature"] = {
             "stalled": "idle_watchdog",
+            "startup_timeout": "startup_watchdog",
             "timed_out": "wall_clock",
             "cancelled": "cancel_requested",
         }.get(forced, parsed["signature"])
@@ -2743,6 +2781,7 @@ def execute(
             "permission_blocked": "check the requested sandbox and directory grants",
             "tool_missing": "install the provider CLI",
             "stalled": "inspect events or try another model",
+            "startup_timeout": "re-route to another model or adapter",
             "usage_limited": "wait for reset or choose another model",
             "rate_limited": "retry after the recorded cooldown",
         }.get(status)
@@ -2817,7 +2856,7 @@ def execute(
         **({"spared": len(descendants.spared_at_stop)} if descendants and descendants.spared_at_stop else {}),
         "question": parsed["question"],
         "retryable": status
-        in {"usage_limited", "rate_limited", "model_unavailable", "stalled"},
+        in {"usage_limited", "rate_limited", "model_unavailable", "stalled", "startup_timeout"},
         "reset_at": parsed["reset_at"],
         "retry_after": parsed["retry_after"],
         "fix": fix,
@@ -2855,6 +2894,7 @@ def parser():
     p.add_argument("--mode", default="read_only")
     p.add_argument("--cwd", type=Path)
     p.add_argument("--workspace-root", type=Path)
+    p.add_argument("--read-root", action="append", default=[])
     p.add_argument("--worktree")
     p.add_argument("--sandbox")
     p.add_argument("--network", choices=["true", "false"])
@@ -2882,15 +2922,18 @@ def main():
     try:
         workspace_root = Path(args.workspace_root or Path.cwd()).expanduser().resolve()
         selected_cwd = Path(args.cwd or workspace_root).expanduser().resolve()
-        if not args.worktree and not selected_cwd.is_relative_to(workspace_root):
+        if not args.worktree and not any(
+                selected_cwd.is_relative_to(root) for root in read_boundary(workspace_root, args.read_root)):
             raise ValueError("cwd must be inside the workspace")
         route = json.loads(args.route_file.read_text())
         original_prompt_file = args.original_prompt_file or args.prompt_file
         check_protected_inputs(route, workspace_root, selected_cwd, worktree=args.worktree,
-                               prompt_file=original_prompt_file, add_dirs=args.add_dir)
+                               prompt_file=original_prompt_file, add_dirs=args.add_dir,
+                               read_roots=args.read_root)
         if original_prompt_file != args.prompt_file:
             check_protected_inputs(route, workspace_root, selected_cwd, worktree=args.worktree,
-                                   prompt_file=args.prompt_file, add_dirs=args.add_dir)
+                                   prompt_file=args.prompt_file, add_dirs=args.add_dir,
+                                   read_roots=args.read_root)
         plan = build_plan(
             args.adapter,
             route,
@@ -2898,6 +2941,7 @@ def main():
             mode=args.mode,
             cwd=args.cwd,
             workspace_root=workspace_root,
+            read_roots=args.read_root,
             worktree=args.worktree,
             sandbox=args.sandbox,
             network=None if args.network is None else args.network == "true",

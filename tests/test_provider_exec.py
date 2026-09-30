@@ -506,6 +506,36 @@ def test_build_plan_rejects_cwd_outside_explicit_workspace_root(tmp_path):
         )
 
 
+def test_build_plan_accepts_read_cwd_inside_an_authorised_read_root(tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    root = tmp_path / "workspace"
+    other = tmp_path / "other-project"
+    root.mkdir()
+    (other / "src").mkdir(parents=True)
+
+    plan = supervisor.build_plan(
+        "agy", {"resolved_model": "fixture"}, "hello",
+        cwd=other / "src", workspace_root=root, read_roots=[other],
+    )
+
+    assert plan["cwd"] == str((other / "src").resolve())
+    assert plan["workspace_root"] == str(root.resolve())
+
+
+def test_build_plan_refuses_a_credential_store_as_read_root(tmp_path, monkeypatch):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (tmp_path / ".ssh").mkdir()
+
+    with pytest.raises(ValueError, match="read roots must exclude credential"):
+        supervisor.build_plan(
+            "agy", {"resolved_model": "fixture"}, "hello",
+            cwd=tmp_path / ".ssh", workspace_root=root, read_roots=[tmp_path / ".ssh"],
+        )
+
+
 def test_build_plan_accepts_writer_worktree_outside_the_callers_tree(tmp_path):
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
     repo = tmp_path / "repo"
@@ -2593,6 +2623,57 @@ def test_all_adapters_stall_with_durable_diagnostics(tmp_path, adapter):
     assert record["exit"] is not None
     assert "idle_warning" in (tmp_path / "events.jsonl").read_text()
     assert record["evidence"]["signature"] == "idle_watchdog"
+
+
+def test_silent_provider_fails_as_startup_timeout_and_is_reaped(tmp_path):
+    child_pid = tmp_path / "child.pid"
+    code = f"""import pathlib,subprocess,sys,time
+child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'])
+pathlib.Path({str(child_pid)!r}).write_text(str(child.pid))
+print('opencode banner', file=sys.stderr, flush=True)
+time.sleep(60)
+"""
+    plan = fixture_plan(tmp_path, code, "opencode", startup_seconds=0.6, idle_seconds=30, timeout_seconds=30)
+    started = time.monotonic()
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert time.monotonic() - started < 10
+    assert record["status"] == "startup_timeout"
+    assert record["evidence"]["signature"] == "startup_watchdog"
+    assert record["retryable"] is True
+    assert record["fix"] == "re-route to another model or adapter"
+    assert "no provider output within 0.6s" in (tmp_path / "result.md").read_text()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        try:
+            os.kill(int(child_pid.read_text()), 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        pytest.fail("provider child survived startup_timeout")
+
+
+def test_provider_output_before_startup_window_keeps_running(tmp_path):
+    code = """import json,time
+print(json.dumps({'type':'thread.started','thread_id':'t1'}), flush=True)
+time.sleep(1.5)
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'DONE'}}), flush=True)
+print(json.dumps({'type':'turn.completed'}), flush=True)
+"""
+    plan = fixture_plan(tmp_path, code, startup_seconds=0.6, idle_seconds=30, timeout_seconds=30)
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert (tmp_path / "result.md").read_text() == "DONE"
+
+
+def test_startup_window_defaults_to_five_minutes_and_reads_environment(tmp_path, monkeypatch):
+    monkeypatch.delenv("CF_DISPATCH_STARTUP_SECONDS", raising=False)
+    assert fixture_plan(tmp_path, "pass")["startup_seconds"] == 300
+    monkeypatch.setenv("CF_DISPATCH_STARTUP_SECONDS", "45")
+    assert fixture_plan(tmp_path, "pass")["startup_seconds"] == 45
+    monkeypatch.setenv("CF_DISPATCH_STARTUP_SECONDS", "-1")
+    with pytest.raises(ValueError, match="finite positive"):
+        fixture_plan(tmp_path, "pass")
 
 
 def test_cursor_terminal_event_closes_open_stdin_and_reaps_descendants(tmp_path):

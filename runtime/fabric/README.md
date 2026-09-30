@@ -99,7 +99,15 @@ rejects with `error: secret_scan_budget_exceeded`; narrow the inputs or explicit
 set `allow_secrets: true` and explain why in the prompt. Writers use `mode: worktree_write` and an
 owned, registered linked worktree. The primary checkout is refused; create a linked
 worktree. `cwd` selects an existing read-only directory inside any registered
-Fabric project. The Python owner validates provider capabilities and
+Fabric project, and `prompt_file` may sit in the caller's directory or any
+registered project. A project is registered once any Fabric command, such as
+`fabric whoami`, has run inside it; an unregistered path is rejected with that
+route or the alternative of dispatching from the other project. For a
+directory outside the caller's, Fabric passes the owner a read root, so the run
+stays in the caller's run root, where `lanes` and `status` find it, and the
+secret scan still covers the prompt. A prompt in a credential or authentication
+store is refused wherever it sits. A resume reuses the saved read roots only
+while each still resolves to the same directory in a registered project. The Python owner validates provider capabilities and
 applies controls; Fabric does not claim a stronger guarantee than its receipt.
 On macOS, non-Codex read-only launches use `sandbox-exec` when available. The
 profile limits writes to the attempt directory and provider state. It denies
