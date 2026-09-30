@@ -7,11 +7,11 @@
   "routes": {
     "strong": [
       {
-        "model": "claude/claude-opus-5-5",
+        "model": "claude/claude-sonnet-5-5",
         "weight": "high"
       },
       {
-        "model": "claude/claude-sonnet-5-5",
+        "model": "claude/claude-opus-5-5",
         "weight": "normal"
       },
       {
@@ -38,7 +38,7 @@
       },
       {
         "model": "claude/claude-sonnet-5-5",
-        "weight": "normal"
+        "weight": "sparing"
       },
       {
         "model": "opencode/opencode-go/deepseek-v4.1-flash",
@@ -95,6 +95,10 @@
       {
         "model": "agy/gemini-3.8-flash",
         "weight": "high"
+      },
+      {
+        "model": "claude/claude-sonnet-5-5",
+        "weight": "normal"
       },
       {
         "model": "claude/claude-opus-5-5",

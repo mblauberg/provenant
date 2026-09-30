@@ -116,7 +116,7 @@ def test_directory_symlink_output_is_rejected_without_escaping():
             bin_dir / "codex",
             """#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{"models":[{"slug":"gpt-6-sol","supported_reasoning_levels":[{"effort":"high"}]}]}'
+              printf '%s\n' '{"models":[{"slug":"gpt-6.1-sol","supported_reasoning_levels":[{"effort":"high"}]}]}'
               exit 0
             fi
             cat >/dev/null
@@ -207,7 +207,7 @@ def test_output_parent_swap_cannot_certify_an_identical_outside_file():
             bin_dir / "codex",
             """#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{"models":[{"slug":"gpt-6-sol","supported_reasoning_levels":[{"effort":"high"}]}]}'
+              printf '%s\n' '{"models":[{"slug":"gpt-6.1-sol","supported_reasoning_levels":[{"effort":"high"}]}]}'
               exit 0
             fi
             cat >/dev/null
@@ -1868,7 +1868,7 @@ def test_bare_codex_dispatch_defaults_to_workhorse_not_flagship():
             bin_dir / "codex",
             f'''#!/usr/bin/env bash
             if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-              printf '%s\n' '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"medium"}},{{"effort":"high"}}]}},{{"slug":"gpt-6-sol","supported_reasoning_levels":[{{"effort":"medium"}},{{"effort":"high"}},{{"effort":"max"}}]}}]}}'
+              printf '%s\n' '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"medium"}},{{"effort":"high"}}]}},{{"slug":"gpt-6.1-sol","supported_reasoning_levels":[{{"effort":"medium"}},{{"effort":"high"}},{{"effort":"max"}}]}}]}}'
               exit 0
             fi
             printf '%s\\n' "$@" > {args_file}
@@ -1899,9 +1899,9 @@ def test_bare_codex_dispatch_defaults_to_workhorse_not_flagship():
         record = json.loads(result.stdout)
         assert result.returncode == 0, json.dumps(record, sort_keys=True)
         assert record["route_alias"] == "workhorse"
-        assert record["resolved_model"] == "gpt-6-sol"
+        assert record["resolved_model"] == "gpt-6.1-sol"
         args = args_file.read_text(encoding="utf-8").splitlines()
-        assert "gpt-6-sol" in args
+        assert "gpt-6.1-sol" in args
         assert "gpt-6-luna" not in args
         assert "gpt-6-astra" not in args
         assert 'service_tier="default"' in args
