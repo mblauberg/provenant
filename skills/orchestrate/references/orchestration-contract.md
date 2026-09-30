@@ -96,6 +96,14 @@ claim, source, confidence, issues and validation. Certification needs a
 non-authoring reviewer plus verified evidence; best-effort routes only scout,
 they do not certify.
 
+### Native result digest
+
+A native subagent's final message lands whole in the chair's context, so its
+brief sets the return shape: about 150 words carrying the verdict or outcome,
+the head SHA when code changed, and paths to the full evidence (report, logs,
+diff). Findings, transcripts and test output stay in those run-dir files; the
+chair reads them only when the digest calls for it.
+
 ### Worker terminal protocol
 
 The terminal record has one explicit classification: `blocked`, `question`,

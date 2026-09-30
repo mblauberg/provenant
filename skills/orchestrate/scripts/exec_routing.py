@@ -128,17 +128,12 @@ UNSAFE_TRAITS = frozenset({"free", "trains-on-prompts"})
 
 
 def _configured_traits(adapter, model):
-    """`model_traits` caveats from the merged routing catalogue, keyed adapter/model or model."""
+    """The router's own trait lookup, so an uncatalogued live id inherits its family's caveats as in the pools."""
     try:
-        table = _model_route_module().load_catalog().get("model_traits", {})
+        route = _model_route_module()
+        return set(route._pools.model_traits(route, route.load_catalog(), adapter, str(model)))
     except (OSError, ValueError, AttributeError, TypeError, KeyError, ImportError):
         return set()
-    traits = set()
-    for key in (f"{adapter}/{model}", model):
-        value = table.get(key) if isinstance(table, dict) else None
-        if isinstance(value, list):
-            traits.update(item for item in value if isinstance(item, str))
-    return traits
 
 
 def disclosure_risk(adapter, model, meta=None):

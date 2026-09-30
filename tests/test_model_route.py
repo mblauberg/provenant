@@ -735,6 +735,89 @@ def test_capability_probe_caches_model_list_by_cli_version(tmp_path):
     assert calls.read_text().splitlines() == ["call", "call"]
 
 
+def test_capability_probe_lists_agy_and_codex_models_for_discovery(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    agy = tmp_path / "agy"
+    agy.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.0; exit; fi\n"
+                   "if [ \"$1\" = --help ]; then exit; fi\n"
+                   "echo 'Fetching available models...'\n"
+                   "printf 'gemini-3.8-flash-high\\tGemini 3.8 Flash (High)\\nclaude-sonnet-4-6\\tClaude Sonnet 4.6\\n'\n")
+    agy.chmod(0o755)
+    record, code = router.probe_capabilities("agy", str(agy))
+    assert code == 0
+    assert record["models"] == ["gemini-3.8-flash-high", "claude-sonnet-4-6"]
+    assert router._listed_models(json.dumps({"models": [{"slug": "gpt-6-luna"}, {"slug": "gpt-6.1-sol"}]})) == [
+        "gpt-6-luna", "gpt-6.1-sol"]
+
+
+def test_discovery_keeps_colon_variants_beside_their_base_id():
+    router = load_router()
+    assert router._listed_models("openrouter/vendor/model\nopenrouter/vendor/model:free\n") == [
+        "openrouter/vendor/model", "openrouter/vendor/model:free"]
+    assert router._listed_models("gpt-6-luna  Luna\ngpt-6-luna:beta  Luna beta\n") == ["gpt-6-luna", "gpt-6-luna:beta"]
+
+
+def test_listing_only_probe_skips_the_kiro_safety_chat_and_keeps_its_evidence(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    chats = []
+
+    def fake_run(argv, **kwargs):
+        if "--no-interactive" in argv:
+            chats.append(argv)
+        output = "1.2.3" if argv[-1] == "--version" else "auto"
+        return subprocess.CompletedProcess(argv, 0, output, "")
+
+    monkeypatch.setattr(router.subprocess, "run", fake_run)
+    listed, code = router.probe_capabilities("kiro", "/fake/kiro-cli", listing_only=True)
+    assert code == 0 and listed["models"] == ["auto"]
+    assert "read_only_probe" not in listed and chats == []
+    full, code = router.probe_capabilities("kiro", "/fake/kiro-cli")
+    assert code == 0 and "read_only_probe" in full and len(chats) == 1
+    again, _ = router.probe_capabilities("kiro", "/fake/kiro-cli", listing_only=True)
+    assert again["cache_hit"] is True and "read_only_probe" in again and len(chats) == 1
+
+
+def _fake_kiro(router, monkeypatch, chats):
+    def fake_run(argv, **kwargs):
+        if "--no-interactive" in argv:
+            chats.append(argv)
+        output = "1.2.3" if argv[-1] == "--version" else "auto"
+        return subprocess.CompletedProcess(argv, 0, output, "")
+    monkeypatch.setattr(router.subprocess, "run", fake_run)
+
+
+def test_listing_only_probe_drops_kiro_evidence_from_another_executable(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    chats = []
+    _fake_kiro(router, monkeypatch, chats)
+    full, _ = router.probe_capabilities("kiro", "/fake/a/kiro-cli")
+    assert "read_only_probe" in full
+    replaced, code = router.probe_capabilities("kiro", "/fake/b/kiro-cli", listing_only=True)
+    assert code == 0 and replaced["cache_hit"] is False
+    assert "read_only_probe" not in replaced
+
+
+def test_full_kiro_probe_rechecks_safety_older_than_a_day_despite_a_fresh_listing(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    chats = []
+    _fake_kiro(router, monkeypatch, chats)
+    router.probe_capabilities("kiro", "/fake/kiro-cli")
+    path = tmp_path / "capabilities.json"
+    cache = json.loads(path.read_text())
+    stale = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    cache["kiro"]["read_only_probe"].update(
+        {"checked_at": stale, "attempted_write": True, "permission_denied": True, "file_created": False})
+    path.write_text(json.dumps(cache))
+    listed, _ = router.probe_capabilities("kiro", "/fake/kiro-cli", listing_only=True)
+    assert listed["cache_hit"] is True and len(chats) == 1
+    full, _ = router.probe_capabilities("kiro", "/fake/kiro-cli")
+    assert full["cache_hit"] is False and len(chats) == 2
+
+
 def test_failed_capability_probe_retries_after_one_hour(tmp_path, monkeypatch):
     router = load_router()
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))

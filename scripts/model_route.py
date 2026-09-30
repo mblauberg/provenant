@@ -580,15 +580,19 @@ def _listed_models(raw: str) -> list[str]:
     if isinstance(data, dict):
         return list(data)
     if isinstance(data, list):
-        return list(dict.fromkeys(item if isinstance(item, str) else item.get("id", item.get("name", ""))
+        return list(dict.fromkeys(item if isinstance(item, str)
+                                  else item.get("id", item.get("slug", item.get("name", "")))
                                   for item in data if isinstance(item, (str, dict))))
     listed: list[str] = []
     for line in raw.splitlines():
-        match = re.search(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", line)
+        if line.rstrip().endswith("..."):  # a progress line such as agy's "Fetching available models..."
+            continue
+        # A variant suffix such as `:free` is part of the id; a trailing colon is not.
+        match = re.search(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+(?::[A-Za-z0-9_.-]+)*", line)
         if match:
             listed.append(match.group(0))
             continue
-        match = re.match(r"^\s*(?:[-*]\s*)?([A-Za-z][A-Za-z0-9._/-]*)(?:\s|$)", line)
+        match = re.match(r"^\s*(?:[-*]\s*)?([A-Za-z][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)*)(?:\s|$)", line)
         if match and match.group(1).casefold() not in {"available", "models", "model", "name", "id"}:
             listed.append(match.group(1))
     return list(dict.fromkeys(listed))
@@ -599,10 +603,16 @@ def _kiro_probe_enforced(evidence: Any) -> bool:
             and evidence.get("permission_denied") is True and evidence.get("file_created") is False)
 
 
-def probe_capabilities(adapter: str, executable: str, deadline: float | None = None) -> tuple[dict[str, Any], int]:
-    commands = {"opencode": ["models"], "cursor": ["models"],
+def probe_capabilities(adapter: str, executable: str, deadline: float | None = None,
+                       listing_only: bool = False) -> tuple[dict[str, Any], int]:
+    """Probe an adapter CLI. `listing_only` (discovery) lists models without Kiro's
+    model-backed safety chat, and keeps safety evidence cached for the same executable
+    and version; a full probe re-runs the chat once that evidence has aged out."""
+    commands = {"opencode": ["models"], "cursor": ["models"], "agy": ["models"],
                 "kiro": ["chat", "--list-models", "--format", "json"],
                 "codex": ["debug", "models"]}
+    # agy and opencode refresh their lists over the network and routinely take several seconds.
+    listing_timeout = 20.0
     if adapter not in commands:
         return {"status": "unsupported_adapter", "adapter": adapter}, 2
     executable = shutil.which(executable) or executable
@@ -610,7 +620,7 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
         return max(0.01, min(limit, deadline - time.monotonic())) if deadline is not None else limit
     try:
         version = subprocess.run([executable, "--version"], capture_output=True, text=True,
-                                 timeout=remaining(2), check=True).stdout.strip()
+                                 timeout=remaining(5), check=True).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return {"status": "probe_unavailable", "adapter": adapter,
                 "message": "CLI version unavailable; fix: check the executable"}, 1
@@ -623,10 +633,16 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
         cache = {}
     previous = cache.get(adapter)
     executable_path = str(Path(executable).resolve())
+    safety_missing = adapter == "kiro" and not listing_only and isinstance(previous, dict) \
+        and "read_only_probe" not in previous and previous.get("status") != "probe_unavailable"
     if (isinstance(previous, dict) and previous.get("version") == version
-            and previous.get("executable") == executable_path):
+            and previous.get("executable") == executable_path and not safety_missing):
         try:
-            observed = datetime.fromisoformat(previous["observed_at"].replace("Z", "+00:00"))
+            # A full Kiro probe is only as fresh as its safety evidence, which a listing refresh keeps.
+            evidence = previous.get("read_only_probe")
+            stamp = evidence["checked_at"] if (adapter == "kiro" and not listing_only and isinstance(evidence, dict)
+                                               and "checked_at" in evidence) else previous["observed_at"]
+            observed = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
             ttl = 3600 if (previous.get("status") == "probe_unavailable" or
                            (adapter == "kiro" and not _kiro_probe_enforced(previous.get("read_only_probe")))) else 86400
             if (datetime.now(timezone.utc) - observed).total_seconds() < ttl:
@@ -635,9 +651,9 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
             pass
     try:
         listing = subprocess.run([executable, *commands[adapter]], capture_output=True, text=True,
-                                 timeout=remaining(3), check=True).stdout
+                                 timeout=remaining(listing_timeout), check=True).stdout
         help_text = subprocess.run([executable, "--help"], capture_output=True, text=True,
-                                   timeout=remaining(1), check=False).stdout
+                                   timeout=remaining(3), check=False).stdout
     except (OSError, subprocess.SubprocessError):
         record = {"status": "probe_unavailable", "adapter": adapter, "version": version,
                   "executable": executable_path,
@@ -649,8 +665,11 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
                   "observed_at": datetime.now(timezone.utc).isoformat(),
                   "probed_flags": sorted(set(re.findall(r"--[a-z][a-z-]+", help_text))),
                   "models": _listed_models(listing)}
-        if adapter == "kiro":
+        if adapter == "kiro" and not listing_only:
             record["read_only_probe"] = _probe_kiro_read_only(executable, version, deadline)
+        elif (adapter == "kiro" and isinstance(previous, dict) and previous.get("version") == version
+              and previous.get("executable") == executable_path and "read_only_probe" in previous):
+            record["read_only_probe"] = previous["read_only_probe"]
         code = 0
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = path.with_suffix(".lock")
@@ -1978,6 +1997,8 @@ def parser() -> argparse.ArgumentParser:
     probe.add_argument("--adapter", required=True)
     probe.add_argument("--executable", required=True)
     probe.add_argument("--json", action="store_true")
+    probe.add_argument("--listing-only", action="store_true",
+                       help="list models only, within a 30-second deadline (discovery)")
     _preferences.add_selection_parser(
         commands, INSTANCE_ROOT / "config" / "model-preferences.json",
     )
@@ -2070,7 +2091,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(route_pick(requests, args.seed), sort_keys=True))
         return 0
     if args.command == "probe":
-        record, code = probe_capabilities(args.adapter, args.executable)
+        record, code = probe_capabilities(
+            args.adapter, args.executable, time.monotonic() + 30 if args.listing_only else None,
+            listing_only=args.listing_only)
         print(json.dumps(record, sort_keys=True))
         return code
     snapshot = catalogue_snapshot(Path(args.catalog) if args.catalog else None)
