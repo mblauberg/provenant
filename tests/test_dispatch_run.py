@@ -3560,6 +3560,7 @@ print(json.dumps({'type':'result','result':'RESUMED ' + session}))
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
     assert subprocess.run(command, cwd=tmp_path, capture_output=True, text=True).returncode == 0
     run_id = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())['run_id']
+    assert not (run / 'dispatch-provider.json').exists()  # retired once the owner reaped its provider
     failing = tmp_path / 'failing.md'
     failing.write_text('fail')
     subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', run_id,

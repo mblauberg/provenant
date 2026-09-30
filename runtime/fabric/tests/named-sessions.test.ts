@@ -480,6 +480,28 @@ it("keeps a turn busy while a stale owner record names a dead owner and status n
   }
 }, 60_000);
 
+it("releases a finished turn whose retained provider record names a reused pid with no start time", async () => {
+  const project = fixtureProject();
+  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  const reused = spawn("sleep", ["30"], { stdio: "ignore" });
+  try {
+    const run = (await chair.call("dispatch", { session: "reuse", prompt: "slow", wait_seconds: 0 })).id as string;
+    const row = (await until(() => chair.call("status", { ids: [run], detail: "full" }),
+      (value) => value.runs?.[0]?.state === "running")).runs[0];
+    // The provider's record outlives it, and its pid now belongs to another process.
+    const token = JSON.parse(readFileSync(join(row.run_dir, "dispatch-status.json"), "utf8")).run_token as string;
+    writeFileSync(join(row.run_dir, "dispatch-provider.json"), JSON.stringify({
+      run_token: token, provider_pid: reused.pid, provider_pgid: reused.pid, provider_started_at: null }));
+    writeFileSync(join(row.run_dir, "cancel"), "");
+    expect(await until(() => chair.call("session", { action: "inspect", name: "reuse" }), (value) => value.active_run_id === null))
+      .toMatchObject({ active_run_id: null, last_turn: { status: "cancelled", run_id: run } });
+    expect(await chair.call("session", { action: "forget", name: "reuse" })).toMatchObject({ forgotten: "reuse" });
+  } finally {
+    reused.kill("SIGKILL");
+    await chair.client.close();
+  }
+}, 60_000);
+
 it("keeps a named session's line in a running turn's rebuilt text", () => {
   const text = digest({ state: "running", run_id: "mcp-abc123", digest: "stale",
     session_digest: "\n  session s resume active" });

@@ -520,19 +520,27 @@ function runOwners(record: OwnerRecord | undefined, status: Record<string, unkno
   return owners;
 }
 
-/** Whether any owner of a run, or a provider one of them recorded, may still be acting for it. */
-function liveness(runDir: string, owners: ProcessIdentity[]): { owner: boolean; provider: boolean } {
+/**
+ * Whether any owner of a run, or a provider one of them recorded, may still be
+ * acting for it. `timedProviders` ignores a provider record with no start time,
+ * whose pid alone cannot tell the provider from a process that reused it.
+ */
+function liveness(runDir: string, owners: ProcessIdentity[], timedProviders = false): { owner: boolean; provider: boolean } {
   const owner = owners.some((identity) => observedAlive(identity.pid, identity.startedAt));
   const provider = owners.some((identity) => {
     const record = identity.token === undefined ? null : readProviderRecord(runDir, identity.token);
-    return record !== null && observedAlive(record.provider_pid, record.provider_started_at);
+    return record !== null && !(timedProviders && record.provider_started_at === null) &&
+      observedAlive(record.provider_pid, record.provider_started_at);
   });
   return { owner, provider };
 }
 
-/** Whether a run's owner or its provider, once started, may still be acting for it. */
+/**
+ * Whether a run whose attempts all read terminal may still be acting: its owner
+ * (between fallback attempts) or a provider with a recorded start time.
+ */
 export function runProcessAlive(runDir: string): boolean {
-  const live = liveness(runDir, runOwners(readOwnerRecord(runDir), readJson(join(runDir, "dispatch-status.json"))));
+  const live = liveness(runDir, runOwners(readOwnerRecord(runDir), readJson(join(runDir, "dispatch-status.json"))), true);
   return live.owner || live.provider;
 }
 

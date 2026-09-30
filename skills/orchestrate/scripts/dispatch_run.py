@@ -1176,6 +1176,24 @@ def _record_provider_process(run_dir: Path, process: subprocess.Popen[Any]) -> N
         return
 
 
+def _retire_provider_process(run_dir: Path, process: subprocess.Popen[Any] | None) -> None:
+    """Drop this run's provider record once this owner has reaped the provider.
+
+    A reaped provider's pid can be recycled; a record left behind, especially one
+    without a start time, would let an unrelated process pass for it.
+    """
+    if process is None or process.returncode is None:
+        return
+    path = run_dir / "dispatch-provider.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        token = os.environ.get("PROVENANT_RUN_TOKEN") or run_identity(run_dir)
+        if record.get("run_token") == token and record.get("provider_pid") == process.pid:
+            path.unlink()
+    except (OSError, ValueError):
+        return
+
+
 # Fabric grants a read root only for a directory inside a registered project.
 PROMPT_PATH_FIX = ("Pass prompt_file=<readable regular file inside the workspace or a registered Fabric project>; "
                    "register another project by running `fabric whoami` there, or dispatch from it.")
@@ -2072,6 +2090,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     plan["warnings"] = active["warnings"]
                     adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
                         on_start=provider_started,on_progress=progress,cancelled=cancellation)
+                    _retire_provider_process(run_dir,process)
                     retry_plan = effort_retry_plan(plan, adapter_record)
                     if retry_plan is not None and not cancellation():
                         plan = retry_plan
@@ -2084,6 +2103,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                             stderr_path=stderr_path, on_start=provider_started,
                             on_progress=progress, cancelled=cancellation,
                         )
+                        _retire_provider_process(run_dir, process)
                 relaunch_skipped = False
                 args._phase_timings["provider"] = round((time.monotonic() - (provider_started_at[0] or spawn_started)) * 1000, 3)
                 if (args.resume and args.tool=="claude" and plan.get("resume_session")
@@ -2279,6 +2299,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         pass
                     if cancelled:
                         process_error = "cancelled"
+                    _retire_provider_process(run_dir, process)
         except InterruptedError:
             pass
         except (OSError, ValueError) as exc:
