@@ -19,7 +19,7 @@ The default MCP surface has twelve tools: `fabric_dispatch`, `fabric_status`, `f
 
 A worker question yields `input_required`; `fabric_dispatch` with `resume` appends an attempt to the same run. `resume` takes a run ID, a run ID plus `task_id` for one task of a batch, or the task's own ID. A `task_id` with no prior attempt is rejected as `resume_task_unknown`. A resume reuses the prior capability list exactly. It may change `context_ceiling`, the attempt's `timeout_seconds`, and `allow_secrets` for the new prompt; any other route or control change is rejected naming the field, and needs a new dispatch. For a batch, use `fabric_dispatch` with `tasks[]`; wait on returned IDs with `fabric_status`.
 
-Dispatch scans prompt text, prompt files and eligible regular files in `add_dirs` before provider launch. A high-signal secret finding rejects with `error: secret_detected` and a one-line removal or `allow_secrets: true` fix. The boolean override applies at the top level or per task, and an attempt records the override and finding names. Directory scans include Git-ignored regular files, skip `.git`, `node_modules`, binary and oversized files, and stop with a receipt warning at 2,000 files or 20 MB.
+Dispatch scans prompt text, prompt files and eligible regular files in `add_dirs` before provider launch. A high-signal secret finding rejects with `error: secret_detected` and a one-line removal or `allow_secrets: true` fix. The boolean override applies at the top level or per task, and an attempt records the override and finding names. Directory scans read each file whole and skip Git-ignored files, `.git`, `node_modules` and other vendored or build directories, binary files (a NUL in the first 8,000 bytes), and directories listed under `secret_scan_exclude` in `<workspace_root>/.agents/fabric-policy.json` (each with a warning); an entry must resolve, links included, inside the workspace root. A scan the budget cannot finish never passes in part: past 10,000 files or 64 MiB the dispatch rejects with `secret_scan_budget_exceeded`, naming the deepest subtree holding at least half the scanned bytes, else the largest top-level one. The same policy's `dispatch_defaults` may set `add_dirs`, positive `timeout_seconds` and boolean `network` (Codex routes only); an explicit dispatch, batch or task field wins, and an invalid key warns and is ignored.
 
 A run has `queued`, `running` and attempt-terminal states. Terminal statuses are `ok`, `partial`, `failed`, `usage_limited`, `rate_limited`, `auth_required`, `model_unavailable`, `permission_blocked`, `stalled`, `startup_timeout`, `timed_out`, `cancelled`, `interrupted`, `rejected`, `tool_missing`, and `input_required`. A provider that writes nothing to stdout within `CF_DISPATCH_STARTUP_SECONDS` (default 300) of launch ends as `startup_timeout` with signature `startup_watchdog`, and its process tree is stopped; stderr banners do not count as output, and time queued for memory admission comes before launch. It is retryable, except for a `worktree_write` attempt that was not provably untouched. Such an attempt falls back only when the worktree was clean at launch (`git status --porcelain`) and, at the timeout, has the same HEAD and status. A bounded walk must also find no file or directory, ignored ones included, whose mtime or ctime is at or after one second before launch. The walk skips `.git`, `.agent-run`, `node_modules`, `.venv`, `__pycache__`, `.pytest_cache`, `dist` and `build`. It counts as changed at 200,000 entries, 5 seconds, or an unreadable directory. Otherwise the receipt says to inspect the worktree instead of falling back. Structured provider events take precedence over text signatures. Fallback creates another attempt under the same run id. Alias routes default to fallback through allowed paid non-training routes; an explicit model defaults to no fallback. Free or prompt-training routes require explicit opt-in.
 
@@ -102,26 +102,46 @@ run also passes `--add-dir` and `--cd <worktree>`. Codex keeps a writable root's
 `.agents/` read-only, even an absent one, which stops a rebase or merge that
 updates or adds a tracked skill, so a linked-worktree Codex writer also gets the
 worktree's `.agents/` in `add_dirs` unless it is a file or link; an absent one
-is created for the attempt and removed afterwards if still empty. After the
-attempt, each `.agents/` path in HEAD, the index and on disk must match the
-attempt's starting HEAD, index or files, or the primary checkout's branch or its
-upstream. Files on disk are hashed without Git, so ignored, skip-worktree and
+is created for the attempt and removed afterwards if still empty. After every
+writer attempt, whatever the adapter, each `.agents/` path in HEAD, the index
+and on disk must match the attempt's starting HEAD, index or files, or the
+primary checkout's branch or its upstream; a path that branch changed and the
+lane merged or rebased onto must keep the branch's version, so a merge that
+discards it (`git merge -s ours`) is caught, except where the lane's branch had also changed that
+path before the attempt: its starting version then stands. A starting untracked file the lane removes or hides
+behind a link counts as changed. Files on disk are hashed without Git, so ignored, skip-worktree and
 filtered files count. An unresolved conflict, an unreadable directory, a
 special file, a replaced `.agents/` root, a tree over 256 MiB or a lane
 process left running also fails. An absent `.agents/` counts as empty, since Git
 removes the directory with its last file; a link or file in its place fails.
-Otherwise the attempt fails with `protected_instructions_changed` and
-lists the paths in its warnings. The check trusts local refs, which the lane can
+Otherwise `instruction_changes` in `<workspace_root>/.agents/fabric-policy.json`
+decides. The default `quarantine` archives the lane's files as a binary patch
+at `<attempt>/protected.patch`, plus `protected.index.patch` or
+`protected.head.patch` when its index or HEAD held different content, each
+published through the attempt directory's descriptor with an atomic replace
+that never follows a planted link. It then commits the start or
+integration-branch version of each path back to the lane as Provenant Fabric,
+returns the index and files to their starting content (or the integration
+branch's version), rechecks, and ends `ok` with a warning naming the patches;
+starting files Git did not hold are stored as objects before launch so they
+can be restored. `allow` keeps an ordinary edit with a warning. `deny`, a failed
+quarantine, and anything quarantine cannot express (a conflict, special file,
+case variant or any unverifiable state above) fail with
+`protected_instructions_changed` under every policy and list the paths in the
+warnings. An unknown value warns and quarantines. The check trusts local refs, which the lane can
 move. It also reports a clean three-way merge into a skill the branch already
 changed, a refresh overtaken by a newer integration-branch change to the same
 file, a refresh under line-ending conversion, and any refresh in a repository
-that tracks a case variant such as `.Agents/`. Another adapter can do such a
-refresh, and a retry clears an overtaken one. Review of the branch diff
+that tracks a case variant such as `.Agents/`. Applying the saved patch from
+the primary checkout lands such a refresh, and a retry clears an overtaken one. Review of the branch diff
 remains the backstop.
 
 `capabilities` is an optional list with distinct values from `postgres` and
-`browser`; an empty list means absent. It is accepted only for a Codex
-`worktree_write` using `sandbox: "workspace-write"` on macOS, with usable
+`browser`; an empty list means absent. Non-Codex adapters apply it without a
+grant, because their `sandbox-exec` profiles restrict only file access; a
+browser lane sets `MAC_CHROMIUM_TMPDIR` to `<attempt>/tmp`. A Codex
+`sandbox: "full"` lane applies none, with a warning, since it is unsandboxed.
+Any other Codex lane needs `worktree_write` with `sandbox: "workspace-write"` on macOS, with usable
 `sandbox-exec` outside another sandbox and applied `network: true`. The lane
 keeps `applied.sandbox: "workspace-write"` and
 `applied.guarantee: "enforced"`, and runs Codex with its native sandbox

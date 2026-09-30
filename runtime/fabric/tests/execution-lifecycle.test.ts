@@ -1807,6 +1807,32 @@ it('resumes a cross-project run with its saved read roots, and refuses one whose
  expect(existsSync(log)).toBe(false);
 });
 
+it("fills unset dispatch fields from the project policy's dispatch_defaults", async () => {
+  mkdirSync(join(workspace, ".agents"));
+  // Written as text so the inherited names arrive as own keys, as they would from a project file.
+  writeFileSync(join(workspace, ".agents", "fabric-policy.json"), '{"dispatch_defaults": {"add_dirs": ["shared"], '
+    + '"network": false, "timeout_seconds": 900, "sandbox": "full", "__proto__": [], "constructor": 1, "toString": 2}}');
+  const log = join(temporaryDirectory, "defaults-preflight.json");
+  const env = { ...ownerEnvironment, FIXTURE_PREFLIGHT_LOG: log };
+  const signal = new AbortController().signal;
+  expect(await dispatchConfiguredProvider({ adapter: "codex", prompt: "p", wait_seconds: 0 }, identity, signal, env))
+    .toMatchObject({ status: "rejected", error: "fixture_logged" });
+  const [single] = JSON.parse(readFileSync(log, "utf8"));
+  expect(single).toMatchObject({ add_dirs: ["shared"], network: false });
+  for (const key of ["sandbox", "__proto__", "constructor", "toString"])
+    expect(single.warnings.join()).toContain(`dispatch_defaults.${key} ignored`);
+  await dispatchConfiguredBatch({ adapter: "codex", add_dirs: ["batch"], tasks: [
+    { id: "a", prompt: "p" },
+    { id: "b", prompt: "p", add_dirs: [], network: true, timeout_seconds: 60 },
+    { id: "c", prompt: "p", adapter: "claude" },
+  ] }, identity, signal, env);
+  const [a, b, c] = JSON.parse(readFileSync(log, "utf8"));
+  expect(a).toMatchObject({ add_dirs: ["batch"], network: false, timeout: 900 });
+  expect(b).toMatchObject({ add_dirs: [], network: true, timeout: 60 });
+  // Only Codex controls network, so other adapters are not sent the default.
+  expect(c.network).toBeUndefined();
+});
+
 it('keeps non-Git cwd dispatches in the caller run root', async () => {
  const nested=join(workspace,'nested');mkdirSync(nested);
  const result=await dispatchConfiguredProvider({adapter:'codex',cwd:nested,prompt:'fixture',wait_seconds:5},identity,new AbortController().signal,ownerEnvironment);

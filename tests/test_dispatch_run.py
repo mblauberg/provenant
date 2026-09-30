@@ -193,18 +193,86 @@ def test_secret_scan_skips_ignored_regular_files_and_marks_budget_exceeded(tmp_p
     assert limited.warnings == ['secret scan budget reached']
 
 
-def test_secret_scan_skips_binary_and_untracked_system_dirs_but_refuses_oversized_files(tmp_path):
+def test_secret_scan_skips_binary_and_untracked_system_dirs(tmp_path):
     scan = load_secret_scan_module()
     secret = b'AKIA' + b'A' * 16
     (tmp_path / 'binary.dat').write_bytes(b'\0' + secret)
-    (tmp_path / 'large.txt').write_bytes(secret + b'a' * scan.MAX_FILE_BYTES)
     for name in ('node_modules', '.git'):
         directory = tmp_path / name
         directory.mkdir()
         (directory / 'secret.txt').write_bytes(secret)
     result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
     assert result.findings == []
+    assert not result.budget_exceeded
+
+
+def test_secret_scan_reads_whole_large_text_files_within_the_budget(tmp_path, monkeypatch):
+    scan = load_secret_scan_module()
+    megabyte = 1024 * 1024
+    (tmp_path / 'head.txt').write_bytes(b'AKIA' + b'A' * 16 + b'\n' + b'a' * megabyte)
+    (tmp_path / 'tail.log').write_bytes(b'a' * 2 * megabyte + b'\n' + b'AKIA' + b'B' * 16)
+    # Only a NUL near the start marks a file binary, as Git judges it, so a trailing one hides nothing.
+    (tmp_path / 'nul.txt').write_bytes(b'AKIA' + b'C' * 16 + b'\n' + b'a' * 9000 + b'\0')
+    (tmp_path / 'image.bin').write_bytes(b'\0' + b'AKIA' + b'D' * 16)
+    result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
+    assert not result.budget_exceeded
+    assert sorted(Path(item.path).name for item in result.findings) == ['head.txt', 'nul.txt', 'tail.log']
+    assert result.warnings == []
+    # A file the remaining budget cannot hold is not scanned in part: the scan fails closed.
+    monkeypatch.setattr(scan, 'MAX_TOTAL_BYTES', 2 * megabyte)
+    limited = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
+    assert limited.budget_exceeded
+
+
+def test_secret_scan_budget_fix_names_the_largest_subtree(tmp_path, monkeypatch):
+    scan = load_secret_scan_module()
+    deep = tmp_path / 'review' / 'deep'
+    deep.mkdir(parents=True)
+    for index in range(5):
+        (deep / f'{index}.txt').write_text('x' * 100)
+    (tmp_path / 'small').mkdir()
+    (tmp_path / 'small' / 'one.txt').write_text('y' * 10)
+    monkeypatch.setattr(scan, 'MAX_FILES', 3)
+    result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
     assert result.budget_exceeded
+    assert f"largest subtree {deep}" in result.fix()
+    assert 'secret_scan_exclude' in result.fix()
+
+
+def test_secret_scan_skips_excluded_directories_with_a_warning(tmp_path):
+    scan = load_secret_scan_module()
+    (tmp_path / 'fixtures').mkdir()
+    (tmp_path / 'fixtures' / 'key.pem').write_text('AKIA' + 'A' * 16)
+    (tmp_path / 'source.txt').write_text('ghp_' + 'a' * 30)
+    (tmp_path / '.agents').mkdir()
+    outside = tmp_path.parent / (tmp_path.name + '-outside')
+    outside.mkdir()
+    (outside / 'key.txt').write_text('AKIA' + 'C' * 16)
+    (tmp_path / 'escape').symlink_to(outside)
+    (tmp_path / '.agents' / 'fabric-policy.json').write_text(
+        json.dumps({'secret_scan_exclude': ['fixtures', '../outside', 7, 'escape']}))
+    result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path), str(outside)], workspace_root=tmp_path)
+    assert sorted(Path(item.path).name for item in result.findings) == ['key.txt', 'source.txt']
+    assert result.warnings == [
+        ".agents/fabric-policy.json secret_scan_exclude takes relative paths inside the project; ignoring '../outside'",
+        ".agents/fabric-policy.json secret_scan_exclude takes relative paths inside the project; ignoring 7",
+        ".agents/fabric-policy.json secret_scan_exclude takes relative paths inside the project; ignoring 'escape'",
+        f"secret scan skipped {(tmp_path / 'fixtures').resolve()} (secret_scan_exclude)",
+    ]
+
+
+def test_preflight_honours_policy_secret_scan_exclusions(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    (tmp_path / '.agents').mkdir()
+    (tmp_path / '.agents' / 'fabric-policy.json').write_text(json.dumps({'secret_scan_exclude': ['shared/fixtures']}))
+    fixtures = tmp_path / 'shared' / 'fixtures'
+    fixtures.mkdir(parents=True)
+    (fixtures / 'key.txt').write_text('rk_live_' + 'a' * 24)
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse',
+            'prompt': 'review shared files', 'add_dirs': [str(tmp_path / 'shared')]}
+    module = load_dispatch_module()
+    assert module.preflight_tasks([task], tmp_path)['status'] == 'validated'
 
 
 def test_secret_scan_budget_skips_vendored_build_and_large_binary_before_counting(tmp_path, monkeypatch):
@@ -213,7 +281,7 @@ def test_secret_scan_budget_skips_vendored_build_and_large_binary_before_countin
         target = tmp_path / dirname
         target.mkdir()
         (target / "ignored.txt").write_text("ordinary")
-    (tmp_path / "large.bin").write_bytes(b"\0" + b"x" * (scan.MAX_FILE_BYTES + 1))
+    (tmp_path / "large.bin").write_bytes(b"\0" + b"x" * (2 * 1024 * 1024))
     (tmp_path / "source.txt").write_text("ordinary")
     monkeypatch.setattr(scan, "MAX_FILES", 1)
     result = scan.scan_inputs(b"hello", "<prompt>", [str(tmp_path)])
@@ -2483,12 +2551,11 @@ def test_front_door_preflight_rejects_all_invalid_tasks_without_run(tmp_path):
 
 
 @pytest.mark.parametrize(("field", "value", "error"), [
-    ("adapter", "claude", "capabilities_adapter_invalid"),
     ("access_mode", "read_only", "capabilities_mode_invalid"),
-    ("sandbox", "full", "capabilities_sandbox_invalid"),
     ("platform", "linux", "capabilities_platform_invalid"),
     ("sandbox_exec", None, "capabilities_confinement_unavailable"),
     ("network", False, "capabilities_network_required"),
+    ("sandbox", "read-only", "capabilities_sandbox_invalid"),
 ])
 def test_front_door_capability_preflight_fails_closed(monkeypatch, tmp_path, field, value, error):
     module = load_dispatch_module()
@@ -2512,6 +2579,18 @@ def test_front_door_capability_preflight_fails_closed(monkeypatch, tmp_path, fie
     assert result["error"] == error
     assert result["fix"].strip().endswith(".")
     assert "\n" not in result["fix"]
+
+
+@pytest.mark.parametrize(("field", "value"), [("adapter", "claude"), ("sandbox", "full")])
+def test_front_door_capability_preflight_accepts_other_adapters_and_full_sandbox(monkeypatch, tmp_path, field, value):
+    module = load_dispatch_module()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(module.provider_exec.sys, "platform", "linux")
+    task = {"id": "capability", "adapter": "codex", "access_mode": "worktree_write",
+            "network": True, "capabilities": ["postgres"], "prompt": "hello", field: value}
+    result = module.preflight_tasks([task], tmp_path)
+    # Later checks (here the missing worktree) may still refuse it, but not its capabilities.
+    assert not result.get("error", "").startswith("capabilities"), result
 
 
 @pytest.mark.parametrize("capabilities", [["unknown"], ["browser", "browser"], "browser", None])

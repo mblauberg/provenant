@@ -1,5 +1,5 @@
 /** Validate the Fabric request and forward routing/control choices to its owner. */
-import { realpathSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { projectRoot, withoutGitRedirects, type Identity } from "./identity.js";
 import { execFile } from "node:child_process";
@@ -366,6 +366,49 @@ export function timeoutSeconds(value: number | undefined, mode?: RouteInput["mod
   if (!Number.isFinite(timeout) || timeout <= 0)
     throw new InputError("invalid_input", "timeout_seconds must be finite and positive");
   return timeout;
+}
+
+export interface DispatchDefaults {
+  add_dirs?: string[];
+  network?: boolean;
+  timeout_seconds?: number;
+}
+
+const POLICY = ".agents/fabric-policy.json";
+const DEFAULT_CHECKS: Record<keyof DispatchDefaults, (value: unknown) => boolean> = {
+  add_dirs: (value) => Array.isArray(value) && value.every((item) => typeof item === "string" && item !== ""),
+  network: (value) => typeof value === "boolean",
+  timeout_seconds: (value) => typeof value === "number" && Number.isFinite(value) && value > 0,
+};
+
+/** The workspace policy's `dispatch_defaults`; a malformed entry is dropped with a warning. */
+export function dispatchDefaults(workspace: string): { defaults: DispatchDefaults; warnings: string[] } {
+  let policy: unknown;
+  try {
+    policy = JSON.parse(readFileSync(join(workspace, POLICY), "utf8"));
+  } catch (error) {
+    const missing = (error as NodeJS.ErrnoException).code === "ENOENT";
+    return { defaults: {}, warnings: missing ? [] : [`${POLICY} is unreadable; no dispatch defaults applied`] };
+  }
+  const raw = (policy as { dispatch_defaults?: unknown } | null)?.dispatch_defaults;
+  if (raw === undefined) return { defaults: {}, warnings: [] };
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw))
+    return { defaults: {}, warnings: [`${POLICY} dispatch_defaults is not an object; ignored`] };
+  const defaults: Record<string, unknown> = {}, warnings: string[] = [];
+  for (const [key, value] of Object.entries(raw)) {
+    if (Object.hasOwn(DEFAULT_CHECKS, key) && DEFAULT_CHECKS[key as keyof DispatchDefaults](value)) defaults[key] = value;
+    else warnings.push(`${POLICY} dispatch_defaults.${key} ignored: set add_dirs, network or timeout_seconds`);
+  }
+  return { defaults, warnings };
+}
+
+/** Fill route fields the dispatch left unset; network only where the adapter controls it (Codex). */
+export function applyDispatchDefaults(route: NormalisedRoute, defaults: DispatchDefaults): NormalisedRoute {
+  const fields = route as NormalisedRoute & Record<string, unknown>;
+  if (fields.add_dirs === undefined && defaults.add_dirs !== undefined) fields.add_dirs = [...defaults.add_dirs];
+  if (fields.network === undefined && defaults.network !== undefined && route.adapter === "codex")
+    fields.network = defaults.network;
+  return route;
 }
 
 const registeredRoots = (identity: Identity) => identity.registeredProjects ?? [identity.project];
