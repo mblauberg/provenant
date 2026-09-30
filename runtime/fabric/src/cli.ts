@@ -59,6 +59,8 @@ const USAGE = `fabric <command>
   doctor [--json]             read-only schema and integrity diagnostics
   adapters [--json]           configured providers: dispatch state, aliases,
                               read-only guarantee, endpoint profiles
+  adapters --models A [--match S]  one adapter's live models (cached probe);
+                              dispatch any as --model A/<id>
   dispatch list [--json]      configured-provider runs recorded in this workspace
   dispatch kill <run> [--json]  stop one recorded run and the group it leads
   dispatch --prompt-file F [--adapter A] [--alias NAME | --model M] [--effort E]
@@ -346,10 +348,24 @@ if (command === "dispatch") {
     process.exit(2);
   }
 }
+if (command === "adapters" && argv.includes("--models")) {
+  const rest = argv.slice(1);
+  const value = (flag: string) => { const at = rest.indexOf(flag); return at < 0 ? undefined : rest[at + 1]; };
+  const adapter = value("--models"), match = value("--match");
+  const known = rest.filter((argument, index) => ["--models", "--match"].includes(argument) ||
+    ["--models", "--match"].includes(rest[index - 1] ?? ""));
+  if (adapter === undefined || adapter.startsWith("--") || match?.startsWith("--") || known.length !== rest.length) {
+    console.error("fabric: usage: fabric adapters --models ADAPTER [--match TEXT]");
+    process.exit(2);
+  }
+  const { liveModels } = await import("./catalogue.js");
+  console.log((await liveModels(adapter, { match })).digest);
+  process.exit(0);
+}
 if (command === "adapters") {
   const unknown = argv.slice(1).filter((argument) => argument !== "--json");
   if (unknown.length > 0) {
-    console.error("fabric: usage: fabric adapters [--json]");
+    console.error("fabric: usage: fabric adapters [--json] | fabric adapters --models ADAPTER [--match TEXT]");
     process.exit(2);
   }
   const { catalogueSnapshot } = await import("./catalogue.js");

@@ -935,3 +935,195 @@ def test_squash_merge_proof_uses_pr_changed_paths(tmp_path, monkeypatch):
 
     monkeypatch.setattr(module, "_command", fake_command)
     assert module._merged(root, "lane/squashed")
+
+
+def _attempt(run: Path, task: str = "t", number: int = 1) -> Path:
+    attempt = run / "dispatch" / "tasks" / task / f"attempt-{number:03d}"
+    (attempt / "tmp" / "cache").mkdir(parents=True)
+    (attempt / "cache").mkdir()
+    (attempt / "tmp" / "cache" / "blob").write_bytes(b"x" * 4096)
+    (attempt / "cache" / "blob").write_bytes(b"y" * 4096)
+    (attempt / "result.md").write_text("OK\n")
+    (attempt / "attempt.json").write_text("{}\n")
+    return attempt
+
+
+def _run_with_attempt(root: Path, status: str, days: int, name: str = "20260801-1200-dispatch-task-a1b2c3"):
+    run = root / ".agent-run" / "runs" / name
+    run.mkdir(parents=True)
+    (run / "RUN_RECEIPT.json").write_text(json.dumps({"status": status}))
+    attempt = _attempt(run)
+    old(run, days)
+    return run, attempt
+
+
+def test_size_counts_blocks_once_and_never_follows_links(tmp_path):
+    module = cleaner()
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "a").write_bytes(b"z" * 8192)
+    os.link(tree / "a", tree / "hard")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "big").write_bytes(b"q" * 1_000_000)
+    os.symlink(outside, tree / "dirlink")
+    os.symlink(outside / "big", tree / "filelink")
+    with (tree / "sparse").open("wb") as stream:
+        stream.truncate(10**12)
+    size = module._size(tree)
+    assert 8192 <= size < 200_000
+
+
+def test_ok_run_bulk_pruned_after_a_day_but_records_kept(tmp_path):
+    module = cleaner()
+    root = repo(tmp_path)
+    run, attempt = _run_with_attempt(root, "ok", 3)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("keep\n")
+    os.symlink(outside, attempt / "tmp" / "link")
+    stamp = (datetime.now(timezone.utc) - timedelta(days=3)).timestamp()
+    os.utime(attempt / "tmp", (stamp, stamp))
+    result = module.plan(root, pr_bodies=[])
+    rows = {row["path"]: row for row in result["rows"]}
+    rel = attempt.relative_to(root).as_posix()
+    assert rows[run.relative_to(root).as_posix()]["verdict"].startswith("keep:retention")
+    assert rows[rel + "/tmp"]["verdict"] == "delete" and rows[rel + "/cache"]["verdict"] == "delete"
+    assert result["reclaimable_bytes"] >= 8192
+    assert module.apply(root, result["plan_sha256"], pr_bodies=[]) == [rel + "/cache", rel + "/tmp"]
+    assert not (attempt / "tmp").exists() and not (attempt / "cache").exists()
+    assert (attempt / "result.md").is_file() and (attempt / "attempt.json").is_file()
+    assert outside.read_text() == "keep\n"
+
+
+def test_fresh_ok_and_recent_failed_runs_keep_bulk(tmp_path):
+    module = cleaner()
+    root = repo(tmp_path)
+    fresh, _ = _run_with_attempt(root, "ok", 0, "20260801-1200-dispatch-task-b2c3d4")
+    failed, _ = _run_with_attempt(root, "failed", 3, "20260801-1200-dispatch-task-c3d4e5")
+    result = module.plan(root, pr_bodies=[])
+    assert not [row for row in result["rows"] if row["kind"] == "attempt-bulk"]
+
+
+def test_bulk_symlinked_task_dir_is_not_followed(tmp_path):
+    module = cleaner()
+    root = repo(tmp_path)
+    run = root / ".agent-run" / "runs" / "20260801-1200-dispatch-task-d4e5f6"
+    (run / "dispatch" / "tasks").mkdir(parents=True)
+    (run / "RUN_RECEIPT.json").write_text(json.dumps({"status": "ok"}))
+    elsewhere = tmp_path / "elsewhere"
+    _attempt(elsewhere)
+    os.symlink(elsewhere / "dispatch" / "tasks" / "t", run / "dispatch" / "tasks" / "t")
+    old(run, 3)
+    result = module.plan(root, pr_bodies=[])
+    assert not [row for row in result["rows"] if row["kind"] == "attempt-bulk"]
+
+
+def test_bulk_skips_nonterminal_and_input_required_attempts(tmp_path):
+    module = cleaner()
+    root = repo(tmp_path)
+    run, attempt = _run_with_attempt(root, "ok", 3)
+    canonical = run / "tasks" / "t" / "attempt-001"
+    canonical.mkdir(parents=True)
+    (canonical / "attempt.json").write_text(json.dumps({"state": "terminal", "status": "input_required"}))
+    assert not [r for r in module.plan(root, pr_bodies=[])["rows"] if r["kind"] == "attempt-bulk"]
+    (canonical / "attempt.json").write_text(json.dumps({"state": "running"}))
+    assert not [r for r in module.plan(root, pr_bodies=[])["rows"] if r["kind"] == "attempt-bulk"]
+
+
+def test_remove_tree_never_follows_swapped_ancestor_or_crosses_mounts(tmp_path):
+    storage = cleaner().attempt_storage
+    anchor = tmp_path / "anchor"
+    victim = tmp_path / "victim"
+    (victim / "tmp").mkdir(parents=True)
+    (victim / "tmp" / "keep").write_text("keep\n")
+    anchor.mkdir()
+    os.symlink(victim, anchor / "attempt")  # ancestor swapped for a symlink
+    assert storage.remove_tree(anchor, anchor / "attempt" / "tmp")
+    assert (victim / "tmp" / "keep").is_file()
+    real = anchor / "real" / "tmp"
+    (real / "sub").mkdir(parents=True)
+    (real / "sub" / "f").write_text("x")
+    os.chmod(real / "sub", 0o500)
+    assert storage.remove_tree(anchor, real) == [] and not real.exists()
+
+
+def test_remove_tree_leaves_other_device_subtree(tmp_path, monkeypatch):
+    storage = cleaner().attempt_storage
+    tmp = tmp_path / "a" / "tmp"
+    (tmp / "mnt").mkdir(parents=True)
+    (tmp / "mnt" / "f").write_text("x")
+    (tmp / "gone").write_text("x")
+    real_stat = os.stat
+
+    def fake(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if path == "mnt":
+            return os.stat_result((result.st_mode, result.st_ino, result.st_dev + 1, *result[3:]))
+        return result
+
+    monkeypatch.setattr(storage.os, "stat", fake)
+    left = storage.remove_tree(tmp_path, tmp)
+    assert len(left) == 1 and left[0].endswith("mnt")
+    assert (tmp / "mnt" / "f").is_file() and not (tmp / "gone").exists()
+
+
+def test_remove_tree_refuses_component_swapped_between_check_and_open(tmp_path, monkeypatch):
+    storage = cleaner().attempt_storage
+    target = tmp_path / "a" / "tmp"
+    (target / "sub").mkdir(parents=True)
+    (target / "sub" / "f").write_text("x")
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keep").write_text("keep\n")
+    real_open = storage.os.open
+
+    def swap(path, flags, *args, **kwargs):
+        if path == "sub":
+            os.rename(target / "sub", tmp_path / "moved")
+            os.rename(victim, target / "sub")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(storage.os, "open", swap)
+    assert storage.remove_tree(tmp_path, target)
+    assert (target / "sub" / "keep").is_file()
+
+
+def test_remove_tree_refuses_ancestor_on_another_device(tmp_path, monkeypatch):
+    storage = cleaner().attempt_storage
+    target = tmp_path / "a" / "b" / "tmp"
+    target.mkdir(parents=True)
+    (target / "f").write_text("x")
+    real_fstat = os.fstat
+    anchor_dev = real_fstat(os.open(tmp_path, os.O_RDONLY)).st_dev
+
+    def fake(fd):
+        result = real_fstat(fd)
+        if result.st_ino == (tmp_path / "a").stat().st_ino:
+            return os.stat_result((result.st_mode, result.st_ino, anchor_dev + 1, *result[3:]))
+        return result
+
+    monkeypatch.setattr(storage.os, "fstat", fake)
+    assert storage.remove_tree(tmp_path, target)
+    assert (target / "f").is_file()
+
+
+def test_open_dir_closes_fd_when_fstat_fails(tmp_path, monkeypatch):
+    storage = cleaner().attempt_storage
+    (tmp_path / "d").mkdir()
+    parent = os.open(tmp_path, os.O_RDONLY)
+    opened = []
+    real_open = storage.os.open
+    monkeypatch.setattr(storage.os, "open", lambda *a, **k: opened.append(real_open(*a, **k)) or opened[-1])
+    monkeypatch.setattr(storage.os, "fstat", lambda fd: (_ for _ in ()).throw(OSError("boom")))
+    try:
+        storage._open_dir("d", parent, 0)
+    except OSError:
+        pass
+    monkeypatch.undo()
+    try:
+        os.fstat(opened[0])
+        leaked = True
+    except OSError:
+        leaked = False
+    os.close(parent)
+    assert not leaked

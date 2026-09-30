@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withoutGitRedirects, type Identity } from "./identity.js";
-import { InputError, type BatchTaskInput, type RouteInput } from "./execution-input.js";
+import { InputError, nativeAdapter, tierAlias, type BatchTaskInput, type RouteInput } from "./execution-input.js";
 
 export const POOL_FIELDS = ["route", "rotate", "council", "models"] as const;
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -22,6 +22,41 @@ type PickResult =
 
 export function usesPool(input: RouteInput): boolean {
   return input.route !== undefined || input.models !== undefined || input.council !== undefined || input.rotate === true;
+}
+
+/**
+ * A Claude or Codex seat that names no adapter, model or pool would land on its
+ * own models through the default or a tier alias. Take the matching pool
+ * instead, where the picker skips the seat's native models; a pool holding only
+ * those is refused with `route_native_only`. An explicit adapter or model runs.
+ * Empty selectors and mixed-selector precedence settle first, so neither
+ * `model: ""` nor `alias` with `rotate` slips back to the seat's own adapter.
+ */
+/** A blank selector means unset, so it neither overrides a default nor counts as a choice. */
+export function withoutEmptySelectors<T extends object>(task: T): T {
+  return Object.fromEntries(Object.entries(task).filter(([key, value]) =>
+    !(["adapter", "model", "alias", "route"].includes(key) && typeof value === "string" && value.trim() === ""))) as T;
+}
+
+export function nativeFirst<T extends RouteInput>(task: T, identity: Identity): { task: T; warnings: string[] } {
+  if (nativeAdapter(identity) === undefined) return { task, warnings: [] };
+  const warnings: string[] = [];
+  let current = withoutEmptySelectors(task);
+  if (usesPool(current)) {
+    try {
+      const settled = settle(current);
+      current = settled.task;
+      warnings.push(...settled.warnings);
+    } catch (error) {
+      if (!(error instanceof InputError)) throw error;
+      return { task: current, warnings }; // expandPools reports it
+    }
+  }
+  if (current.adapter !== undefined || current.model !== undefined || usesPool(current)) return { task: current, warnings };
+  const alias = current.alias === undefined ? "workhorse" : tierAlias(current.alias);
+  if (alias === undefined) return { task: current, warnings };
+  const { alias: _alias, ...rest } = current;
+  return { task: { ...rest, route: alias, native_default: alias } as T, warnings };
 }
 
 function withoutPool<T extends RouteInput>(input: T): T {
@@ -128,6 +163,7 @@ export async function expandPools(
       ...(task.adapter === undefined ? {} : { adapter: task.adapter }),
       ...(task.effort === undefined ? {} : { effort: task.effort }),
       ...(task.confidential === true ? { confidential: true } : {}),
+      ...(nativeAdapter(identity) === undefined ? {} : { native: nativeAdapter(identity) }),
       project: identity.project,
     } });
   });
@@ -144,10 +180,13 @@ export async function expandPools(
       errors.push({ task_id: id, error: answer.error, fix: answer.fix });
       return [];
     }
+    if (task.native_default !== undefined) {
+      warnings.push(`${task.native_default} taken from the route pool: ${nativeAdapter(identity)} models run as native subagents`);
+    }
     warnings.push(...answer.warnings);
     const members = task.council !== undefined || task.models !== undefined;
     council ||= members;
-    const { alias: _alias, ...rest } = withoutPool(task);
+    const { alias: _alias, native_default: _default, ...rest } = withoutPool(task);
     return answer.picks.map((choice, member) => ({
       ...rest,
       id: members ? `${id}-${member + 1}` : id,

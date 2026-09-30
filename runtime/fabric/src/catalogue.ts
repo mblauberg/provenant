@@ -1,5 +1,5 @@
 /** Read the Python-owned merged routing snapshot, cached by source mtimes. */
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -143,4 +143,96 @@ export function catalogueSnapshot(root?: string, env: NodeJS.ProcessEnv = proces
   };
   cache.set(key, { stamp, value });
   return value;
+}
+
+const LISTED: Record<string, string> = { agy: "agy", codex: "codex", cursor: "cursor-agent", kiro: "kiro-cli", opencode: "opencode" };
+const FLAT_LIMIT = 24, GROUP_LIMIT = 20, OUTPUT_BUDGET = 4096;
+
+/**
+ * Live model discovery through the Python probe, which bounds the listing and
+ * caches it for a day. The digest stays short: small lists are printed whole,
+ * larger ones by family, and a large family only by count until `match` narrows it.
+ */
+export async function liveModels(adapter: string, options: LiveModelOptions = {}): Promise<{ digest: string }> {
+  const digest = await liveDigest(adapter, options);
+  // Every path is budgeted below; this is the backstop for an unexpectedly long head line.
+  return { digest: digest.length <= OUTPUT_BUDGET ? digest : `${digest.slice(0, OUTPUT_BUDGET - 40)}\n… truncated; pass match to narrow` };
+}
+
+interface LiveModelOptions { match?: string; root?: string; env?: NodeJS.ProcessEnv; snapshot?: CatalogueSnapshot }
+
+/** The catalogued ids as one line within `room` characters, naming what it leaves out. */
+function cataloguedLine(models: string[], match: string | undefined, room: number): string {
+  const needle = match?.toLowerCase();
+  const chosen = needle ? models.filter((model) => model.toLowerCase().includes(needle)) : models;
+  let line = needle ? `catalogued (${chosen.length} of ${models.length} match ${match}):` : "catalogued:";
+  if (chosen.length === 0) return `${line} -`;
+  let kept = 0;
+  for (const id of chosen) {
+    if (line.length + id.length + 1 > room - 48) break;
+    line += ` ${id}`;
+    kept += 1;
+  }
+  return kept < chosen.length ? `${line} ${chosen.length - kept} more omitted; pass match to narrow` : line;
+}
+
+async function liveDigest(adapter: string, options: LiveModelOptions): Promise<string> {
+  const env = options.env ?? process.env;
+  const snapshot = options.snapshot ?? catalogueSnapshot(options.root, env);
+  const entry = snapshot.adapters.find((candidate) => candidate.name === adapter);
+  if (entry === undefined) {
+    return `${adapter}: unknown adapter; known: ${snapshot.adapters.map((item) => item.name).sort().join(", ")}`;
+  }
+  const withCatalogue = (head: string) => `${head}\n${cataloguedLine(entry.models, options.match, OUTPUT_BUDGET - head.length - 1)}`;
+  if (adapter === "claude") return withCatalogue("claude: no live list; run Claude models as native subagents (Agent tool)");
+  const executable = LISTED[adapter];
+  if (executable === undefined) return withCatalogue(`${adapter}: no live list`);
+  const configuredRoot = options.root || env.AGENT_FABRIC_PRODUCT_ROOT;
+  const productRoot = configuredRoot && isAbsolute(configuredRoot) ? configuredRoot : findProductRoot();
+  const configuredPython = env.HARNESS_PYTHON;
+  const python = configuredPython && isAbsolute(configuredPython) ? configuredPython : "python3";
+  const stdout = await new Promise<string>((resolveOutput) => {
+    execFile(python, [join(productRoot, "scripts", "model_route.py"), "probe", "--adapter", adapter, "--executable", executable, "--listing-only"],
+      // The listing-only probe bounds each child within its own 30-second deadline, inside this one.
+      { cwd: productRoot, env: { ...process.env, ...env }, encoding: "utf8", timeout: 40_000, maxBuffer: 4 * 1024 * 1024 },
+      (_error, output) => resolveOutput(output ?? ""));
+  });
+  let record: { models?: unknown; message?: string; status?: string; cache_hit?: boolean } = {};
+  try { record = JSON.parse(stdout); } catch { /* reported below */ }
+  const listed = Array.isArray(record.models) ? record.models.filter((model): model is string => typeof model === "string") : [];
+  if (listed.length === 0) {
+    return withCatalogue(`${adapter}: live list unavailable (${String(record.message ?? record.status ?? "probe failed").slice(0, 200)})`);
+  }
+  const needle = options.match?.toLowerCase();
+  const models = needle ? listed.filter((model) => model.toLowerCase().includes(needle)) : listed;
+  const cached = record.cache_hit ? " (cached)" : "";
+  const head = needle ? `${adapter}: ${models.length} of ${listed.length} live models match ${options.match}${cached}`
+    : `${adapter}: ${listed.length} live models${cached}`;
+  let lines: string[];
+  if (models.length <= FLAT_LIMIT) {
+    lines = models.length ? [models.join(" ")] : [];
+  } else {
+    const groups = new Map<string, string[]>();
+    for (const model of models) {
+      const cut = model.includes("/") ? model.indexOf("/") : model.indexOf("-");
+      const group = cut > 0 ? model.slice(0, cut + 1) : "";
+      groups.set(group, [...(groups.get(group) ?? []), model.slice(group.length)]);
+    }
+    lines = [...groups].map(([group, names]) =>
+      `${group || "other"} (${names.length}): ${names.length > GROUP_LIMIT ? "pass match to list" : names.join(" ")}`);
+  }
+  const tail = `dispatch any as model "${adapter}/<id>"; an uncatalogued id runs with a note`;
+  // Whole lines only, within one budget; a long flat line collapses to its count.
+  const reserve = head.length + tail.length + 80;
+  const kept: string[] = [];
+  let used = reserve, omittedModels = 0;
+  for (const line of lines) {
+    if (used + line.length + 1 <= OUTPUT_BUDGET) { kept.push(line); used += line.length + 1; continue; }
+    omittedModels += models.length <= FLAT_LIMIT ? models.length : Number(/\((\d+)\)/u.exec(line)?.[1] ?? 0);
+  }
+  const omitted = lines.length - kept.length;
+  const note = omitted === 0 ? [] : [models.length <= FLAT_LIMIT
+    ? `${omittedModels} models omitted; pass match to narrow`
+    : `${omitted} more groups (${omittedModels} models) omitted; pass match to narrow`];
+  return [head, ...kept, ...note, tail].join("\n");
 }
