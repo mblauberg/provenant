@@ -417,7 +417,12 @@ exit 99
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     module = load_dispatch_module()
     monkeypatch.setattr(module.memory_admission, "available_memory_mb", lambda: (640, 16384))
-    monkeypatch.setenv("FABRIC_MEMORY_WAIT_SECONDS", "0")
+    original_admit = module.memory_admission.admit
+    admission_timeouts = []
+    def track_admission_timeout(*args, **kwargs):
+        admission_timeouts.append(kwargs.get("timeout_seconds"))
+        return original_admit(*args, **kwargs)
+    monkeypatch.setattr(module.memory_admission, "admit", track_admission_timeout)
     monkeypatch.chdir(tmp_path)
     if legacy:
         adapter = tmp_path / "adapter"
@@ -426,14 +431,64 @@ exit 99
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "memory-expiry", "--adapter", "codex",
         "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--timeout-seconds", "0.01",
     ])
     assert module.dispatch(args) == 1
     attempt = json.loads((run_dir / "dispatch/tasks/memory-expiry/attempt-001/attempt.json").read_text())
     state = json.loads((run_dir / "tasks/memory-expiry/attempt-001/attempt.json").read_text())
     assert attempt["status"] == state["status"] == "failed"
     assert attempt["outcome"] == state["error"] == "memory_unavailable"
+    assert admission_timeouts == [0.01]
     assert "lower the mode's memory_floor_percent" in state["fix"]
     assert "memory_unavailable" in state["digest"]
+
+
+def test_queued_receipt_is_published_where_admission_scans(tmp_path, monkeypatch):
+    run_dir = make_run(tmp_path, "runs/20260930-1200-dispatch-queue")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("hello\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_executable(bin_dir / "codex", '''#!/usr/bin/env bash
+if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+  printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+  exit 0
+fi
+exit 99
+''')
+    monkeypatch.setenv("PATH", f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    module = load_dispatch_module()
+    admission = module.memory_admission
+    monkeypatch.setattr(admission, "available_memory_mb", lambda: (640, 16384))
+    original_admit = admission.admit
+    published = []
+
+    def observe_queue(on_wait, *args, **kwargs):
+        def waiting(reason):
+            on_wait(reason)
+            published.extend((path, json.loads(path.read_text()), kwargs["queued_since"])
+                             for path in admission.queued_receipts(kwargs["queue_root"]))
+        return original_admit(waiting, *args, **kwargs)
+
+    monkeypatch.setattr(admission, "admit", observe_queue)
+    monkeypatch.chdir(tmp_path)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "queue-wiring", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--timeout-seconds", "0.01",
+    ])
+    assert module.dispatch(args) == 1
+    assert published
+    path, row, queued_since = published[0]
+    assert path == run_dir / "tasks/queue-wiring/attempt-001/attempt.json"
+    assert row["state"] == "queued" and row["queue_reason"] == "memory"
+    assert row["timing"]["queued_since"] == queued_since
+    assert row["admission"] == {
+        "owner_pid": os.getpid(),
+        "owner_start_epoch": admission._start_epoch(os.getpid()),
+        "floor_percent": admission.floor_percent(tmp_path, args.access_mode),
+    }
 
 
 def test_opencode_explicit_model_receipt_drops_implied_alias(tmp_path: Path) -> None:
@@ -3069,6 +3124,14 @@ def test_finalize_phase_includes_receipt_publication(tmp_path, monkeypatch):
     assert attempt['timing']['phases']['finalize'] >= 120
 
 
+def normalise_plan_identity(plan):
+    """Replace the per-plan session id and Codex permissions profile name, which differ by design."""
+    for key, placeholder in (('session_id', '<session>'), ('profile', '<profile>')):
+        owner = plan if key == 'session_id' else plan['applied']['write_boundary']
+        value = owner.pop(key, None)
+        plan['argv'] = [arg.replace(value, placeholder) if value else arg for arg in plan['argv']]
+
+
 @pytest.mark.parametrize('adapter, model, effort', [
     ('claude', 'opus', None), ('codex', 'gpt-6-luna', 'low'),
 ])
@@ -3096,9 +3159,7 @@ def test_fabric_fast_plan_matches_shell_for_explicit_model(tmp_path, monkeypatch
     assert planned is not None
     expected = json.loads(shell.stdout)
     for value in (planned, expected):
-        session = value.pop('session_id', None)
-        value['argv'] = [arg.replace(session, '<session>') if session else arg
-                         for arg in value['argv']]
+        normalise_plan_identity(value)
     assert planned == expected
 
 
@@ -3133,8 +3194,7 @@ def test_fabric_fast_plan_matches_or_delegates_shell_edge_routes(
     assert shell.returncode == 0, shell.stderr
     expected = json.loads(shell.stdout)
     for value in (planned, expected):
-        session = value.pop('session_id', None)
-        value['argv'] = [arg.replace(session, '<session>') if session else arg for arg in value['argv']]
+        normalise_plan_identity(value)
     assert planned == expected
 
 

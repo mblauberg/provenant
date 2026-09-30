@@ -1787,6 +1787,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         def waiting(reason):
             active["state"] = "queued"
             active["queue_reason"] = "memory"
+            if "admission" not in active:
+                active["admission"] = memory_admission.queue_entry(workspace, args.access_mode)
             active["reason"] = reason
             active["timing"]["queued_since"] = waiting_since
             active["timing"]["queued_seconds"] = getattr(args, "_queued_seconds", 0.0)
@@ -1797,7 +1799,10 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         try:
             memory_lease = memory_admission.admit(waiting, cancelled_now, warning,
                                                    waited_seconds=admission_queued_seconds,
-                                                   workspace_root=workspace, mode=args.access_mode)
+                                                   workspace_root=workspace, mode=args.access_mode,
+                                                   timeout_seconds=args.timeout_seconds,
+                                                   queue_root=run_root(workspace) / ".agent-run",
+                                                   queued_since=waiting_since)
         except memory_admission.MemoryUnavailableError as exc:
             process_error = exc.code
             memory_lease = None
@@ -1805,6 +1810,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         admission_queued_seconds += queued_seconds
         args._queued_seconds = getattr(args, "_queued_seconds", 0.0) + queued_seconds
         active["timing"].pop("queued_since", None)
+        active.pop("admission", None)
         active["timing"]["queued_seconds"] = args._queued_seconds
         started = time.monotonic()
         started_at = now()

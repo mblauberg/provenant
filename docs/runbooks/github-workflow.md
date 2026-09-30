@@ -130,6 +130,10 @@ with an upstream so `gh pr create` finds the branch:
 git push -u origin fix/repo-runbook-mechanics
 ```
 
+A Fabric writer lane cannot write the shared Git `config`, so `-u` pushes but
+cannot record the upstream. From a lane, push with `git push origin HEAD` and
+pass `--head <branch>` to `gh pr create`.
+
 ### Pull request
 
 Open the pull request against `main` and link the issue per the rule in

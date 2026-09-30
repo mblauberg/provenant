@@ -56,7 +56,7 @@ import {
   type RecordedRun,
 } from "./run-registry.js";
 
-import { Store } from "./store.js";
+import { laneTaskId, Store } from "./store.js";
 import { digest } from "./surface.js";
 
 const execFileAsync = promisify(execFile);
@@ -408,7 +408,7 @@ export function startOwner(
               if (row.state === "terminal")
                 mailbox.send(identity, identity.agentId, digest(row), {
                   kind: "run_terminal",
-                  outputPath: `${row.run_id}:${row.task_id}:${row.attempt ?? row.attempt_count}`,
+                  outputPath: `${row.run_id}:${laneTaskId(row)}:${row.attempt ?? row.attempt_count}`,
                 });
           } finally {
             mailbox.close();
