@@ -313,12 +313,10 @@ it can also take frontend legwork. It is a different family for cross-family
 review legs and is reachable at `-high`, `-medium` and `-low`. Use
 `gemini-3.8-flash-high` for registers carrying legal or regulatory risk as well.
 
-**Route pools carry these preferences as weights** (`provenant routes` prints
-them). `strong`: Sonnet high, Opus and Sol normal, Astra sparing. `bulk`: Luna
-high; Gemini Flash normal; Sonnet, Sol, DeepSeek and GLM sparing. `design`:
-Sonnet high; Opus normal; DeepSeek, GLM, Astra and the free models sparing.
-`writing`: Gemini Flash high, Sonnet normal, Opus sparing. When a preference here changes, change
-the pool weights in `config/model-routing.json` in the same edit.
+**Route pools carry these preferences as weights.** The pools live only in
+`config/model-routing.json` `routes`; `provenant routes` prints them with live
+availability. To change a preference, edit the weight or order there; nothing
+else restates them.
 
 **Critical review has no fixed family.** The cross-family obligation is relative
 to whoever chairs the run, so the right second family depends on the first. Do

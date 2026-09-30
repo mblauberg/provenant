@@ -11,16 +11,16 @@
         "weight": "high"
       },
       {
-        "model": "claude/claude-opus-5-5",
-        "weight": "normal"
-      },
-      {
         "model": "codex/gpt-6.1-sol",
         "weight": "normal",
         "effort": [
           "high",
           "xhigh"
         ]
+      },
+      {
+        "model": "claude/claude-opus-5-5",
+        "weight": "normal"
       },
       {
         "model": "codex/gpt-6-astra",
@@ -37,11 +37,27 @@
         "weight": "normal"
       },
       {
-        "model": "claude/claude-sonnet-5-5",
+        "model": "opencode/opencode/space-bunny-free",
+        "weight": "normal"
+      },
+      {
+        "model": "opencode/opencode/mimo-v2.6-flash-free",
+        "weight": "normal"
+      },
+      {
+        "model": "opencode/opencode/muse-spark-1.3-contributor-free",
+        "weight": "normal"
+      },
+      {
+        "model": "agy/claude-opus-4-6-thinking",
         "weight": "sparing"
       },
       {
-        "model": "opencode/opencode-go/deepseek-v4.1-flash",
+        "model": "agy/claude-sonnet-4-6",
+        "weight": "sparing"
+      },
+      {
+        "model": "claude/claude-sonnet-5-5",
         "weight": "sparing"
       },
       {
@@ -51,6 +67,10 @@
           "medium",
           "high"
         ]
+      },
+      {
+        "model": "opencode/opencode-go/deepseek-v4.1-flash",
+        "weight": "sparing"
       },
       {
         "model": "opencode/opencode-go/glm-5.3-flash",
@@ -63,32 +83,20 @@
         "weight": "high"
       },
       {
+        "model": "agy/gemini-3.8-flash",
+        "weight": "normal"
+      },
+      {
         "model": "claude/claude-opus-5-5",
         "weight": "normal"
       },
       {
-        "model": "opencode/opencode-go/deepseek-v4.1-flash",
-        "weight": "sparing"
+        "model": "agy/claude-opus-4-6-thinking",
+        "weight": "normal"
       },
       {
-        "model": "opencode/opencode-go/glm-5.3-flash",
-        "weight": "sparing"
-      },
-      {
-        "model": "opencode/opencode/space-bunny-free",
-        "weight": "sparing"
-      },
-      {
-        "model": "opencode/opencode/muse-spark-1.3-contributor-free",
-        "weight": "sparing"
-      },
-      {
-        "model": "opencode/opencode/mimo-v2.6-flash-free",
-        "weight": "sparing"
-      },
-      {
-        "model": "codex/gpt-6-astra",
-        "weight": "sparing"
+        "model": "agy/claude-sonnet-4-6",
+        "weight": "normal"
       }
     ],
     "writing": [
@@ -101,15 +109,15 @@
         "weight": "normal"
       },
       {
-        "model": "claude/claude-opus-5-5",
-        "weight": "sparing"
-      },
-      {
         "model": "agy/claude-opus-4-6-thinking",
-        "weight": "sparing"
+        "weight": "normal"
       },
       {
         "model": "agy/claude-sonnet-4-6",
+        "weight": "normal"
+      },
+      {
+        "model": "claude/claude-opus-5-5",
         "weight": "sparing"
       }
     ]

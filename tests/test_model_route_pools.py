@@ -15,10 +15,17 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 SEED = json.loads((ROOT / "config" / "model-routing.json").read_text())
-# The selection tests pin one three-model strong pool, so seed edits to it do not move their arithmetic.
+# The selection tests pin their own strong and design pools, so reweighting the seed never moves their arithmetic.
 CATALOG = {**SEED, "routes": {**SEED["routes"], "strong": [
     {"model": "claude/claude-opus-5-5", "weight": "high"},
     {"model": "codex/gpt-6.1-sol", "weight": "normal", "effort": ["high", "xhigh"]},
+    {"model": "codex/gpt-6-astra", "weight": "sparing"}], "design": [
+    {"model": "claude/claude-sonnet-5-5", "weight": "high"},
+    {"model": "claude/claude-opus-5-5", "weight": "normal"},
+    {"model": "opencode/opencode-go/deepseek-v4.1-flash", "weight": "sparing"},
+    {"model": "opencode/opencode-go/glm-5.3-flash", "weight": "sparing"},
+    {"model": "opencode/opencode/muse-spark-1.3-contributor-free", "weight": "sparing"},
+    {"model": "opencode/opencode/mimo-v2.6-flash-free", "weight": "sparing"},
     {"model": "codex/gpt-6-astra", "weight": "sparing"}]}}
 
 
