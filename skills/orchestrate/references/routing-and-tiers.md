@@ -8,7 +8,7 @@ Each primary runs its own models as native subagents: Claude Code through the Ag
 
 - a pool pick (default, `rotate`), a dispatch with no selector and a tier alias skip the seat's own models, with `<adapter>/<model> skipped: use a native subagent`;
 - `council: N` hands native members back as `spawn N native <adapter> member(s) (<models>); Fabric runs m of N`;
-- a tier alias is read case- and typo-tolerantly (`Workhorse`, `workhorze`) before this check;
+- before this check, empty selectors are dropped, mixed selectors settle by precedence, and a tier alias is read case- and typo-tolerantly (`Workhorse`, `workhorze`);
 - when nothing else is available, the pick is rejected with `route_native_only`, whose fix names the native spawn and `adapter: <seat>`: the seat's own models never run by default;
 - an explicit `adapter`, `model` or `models` entry naming the seat's own model still runs, with a leading `NATIVE:` warning.
 

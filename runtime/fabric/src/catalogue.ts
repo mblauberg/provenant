@@ -153,20 +153,40 @@ const FLAT_LIMIT = 24, GROUP_LIMIT = 20, OUTPUT_BUDGET = 4096;
  * caches it for a day. The digest stays short: small lists are printed whole,
  * larger ones by family, and a large family only by count until `match` narrows it.
  */
-export async function liveModels(adapter: string, options: { match?: string; root?: string; env?: NodeJS.ProcessEnv } = {}):
-  Promise<{ digest: string }> {
+export async function liveModels(adapter: string, options: LiveModelOptions = {}): Promise<{ digest: string }> {
+  const digest = await liveDigest(adapter, options);
+  // Every path is budgeted below; this is the backstop for an unexpectedly long head line.
+  return { digest: digest.length <= OUTPUT_BUDGET ? digest : `${digest.slice(0, OUTPUT_BUDGET - 40)}\n… truncated; pass match to narrow` };
+}
+
+interface LiveModelOptions { match?: string; root?: string; env?: NodeJS.ProcessEnv; snapshot?: CatalogueSnapshot }
+
+/** The catalogued ids as one line within `room` characters, naming what it leaves out. */
+function cataloguedLine(models: string[], match: string | undefined, room: number): string {
+  const needle = match?.toLowerCase();
+  const chosen = needle ? models.filter((model) => model.toLowerCase().includes(needle)) : models;
+  let line = needle ? `catalogued (${chosen.length} of ${models.length} match ${match}):` : "catalogued:";
+  if (chosen.length === 0) return `${line} -`;
+  let kept = 0;
+  for (const id of chosen) {
+    if (line.length + id.length + 1 > room - 48) break;
+    line += ` ${id}`;
+    kept += 1;
+  }
+  return kept < chosen.length ? `${line} ${chosen.length - kept} more omitted; pass match to narrow` : line;
+}
+
+async function liveDigest(adapter: string, options: LiveModelOptions): Promise<string> {
   const env = options.env ?? process.env;
-  const snapshot = catalogueSnapshot(options.root, env);
+  const snapshot = options.snapshot ?? catalogueSnapshot(options.root, env);
   const entry = snapshot.adapters.find((candidate) => candidate.name === adapter);
   if (entry === undefined) {
-    return { digest: `${adapter}: unknown adapter; known: ${snapshot.adapters.map((item) => item.name).sort().join(", ")}` };
+    return `${adapter}: unknown adapter; known: ${snapshot.adapters.map((item) => item.name).sort().join(", ")}`;
   }
-  const catalogued = `catalogued: ${entry.models.join(" ") || "-"}`;
-  if (adapter === "claude") {
-    return { digest: `claude: no live list; run Claude models as native subagents (Agent tool)\n${catalogued}` };
-  }
+  const withCatalogue = (head: string) => `${head}\n${cataloguedLine(entry.models, options.match, OUTPUT_BUDGET - head.length - 1)}`;
+  if (adapter === "claude") return withCatalogue("claude: no live list; run Claude models as native subagents (Agent tool)");
   const executable = LISTED[adapter];
-  if (executable === undefined) return { digest: `${adapter}: no live list\n${catalogued}` };
+  if (executable === undefined) return withCatalogue(`${adapter}: no live list`);
   const configuredRoot = options.root || env.AGENT_FABRIC_PRODUCT_ROOT;
   const productRoot = configuredRoot && isAbsolute(configuredRoot) ? configuredRoot : findProductRoot();
   const configuredPython = env.HARNESS_PYTHON;
@@ -181,7 +201,7 @@ export async function liveModels(adapter: string, options: { match?: string; roo
   try { record = JSON.parse(stdout); } catch { /* reported below */ }
   const listed = Array.isArray(record.models) ? record.models.filter((model): model is string => typeof model === "string") : [];
   if (listed.length === 0) {
-    return { digest: `${adapter}: live list unavailable (${record.message ?? record.status ?? "probe failed"})\n${catalogued}` };
+    return withCatalogue(`${adapter}: live list unavailable (${String(record.message ?? record.status ?? "probe failed").slice(0, 200)})`);
   }
   const needle = options.match?.toLowerCase();
   const models = needle ? listed.filter((model) => model.toLowerCase().includes(needle)) : listed;
@@ -214,5 +234,5 @@ export async function liveModels(adapter: string, options: { match?: string; roo
   const note = omitted === 0 ? [] : [models.length <= FLAT_LIMIT
     ? `${omittedModels} models omitted; pass match to narrow`
     : `${omitted} more groups (${omittedModels} models) omitted; pass match to narrow`];
-  return { digest: [head, ...kept, ...note, tail].join("\n") };
+  return [head, ...kept, ...note, tail].join("\n");
 }

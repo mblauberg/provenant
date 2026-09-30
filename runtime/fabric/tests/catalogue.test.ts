@@ -84,3 +84,20 @@ it("keeps a huge live list within the output budget and says what it left out", 
     expect(digest.split("\n").at(-1)).toContain('dispatch any as model "opencode/<id>"');
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+it("keeps the failure and no-live-list replies within the output budget too", async () => {
+  const root = mkdtempSync(join(tmpdir(), "fabric-live-fallback-"));
+  try {
+    const ids = Array.from({ length: 1200 }, (_, index) => `vendor/catalogued-model-${index}`);
+    const entry = (name: string) => ({ name, models: ids, aliases: {}, model_details: [] });
+    const snapshot = { adapters: [entry("copilot"), entry("opencode")], endpoints: {}, drift: [] } as any;
+    const env = { ...process.env, PATH: join(root, "empty-bin"), AGENT_FABRIC_STATE_ROOT: root };
+    for (const adapter of ["copilot", "opencode"]) {
+      const { digest } = await liveModels(adapter, { root: repositoryRoot, env, snapshot });
+      expect(digest.length, adapter).toBeLessThanOrEqual(4096);
+      expect(digest, adapter).toMatch(/ \d+ more omitted; pass match to narrow$/u);
+    }
+    const narrowed = await liveModels("copilot", { root: repositoryRoot, env, snapshot, match: "model-119" });
+    expect(narrowed.digest).toMatch(/^copilot: no live list\ncatalogued \(11 of 1200 match model-119\): vendor\/catalogued-model-119 /u);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

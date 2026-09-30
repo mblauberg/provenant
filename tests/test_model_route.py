@@ -738,6 +738,45 @@ def test_listing_only_probe_skips_the_kiro_safety_chat_and_keeps_its_evidence(tm
     assert again["cache_hit"] is True and "read_only_probe" in again and len(chats) == 1
 
 
+def _fake_kiro(router, monkeypatch, chats):
+    def fake_run(argv, **kwargs):
+        if "--no-interactive" in argv:
+            chats.append(argv)
+        output = "1.2.3" if argv[-1] == "--version" else "auto"
+        return subprocess.CompletedProcess(argv, 0, output, "")
+    monkeypatch.setattr(router.subprocess, "run", fake_run)
+
+
+def test_listing_only_probe_drops_kiro_evidence_from_another_executable(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    chats = []
+    _fake_kiro(router, monkeypatch, chats)
+    full, _ = router.probe_capabilities("kiro", "/fake/a/kiro-cli")
+    assert "read_only_probe" in full
+    replaced, code = router.probe_capabilities("kiro", "/fake/b/kiro-cli", listing_only=True)
+    assert code == 0 and replaced["cache_hit"] is False
+    assert "read_only_probe" not in replaced
+
+
+def test_full_kiro_probe_rechecks_safety_older_than_a_day_despite_a_fresh_listing(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    chats = []
+    _fake_kiro(router, monkeypatch, chats)
+    router.probe_capabilities("kiro", "/fake/kiro-cli")
+    path = tmp_path / "capabilities.json"
+    cache = json.loads(path.read_text())
+    stale = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    cache["kiro"]["read_only_probe"].update(
+        {"checked_at": stale, "attempted_write": True, "permission_denied": True, "file_created": False})
+    path.write_text(json.dumps(cache))
+    listed, _ = router.probe_capabilities("kiro", "/fake/kiro-cli", listing_only=True)
+    assert listed["cache_hit"] is True and len(chats) == 1
+    full, _ = router.probe_capabilities("kiro", "/fake/kiro-cli")
+    assert full["cache_hit"] is False and len(chats) == 2
+
+
 def test_failed_capability_probe_retries_after_one_hour(tmp_path, monkeypatch):
     router = load_router()
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))

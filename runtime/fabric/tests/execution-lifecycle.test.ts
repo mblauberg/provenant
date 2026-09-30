@@ -1422,6 +1422,28 @@ describe("native-first routing", () => {
     expect(JSON.stringify(done.warnings)).toContain("workhorse taken from the route pool: claude models run as native subagents");
   });
 
+  it("settles empty selectors and precedence before choosing native-first", async () => {
+    const seat = claudeSeat();
+    expect(nativeFirst({ id: "d", prompt: "p", model: "" } as BatchTaskInput, seat).task)
+      .toEqual({ id: "d", prompt: "p", route: "workhorse", native_default: "workhorse" });
+    expect(nativeFirst({ id: "d", prompt: "p", alias: " " } as BatchTaskInput, seat).task)
+      .toEqual({ id: "d", prompt: "p", route: "workhorse", native_default: "workhorse" });
+    const rotated = nativeFirst({ id: "d", prompt: "p", alias: "flagship", rotate: true } as BatchTaskInput, seat);
+    expect(rotated.task).toEqual({ id: "d", prompt: "p", route: "flagship", native_default: "flagship" });
+    expect(rotated.warnings).toEqual(["rotate ignored: alias flagship names one model; pass route for a pool"]);
+    const single = await dispatchConfiguredProvider({ alias: "flagship", rotate: true, model: "", prompt: "ordinary run", wait_seconds: 5 },
+      seat, new AbortController().signal, poolEnvironment());
+    expect(single.status, JSON.stringify(single)).toBe("ok");
+    expect((single.route as Record<string, unknown>).adapter).not.toBe("claude");
+    const batch = await dispatchConfiguredBatch({ tasks: [{ id: "e", prompt: "p", alias: "" }, { id: "r", prompt: "p", alias: "flagship", rotate: true }], wait_seconds: 5 },
+      seat, new AbortController().signal, poolEnvironment());
+    // Both tasks reach the pool, which skips the seat's own model, before any owner runs.
+    const noted = JSON.stringify(batch.warnings);
+    expect(noted).toContain("workhorse taken from the route pool: claude models run as native subagents");
+    expect(noted).toContain("flagship taken from the route pool: claude models run as native subagents");
+    expect(noted).toContain("rotate ignored: alias flagship names one model");
+  });
+
   it("runs an explicit native model with a prominent warning of its own", async () => {
     const done = await dispatchConfiguredProvider({ adapter: "claude", model: "haiku", prompt: "ordinary run", wait_seconds: 5 },
       claudeSeat(), new AbortController().signal, poolEnvironment());
@@ -1436,7 +1458,7 @@ describe("native-first routing", () => {
     writeFileSync(join(bin, "codex"), "#!/bin/sh\nexit 0\n");
     chmodSync(join(bin, "codex"), 0o755);
     const codexSeat = { ...identity, provider: "codex" };
-    const task = nativeFirst({ id: "d", prompt: "p" } as BatchTaskInput, codexSeat);
+    const { task } = nativeFirst({ id: "d", prompt: "p" } as BatchTaskInput, codexSeat);
     expect(task).toEqual({ id: "d", prompt: "p", route: "workhorse", native_default: "workhorse" });
     const expanded = await expandPools([task], fixturePython, product, codexSeat,
       { ...poolEnvironment(), PATH: bin }, new AbortController().signal);
@@ -1448,11 +1470,11 @@ describe("native-first routing", () => {
   it("canonicalises a tier alias before choosing native-first", () => {
     const codexSeat = { ...identity, provider: "codex" };
     for (const alias of ["Workhorse", "workhorze", "WORKHORSE"])
-      expect(nativeFirst({ id: "d", prompt: "p", alias } as BatchTaskInput, codexSeat))
+      expect(nativeFirst({ id: "d", prompt: "p", alias } as BatchTaskInput, codexSeat).task)
         .toEqual({ id: "d", prompt: "p", route: "workhorse", native_default: "workhorse" });
-    expect(nativeFirst({ id: "d", prompt: "p", alias: "Flagshp" } as BatchTaskInput, codexSeat))
+    expect(nativeFirst({ id: "d", prompt: "p", alias: "Flagshp" } as BatchTaskInput, codexSeat).task)
       .toMatchObject({ route: "flagship" });
-    expect(nativeFirst({ id: "d", prompt: "p", alias: "luna" } as BatchTaskInput, codexSeat))
+    expect(nativeFirst({ id: "d", prompt: "p", alias: "luna" } as BatchTaskInput, codexSeat).task)
       .toEqual({ id: "d", prompt: "p", alias: "luna" });
   });
 

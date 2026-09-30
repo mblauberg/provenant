@@ -624,8 +624,9 @@ async function dispatchConfiguredProviderUnchecked(
 ): Promise<Record<string, unknown>> {
   const workspaceIdentity = identity;
   const root = productRoot(env);
-  let poolWarnings: string[] = [];
-  input = nativeFirst(input, identity);
+  const preferred = nativeFirst(input, identity);
+  input = preferred.task;
+  let poolWarnings: string[] = preferred.warnings;
   if (usesPool(input)) {
     // A route pick keeps this a single dispatch; a council runs as a batch of its members.
     const taskId = input.task_id ?? (input.council === undefined && input.models === undefined ? undefined : "council");
@@ -644,12 +645,12 @@ async function dispatchConfiguredProviderUnchecked(
         concurrency: Math.min(8, expanded.tasks.length),
         wait_seconds: wait_seconds ?? DEFAULT_WAIT_SECONDS,
       }, identity, signal, env);
-      return withWarnings(result, expanded.warnings);
+      return withWarnings(result, [...preferred.warnings, ...expanded.warnings]);
     }
     // A single pick, or a selector that won precedence, replaces the request's own selectors.
     const { id: _id, ...picked } = expanded.tasks[0]!;
     input = { ...(picked as DispatchInput), ...(input.task_id === undefined ? {} : { task_id: input.task_id }) };
-    poolWarnings = expanded.warnings;
+    poolWarnings = [...preferred.warnings, ...expanded.warnings];
   }
   const snapshotStarted = performance.now(), catalogue = catalogueSnapshot(root, env);
   const initialRoute = normaliseRoute(input, identity, catalogue);
@@ -826,7 +827,11 @@ async function dispatchConfiguredBatchUnchecked(
     return [{ ...own, ...task, id: task.id ?? `task-${index + 1}` }];
   });
   const poolWarnings: string[] = [];
-  merged = merged.map((task) => nativeFirst(task, identity));
+  merged = merged.map((task) => {
+    const preferred = nativeFirst(task, identity);
+    poolWarnings.push(...preferred.warnings);
+    return preferred.task;
+  });
   let councils = false;
   if (merged.some(usesPool)) {
     const expanded = await expandPools(merged, await pythonOwner(root, identity, env), root, identity, env, signal);

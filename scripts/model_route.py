@@ -510,7 +510,8 @@ def _kiro_probe_enforced(evidence: Any) -> bool:
 def probe_capabilities(adapter: str, executable: str, deadline: float | None = None,
                        listing_only: bool = False) -> tuple[dict[str, Any], int]:
     """Probe an adapter CLI. `listing_only` (discovery) lists models without Kiro's
-    model-backed safety chat, and keeps any safety evidence already cached."""
+    model-backed safety chat, and keeps safety evidence cached for the same executable
+    and version; a full probe re-runs the chat once that evidence has aged out."""
     commands = {"opencode": ["models"], "cursor": ["models"], "agy": ["models"],
                 "kiro": ["chat", "--list-models", "--format", "json"],
                 "codex": ["debug", "models"]}
@@ -541,7 +542,11 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
     if (isinstance(previous, dict) and previous.get("version") == version
             and previous.get("executable") == executable_path and not safety_missing):
         try:
-            observed = datetime.fromisoformat(previous["observed_at"].replace("Z", "+00:00"))
+            # A full Kiro probe is only as fresh as its safety evidence, which a listing refresh keeps.
+            evidence = previous.get("read_only_probe")
+            stamp = evidence["checked_at"] if (adapter == "kiro" and not listing_only and isinstance(evidence, dict)
+                                               and "checked_at" in evidence) else previous["observed_at"]
+            observed = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
             ttl = 3600 if (previous.get("status") == "probe_unavailable" or
                            (adapter == "kiro" and not _kiro_probe_enforced(previous.get("read_only_probe")))) else 86400
             if (datetime.now(timezone.utc) - observed).total_seconds() < ttl:
@@ -567,7 +572,7 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
         if adapter == "kiro" and not listing_only:
             record["read_only_probe"] = _probe_kiro_read_only(executable, version, deadline)
         elif (adapter == "kiro" and isinstance(previous, dict) and previous.get("version") == version
-              and "read_only_probe" in previous):
+              and previous.get("executable") == executable_path and "read_only_probe" in previous):
             record["read_only_probe"] = previous["read_only_probe"]
         code = 0
     path.parent.mkdir(parents=True, exist_ok=True)

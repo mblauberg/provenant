@@ -29,14 +29,29 @@ export function usesPool(input: RouteInput): boolean {
  * own models through the default or a tier alias. Take the matching pool
  * instead, where the picker skips the seat's native models; a pool holding only
  * those is refused with `route_native_only`. An explicit adapter or model runs.
+ * Empty selectors and mixed-selector precedence settle first, so neither
+ * `model: ""` nor `alias` with `rotate` slips back to the seat's own adapter.
  */
-export function nativeFirst<T extends RouteInput>(task: T, identity: Identity): T {
-  if (nativeAdapter(identity) === undefined || task.adapter !== undefined || task.model !== undefined ||
-      usesPool(task)) return task;
-  const alias = task.alias === undefined ? "workhorse" : tierAlias(task.alias);
-  if (alias === undefined) return task;
-  const { alias: _alias, ...rest } = task;
-  return { ...rest, route: alias, native_default: alias } as T;
+export function nativeFirst<T extends RouteInput>(task: T, identity: Identity): { task: T; warnings: string[] } {
+  if (nativeAdapter(identity) === undefined) return { task, warnings: [] };
+  const warnings: string[] = [];
+  let current = Object.fromEntries(Object.entries(task).filter(([key, value]) =>
+    !(["adapter", "model", "alias", "route"].includes(key) && typeof value === "string" && value.trim() === ""))) as T;
+  if (usesPool(current)) {
+    try {
+      const settled = settle(current);
+      current = settled.task;
+      warnings.push(...settled.warnings);
+    } catch (error) {
+      if (!(error instanceof InputError)) throw error;
+      return { task: current, warnings }; // expandPools reports it
+    }
+  }
+  if (current.adapter !== undefined || current.model !== undefined || usesPool(current)) return { task: current, warnings };
+  const alias = current.alias === undefined ? "workhorse" : tierAlias(current.alias);
+  if (alias === undefined) return { task: current, warnings };
+  const { alias: _alias, ...rest } = current;
+  return { task: { ...rest, route: alias, native_default: alias } as T, warnings };
 }
 
 function withoutPool<T extends RouteInput>(input: T): T {
