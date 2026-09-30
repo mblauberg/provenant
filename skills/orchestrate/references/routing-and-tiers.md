@@ -97,6 +97,16 @@ Cost is not just tokens: tools meter differently (tokens vs credits vs monthly c
 tiers cost far more per call. A "small, objective" task only stays cheap if the schema is strict and
 the output is validated — a loose schema lets a cheap model invent fields, which costs more in rework.
 
+## Version-free family names
+
+An adapter with `"latest_aliases": true` in `config/model-routing.json` (codex, claude, agy) resolves a
+model id minus its version tokens (`gpt-sol`, `claude-sonnet`), or the last word alone (`sol`, `sonnet`)
+when unambiguous, to the highest-versioned model of that family. It also considers the adapter's cached live
+listing (codex has one): a newer id (`gpt-6.2-sol`) is picked with a note to run `provenant refresh-routing` or add it to
+the catalogue, and effort, privacy and cooldown gates still apply (efforts come from the catalogue entry).
+Explicit versioned ids stay exact. Claude has no live listing, so a new Claude model still needs one
+catalogue line; the native Agent tool's `sonnet`/`opus` already track the latest.
+
 ## Choosing among admissible routes
 
 The tables above decide what a route *must* be. When more than one route

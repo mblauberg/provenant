@@ -456,6 +456,7 @@
   },
   "adapters": {
     "claude": {
+      "latest_aliases": true,
       "trains_on_prompts": false,
       "endpoint_provider": "anthropic",
       "fixed_model_family": "anthropic",
@@ -516,6 +517,7 @@
       ]
     },
     "codex": {
+      "latest_aliases": true,
       "trains_on_prompts": false,
       "endpoint_provider": "openai",
       "fixed_model_family": "openai",
@@ -638,6 +640,7 @@
       }
     },
     "agy": {
+      "latest_aliases": true,
       "trains_on_prompts": false,
       "endpoint_provider": "agy",
       "fixed_model_family": null,

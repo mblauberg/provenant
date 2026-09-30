@@ -4568,3 +4568,61 @@ def test_informational_routes_add_no_warning_notes(tmp_path, adapter, model, abs
     assert result.returncode == 0 and route["status"] == "ok", result.stdout
     assert route["resolved_model"]
     assert not any(absent in note for note in route["notes"] + route["warnings"])
+
+
+def _live_cache(state, adapter, models, age=timedelta(0)):
+    (state / "capabilities.json").write_text(json.dumps({adapter: {
+        "observed_at": (datetime.now(timezone.utc) - age).isoformat(), "models": models}}))
+
+
+def test_family_keys_resolve_to_the_highest_catalogue_version(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    catalog = router.load_catalog()
+    for adapter, requested, expected in (
+            ("codex", "gpt-sol", "gpt-6.1-sol"), ("codex", "sol", "gpt-6.1-sol"),
+            ("claude", "claude-sonnet", "claude-sonnet-5-5"), ("claude", "claude-opus", "claude-opus-5-5"),
+            ("claude", "sonnet", "claude-sonnet-5-5"), ("agy", "sonnet", "claude-sonnet-4-6")):
+        entry, notes = router._registered_match(adapter, requested, catalog)
+        assert entry and entry["id"] == expected and not notes, (adapter, requested)
+    # Explicit versions stay exact, and adapters that do not opt in are untouched.
+    assert router._registered_match("claude", "claude-sonnet-5", catalog)[0]["id"] == "claude-sonnet-5-5"
+    catalog["adapters"]["codex"]["latest_aliases"] = False
+    assert router._registered_match("codex", "gpt-sol", catalog)[0] is None
+
+
+def test_family_alias_picks_a_newer_live_model_with_a_note_and_never_upgrades_explicit_ids(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    _live_cache(tmp_path, "codex", ["gpt-6.2-sol", "gpt-6.1-sol", "gpt-6.2-luna"])
+    catalog = router.load_catalog()
+    for requested in ("gpt-sol", "sol"):
+        entry, notes = router._registered_match("codex", requested, catalog)
+        assert entry["id"] == "gpt-6.2-sol"
+        assert notes == ["gpt-6.2-sol is newer than the catalogue; run provenant refresh-routing "
+                         "or add it to config/model-routing.json"]
+    base = next(item for item in catalog["adapters"]["codex"]["models"] if item["id"] == "gpt-6.1-sol")
+    assert entry["efforts"] == base["efforts"]
+    assert router._registered_match("codex", "gpt-6.1-sol", catalog)[0]["id"] == "gpt-6.1-sol"
+    _live_cache(tmp_path, "codex", ["gpt-6.2-sol"], age=timedelta(days=2))
+    assert router._registered_match("codex", "sol", catalog)[0]["id"] == "gpt-6.1-sol"
+    _live_cache(tmp_path, "codex", ["gpt-6.1-sol"])
+    assert router._registered_match("codex", "sol", catalog)[1] == []
+
+
+def test_resolve_applies_effort_and_cooldown_gates_to_a_live_family_pick(tmp_path):
+    _live_cache(tmp_path, "codex", ["gpt-6.2-sol"])
+    env = {**os.environ, "HARNESS_PYTHON": sys.executable, "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
+           "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT), "AGENT_FABRIC_STATE_ROOT": str(tmp_path)}
+    def route():
+        run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "codex", "--model", "gpt-sol",
+                              "--effort", "high", "--role", "worker"], capture_output=True, text=True, env=env)
+        assert run.returncode == 0, run.stderr
+        return json.loads(run.stdout)
+    result = route()
+    assert result["resolved_model"] == "gpt-6.2-sol", result
+    assert result["requested_model"] == "gpt-sol"
+    assert any("newer than the catalogue" in note for note in result["notes"]), result
+    until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    (tmp_path / "cooldowns.json").write_text(json.dumps({"cooldowns": {"codex/gpt-6.2-sol": {"cooling_until": until}}}))
+    assert any("cooling" in warning for warning in route()["warnings"])

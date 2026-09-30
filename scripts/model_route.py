@@ -365,6 +365,51 @@ def registered_model_ids(adapter: dict[str, Any]) -> list[str]:
     return ids
 
 
+def _family_key(model_id: str) -> str:
+    """The id with its version tokens removed: gpt-6.1-sol -> gpt-sol, claude-sonnet-5-5 -> claude-sonnet."""
+    return "-".join(part for part in re.split(r"[-_\s]+", model_id.casefold())
+                    if part and not re.fullmatch(r"v?\d+(?:\.\d+)*", part))
+
+
+def _version(model_id: str) -> tuple[int, ...]:
+    return tuple(int(part) for part in re.findall(r"\d+", model_id))
+
+
+def _cached_live_models(adapter: str) -> list[str]:
+    """Model ids from the fresh (under a day old) capabilities cache; never probes."""
+    try:
+        probed = json.loads((_state_root() / "capabilities.json").read_text()).get(adapter, {})
+        observed = datetime.fromisoformat(str(probed["observed_at"]).replace("Z", "+00:00"))
+        if (datetime.now(timezone.utc) - observed).total_seconds() > 86400:
+            return []
+        return [item for item in probed.get("models", []) if isinstance(item, str)]
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        return []
+
+
+def _latest_in_family(adapter: str, token: str, named: list[dict[str, Any]],
+                      catalog: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+    """Resolve a version-free name to the newest model of its family, when the adapter opts in."""
+    entries = catalog["adapters"][adapter].get("models", [])
+    if re.search(r"\d", token):
+        return None, []
+    pool = named or [entry for entry in entries
+                     if token in (_family_key(entry["id"]), _family_key(entry["id"]).rsplit("-", 1)[-1])]
+    keys = {_family_key(entry["id"]) for entry in pool}
+    if len(keys) != 1:
+        return None, []
+    key = keys.pop()
+    best = max((entry for entry in entries if _family_key(entry["id"]) == key), key=lambda item: _version(item["id"]))
+    live = [model for model in _cached_live_models(adapter)
+            if _family_key(model) == key and _version(model) > _version(best["id"])]
+    if not live:
+        return best, []
+    newest = max(live, key=_version)
+    # The live id inherits the catalogue entry's efforts, transport and privacy flags, so every gate still applies.
+    return ({**best, "id": newest, "names": [], "default": False},
+            [f"{newest} is newer than the catalogue; run provenant refresh-routing or add it to config/model-routing.json"])
+
+
 def _registered_match(adapter: str, requested: str, catalog: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
     entries = catalog["adapters"][adapter].get("models", [])
     token = requested.casefold()
@@ -382,6 +427,13 @@ def _registered_match(adapter: str, requested: str, catalog: dict[str, Any]) -> 
                 if (registered and registered.group(2) == version_match.group(2)
                         and requested_version < tuple(int(part) for part in registered.group(1).split("."))):
                     retired.append(entry)
+    if not exact and not variant and catalog["adapters"][adapter].get("latest_aliases") is True:
+        latest, latest_notes = _latest_in_family(adapter, token, named, catalog)
+        if latest is not None:
+            if len(named) > 1:
+                latest_notes.insert(0, f"{requested} is ambiguous; used {latest['id']} "
+                                       f"(alternatives: {', '.join(item['id'] for item in named)})")
+            return latest, latest_notes
     matches = exact or named or variant or retired
     if not matches:
         return None, []

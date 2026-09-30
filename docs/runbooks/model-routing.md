@@ -40,7 +40,8 @@ pool with live availability; the rotation cursor lives in
 entries by canonical model, so a spelling alias such as `codex/gpt-6-sol`
 switches off the seeded `codex/gpt-6.1-sol`. `refresh-routing` merges a pool
 per entry and per field, so an instance edit and a product edit to the same
-pool both survive.
+pool both survive. Adapters with `latest_aliases` also resolve version-free names such as `gpt-sol` to the
+newest model (see `skills/orchestrate/references/routing-and-tiers.md`).
 
 `provenant help routes` is `provenant routes --health`: every pool with live
 availability, then the configured task classes and current route health. `AGENT_FABRIC_STATE_ROOT` relocates both health and cooldown

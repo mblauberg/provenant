@@ -15,6 +15,7 @@ export interface AdapterEntry {
   endpoint_provider: string | null;
   fixed_model_family: string | null;
   effort_transport: string;
+  latest_aliases?: boolean;
   aliases: Record<string, string[]>;
   models: string[];
   model_details: Array<{ id?: string; names?: string[]; [key: string]: unknown }>;
@@ -122,6 +123,7 @@ export function catalogueSnapshot(root?: string, env: NodeJS.ProcessEnv = proces
       endpoint_provider: entry.endpoint_provider ?? null,
       fixed_model_family: entry.fixed_model_family ?? null,
       effort_transport: entry.effort_transport ?? "flag",
+      ...(entry.latest_aliases === true ? { latest_aliases: true } : {}),
       aliases,
       models,
       model_details: modelDetails,
