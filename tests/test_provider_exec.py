@@ -505,6 +505,36 @@ def test_build_plan_rejects_cwd_outside_explicit_workspace_root(tmp_path):
         )
 
 
+def test_build_plan_accepts_read_cwd_inside_an_authorised_read_root(tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    root = tmp_path / "workspace"
+    other = tmp_path / "other-project"
+    root.mkdir()
+    (other / "src").mkdir(parents=True)
+
+    plan = supervisor.build_plan(
+        "agy", {"resolved_model": "fixture"}, "hello",
+        cwd=other / "src", workspace_root=root, read_roots=[other],
+    )
+
+    assert plan["cwd"] == str((other / "src").resolve())
+    assert plan["workspace_root"] == str(root.resolve())
+
+
+def test_build_plan_refuses_a_credential_store_as_read_root(tmp_path, monkeypatch):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (tmp_path / ".ssh").mkdir()
+
+    with pytest.raises(ValueError, match="read roots must exclude credential"):
+        supervisor.build_plan(
+            "agy", {"resolved_model": "fixture"}, "hello",
+            cwd=tmp_path / ".ssh", workspace_root=root, read_roots=[tmp_path / ".ssh"],
+        )
+
+
 def test_build_plan_accepts_writer_worktree_outside_the_callers_tree(tmp_path):
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
     repo = tmp_path / "repo"
