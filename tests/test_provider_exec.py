@@ -785,6 +785,10 @@ def test_read_only_transcript_denies_follow_every_state_allow(monkeypatch, tmp_p
     session = own / plan["session_id"]
     expected = [f'(allow file-read-data (literal "{session}.jsonl") (subpath "{session}"))']
     assert later == (expected if adapter == "claude" else [])
+    # Only a UUID names a session, so no id can reopen the project's memory or another directory.
+    for session_id in ("memory", "..", "s-1"):
+        plan["session_id"] = session_id
+        assert not any(str(own) in line for line in mod.os_confinement_profile(plan).splitlines())
     del plan["session_id"]
     lines = mod.os_confinement_profile(plan).splitlines()
     assert not any(str(own) in line for line in lines)
@@ -803,15 +807,16 @@ def test_claude_read_only_lane_cannot_read_other_projects_transcripts(monkeypatc
     workspace = tmp_path / "repo"
     workspace.mkdir()
     own = home / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(workspace.resolve()))
+    mine = "11111111-2222-3333-4444-555555555555"
     (own / "memory").mkdir(parents=True)
-    (own / "mine").mkdir()
-    (own / "mine.jsonl").write_text("mine\n", encoding="utf-8")
-    (own / "mine/subagent.jsonl").write_text("mine\n", encoding="utf-8")
+    (own / mine).mkdir()
+    (own / f"{mine}.jsonl").write_text("mine\n", encoding="utf-8")
+    (own / f"{mine}/subagent.jsonl").write_text("mine\n", encoding="utf-8")
     (own / "chair.jsonl").write_text("chair\n", encoding="utf-8")
     (own / "memory/MEMORY.md").write_text("memory\n", encoding="utf-8")
     monkeypatch.setattr(mod.Path, "home", lambda: home)
     plan = {"adapter": "claude", "mode": "read_only", "route": {}, "workspace_root": str(workspace),
-            "cwd": str(workspace), "session_id": "fresh", "resume_session": "mine",
+            "cwd": str(workspace), "session_id": "66666666-7777-8888-9999-000000000000", "resume_session": mine,
             "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
     profile = mod.os_confinement_profile(plan)
 
@@ -825,8 +830,8 @@ def test_claude_read_only_lane_cannot_read_other_projects_transcripts(monkeypatc
     assert probe.stdout == "{}\n"
     assert run(f"cat '{home}/.claude/projects/other/session.jsonl'").returncode != 0
     # Its own session stays readable, so the lane can resume; the project's other sessions do not.
-    assert run(f"cat '{own}/mine.jsonl'").stdout == "mine\n"
-    assert run(f"cat '{own}/mine/subagent.jsonl'").stdout == "mine\n"
+    assert run(f"cat '{own}/{mine}.jsonl'").stdout == "mine\n"
+    assert run(f"cat '{own}/{mine}/subagent.jsonl'").stdout == "mine\n"
     assert run(f"cat '{own}/chair.jsonl'").returncode != 0
     assert run(f"cat '{own}/memory/MEMORY.md'").returncode != 0
 
@@ -1177,6 +1182,17 @@ def test_structured_result_and_question_take_precedence_over_prose():
     assert parsed["question"] == "Target main or release/3?"
     assert parsed["session_id"] == "s1"
     assert parsed["observed_model"] == "opus"
+
+
+def test_claude_session_comes_only_from_its_own_events_not_nested_tool_output():
+    events = [
+        {"type": "system", "subtype": "init", "session_id": "s1", "model": "opus"},
+        {"type": "result", "is_error": False, "result": "done", "session_id": "s1"},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "content": {"session_id": "other"}}]},
+         "tool_use_result": {"session_id": "other"}, "session_id": "s1"},
+    ]
+    parsed = supervisor().parse_output("claude", "\n".join(map(json.dumps, events)))
+    assert parsed["session_id"] == "s1"
 
 
 def test_reconnecting_is_nonfatal_and_quota_discussion_is_not_an_error():

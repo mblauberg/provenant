@@ -511,10 +511,13 @@ def _claude_project_dir(home, cwd):
     return Path(home) / ".claude/projects" / name
 
 
+CLAUDE_SESSION_ID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+
+
 def _claude_session_reads(home, plan):
     """A Claude lane may read back its own session's transcript, which it needs to resume."""
     sessions = [session for session in dict.fromkeys((plan.get("resume_session"), plan.get("session_id")))
-                if session and re.fullmatch(r"[A-Za-z0-9-]+", str(session))]
+                if session and re.fullmatch(CLAUDE_SESSION_ID, str(session))]
     if not sessions:
         return ""
     directory = _claude_project_dir(home, plan["cwd"])
@@ -1205,7 +1208,8 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
                 if str(data.get("status", "success")).lower() != "success":
                     errors.append(json.dumps(data, ensure_ascii=False)[:400])
         for item in _objects(event):
-            for key in config.SESSION_KEYS:
+            # Claude nests tool output in its events, so only the event's own session id counts.
+            for key in (config.SESSION_KEYS if adapter != "claude" or item is event else ()):
                 if isinstance(item.get(key), str):
                     result["session_id"] = item[key]
             if isinstance(item.get("retry_after"), (int, float)):
