@@ -104,6 +104,15 @@ if _preferences is None:
     sys.modules["model_route_preferences"] = _preferences
     _preferences_spec.loader.exec_module(_preferences)
 
+_POOLS_PATH = Path(__file__).resolve().parent / "model_route_pools.py"
+_pools = sys.modules.get("model_route_pools")
+if _pools is None:
+    _pools_spec = importlib.util.spec_from_file_location("model_route_pools", _POOLS_PATH)
+    assert _pools_spec is not None and _pools_spec.loader is not None
+    _pools = importlib.util.module_from_spec(_pools_spec)
+    sys.modules["model_route_pools"] = _pools
+    _pools_spec.loader.exec_module(_pools)
+
 EFFORT_ORDER = _catalog_validation.EFFORT_ORDER
 ALIAS_ORDER = _catalog_validation.ALIAS_ORDER
 infer_family = _catalog_validation.infer_family
@@ -133,6 +142,17 @@ def _merge_catalog(base: Any, overlay: Any, path: str, drift: list[str]) -> Any:
                 merged[key] = _merge_catalog(base[key], value, child, drift)
             elif path in {"adapters", "families", "endpoints"} and not isinstance(value, dict):
                 drift.append(f"{child}: malformed overlay entry dropped; fix: use an object")
+            elif path == "routes" and not (
+                isinstance(value, list) and value
+                and all(_pools.entry_is_valid(entry, EFFORT_ORDER) for entry in value)
+            ):
+                drift.append(f"{child}: malformed overlay entry dropped; fix: list adapter/model entries with weights")
+            elif path == "model_traits" and not (
+                isinstance(value, list) and all(isinstance(trait, str) and trait for trait in value)
+            ):
+                drift.append(f"{child}: malformed overlay entry dropped; fix: use a list of trait names")
+            elif path == "route_synonyms" and not isinstance(value, str):
+                drift.append(f"{child}: malformed overlay entry dropped; fix: name a route")
             elif path == "adapters" and not (
                 isinstance(value.get("endpoint_provider"), str)
                 and (value.get("fixed_model_family") is None or isinstance(value.get("fixed_model_family"), str))
@@ -181,6 +201,12 @@ def _merge_catalog(base: Any, overlay: Any, path: str, drift: list[str]) -> Any:
             name = item["id"]
             merged[name] = _merge_catalog(merged[name], item, f"{path}.{name}", drift) if name in merged else item
         return list(merged.values())
+    if isinstance(base, list) and re.fullmatch(r"routes\.[^.]+", path):
+        # An overlay pool reorders and reweights by model; unlisted entries keep their place after it.
+        if not isinstance(overlay, list):
+            drift.append(f"{path}: malformed overlay entry dropped; fix: use a list of pool entries")
+            return base
+        return _pools.merge_route(base, overlay, path, drift, EFFORT_ORDER)
     if isinstance(base, list) and path.endswith(".names"):
         if not isinstance(overlay, list) or any(not isinstance(value, str) or not value for value in overlay):
             drift.append(f"{path}: malformed overlay entry dropped; fix: use string names")
@@ -1859,7 +1885,57 @@ def parser() -> argparse.ArgumentParser:
     _preferences.add_selection_parser(
         commands, INSTANCE_ROOT / "config" / "model-preferences.json",
     )
+    routes = commands.add_parser(
+        "routes", help="print each route pool with live availability",
+        description="Print every global route pool (strong, bulk, design, writing) with each model's weight, "
+                    "effort band, caveats and live availability.")
+    routes.add_argument("--json", action="store_true", help="print one fabric.routes.v1 JSON document")
+    routes.add_argument("--health", action="store_true",
+                        help="also print task-class routes and recent route health (the `route health` view)")
+    pick = commands.add_parser("pick", help="pick models from route pools; JSON requests on stdin")
+    pick.add_argument("--seed", type=int, help=argparse.SUPPRESS)
     return root
+
+
+def _router() -> Any:
+    """This module as the pool picker's router, whether run as a script or loaded by path."""
+    import types
+
+    return sys.modules.get(__name__) or types.SimpleNamespace(**globals())
+
+
+def _health_record(catalog: dict[str, Any]) -> dict[str, Any]:
+    """Task-class routes plus the recent outcome health Fabric records."""
+    record = {"schema": "fabric.route-health.v1", "task_class_routes": catalog.get("task_class_routes", {})}
+    try:
+        path = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts" / "fabric_records.py"
+        spec = importlib.util.spec_from_file_location(
+            "provenant_fabric_records", path, submodule_search_locations=[str(path.parent)]
+        )
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        record["routes"] = module.read_route_health()
+    except (ImportError, OSError, AttributeError, TypeError, ValueError):
+        record["routes"] = {}
+    return record
+
+
+def route_pick(requests: Any, seed: int | None = None) -> dict[str, Any]:
+    """Answer the Fabric front door's pool requests in one call."""
+    import random
+
+    catalog = load_catalog()
+    availability = _pools.Availability(_router(), catalog)
+    if not isinstance(requests, list):
+        return {"status": "rejected", "error": "invalid_input", "fix": "Pass a requests list."}
+    results = _pools.pick_many(
+        _router(), catalog, requests, availability=availability,
+        state_path=_state_root() / "route-rotation.json", effort_order=EFFORT_ORDER,
+        rng=random.Random(seed),
+    )
+    return {"status": "ok", "results": results}
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1873,21 +1949,29 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(record, sort_keys=True))
         return 0
     if args.command == "health":
-        catalog = load_catalog()
-        record = {"schema": "fabric.route-health.v1", "task_class_routes": catalog.get("task_class_routes", {})}
-        try:
-            path = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts" / "fabric_records.py"
-            spec = importlib.util.spec_from_file_location(
-                "provenant_fabric_records", path, submodule_search_locations=[str(path.parent)]
-            )
-            assert spec is not None and spec.loader is not None
-            module = importlib.util.module_from_spec(spec)
-            sys.modules[spec.name] = module
-            spec.loader.exec_module(module)
-            record["routes"] = module.read_route_health()
-        except (ImportError, OSError, AttributeError, TypeError, ValueError):
-            record["routes"] = {}
+        record = _health_record(load_catalog())
         print(json.dumps(record, sort_keys=True) if args.json else json.dumps(record, indent=2, sort_keys=True))
+        return 0
+    if args.command == "routes":
+        catalog = load_catalog()
+        document = _pools.describe(
+            _router(), catalog, _pools.Availability(_router(), catalog), EFFORT_ORDER)
+        if args.health:
+            document["health"] = _health_record(catalog)
+        if args.json:
+            print(json.dumps(document, sort_keys=True))
+        else:
+            print(_pools.render(document))
+            if args.health:
+                print("\ntask-class routes and recent health (route health --json):")
+                print(json.dumps(document["health"], indent=2, sort_keys=True))
+        return 0
+    if args.command == "pick":
+        try:
+            requests = json.loads(sys.stdin.read() or "{}").get("requests")
+        except (ValueError, AttributeError):
+            requests = None
+        print(json.dumps(route_pick(requests, args.seed), sort_keys=True))
         return 0
     if args.command == "probe":
         record, code = probe_capabilities(args.adapter, args.executable)

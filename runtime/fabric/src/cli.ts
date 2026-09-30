@@ -60,6 +60,16 @@ const USAGE = `fabric <command>
   dispatch kill <run> [--json]  stop one recorded run and the group it leads
   dispatch --prompt-file F [--adapter A] [--alias NAME | --model M] [--effort E]
            [--mode MODE] [--worktree W | --cwd D] [--id ID] [--wait]
+  dispatch --prompt-file F --route strong|bulk|design|writing
+                              top model of a global pool; --adapter narrows it
+  dispatch --prompt-file F --route R --rotate    cycle the pool per project
+  dispatch --prompt-file F --route R --council N  N members (1-8), families
+                              spread first; rotate is ignored with a council
+  dispatch --prompt-file F --models a/m[@e],b/m  ad-hoc council; bypasses --route
+  --confidential              with any selector: never a free or prompt-training
+                              model, fallbacks included
+  An explicit --model wins over --route; see
+  skills/orchestrate/references/routing-and-tiers.md#route-pools
   dispatch --tasks F [route flags]  run a JSON task manifest; flags set task defaults
 
 Identity comes from the working directory and AGENT_FABRIC_LABEL (or
@@ -241,16 +251,17 @@ if (command === "dispatch") {
     const options = subcommand?.startsWith("--") ? rest : rest.slice(1);
     const values = new Map<string, string>();
     const switches = new Set<string>();
-    const allowed = new Set(["--adapter", "--alias", "--model", "--effort", "--mode", "--worktree", "--cwd", "--prompt-file", "--id", "--tasks"]);
+    const allowed = new Set(["--adapter", "--alias", "--model", "--effort", "--mode", "--worktree", "--cwd", "--prompt-file", "--id", "--tasks",
+      "--route", "--council", "--models"]);
     for (let index = 0; index < options.length; index += 1) {
       const option = options[index]!;
-      if (option === "--wait") {
+      if (["--wait", "--rotate", "--confidential"].includes(option)) {
         if (switches.has(option)) throw new Error(`${option} may be passed once`);
         switches.add(option);
         continue;
       }
       if (!option.startsWith("--")) throw new Error(`unexpected argument: ${option}`);
-      if (!allowed.has(option)) throw new Error(`unknown option ${option}; choose ${[...allowed].join(", ")} or --wait`);
+      if (!allowed.has(option)) throw new Error(`unknown option ${option}; choose ${[...allowed].join(", ")}, --rotate, --confidential or --wait`);
       const value = options[++index];
       if (value === undefined || value.startsWith("--")) throw new Error(`${option} requires a value`);
       if (values.has(option)) throw new Error(`${option} may be passed once`);
@@ -267,7 +278,14 @@ if (command === "dispatch") {
       ...(read("mode") === undefined ? {} : { mode: read("mode") as RouteInput["mode"] }),
       ...(read("worktree") === undefined ? {} : { worktree: read("worktree") }),
       ...(read("cwd") === undefined ? {} : { cwd: read("cwd") }),
+      ...(read("route") === undefined ? {} : { route: read("route") }),
+      ...(read("council") === undefined ? {} : { council: Number(read("council")) }),
+      ...(read("models") === undefined ? {} : { models: read("models")!.split(",").map((item) => item.trim()).filter(Boolean) }),
+      ...(switches.has("--rotate") ? { rotate: true } : {}),
+      ...(switches.has("--confidential") ? { confidential: true } : {}),
     };
+    if (route.council !== undefined && (!Number.isInteger(route.council) || route.council < 1 || route.council > 8))
+      throw new Error("--council requires an integer from 1 to 8");
     const tasksFile = read("tasks");
     // This process exits once the wait ends; the run must not depend on it.
     hostOwnersInThemselves();

@@ -338,7 +338,40 @@ def _routing_base(instance_root: Path) -> dict[str, Any] | None:
     return document
 
 
-def _routing_merge(base: Any, product: Any, installed: Any, path: tuple[str, ...], conflicts: list[str]) -> Any:
+def _route_key(product: dict[str, Any]) -> Any:
+    """Canonical `adapter/model` for a route entry, so spelling aliases merge as one entry."""
+    try:
+        import importlib.util as _util
+        spec = _util.spec_from_file_location("provenant_model_route_for_merge",
+                                             Path(__file__).resolve().parent / "model_route.py")
+        router = _util.module_from_spec(spec)
+        spec.loader.exec_module(router)
+        split = router._pools.split_model
+    except Exception:  # the plain spelling still merges when the router is unavailable
+        return lambda text: text
+
+    def key(text: str) -> str:
+        try:
+            return "/".join(split(router, product, text))
+        except Exception:
+            return text
+    return key
+
+
+def _route_entries(entries: Any, key: Any) -> dict[str, Any] | None:
+    if entries is _MISSING:
+        return {}
+    if not isinstance(entries, list) or not all(isinstance(entry, dict) and isinstance(entry.get("model"), str)
+                                                 for entry in entries):
+        return None
+    indexed: dict[str, Any] = {}
+    for entry in entries:
+        indexed.setdefault(key(entry["model"]), entry)
+    return indexed
+
+
+def _routing_merge(base: Any, product: Any, installed: Any, path: tuple[str, ...], conflicts: list[str],
+                   route_key: Any = None) -> Any:
     if path == ("schema_version",):
         if installed != product and installed != base:
             conflicts.append("schema_version")
@@ -352,13 +385,27 @@ def _routing_merge(base: Any, product: Any, installed: Any, path: tuple[str, ...
     if product is _MISSING:
         # A removed product key remains only when the instance edited it.
         return installed
+    if len(path) == 2 and path[0] == "routes" and isinstance(product, list) and isinstance(installed, list):
+        # A route pool merges per entry (keyed by canonical model) and per field,
+        # so an instance edit and a product edit to one pool both survive.
+        key = route_key or (lambda text: text)
+        indexed = [_route_entries(entries, key) for entries in (base, product, installed)]
+        if all(entries is not None for entries in indexed):
+            before, shipped, local = indexed
+            result = []
+            for name in [*local, *(name for name in shipped if name not in local)]:
+                merged = _routing_merge(before.get(name, _MISSING), shipped.get(name, _MISSING),
+                                        local.get(name, _MISSING), (*path, name), conflicts, route_key)
+                if merged is not _MISSING:
+                    result.append(merged)
+            return result
     if isinstance(product, dict) and isinstance(installed, dict) and (isinstance(base, dict) or base is _MISSING):
         baseline = base if isinstance(base, dict) else {}
         result = {}
         for key in sorted(set(baseline) | set(product) | set(installed)):
             merged = _routing_merge(
                 baseline.get(key, _MISSING), product.get(key, _MISSING),
-                installed.get(key, _MISSING), (*path, key), conflicts,
+                installed.get(key, _MISSING), (*path, key), conflicts, route_key,
             )
             if merged is not _MISSING:
                 result[key] = merged
@@ -374,7 +421,8 @@ def _routing_result(product: dict[str, Any], installed: dict[str, Any], base: di
         # has no evidence of an instance edit; use the product and keep unknown
         # keys visible so a retired product key can be removed deliberately.
         return _routing_merge_without_base(product, installed), []
-    merged = _routing_merge(base if base is not None else _MISSING, product, installed, (), conflicts)
+    merged = _routing_merge(base if base is not None else _MISSING, product, installed, (), conflicts,
+                            _route_key(product))
     return merged, sorted(set(conflicts))
 
 
