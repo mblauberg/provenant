@@ -177,10 +177,19 @@ declared `add_dirs` for confined writers, or the native sandbox;
 Read-only macOS launches can read `~/.gitconfig` and
 `$XDG_CONFIG_HOME/git/config` (default `~/.config/git/config`) so `git status`
 works. Other home-directory reads remain denied apart from provider state and
-sign-in files listed by the adapter profile (for Claude and agy, the login
-keychain; for Kiro, `~/Library/Application Support/kiro-cli`, writable so its
-token can refresh, and its `~/.local/bin` launcher links). Claude lanes get `CLAUDE_CODE_TMPDIR` in the attempt's `tmp`, so they
-never touch `/tmp/claude-<uid>`.
+sign-in files listed by the adapter profile: the login keychain for agy and for
+Claude lanes on OAuth sign-in (bare and endpoint routes, which use a key, do not
+get it); and for Kiro, `~/Library/Application Support/kiro-cli` and its
+`~/.local/bin` launcher links. Kiro can write only `data.sqlite3*` there, so its
+token can refresh; the shell hooks and binaries beside it stay read-only, and a
+confined Kiro dispatch refuses until kiro-cli has unpacked its engine outside the
+sandbox. The keychain file grant, together with the profile's unrestricted
+`mach-lookup`, lets an OAuth Claude lane query the whole login keychain through
+the security service; SBPL has no narrower filter, and read-only Claude lanes
+have no shell. `~/.claude/projects` and `~/.codex/sessions` stay unreadable
+even where provider state covers them. Claude lanes get `CLAUDE_CODE_TMPDIR` in
+the attempt's `tmp`, which is private to the user (mode 0700), so they never
+touch `/tmp/claude-<uid>`.
 Projects declare protected paths in `.agents/fabric-policy.json`, relative to
 the directory holding `.agents/`. Fabric checks the workspace root and the Git
 toplevels of the workspace, cwd and worktree; for a non-Git workspace, it also
@@ -245,10 +254,12 @@ means a training or unresolved route; a non-training route reports
 `protected_read_expected: true`. Kiro runs its own `auto` model, because the
 catalogue has no Kiro alias, and OpenCode runs a free training route, so both
 exercise the protected-read denial; agy runs `gemini-3.8-flash` by name. Each
-row records the probe `method`: a read-only Claude lane has file tools but no
-shell, so its writes fail for want of a tool. A missing executable or a provider
-reporting a usage, rate, sign-in or model limit is reported as `skipped` with
-its reason; the command exits nonzero only when a row fails. It prints JSON
+row records the probe `method`: read-only Claude and OpenCode lanes have no
+shell or write tool, so their writes fail for want of a tool rather than by an
+OS denial. A missing executable, or a provider reporting a usage, rate, sign-in
+or model limit, is reported as `skipped` with its reason, unless a forbidden
+file already exists on disk, which fails the row; the command exits nonzero only
+when a row fails. It prints JSON
 containing each adapter, mode, resolved `Route:` line, confinement, warnings
 and probe result, and creates its Git fixtures and run artifacts in a temporary
 directory that is removed when the command exits. Do not add this command to

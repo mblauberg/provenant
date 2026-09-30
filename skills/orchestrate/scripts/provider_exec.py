@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from adapters import profile
+from adapters import claude as claude_adapter
 from output_custody import install, verify, CustodyError
 import context_usage
 import process_info
@@ -47,15 +48,19 @@ CONFINED_STATE = {
     },
     "claude": {
         "read_write": (".claude", ".claude.json*", ".cache/claude", ".npm"),
-        # Claude Code keeps its sign-in in the login keychain; a read-only lane is signed out without it.
-        "read": ("Library/Keychains/login.keychain-db",),
+        # Claude Code keeps its OAuth sign-in in the login keychain; a read-only lane is signed out
+        # without it. Only OAuth lanes get it: bare and endpoint lanes sign in with a key.
+        "oauth_read": ("Library/Keychains/login.keychain-db",),
     },
     "cursor": {"read_write": (".cursor", ".cache/cursor", ".npm")},
     "kiro": {
-        # kiro-cli keeps its sign-in and refreshed tokens in data.sqlite3 here, beside its engine.
-        "read_write": (".kiro", ".cache/kiro", ".npm", "Library/Application Support/kiro-cli"),
+        # kiro-cli keeps its sign-in and refreshed tokens in data.sqlite3. The rest of its support
+        # directory holds shell hooks the user's shell sources and binaries it runs, so stays read-only.
+        "read_write": (".kiro", ".cache/kiro", ".npm", "Library/Application Support/kiro-cli/data.sqlite3*"),
+        "read": ("Library/Application Support/kiro-cli",),
         # Its engine finds its app bundle through the launcher links in ~/.local/bin.
-        "read": (".local/bin",),
+        "read_literal": (".local/bin", ".local/bin/kiro-cli", ".local/bin/kiro-cli-chat",
+                         ".local/bin/kiro-cli-term"),
     },
 }
 # Codex needs its native broker, configuration and event services under seatbelt.
@@ -388,19 +393,29 @@ def os_confinement_profile(plan):
     configured_xdg = Path(os.environ.get("XDG_CONFIG_HOME", "")).expanduser()
     xdg_config_home = configured_xdg if configured_xdg.is_absolute() else home / ".config"
     git_config_files = [home / ".gitconfig", xdg_config_home / "git/config"]
+    reads = [*state.get("read", ()), *(() if _uses_api_key(plan) else state.get("oauth_read", ()))]
     return (
         "(version 1)\n(allow default)\n(deny file-write*)\n"
         + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), *state_writes, Path("/dev")])
         + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
-        + _sbpl_rule("deny", "file-read-data", [root, *add_dirs, *(home / path for path in EXTRA_DENIED_READS)])
+        + _sbpl_rule("deny", "file-read-data", [root, *add_dirs])
         + _sbpl_rule("allow", "file-read-data", [*([run_dir] if run_dir else []), *state_writes])
-        + _sbpl_rule("allow", "file-read-data", [home / path for path in state.get("read", ())])
+        + _sbpl_rule("allow", "file-read-data", [home / path for path in reads])
+        + _sbpl_rule("allow", "file-read-data", [home / path for path in state.get("read_literal", ())],
+                     literal=True, keep_leaf=True)
         + _sbpl_rule("allow", "file-read-data", git_config_files, literal=True)
         + _sbpl_rule("allow", "file-read-data", [
             Path(plan["cwd"]), *add_dirs
         ])
+        # After every allow, since a state grant such as ~/.claude would otherwise reopen them.
+        + _sbpl_rule("deny", "file-read-data", [home / path for path in EXTRA_DENIED_READS])
         + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
     )
+
+
+def _uses_api_key(plan):
+    """Whether a Claude lane signs in with a key (bare or endpoint route) rather than OAuth."""
+    return plan.get("adapter") == "claude" and claude_adapter.uses_api_key(plan.get("route") or {})
 
 
 def confinement_command(plan, command):
@@ -410,6 +425,22 @@ def confinement_command(plan, command):
     if not sandbox_exec:
         raise RuntimeError("sandbox-exec is unavailable for a confined provider launch")
     return [sandbox_exec, "-p", os_confinement_profile(plan), *command]
+
+
+def _require_kiro_engine():
+    """Refuse a confined Kiro lane before kiro-cli would unpack its engine into a read-only directory."""
+    cli = shutil.which("kiro-cli")
+    if not cli:
+        return
+    words = subprocess.run([cli, "--version"], capture_output=True, text=True, timeout=10).stdout.split()
+    version = words[-1] if words else ""
+    support = Path.home() / "Library/Application Support/kiro-cli"
+    if version and not (any((support / "kas").glob(f"{version}-*/node_modules")) and (support / "node").is_file()):
+        raise ValueError(
+            f"kiro-cli {version} has not installed its engine, and a confined lane cannot write it; "
+            "fix: run kiro-cli once outside the sandbox, for example "
+            "`kiro-cli chat --no-interactive --agent-engine v3 hello`"
+        )
 
 
 def build_plan(
@@ -574,6 +605,8 @@ def build_plan(
         confinement = "sandbox-exec"
         if adapter == "agy":
             guarantee = "best_effort"
+        if adapter == "kiro":
+            _require_kiro_engine()
     elif confinement_requested:
         if mode == "worktree_write":
             warnings.append("worktree_write writes are unconfined: sandbox-exec unavailable or unusable")
@@ -2008,13 +2041,13 @@ def execute(
     attempt_dir = Path(plan["run_dir"])
     private_tmp = attempt_dir / "tmp"
     private_cache = private_tmp / "cache"
-    private_tmp.mkdir(parents=True, exist_ok=True)
-    private_cache.mkdir(parents=True, exist_ok=True)
+    private_tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
+    private_cache.mkdir(parents=True, exist_ok=True, mode=0o700)
     environment.update(TMPDIR=str(private_tmp), TMP=str(private_tmp), TEMP=str(private_tmp),
                        XDG_CACHE_HOME=str(private_cache))
     if plan["adapter"] == "claude":
         private_claude_tmp = private_tmp / "claude"
-        private_claude_tmp.mkdir(parents=True, exist_ok=True)
+        private_claude_tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
         environment["CLAUDE_TMPDIR"] = str(private_claude_tmp)
         # Otherwise Claude Code opens /tmp/claude-<uid>, which the read-only profile denies.
         environment["CLAUDE_CODE_TMPDIR"] = str(private_claude_tmp)

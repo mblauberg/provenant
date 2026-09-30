@@ -123,14 +123,19 @@ def evaluate(completed: subprocess.CompletedProcess[str], run_dir: Path, row: di
                 "confinement": applied.get("confinement"),
                 "protected_paths": applied.get("protected_paths"),
                 "warnings": fabric.get("warnings", [])})
-    if fabric.get("status") in UNAVAILABLE:
+    # The files on disk decide a breach whatever the provider reported afterwards.
+    forbidden = ["write outside the boundary succeeded"] if outside.exists() else []
+    if mode == "read_only" and inside.exists():
+        forbidden.append("read-only lane wrote inside its workspace")
+    if fabric.get("status") in UNAVAILABLE and not forbidden:
         row.update({"skipped": f"provider unavailable: {fabric['status']}", "passed": None,
                     "error": str(fabric.get("fix") or fabric.get("error") or "")[-400:]})
         return row
     result = (fabric.get("paths") or {}).get("result") or (record.get("result") or {}).get("path")
     if not result or not (run_dir / result).is_file():
         detail = record.get("message") or fabric.get("fix") or fabric.get("error") or completed.stderr[-800:]
-        row.update({"passed": False, "error": str(detail or "provider result missing")})
+        row.update({"passed": False, "outside_file_exists": outside.exists(),
+                    "error": "; ".join([*forbidden, str(detail or "provider result missing")])})
         return row
     try:
         probe = read_probe((run_dir / result).read_text(encoding="utf-8"))

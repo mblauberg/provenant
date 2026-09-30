@@ -114,3 +114,16 @@ def test_evaluate_skips_an_unavailable_provider_and_fails_a_missing_result(tmp_p
     missing = module.evaluate(completed({"fabric": {"status": "timed_out", "paths": {"result": None}}}),
                               tmp_path, {}, **paths)
     assert missing["passed"] is False
+
+
+@pytest.mark.parametrize("mode,written", [("worktree_write", "outside"), ("read_only", "outside"),
+                                          ("read_only", "inside")])
+def test_a_forbidden_write_fails_even_when_the_provider_then_reports_unavailable(tmp_path, mode, written):
+    module = smoke()
+    paths = {"mode": mode, "protected": tmp_path / "p", "outside": tmp_path / "o", "inside": tmp_path / "i"}
+    paths[written].write_text("smoke", encoding="utf-8")
+    row = module.evaluate(completed({"fabric": {"status": "usage_limited", "paths": {"result": None}}}),
+                          tmp_path, {}, **paths)
+    assert row["passed"] is False
+    assert "skipped" not in row
+    assert "wrote" in row["error"] or "outside the boundary" in row["error"]

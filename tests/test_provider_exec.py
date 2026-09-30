@@ -562,38 +562,156 @@ def test_read_only_profile_denies_writes_outside_attempt_and_provider_state(monk
         assert f'(subpath "{path}")' not in allow
 
 
-def test_claude_read_only_profile_reads_login_keychain_but_not_other_keychains(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    "route,api_key,granted",
+    [
+        ({}, None, True),
+        ({"endpoint_base_url": "https://api.example.invalid/anthropic"}, None, False),
+        ({}, "sk-test", False),
+    ],
+    ids=["oauth", "endpoint", "api-key"],
+)
+def test_claude_read_only_profile_reads_login_keychain_only_for_oauth_lanes(
+    monkeypatch, tmp_path, route, api_key, granted
+):
     mod = supervisor()
     home = tmp_path / "home"
     workspace = home / "repo"
     workspace.mkdir(parents=True)
     monkeypatch.setattr(mod.Path, "home", lambda: home)
-    plan = {"adapter": "claude", "mode": "read_only", "workspace_root": str(workspace),
+    if api_key is None:
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", api_key)
+    plan = {"adapter": "claude", "mode": "read_only", "route": route, "workspace_root": str(workspace),
             "cwd": str(workspace), "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
     profile = mod.os_confinement_profile(plan)
     allow = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-read-data "))
-    # Claude Code reads its sign-in from the login keychain; without it a read-only lane is signed out.
-    assert f'(subpath "{home / "Library/Keychains/login.keychain-db"}")' in allow
+    # An OAuth lane reads its sign-in from the login keychain; a bare or endpoint lane uses a key.
+    assert (f'"{home / "Library/Keychains/login.keychain-db"}"' in allow) is granted
     assert f'(subpath "{home / "Library/Keychains"}")' not in allow
 
 
+KIRO_SUPPORT = "Library/Application Support/kiro-cli"
+# Files in Kiro's support directory that the user's shell sources or that Kiro executes.
+KIRO_EXECUTABLES = ("shell/zshrc.pre.zsh", "shell/bashrc.post.bash", "node", "bun", "tui.js",
+                    "node.sha256", "kas/2.23.0-abc/node_modules/index.js", "run/chat-cli-2.23.0")
+
+
 @pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
-def test_kiro_profile_keeps_its_sign_in_database_and_launcher_links(monkeypatch, tmp_path, mode):
+def test_kiro_profile_writes_only_its_sign_in_state_not_shell_hooks_or_executables(monkeypatch, tmp_path, mode):
     mod = supervisor()
-    home = tmp_path / "home"
+    home = (tmp_path / "home").resolve()
     workspace = home / "repo"
     workspace.mkdir(parents=True)
+    support = home / KIRO_SUPPORT
+    for relative in (*KIRO_EXECUTABLES, "data.sqlite3"):
+        (support / relative).parent.mkdir(parents=True, exist_ok=True)
+        (support / relative).write_text("original\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
     monkeypatch.setattr(mod.Path, "home", lambda: home)
     plan = {"adapter": "kiro", "mode": mode, "workspace_root": str(workspace), "cwd": str(workspace),
             "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
     profile = mod.os_confinement_profile(plan)
     writes = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-write* "))
-    # Without it, kiro-cli cannot refresh its token and asks for a browser sign-in.
-    assert f'(subpath "{home / "Library/Application Support/kiro-cli"}")' in writes
+    assert f'(subpath "{support}")' not in writes
+    assert "data\\.sqlite3[^/]*$" in writes
     if mode == "read_only":
         reads = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-read-data "))
-        assert f'(subpath "{home / ".local/bin"}")' in reads
-        assert f'(subpath "{home / "Library/Application Support/kiro-cli"}")' in reads
+        assert f'(subpath "{support}")' in reads
+        # The engine resolves its app bundle through these launcher links, and needs nothing else there.
+        assert f'(subpath "{home / ".local/bin"}")' not in reads
+        for name in ("", "/kiro-cli", "/kiro-cli-chat", "/kiro-cli-term"):
+            assert f'(literal "{home}/.local/bin{name}")' in reads
+    sandbox_exec = mod._sandbox_exec_path()
+    if sys.platform != "darwin" or not sandbox_exec:
+        return
+
+    def run(script):
+        return subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script],
+                              capture_output=True, text=True)
+
+    probe = run(f"printf x > '{support}/data.sqlite3-wal'")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert probe.returncode == 0, probe.stderr
+    for relative in KIRO_EXECUTABLES:
+        assert run(f"printf hijack > '{support}/{relative}'").returncode != 0, relative
+        assert (support / relative).read_text(encoding="utf-8") == "original\n", relative
+    assert run(f"printf x > '{support}/shell/new.zsh'").returncode != 0
+    assert run(f"printf x > '{support}/kas/2.24.0-new'").returncode != 0
+
+
+def test_confined_kiro_refuses_a_missing_engine_with_a_fix(monkeypatch, tmp_path):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "kiro-cli"
+    launcher.write_text("#!/bin/sh\necho 'kiro-cli 9.9.9'\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    route = {"resolved_model": "auto"}
+    with pytest.raises(ValueError, match="kiro-cli 9.9.9 has not installed its engine.*fix: run kiro-cli once outside"):
+        mod.build_plan("kiro", route, "hello", cwd=workspace, workspace_root=workspace)
+    support = home / KIRO_SUPPORT
+    (support / "kas/9.9.9-abc/node_modules").mkdir(parents=True)
+    (support / "node").write_text("", encoding="utf-8")
+    plan = mod.build_plan("kiro", route, "hello", cwd=workspace, workspace_root=workspace)
+    assert plan["applied"]["confinement"] == "sandbox-exec"
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None)
+    (support / "node").unlink()
+    assert mod.build_plan("kiro", route, "hello", cwd=workspace, workspace_root=workspace)["applied"][
+        "confinement"] == "none"
+
+
+@pytest.mark.parametrize("adapter", ["claude", "codex", "agy", "opencode", "cursor", "kiro"])
+def test_read_only_transcript_denies_follow_every_state_allow(monkeypatch, tmp_path, adapter):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    plan = {"adapter": adapter, "mode": "read_only", "route": {}, "workspace_root": str(workspace),
+            "cwd": str(workspace), "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    lines = mod.os_confinement_profile(plan).splitlines()
+    denied = [f'(subpath "{home / path}")' for path in mod.EXTRA_DENIED_READS]
+    last_deny = max(index for index, line in enumerate(lines)
+                    if line.startswith("(deny file-read-data ") and all(rule in line for rule in denied))
+    assert not any(line.startswith("(allow file-read") for line in lines[last_deny + 1:])
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+def test_claude_read_only_lane_cannot_read_other_projects_transcripts(monkeypatch, tmp_path):
+    mod = supervisor()
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    home = (tmp_path / "home").resolve()
+    (home / ".claude/projects/other").mkdir(parents=True)
+    (home / ".claude/projects/other/session.jsonl").write_text("transcript\n", encoding="utf-8")
+    (home / ".claude/settings.json").write_text("{}\n", encoding="utf-8")
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    plan = {"adapter": "claude", "mode": "read_only", "route": {}, "workspace_root": str(workspace),
+            "cwd": str(workspace), "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    profile = mod.os_confinement_profile(plan)
+
+    def run(script):
+        return subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script],
+                              capture_output=True, text=True)
+
+    probe = run(f"cat '{home}/.claude/settings.json'")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert probe.stdout == "{}\n"
+    assert run(f"cat '{home}/.claude/projects/other/session.jsonl'").returncode != 0
 
 
 def test_sbpl_filter_star_escapes_regex_without_resolving_symlink_target(tmp_path):
@@ -1516,6 +1634,9 @@ print(json.dumps({'type':'turn.completed'}))
     # Claude Code otherwise opens /tmp/claude-<uid>, which a read-only profile cannot read.
     assert paths["CLAUDE_CODE_TMPDIR"] == str(tmp_path / "tmp/claude")
     assert (tmp_path / "tmp/claude").is_dir()
+    # Private to the provider's user, as the Codex lane home is.
+    assert (tmp_path / "tmp").stat().st_mode & 0o777 == 0o700
+    assert (tmp_path / "tmp/claude").stat().st_mode & 0o777 == 0o700
 
 
 def test_codex_read_only_records_native_write_boundary(tmp_path):
