@@ -343,7 +343,7 @@ it.each([false, true])("exposes the default tools within budget (legacy=%s)", as
     expect((brief.content as any[])[0]?.text).toBe("no runs");
     const full = await client.callTool({ name: "fabric_status", arguments: { ids: [], wait_seconds: 0, detail: "full" } });
     expect(full.structuredContent).toMatchObject({ runs: [] });
-    expect((await client.callTool({ name: "fabric_runs", arguments: {} })).structuredContent)
+    expect((await client.callTool({ name: "fabric_runs", arguments: { detail: "full" } })).structuredContent)
       .toMatchObject({ schema: "fabric.runs.v1", status: "ok", runs: [] });
     expect((await client.callTool({ name: "fabric_events", arguments: {} })).structuredContent)
       .toMatchObject({ schema: "fabric.events.v1", status: "ok", events: [] });
@@ -444,11 +444,13 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     const waitInvalid = await client.callTool({ name: "fabric_dispatch", arguments: { prompt: "invalid", wait_seconds: -1 } });
     expect(waitInvalid.isError).not.toBe(true);
     expect((waitInvalid.content as any[])[0].text).toBe("rejected wait_invalid · fix: Pass wait_seconds from 0 to 55.");
-    for (const value of [1.5, null, "4"]) {
+    for (const value of [1.5, null, "soon"]) {
       const invalid = await client.callTool({ name: "fabric_status", arguments: { ids: [], wait_seconds: value } });
       expect(invalid.isError).not.toBe(true);
       expect((invalid.content as any[])[0].text).toBe("rejected wait_invalid · fix: Pass wait_seconds from 0 to 55.");
     }
+    const numericString = await client.callTool({ name: "fabric_status", arguments: { ids: [], wait_seconds: "0" } });
+    expect((numericString.content as any[])[0].text).toContain('read wait_seconds "0" as a number');
     const badTimeout = await client.callTool({ name: "fabric_dispatch", arguments: { prompt: "invalid", timeout_seconds: 0 } });
     expect((badTimeout.content as any[])[0].text).toContain("rejected timeout_invalid");
     for (const capabilities of [["unknown"], ["browser", "browser"], "browser", [1]]) {
@@ -748,7 +750,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect(resumedNoControls.structuredContent).toMatchObject({status:"ok",attempt:2});
     const slow = await call("dispatch", { adapter: "codex", prompt: "slow", wait_seconds: 0 });
     const active = slow.structuredContent as any;
-    const cancelled = await call("cancel", { id: active.id });
+    const cancelled = await call("cancel", { id: active.id, detail: "full" });
     expect((cancelled.structuredContent as any).runs[0].status).toBe("cancelled");
     expect((cancelled.structuredContent as any).runs[0].attempts).toBeUndefined();
     // A cancel that has to SIGKILL an owner before it writes a result stays a cancel.
