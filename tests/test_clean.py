@@ -8,7 +8,10 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
+
+import pytest
 
 
 SCRIPT = Path(__file__).resolve().parents[1] / "scripts" / "clean.py"
@@ -131,6 +134,72 @@ def test_unrelated_kept_run_growth_does_not_invalidate_cleanup_plan(tmp_path):
     assert first["plan_sha256"] == second["plan_sha256"]
 
 
+def applied(module, root, proposal):
+    module.save_plan(proposal)
+    return module.apply(root, proposal["plan_sha256"], pr_bodies=[])[0]
+
+
+def _finished_run(root: Path, name: str) -> Path:
+    path = root / ".agent-run" / "runs" / name
+    path.mkdir(parents=True)
+    (path / "RUN_RECEIPT.json").write_text(json.dumps({"status": "ok"}))
+    old(path)
+    return path
+
+
+def test_apply_deletes_approved_rows_still_eligible_and_ignores_drift(tmp_path):
+    root = repo(tmp_path)
+    kept = _finished_run(root, "20260801-1200-dispatch-task-a1b2c3")
+    vanished = _finished_run(root, "20260801-1200-dispatch-task-b1c2d3")
+    module = cleaner()
+    proposal = module.plan(root, pr_bodies=[])
+    module.save_plan(proposal)
+    shutil.rmtree(vanished)
+    appeared = _finished_run(root, "20260801-1200-dispatch-task-c1d2e3")
+    removed, skipped = module.apply(root, proposal["plan_sha256"], pr_bodies=[])
+    assert removed == [".agent-run/runs/20260801-1200-dispatch-task-a1b2c3"]
+    assert [row["path"] for row in skipped] == [".agent-run/runs/20260801-1200-dispatch-task-b1c2d3"]
+    assert not kept.exists()
+    assert appeared.exists()
+
+
+def test_apply_skips_row_that_stopped_being_eligible(tmp_path):
+    root = repo(tmp_path)
+    run = _finished_run(root, "20260801-1200-dispatch-task-a1b2c3")
+    module = cleaner()
+    proposal = module.plan(root, pr_bodies=[])
+    module.save_plan(proposal)
+    (run / "KEEP").write_text("pinned since\n")
+    removed, skipped = module.apply(root, proposal["plan_sha256"], pr_bodies=[])
+    assert removed == [] and len(skipped) == 1
+    assert run.exists()
+
+
+def test_apply_refuses_unsaved_or_altered_plan(tmp_path):
+    root = repo(tmp_path)
+    _finished_run(root, "20260801-1200-dispatch-task-a1b2c3")
+    module = cleaner()
+    proposal = module.plan(root, pr_bodies=[])
+    with pytest.raises(module.CleanError):
+        module.apply(root, proposal["plan_sha256"], pr_bodies=[])
+    saved = module.save_plan(proposal)
+    document = json.loads(saved.read_text())
+    document["approval"]["rows"].append({"path": ".agent-run/runs/other", "kind": "dispatch", "verdict": "delete", "_identity": [1, 2, 3, 4]})
+    saved.write_text(json.dumps(document))
+    with pytest.raises(module.CleanError):
+        module.apply(root, proposal["plan_sha256"], pr_bodies=[])
+
+
+def test_runs_index_lock_is_kept_infrastructure(tmp_path):
+    root = repo(tmp_path)
+    runs = root / ".agent-run" / "runs"
+    runs.mkdir(parents=True)
+    (runs / "index.lock").write_text("")
+    old(runs / "index.lock")
+    rows = {row["path"]: row for row in cleaner().plan(root, pr_bodies=[])["rows"]}
+    assert rows[".agent-run/runs/index.lock"]["verdict"].startswith("keep:")
+
+
 def test_apply_requires_current_digest_and_respects_pins_and_acceptance(tmp_path):
     root = repo(tmp_path)
     runs = root / ".agent-run" / "runs"
@@ -148,15 +217,10 @@ def test_apply_requires_current_digest_and_respects_pins_and_acceptance(tmp_path
         old(path)
     module = cleaner()
     first = module.plan(root, pr_bodies=[])
-    assert module.apply(root, first["plan_sha256"], pr_bodies=[]) == [".agent-run/runs/20260801-1200-dispatch-task-a1b2c3"]
+    assert applied(module, root, first) == [".agent-run/runs/20260801-1200-dispatch-task-a1b2c3"]
     assert not ordinary.exists()
     assert pinned.exists() and delivery.exists()
-    try:
-        module.apply(root, first["plan_sha256"], pr_bodies=[])
-    except module.CleanError as exc:
-        assert "plan" in str(exc)
-    else:
-        raise AssertionError("stale plan was accepted")
+    assert module.apply(root, first["plan_sha256"], pr_bodies=[])[0] == []
 
 
 def test_scratch_retention_and_index_are_protected(tmp_path):
@@ -269,7 +333,7 @@ def test_abandoned_active_run_closes_before_retention_deletion(tmp_path):
     module = cleaner()
     proposal = module.plan(root, pr_bodies=[])
     assert next(row for row in proposal["rows"] if row["path"].endswith(run.name))["verdict"] == "abandon"
-    assert module.apply(root, proposal["plan_sha256"], pr_bodies=[]) == []
+    assert applied(module, root, proposal) == []
     assert run.exists()
     result = json.loads(receipt.read_text())
     assert result["status"] == "interrupted"
@@ -437,7 +501,7 @@ def test_worktree_scratch_does_not_count_as_a_run(tmp_path):
     proposal = module.plan(root, pr_bodies=[])
     row = next(row for row in proposal["rows"] if row["path"] == ".worktrees/lane-done")
     assert row["verdict"] == "delete"
-    assert module.apply(root, proposal["plan_sha256"], pr_bodies=[]) == [".worktrees/lane-done"]
+    assert applied(module, root, proposal) == [".worktrees/lane-done"]
 
 
 def test_missing_gh_warns_and_git_proven_worktree_can_expire(tmp_path, monkeypatch):
@@ -518,7 +582,7 @@ def test_clean_output_hides_internal_identity_and_summarises_kept_rows(tmp_path)
     text_result = subprocess.run(["python3", str(SCRIPT), "--repo", str(root)],
                                  text=True, capture_output=True, check=False)
     assert text_result.returncode == 0, text_result.stderr
-    assert "kept: 1 paths" in text_result.stdout
+    assert "kept: 2 paths" in text_result.stdout  # the run and the saved plan file
     assert active.name not in text_result.stdout
 
 
@@ -534,7 +598,7 @@ def test_worktree_apply_uses_plan_digest_and_removes_clean_merged_worktree(tmp_p
     module = cleaner()
     proposal = module.plan(root, pr_bodies=[])
     assert next(row for row in proposal["rows"] if row["path"] == ".worktrees/lane-done")["verdict"] == "delete"
-    assert module.apply(root, proposal["plan_sha256"], pr_bodies=[]) == [".worktrees/lane-done"]
+    assert applied(module, root, proposal) == [".worktrees/lane-done"]
     assert not target.exists()
     assert subprocess.run(["git", "-C", str(root), "show-ref", "--verify", "--quiet",
                            "refs/heads/lane/done"]).returncode != 0
@@ -556,7 +620,7 @@ def test_worktree_apply_removes_merged_branch_when_primary_is_not_integration(tm
     module = cleaner()
     proposal = module.plan(root, pr_bodies=[])
     assert next(row for row in proposal["rows"] if row["path"] == ".worktrees/lane-done")["verdict"] == "delete"
-    assert module.apply(root, proposal["plan_sha256"], pr_bodies=[]) == [".worktrees/lane-done"]
+    assert applied(module, root, proposal) == [".worktrees/lane-done"]
     assert not target.exists()
     assert subprocess.run(["git", "-C", str(root), "show-ref", "--verify", "--quiet",
                            "refs/heads/lane/done"]).returncode != 0
@@ -570,7 +634,7 @@ def test_worktree_apply_keeps_branch_at_integration_tip(tmp_path):
     module = cleaner()
     proposal = module.plan(root, pr_bodies=[])
     assert next(row for row in proposal["rows"] if row["path"] == ".worktrees/lane-base")["verdict"] == "keep:branch-at-base"
-    assert module.apply(root, proposal["plan_sha256"], pr_bodies=[]) == []
+    assert applied(module, root, proposal) == []
     assert target.exists()
 
 
@@ -889,7 +953,7 @@ def test_prune_merged_plan_fails_closed_if_integration_branch_disappears(tmp_pat
     subprocess.run(["git", "-C", str(root), "branch", "-M", "feature"], check=True)
 
     try:
-        module._apply_plan(proposal, proposal["plan_sha256"])
+        module._apply_plan(proposal, proposal["approval"])
     except module.CleanError as exc:
         assert "integration branch" in str(exc)
     else:
@@ -989,7 +1053,7 @@ def test_ok_run_bulk_pruned_after_a_day_but_records_kept(tmp_path):
     assert rows[run.relative_to(root).as_posix()]["verdict"].startswith("keep:retention")
     assert rows[rel + "/tmp"]["verdict"] == "delete" and rows[rel + "/cache"]["verdict"] == "delete"
     assert result["reclaimable_bytes"] >= 8192
-    assert module.apply(root, result["plan_sha256"], pr_bodies=[]) == [rel + "/cache", rel + "/tmp"]
+    assert applied(module, root, result) == [rel + "/cache", rel + "/tmp"]
     assert not (attempt / "tmp").exists() and not (attempt / "cache").exists()
     assert (attempt / "result.md").is_file() and (attempt / "attempt.json").is_file()
     assert outside.read_text() == "keep\n"

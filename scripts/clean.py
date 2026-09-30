@@ -482,6 +482,10 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
             if parent.name == "runs" and path.name == "index.jsonl":
                 rows.append(_row(root, path, "index", "keep:provenance-index", now))
                 continue
+            if parent.name == "runs" and path.name == "index.lock" and path.is_file() and not path.is_symlink():
+                # fabric_records.locked() holds this beside the index on every append.
+                rows.append(_row(root, path, "index", "keep:index-lock", now))
+                continue
             if path.is_symlink():
                 rows.append(_row(root, path, "unknown", "triage:symlink", now))
                 continue
@@ -585,10 +589,11 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
         digest_data["integration_revision"] = integration_revision
         digest_data["branches"] = branches
         digest_data["merged_since_revision"] = since_revision
-    digest = "sha256:" + hashlib.sha256(json.dumps(digest_data, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    digest = _digest(digest_data)
     total = sum(row["size_bytes"] for row in rows if row["verdict"] == "delete")
     all_size = sum(row["size_bytes"] for row in rows if row["kind"] not in {"owner-log", "index", "attempt-bulk"})
     result: dict[str, Any] = {"root": str(root), "rows": rows, "reclaimable_bytes": total, "plan_sha256": digest,
+                              "approval": digest_data,
                               "warnings": (["GitHub PR state unavailable; run deletion held, merged worktrees use Git proof"]
                                            if pr_bodies is None else [])}
     if integration_ref is not None:
@@ -603,17 +608,58 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
     return result
 
 
-def _apply_plan(current: dict[str, Any], approved_plan: str) -> list[str]:
-    if approved_plan != current["plan_sha256"]:
-        raise CleanError("approved plan digest does not match the current cleanup plan")
+def _plan_file(root: Path, digest: str) -> Path:
+    return root / ".agent-run" / "scratch" / f"clean-plan-{digest.removeprefix('sha256:')}.json"
+
+
+def _digest(approval: dict[str, Any]) -> str:
+    return "sha256:" + hashlib.sha256(json.dumps(approval, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def save_plan(current: dict[str, Any]) -> Path:
+    """Keep the approvable row set so apply can re-derive it. Lives in scratch, which expires in a day."""
+    path = _plan_file(Path(current["root"]), current["plan_sha256"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if path.parent.is_symlink() or path.is_symlink():
+        raise CleanError(f"refusing to write plan through a link: {path}")
+    path.write_text(json.dumps({"plan_sha256": current["plan_sha256"], "approval": current["approval"]}, sort_keys=True))
+    return path
+
+
+def _load_plan(root: Path, digest: str) -> dict[str, Any]:
+    saved = _json(_plan_file(root, digest)) if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) else None
+    approval = saved.get("approval") if saved else None
+    if not isinstance(approval, dict) or _digest(approval) != digest or saved.get("plan_sha256") != digest:
+        raise CleanError("approved plan digest matches no saved cleanup plan; run provenant clean first")
+    return approval
+
+
+def _apply_plan(current: dict[str, Any], approved: dict[str, Any]) -> tuple[list[str], list[dict[str, str]]]:
+    """Act on the approved rows that are still exactly as approved; report the rest as skipped.
+
+    Rows that became eligible after approval are never acted on.
+    """
     root = Path(current["root"])
-    if "integration_ref" in current:
+    if approved["root"] != str(root):
+        raise CleanError("approved plan belongs to another repository")
+    if "integration_ref" in current or "integration_ref" in approved:
         integration_ref = _integration_ref(root, required=True)
         revision = _command("git", "rev-parse", "--verify", f"{integration_ref}^{{commit}}", cwd=root)
-        if (integration_ref != current["integration_ref"] or revision.returncode != 0
-                or revision.stdout.strip() != current["integration_revision"]):
+        if (integration_ref != approved.get("integration_ref") or revision.returncode != 0
+                or revision.stdout.strip() != approved.get("integration_revision")):
             raise CleanError("integration branch changed since the pruning plan")
-        for row in current["rows"]:
+    now_rows = {row["path"]: row for row in current["rows"] if row["verdict"] in {"delete", "abandon"}}
+    rows: list[dict[str, Any]] = []
+    skipped: list[dict[str, str]] = []
+    for approved_row in approved["rows"]:
+        row = now_rows.get(approved_row["path"])
+        if row is not None and {k: v for k, v in row.items() if k not in {"age_days", "size_bytes"}} == approved_row:
+            rows.append(row)
+        else:
+            skipped.append({"path": approved_row["path"], "reason": "no longer eligible as approved"})
+    if "integration_ref" in approved:
+        integration_ref = approved["integration_ref"]
+        for row in rows:
             if row["kind"] != "worktree" or row["verdict"] != "delete":
                 continue
             path = root / row["path"]
@@ -621,20 +667,21 @@ def _apply_plan(current: dict[str, Any], approved_plan: str) -> list[str]:
             if (branch.returncode != 0 or path.name != branch.stdout.strip().replace("/", "-")
                     or not _merged_by_ancestry(root, branch.stdout.strip(), integration_ref)):
                 raise CleanError(f"merged worktree changed since the pruning plan: {path}")
-            if current.get("branches") and branch.stdout.strip() not in current["branches"]:
+            if approved.get("branches") and branch.stdout.strip() not in approved["branches"]:
                 raise CleanError(f"pruning branch changed since the plan: {path}")
-            since_revision = current.get("merged_since_revision")
+            since_revision = approved.get("merged_since_revision")
             if since_revision and _command("git", "merge-base", "--is-ancestor", f"refs/heads/{branch.stdout.strip()}",
                                            since_revision, cwd=root).returncode != 1:
                 raise CleanError(f"merge starting revision already contains branch: {path}")
     removed: list[str] = []
-    for row in current["rows"]:
+    for row in rows:
         path = root / row["path"]
         verdict = row["verdict"]
-        if verdict not in {"delete", "abandon"}:
-            continue
-        if path.is_symlink() or not path.exists() or not path.resolve().is_relative_to(root):
+        if path.is_symlink() or not path.resolve().is_relative_to(root):
             raise CleanError(f"path changed during cleanup: {path}")
+        if not path.exists():
+            skipped.append({"path": row["path"], "reason": "vanished during cleanup"})
+            continue
         if verdict == "abandon":
             receipt_path = path / "RUN_RECEIPT.json"
             receipt = _json(receipt_path)
@@ -667,15 +714,18 @@ def _apply_plan(current: dict[str, Any], approved_plan: str) -> list[str]:
         else:
             path.unlink()
         removed.append(row["path"])
-    return removed
+    return removed, skipped
 
 
 def apply(repo: Path, approved_plan: str, *, include: frozenset[str] = DEFAULT_INCLUDE,
           older_than: float | None = None, pr_bodies: list[str] | None = None,
-          prune_merged: bool = False) -> list[str]:
+          prune_merged: bool = False) -> tuple[list[str], list[dict[str, str]]]:
+    approved = _load_plan(primary_root(repo), approved_plan)
+    if approved["include"] != sorted(include) or approved["older_than"] != older_than:
+        raise CleanError("approved plan was made with different --include or --older-than")
     current = plan(repo, include=include, older_than=older_than, pr_bodies=pr_bodies,
                    prune_merged=prune_merged)
-    return _apply_plan(current, approved_plan)
+    return _apply_plan(current, approved)
 
 
 def _duration(value: str) -> float:
@@ -691,7 +741,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--include", default="runs,scratch,worktrees")
     parser.add_argument("--older-than", type=_duration)
     parser.add_argument("--apply", action="store_true")
-    parser.add_argument("--plan")
+    parser.add_argument("--plan", metavar="sha256:DIGEST", help="digest of a saved plan; with --apply, delete its rows that are still eligible")
     parser.add_argument("--prune-merged", action="store_true", help="remove clean ancestry-proven merged worktrees")
     selector = parser.add_mutually_exclusive_group()
     selector.add_argument("--branch", action="append", default=[], metavar="NAME")
@@ -714,22 +764,24 @@ def main(argv: list[str] | None = None) -> int:
             worktrees = frozenset({"worktrees"})
             proposal = plan(args.repo, include=worktrees, prune_merged=True,
                             branches=tuple(args.branch), merged_since=args.merged_since)
-            removed = _apply_plan(proposal, proposal["plan_sha256"])
+            removed, _ = _apply_plan(proposal, proposal["approval"])
             report = {"removed": removed, "skipped": [
                 {"path": row["path"], "reason": row["verdict"]}
                 for row in proposal["rows"] if row["kind"] == "worktree" and row["verdict"] != "delete"
             ]}
         elif args.apply:
-            removed = apply(args.repo, args.plan, include=include, older_than=args.older_than)
-            report = {"removed": removed, "count": len(removed)}
+            removed, skipped = apply(args.repo, args.plan, include=include, older_than=args.older_than)
+            report = {"removed": removed, "count": len(removed), "skipped": skipped}
         else:
             report = plan(args.repo, include=include, older_than=args.older_than)
+            save_plan(report)
     except (CleanError, OSError, subprocess.TimeoutExpired) as exc:
         print(f"provenant clean: {exc}", file=sys.stderr)
         return 2
     if args.json:
-        public = {**report, "rows": [{key: value for key, value in row.items() if key != "_identity"}
-                                     for row in report["rows"]]} if not (args.apply or args.prune_merged) else report
+        public = {**{key: value for key, value in report.items() if key != "approval"},
+                  "rows": [{key: value for key, value in row.items() if key != "_identity"}
+                           for row in report["rows"]]} if not (args.apply or args.prune_merged) else report
         print(json.dumps(public, indent=2, sort_keys=True))
     elif args.prune_merged:
         for path in report["removed"]:
@@ -740,6 +792,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"removed {report['count']} paths")
         for path in report["removed"]:
             print(path)
+        for row in report["skipped"]:
+            print(f"skipped {row['path']}: {row['reason']}")
     else:
         keep = sum(row["verdict"].startswith("keep:") for row in report["rows"])
         print(f"kept: {keep} paths")
