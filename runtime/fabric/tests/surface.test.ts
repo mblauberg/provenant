@@ -504,7 +504,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect((await peerCall("whoami")).structuredContent).toMatchObject({
       project: projectRoot, cwd: projectRoot, agentId: "worker-seat",
     });
-    const workerRun = await peerCall("dispatch", { prompt: "worker context", wait_seconds: 5 });
+    const workerRun = await peerCall("dispatch", { adapter: "codex", prompt: "worker context", wait_seconds: 5 });
     const workerRow = workerRun.structuredContent as any;
     expect(workerRow, JSON.stringify(workerRow)).toHaveProperty("run_dir");
     expect(JSON.parse(readFileSync(join(workerRow.run_dir, "_owner", `${workerRow.task_id}-env-1.json`), "utf8")))
