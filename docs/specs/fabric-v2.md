@@ -82,10 +82,13 @@ rejected when its prompt file or additional directory overlaps a protected
 path, its cwd lies inside one, or OS read confinement is unavailable. Its
 `sandbox-exec` profile
 denies reads of those paths in every registered worktree. Non-training routes
-are unaffected. Codex writer confinement is supplied by `-s workspace-write`
-(or `-c sandbox_mode="workspace-write"` on resume),
-`-c sandbox_workspace_write.writable_roots=<add_dirs>` and a fresh run's
-`--cd <worktree>`. Codex keeps a writable root's `.agents/` read-only, which
+are unaffected. Codex writer confinement is supplied by a permissions
+profile named uniquely for each plan (`-c default_permissions="provenant-<random>"`,
+extending `:workspace`, on fresh runs and resumes), because Codex merges config
+tables and a fixed name would inherit a system config's grants. Its
+`filesystem` table grants `add_dirs` and the Git write boundary below and keeps
+the common directory and the worktree `.git` marker read-only; a fresh run
+also passes `--add-dir` and `--cd <worktree>`. Codex keeps a writable root's `.agents/` read-only, which
 stops a rebase or merge that updates a tracked skill, so a linked-worktree
 Codex writer also gets the worktree's `.agents/` in `add_dirs`. After the
 attempt, each `.agents/` path in HEAD, the index and on disk must match the
@@ -124,13 +127,9 @@ local address, so an inbound loopback rule would not establish a loopback limit.
 Each task uses one `CODEX_HOME` at `<task directory>/codex-home` for all
 attempts. Existing `auth.json`, `AGENTS.md`, `HARNESS.md` and `skills` are symlinked from the
 caller's `CODEX_HOME`, or `~/.codex`; the profile grants writes to the task
-home and only the literal source `auth.json`. The Git common directory is
-denied and is not a writable root. Git writes use the private worktree Git
-directory plus the narrow common `objects`, `refs`, `logs`, `packed-refs` and
-`packed-refs.lock` paths, granted by their own names, so a link planted at one
-never moves a later grant. The worktree `.git` marker and private Git
-directory's `config.worktree`, `commondir` and `gitdir` are not writable;
-Fabric recreates the task home links every attempt and fails a symlinked or
+home and only the literal source `auth.json`. It grants each Git write
+boundary path by its own name, so a link planted at one never moves a later
+grant. Fabric recreates the task home links every attempt and fails a symlinked or
 non-directory task home, while allowing the lane to overwrite the literal
 source `auth.json` for token refresh, a file it could already read. That grant
 names the unresolved source path and covers in-place rewrites only, not
@@ -141,4 +140,4 @@ paths under lane `TMPDIR` exceed macOS's
 103-byte limit; use TCP or a short socket directory. Attempts set `TMPDIR`,
 `TMP` and `TEMP` to `<attempt>/tmp` and `XDG_CACHE_HOME` to `<attempt>/tmp/cache`.
 
-`model_route.py snapshot --json` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Wrapped writer launches (agy, Claude, Cursor, OpenCode and Kiro) restrict writes to the worktree, declared `add_dirs`, per-worktree Git metadata, common Git objects, refs, logs and packed refs, attempt files, temp paths, devices and provider state. Where protected-path policy applies, its read and write denies take precedence within an `add_dir`; receipts list the writable `add_dirs` in `applied.write_boundary`. Codex writers without capabilities use its native `workspace-write` sandbox. Unavailable OS confinement refuses agy write dispatches and produces an explicit warning for other wrapped writers.
+`model_route.py snapshot --json` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Every writer, Codex included, has one Git write boundary: its per-worktree Git directory (`--absolute-git-dir`) plus the common directory's `objects`, `refs`, `logs`, `packed-refs`, `packed-refs.lock` and `packed-refs.new`; the rest of the common directory (`hooks`, `config`, `info`, other lanes' `worktrees/<name>`) is never writable, and a Codex writer drops an `add_dir` at or inside it with a warning. Codex writers also keep the worktree `.git` marker and the private directory's `config.worktree`, `commondir` and `gitdir` read-only; Codex refuses to launch with a symlinked grant path. Writer attempts set `gc.auto=0`, `maintenance.auto=false` and `rerere.enabled=false` through `GIT_CONFIG_COUNT`. Because the shared `config` is read-only, a lane pushes with `git push origin HEAD` and opens its pull request with `gh pr create --head <branch>`; `git push -u` pushes but cannot record the upstream. Wrapped writer launches (agy, Claude, Cursor, OpenCode and Kiro) restrict writes to the worktree, declared `add_dirs`, the Git write boundary, attempt files, temp paths, devices and provider state. Where protected-path policy applies, its read and write denies take precedence within an `add_dir`; receipts list the writable `add_dirs` in `applied.write_boundary`. Codex writers without capabilities use its native sandbox with that permissions profile, recorded as `applied.write_boundary.filesystem`. Unavailable OS confinement refuses agy write dispatches and produces an explicit warning for other wrapped writers.
