@@ -200,6 +200,19 @@ def test_plan_older_than_a_day_is_expired_by_its_own_timestamp(tmp_path):
         module.apply(root, proposal["plan_sha256"], pr_bodies=[])
 
 
+def test_plan_dated_in_the_future_is_refused(tmp_path):
+    root = repo(tmp_path)
+    _finished_run(root, "20260801-1200-dispatch-task-a1b2c3")
+    module = cleaner()
+    proposal = module.plan(root, pr_bodies=[])
+    saved = module.save_plan(proposal)
+    document = json.loads(saved.read_text())
+    document["created_at"] = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    saved.write_text(json.dumps(document))
+    with pytest.raises(module.CleanError, match="expired"):
+        module.apply(root, proposal["plan_sha256"], pr_bodies=[])
+
+
 def test_attempt_bulk_is_rechecked_against_its_run_before_deletion(tmp_path):
     root = repo(tmp_path)
     module = cleaner()

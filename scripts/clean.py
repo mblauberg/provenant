@@ -636,7 +636,7 @@ def _load_plan(root: Path, digest: str) -> dict[str, Any]:
     except (KeyError, TypeError, ValueError):
         age = None
     if (not isinstance(approval, dict) or _digest(approval) != digest or saved.get("plan_sha256") != digest
-            or age is None or age.total_seconds() > DAY):
+            or age is None or not -60 <= age.total_seconds() <= DAY):
         raise CleanError("saved plan not found or expired; run `provenant clean` again")
     return approval
 
