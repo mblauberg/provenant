@@ -69,8 +69,8 @@ def claude_events(*answered, usage=None, init="claude-haiku-4-5-20251001"):
 
 def test_claude_window_comes_from_the_answering_model_never_init_or_the_largest():
     meter = context().Meter("claude")
-    for event in claude_events(("claude-sonnet-5", "tool-1"), ("claude-haiku-4-5-20251001", None),
-                               usage={"claude-sonnet-5": {"contextWindow": 1000000},
+    for event in claude_events(("claude-sonnet-5-5", "tool-1"), ("claude-haiku-4-5-20251001", None),
+                               usage={"claude-sonnet-5-5": {"contextWindow": 1000000},
                                       "claude-haiku-4-5-20251001": {"contextWindow": 200000}}):
         meter.observe(event)
     assert meter.result()["context_window_tokens"] == 200000
@@ -79,7 +79,7 @@ def test_claude_window_comes_from_the_answering_model_never_init_or_the_largest(
         unmatched.observe(event)
     assert unmatched.result()["context_window_tokens"] is None
     single = context().Meter("claude")
-    for event in claude_events(usage={"claude-sonnet-5": {"contextWindow": 1000000}}):
+    for event in claude_events(usage={"claude-sonnet-5-5": {"contextWindow": 1000000}}):
         single.observe(event)
     assert single.result()["context_window_tokens"] == 1000000
 
@@ -120,20 +120,20 @@ def test_direct_haiku_answers_as_haiku_without_warning(tmp_path, provider_homes)
 
 
 def test_several_answering_models_are_all_recorded_and_the_final_one_routes(tmp_path, provider_homes):
-    record = replayed(tmp_path, claude_events(("claude-sonnet-5", None), ("claude-opus-5-5", "tool-1"),
+    record = replayed(tmp_path, claude_events(("claude-sonnet-5-5", None), ("claude-opus-5-5", "tool-1"),
                                               ("claude-haiku-4-5-20251001", None)))
     provenance = record["provenance"]
-    assert provenance["answered_models"] == ["claude-sonnet-5", "claude-opus-5-5", "claude-haiku-4-5-20251001"]
+    assert provenance["answered_models"] == ["claude-sonnet-5-5", "claude-opus-5-5", "claude-haiku-4-5-20251001"]
     assert provenance["observed_model"] == "claude-haiku-4-5-20251001"
-    assert ("claude answered as claude-sonnet-5, claude-opus-5-5, claude-haiku-4-5-20251001; "
+    assert ("claude answered as claude-sonnet-5-5, claude-opus-5-5, claude-haiku-4-5-20251001; "
             "route records claude-haiku-4-5-20251001") in record["warnings"]
 
 
 def test_model_usage_then_init_are_fallbacks_for_the_answering_model(tmp_path, provider_homes):
-    usage = replayed(tmp_path, claude_events(usage={"claude-sonnet-5": {"contextWindow": 1000000}}))
+    usage = replayed(tmp_path, claude_events(usage={"claude-sonnet-5-5": {"contextWindow": 1000000}}))
     assert (usage["provenance"]["observed_model"], usage["provenance"]["observed_source"]) == (
-        "claude-sonnet-5", "claude:result.modelUsage")
-    assert "claude answered as claude-sonnet-5; init reported claude-haiku-4-5-20251001" in usage["warnings"]
+        "claude-sonnet-5-5", "claude:result.modelUsage")
+    assert "claude answered as claude-sonnet-5-5; init reported claude-haiku-4-5-20251001" in usage["warnings"]
     ambiguous = replayed(tmp_path, claude_events(usage={"a": {}, "b": {}}))
     assert (ambiguous["provenance"]["observed_model"], ambiguous["provenance"]["observed_source"]) == (
         "claude-haiku-4-5-20251001", "claude:init.model")
