@@ -86,6 +86,55 @@ export interface LandingLease {
   takenOverFrom?: string;
 }
 
+/** A named provider session: the last clean turn plus the latest turn. */
+export interface NamedSession {
+  name: string;
+  adapter: string | null;
+  providerSessionId: string | null;
+  runId: string | null;
+  taskId: string | null;
+  attempt: number | null;
+  resultPath: string | null;
+  turnClaim: string;
+  turnKind: string;
+  turnRunId: string | null;
+  turnTaskId: string | null;
+  turnAttempt: number | null;
+  turnStatus: string | null;
+  turnPid: number | null;
+  createdBy: string;
+  updatedBy: string;
+  updatedAt: string;
+}
+
+export type SessionTurnKind = "start" | "resume" | "fresh";
+
+/** The run and first attempt a launched turn runs as. */
+export interface SessionLaunch {
+  runId: string;
+  taskId: string;
+  attempt: number;
+}
+
+export interface SessionPointer {
+  adapter: string | null;
+  providerSessionId: string | null;
+  runId: string;
+  taskId: string;
+  attempt: number;
+  resultPath: string | null;
+}
+
+function namedSession(row: Record<string, any>): NamedSession {
+  return {
+    name: row.name, adapter: row.adapter, providerSessionId: row.provider_session_id, runId: row.run_id,
+    taskId: row.task_id, attempt: row.attempt, resultPath: row.result_path, turnClaim: row.turn_claim,
+    turnKind: row.turn_kind, turnRunId: row.turn_run_id, turnTaskId: row.turn_task_id, turnAttempt: row.turn_attempt,
+    turnStatus: row.turn_status, turnPid: row.turn_pid, createdBy: row.created_by, updatedBy: row.updated_by,
+    updatedAt: new Date(row.updated_at).toISOString(),
+  };
+}
+
 function holder(who: Identity, session: string): string {
   if (!session.trim() || session.length > 128) throw new Error("session id must be 1 to 128 characters");
   if (session.includes("/")) throw new Error("session id must not contain /");
@@ -374,6 +423,91 @@ export class Store {
         .run(Date.now(), who.project, owner, generation, Date.now(), Date.now());
       if (changed.changes !== 1) throw new Error("stale landing lease");
       this.#log(who, "landing_release", `${owner} generation ${generation}`);
+    }).immediate();
+  }
+
+  session(project: string, name: string): NamedSession | undefined {
+    const row = this.#db.prepare(`SELECT * FROM sessions WHERE project = ? AND name = ?`).get(project, name);
+    return row === undefined ? undefined : namedSession(row as Record<string, any>);
+  }
+
+  sessions(project: string): NamedSession[] {
+    return (this.#db.prepare(`SELECT * FROM sessions WHERE project = ? ORDER BY name`).all(project) as Record<string, any>[])
+      .map(namedSession);
+  }
+
+  /**
+   * Take the name's one active turn. `observedClaim` is the settled turn the
+   * caller planned from (null for no row); any turn claimed since, or an active
+   * turn, returns the row instead. The turn has no run until it launches.
+   */
+  claimSessionTurn(who: Identity, name: string, observedClaim: string | null, kind: SessionTurnKind, pid: number):
+    { claim: string } | { conflict: NamedSession | undefined } {
+    const claim = randomUUID(), now = Date.now();
+    return this.#db.transaction(() => {
+      const existing = this.session(who.project, name);
+      if (existing ? existing.turnStatus === null || existing.turnClaim !== observedClaim : observedClaim !== null)
+        return { conflict: existing };
+      this.#db.prepare(
+        `INSERT INTO sessions(project, name, turn_claim, turn_kind, turn_run_id, turn_task_id, turn_attempt, turn_status,
+           turn_pid, created_by, updated_by, created_at, updated_at)
+         VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, ?, ?, ?, ?, ?)
+         ON CONFLICT(project, name) DO UPDATE SET turn_claim = excluded.turn_claim, turn_kind = excluded.turn_kind,
+           turn_run_id = excluded.turn_run_id, turn_task_id = excluded.turn_task_id, turn_attempt = excluded.turn_attempt,
+           turn_status = NULL, turn_pid = excluded.turn_pid, updated_by = excluded.updated_by, updated_at = excluded.updated_at`,
+      ).run(who.project, name, claim, kind, pid, who.agentId, who.agentId, now, now);
+      this.#log(who, "session", `${name} ${kind}`);
+      return { claim };
+    }).immediate();
+  }
+
+  /**
+   * Record the run a turn is about to launch, before its owner starts. Throws
+   * unless this claim still holds the active turn, so an unrecorded run never starts.
+   */
+  bindSessionTurn(who: Identity, name: string, claim: string, turn: SessionLaunch): void {
+    const changed = this.#db.prepare(`UPDATE sessions SET turn_run_id = ?, turn_task_id = ?, turn_attempt = ?,
+        updated_at = ? WHERE project = ? AND name = ? AND turn_claim = ? AND turn_status IS NULL`)
+      .run(turn.runId, turn.taskId, turn.attempt, Date.now(), who.project, name, claim).changes;
+    if (changed !== 1) throw new Error(`session ${name} no longer holds this turn`);
+  }
+
+  /** The launcher is done: from here the run's owner and attempts alone decide the turn. */
+  releaseSessionLauncher(who: Identity, name: string, claim: string): void {
+    this.#db.prepare(`UPDATE sessions SET turn_pid = NULL WHERE project = ? AND name = ? AND turn_claim = ?
+        AND turn_status IS NULL`).run(who.project, name, claim);
+  }
+
+  /**
+   * End a turn. Only a clean turn (`advance`) moves the session pointer; a
+   * name whose first turn never launched a run disappears again.
+   */
+  settleSessionTurn(who: Identity, name: string, claim: string, status: string, advance?: SessionPointer): void {
+    this.#db.transaction(() => {
+      const row = this.session(who.project, name);
+      if (!row || row.turnClaim !== claim || row.turnStatus !== null) return;
+      if (row.runId === null && row.turnRunId === null && advance === undefined) {
+        this.#db.prepare(`DELETE FROM sessions WHERE project = ? AND name = ? AND turn_claim = ?`).run(who.project, name, claim);
+        return;
+      }
+      this.#db.prepare(`UPDATE sessions SET turn_status = ?, turn_pid = NULL, updated_at = ?,
+          adapter = COALESCE(?, adapter), provider_session_id = CASE WHEN ? THEN ? ELSE provider_session_id END,
+          run_id = COALESCE(?, run_id), task_id = COALESCE(?, task_id), attempt = COALESCE(?, attempt),
+          result_path = CASE WHEN ? THEN ? ELSE result_path END
+        WHERE project = ? AND name = ? AND turn_claim = ?`)
+        .run(status, Date.now(), advance?.adapter ?? null, advance ? 1 : 0, advance?.providerSessionId ?? null,
+          advance?.runId ?? null, advance?.taskId ?? null, advance?.attempt ?? null, advance ? 1 : 0,
+          advance?.resultPath ?? null, who.project, name, claim);
+    }).immediate();
+  }
+
+  /** Drop only the alias, and only between turns. Run outputs and provider history stay. */
+  forgetSession(who: Identity, name: string): boolean {
+    return this.#db.transaction(() => {
+      const removed = this.#db.prepare(`DELETE FROM sessions WHERE project = ? AND name = ? AND turn_status IS NOT NULL`)
+        .run(who.project, name).changes === 1;
+      if (removed) this.#log(who, "session", `${name} forgotten`);
+      return removed;
     }).immediate();
   }
 

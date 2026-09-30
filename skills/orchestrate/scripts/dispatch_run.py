@@ -1177,6 +1177,24 @@ def _record_provider_process(run_dir: Path, process: subprocess.Popen[Any]) -> N
         return
 
 
+def _retire_provider_process(run_dir: Path, process: subprocess.Popen[Any] | None) -> None:
+    """Drop this run's provider record once this owner has reaped the provider.
+
+    A reaped provider's pid can be recycled; a record left behind, especially one
+    without a start time, would let an unrelated process pass for it.
+    """
+    if process is None or process.returncode is None:
+        return
+    path = run_dir / "dispatch-provider.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+        token = os.environ.get("PROVENANT_RUN_TOKEN") or run_identity(run_dir)
+        if record.get("run_token") == token and record.get("provider_pid") == process.pid:
+            path.unlink()
+    except (OSError, ValueError):
+        return
+
+
 # Fabric grants a read root only for a directory inside a registered project.
 PROMPT_PATH_FIX = ("Pass prompt_file=<readable regular file inside the workspace or a registered Fabric project>; "
                    "register another project by running `fabric whoami` there, or dispatch from it.")
@@ -1593,6 +1611,11 @@ def prepare_resume(args):
     elif len(tasks)>1: raise ResumeError("resume_task_required","resume a batch task: pass task_id")
     previous=max(rows,key=lambda row:row["attempt"])
     if previous["state"]!="terminal": raise ValueError("resume requires a terminal attempt")
+    pinned=getattr(args,"resume_attempt",None)
+    if pinned is not None:
+        # A named session continues from its last clean attempt, not the latest one.
+        previous=next((row for row in rows if row["attempt"]==pinned),None)
+        if previous is None: raise ResumeError("resume_attempt_unknown",f"attempt {pinned} is not recorded in this run")
     route=previous.get("requested_route") or {}
     requested=previous["provenance"]["requested"]
     if (args.tool and args.tool!=requested["adapter"]) or (args.model and args.model!=previous["provenance"]["resolved_model"]):
@@ -1638,10 +1661,17 @@ def prepare_resume(args):
                 if isinstance(event,dict) and event.get("session_id")==args.resume_session:
                     observed_session=True
                     break
+    required=getattr(args,"require_session",None)
+    if required is not None and args.resume_session!=required:
+        raise ResumeError("continuation_unsupported",f"attempt {previous['attempt']} did not record provider session {required}; "
+                          "pass fresh: true to start a new session primed with its last result")
     if not args.resume_session or args.tool=="copilot" or (
         args.tool=="claude" and previous["status"] in INCOMPLETE_TURN_STATUSES
         and not observed_session
     ):
+        if required is not None:
+            raise ResumeError("continuation_unsupported",f"{args.tool} cannot continue provider session {required}; "
+                              "pass fresh: true to start a new session primed with its last result")
         if (args.tool=="claude" and previous["mode"]=="worktree_write"
             and previous["status"] in INCOMPLETE_TURN_STATUSES):
             raise ValueError("Claude session unavailable after incomplete writer turn; review worktree changes, then dispatch a new run")
@@ -2063,6 +2093,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     plan["warnings"] = active["warnings"]
                     adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
                         on_start=provider_started,on_progress=progress,cancelled=cancellation)
+                    _retire_provider_process(run_dir,process)
                     retry_plan = effort_retry_plan(plan, adapter_record)
                     if retry_plan is not None and not cancellation():
                         plan = retry_plan
@@ -2075,13 +2106,20 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                             stderr_path=stderr_path, on_start=provider_started,
                             on_progress=progress, cancelled=cancellation,
                         )
+                        _retire_provider_process(run_dir, process)
                 relaunch_skipped = False
                 args._phase_timings["provider"] = round((time.monotonic() - (provider_started_at[0] or spawn_started)) * 1000, 3)
                 if (args.resume and args.tool=="claude" and plan.get("resume_session")
                     and adapter_record.get("status")=="failed"
                     and re.search(r"no conversation found",adapter_record.get("evidence",{}).get("excerpt") or "",re.I)):
                     previous=args.resume_previous
-                    if (previous["mode"]=="worktree_write" and previous["status"] in INCOMPLETE_TURN_STATUSES):
+                    if getattr(args,"require_session",None) is not None:
+                        # A named session never silently becomes a new provider session.
+                        adapter_record["status"]="rejected"
+                        adapter_record["error"]="continuation_unsupported"
+                        adapter_record["fix"]="The provider no longer has this session; pass fresh: true to start a new session primed with its last result."
+                        adapter_record["evidence"]["signature"]="continuation_unsupported"
+                    elif (previous["mode"]=="worktree_write" and previous["status"] in INCOMPLETE_TURN_STATUSES):
                         adapter_record["status"]="rejected"
                         adapter_record["fix"]="Review worktree changes, then dispatch a new run."
                         adapter_record["evidence"]["signature"]="resume_session_missing"
@@ -2264,6 +2302,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         pass
                     if cancelled:
                         process_error = "cancelled"
+                    _retire_provider_process(run_dir, process)
         except InterruptedError:
             pass
         except (OSError, ValueError) as exc:
@@ -2632,6 +2671,8 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--batch-id", help=argparse.SUPPRESS)
     root.add_argument("--cwd",dest="provider_cwd",type=Path)
     root.add_argument("--resume", help="resume this run id; inherit route and controls")
+    root.add_argument("--resume-attempt", type=int, help="resume from this attempt instead of the latest")
+    root.add_argument("--require-session", help="continue exactly this provider session; never relaunch a new one")
     root.add_argument("--context-ceiling", type=float, help="auto-compaction threshold in tokens, clamped to 100k-1M")
     root.add_argument("--sandbox", choices=("read-only","workspace-write","full"))
     root.add_argument("--network", choices=("true","false"))

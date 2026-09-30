@@ -1,6 +1,6 @@
 /** Continue a provider session, or hand its result to a fresh session. */
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
 import { preflight, validatePrompt, rejected, timeoutSeconds, InputError, ownerPromptPath, savedReadRoots, type DispatchInput, type RouteInput } from "./execution-input.js";
@@ -13,6 +13,7 @@ import {
   pythonOwner,
   stagingPath,
   startOwner,
+  type LaunchObserver,
 } from "./execution.js";
 import type { Identity } from "./identity.js";
 import { fabricStatus, processMatches, readOwnerRecord, statusRows } from "./run-registry.js";
@@ -23,6 +24,25 @@ export const HANDOFF_BYTES = 8000;
 /** The effort a run sent; one the provider only reported was never sent, so it is not re-sent. */
 function sentEffort(previous: Record<string, any>): string | undefined {
   return previous.provenance?.effort_observed_source ? undefined : previous.provenance?.effort_applied || undefined;
+}
+
+/**
+ * One earlier attempt of a task row, standing in for the row: a named session
+ * continues from its last clean attempt, not from whatever attempt came last.
+ */
+function pinnedAttempt(row: Record<string, any>, attempt: number | undefined): Record<string, any> {
+  if (attempt === undefined) return row;
+  const pinned = (row.attempts ?? []).find((item: Record<string, any>) => Number(item.attempt) === attempt);
+  if (!pinned) throw new InputError("resume_attempt_unknown", `Attempt ${attempt} of run ${row.run_id} is no longer recorded.`);
+  const result = pinned.paths?.result;
+  return { ...row, ...pinned, run_dir: row.run_dir,
+    result_path: typeof result === "string" ? resolve(String(row.run_dir), result) : null };
+}
+
+/** Continue from one saved attempt and exactly its provider session, never a relaunch. */
+export interface PinnedContinuation extends LaunchObserver {
+  attempt?: number;
+  session?: string;
 }
 
 /** One task row: a run id with task_id for a batch, or a task's own id. */
@@ -40,6 +60,7 @@ export async function resumeConfiguredProvider(
   identity: Identity,
   signal: AbortSignal,
   env: NodeJS.ProcessEnv = process.env,
+  pin: PinnedContinuation = {},
 ): Promise<Record<string, unknown>> {
   let lock: string | undefined,
     launched = false;
@@ -57,10 +78,11 @@ export async function resumeConfiguredProvider(
       throw new InputError("resume_route_change", `Resume keeps the route, mode and controls; drop ${changed.join(", ")} or dispatch a new run.`);
     const target = await targetTask(identity.cwd, input.resume!, input.task_id, "resume");
     if (target.rejected) return target.rejected;
-    const previous = target.row!;
-    if (previous.state !== "terminal")
+    const latest = target.row!;
+    if (latest.state !== "terminal")
       throw new InputError("resume_not_ready", "Resume one terminal task; wait for its active attempt to finish.");
-    if(previous.attempts?.at(-1)?.state === "running") throw new InputError("resume_not_ready", "Dispatch a new run; the owner did not terminalise this attempt.");
+    if(latest.attempts?.at(-1)?.state === "running") throw new InputError("resume_not_ready", "Dispatch a new run; the owner did not terminalise this attempt.");
+    const previous = pinnedAttempt(latest, pin.attempt);
     const root = productRoot(env),
       runDir = String(previous.run_dir),
       taskId = String(previous.task_id);
@@ -119,12 +141,18 @@ export async function resumeConfiguredProvider(
     }], identity, env, signal);
     if (checked.status === "rejected") return { status: "rejected", error: checked.error, fix: checked.fix };
     if (input.prompt !== undefined) writeFileSync(path, input.prompt, { mode: 0o600, flag: "wx" });
-    const next = Math.max(0,...(previous.attempts ?? []).map((row:Record<string,any>)=>Number(row.attempt) || 0)) + 1;
+    const next = Math.max(0,...(latest.attempts ?? []).map((row:Record<string,any>)=>Number(row.attempt) || 0)) + 1;
     // A batch keeps its manifest ids and routes, so its other tasks stay listed.
     const taskIds: string[] = batch ? batch.task_ids : [taskId];
     const routes = batch
       ? taskIds.map((id, index) => (id === taskId ? (checked.routes as unknown[])?.[0] : batch.routes?.[index]))
       : checked.routes;
+    try {
+      pin.onLaunch?.({ runId: String(previous.run_id), taskId, attempt: next });
+    } catch (error) {
+      if (input.prompt !== undefined) rmSync(path, { force: true });
+      throw error;
+    }
     const started = startOwner(
       python,
       [
@@ -142,6 +170,8 @@ export async function resumeConfiguredProvider(
         ...(input.context_ceiling === undefined ? [] : ["--context-ceiling", String(input.context_ceiling)]),
         ...(input.allow_secrets === true ? ["--allow-secrets"] : []),
         ...(previous.mode === "worktree_write" ? [] : ["--cwd", executionIdentity.cwd]),
+        ...(pin.attempt === undefined ? [] : ["--resume-attempt", String(pin.attempt)]),
+        ...(pin.session === undefined ? [] : ["--require-session", pin.session]),
       ],
       identity,
       env,
@@ -245,15 +275,16 @@ export async function handoffDispatch(
   identity: Identity,
   signal: AbortSignal,
   env: NodeJS.ProcessEnv = process.env,
+  pin: PinnedContinuation = {},
 ): Promise<Record<string, unknown>> {
   try {
     validatePrompt(input.prompt, input.prompt_file);
     const { handoff, task_id, ...rest } = input;
     const target = await targetTask(identity.cwd, handoff!, task_id, "handoff");
     if (target.rejected) return target.rejected;
-    const previous = target.row!;
-    if (previous.state !== "terminal")
+    if (target.row!.state !== "terminal")
       throw new InputError("handoff_not_ready", "Wait for the prior task to finish, then hand off.");
+    const previous = pinnedAttempt(target.row!, pin.attempt);
     let prompt = input.prompt;
     if (prompt === undefined) {
       try {
@@ -280,7 +311,7 @@ export async function handoffDispatch(
       ...inheritedConfidential(rest, requested),
       prompt: brief + prompt,
       prompt_file: undefined,
-    }, identity, signal, env);
+    }, identity, signal, env, pin);
   } catch (error) {
     if (signal.aborted) throw error;
     return rejected(error);

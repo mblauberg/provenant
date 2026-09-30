@@ -488,7 +488,8 @@ export function pruneDispatchRuns(workspace: string, env: NodeJS.ProcessEnv): st
   return pruned;
 }
 
-function observedAlive(pid: number, startedAt: string | null): boolean {
+/** Liveness for exclusion: an unknown process identity counts as alive. Signalling uses processMatches. */
+export function observedAlive(pid: number, startedAt: string | null): boolean {
   if (!positiveInteger(pid)) return false;
   try {
     process.kill(pid, 0);
@@ -499,6 +500,104 @@ function observedAlive(pid: number, startedAt: string | null): boolean {
   const observed = processStartedAt(pid);
   // An unavailable process identity is not evidence of death. Signalling stays strict.
   return observed === null || startMatches(pid, startedAt, observed);
+}
+
+type ProcessIdentity = { pid: number; startedAt: string | null; token?: string };
+
+/**
+ * A run's owners: its owner record and the identity its launcher stamped into
+ * run status after the spawn. The stamp survives a record that could not be
+ * written; the two differ only when a record could not be replaced, so both count.
+ */
+function runOwners(record: OwnerRecord | undefined, status: Record<string, unknown> | undefined): ProcessIdentity[] {
+  const owners: ProcessIdentity[] = record
+    ? [{ pid: record.owner_pid, startedAt: record.owner_started_at, token: record.run_token }] : [];
+  if (positiveInteger(status?.owner_pid)) {
+    const stamped = { pid: status.owner_pid, startedAt: typeof status.owner_started_at === "string" ? status.owner_started_at : null,
+      ...(typeof status.run_token === "string" ? { token: status.run_token } : {}) };
+    if (!owners.some((owner) => owner.pid === stamped.pid && owner.token === stamped.token)) owners.push(stamped);
+  }
+  return owners;
+}
+
+/**
+ * Whether any owner of a run, or a provider one of them recorded, may still be
+ * acting for it. `timedProviders` ignores a provider record with no start time,
+ * whose pid alone cannot tell the provider from a process that reused it.
+ */
+function liveness(runDir: string, owners: ProcessIdentity[], timedProviders = false): { owner: boolean; provider: boolean } {
+  const owner = owners.some((identity) => observedAlive(identity.pid, identity.startedAt));
+  const provider = owners.some((identity) => {
+    const record = identity.token === undefined ? null : readProviderRecord(runDir, identity.token);
+    return record !== null && !(timedProviders && record.provider_started_at === null) &&
+      observedAlive(record.provider_pid, record.provider_started_at);
+  });
+  return { owner, provider };
+}
+
+/**
+ * Whether an attempt's own receipt reads terminal, or undefined with no receipt.
+ * The canonical `tasks` receipt decides when present; only without it does the
+ * owner's legacy `dispatch/tasks` envelope, written once the attempt ends and
+ * carrying no state field, count as terminal evidence.
+ */
+function receiptTerminal(runDir: string, taskId: string, name: string): boolean | undefined {
+  const canonical = readJson(join(runDir, "tasks", taskId, name, "attempt.json"));
+  if (canonical !== undefined) return canonical.state === "terminal";
+  const legacy = readJson(join(runDir, "dispatch", "tasks", taskId, name, "attempt.json"));
+  if (legacy === undefined) return undefined;
+  return legacy.record_type === "dispatch-attempt" && typeof legacy.finished_at === "string";
+}
+
+/**
+ * Whether an attempt's own evidence says no provider of its can still run: its
+ * receipt reads terminal, or it never launched. An unlaunched attempt has no
+ * directory, its run status announced it with no owner stamped, and every
+ * earlier attempt's receipt reads terminal. A closure status synthesised for a
+ * dead owner is neither, so it is no evidence a provider ended.
+ */
+function attemptSettled(runDir: string, taskId: string, attempt: number): boolean {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(taskId) || !Number.isInteger(attempt) || attempt < 1) return false;
+  const name = `attempt-${String(attempt).padStart(3, "0")}`;
+  const trees = ["tasks", "dispatch/tasks"].map((tree) => join(runDir, tree, taskId));
+  const own = receiptTerminal(runDir, taskId, name);
+  if (own !== undefined) return own;
+  if (trees.some((tree) => existsSync(join(tree, name)))) return false;
+  const status = readJson(join(runDir, "dispatch-status.json"));
+  if (Number(status?.next_attempt) !== attempt || status?.owner_pid !== undefined) return false;
+  const earlier = new Set<string>();
+  for (const tree of trees) {
+    try {
+      for (const entry of readdirSync(tree)) if (/^attempt-\d+$/u.test(entry)) earlier.add(entry);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
+    }
+  }
+  return [...earlier].every((entry) => receiptTerminal(runDir, taskId, entry) === true);
+}
+
+/**
+ * Whether a run whose task reads terminal may still be acting: its owner
+ * (between fallback attempts) or a provider. A provider record with no start
+ * time, whose pid alone cannot tell the provider from a process that reused
+ * it, is ignored only once the task's attempt has settled by its own evidence.
+ */
+export function runProcessAlive(runDir: string, taskId: string, attempt: number): boolean {
+  const live = liveness(runDir, runOwners(readOwnerRecord(runDir), readJson(join(runDir, "dispatch-status.json"))),
+    attemptSettled(runDir, taskId, attempt));
+  return live.owner || live.provider;
+}
+
+/**
+ * A launcher that announced an attempt and died before starting any owner: nothing will run it.
+ * The launcher stamps its owner into status before writing an owner record, so with no stamp
+ * any owner record is an earlier launch's, and it counts only while that owner still lives.
+ */
+function launcherAbandoned(status: Record<string, unknown> | undefined, owners: ProcessIdentity[]): boolean {
+  return status?.owner_pid === undefined && !owners.some((owner) => observedAlive(owner.pid, owner.startedAt)) &&
+    status?.status === "running" && status.finished_at === undefined &&
+    positiveInteger(status.host_pid) &&
+    !observedAlive(status.host_pid, typeof status.host_started_at === "string" ? status.host_started_at : null);
 }
 
 /** Status observes retained files and process identities; it never repairs or reaps runs. */
@@ -566,10 +665,8 @@ async function legacyStatus(
         : undefined;
     const rows = (id === undefined ? matches : matches.slice(0, 1)).map(
       ({ runDir, status: initialStatus, owner, started }) => {
-        const provider = owner === undefined ? null : readProviderRecord(runDir, owner.run_token);
-        const alive =
-          (owner !== undefined && observedAlive(owner.owner_pid, owner.owner_started_at)) ||
-          (provider !== null && observedAlive(provider.provider_pid, provider.provider_started_at));
+        const live = liveness(runDir, runOwners(owner, initialStatus));
+        const alive = live.owner || live.provider;
         // Once the owner is dead its attempt files are final. Read them after the probe.
         const status = readJson(join(runDir, "dispatch-status.json")) ?? initialStatus;
         const safePath = (value: unknown): string | undefined => {
@@ -774,15 +871,14 @@ function v1Rows(runDir: string): Record<string, any>[] {
   if (grouped.size === 0) return [];
   const metadata = readJson(join(runDir, "dispatch-status.json"));
   const receipt = readJson(join(runDir, "RUN_RECEIPT.json"));
-  const owner = readOwnerRecord(runDir);
-  const provider = owner && readProviderRecord(runDir, owner.run_token);
-  const dead =
-    owner !== undefined &&
-    !observedAlive(owner.owner_pid, owner.owner_started_at) &&
-    !(provider && observedAlive(provider.provider_pid, provider.provider_started_at));
+  const owners = runOwners(readOwnerRecord(runDir), metadata);
+  const live = liveness(runDir, owners);
+  const ownerAlive = live.owner;
+  const dead = owners.length > 0 && !live.owner && !live.provider;
   const closed = metadata?.finished_at !== undefined && metadata?.status !== "running";
-  const ownerAlive = owner !== undefined && observedAlive(owner.owner_pid, owner.owner_started_at);
   const interrupted = !ownerAlive && (receipt?.status === "interrupted" || dead || closed);
+  // Only the attempt the dead launcher announced is closed; any attempt an owner wrote stands.
+  const abandoned = launcherAbandoned(metadata, owners);
   const closureStatus = receipt?.status === "cancelled" || metadata?.status === "cancelled" ? "cancelled" : "interrupted";
   const summary =
     typeof metadata?.batch_id === "string" && /^[A-Za-z0-9._-]+$/u.test(metadata.batch_id)
@@ -804,8 +900,10 @@ function v1Rows(runDir: string): Record<string, any>[] {
           }
         : row;
     if (pending) {
-      const status = closed && metadata?.status === "rejected" ? "rejected" : interrupted ? closureStatus : null;
-      const fix = metadata?.fix ?? metadata?.message ?? "Dispatch a new run; the owner exited.";
+      const ended = interrupted || abandoned;
+      const status = closed && metadata?.status === "rejected" ? "rejected" : ended ? closureStatus : null;
+      const fix = metadata?.fix ?? metadata?.message ??
+        (abandoned ? "The launcher exited before starting the run owner; retry." : "Dispatch a new run; the owner exited.");
       return {
         schema: "fabric.status.v1",
         id: row.run_id,
@@ -815,11 +913,11 @@ function v1Rows(runDir: string): Record<string, any>[] {
         attempt: metadata!.next_attempt,
         attempts: attempts.map((attempt) => ({ ...attempt, status: canonicalSuccessStatus(attempt.status) })),
         attempt_count: attempts.length,
-        state: interrupted ? "terminal" : "queued",
+        state: ended ? "terminal" : "queued",
         status,
-        ...(interrupted ? { fix, message: metadata?.message } : {}),
+        ...(ended ? { fix, message: metadata?.message, ...(status === "rejected" && typeof metadata?.error === "string" ? { error: metadata.error } : {}) } : {}),
         started_at: metadata!.started_at,
-        digest: interrupted ? `${status} ${row.run_id} · fix: ${fix}` : `running ${row.run_id} attempt ${metadata!.next_attempt} · fabric_status{ids:["${row.run_id}"],wait_seconds:55}`,
+        digest: ended ? `${status} ${row.run_id} · fix: ${fix}` : `running ${row.run_id} attempt ${metadata!.next_attempt} · fabric_status{ids:["${row.run_id}"],wait_seconds:55}`,
         paths: {},
       };
     }

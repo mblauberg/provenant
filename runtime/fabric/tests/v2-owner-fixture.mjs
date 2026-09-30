@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs";
 import { join, isAbsolute } from "node:path";
 const args = process.argv.slice(2),
@@ -104,11 +104,30 @@ if (prompt === "reject-before-attempt") {
 }
 if (prompt === "crash-before-attempt") process.exit(2);
 if (prompt === "pause-before-attempt") await new Promise((r) => setTimeout(r, 1000));
-const path = join(dir, "tasks", task, `attempt-${String(attempt).padStart(3, "0")}`);
-mkdirSync(path, { recursive: true });
-const priorApplied = attempt > 1
-  ? JSON.parse(readFileSync(join(dir, "tasks", task, `attempt-${String(attempt - 1).padStart(3, "0")}`, "attempt.json"), "utf8")).applied
+const attemptDir = (number) => join(dir, "tasks", task, `attempt-${String(number).padStart(3, "0")}`);
+// A named session resumes a pinned attempt; otherwise the latest one.
+const prior = attempt > 1
+  ? JSON.parse(readFileSync(join(attemptDir(Number(value("--resume-attempt") ?? attempt - 1)), "attempt.json"), "utf8"))
   : {};
+if (value("--require-session") !== undefined && prior.session_id !== value("--require-session")) {
+  console.log(JSON.stringify({schema_version:1,status:"rejected",error:"continuation_unsupported",
+    message:"no provider session; pass fresh: true"})); process.exit(2);
+}
+if (prompt === "fallback-slow" || prompt === "fallback-gap") {
+  // A retryable first attempt, then the owner's fallback attempt in the same invocation.
+  mkdirSync(attemptDir(attempt), { recursive: true });
+  writeFileSync(join(attemptDir(attempt), "attempt.json"), JSON.stringify({
+    schema: "fabric.attempt.v1", run_id: process.env.PROVENANT_RUN_ID, task_id: task, attempt, state: "terminal",
+    status: "failed", retryable: true, session_id: null, provenance: { transport: "codex" },
+    started_at: new Date().toISOString(), ended_at: new Date().toISOString(), paths: {},
+  }));
+  attempt += 1;
+  // The owner is alive between attempts, with every attempt so far terminal.
+  while (prompt === "fallback-gap" && !existsSync(join(dir, "release"))) await new Promise((r) => setTimeout(r, 20));
+}
+const path = attemptDir(attempt);
+mkdirSync(path, { recursive: true });
+const priorApplied = prior.applied ?? {};
 const run_id = process.env.PROVENANT_RUN_ID;
 const row = {
   schema: "fabric.attempt.v1",
@@ -118,6 +137,9 @@ const row = {
   state: "running",
   status: null,
   cwd: value("--cwd") ?? process.cwd(),
+  // A resume keeps the provider session; "lose-session" models a turn that recorded none.
+  session_id: prompt === "lose-session" ? null : prompt === "fail-new-session" ? `other-${attempt}`
+    : prior.session_id ?? `fixture-${process.env.PROVENANT_RUN_ID}-${task}`,
   mode: args.includes("--access-mode") ? value("--access-mode") : "read_only",
   worktree: args.includes("--worktree") ? value("--worktree") : null,
   started_at: new Date().toISOString(),
@@ -129,7 +151,8 @@ const row = {
     add_dirs: [],
     capabilities: value("--capabilities") ? JSON.parse(value("--capabilities")) : priorApplied.capabilities ?? [],
   },
-  provenance: { requested: { adapter: value("--adapter"), model: value("--model"), alias: value("--alias"), effort: value("--effort") }, line: "Route: codex/fixture@high (openai; observed)" },
+  provenance: { requested: { adapter: value("--adapter"), model: value("--model"), alias: value("--alias"), effort: value("--effort") }, transport: value("--adapter") ?? prior.provenance?.transport ?? "codex", line: "Route: codex/fixture@high (openai; observed)",
+    ...(prompt.startsWith("fallback-") ? { fallback_from: { attempt: attempt - 1, status: "failed" } } : {}) },
   paths: {
     result: join(path, "result.md"),
     stderr: join(path, "stderr.log"),
@@ -144,28 +167,62 @@ const write = () => writeFileSync(join(path, "attempt.json"), JSON.stringify(row
 write();
 writeFileSync(join(path, "stderr.log"), "fixture stderr");
 writeFileSync(join(path, "events.jsonl"), "{}\n");
+if (prompt === "orphan-provider") {
+  // The owner records a provider in its own process group, then dies before the attempt ends.
+  const provider = spawn(process.execPath, ["-e", `
+    const { appendFileSync, existsSync } = require("node:fs");
+    const log = process.env.PROVENANT_FIXTURE_PID_LOG;
+    if (log) appendFileSync(log, JSON.stringify({ pid: process.pid, event: "start" }) + "\\n");
+    const end = () => { if (log) appendFileSync(log, JSON.stringify({ pid: process.pid, event: "exit" }) + "\\n"); process.exit(0); };
+    setTimeout(end, 20000);
+    setInterval(() => { if (existsSync(${JSON.stringify(join(dir, "release"))})) end(); }, 20);
+  `], { detached: true, stdio: "ignore" });
+  provider.unref();
+  writeFileSync(join(dir, "dispatch-provider.json"), JSON.stringify({
+    run_token: process.env.PROVENANT_RUN_TOKEN, provider_pid: provider.pid, provider_pgid: provider.pid, provider_started_at: null,
+  }));
+  process.exit(0);
+}
+if (prompt === "admission-slow") {
+  // The owner waits for memory admission, then runs once released.
+  Object.assign(row, { state: "queued", queue_reason: "memory", admission: { owner_pid: process.pid, owner_start_epoch: null } });
+  write();
+  while (!existsSync(join(dir, "release"))) await new Promise((r) => setTimeout(r, 20));
+  delete row.queue_reason;
+  delete row.admission;
+  row.state = "running";
+  write();
+}
 if (prompt === "stubborn") {
   // Ignores SIGTERM and never honours the cancel file: only SIGKILL ends it,
   // before any terminal row is written.
   process.on("SIGTERM", () => {});
   while (true) await new Promise((r) => setTimeout(r, 50));
 }
-if (prompt === "slow") {
+if (prompt === "slow" || prompt === "fallback-slow") {
   while (true) {
     try {
       readFileSync(join(dir, "cancel"));
       row.status = "cancelled";
       break;
     } catch {}
+    if (prompt === "fallback-slow" && existsSync(join(dir, "release"))) break;
     await new Promise((r) => setTimeout(r, 20));
   }
 }
+if (prompt === "no-conversation" && value("--require-session") !== undefined) {
+  row.status = "rejected";
+  row.error = "continuation_unsupported";
+  row.fix = "The provider no longer has this session; pass fresh: true.";
+}
 row.state = "terminal";
-row.status ??= prompt === "question" ? "input_required" : "ok";
+row.status ??= prompt === "question" ? "input_required"
+  : ["fail", "lose-session", "fail-new-session", "mark-fail"].includes(prompt) ? "failed" : "ok";
 row.ended_at = new Date().toISOString();
 row.question = row.status === "input_required" ? "Which branch?" : null;
 row.digest = `${row.status} ${run_id} codex/fixture@high · result ${row.paths.result}\n  ${row.provenance.line}`;
-writeFileSync(join(path, "result.md"), "x".repeat(25000));
+// "mark" prompts end their result with its attempt, so a handoff shows which result it carried.
+writeFileSync(join(path, "result.md"), "x".repeat(25000) + (prompt.startsWith("mark") ? `\nresult of ${run_id}/${task}#${attempt}\n` : ""));
 write();
 writeFileSync(join(dir, "RUN_RECEIPT.json"), JSON.stringify({ status: row.status, attempts: [row] }));
 console.log(JSON.stringify(row));

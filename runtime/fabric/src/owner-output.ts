@@ -241,6 +241,7 @@ export function compactDispatch(started: OwnerFiles, completion: OwnerCompletion
     status: canonicalSuccessStatus(record.status),
     ...(record.message === undefined ? {} : { message: record.message }),
     ...(record.fix === undefined ? {} : { fix: record.fix }),
+    ...(typeof record.error === "string" && record.error !== record.status ? { error: record.error } : {}),
     outcome: record.outcome,
     task_id: record.task_id,
     attempt_id: record.attempt_id,

@@ -8,6 +8,7 @@ import { statusRows, fabricOutput, resultTail } from "./run-registry.js";
 import { reply, digest, serverBuild, mailboxView, adapterView, runView, fullView, lanesDigest, cancelDigest } from "./surface.js";
 import { catalogueSnapshot, liveModels } from "./catalogue.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
+import { reconcileSession, sessionDispatch, sessionName, sessionView } from "./sessions.js";
 import {
   cancelConfiguredRun,
   dispatchConfiguredBatch,
@@ -17,7 +18,7 @@ import {
 } from "./execution.js";
 import { isSQLiteContention, Store, type Message } from "./store.js";
 import { readEvents, readRuns } from "./run-reader.js";
-import { canonicalMode, editDistance, ACCESS_MODES } from "./execution-input.js";
+import { canonicalMode, editDistance, rejected, ACCESS_MODES } from "./execution-input.js";
 
 // Leave margin under the MCP SDK's 60-second default request timeout.
 const MAX_WAIT_SECONDS = MAX_EXECUTION_WAIT_SECONDS;
@@ -413,7 +414,7 @@ function acknowledgeRuns(result: { runs?: Record<string, any>[] }) {
 }
 register(
   "fabric_dispatch",
-  "Run one prompt or tasks; resume or hand off a run. wait_seconds above 55 clamps to 55.",
+  "Run one prompt or tasks; resume or hand off a run; session names a resumable conversation. wait_seconds above 55 clamps to 55.",
   {
     ...task,
     task_id: str,
@@ -421,6 +422,8 @@ register(
     concurrency: batch.concurrency,
     resume: str,
     handoff: str,
+    session: str,
+    fresh: z.boolean().optional(),
     context_ceiling: z.number().optional(),
     wait_seconds: wait,
     detail,
@@ -430,28 +433,44 @@ register(
     if (waitResult.error) return waitResult.error;
     const numericError = validateDispatchNumbers(input);
     if (numericError) return numericError;
-    if ([input.tasks, input.resume, input.handoff].filter(Boolean).length > 1 || (input.tasks && (input.prompt || input.prompt_file)))
-      return { status: "rejected", error: "dispatch_conflict", fix: "Pass one prompt, tasks, resume or handoff." };
+    if ([input.tasks, input.resume, input.handoff, input.session].filter(Boolean).length > 1 || (input.tasks && (input.prompt || input.prompt_file)))
+      return { status: "rejected", error: "dispatch_conflict", fix: "Pass one prompt, tasks, resume, handoff or session." };
+    if (input.fresh !== undefined && !input.session)
+      return { status: "rejected", error: "dispatch_conflict", fix: "Pass fresh only with session." };
     input.wait_seconds = waitResult.value;
     if (input.concurrency !== undefined && input.concurrency > 8) {
       const requestedConcurrency = input.concurrency;
       input.concurrency = 8;
       waitResult.warnings.push(`! concurrency ${requestedConcurrency} clamped to 8`);
     }
-    const result = input.resume
+    const result = input.session
+      ? await sessionDispatch(input, executionIdentity(), readyStore(), signal)
+      : input.resume
       ? await resumeConfiguredProvider(input, executionIdentity(), signal)
       : input.handoff
         ? await handoffDispatch(input, executionIdentity(), signal)
         : input.tasks
         ? await dispatchConfiguredBatch({ ...input, wait_seconds: input.wait_seconds ?? 0 }, executionIdentity(), signal)
         : await dispatchConfiguredProvider(input, executionIdentity(), signal);
-    if (!result.id) return withWarnings(result, waitResult.warnings);
-    const observed = await statusRows(who.project, [String(result.id)], 0, "all", signal, input.detail);
-    if (input.resume && result.task_id) observed.runs = observed.runs?.filter((row) => row.task_id === result.task_id);
+    const runId = result.id ?? (input.session ? result.run_id : undefined);
+    if (!runId) return withWarnings(result, waitResult.warnings);
+    const observed = await statusRows(who.project, [String(runId)], 0, "all", signal, input.detail);
+    if ((input.resume || input.session) && result.task_id) observed.runs = observed.runs?.filter((row) => row.task_id === result.task_id);
     acknowledgeRuns(observed);
     if (observed.runs?.length === 1) {
       const row = observed.runs[0]!;
-      return runView(withWarnings({ ...result, ...row, paths: { ...(result.paths as object), ...row.paths } }, waitResult.warnings), input.detail);
+      const value = runView(withWarnings({ ...result, ...row, paths: { ...(result.paths as object), ...row.paths } }, waitResult.warnings), input.detail);
+      if (!input.session) return value;
+      // Settle a turn that already finished, so the reply shows where the name now points.
+      const session = await reconcileSession(readyStore(), who, input.session);
+      const unsupported = (result.error === "continuation_unsupported" ? `\n  fix: ${String(result.fix)}` : "") +
+        (result.session_error ? `\n  ! ${String(result.session_error)}` : "");
+      const line = `  session ${input.session} ${result.session_turn}${session?.turnStatus === null ? " active" : ""}`;
+      return { ...value, session: input.session, session_turn: result.session_turn,
+        ...(result.error === "continuation_unsupported" ? { error: result.error, fix: result.fix } : {}),
+        ...(result.session_error ? { session_error: result.session_error } : {}),
+        session_digest: `${unsupported}\n${line}`,
+        ...(typeof value.digest === "string" ? { digest: `${value.digest}${unsupported}\n${line}` } : {}) };
     }
     const value = observed.runs ? {
       ...observed,
@@ -541,6 +560,31 @@ register("fabric_landing_lease", "Acquire, renew, verify or release the reposito
   readyStore().releaseLanding(who, session_id, generation);
   return { released: generation };
 });
+register(
+  "fabric_session",
+  "Inspect, list or forget named sessions; fabric_dispatch with session starts or resumes one.",
+  { action: z.enum(["inspect", "list", "forget"]), name: str },
+  async ({ action, name }) => {
+    const store = readyStore();
+    if (action === "list") {
+      const rows = [];
+      for (const row of store.sessions(who.project)) {
+        const current = await reconcileSession(store, who, row.name);
+        if (current) rows.push(sessionView(current));
+      }
+      return { sessions: rows, digest: rows.map((row) => row.digest).join("\n") || "no sessions" };
+    }
+    let key: string;
+    try { key = sessionName(name); } catch (error) { return rejected(error); }
+    const row = await reconcileSession(store, who, key);
+    if (!row) return { status: "rejected", error: "session_unknown", fix: `Start ${key} with fabric_dispatch{session, prompt}.` };
+    if (action === "inspect") return sessionView(row);
+    if (row.turnStatus === null || !store.forgetSession(who, key))
+      return { status: "rejected", error: "session_busy", session: key, active_run_id: row.turnRunId,
+        fix: `Wait for run ${row.turnRunId ?? "launch"} to finish, or cancel it, then forget.` };
+    return { status: "ok", forgotten: key, digest: `forgot session ${key}; run ${row.runId ?? row.turnRunId} and provider history kept` };
+  },
+);
 register("fabric_cancel", "Stop a run and its provider group, or one task of a batch by its task id.", { id: z.string(), reason: str, detail }, async ({ id, reason, detail }) => {
   const result = await cancelConfiguredRun(id, who, reason);
   acknowledgeRuns(result);
