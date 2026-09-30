@@ -244,7 +244,7 @@ inside `sandbox-exec`. PostgreSQL socket paths under the lane's `TMPDIR` exceed
 macOS's 103-byte socket-path limit; use TCP or a shorter socket directory.
 Protected-path dispatches to training routes still refuse without OS read
 confinement.
-The receipt records sorted `applied.capabilities` and `applied.confinement` as `sandbox-exec`, `provider-native` or `none`;
+The receipt records sorted `applied.capabilities`, the read-denied `applied.protected_paths` (empty on a non-training route) and `applied.confinement` as `sandbox-exec`, `provider-native` or `none`;
 `applied.write_boundary` records the effective writable paths, including
 declared `add_dirs` for confined writers, or the native sandbox and, for
 Codex, its permissions `profile` name and a writer's `filesystem` table;
@@ -252,7 +252,26 @@ Codex, its permissions `profile` name and a writer's `filesystem` table;
 Read-only macOS launches can read `~/.gitconfig` and
 `$XDG_CONFIG_HOME/git/config` (default `~/.config/git/config`) so `git status`
 works. Other home-directory reads remain denied apart from provider state and
-sign-in files listed by the adapter profile.
+sign-in files listed by the adapter profile: the login keychain for agy and for
+Claude lanes on OAuth sign-in (bare and endpoint routes, which use a key, do not
+get it); and for Kiro, `~/Library/Application Support/kiro-cli` and its
+`~/.local/bin` launcher links, but not its cross-project `history`. Kiro can
+write there only `data.sqlite3` and `.refresh.lock`, in place, and SQLite's
+`-wal`, `-shm` and `-journal` sidecars, which it needs to read its sign-in. It
+cannot create links there, and the shell hooks and binaries beside them stay
+read-only. An expired Kiro sign-in has not been seen to renew inside the
+sandbox: the lane waits at a browser sign-in until it times out. Run
+`kiro-cli whoami` outside the sandbox to renew it. A confined Kiro dispatch refuses until kiro-cli has unpacked its
+engine outside the sandbox. Writable provider state is granted by its own
+name, and a launch fails if any such path is a symbolic link, so a link a lane
+planted cannot move the next attempt's grant to the link's target. The keychain file grant, together with the profile's unrestricted
+`mach-lookup`, lets an OAuth Claude lane query the whole login keychain through
+the security service; SBPL has no narrower filter, and read-only Claude lanes
+have no shell. `~/.claude/projects` and `~/.codex/sessions` stay unreadable
+even where provider state covers them, except a Claude lane's own session
+transcript (`<session>.jsonl` and `<session>/`), which it needs to resume. Claude lanes get `CLAUDE_CODE_TMPDIR` in
+the attempt's `tmp`, which is private to the user (mode 0700), so they never
+touch `/tmp/claude-<uid>`.
 Projects declare protected paths in `.agents/fabric-policy.json`, relative to
 the directory holding `.agents/`. Fabric checks the workspace root and the Git
 toplevels of the workspace, cwd and worktree; for a non-Git workspace, it also
@@ -329,13 +348,27 @@ python3 runtime/fabric/live-sandbox-smoke.py --execute
 ```
 
 It dispatches one short `read_only` and one `worktree_write` task for each
-installed writer adapter among Codex, Claude, Kiro and OpenCode. Each task
-probes a declared protected file and a write target outside its boundary. The
-command exits nonzero if a probe fails and prints JSON containing each adapter,
-mode, resolved `Route:` line, confinement, warnings and result. It creates its
-Git fixtures and run artifacts in a temporary directory, which is removed when
-the command exits. Do not add this command to the default test run. Record the
-first run's JSON results in the pull request.
+writer adapter among Codex, Claude, agy, Kiro and OpenCode, sequentially and
+without fallback; `--adapter NAME` (repeatable) narrows the set and `--timeout`
+sets the per-task limit (default 300 seconds). Each task tries to read a
+declared protected file inside its cwd, write outside its boundary, and write
+inside its cwd. Every lane must fail the outside write; a writer must succeed
+inside its worktree and a read-only lane must fail there. The protected read
+must fail only where the receipt's `applied.protected_paths` covers it, which
+means a training or unresolved route; a non-training route reports
+`protected_read_expected: true`. Kiro runs its own `auto` model, because the
+catalogue has no Kiro alias, and OpenCode runs a free training route, so both
+exercise the protected-read denial; agy runs `gemini-3.8-flash` by name. Each
+row records the probe `method`: read-only Claude, OpenCode and Kiro lanes have
+no permitted shell or write tool, so their writes fail at the tool layer rather
+than by an OS denial. A missing executable, or a provider reporting a usage, rate, sign-in
+or model limit, is reported as `skipped` with its reason, unless a forbidden
+file already exists on disk, which fails the row; the command exits nonzero only
+when a row fails. It prints JSON
+containing each adapter, mode, resolved `Route:` line, confinement, warnings
+and probe result, and creates its Git fixtures and run artifacts in a temporary
+directory that is removed when the command exits. Do not add this command to
+the default test run.
 An invalid floor records a failed attempt with a fix. The parent keeps a
 watchdog for child owners and excludes their published queued time.
 
