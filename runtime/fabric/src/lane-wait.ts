@@ -57,7 +57,9 @@ export async function waitForLanes(deps: LaneWaitDependencies): Promise<number> 
         return `${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${row.result_path ?? "-"}\n`;
       }).join(""));
       if (expired && pending.length) await write(timeout());
-      for (;;) {
+      for (let first = true; ; first = false) {
+        // Every retry, including the one after a capped sleep, checks the clock before writing.
+        if (!first && now() >= deadline) return 124;
         try {
           store.markLanesSeen(who, unseen.map((index) => attempts[index]!));
           return expired && pending.length ? 124 : 0;

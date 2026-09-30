@@ -179,3 +179,26 @@ it("--timeout 0 polls once", async () => {
   expect(await waiter.code).toBe(124);
   expect(waiter.output.join("")).toBe("timeout after 0s; still running: a\n");
 });
+
+it("does not write the cursor at the deadline when contention clears exactly then", async () => {
+  const opened = store();
+  let clock = 0, marks = 0;
+  const flaky = {
+    unseenLanes: (...args: Parameters<Store["unseenLanes"]>) => opened.unseenLanes(...args),
+    markLanesSeen: (...args: Parameters<Store["markLanesSeen"]>) => {
+      if (marks++ === 0) throw busy();
+      return opened.markLanesSeen(...args);
+    },
+  };
+  const code = await waitForLanes({
+    who, store: flaky, timeoutSeconds: 1,
+    read: async () => ({ schema: "fabric.runs.v1", status: "ok", runs: [lane("edge")] }),
+    write: async () => undefined, fail: (text) => { throw new Error(text); },
+    sleep: async (ms) => { clock += ms; }, now: () => clock,
+  });
+  expect(code).toBe(124);
+  expect(marks).toBe(1);
+  const again = run(opened, [[lane("edge")]]);
+  expect(await again.code).toBe(0);
+  expect(again.output.join("")).toContain("edge");
+});
