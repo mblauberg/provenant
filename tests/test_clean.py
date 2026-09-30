@@ -1105,3 +1105,25 @@ def test_remove_tree_refuses_ancestor_on_another_device(tmp_path, monkeypatch):
     monkeypatch.setattr(storage.os, "fstat", fake)
     assert storage.remove_tree(tmp_path, target)
     assert (target / "f").is_file()
+
+
+def test_open_dir_closes_fd_when_fstat_fails(tmp_path, monkeypatch):
+    storage = cleaner().attempt_storage
+    (tmp_path / "d").mkdir()
+    parent = os.open(tmp_path, os.O_RDONLY)
+    opened = []
+    real_open = storage.os.open
+    monkeypatch.setattr(storage.os, "open", lambda *a, **k: opened.append(real_open(*a, **k)) or opened[-1])
+    monkeypatch.setattr(storage.os, "fstat", lambda fd: (_ for _ in ()).throw(OSError("boom")))
+    try:
+        storage._open_dir("d", parent, 0)
+    except OSError:
+        pass
+    monkeypatch.undo()
+    try:
+        os.fstat(opened[0])
+        leaked = True
+    except OSError:
+        leaked = False
+    os.close(parent)
+    assert not leaked

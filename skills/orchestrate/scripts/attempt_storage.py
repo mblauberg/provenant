@@ -40,10 +40,13 @@ def _open_dir(name: str, parent_fd: int, dev: int) -> int:
     """Open a real directory on ``dev`` and prove it is the one just examined."""
     before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
     fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
-    after = os.fstat(fd)
-    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino) or after.st_dev != dev:
+    try:
+        after = os.fstat(fd)
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino) or after.st_dev != dev:
+            raise OSError(f"directory changed or crosses a device: {name}")
+    except BaseException:
         os.close(fd)
-        raise OSError(f"directory changed or crosses a device: {name}")
+        raise
     return fd
 
 
