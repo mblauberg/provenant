@@ -4515,8 +4515,9 @@ def fake_toolchain_home(tmp_path, monkeypatch):
     (home / ".local/share/opencode").mkdir(parents=True)
     (home / ".local/share/opencode/auth.json").write_text("secret\n")
     (home / "notes.txt").write_text("private\n")
-    search_path = os.pathsep.join([str(links), str(tools["node"].parent), str(tools["uv"].parent),
-                                   "/usr/bin", "/bin"])
+    # Hermetic: a host toolchain on /usr/bin (Linux runners ship python3 with /usr/lib/python3.*)
+    # would add its own grants. A test that runs a shell appends the system directories itself.
+    search_path = os.pathsep.join([str(links), str(tools["node"].parent), str(tools["uv"].parent)])
     return home, tools, search_path
 
 
@@ -4550,7 +4551,7 @@ def test_toolchain_reads_follow_a_workspace_venv_to_its_base_interpreter(tmp_pat
     (repo / ".venv/pyvenv.cfg").write_text(f"home = {tools['python3'].parent}\n")
     (repo / ".venv/bin/python").symlink_to(tools["python3"])
     plan = {"adapter": "claude", "mode": "read_only", "cwd": str(cwd), "applied": {"add_dirs": []}}
-    files, project_files, directories = supervisor()._toolchain_reads(plan, repo, "/usr/bin:/bin")
+    files, project_files, directories = supervisor()._toolchain_reads(plan, repo, "/nonexistent")
     assert repo.resolve() / ".venv" in directories
     assert home / ".pyenv/versions/3.13.0/lib" in directories
     assert tools["python3"] in files
@@ -4562,7 +4563,8 @@ def test_confined_read_only_lane_runs_home_toolchains_but_not_credentials(tmp_pa
     mod = supervisor()
     if not mod._sandbox_exec_path():
         pytest.skip("sandbox-exec is unavailable or disabled")
-    home, tools, search_path = fake_toolchain_home(tmp_path, monkeypatch)
+    home, tools, toolchain_path = fake_toolchain_home(tmp_path, monkeypatch)
+    search_path = os.pathsep.join([toolchain_path, "/usr/bin", "/bin"])
     repo = tmp_path / "repo"
     repo.mkdir()
     attempt = tmp_path / "attempt"
