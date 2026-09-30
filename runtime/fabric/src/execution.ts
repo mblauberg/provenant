@@ -38,7 +38,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { catalogueSnapshot, type CatalogueSnapshot } from "./catalogue.js";
-import { expandPools, nativeFirst, usesPool, POOL_FIELDS } from "./pools.js";
+import { expandPools, nativeFirst, usesPool, withoutEmptySelectors, POOL_FIELDS } from "./pools.js";
 import { runRoot, databasePath, withoutGitRedirects, type Identity } from "./identity.js";
 import {
   shortRunId,
@@ -811,9 +811,9 @@ async function dispatchConfiguredBatchUnchecked(
   const root = productRoot(env);
   const catalogue = catalogueSnapshot(root, env);
   const errors: Record<string, unknown>[] = [];
-  const defaults = Object.fromEntries(Object.entries(input).filter(([key]) =>
-    ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", ...POOL_FIELDS].includes(key)));
-  let merged: BatchTaskInput[] = input.tasks.flatMap((task, index) => {
+  const defaults = withoutEmptySelectors(Object.fromEntries(Object.entries(input).filter(([key]) =>
+    ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", ...POOL_FIELDS].includes(key))));
+  let merged: BatchTaskInput[] = input.tasks.map((task) => withoutEmptySelectors(task)).flatMap((task, index) => {
     const taskError = (task as BatchTaskInput & { _fabric_error?: Record<string, unknown> })._fabric_error;
     if (taskError) {
       errors.push({ task_id: task.id ?? `task-${index + 1}`, ...taskError });

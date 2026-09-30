@@ -32,11 +32,16 @@ export function usesPool(input: RouteInput): boolean {
  * Empty selectors and mixed-selector precedence settle first, so neither
  * `model: ""` nor `alias` with `rotate` slips back to the seat's own adapter.
  */
+/** A blank selector means unset, so it neither overrides a default nor counts as a choice. */
+export function withoutEmptySelectors<T extends object>(task: T): T {
+  return Object.fromEntries(Object.entries(task).filter(([key, value]) =>
+    !(["adapter", "model", "alias", "route"].includes(key) && typeof value === "string" && value.trim() === ""))) as T;
+}
+
 export function nativeFirst<T extends RouteInput>(task: T, identity: Identity): { task: T; warnings: string[] } {
   if (nativeAdapter(identity) === undefined) return { task, warnings: [] };
   const warnings: string[] = [];
-  let current = Object.fromEntries(Object.entries(task).filter(([key, value]) =>
-    !(["adapter", "model", "alias", "route"].includes(key) && typeof value === "string" && value.trim() === ""))) as T;
+  let current = withoutEmptySelectors(task);
   if (usesPool(current)) {
     try {
       const settled = settle(current);

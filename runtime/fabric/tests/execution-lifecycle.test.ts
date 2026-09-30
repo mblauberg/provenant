@@ -1444,6 +1444,18 @@ describe("native-first routing", () => {
     expect(noted).toContain("rotate ignored: alias flagship names one model");
   });
 
+  it("lets a batch task's empty selector inherit the batch default", async () => {
+    const seat = claudeSeat();
+    const adapter = await dispatchConfiguredBatch({ adapter: "codex", tasks: [{ id: "a", prompt: "p", adapter: "" }], wait_seconds: 5 },
+      seat, new AbortController().signal, poolEnvironment());
+    expect(JSON.stringify(adapter.warnings ?? [])).not.toContain("taken from the route pool");
+    const routed = await dispatchConfiguredBatch({ route: "strong", tasks: [{ id: "r", prompt: "p", model: "" }], wait_seconds: 5 },
+      seat, new AbortController().signal, poolEnvironment());
+    const noted = JSON.stringify(routed.warnings ?? []);
+    expect(noted).not.toContain("workhorse taken from the route pool");
+    expect(noted).toContain("claude/claude-opus-5-5 skipped: use a native subagent");
+  });
+
   it("runs an explicit native model with a prominent warning of its own", async () => {
     const done = await dispatchConfiguredProvider({ adapter: "claude", model: "haiku", prompt: "ordinary run", wait_seconds: 5 },
       claudeSeat(), new AbortController().signal, poolEnvironment());
