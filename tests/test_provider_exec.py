@@ -371,9 +371,12 @@ def test_protected_profile_covers_registered_worktrees_and_non_training_route(mo
     for root in (repo, sibling):
         assert f'(subpath "{root / "private"}")' in deny
     assert plan["applied"]["confinement"] == "sandbox-exec"
+    assert plan["applied"]["protected_paths"] == plan["protected_paths"]
+    assert str(repo / "private") in plan["applied"]["protected_paths"]
     safe = mod.build_plan("claude", {"trains_on_prompts": False}, "hello",
                           cwd=repo / "safe", workspace_root=repo)
     assert safe["protected_paths"] == []
+    assert safe["applied"]["protected_paths"] == []
     assert safe["applied"]["confinement"] == "sandbox-exec"
 
 
@@ -590,6 +593,262 @@ def test_read_only_profile_denies_writes_outside_attempt_and_provider_state(monk
     assert '(subpath "/dev")' in allow
     for path in (workspace, add_dir, home, tmp_path / "T", Path("/private/tmp")):
         assert f'(subpath "{path}")' not in allow
+
+
+@pytest.mark.parametrize(
+    "route,api_key,granted",
+    [
+        ({}, None, True),
+        ({"endpoint_base_url": "https://api.example.invalid/anthropic"}, None, False),
+        ({}, "sk-test", False),
+    ],
+    ids=["oauth", "endpoint", "api-key"],
+)
+def test_claude_read_only_profile_reads_login_keychain_only_for_oauth_lanes(
+    monkeypatch, tmp_path, route, api_key, granted
+):
+    mod = supervisor()
+    home = tmp_path / "home"
+    workspace = home / "repo"
+    workspace.mkdir(parents=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    if api_key is None:
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    else:
+        monkeypatch.setenv("ANTHROPIC_API_KEY", api_key)
+    plan = {"adapter": "claude", "mode": "read_only", "route": route, "workspace_root": str(workspace),
+            "cwd": str(workspace), "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    profile = mod.os_confinement_profile(plan)
+    allow = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-read-data "))
+    # An OAuth lane reads its sign-in from the login keychain; a bare or endpoint lane uses a key.
+    assert (f'"{home / "Library/Keychains/login.keychain-db"}"' in allow) is granted
+    assert f'(subpath "{home / "Library/Keychains"}")' not in allow
+
+
+KIRO_SUPPORT = "Library/Application Support/kiro-cli"
+# Files in Kiro's support directory that the user's shell sources or that Kiro executes.
+KIRO_EXECUTABLES = ("shell/zshrc.pre.zsh", "shell/bashrc.post.bash", "node", "bun", "tui.js",
+                    "node.sha256", "kas/2.23.0-abc/node_modules/index.js", "run/chat-cli-2.23.0")
+
+
+@pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
+def test_kiro_profile_writes_only_its_sign_in_state_not_shell_hooks_or_executables(monkeypatch, tmp_path, mode):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    workspace = home / "repo"
+    workspace.mkdir(parents=True)
+    support = home / KIRO_SUPPORT
+    for relative in (*KIRO_EXECUTABLES, "data.sqlite3", ".refresh.lock", "history"):
+        (support / relative).parent.mkdir(parents=True, exist_ok=True)
+        (support / relative).write_text("original\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    plan = {"adapter": "kiro", "mode": mode, "workspace_root": str(workspace), "cwd": str(workspace),
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    profile = mod.os_confinement_profile(plan)
+    writes = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-write* "))
+    assert f'(subpath "{support}")' not in writes
+    assert "data\\.sqlite3[^/]*$" not in writes
+    if mode == "read_only":
+        reads = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-read-data "))
+        assert f'(subpath "{support}")' in reads
+        # The engine resolves its app bundle through these launcher links, and needs nothing else there.
+        assert f'(subpath "{home / ".local/bin"}")' not in reads
+        for name in ("", "/kiro-cli", "/kiro-cli-chat", "/kiro-cli-term"):
+            assert f'(literal "{home}/.local/bin{name}")' in reads
+    sandbox_exec = mod._sandbox_exec_path()
+    if sys.platform != "darwin" or not sandbox_exec:
+        return
+
+    def run(script):
+        return subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script],
+                              capture_output=True, text=True)
+
+    probe = run(f"printf x > '{support}/data.sqlite3-wal'")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert probe.returncode == 0, probe.stderr
+    # SQLite creates and removes its own sidecars; kiro-cli rewrites its lock and database in place.
+    assert run(f"rm '{support}/data.sqlite3-wal'").returncode == 0
+    for name in ("data.sqlite3-shm", "data.sqlite3-journal"):
+        assert run(f"printf x > '{support}/{name}' && rm '{support}/{name}'").returncode == 0, name
+    # kiro-cli opens this lock for writing before it reads its token, or reports the token expired.
+    assert run(f"printf x > '{support}/.refresh.lock'").returncode == 0
+    assert run(f"printf x >> '{support}/data.sqlite3'").returncode == 0
+    for relative in KIRO_EXECUTABLES:
+        assert run(f"printf hijack > '{support}/{relative}'").returncode != 0, relative
+        assert (support / relative).read_text(encoding="utf-8") == "original\n", relative
+    assert run(f"printf x > '{support}/shell/new.zsh'").returncode != 0
+    assert run(f"printf x > '{support}/kas/2.24.0-new'").returncode != 0
+    assert run(f"printf x > '{support}/data.sqlite3-evil'").returncode != 0
+    # No link that the user's unconfined kiro-cli would later follow into a shell hook.
+    hook = support / "shell/zshrc.pre.zsh"
+    for name in ("data.sqlite3-wal", "data.sqlite3-journal", ".refresh.lock", "data.sqlite3"):
+        target = support / name
+        assert run(f"ln -s '{hook}' '{target}'").returncode != 0, name
+        assert run(f"ln '{hook}' '{target}'").returncode != 0, name
+        assert not target.is_symlink(), name
+    for name in (".refresh.lock", "data.sqlite3"):
+        assert run(f"rm -f '{support}/{name}'").returncode != 0, name
+        assert run(f"printf x > '{support}/data.sqlite3-wal' && mv '{support}/data.sqlite3-wal' '{support}/{name}'"
+                   ).returncode != 0, name
+        assert (support / name).is_file() and not (support / name).is_symlink(), name
+    assert hook.read_text(encoding="utf-8") == "original\n"
+    history = run(f"cat '{support}/history'")
+    if mode == "read_only":
+        # kiro-cli's prompt history spans every project; a read-only lane has no need of it.
+        assert history.returncode != 0
+        assert run(f"cat '{support}/data.sqlite3'").returncode == 0
+
+
+STATE_WRITE_ENTRIES = [
+    (adapter, entry)
+    for adapter, state in importlib.import_module("skills.orchestrate.scripts.provider_exec").CONFINED_STATE.items()
+    for entry in (*state.get("read_write", ()), *state.get("write_in_place", ()))
+    if not entry.endswith("*")
+]
+
+
+@pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
+@pytest.mark.parametrize("adapter,entry", STATE_WRITE_ENTRIES)
+def test_a_link_planted_at_writable_provider_state_never_moves_the_grant(monkeypatch, tmp_path, adapter,
+                                                                         entry, mode):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    workspace = home / "repo"
+    workspace.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    target = home / "Library/Application Support/kiro-cli/node"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("binary\n", encoding="utf-8")
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    plan = {"adapter": adapter, "mode": mode, "route": {}, "workspace_root": str(workspace),
+            "cwd": str(workspace), "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    # Without a link, each grant names the state path itself.
+    assert f'"{home / entry}"' in mod.os_confinement_profile(plan)
+    planted = home / entry
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    if planted.exists():
+        planted.unlink()
+    planted.symlink_to(target)
+    # An earlier lane planted a link there: the next profile refuses rather than granting its target.
+    with pytest.raises(PermissionError, match="provider state must not be a symlink"):
+        mod.os_confinement_profile(plan)
+
+
+def test_confined_kiro_refuses_a_missing_engine_with_a_fix(monkeypatch, tmp_path):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    launcher = bin_dir / "kiro-cli"
+    launcher.write_text("#!/bin/sh\necho 'kiro-cli 9.9.9'\n", encoding="utf-8")
+    launcher.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    route = {"resolved_model": "auto"}
+    with pytest.raises(ValueError, match="kiro-cli 9.9.9 has not installed its engine.*fix: run kiro-cli once outside"):
+        mod.build_plan("kiro", route, "hello", cwd=workspace, workspace_root=workspace)
+    support = home / KIRO_SUPPORT
+    (support / "kas/9.9.9-abc/node_modules").mkdir(parents=True)
+    (support / "node").write_text("", encoding="utf-8")
+    plan = mod.build_plan("kiro", route, "hello", cwd=workspace, workspace_root=workspace)
+    assert plan["applied"]["confinement"] == "sandbox-exec"
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: None)
+    (support / "node").unlink()
+    assert mod.build_plan("kiro", route, "hello", cwd=workspace, workspace_root=workspace)["applied"][
+        "confinement"] == "none"
+
+
+@pytest.mark.parametrize("adapter", ["claude", "codex", "agy", "opencode", "cursor", "kiro"])
+def test_read_only_transcript_denies_follow_every_state_allow(monkeypatch, tmp_path, adapter):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    plan = {"adapter": adapter, "mode": "read_only", "route": {}, "workspace_root": str(workspace),
+            "cwd": str(workspace), "session_id": "11111111-2222-3333-4444-555555555555",
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    lines = mod.os_confinement_profile(plan).splitlines()
+    denied = [f'(subpath "{home / path}")' for path in mod.EXTRA_DENIED_READS]
+    last_deny = max(index for index, line in enumerate(lines)
+                    if line.startswith("(deny file-read-data ") and all(rule in line for rule in denied))
+    later = [line for line in lines[last_deny + 1:] if line.startswith("(allow file-read")]
+    # Only a Claude lane's own session transcript reopens, so that it can resume.
+    own = home / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(workspace.resolve()))
+    session = own / plan["session_id"]
+    expected = [f'(allow file-read-data (literal "{session}.jsonl") (subpath "{session}"))']
+    assert later == (expected if adapter == "claude" else [])
+    del plan["session_id"]
+    lines = mod.os_confinement_profile(plan).splitlines()
+    assert not any(str(own) in line for line in lines)
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+def test_claude_read_only_lane_cannot_read_other_projects_transcripts(monkeypatch, tmp_path):
+    mod = supervisor()
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    home = (tmp_path / "home").resolve()
+    (home / ".claude/projects/other").mkdir(parents=True)
+    (home / ".claude/projects/other/session.jsonl").write_text("transcript\n", encoding="utf-8")
+    (home / ".claude/settings.json").write_text("{}\n", encoding="utf-8")
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    own = home / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(workspace.resolve()))
+    (own / "memory").mkdir(parents=True)
+    (own / "mine").mkdir()
+    (own / "mine.jsonl").write_text("mine\n", encoding="utf-8")
+    (own / "mine/subagent.jsonl").write_text("mine\n", encoding="utf-8")
+    (own / "chair.jsonl").write_text("chair\n", encoding="utf-8")
+    (own / "memory/MEMORY.md").write_text("memory\n", encoding="utf-8")
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    plan = {"adapter": "claude", "mode": "read_only", "route": {}, "workspace_root": str(workspace),
+            "cwd": str(workspace), "session_id": "fresh", "resume_session": "mine",
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    profile = mod.os_confinement_profile(plan)
+
+    def run(script):
+        return subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script],
+                              capture_output=True, text=True)
+
+    probe = run(f"cat '{home}/.claude/settings.json'")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert probe.stdout == "{}\n"
+    assert run(f"cat '{home}/.claude/projects/other/session.jsonl'").returncode != 0
+    # Its own session stays readable, so the lane can resume; the project's other sessions do not.
+    assert run(f"cat '{own}/mine.jsonl'").stdout == "mine\n"
+    assert run(f"cat '{own}/mine/subagent.jsonl'").stdout == "mine\n"
+    assert run(f"cat '{own}/chair.jsonl'").returncode != 0
+    assert run(f"cat '{own}/memory/MEMORY.md'").returncode != 0
+
+
+def test_claude_project_dir_matches_claude_naming_including_long_paths():
+    mod = supervisor()
+    home = Path("/Users/someone")
+    projects = home / ".claude/projects"
+    assert mod._claude_project_dir(home, "/Users/someone/Repos/my_app.v2") == (
+        projects / "-Users-someone-Repos-my-app-v2")
+    # Claude replaces each UTF-16 code unit, so a character outside the BMP becomes two dashes.
+    assert mod._claude_project_dir(home, "/Users/someone/a\U0001F600b").name == "-Users-someone-a--b"
+    # A long name keeps 200 characters plus Claude's 32-bit string hash in base 36; checked against
+    # the directory Claude Code 2.1.285 created for this path.
+    scratch = ("/private/tmp/claude-501/-Users-user-Repos-provenant/"
+               "76b874fc-49eb-4d7e-9fbb-8ff3e570ed9f/scratchpad/" + "x" * 120 + "/" + "y" * 60)
+    assert mod._claude_project_dir(home, scratch).name == (
+        re.sub(r"[^A-Za-z0-9]", "-", scratch)[:200] + "-qpcnov")
+    # Two long paths that share their first 200 characters get different, exact directories.
+    first = mod._claude_project_dir(home, "/Users/someone/" + "a" * 220 + "/one")
+    second = mod._claude_project_dir(home, "/Users/someone/" + "a" * 220 + "/two")
+    assert first != second and first.name[:200] == second.name[:200]
 
 
 def test_sbpl_filter_star_escapes_regex_without_resolving_symlink_target(tmp_path):
@@ -891,7 +1150,7 @@ def test_model_families_load_catalog_without_snapshot(monkeypatch):
         "snapshot",
         lambda: (_ for _ in ()).throw(AssertionError("snapshot subprocess called")),
     )
-    assert exec_routing.model_families("claude-sonnet-5") == ("anthropic",)
+    assert exec_routing.model_families("claude-sonnet-5-5") == ("anthropic",)
 
 
 def test_structured_result_and_question_take_precedence_over_prose():
@@ -1555,16 +1814,25 @@ def test_codex_capability_swappable_source_home_fails_before_launch(monkeypatch,
 
 def test_claude_adapter_receives_attempt_private_claude_tmpdir(tmp_path):
     code = """import json, os
-print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({key: os.environ.get(key) for key in ('TMPDIR','CLAUDE_TMPDIR')})}}))
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({key: os.environ.get(key) for key in ('TMPDIR','CLAUDE_TMPDIR','CLAUDE_CODE_TMPDIR')})}}))
 print(json.dumps({'type':'turn.completed'}))
 """
     plan = fixture_plan(tmp_path, code, adapter="claude")
+    # A directory left by an earlier attempt is tightened, not trusted.
+    (tmp_path / "tmp/claude").mkdir(parents=True)
+    (tmp_path / "tmp").chmod(0o755)
+    (tmp_path / "tmp/claude").chmod(0o755)
     record = supervisor().execute(plan, tmp_path / "result.md")
     assert record["status"] == "ok"
     paths = json.loads((tmp_path / "result.md").read_text())
     assert paths["TMPDIR"] == str(tmp_path / "tmp")
     assert paths["CLAUDE_TMPDIR"] == str(tmp_path / "tmp/claude")
+    # Claude Code otherwise opens /tmp/claude-<uid>, which a read-only profile cannot read.
+    assert paths["CLAUDE_CODE_TMPDIR"] == str(tmp_path / "tmp/claude")
     assert (tmp_path / "tmp/claude").is_dir()
+    # Private to the provider's user, as the Codex lane home is.
+    assert (tmp_path / "tmp").stat().st_mode & 0o777 == 0o700
+    assert (tmp_path / "tmp/claude").stat().st_mode & 0o777 == 0o700
 
 
 def test_codex_read_only_records_native_write_boundary(tmp_path):
@@ -2799,7 +3067,7 @@ def test_catalogued_observed_substitution_records_answering_family_without_certi
     code = """import json
 events = [
     {"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"},
-    {"type":"assistant","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"DONE"}]}},
+    {"type":"assistant","message":{"model":"claude-sonnet-5-5","content":[{"type":"text","text":"DONE"}]}},
     {"type":"result","result":"DONE","is_error":False,"session_id":"s-1"},
 ]
 for event in events:
@@ -2814,7 +3082,7 @@ for event in events:
     )
     record = supervisor().execute(plan, tmp_path / "result.md")
     assert record["status"] == "ok"
-    assert record["provenance"]["observed_model"] == "claude-sonnet-5"
+    assert record["provenance"]["observed_model"] == "claude-sonnet-5-5"
     assert record["provenance"]["family"] == "anthropic"
     assert record["provenance"]["identity"] == "observed"
     assert "observed family anthropic inferred from catalogue" in record["provenance"]["notes"]
@@ -2836,7 +3104,7 @@ def test_catalogue_lookup_oserror_does_not_fail_finalisation(tmp_path, monkeypat
     code = """import json
 for event in [
     {"type":"system","subtype":"init","model":"claude-haiku-4-5-20251001","session_id":"s-1"},
-    {"type":"assistant","message":{"model":"claude-sonnet-5","content":[{"type":"text","text":"DONE"}]}},
+    {"type":"assistant","message":{"model":"claude-sonnet-5-5","content":[{"type":"text","text":"DONE"}]}},
     {"type":"result","result":"DONE","is_error":False,"session_id":"s-1"},
 ]:
     print(json.dumps(event), flush=True)
@@ -3036,13 +3304,14 @@ def test_usage_limit_falls_back_as_attempt_two(tmp_path, explicit):
     bindir = tmp_path / "bin"
     bindir.mkdir()
     cli = bindir / "claude"
+    initial_model = "opus" if explicit else "sonnet"
     cli.write_text("""#!/usr/bin/env python3
 import json,sys
 sys.stdin.read()
 model=sys.argv[sys.argv.index('--model')+1]
-print(json.dumps({'type':'result','is_error':model=='opus','result':"You've hit your usage limit" if model=='opus' else 'DONE'}))
-sys.exit(1 if model=='opus' else 0)
-""")
+print(json.dumps({'type':'result','is_error':model=='TARGET_MODEL','result':"You've hit your usage limit" if model=='TARGET_MODEL' else 'DONE'}))
+sys.exit(1 if model=='TARGET_MODEL' else 0)
+""".replace("TARGET_MODEL", initial_model))
     cli.chmod(0o755)
     fallback_cli = bindir / 'opencode'
     fallback_cli.write_text("#!/usr/bin/env python3\nimport json\nprint(json.dumps({'type':'text','part':{'text':'DONE'}}))\n")
@@ -3093,12 +3362,8 @@ sys.exit(1 if model=='opus' else 0)
     assert len({row["run_id"] for row in rows}) == 1
     assert rows[1]["provenance"]["fallback_from"]["status"] == "usage_limited"
     assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "ok"
-    assert (
-        json.loads((tmp_path / "cooldowns.json").read_text())["cooldowns"][
-            "claude/*"
-        ]["source_run"]
-        == rows[0]["run_id"]
-    )
+    cooldowns = json.loads((tmp_path / "cooldowns.json").read_text())["cooldowns"]
+    assert cooldowns["claude/*"]["source_run"] == rows[0]["run_id"]
 
 
 def test_codex_observed_model_comes_from_rollout_turn_context(tmp_path):
@@ -4178,11 +4443,12 @@ def test_agy_nested_result_failure_keeps_provider_error():
     assert "quota" in parsed["excerpt"].lower()
 
 
-def test_kiro_stream_json_selects_the_v2_engine():
+def test_kiro_stream_json_selects_the_v3_engine():
     from adapters import kiro
     command = kiro.argv({"mode": "read_only", "resume_session": None, "model": "auto",
                          "effort": None, "boundary_prompt": "B", "prompt": "P"})
-    assert command[command.index("--agent-engine") + 1] == "v2"
+    # kiro-cli 2.23's v2 engine never finishes a headless turn; v3 emits the same stream.
+    assert command[command.index("--agent-engine") + 1] == "v3"
     assert command.index("--agent-engine") < command.index("--output-format")
 
 
@@ -4221,8 +4487,9 @@ def test_kiro_v2_engine_stream_is_parsed_and_auto_is_not_passed():
 def test_claude_reported_ids_match_their_aliases():
     module = supervisor()
     assert module._same_model("claude", "haiku", "claude-haiku-4-5-20251001")
-    assert module._same_model("claude", "sonnet", "claude-sonnet-5")
-    assert not module._same_model("claude", "haiku", "claude-sonnet-5")
+    assert module._same_model("claude", "sonnet", "claude-sonnet-5-5")
+    assert module._same_model("claude", "claude-sonnet-5-5", "claude-sonnet-5")
+    assert not module._same_model("claude", "haiku", "claude-sonnet-5-5")
 
 
 def test_subreaper_is_held_only_while_attempts_run(tmp_path, monkeypatch):

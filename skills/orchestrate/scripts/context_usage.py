@@ -237,7 +237,8 @@ def clamp_ceiling(value):
 # contextWindow of the answering model in live turns, 2026-09-23 (Claude Code 2.1.280). Haiku's
 # 200k window remains the ceiling bound if a session answers with a larger-window model.
 CLAUDE_WINDOWS = {"opus": 1000000, "opus-5.5": 1000000, "claude-opus-5-5": 1000000, "sonnet": 1000000,
-                  "claude-sonnet-5": 1000000, "fable": 1000000, "claude-fable-5-1": 1000000,
+                  "claude-sonnet-5-5": 1000000, "claude-sonnet-5": 1000000,
+                  "fable": 1000000, "claude-fable-5-1": 1000000,
                   "haiku": 200000, "claude-haiku-4-5": 200000, "claude-haiku-4-5-20251001": 200000}
 
 
