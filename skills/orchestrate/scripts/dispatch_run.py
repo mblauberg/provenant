@@ -833,6 +833,7 @@ def build_command(
     for flag, value in (("--cwd",getattr(args,"provider_cwd",None)),("--sandbox", getattr(args,"sandbox",None)),("--network",getattr(args,"network",None)),("--resume-session",getattr(args,"resume_session",None))):
         if value is not None: command.extend((flag,str(value)))
     for directory in getattr(args,"add_dirs",[]): command.extend(("--add-dir",str(directory)))
+    for root in getattr(args,"read_roots",None) or []: command.extend(("--read-root",str(root)))
     if not getattr(args,"preface",True): command.append("--no-preface")
     policy = exec_routing.validate_policy(getattr(args, "fallback", None))
     if policy is not None:
@@ -989,8 +990,8 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
             return None
         plan = provider_exec.build_plan(
             args.tool, route, prompt,
-            cwd=workspace, workspace_root=workspace, mode=args.access_mode,
-            timeout_seconds=provider_timeout_seconds(args.timeout_seconds),
+            cwd=workspace, workspace_root=workspace, read_roots=getattr(args, "read_roots", None) or [],
+            mode=args.access_mode, timeout_seconds=provider_timeout_seconds(args.timeout_seconds),
             intent=args.intent, preface=args.preface, requested_model=args.model,
             requested_effort=args.effort or "", run_id=os.environ.get("PROVENANT_RUN_ID", ""),
             run_dir=result_path.parent,
@@ -1175,13 +1176,18 @@ def _record_provider_process(run_dir: Path, process: subprocess.Popen[Any]) -> N
         return
 
 
+# Fabric grants a read root only for a directory inside a registered project.
+PROMPT_PATH_FIX = ("Pass prompt_file=<readable regular file inside the workspace or a registered Fabric project>; "
+                   "register another project by running `fabric whoami` there, or dispatch from it.")
+
+
 class PreflightError(ValueError):
     def __init__(self, code: str, fix: str):
         super().__init__(fix)
         self.code = code
 
 
-def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path) -> bytes:
+def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path, read_roots=()) -> bytes:
     prompt_source = None
     if prompt_file is not None:
         prompt_source = prompt_file.expanduser()
@@ -1191,10 +1197,10 @@ def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path) -> byte
     if prompt_source is not None:
         if not prompt_source.exists():
             raise PreflightError("prompt_unavailable", f"cannot read prompt file: {prompt_source}")
-        prompt_root = next((root for root in (run_dir, workspace, run_workspace(run_dir, workspace))
-                            if prompt_source.is_relative_to(root)), None)
+        roots = (run_dir, workspace, run_workspace(run_dir, workspace), *(Path(root) for root in read_roots))
+        prompt_root = next((root for root in roots if prompt_source.is_relative_to(root)), None)
         if prompt_root is None:
-            raise PreflightError("prompt_path_forbidden", "prompt file must be inside the run directory or current workspace")
+            raise PreflightError("prompt_path_forbidden", "prompt file must be inside the run directory, current workspace or a read root")
         sensitive_roots = {".ssh", ".aws", ".azure", ".gnupg"}
         sensitive_files = {
             ".env", ".env.local", ".env.production", "credentials.json",
@@ -1206,7 +1212,9 @@ def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path) -> byte
             part == ".config" and index + 1 < len(parts) and parts[index + 1] in config_auth_dirs
             for index, part in enumerate(parts)
         )
-        if sensitive_roots.intersection(parts) or prompt_source.name.casefold() in sensitive_files or config_auth:
+        # credential_path resolves the whole path, so a link into a store is refused too.
+        if (sensitive_roots.intersection(parts) or prompt_source.name.casefold() in sensitive_files or config_auth
+                or provider_exec.credential_path(prompt_source)):
             raise PreflightError("credential_or_auth_store_denied", "prompt path is a credential or authentication store")
         try:
             prompt_bytes = _read_prompt_once(prompt_root, prompt_source)
@@ -1298,7 +1306,14 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                     raise PreflightError("prompt_invalid", "Pass prompt as text.")
                 if "allow_secrets" in task and type(task["allow_secrets"]) is not bool:
                     raise PreflightError("allow_secrets_invalid", "Pass allow_secrets: true or false.")
-                prompt_bytes = (read_prompt_input(Path(task["prompt_file"]), workspace, workspace)
+                read_roots = task.get("read_roots") or []
+                if not isinstance(read_roots, list) or not all(
+                        isinstance(root, str) and Path(root).is_absolute() for root in read_roots):
+                    raise PreflightError("read_roots_invalid", "Pass read_roots as a list of absolute directories.")
+                if any(provider_exec.credential_path(root) for root in read_roots):
+                    raise PreflightError("credential_or_auth_store_denied", "Read roots must exclude credential stores.")
+                read_roots = [str(Path(root).resolve()) for root in read_roots]
+                prompt_bytes = (read_prompt_input(Path(task["prompt_file"]), workspace, workspace, read_roots)
                                 if task.get("prompt_file") is not None else task["prompt"].encode())
                 try:
                     scan = secret_scan.scan_inputs(
@@ -1406,16 +1421,16 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                 protected = provider_exec.check_protected_inputs(
                     route, workspace, worktree if mode == "worktree_write" else task.get("cwd") or workspace,
                     worktree=worktree if mode == "worktree_write" else None,
-                    prompt_file=task.get("prompt_file"), add_dirs=task.get("add_dirs", []))
+                    prompt_file=task.get("prompt_file"), add_dirs=task.get("add_dirs", []), read_roots=read_roots)
                 if protected and (adapter == "codex" or not provider_exec._sandbox_exec_path()):
                     raise ValueError("protected paths require sandbox-exec read confinement; fix: use a non-training route")
                 if task.get("prompt_file") is not None:
-                    read_prompt_input(Path(task["prompt_file"]), workspace, workspace)
+                    read_prompt_input(Path(task["prompt_file"]), workspace, workspace, read_roots)
                 routes.append(route)
             except (PreflightError, WorktreeLeaseError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
                 prompt_fixes = {
                     "prompt_unavailable": "Pass prompt text or prompt_file=<readable regular file inside the workspace>.",
-                    "prompt_path_forbidden": "Pass prompt_file=<readable regular file inside the workspace>.",
+                    "prompt_path_forbidden": PROMPT_PATH_FIX,
                     "credential_or_auth_store_denied": "Pass prompt text or a workspace prompt file outside credential and authentication stores.",
                     "prompt_hard_link_denied": "Pass prompt_file=<workspace file with one hard link>.",
                 }
@@ -1445,6 +1460,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     return {"schema":"fabric.attempt.v1","run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
         "attempt":number,"state":"running","status":None,"mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
         "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
+        **({"read_roots":[str(root) for root in args.read_roots]} if getattr(args,"read_roots",None) else {}),
         "worktree":str(args.worktree) if args.worktree else None,"started_at":started_at,"ended_at":None,"last_progress_at":started_at,
         "pgid":None,"session_id":plan.get("session_id"),"retryable":False,"reset_at":None,"retry_after":None,"fix":None,
         "evidence":{"exit":None,"signal":None,"signature":None,"excerpt":""},"question":None,
@@ -1548,6 +1564,11 @@ def prepare_resume(args):
     args.workspace_root=Path(previous.get("workspace_root") or (previous.get("workspace") or {}).get("root") or Path.cwd()).expanduser().resolve()
     args.sandbox=previous["applied"]["sandbox"];args.network=None if previous["applied"]["network"] is None else str(previous["applied"]["network"]).lower()
     args.add_dirs=previous["applied"]["add_dirs"];args.resume_session=previous["session_id"]
+    args.read_roots=previous.get("read_roots") or []
+    # A read root was canonical when granted; a directory since swapped for a link is not that grant.
+    bound=[*args.read_roots,*([args.provider_cwd] if args.read_roots and args.provider_cwd else [])]
+    if any(Path(path).resolve()!=Path(path) for path in bound):
+        raise ResumeError("resume_read_root_changed","a read root or cwd now resolves elsewhere; dispatch a new run")
     args.capabilities=previous["applied"].get("capabilities", [])
     args.fallback="false"
     for field in ("intent", "orchestrator_family", "role", "risk_tier", "model_override_tier", "reviewer_id", "preface"):
@@ -1664,12 +1685,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         original_prompt = str((source if source.is_absolute() else workspace / source).resolve())
     args.original_prompt_file = original_prompt
     try:
-        protected = provider_exec.protected_paths(workspace, provider_cwd, args.worktree)
+        read_roots = [str(root) for root in getattr(args, "read_roots", None) or []]
+        protected = provider_exec.protected_paths(workspace, provider_cwd, args.worktree, read_roots)
         if protected and (args.prompt_file is not None or args.add_dirs):
             task = {"id": args.task_id, "adapter": args.tool, "access_mode": args.access_mode,
                     "worktree": str(args.worktree) if args.worktree else None,
                     "cwd": str(provider_cwd), "prompt_file": str(args.prompt_file) if args.prompt_file else None,
-                    "add_dirs": args.add_dirs, "alias": args.alias, "model": args.model,
+                    "add_dirs": args.add_dirs, "read_roots": read_roots, "alias": args.alias, "model": args.model,
                     "effort": args.effort, "fallback": args.fallback,
                     "role": args.role, "task_class": args.task_class}
             if args.prompt_file is None:
@@ -1681,7 +1703,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     except (OSError, ValueError) as exc:
         return fail(run_dir, "protected_path_denied", str(exc))
     try:
-        prompt_bytes = (read_prompt_input(args.prompt_file, workspace, run_dir)
+        prompt_bytes = (read_prompt_input(args.prompt_file, workspace, run_dir, getattr(args, "read_roots", None) or [])
                         if args.prompt_file is not None else sys.stdin.buffer.read())
     except PreflightError as exc:
         return fail(run_dir, exc.code, str(exc))
@@ -2477,6 +2499,8 @@ def execute_attempt_sequence(args,custody=None):
 
 def dispatch(args: argparse.Namespace) -> int:
     """Run one attempt while serialising standalone run-ledger mutation."""
+    # Canonical before first use, so the saved roots are what resume re-checks strictly.
+    args.read_roots = [str(Path(root).expanduser().resolve()) for root in getattr(args, "read_roots", None) or []]
     if args.timeout_seconds is None:
         args.timeout_seconds = 10800.0 if args.access_mode == "worktree_write" else DEFAULT_TIMEOUT_SECONDS
     run_dir = args.run_dir.resolve()
@@ -2559,6 +2583,8 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--network", choices=("true","false"))
     root.add_argument("--capabilities", type=provider_exec.parse_capabilities_argument)
     root.add_argument("--add-dir", dest="add_dirs", action="append", default=[])
+    root.add_argument("--read-root", dest="read_roots", action="append", default=[],
+                      help="outside directory a read-only cwd or prompt file may use; repeatable")
     root.add_argument("--allow-secrets", action="store_true")
     root.add_argument("--no-preface", dest="preface", action="store_false")
     root.add_argument("--fallback", default=None, help="false, true, any, or JSON route list")

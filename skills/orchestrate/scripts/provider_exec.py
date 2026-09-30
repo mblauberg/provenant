@@ -258,10 +258,10 @@ def _git_toplevel(path):
     return Path(result.stdout.strip()).resolve() if result.returncode == 0 and result.stdout.strip() else None
 
 
-def protected_paths(workspace_root, cwd=None, worktree=None):
+def protected_paths(workspace_root, cwd=None, worktree=None, read_roots=()):
     workspace = Path(workspace_root).expanduser().resolve()
     owners = [workspace]
-    roots = [_git_toplevel(path) for path in (workspace, cwd, worktree) if path is not None]
+    roots = [_git_toplevel(path) for path in (workspace, cwd, worktree, *read_roots) if path is not None]
     if roots[0] is None:
         for child in sorted(workspace.iterdir()):
             if child.is_dir() and _git_toplevel(child) == child.resolve():
@@ -302,11 +302,11 @@ def protected_paths(workspace_root, cwd=None, worktree=None):
     return list(dict.fromkeys(protected))
 
 
-def check_protected_inputs(route, workspace_root, cwd, *, worktree=None, prompt_file=None, add_dirs=()):
+def check_protected_inputs(route, workspace_root, cwd, *, worktree=None, prompt_file=None, add_dirs=(), read_roots=()):
     if route.get("trains_on_prompts") is False:
         return []
     workspace = Path(workspace_root).expanduser().resolve()
-    paths = protected_paths(workspace, cwd, worktree)
+    paths = protected_paths(workspace, cwd, worktree, read_roots)
     if not paths:
         return []
     for candidate, reject_parent in ((prompt_file, True), (cwd, False), *((path, True) for path in add_dirs)):
@@ -416,6 +416,18 @@ def confinement_command(plan, command):
     return [sandbox_exec, "-p", os_confinement_profile(plan), *command]
 
 
+def read_boundary(workspace_root, read_roots=()):
+    """The workspace plus the roots a caller authorised for a read cwd or prompt.
+
+    Fabric passes a read root for a directory it has matched to a registered project, so a
+    read-only dispatch can work in another project while its run stays in the caller's.
+    """
+    roots = [Path(root).expanduser().resolve() for root in read_roots]
+    if any(credential_path(root) for root in roots):
+        raise ValueError("read roots must exclude credential and authentication stores")
+    return [Path(workspace_root).expanduser().resolve(), *roots]
+
+
 def build_plan(
     adapter,
     route,
@@ -423,6 +435,7 @@ def build_plan(
     *,
     cwd=None,
     workspace_root=None,
+    read_roots=(),
     mode="read_only",
     worktree=None,
     sandbox=None,
@@ -453,7 +466,8 @@ def build_plan(
     if not selected_cwd.is_dir():
         raise ValueError("cwd must be a readable directory")
     # A writer's worktree may sit outside the caller's tree; only a read cwd is bounded here.
-    if workspace_root and not worktree and not selected_cwd.is_relative_to(Path(workspace_root).expanduser().resolve()):
+    if workspace_root and not worktree and not any(
+            selected_cwd.is_relative_to(root) for root in read_boundary(workspace_root, read_roots)):
         raise ValueError("cwd must be inside the workspace")
     workspace_root = str(Path(workspace_root or selected_cwd).expanduser().resolve())
     cwd = str(selected_cwd)
@@ -472,10 +486,11 @@ def build_plan(
         git_private = git_dirs[0]
         git_common = git_dirs[1]
     guarded = check_protected_inputs(route, workspace_root, cwd, worktree=worktree,
-                                     prompt_file=original_prompt_file, add_dirs=add_dirs)
+                                     prompt_file=original_prompt_file, add_dirs=add_dirs,
+                                     read_roots=read_roots)
     if prompt_file is not None and prompt_file != original_prompt_file:
         check_protected_inputs(route, workspace_root, cwd, worktree=worktree,
-                               prompt_file=prompt_file, add_dirs=add_dirs)
+                               prompt_file=prompt_file, add_dirs=add_dirs, read_roots=read_roots)
     sandbox = sandbox or (
         "workspace-write" if mode == "worktree_write" else "read-only"
     )
@@ -2669,6 +2684,7 @@ def parser():
     p.add_argument("--mode", default="read_only")
     p.add_argument("--cwd", type=Path)
     p.add_argument("--workspace-root", type=Path)
+    p.add_argument("--read-root", action="append", default=[])
     p.add_argument("--worktree")
     p.add_argument("--sandbox")
     p.add_argument("--network", choices=["true", "false"])
@@ -2696,15 +2712,18 @@ def main():
     try:
         workspace_root = Path(args.workspace_root or Path.cwd()).expanduser().resolve()
         selected_cwd = Path(args.cwd or workspace_root).expanduser().resolve()
-        if not args.worktree and not selected_cwd.is_relative_to(workspace_root):
+        if not args.worktree and not any(
+                selected_cwd.is_relative_to(root) for root in read_boundary(workspace_root, args.read_root)):
             raise ValueError("cwd must be inside the workspace")
         route = json.loads(args.route_file.read_text())
         original_prompt_file = args.original_prompt_file or args.prompt_file
         check_protected_inputs(route, workspace_root, selected_cwd, worktree=args.worktree,
-                               prompt_file=original_prompt_file, add_dirs=args.add_dir)
+                               prompt_file=original_prompt_file, add_dirs=args.add_dir,
+                               read_roots=args.read_root)
         if original_prompt_file != args.prompt_file:
             check_protected_inputs(route, workspace_root, selected_cwd, worktree=args.worktree,
-                                   prompt_file=args.prompt_file, add_dirs=args.add_dir)
+                                   prompt_file=args.prompt_file, add_dirs=args.add_dir,
+                                   read_roots=args.read_root)
         plan = build_plan(
             args.adapter,
             route,
@@ -2712,6 +2731,7 @@ def main():
             mode=args.mode,
             cwd=args.cwd,
             workspace_root=workspace_root,
+            read_roots=args.read_root,
             worktree=args.worktree,
             sandbox=args.sandbox,
             network=None if args.network is None else args.network == "true",

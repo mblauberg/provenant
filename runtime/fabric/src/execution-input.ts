@@ -1,6 +1,6 @@
 /** Validate the Fabric request and forward routing/control choices to its owner. */
 import { realpathSync, statSync } from "node:fs";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { projectRoot, withoutGitRedirects, type Identity } from "./identity.js";
 import { execFile } from "node:child_process";
 import type { CatalogueSnapshot } from "./catalogue.js";
@@ -92,6 +92,7 @@ export interface NormalisedRoute {
   context_ceiling?: number;
   allow_secrets?: boolean;
   capabilities?: DispatchCapability[];
+  read_roots?: string[];
   warnings?: string[];
 }
 
@@ -263,6 +264,8 @@ export function routeArguments(route: NormalisedRoute): string[] {
     if (value === undefined || (key === "alias" && route.model !== undefined)) continue;
     if (key === "add_dirs") {
       for (const dir of value as string[]) args.push("--add-dir", dir);
+    } else if (key === "read_roots") {
+      for (const dir of value as string[]) args.push("--read-root", dir);
     } else if (key === "allow_secrets") {
       if (value === true) args.push("--allow-secrets");
     } else args.push(`--${key.replaceAll("_", "-")}`, typeof value === "string" ? value : JSON.stringify(value));
@@ -283,18 +286,80 @@ export function timeoutSeconds(value: number | undefined, mode?: RouteInput["mod
   return timeout;
 }
 
-export function workingIdentity(input: RouteInput, identity: Identity, projectRoots: string[] = identity.registeredProjects ?? [identity.project]): Identity {
+const registeredRoots = (identity: Identity) => identity.registeredProjects ?? [identity.project];
+
+/** Whether a canonical directory lies in a registered project or one of its linked worktrees. */
+function inRegisteredProject(directory: string, projectRoots: string[]): boolean {
+  const candidateProject = projectRoot(directory);
+  return projectRoots.some((root) => inside(canonical(root), directory) || candidateProject === canonical(root));
+}
+
+export function workingIdentity(input: RouteInput, identity: Identity, projectRoots: string[] = registeredRoots(identity)): Identity {
   if (input.cwd === undefined) return identity;
   if (input.mode === "worktree_write")
     throw new InputError("cwd_not_applicable", "Use worktree for writers; cwd is a read-only directory.");
   const cwd = canonical(resolve(identity.cwd, input.cwd));
   let directory = false;
   try { directory = statSync(cwd).isDirectory(); } catch { /* typed below */ }
-  const candidateProject = projectRoot(cwd);
-  const belongsToRegisteredProject = projectRoots.some((root) => inside(canonical(root), cwd) || candidateProject === canonical(root));
-  if ((!inside(canonical(identity.cwd), cwd) && !belongsToRegisteredProject) || !directory)
-    throw new InputError("cwd_unavailable", "Pass an existing cwd inside a registered Fabric project.");
+  if (!directory)
+    throw new InputError("cwd_unavailable", "Pass an existing cwd directory.");
+  if (!inside(canonical(identity.cwd), cwd) && !inRegisteredProject(cwd, projectRoots))
+    throw new InputError("cwd_unavailable",
+      "Pass a cwd inside a registered Fabric project; register that project by running `fabric whoami` there, or dispatch from it.");
   return { ...identity, cwd };
+}
+
+/**
+ * An absolute prompt path whose directory is canonical, so the owner compares
+ * it with its resolved workspace (macOS /var is /private/var). The file itself
+ * is not resolved: the owner still refuses a linked prompt.
+ */
+export function ownerPromptPath(identity: Identity, promptFile: string): string {
+  const path = resolve(identity.cwd, promptFile);
+  return join(canonical(dirname(path)), basename(path));
+}
+
+/**
+ * Directories outside the caller's cwd that a read-only cwd or a prompt file
+ * uses, once each is matched to a registered project. The owner keeps its
+ * workspace bound and accepts these as the only exceptions, so the run stays
+ * in the caller's run root while the provider reads the other project.
+ */
+export function readRoots(
+  identity: Identity,
+  cwd: string | undefined,
+  promptFile: string | undefined,
+  projectRoots: string[] = registeredRoots(identity),
+): string[] {
+  const home = canonical(identity.cwd);
+  const roots: string[] = [];
+  if (cwd !== undefined && !inside(home, canonical(cwd))) roots.push(cwd);
+  if (promptFile !== undefined) {
+    const directory = dirname(ownerPromptPath(identity, promptFile));
+    if (!inside(home, directory) && !roots.some((root) => inside(canonical(root), directory)) &&
+        inRegisteredProject(directory, projectRoots))
+      roots.push(directory);
+  }
+  return roots;
+}
+
+/**
+ * The read roots and cwd a resume reuses. Each was canonical when granted; one
+ * that now resolves elsewhere, or has left every registered project, is refused.
+ */
+export function savedReadRoots(
+  identity: Identity,
+  roots: unknown,
+  cwd: unknown,
+  projectRoots: string[] = registeredRoots(identity),
+): string[] {
+  if (roots === undefined || roots === null || (Array.isArray(roots) && roots.length === 0)) return [];
+  const bound = Array.isArray(roots) ? [...roots, ...(typeof cwd === "string" ? [cwd] : [])] : [roots];
+  if (!bound.every((path) => typeof path === "string" && isAbsolute(path) && canonical(path) === path &&
+      inRegisteredProject(path, projectRoots)))
+    throw new InputError("resume_read_root_changed",
+      "Dispatch a new run; a saved read root or cwd has moved or left every registered Fabric project.");
+  return roots as string[];
 }
 
 export class InputError extends Error {

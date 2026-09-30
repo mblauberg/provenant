@@ -389,9 +389,9 @@ register(
     const result = input.session
       ? await sessionDispatch(input, executionIdentity(), readyStore(), signal)
       : input.resume
-      ? await resumeConfiguredProvider(input, who, signal)
+      ? await resumeConfiguredProvider(input, executionIdentity(), signal)
       : input.handoff
-        ? await handoffDispatch(input, who, signal)
+        ? await handoffDispatch(input, executionIdentity(), signal)
         : input.tasks
         ? await dispatchConfiguredBatch({ ...input, wait_seconds: input.wait_seconds ?? 0 }, executionIdentity(), signal)
         : await dispatchConfiguredProvider(input, executionIdentity(), signal);
