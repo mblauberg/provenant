@@ -1,6 +1,7 @@
 import importlib.util
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -830,3 +831,39 @@ def test_git_launcher_oserror_is_reported_as_policy_error(tmp_path, monkeypatch)
 
     with pytest.raises(worktree_policy.PolicyError, match="could not launch git"):
         worktree_policy.git(tmp_path, "status")
+
+
+def _hold_lease(target: Path):
+    import fcntl
+    git_dir = subprocess.run(["git", "-C", str(target), "rev-parse", "--absolute-git-dir"],
+                             check=True, capture_output=True, text=True).stdout.strip()
+    handle = open(Path(git_dir) / "provenant-dispatch-writer.lock", "a+")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
+
+
+def test_remove_refuses_worktree_with_live_writer_lane(tmp_path, capsys):
+    repo = tmp_path / "project"
+    init_repo(repo)
+    assert worktree_policy.main(["create", "busy", "--repo", str(repo), "--new-branch", "feature/busy"]) == 0
+    target = repo / ".worktrees" / "busy"
+    handle = _hold_lease(target)
+    capsys.readouterr()
+    assert worktree_policy.main(["remove", "busy", "--repo", str(repo)]) == 2
+    err = capsys.readouterr().err
+    assert "active writer lane" in err and "--force" in err
+    assert target.is_dir()
+    handle.close()
+    assert worktree_policy.main(["remove", "busy", "--repo", str(repo)]) == 0
+    assert not target.exists()
+
+
+def test_remove_force_overrides_live_writer_lane(tmp_path, capsys):
+    repo = tmp_path / "project"
+    init_repo(repo)
+    assert worktree_policy.main(["create", "busy", "--repo", str(repo), "--new-branch", "feature/busy"]) == 0
+    target = repo / ".worktrees" / "busy"
+    handle = _hold_lease(target)
+    assert worktree_policy.main(["remove", "busy", "--repo", str(repo), "--force"]) == 0
+    handle.close()
+    assert not target.exists()
