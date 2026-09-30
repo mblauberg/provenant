@@ -211,9 +211,12 @@ def test_secret_scan_reads_whole_large_text_files_within_the_budget(tmp_path, mo
     megabyte = 1024 * 1024
     (tmp_path / 'head.txt').write_bytes(b'AKIA' + b'A' * 16 + b'\n' + b'a' * megabyte)
     (tmp_path / 'tail.log').write_bytes(b'a' * 2 * megabyte + b'\n' + b'AKIA' + b'B' * 16)
+    # Only a NUL near the start marks a file binary, as Git judges it, so a trailing one hides nothing.
+    (tmp_path / 'nul.txt').write_bytes(b'AKIA' + b'C' * 16 + b'\n' + b'a' * 9000 + b'\0')
+    (tmp_path / 'image.bin').write_bytes(b'\0' + b'AKIA' + b'D' * 16)
     result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
     assert not result.budget_exceeded
-    assert sorted(Path(item.path).name for item in result.findings) == ['head.txt', 'tail.log']
+    assert sorted(Path(item.path).name for item in result.findings) == ['head.txt', 'nul.txt', 'tail.log']
     assert result.warnings == []
     # A file the remaining budget cannot hold is not scanned in part: the scan fails closed.
     monkeypatch.setattr(scan, 'MAX_TOTAL_BYTES', 2 * megabyte)

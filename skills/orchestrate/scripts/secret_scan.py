@@ -189,7 +189,7 @@ def scan_inputs(prompt: bytes, prompt_path: str, add_dirs: list[str] | None = No
                     continue
                 with path.open("rb") as stream:
                     content = stream.read(MAX_TOTAL_BYTES - bytes_seen + 1)
-                if b"\0" in content:
+                if b"\0" in content[:8000]:
                     continue
                 if files_seen >= MAX_FILES or bytes_seen + len(content) > MAX_TOTAL_BYTES:
                     result.budget_exceeded = True
