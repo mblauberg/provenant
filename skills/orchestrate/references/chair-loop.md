@@ -23,6 +23,10 @@ wake, in this order:
    its steward mode instead of doing it inline.
 6. **Checkpoint** the state file, then arm the wait.
 
+A wake that changes nothing stays silent. If reconcile shows no state change and
+no decision is due, checkpoint and re-arm without an owner-facing message. A
+landing, a new blocker, a due decision or an owner question still gets one.
+
 Keep a wake short. Anything longer than a few commands goes to a lane.
 
 ## Frontier hook
@@ -60,7 +64,8 @@ code — independently of this lane id.
 ## Waiting
 
 After dispatch, keep one `provenant lanes --wait` running in the background.
-When it exits, read the printed lanes, act, and re-arm it. `provenant lanes` is
+When it exits, read the printed lanes, act, and re-arm it; the next wait reports
+any lane that finished in between. `provenant lanes` is
 the source of truth after compaction or restart. Use `provenant events --follow`
 only for foreground streaming; it replays retained events without a cursor and
 does not exit on its own.

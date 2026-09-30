@@ -329,7 +329,7 @@ register(
   async ({ ids, wait_seconds }, { signal }) => {
     const bounded = boundedWait(wait_seconds);
     if (bounded.error) return bounded.error;
-    return readRuns(who.cwd, ids, bounded.value, signal);
+    return readRuns(who.project, ids, bounded.value, signal);
   },
 );
 register(
@@ -342,7 +342,7 @@ register(
     const deadline = Date.now() + (bounded.value ?? 0) * 1000;
     for (;;) {
       signal.throwIfAborted();
-      const result = await readEvents(who.cwd, cursor, readyStore().inbox(who, { peek: true, limit: 100 }));
+      const result = await readEvents(who.project, cursor, readyStore().inbox(who, { peek: true, limit: 100 }));
       if (result.status !== "ok" || result.events.length || Date.now() >= deadline) return result;
       await delay(Math.min(250, deadline - Date.now()), undefined, { signal });
     }
@@ -382,14 +382,14 @@ register(
       waitResult.warnings.push(`! concurrency ${requestedConcurrency} clamped to 8`);
     }
     const result = input.resume
-      ? await resumeConfiguredProvider(input, who, signal)
+      ? await resumeConfiguredProvider(input, executionIdentity(), signal)
       : input.handoff
-        ? await handoffDispatch(input, who, signal)
+        ? await handoffDispatch(input, executionIdentity(), signal)
         : input.tasks
         ? await dispatchConfiguredBatch({ ...input, wait_seconds: input.wait_seconds ?? 0 }, executionIdentity(), signal)
         : await dispatchConfiguredProvider(input, executionIdentity(), signal);
     if (!result.id) return withWarnings(result, waitResult.warnings);
-    const observed = await statusRows(who.cwd, [String(result.id)], 0, "all", signal, input.detail);
+    const observed = await statusRows(who.project, [String(result.id)], 0, "all", signal, input.detail);
     if (input.resume && result.task_id) observed.runs = observed.runs?.filter((row) => row.task_id === result.task_id);
     acknowledgeRuns(observed);
     if (observed.runs?.length === 1) {
@@ -417,7 +417,7 @@ register(
   async ({ ids, id, wait_seconds, until, detail }, { signal }) => {
     const waitResult = boundedWait(wait_seconds);
     if (waitResult.error) return waitResult.error;
-    const result = await statusRows(who.cwd, ids ?? (id ? [id] : undefined), waitResult.value, until, signal, detail);
+    const result = await statusRows(who.project, ids ?? (id ? [id] : undefined), waitResult.value, until, signal, detail);
     acknowledgeRuns(result);
     const view = runView(withWarnings(result, waitResult.warnings), detail);
     // Claims are an addendum; run status must stay readable when the store cannot open.
@@ -489,7 +489,7 @@ register(
       (typeof input.max_bytes !== "number" || !Number.isInteger(input.max_bytes) || input.max_bytes < 1))
       return { status: "rejected", error: "max_bytes_invalid", fix: "Pass max_bytes as an integer from 1 to 20000." };
     const requested = input.max_bytes;
-    const result = await fabricOutput(who.cwd, { ...input, max_bytes: requested === undefined ? undefined : Math.min(requested, 20000) });
+    const result = await fabricOutput(who.project, { ...input, max_bytes: requested === undefined ? undefined : Math.min(requested, 20000) });
     return requested !== undefined && requested > 20000
       ? withWarnings(result, [`! max_bytes ${requested} clamped to 20000`])
       : result;

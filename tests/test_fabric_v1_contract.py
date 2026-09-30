@@ -14,6 +14,7 @@ STATUSES = {
     "model_unavailable",
     "permission_blocked",
     "stalled",
+    "startup_timeout",
     "timed_out",
     "cancelled",
     "interrupted",

@@ -55,8 +55,11 @@ Owners are detached session leaders and outlive the CLI and MCP host. A
 CLI-started owner is recorded as its own host. An MCP host that closes or is
 signalled hands its runs to their owners rather than cancelling them. A fresh
 `dispatch list` and `status <run-dir>` resolve these runs from their records.
-Only a live host sends the inbox notice when a run finishes; `fabric_events` and
-`lanes --wait` report every run.
+Only a live host sends the inbox notice when a run finishes. `fabric_events`
+exposes retained task-state events. `lanes --wait` reports each terminal or
+input-required lane of the registered project, finished within the last day,
+once per seat, including lanes that finished between waits; named ids narrow it
+to those lanes, and a batch id to its tasks.
 The next dispatch reaps a run only when its host is gone and its owner or
 provider still runs: an owner that exited and left its provider behind, or a
 run whose MCP host was killed with SIGKILL.
@@ -96,7 +99,15 @@ rejects with `error: secret_scan_budget_exceeded`; narrow the inputs or explicit
 set `allow_secrets: true` and explain why in the prompt. Writers use `mode: worktree_write` and an
 owned, registered linked worktree. The primary checkout is refused; create a linked
 worktree. `cwd` selects an existing read-only directory inside any registered
-Fabric project. The Python owner validates provider capabilities and
+Fabric project, and `prompt_file` may sit in the caller's directory or any
+registered project. A project is registered once any Fabric command, such as
+`fabric whoami`, has run inside it; an unregistered path is rejected with that
+route or the alternative of dispatching from the other project. For a
+directory outside the caller's, Fabric passes the owner a read root, so the run
+stays in the caller's run root, where `lanes` and `status` find it, and the
+secret scan still covers the prompt. A prompt in a credential or authentication
+store is refused wherever it sits. A resume reuses the saved read roots only
+while each still resolves to the same directory in a registered project. The Python owner validates provider capabilities and
 applies controls; Fabric does not claim a stronger guarantee than its receipt.
 On macOS, non-Codex read-only launches use `sandbox-exec` when available. The
 profile limits writes to the attempt directory and provider state. It denies
@@ -106,20 +117,44 @@ paths. Codex read-only uses its native read-only sandbox.
 Inside another sandbox, where macOS refuses a nested one, the attempt records
 an explicit unconfined-write warning. A `cwd` below the root may also warn that
 it is not a read boundary.
+Every writer, Codex included, has the same Git write boundary: its own
+per-worktree Git directory (`git rev-parse --absolute-git-dir`) plus the
+common directory's `objects`, `refs` and `logs` and its `packed-refs`,
+`packed-refs.lock` and `packed-refs.new` files. The rest of the common
+directory, including `hooks`, `config`, `info` and other lanes'
+`worktrees/<name>`, is never writable, because Git later runs what it names in
+the primary checkout and every lane. A Codex writer's `add_dir` at or inside
+the common directory is dropped with a warning. Codex writers also keep the
+worktree `.git` marker and the private Git directory's `config.worktree`,
+`commondir` and `gitdir` read-only. Writer attempts set `gc.auto=0`,
+`maintenance.auto=false` and `rerere.enabled=false` through
+`GIT_CONFIG_COUNT`, since those would write to the common directory. The
+shared `config` is read-only, so a lane cannot record an upstream,
+add a remote or add a worktree. `git push -u` still pushes but prints a
+config-lock error; push with `git push origin HEAD` and open the pull request
+with `gh pr create --head <branch>`.
 Wrapped writer runs on macOS (agy, Claude, Cursor, OpenCode and Kiro) use
 `sandbox-exec` to restrict writes to their worktree, declared `add_dirs`,
-per-worktree Git metadata, common Git objects, refs, logs and packed refs,
-attempt files, device nodes and provider state. Where protected-path policy
-applies, its read and write denies still take precedence inside an `add_dir`.
+the Git write boundary, attempt files, device nodes and provider state. Where
+protected-path policy applies, its read and write denies still take precedence
+inside an `add_dir`.
 Each attempt sets `TMPDIR`, `TMP` and `TEMP` to `<attempt>/tmp` and
 `XDG_CACHE_HOME` to `<attempt>/tmp/cache`. Shared temp and general user caches
-are not writable. Codex writers without capabilities use
-`-s workspace-write` (or `-c sandbox_mode="workspace-write"`
-on resume), with `-c sandbox_workspace_write.writable_roots=<add_dirs>` and
-`--cd <worktree>` on a fresh run. Codex keeps a writable root's `.agents/`
-read-only, so a linked-worktree Codex writer also gets the worktree's
-`.agents/` as an `add_dir`; Git can then rebase or merge the integration branch
-over tracked skills. Fabric fails the attempt with
+are not writable. Codex writers without capabilities use Codex's native
+sandbox through a permissions profile named for that plan,
+`-c default_permissions="provenant-<random>"`, which extends `:workspace`,
+sets `network.enabled` and passes a `filesystem` table. The table grants
+`add_dirs` and the Git write boundary and leaves the common directory and the
+`.git` marker read-only. Codex applies the nearest entry, and the same flags
+apply on resume. Codex merges config tables, so the unique name keeps a system
+config's grants under a known profile name out of the lane's policy; the
+read-only network profile is named the same way. A fresh
+run also passes `--add-dir` for each `add_dir` and `--cd <worktree>`. Codex
+refuses to launch with a symlinked grant path, so a link planted at one stops
+the next attempt rather than moving its grant. Codex keeps a writable root's
+`.agents/` read-only, so a linked-worktree Codex writer also gets the
+worktree's `.agents/` as an `add_dir`; Git can then rebase or merge the
+integration branch over tracked skills. Fabric fails the attempt with
 `protected_instructions_changed` when an `.agents/` path in HEAD, the index or
 on disk ends up matching neither the attempt's starting state nor the primary
 checkout's branch or its upstream. If OS confinement is unavailable, agy write
@@ -148,13 +183,9 @@ does not claim that an inbound loopback rule limits connections.
 Each task keeps one `CODEX_HOME` at `<task directory>/codex-home` across its
 attempts. Existing `auth.json`, `AGENTS.md`, `HARNESS.md` and `skills` entries are symlinked
 from `CODEX_HOME` supplied by the caller, or `~/.codex`; the profile grants
-writes to the task home and the literal source `auth.json` only. Its Git write
-boundary grants the private worktree Git directory and the common repository's
-`objects`, `refs`, `logs`, `packed-refs` and `packed-refs.lock` paths, granted
-by their own names, so a link planted at one never moves a later grant. The Git
-common directory itself is denied and is never added as a writable root.
-The worktree `.git` marker and private Git directory's `config.worktree`,
-`commondir` and `gitdir` are not writable; Fabric recreates the task home links
+writes to the task home and the literal source `auth.json` only. It grants
+each Git write boundary path by its own name, so a link planted at one never
+moves a later grant. Fabric recreates the task home links
 every attempt and fails a symlinked or non-directory task home, while allowing
 the lane to overwrite the literal source `auth.json` for token refresh, a file
 it could already read. That grant names the unresolved source path and covers
@@ -169,7 +200,8 @@ Protected-path dispatches to training routes still refuse without OS read
 confinement.
 The receipt records sorted `applied.capabilities` and `applied.confinement` as `sandbox-exec`, `provider-native` or `none`;
 `applied.write_boundary` records the effective writable paths, including
-declared `add_dirs` for confined writers, or the native sandbox;
+declared `add_dirs` for confined writers, or the native sandbox and, for
+Codex, its permissions `profile` name and a writer's `filesystem` table;
 `workspace.cwd` is the provider cwd and `workspace.root` is the caller workspace.
 Read-only macOS launches can read `~/.gitconfig` and
 `$XDG_CONFIG_HOME/git/config` (default `~/.config/git/config`) so `git status`
@@ -213,8 +245,7 @@ Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, and `detail`.
 New attempts wait when available host memory is below 10% of physical RAM for
 `worktree_write` or 5% for `read_only`; set either percentage from 0 to 100 in
 `<workspace_root>/.agents/fabric-policy.json` as `{"memory_floor_percent":{"worktree_write":10,"read_only":5}}` (either key may be omitted, and 0 disables that mode's floor).
-Queued time does not use the execution timeout, but `FABRIC_MEMORY_WAIT_SECONDS`
-limits each wait (default 1800); expiry fails the attempt as `memory_unavailable`.
+Queued time does not use the execution timeout, and each attempt waits for memory admission up to its own dispatch `timeout_seconds`. Within a project, queued attempts are admitted in order of queue entry, but an attempt waits only for an earlier waiter that is live, has republished within three polls and whose floor is currently met; expiry fails the attempt as `memory_unavailable`.
 Owners serialise admission through a per-user host lock in `$XDG_STATE_HOME/provenant/admission.lock`
 (default `~/.local/state/provenant/admission.lock`) and hold it for up to 20 seconds after provider start; lock creation failure admits with a warning, while probe failure holds and retries until the wait expires. `fabric_status` and `fabric status` show the available percentage, floor and wait budget and allow cancellation.
 

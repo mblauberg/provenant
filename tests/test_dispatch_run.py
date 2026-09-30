@@ -270,6 +270,7 @@ def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
         "run_id": "resume-me", "task_id": "task-1", "attempt": 1, "state": "terminal",
         "status": "ok", "mode": "read_only", "cwd": str(workspace / "src"), "worktree": None,
         "workspace": {"root": str(workspace)}, "session_id": "saved-session",
+        "read_roots": [str(tmp_path / "other-project")],
         "provenance": {"requested": {"adapter": "codex"}, "resolved_model": "fixture", "effort_applied": ""},
         "applied": {"sandbox": "read-only", "network": None, "add_dirs": [],
                     "capabilities": ["browser", "postgres"]},
@@ -287,6 +288,7 @@ def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
     module.prepare_resume(args)
 
     assert args.workspace_root == workspace
+    assert args.read_roots == [str(tmp_path / "other-project")]
     assert args.capabilities == ["browser", "postgres"]
 
 
@@ -415,7 +417,12 @@ exit 99
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
     module = load_dispatch_module()
     monkeypatch.setattr(module.memory_admission, "available_memory_mb", lambda: (640, 16384))
-    monkeypatch.setenv("FABRIC_MEMORY_WAIT_SECONDS", "0")
+    original_admit = module.memory_admission.admit
+    admission_timeouts = []
+    def track_admission_timeout(*args, **kwargs):
+        admission_timeouts.append(kwargs.get("timeout_seconds"))
+        return original_admit(*args, **kwargs)
+    monkeypatch.setattr(module.memory_admission, "admit", track_admission_timeout)
     monkeypatch.chdir(tmp_path)
     if legacy:
         adapter = tmp_path / "adapter"
@@ -424,14 +431,64 @@ exit 99
     args = module.parser().parse_args([
         "--run-dir", str(run_dir), "--task-id", "memory-expiry", "--adapter", "codex",
         "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--timeout-seconds", "0.01",
     ])
     assert module.dispatch(args) == 1
     attempt = json.loads((run_dir / "dispatch/tasks/memory-expiry/attempt-001/attempt.json").read_text())
     state = json.loads((run_dir / "tasks/memory-expiry/attempt-001/attempt.json").read_text())
     assert attempt["status"] == state["status"] == "failed"
     assert attempt["outcome"] == state["error"] == "memory_unavailable"
+    assert admission_timeouts == [0.01]
     assert "lower the mode's memory_floor_percent" in state["fix"]
     assert "memory_unavailable" in state["digest"]
+
+
+def test_queued_receipt_is_published_where_admission_scans(tmp_path, monkeypatch):
+    run_dir = make_run(tmp_path, "runs/20260930-1200-dispatch-queue")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("hello\n", encoding="utf-8")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    write_executable(bin_dir / "codex", '''#!/usr/bin/env bash
+if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
+  printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+  exit 0
+fi
+exit 99
+''')
+    monkeypatch.setenv("PATH", f"{bin_dir}:{ROOT / 'scripts'}:{os.environ['PATH']}")
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path))
+    module = load_dispatch_module()
+    admission = module.memory_admission
+    monkeypatch.setattr(admission, "available_memory_mb", lambda: (640, 16384))
+    original_admit = admission.admit
+    published = []
+
+    def observe_queue(on_wait, *args, **kwargs):
+        def waiting(reason):
+            on_wait(reason)
+            published.extend((path, json.loads(path.read_text()), kwargs["queued_since"])
+                             for path in admission.queued_receipts(kwargs["queue_root"]))
+        return original_admit(waiting, *args, **kwargs)
+
+    monkeypatch.setattr(admission, "admit", observe_queue)
+    monkeypatch.chdir(tmp_path)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "queue-wiring", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+        "--timeout-seconds", "0.01",
+    ])
+    assert module.dispatch(args) == 1
+    assert published
+    path, row, queued_since = published[0]
+    assert path == run_dir / "tasks/queue-wiring/attempt-001/attempt.json"
+    assert row["state"] == "queued" and row["queue_reason"] == "memory"
+    assert row["timing"]["queued_since"] == queued_since
+    assert row["admission"] == {
+        "owner_pid": os.getpid(),
+        "owner_start_epoch": admission._start_epoch(os.getpid()),
+        "floor_percent": admission.floor_percent(tmp_path, args.access_mode),
+    }
 
 
 def test_opencode_explicit_model_receipt_drops_implied_alias(tmp_path: Path) -> None:
@@ -1044,7 +1101,7 @@ def test_nonzero_provider_exit_is_recorded_without_substitution(tmp_path: Path) 
         bin_dir / "codex",
         """#!/usr/bin/env bash
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
-          printf '{"models":[{"slug":"gpt-6-sol","supported_reasoning_levels":[{"effort":"high"}]},{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
+          printf '{"models":[{"slug":"gpt-6.1-sol","supported_reasoning_levels":[{"effort":"high"}]},{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
         fi
         cat >/dev/null
@@ -2474,6 +2531,124 @@ def test_preflight_secret_file_rejects_and_explicit_override_accepts(tmp_path, m
     assert module.preflight_tasks([{**task, 'allow_secrets': True}])['status'] == 'validated'
 
 
+def test_preflight_accepts_a_prompt_file_only_inside_a_read_root(tmp_path, monkeypatch):
+    workspace = tmp_path / 'caller'
+    other = tmp_path / 'other-project'
+    workspace.mkdir()
+    other.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    module = load_dispatch_module()
+    prompt = other / 'brief.md'
+    prompt.write_text('read the other project')
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt)}
+
+    rejected = module.preflight_tasks([task], workspace)
+    assert rejected['error'] == 'prompt_path_forbidden'
+    assert 'registered Fabric project' in rejected['fix']
+    assert 'dispatch from it' in rejected['fix']
+    assert module.preflight_tasks([{**task, 'read_roots': [str(other)]}], workspace)['status'] == 'validated'
+
+
+def test_preflight_scans_a_read_root_prompt_for_secrets(tmp_path, monkeypatch):
+    workspace = tmp_path / 'caller'
+    other = tmp_path / 'other-project'
+    workspace.mkdir()
+    other.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    module = load_dispatch_module()
+    prompt = other / 'brief.md'
+    prompt.write_text('hello\n' + 'AKIA' + 'A' * 16)
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt),
+            'read_roots': [str(other)]}
+    assert module.preflight_tasks([task], workspace)['error'] == 'secret_detected'
+
+
+def test_preflight_refuses_a_credential_store_prompt_in_any_root(tmp_path, monkeypatch):
+    workspace = tmp_path / 'caller'
+    other = tmp_path / 'other-project'
+    (workspace / 'notes').mkdir(parents=True)
+    (other / '.codex').mkdir(parents=True)
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    module = load_dispatch_module()
+    auth = other / '.codex' / 'auth.json'
+    auth.write_text('{"tokens": {"opaque": "value"}}')
+    local = workspace / 'notes' / 'auth.json'
+    local.write_text('{"opaque": "value"}')
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse'}
+    for prompt, roots in ((auth, [str(other)]), (local, [])):
+        result = module.preflight_tasks([{**task, 'prompt_file': str(prompt), 'read_roots': roots}], workspace)
+        assert result['error'] == 'credential_or_auth_store_denied', prompt
+
+
+def test_prepare_resume_refuses_a_read_root_that_now_resolves_elsewhere(tmp_path: Path):
+    module = load_dispatch_module()
+    run_dir = make_run(tmp_path, "resume-moved")
+    attempt_dir = run_dir / "tasks/task-1/attempt-001"
+    attempt_dir.mkdir(parents=True)
+    other, elsewhere = tmp_path / "other-project", tmp_path / "elsewhere"
+    (other / "src").mkdir(parents=True)
+    (elsewhere / "src").mkdir(parents=True)
+    previous = {
+        "run_id": "resume-me", "task_id": "task-1", "attempt": 1, "state": "terminal",
+        "status": "ok", "mode": "read_only", "cwd": str(other / "src"), "worktree": None,
+        "workspace": {"root": str(tmp_path)}, "session_id": "saved-session",
+        "read_roots": [str(other / "src")],
+        "provenance": {"requested": {"adapter": "codex"}, "resolved_model": "fixture", "effort_applied": ""},
+        "applied": {"sandbox": "read-only", "network": None, "add_dirs": []},
+        "paths": {"events": None}, "requested_route": {},
+    }
+    (attempt_dir / "attempt.json").write_text(json.dumps(previous), encoding="utf-8")
+    fresh = lambda: SimpleNamespace(
+        run_dir=run_dir, resume="resume-me", task_id=None, tool=None, model=None, effort=None,
+        access_mode=None, worktree=None, provider_cwd=None, sandbox=None, network=None,
+        add_dirs=[], resume_session=None, fallback=None, context_ceiling=None,
+    )
+    module.prepare_resume(fresh())
+    other.rename(tmp_path / "moved")
+    other.symlink_to(elsewhere)
+    with pytest.raises(module.ResumeError) as refused:
+        module.prepare_resume(fresh())
+    assert refused.value.code == "resume_read_root_changed"
+
+
+def test_read_only_dispatch_runs_in_a_read_root_outside_the_workspace(tmp_path, monkeypatch):
+    code = '''import json,os,sys
+sys.stdin.read()
+print(json.dumps({"type":"result","result":os.getcwd()}))
+'''
+    workspace = tmp_path / 'caller'
+    other = tmp_path / 'other-project'
+    workspace.mkdir()
+    (other / 'src').mkdir(parents=True)
+    run, prompt, command = real_owner_fixture(workspace, monkeypatch, code)
+    brief = other / 'brief.md'
+    brief.write_text('read the other project')
+    command[command.index(str(prompt))] = str(brief)
+    command += ['--cwd', str(other / 'src'), '--no-preface']
+
+    refused = subprocess.run(command, cwd=workspace, capture_output=True, text=True)
+    assert refused.returncode != 0
+    assert 'read root' in refused.stdout + refused.stderr
+
+    # A non-canonical root is resolved before use and saved canonical, so resume accepts it.
+    result = subprocess.run([*command, '--read-root', str(other / 'src' / '..')], cwd=workspace,
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    row = json.loads(next(run.glob('tasks/*/attempt-001/attempt.json')).read_text())
+    assert row['status'] == 'ok'
+    assert row['cwd'] == str((other / 'src').resolve())
+    assert row['read_roots'] == [str(other.resolve())]
+    assert (run / row['paths']['result']).read_text().strip() == str((other / 'src').resolve())
+    resumed = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', row['run_id'],
+                              '--prompt-file', str(brief)], cwd=workspace, capture_output=True, text=True)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    second = json.loads(next(run.glob('tasks/*/attempt-002/attempt.json')).read_text())
+    assert (second['status'], second['read_roots']) == ('ok', [str(other.resolve())])
+
+
 def test_preflight_secret_in_add_dirs_rejects_and_override_accepts(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
@@ -2926,6 +3101,80 @@ def test_fallback_reentry_does_not_charge_front_door_phases_again(tmp_path, monk
                ('validate', 'run_dir_init', 'snapshot', 'owner_setup'))
 
 
+def test_startup_timeout_falls_back_when_the_dispatch_allows(tmp_path, monkeypatch):
+    run, prompt, command = real_owner_fixture(
+        tmp_path, monkeypatch,
+        'import sys,json,time\nsys.stdin.read()\n'
+        'if "opus" in sys.argv: time.sleep(60)\n'
+        'print(json.dumps({"type":"result","result":"DONE"}))\n',
+    )
+    isolate_fabric_plan_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('CF_DISPATCH_STARTUP_SECONDS', '1')
+    mod = load_dispatch_module()
+    args = mod.parser().parse_args(command[2:])
+    args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
+    args.fallback = json.dumps(['claude/sonnet'])
+    assert mod.dispatch(args) == 0
+    attempts = sorted(run.glob('tasks/*/attempt-*/attempt.json'))
+    first, second = (json.loads(path.read_text()) for path in attempts)
+    assert first['status'] == 'startup_timeout'
+    assert first['retryable'] is True
+    assert first['evidence']['signature'] == 'startup_watchdog'
+    assert first['digest'].startswith('startup_timeout ')
+    assert 're-route to another model or adapter' in first['digest']
+    assert second['status'] == 'ok'
+    assert second['provenance']['fallback_from']['status'] == 'startup_timeout'
+
+
+@pytest.mark.parametrize('edits', [None, 'partial.txt', 'config/installation.json', 'local-config/settings.json', 'cap'])
+def test_writer_startup_timeout_falls_back_only_over_an_untouched_worktree(tmp_path, monkeypatch, edits):
+    path = edits if edits not in {None, 'cap'} else None
+    run, prompt, command = real_owner_fixture(
+        tmp_path, monkeypatch,
+        'import sys,json,time\nfrom pathlib import Path\nsys.stdin.read()\n'
+        'if "opus" in sys.argv:\n'
+        + (f'    Path({path!r}).write_text("half done")\n' if path else '')
+        # Churn under skipped directories never blocks fallback.
+        + '    for churn in ("node_modules/launch.lock", "pkg/__pycache__/mod.pyc", ".pytest_cache/v"):\n'
+        '        Path(churn).write_text("launch churn")\n'
+        '    time.sleep(60)\n'
+        'print(json.dumps({"type":"result","result":"DONE"}))\n',
+    )
+    worktree = make_worktree(tmp_path)
+    # An ignored file, a file inside an ignored directory, and ignored caches.
+    for name in ('config/installation.json', 'local-config/settings.json', 'node_modules/cache',
+                 'pkg/__pycache__/old.pyc', '.pytest_cache/v'):
+        (worktree / name).parent.mkdir(parents=True, exist_ok=True)
+        (worktree / name).write_text('{}')
+    exclude = Path(subprocess.check_output(['git', '-C', str(worktree), 'rev-parse', '--git-path', 'info/exclude'],
+                                           text=True).strip())
+    exclude = exclude if exclude.is_absolute() else worktree / exclude
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    exclude.write_text('config/installation.json\nlocal-config/\nnode_modules/\npkg/\n.pytest_cache/\n')
+    time.sleep(1.2)  # setup must predate the launch tolerance
+    isolate_fabric_plan_env(monkeypatch)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('CF_DISPATCH_STARTUP_SECONDS', '1')
+    mod = load_dispatch_module()
+    if edits == 'cap':
+        monkeypatch.setattr(mod, 'STARTUP_WALK_MAX_ENTRIES', 2)
+    args = mod.parser().parse_args(command[2:] + ['--access-mode', 'worktree_write', '--worktree', str(worktree)])
+    args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS
+    args.fallback = json.dumps(['claude/sonnet'])
+    mod.dispatch(args)
+    attempts = [json.loads(path.read_text()) for path in sorted(run.glob('tasks/*/attempt-*/attempt.json'))]
+    assert attempts[0]['status'] == 'startup_timeout'
+    if edits:
+        assert len(attempts) == 1
+        assert attempts[0]['retryable'] is False
+        assert attempts[0]['fix'].startswith('inspect the worktree')
+    else:
+        assert [row['status'] for row in attempts] == ['startup_timeout', 'ok']
+    if path:
+        assert (worktree / path).read_text() == 'half done'
+
+
 def test_finalize_phase_includes_receipt_publication(tmp_path, monkeypatch):
     run, prompt, command = real_owner_fixture(
         tmp_path, monkeypatch,
@@ -2947,6 +3196,14 @@ def test_finalize_phase_includes_receipt_publication(tmp_path, monkeypatch):
     assert mod.dispatch(args) == 0
     attempt = json.loads(next(run.glob('tasks/*/attempt-*/attempt.json')).read_text())
     assert attempt['timing']['phases']['finalize'] >= 120
+
+
+def normalise_plan_identity(plan):
+    """Replace the per-plan session id and Codex permissions profile name, which differ by design."""
+    for key, placeholder in (('session_id', '<session>'), ('profile', '<profile>')):
+        owner = plan if key == 'session_id' else plan['applied']['write_boundary']
+        value = owner.pop(key, None)
+        plan['argv'] = [arg.replace(value, placeholder) if value else arg for arg in plan['argv']]
 
 
 @pytest.mark.parametrize('adapter, model, effort', [
@@ -2976,9 +3233,7 @@ def test_fabric_fast_plan_matches_shell_for_explicit_model(tmp_path, monkeypatch
     assert planned is not None
     expected = json.loads(shell.stdout)
     for value in (planned, expected):
-        session = value.pop('session_id', None)
-        value['argv'] = [arg.replace(session, '<session>') if session else arg
-                         for arg in value['argv']]
+        normalise_plan_identity(value)
     assert planned == expected
 
 
@@ -3013,8 +3268,7 @@ def test_fabric_fast_plan_matches_or_delegates_shell_edge_routes(
     assert shell.returncode == 0, shell.stderr
     expected = json.loads(shell.stdout)
     for value in (planned, expected):
-        session = value.pop('session_id', None)
-        value['argv'] = [arg.replace(session, '<session>') if session else arg for arg in value['argv']]
+        normalise_plan_identity(value)
     assert planned == expected
 
 

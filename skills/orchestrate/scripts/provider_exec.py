@@ -77,8 +77,20 @@ CODEX_BROWSER_MACH_PORT_PREFIXES = (
 CODEX_POSTGRES_IPC_OPERATIONS = ("ipc-sysv-shm", "ipc-sysv-sem")
 CAPABILITY_VALUES = frozenset({"postgres", "browser"})
 EXTRA_DENIED_READS = (".claude/projects", ".codex/sessions")
+# Every writer's Git write boundary: its private worktree Git directory plus these common paths.
+# The rest of the common directory (hooks, config, info, other worktrees) runs code or holds state
+# for every checkout, so it stays read-only. Codex writers also keep GIT_PRIVATE_READ_ONLY.
+GIT_COMMON_WRITE_DIRS = ("objects", "refs", "logs")
+# Git rewrites packed-refs through the lock and a .new file renamed over it.
+GIT_COMMON_WRITE_FILES = ("packed-refs", "packed-refs.lock", "packed-refs.new")
+GIT_PRIVATE_READ_ONLY = ("config.worktree", "commondir", "gitdir")
+# Automatic gc and rerere write gc.pid, gc.log and rr-cache in the read-only common directory.
+WRITER_GIT_CONFIG = (("gc.auto", "0"), ("maintenance.auto", "false"), ("rerere.enabled", "false"))
 # Repository agent instructions and skills. Codex protects them inside a writable root.
 INSTRUCTION_DIR = ".agents"
+# A provider that has written nothing to stdout this long after launch is failed
+# as startup_timeout so the chair can re-route instead of waiting out the run.
+STARTUP_SECONDS = 300.0
 # Instructions are small text; a larger tree is refused rather than hashed at length.
 INSTRUCTION_BYTES_LIMIT = 256 * 1024 * 1024
 
@@ -246,10 +258,10 @@ def _git_toplevel(path):
     return Path(result.stdout.strip()).resolve() if result.returncode == 0 and result.stdout.strip() else None
 
 
-def protected_paths(workspace_root, cwd=None, worktree=None):
+def protected_paths(workspace_root, cwd=None, worktree=None, read_roots=()):
     workspace = Path(workspace_root).expanduser().resolve()
     owners = [workspace]
-    roots = [_git_toplevel(path) for path in (workspace, cwd, worktree) if path is not None]
+    roots = [_git_toplevel(path) for path in (workspace, cwd, worktree, *read_roots) if path is not None]
     if roots[0] is None:
         for child in sorted(workspace.iterdir()):
             if child.is_dir() and _git_toplevel(child) == child.resolve():
@@ -290,11 +302,11 @@ def protected_paths(workspace_root, cwd=None, worktree=None):
     return list(dict.fromkeys(protected))
 
 
-def check_protected_inputs(route, workspace_root, cwd, *, worktree=None, prompt_file=None, add_dirs=()):
+def check_protected_inputs(route, workspace_root, cwd, *, worktree=None, prompt_file=None, add_dirs=(), read_roots=()):
     if route.get("trains_on_prompts") is False:
         return []
     workspace = Path(workspace_root).expanduser().resolve()
-    paths = protected_paths(workspace, cwd, worktree)
+    paths = protected_paths(workspace, cwd, worktree, read_roots)
     if not paths:
         return []
     for candidate, reject_parent in ((prompt_file, True), (cwd, False), *((path, True) for path in add_dirs)):
@@ -334,8 +346,8 @@ def os_confinement_profile(plan):
         if private is not None and private != common:
             git_allowed.append(private)
         if common is not None:
-            git_allowed.extend(common / path for path in ("objects", "refs", "logs"))
-        literal_files = ([common / path for path in ("packed-refs", "packed-refs.lock")]
+            git_allowed.extend(common / path for path in GIT_COMMON_WRITE_DIRS)
+        literal_files = ([common / path for path in GIT_COMMON_WRITE_FILES]
                          if common is not None else [])
         capabilities = plan.get("applied", {}).get("capabilities", [])
         profile = (
@@ -348,9 +360,10 @@ def os_confinement_profile(plan):
         if plan.get("adapter") == "codex" and capabilities:
             codex_home = Path(plan["codex_home"])
             auth_path = Path(plan["codex_auth_path"])
+            # Codex's native sandbox keeps these read-only, so a capability lane keeps them too.
             profile += _sbpl_rule("deny", "file-write*", [cwd / ".git"])
             if private is not None and private != common:
-                for name in ("config.worktree", "commondir", "gitdir"):
+                for name in GIT_PRIVATE_READ_ONLY:
                     profile += _sbpl_rule("deny", "file-write*", [private / name], literal=True)
             profile += _sbpl_rule("allow", "file-write*", [codex_home])
             # Quote without resolving, and allow in-place rewrites only, so the lane cannot swap the
@@ -403,6 +416,18 @@ def confinement_command(plan, command):
     return [sandbox_exec, "-p", os_confinement_profile(plan), *command]
 
 
+def read_boundary(workspace_root, read_roots=()):
+    """The workspace plus the roots a caller authorised for a read cwd or prompt.
+
+    Fabric passes a read root for a directory it has matched to a registered project, so a
+    read-only dispatch can work in another project while its run stays in the caller's.
+    """
+    roots = [Path(root).expanduser().resolve() for root in read_roots]
+    if any(credential_path(root) for root in roots):
+        raise ValueError("read roots must exclude credential and authentication stores")
+    return [Path(workspace_root).expanduser().resolve(), *roots]
+
+
 def build_plan(
     adapter,
     route,
@@ -410,6 +435,7 @@ def build_plan(
     *,
     cwd=None,
     workspace_root=None,
+    read_roots=(),
     mode="read_only",
     worktree=None,
     sandbox=None,
@@ -418,6 +444,7 @@ def build_plan(
     capabilities=None,
     timeout_seconds=None,
     idle_seconds=None,
+    startup_seconds=None,
     preface=True,
     run_id="",
     chair="",
@@ -439,7 +466,8 @@ def build_plan(
     if not selected_cwd.is_dir():
         raise ValueError("cwd must be a readable directory")
     # A writer's worktree may sit outside the caller's tree; only a read cwd is bounded here.
-    if workspace_root and not worktree and not selected_cwd.is_relative_to(Path(workspace_root).expanduser().resolve()):
+    if workspace_root and not worktree and not any(
+            selected_cwd.is_relative_to(root) for root in read_boundary(workspace_root, read_roots)):
         raise ValueError("cwd must be inside the workspace")
     workspace_root = str(Path(workspace_root or selected_cwd).expanduser().resolve())
     cwd = str(selected_cwd)
@@ -458,10 +486,11 @@ def build_plan(
         git_private = git_dirs[0]
         git_common = git_dirs[1]
     guarded = check_protected_inputs(route, workspace_root, cwd, worktree=worktree,
-                                     prompt_file=original_prompt_file, add_dirs=add_dirs)
+                                     prompt_file=original_prompt_file, add_dirs=add_dirs,
+                                     read_roots=read_roots)
     if prompt_file is not None and prompt_file != original_prompt_file:
         check_protected_inputs(route, workspace_root, cwd, worktree=worktree,
-                               prompt_file=prompt_file, add_dirs=add_dirs)
+                               prompt_file=prompt_file, add_dirs=add_dirs, read_roots=read_roots)
     sandbox = sandbox or (
         "workspace-write" if mode == "worktree_write" else "read-only"
     )
@@ -496,29 +525,14 @@ def build_plan(
     for directory in directories:
         if credential_path(directory) or Path.home().resolve().is_relative_to(Path(directory)):
             warnings.append("credential or authentication add-dir dropped: " + directory)
-        elif capabilities and git_common is not None and Path(directory).resolve() == git_common:
-            warnings.append("Codex capability lane drops Git common directory add-dir: " + directory)
+        elif adapter == "codex" and git_common is not None and Path(directory).is_relative_to(git_common):
+            warnings.append("Codex writer drops Git common directory add-dir: " + directory)
         else:
             safe_directories.append(directory)
     directories = safe_directories
     if any(not Path(p).is_dir() for p in directories):
         raise ValueError("add-dir must be a readable directory")
-    if mode == "worktree_write" and adapter == "codex" and Path(cwd, ".git").is_file():
-        common = subprocess.run(
-            [
-                "git",
-                "-C",
-                cwd,
-                "rev-parse",
-                "--path-format=absolute",
-                "--git-common-dir",
-            ],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if not capabilities and common.returncode == 0 and common.stdout.strip() not in directories:
-            directories.append(common.stdout.strip())
+    if mode == "worktree_write" and adapter == "codex" and git_private is not None:
         # Codex's workspace-write sandbox keeps each writable root's .agents read-only, so a
         # rebase or merge that updates a tracked skill stops half-way. Granting the directory
         # lets Git rewrite it; execute() then fails a lane that authored a change there.
@@ -605,7 +619,7 @@ def build_plan(
                            CONFINED_STATE.get(adapter, {}).get("read_write", ())), "/dev"]
         if mode == "worktree_write":
             git_paths = ([str(git_private), *(str(git_common / path) for path in
-                           ("objects", "refs", "logs", "packed-refs", "packed-refs.lock"))]
+                           GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)]
                          if git_private is not None else [])
             writable_paths = [cwd, *directories, *writable_paths, *git_paths]
         if codex_home is not None:
@@ -613,6 +627,21 @@ def build_plan(
         write_boundary = {"kind": "sandbox-exec", "writable_paths": writable_paths}
     elif confinement == "provider-native":
         write_boundary = {"kind": "provider-native", "sandbox": sandbox}
+        if adapter == "codex":
+            write_boundary["profile"] = "provenant-" + uuid.uuid4().hex
+        if mode == "worktree_write" and sandbox == "workspace-write":
+            # Codex applies the nearest entry, so the common directory reads as read-only below
+            # any add_dir while the named Git paths inside it stay writable.
+            filesystem = {directory: "write" for directory in directories}
+            if git_private is not None:
+                filesystem[str(git_common)] = "read"
+                for path in (git_private, *(git_common / name for name in
+                                            GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)):
+                    filesystem[str(path)] = "write"
+                for name in GIT_PRIVATE_READ_ONLY:
+                    filesystem[str(git_private / name)] = "read"
+                filesystem[str(Path(cwd, ".git"))] = "read"
+            write_boundary["filesystem"] = filesystem
     else:
         write_boundary = {"kind": "none", "writable_paths": None}
     applied_sandbox = (
@@ -630,7 +659,12 @@ def build_plan(
         or os.environ.get("CF_DISPATCH_IDLE_SECONDS")
         or (config.IDLE_WRITE if mode == "worktree_write" else config.IDLE_READ)
     )
-    if not all(math.isfinite(value) and value > 0 for value in (timeout, idle)):
+    startup = float(
+        startup_seconds
+        or os.environ.get("CF_DISPATCH_STARTUP_SECONDS")
+        or STARTUP_SECONDS
+    )
+    if not all(math.isfinite(value) and value > 0 for value in (timeout, idle, startup)):
         raise ValueError("timeouts must be finite positive numbers")
     boundary = f"Workspace root: {cwd}\nResolve relative paths against this root. " + (
         "Write, run commands and commit only inside this owned worktree. Do not push or change other checkouts."
@@ -656,6 +690,7 @@ def build_plan(
         "original_prompt_file": original_path,
         "timeout_seconds": timeout,
         "idle_seconds": idle,
+        "startup_seconds": startup,
         "grace_seconds": 5.0,
         "session_id": session_id
         or (str(uuid.uuid4()) if adapter == "claude" else None),
@@ -2002,6 +2037,12 @@ def execute(
     private_cache.mkdir(parents=True, exist_ok=True)
     environment.update(TMPDIR=str(private_tmp), TMP=str(private_tmp), TEMP=str(private_tmp),
                        XDG_CACHE_HOME=str(private_cache))
+    if plan["mode"] == "worktree_write":
+        # Inherited GIT_ variables were dropped above, so this list is the whole command-line scope.
+        environment["GIT_CONFIG_COUNT"] = str(len(WRITER_GIT_CONFIG))
+        for index, (key, value) in enumerate(WRITER_GIT_CONFIG):
+            environment[f"GIT_CONFIG_KEY_{index}"] = key
+            environment[f"GIT_CONFIG_VALUE_{index}"] = value
     if plan["adapter"] == "claude":
         private_claude_tmp = private_tmp / "claude"
         private_claude_tmp.mkdir(parents=True, exist_ok=True)
@@ -2042,6 +2083,7 @@ def execute(
     diagnostics = BoundedCapture(stderr_path)
     started_at, started = now(), time.monotonic()
     last_progress, last_progress_at = started, started_at
+    launched, produced = started, False
     process = None
     descendants = None
     subreaper = False
@@ -2180,6 +2222,7 @@ def execute(
                 stderr=subprocess.PIPE,
                 start_new_session=True,
             )
+            launched = time.monotonic()
             descendants = _Descendants(process, attempt_marker)
             descendants.sample()
             if on_start:
@@ -2208,6 +2251,7 @@ def execute(
                         selector.unregister(key.fileobj)
                         continue
                     if key.data == "stdout":
+                        produced = True
                         raw.write(data)
                         consume(data)
                     else:
@@ -2239,6 +2283,10 @@ def execute(
                     break
                 if current - started >= plan["timeout_seconds"]:
                     forced = "timed_out"
+                    break
+                # Only provider stdout counts: a banner on stderr is not a started turn.
+                if not produced and current - launched >= plan.get("startup_seconds", STARTUP_SECONDS):
+                    forced = "startup_timeout"
                     break
                 if current >= next_sample:
                     next_sample = current + 1
@@ -2320,6 +2368,11 @@ def execute(
         )
     elif forced == "timed_out":
         diagnostics.write(b"wall clock deadline exceeded\n")
+    elif forced == "startup_timeout":
+        diagnostics.write(
+            f"no provider output within {plan.get('startup_seconds', STARTUP_SECONDS):g}s of launch; "
+            "re-route to another model or adapter\n".encode()
+        )
     stdout, stderr = (
         raw.text(),
         diagnostics.text(),
@@ -2358,6 +2411,7 @@ def execute(
         parsed["status"] = forced
         parsed["signature"] = {
             "stalled": "idle_watchdog",
+            "startup_timeout": "startup_watchdog",
             "timed_out": "wall_clock",
             "cancelled": "cancel_requested",
         }.get(forced, parsed["signature"])
@@ -2517,6 +2571,7 @@ def execute(
             "permission_blocked": "check the requested sandbox and directory grants",
             "tool_missing": "install the provider CLI",
             "stalled": "inspect events or try another model",
+            "startup_timeout": "re-route to another model or adapter",
             "usage_limited": "wait for reset or choose another model",
             "rate_limited": "retry after the recorded cooldown",
         }.get(status)
@@ -2591,7 +2646,7 @@ def execute(
         **({"spared": len(descendants.spared_at_stop)} if descendants and descendants.spared_at_stop else {}),
         "question": parsed["question"],
         "retryable": status
-        in {"usage_limited", "rate_limited", "model_unavailable", "stalled"},
+        in {"usage_limited", "rate_limited", "model_unavailable", "stalled", "startup_timeout"},
         "reset_at": parsed["reset_at"],
         "retry_after": parsed["retry_after"],
         "fix": fix,
@@ -2629,6 +2684,7 @@ def parser():
     p.add_argument("--mode", default="read_only")
     p.add_argument("--cwd", type=Path)
     p.add_argument("--workspace-root", type=Path)
+    p.add_argument("--read-root", action="append", default=[])
     p.add_argument("--worktree")
     p.add_argument("--sandbox")
     p.add_argument("--network", choices=["true", "false"])
@@ -2656,15 +2712,18 @@ def main():
     try:
         workspace_root = Path(args.workspace_root or Path.cwd()).expanduser().resolve()
         selected_cwd = Path(args.cwd or workspace_root).expanduser().resolve()
-        if not args.worktree and not selected_cwd.is_relative_to(workspace_root):
+        if not args.worktree and not any(
+                selected_cwd.is_relative_to(root) for root in read_boundary(workspace_root, args.read_root)):
             raise ValueError("cwd must be inside the workspace")
         route = json.loads(args.route_file.read_text())
         original_prompt_file = args.original_prompt_file or args.prompt_file
         check_protected_inputs(route, workspace_root, selected_cwd, worktree=args.worktree,
-                               prompt_file=original_prompt_file, add_dirs=args.add_dir)
+                               prompt_file=original_prompt_file, add_dirs=args.add_dir,
+                               read_roots=args.read_root)
         if original_prompt_file != args.prompt_file:
             check_protected_inputs(route, workspace_root, selected_cwd, worktree=args.worktree,
-                                   prompt_file=args.prompt_file, add_dirs=args.add_dir)
+                                   prompt_file=args.prompt_file, add_dirs=args.add_dir,
+                                   read_roots=args.read_root)
         plan = build_plan(
             args.adapter,
             route,
@@ -2672,6 +2731,7 @@ def main():
             mode=args.mode,
             cwd=args.cwd,
             workspace_root=workspace_root,
+            read_roots=args.read_root,
             worktree=args.worktree,
             sandbox=args.sandbox,
             network=None if args.network is None else args.network == "true",

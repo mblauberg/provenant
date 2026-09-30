@@ -10,7 +10,7 @@ On macOS, Codex `read-only` and `workspace-write` runs put the bundled `ps` shim
 
 Take the returned run id and call `fabric_status` with `ids: [id]` and `wait_seconds: 55`. `fabric_output` gives bounded live tails. `fabric_cancel` stops the process group. A worker question yields `input_required`; reply with `fabric_dispatch` using `resume: id` and a new prompt. For one task of a batch, pass the run id plus `task_id`, or the task's own id. Terminal digests include the ready-to-paste provenance line and, when known, the session size (`ctx 212k/1M`). Resuming a large session re-reads its whole context. When the digest warns `! resuming a ~620k-token session`, prefer `fabric_dispatch` with `handoff: id` and a new prompt. It starts a fresh session primed with the prior route and result tail. `context_ceiling` (default 300,000 tokens) can lower Claude and Codex auto-compaction but never raises it. Where the provider already compacts earlier, or its point is unknown, the receipt records `provider_default`. Other adapters record `unsupported`. Direct CLI is a degraded path under [direct-cli-fallback.md](direct-cli-fallback.md).
 
-Task class selects `flagship`, `workhorse` or `scout` when no explicit model is chosen. The configured catalogue determines candidates; the receipt is authoritative for the applied route. A cooling explicit model still runs with a warning; alias routes skip cooling candidates. An account-level usage limit cools the whole adapter, except on agy, which meters each hosted model separately. Automatic fallback stays within permitted paid non-training routes unless the caller opts into `fallback: "any"` or an explicit list.
+Task class selects `flagship`, `workhorse` or `scout` when no explicit model is chosen. The configured catalogue determines candidates; the receipt is authoritative for the applied route. A cooling explicit model still runs with a warning; alias routes skip cooling candidates. An account-level usage limit cools the whole adapter, except on agy, which meters each hosted model separately. Automatic fallback stays within permitted paid non-training routes unless the caller opts into `fallback: "any"` or an explicit list. A lane whose provider produces no output within five minutes of launch ends as `startup_timeout`: treat it as a re-route signal, not a reason to retry the same route. It is retryable, so a dispatch that allows fallback moves to its next candidate automatically; with fallback off, dispatch again at once on another model or adapter. A writer falls back only when its worktree was clean and is unchanged; otherwise the receipt is not retryable and its fix says to inspect the worktree first.
 
 ## Tiers (relative, family-agnostic)
 
@@ -58,12 +58,12 @@ and `xhigh` for critical review and for legwork that needs judgement. The
 native Codex CLI reports `max` and `ultra` for Astra and the Responses API
 stops at `max`; those are separate surfaces, only the runtime capability probe
 decides what the adapter can dispatch, and the catalogue defaults to neither.
-Every substitution is recorded. The Codex workhorse alias contains only GPT-6
-Sol (`gpt-6-sol`); scout is GPT-6 Luna (`gpt-6-luna`). Luna also appears in
-the mechanical, bulk and research task classes for bounded or non-visual
-legwork. Sol and Luna run at `high` by default and can be raised to `xhigh` or
-`max` when a slice warrants it. GPT-5.6 models and Terra are no longer
-catalogue routes. Claude and Codex are equal primary families.
+Every substitution is recorded. The workhorse alias lists GPT-6.1 Sol
+(`gpt-6.1-sol`) first, with GPT-6 Luna (`gpt-6-luna`) as its admissible
+fallback; scout is Luna. Both run at `high` by default and are raised to
+`xhigh` or `max` when a slice warrants it. GPT-5.6 models and Terra are no
+longer catalogue routes. Claude and
+Codex are equal primary families.
 
 Effort rule: **medium by default**; **high for verification, adversarial, and high-stakes** calls
 (that's where subtle errors hide); reserve the very highest effort for isolated single-shot calls —

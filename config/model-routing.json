@@ -27,7 +27,7 @@
       "role": "worker",
       "models": {
         "codex": [
-          "gpt-6-sol"
+          "gpt-6.1-sol"
         ],
         "claude": [
           "claude-sonnet-5-5"
@@ -75,7 +75,8 @@
       "role": "worker",
       "models": {
         "codex": [
-          "gpt-6-sol"
+          "gpt-6.1-sol",
+          "gpt-6-luna"
         ],
         "claude": [
           "claude-sonnet-5-5",
@@ -109,7 +110,7 @@
       "role": "worker",
       "models": {
         "codex": [
-          "gpt-6-sol"
+          "gpt-6.1-sol"
         ],
         "claude": [
           "claude-sonnet-5-5"
@@ -126,7 +127,7 @@
       "models": {
         "codex": [
           "gpt-6-astra",
-          "gpt-6-sol"
+          "gpt-6.1-sol"
         ],
         "claude": [
           "claude-sonnet-5-5",
@@ -143,7 +144,7 @@
       "role": "reviewer",
       "models": {
         "codex": [
-          "gpt-6-sol",
+          "gpt-6.1-sol",
           "gpt-6-astra"
         ],
         "claude": [
@@ -161,7 +162,7 @@
       "role": "worker",
       "models": {
         "codex": [
-          "gpt-6-sol",
+          "gpt-6.1-sol",
           "gpt-6-luna"
         ],
         "claude": [
@@ -243,7 +244,8 @@
           "gpt-6-astra"
         ],
         "workhorse": [
-          "gpt-6-sol"
+          "gpt-6.1-sol",
+          "gpt-6-luna"
         ],
         "scout": [
           "gpt-6-luna"
@@ -400,7 +402,7 @@
           ]
         },
         {
-          "id": "gpt-6-sol",
+          "id": "gpt-6.1-sol",
           "names": [
             "sol"
           ],
