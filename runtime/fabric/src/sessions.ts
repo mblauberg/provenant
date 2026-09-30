@@ -10,7 +10,7 @@ import { InputError, rejected, type DispatchInput } from "./execution-input.js";
 import { dispatchConfiguredProvider } from "./execution.js";
 import type { Identity } from "./identity.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
-import { findRecordedRun, observedAlive, statusRows } from "./run-registry.js";
+import { runOwnerAlive, statusRows } from "./run-registry.js";
 import { canonicalSuccessStatus } from "./success-status.js";
 import type { NamedSession, SessionLaunch, SessionTurnKind, Store } from "./store.js";
 
@@ -60,8 +60,8 @@ function turnAttempts(task: Record<string, any>, first: number): Record<string, 
 
 /**
  * Settle a finished or abandoned turn from run state; return the current row.
- * The run is recorded before its owner starts, so a turn is busy while its
- * launcher lives, its run's owner lives, or an attempt of its run is still open.
+ * Busy follows the run's lifecycle: a turn is open while its launcher is still
+ * recording or starting it, then while its run's task is open or its owner lives.
  */
 export async function reconcileSession(store: Store, who: Identity, name: string): Promise<NamedSession | undefined> {
   const row = store.session(who.project, name);
@@ -69,21 +69,14 @@ export async function reconcileSession(store: Store, who: Identity, name: string
   let status = "interrupted",
     runDir = "",
     final: Record<string, any> | undefined;
-  // The launcher is still recording, starting or watching its run.
   if (alive(row.turnPid)) return row;
-  // A dead launcher with no recorded run launched nothing; one with a recorded
-  // run defers to that run's owner and the turn's own attempts.
+  // A dead launcher with no recorded run launched nothing.
   if (row.turnRunId !== null) {
-    // Exclusion errs towards a live owner: an unknown process identity is not death.
-    const owner = findRecordedRun(who.cwd, row.turnRunId);
-    if (owner && observedAlive(owner.owner_pid, owner.owner_started_at)) return row;
     const task = await taskRow(who.cwd, row.turnRunId, row.turnTaskId);
-    const attempts = task ? turnAttempts(task, row.turnAttempt!) : [];
-    // With launcher and owner gone, only a turn attempt past queued can still be open;
-    // a queued placeholder for an owner that never started holds nothing.
-    if (task && task.state !== "terminal" && attempts.some((attempt) => !["terminal", "queued"].includes(attempt.state)))
-      return row;
+    // The owner also lives between an attempt and the fallback it chains on, when every attempt reads terminal.
+    if (task && (task.state !== "terminal" || runOwnerAlive(String(task.run_dir)))) return row;
     runDir = String(task?.run_dir ?? "");
+    const attempts = task ? turnAttempts(task, row.turnAttempt!) : [];
     final = task && (attempts.at(-1) ??
       // An owner that rejected the turn before its attempt existed.
       (Number(task.attempt) === row.turnAttempt ? task : undefined));

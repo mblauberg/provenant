@@ -96,6 +96,13 @@ export function hostOwnersInThemselves(): void {
   ownersHostThemselves = true;
 }
 
+let launcherStarted: string | null | undefined;
+
+/** This process's start time, probed once: the launcher identity a run's status records. */
+function launcherStartedAt(): string | null {
+  return (launcherStarted ??= processStartedAt(process.pid));
+}
+
 /** A self-hosted run is orphaned only once its owner is gone. */
 function selfHosted(record: OwnerRecord): OwnerRecord {
   return { ...record, host_pid: record.owner_pid, host_started_at: record.owner_started_at };
@@ -346,6 +353,9 @@ export function startOwner(
     status: "running",
     owner_stdout: stdoutPath,
     owner_stderr: stderrPath,
+    // The launcher: if it dies before an owner is stamped below, readers close the announced attempt.
+    host_pid: process.pid,
+    host_started_at: launcherStartedAt(),
   };
   writeFileSync(statusPath, JSON.stringify(metadata) + "\n", { mode: 0o600 });
   let child: ChildProcess;
@@ -449,6 +459,13 @@ export function startOwner(
   };
   const pid = child.pid;
   if (pid !== undefined) {
+    const ownerStartedAt = processStartedAt(pid);
+    try {
+      // The owner's identity in run status too, so readers still see it if the record cannot be written.
+      writeFileSync(statusPath, JSON.stringify({ ...metadata, owner_pid: pid, owner_started_at: ownerStartedAt }) + "\n", { mode: 0o600 });
+    } catch {
+      /* The owner record below still identifies it. */
+    }
     const hosted: OwnerRecord = {
       schema_version: 1,
       kind: identification.kind,
@@ -459,9 +476,9 @@ export function startOwner(
       // A detached child leads the group it was placed in, so the leader is
       // the child itself.
       owner_pgid: pid,
-      owner_started_at: processStartedAt(pid),
+      owner_started_at: ownerStartedAt,
       host_pid: process.pid,
-      host_started_at: processStartedAt(process.pid),
+      host_started_at: launcherStartedAt(),
       started_at: new Date().toISOString(),
       owner_stdout: stdoutPath,
       owner_stderr: stderrPath,

@@ -502,6 +502,31 @@ export function observedAlive(pid: number, startedAt: string | null): boolean {
   return observed === null || startMatches(pid, startedAt, observed);
 }
 
+type ProcessIdentity = { pid: number; startedAt: string | null };
+
+/**
+ * A run's owner: its owner record, else the identity its launcher stamped into
+ * run status after the spawn, which survives a record that could not be written.
+ */
+function runOwner(owner: OwnerRecord | undefined, status: Record<string, unknown> | undefined): ProcessIdentity | undefined {
+  if (owner) return { pid: owner.owner_pid, startedAt: owner.owner_started_at };
+  if (!positiveInteger(status?.owner_pid)) return undefined;
+  return { pid: status.owner_pid, startedAt: typeof status.owner_started_at === "string" ? status.owner_started_at : null };
+}
+
+/** Whether the owner of a run, once started, may still be acting for it. */
+export function runOwnerAlive(runDir: string): boolean {
+  const owner = runOwner(readOwnerRecord(runDir), readJson(join(runDir, "dispatch-status.json")));
+  return owner !== undefined && observedAlive(owner.pid, owner.startedAt);
+}
+
+/** A launcher that announced an attempt and died before starting any owner: nothing will run it. */
+function launcherAbandoned(status: Record<string, unknown> | undefined, owner: ProcessIdentity | undefined): boolean {
+  return owner === undefined && status?.status === "running" && status.finished_at === undefined &&
+    positiveInteger(status.host_pid) &&
+    !observedAlive(status.host_pid, typeof status.host_started_at === "string" ? status.host_started_at : null);
+}
+
 /** Status observes retained files and process identities; it never repairs or reaps runs. */
 async function legacyStatus(
   workspace: string,
@@ -568,8 +593,9 @@ async function legacyStatus(
     const rows = (id === undefined ? matches : matches.slice(0, 1)).map(
       ({ runDir, status: initialStatus, owner, started }) => {
         const provider = owner === undefined ? null : readProviderRecord(runDir, owner.run_token);
+        const identity = runOwner(owner, initialStatus);
         const alive =
-          (owner !== undefined && observedAlive(owner.owner_pid, owner.owner_started_at)) ||
+          (identity !== undefined && observedAlive(identity.pid, identity.startedAt)) ||
           (provider !== null && observedAlive(provider.provider_pid, provider.provider_started_at));
         // Once the owner is dead its attempt files are final. Read them after the probe.
         const status = readJson(join(runDir, "dispatch-status.json")) ?? initialStatus;
@@ -775,15 +801,16 @@ function v1Rows(runDir: string): Record<string, any>[] {
   if (grouped.size === 0) return [];
   const metadata = readJson(join(runDir, "dispatch-status.json"));
   const receipt = readJson(join(runDir, "RUN_RECEIPT.json"));
-  const owner = readOwnerRecord(runDir);
-  const provider = owner && readProviderRecord(runDir, owner.run_token);
-  const dead =
-    owner !== undefined &&
-    !observedAlive(owner.owner_pid, owner.owner_started_at) &&
+  const record = readOwnerRecord(runDir);
+  const provider = record && readProviderRecord(runDir, record.run_token);
+  const owner = runOwner(record, metadata);
+  const ownerAlive = owner !== undefined && observedAlive(owner.pid, owner.startedAt);
+  const dead = owner !== undefined && !ownerAlive &&
     !(provider && observedAlive(provider.provider_pid, provider.provider_started_at));
   const closed = metadata?.finished_at !== undefined && metadata?.status !== "running";
-  const ownerAlive = owner !== undefined && observedAlive(owner.owner_pid, owner.owner_started_at);
   const interrupted = !ownerAlive && (receipt?.status === "interrupted" || dead || closed);
+  // Only the attempt the dead launcher announced is closed; any attempt an owner wrote stands.
+  const abandoned = launcherAbandoned(metadata, owner);
   const closureStatus = receipt?.status === "cancelled" || metadata?.status === "cancelled" ? "cancelled" : "interrupted";
   const summary =
     typeof metadata?.batch_id === "string" && /^[A-Za-z0-9._-]+$/u.test(metadata.batch_id)
@@ -805,8 +832,10 @@ function v1Rows(runDir: string): Record<string, any>[] {
           }
         : row;
     if (pending) {
-      const status = closed && metadata?.status === "rejected" ? "rejected" : interrupted ? closureStatus : null;
-      const fix = metadata?.fix ?? metadata?.message ?? "Dispatch a new run; the owner exited.";
+      const ended = interrupted || abandoned;
+      const status = closed && metadata?.status === "rejected" ? "rejected" : ended ? closureStatus : null;
+      const fix = metadata?.fix ?? metadata?.message ??
+        (abandoned ? "The launcher exited before starting the run owner; retry." : "Dispatch a new run; the owner exited.");
       return {
         schema: "fabric.status.v1",
         id: row.run_id,
@@ -816,11 +845,11 @@ function v1Rows(runDir: string): Record<string, any>[] {
         attempt: metadata!.next_attempt,
         attempts: attempts.map((attempt) => ({ ...attempt, status: canonicalSuccessStatus(attempt.status) })),
         attempt_count: attempts.length,
-        state: interrupted ? "terminal" : "queued",
+        state: ended ? "terminal" : "queued",
         status,
-        ...(interrupted ? { fix, message: metadata?.message, ...(status === "rejected" && typeof metadata?.error === "string" ? { error: metadata.error } : {}) } : {}),
+        ...(ended ? { fix, message: metadata?.message, ...(status === "rejected" && typeof metadata?.error === "string" ? { error: metadata.error } : {}) } : {}),
         started_at: metadata!.started_at,
-        digest: interrupted ? `${status} ${row.run_id} · fix: ${fix}` : `running ${row.run_id} attempt ${metadata!.next_attempt} · fabric_status{ids:["${row.run_id}"],wait_seconds:55}`,
+        digest: ended ? `${status} ${row.run_id} · fix: ${fix}` : `running ${row.run_id} attempt ${metadata!.next_attempt} · fabric_status{ids:["${row.run_id}"],wait_seconds:55}`,
         paths: {},
       };
     }

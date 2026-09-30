@@ -167,6 +167,16 @@ const write = () => writeFileSync(join(path, "attempt.json"), JSON.stringify(row
 write();
 writeFileSync(join(path, "stderr.log"), "fixture stderr");
 writeFileSync(join(path, "events.jsonl"), "{}\n");
+if (prompt === "admission-slow") {
+  // The owner waits for memory admission, then runs once released.
+  Object.assign(row, { state: "queued", queue_reason: "memory", admission: { owner_pid: process.pid, owner_start_epoch: null } });
+  write();
+  while (!existsSync(join(dir, "release"))) await new Promise((r) => setTimeout(r, 20));
+  delete row.queue_reason;
+  delete row.admission;
+  row.state = "running";
+  write();
+}
 if (prompt === "stubborn") {
   // Ignores SIGTERM and never honours the cancel file: only SIGKILL ends it,
   // before any terminal row is written.

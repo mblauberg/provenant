@@ -69,9 +69,12 @@ dispatch and run owners keep sole ownership of processes, attempts,
 cancellation and result files. Only a clean turn (`ok` or `input_required`)
 moves the alias, to the attempt that ended the owner invocation. One turn per
 name is active; a concurrent caller gets `session_busy`. A turn records its run
-before the owner starts, and launches nothing if it cannot. It is active while
-the launching process, the run's owner or an open attempt of the turn lives. This is
-reconciled whenever the name is read; there is no lease timer, heartbeat,
+before the owner starts, and launches nothing if it cannot. Busy follows the
+run's lifecycle: the turn is active while its launching process lives, then
+while its run's task is open or the run's owner lives. The run status records
+the launcher and the owner it started, so readers close an attempt whose
+launcher died before starting an owner, and keep open one whose owner lives
+without an owner record. This is reconciled whenever the name is read; there is no lease timer, heartbeat,
 queue, expiry or cleanup daemon. A provider without native continuation, or one
 that no longer has the session, reports `continuation_unsupported` rather than
 falling back to a new session.

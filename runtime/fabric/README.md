@@ -291,7 +291,9 @@ the attempt that ended it cleanly. A name runs one turn at a time; another call
 gets `session_busy` with the active run ID. The turn records its run before
 the owner starts, so a caller that exits or dies while waiting leaves the name
 busy until the run's owner finishes; an owner whose identity cannot be verified
-counts as alive. If that record cannot be written, nothing is launched and the
+counts as alive. Busy is read from the run itself: a launcher that dies before
+starting the owner leaves an attempt that status reports `interrupted`, so the
+name, resume and `fresh` all proceed. If that record cannot be written, nothing is launched and the
 reply carries `session_unrecorded` and `session_error`. `fabric_session` with `action: inspect`, `list` or
 `forget` reads or drops a name; `forget` is refused while a turn is active and
 leaves run files and provider history in place. A provider without native

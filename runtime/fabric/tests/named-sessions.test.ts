@@ -376,10 +376,47 @@ it("never runs a second turn on a name after a launch it could not record", asyn
     expect(live(), `${first.stdout}${first.stderr}`).toBeLessThanOrEqual(1);
     expect(first.stdout).toContain("session_unrecorded");
     expect(first.stdout).toContain("nothing was launched");
-    expect(second).toMatchObject({ status: "running", session_turn: "start" });
+    // A launched run reads running, or null once its owner has written the attempt.
+    expect(second).toMatchObject({ session: "unrec", session_turn: "start" });
+    expect(second.error).toBeUndefined();
+    expect(second.id).toMatch(/^mcp-/u);
     expect(await chair.call("dispatch", { session: "unrec", prompt: "x" }))
       .toMatchObject({ status: "rejected", error: "session_busy", active_run_id: second.id });
     await chair.call("cancel", { id: second.id });
+  } finally {
+    await chair.client.close();
+  }
+}, 60_000);
+
+it("keeps a turn busy while its owner lives without an owner record", async () => {
+  const project = fixtureProject();
+  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  try {
+    writeFileSync(join(project.linked, "queued.md"), "admission-slow");
+    // The CLI launcher cannot publish the owner record, starts the owner anyway and exits.
+    const launched = spawnSync(resolve(import.meta.dirname, "../bin/fabric"),
+      ["dispatch", "--session", "queue", "--prompt-file", "queued.md"], {
+        cwd: project.linked, encoding: "utf8", env: {
+          ...project.env(project.linked, "cli-seat", "codex"), PROVENANT_OWNER_RECORD_FAULT: "1",
+          NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${resolve(import.meta.dirname, "spawn-fault-preload.mjs")}`.trim(),
+        },
+      });
+    expect(launched.status, launched.stdout + launched.stderr).toBe(0);
+    const run = launched.stdout.split("\n")[0]!;
+    expect(run).toMatch(/^mcp-/u);
+    // The owner waits for memory admission: its attempt is queued and nothing records the owner.
+    const row = (await until(() => chair.call("status", { ids: [run], detail: "full" }),
+      (value) => value.runs?.[0]?.state === "queued" && value.runs[0].attempt === 1)).runs[0];
+    expect(row).toMatchObject({ state: "queued", attempt: 1 });
+    expect(existsSync(join(row.run_dir, "dispatch-owner.json"))).toBe(false);
+    expect(await chair.call("session", { action: "inspect", name: "queue" })).toMatchObject({ active_run_id: run });
+    expect(await chair.call("session", { action: "forget", name: "queue" }))
+      .toMatchObject({ status: "rejected", error: "session_busy", active_run_id: run });
+    expect(await chair.call("dispatch", { session: "queue", prompt: "x" }))
+      .toMatchObject({ status: "rejected", error: "session_busy", active_run_id: run });
+    writeFileSync(join(row.run_dir, "release"), "");
+    expect(await until(() => chair.call("session", { action: "inspect", name: "queue" }), (value) => value.active_run_id === null))
+      .toMatchObject({ run_id: run, attempt: 1, active_run_id: null, last_turn: { status: "ok" } });
   } finally {
     await chair.client.close();
   }
@@ -415,15 +452,23 @@ it("recovers a resumed turn whose launcher failed between recording it and start
     expect(await chair.call("dispatch", { session: "crash", prompt: "again", wait_seconds: 5 }))
       .toMatchObject({ status: "ok", attempt: 2, session_turn: "resume" });
 
-    // A launcher that dies at the same point leaves a recorded turn with no owner and no attempt: settled on read.
-    const killed = faulty("kill");
-    expect(killed.signal).toBe("SIGKILL");
+    // A launcher that dies at the same point announced an attempt no owner will run:
+    // the run lifecycle closes it, so the turn settles and resume works on it.
+    expect(faulty("kill").signal).toBe("SIGKILL");
+    expect((await chair.call("status", { ids: [first.run_id], detail: "full" })).runs[0])
+      .toMatchObject({ attempt: 3, state: "terminal", status: "interrupted" });
     expect(await chair.call("session", { action: "inspect", name: "crash" })).toMatchObject({
       run_id: first.run_id, attempt: 2, active_run_id: null, last_turn: { attempt: 3, status: "interrupted" },
     });
+    expect(await chair.call("dispatch", { session: "crash", prompt: "again", wait_seconds: 5 }))
+      .toMatchObject({ status: "ok", run_id: first.run_id, attempt: 3, session_turn: "resume" });
+
+    // So does a handoff to a fresh session.
+    expect(faulty("kill").signal).toBe("SIGKILL");
+    const fresh = await chair.call("dispatch", { session: "crash", prompt: "first", fresh: true, wait_seconds: 5 });
+    expect(fresh).toMatchObject({ status: "ok", attempt: 1, session_turn: "fresh" });
+    expect(fresh.run_id).not.toBe(first.run_id);
     expect(await chair.call("session", { action: "forget", name: "crash" })).toMatchObject({ forgotten: "crash" });
-    expect(await chair.call("dispatch", { session: "crash", prompt: "first", wait_seconds: 5 }))
-      .toMatchObject({ status: "ok", attempt: 1, session_turn: "start" });
   } finally {
     await chair.client.close();
   }
