@@ -3004,6 +3004,14 @@ def test_finalize_phase_includes_receipt_publication(tmp_path, monkeypatch):
     assert attempt['timing']['phases']['finalize'] >= 120
 
 
+def normalise_plan_identity(plan):
+    """Replace the per-plan session id and Codex permissions profile name, which differ by design."""
+    for key, placeholder in (('session_id', '<session>'), ('profile', '<profile>')):
+        owner = plan if key == 'session_id' else plan['applied']['write_boundary']
+        value = owner.pop(key, None)
+        plan['argv'] = [arg.replace(value, placeholder) if value else arg for arg in plan['argv']]
+
+
 @pytest.mark.parametrize('adapter, model, effort', [
     ('claude', 'opus', None), ('codex', 'gpt-6-luna', 'low'),
 ])
@@ -3031,9 +3039,7 @@ def test_fabric_fast_plan_matches_shell_for_explicit_model(tmp_path, monkeypatch
     assert planned is not None
     expected = json.loads(shell.stdout)
     for value in (planned, expected):
-        session = value.pop('session_id', None)
-        value['argv'] = [arg.replace(session, '<session>') if session else arg
-                         for arg in value['argv']]
+        normalise_plan_identity(value)
     assert planned == expected
 
 
@@ -3068,8 +3074,7 @@ def test_fabric_fast_plan_matches_or_delegates_shell_edge_routes(
     assert shell.returncode == 0, shell.stderr
     expected = json.loads(shell.stdout)
     for value in (planned, expected):
-        session = value.pop('session_id', None)
-        value['argv'] = [arg.replace(session, '<session>') if session else arg for arg in value['argv']]
+        normalise_plan_identity(value)
     assert planned == expected
 
 
