@@ -350,7 +350,8 @@ def os_confinement_profile(plan):
     state = CONFINED_STATE.get(plan.get("adapter"), {})
     add_dirs = [Path(path) for path in plan.get("applied", {}).get("add_dirs", [])]
     run_dir = Path(plan["run_dir"]) if plan.get("run_dir") else None
-    state_writes = [home / path for path in state.get("read_write", ())]
+    state_writes = _state_paths(home, state.get("read_write", ()))
+    _state_paths(home, state.get("write_in_place", ()))
     if plan.get("mode") == "worktree_write":
         cwd = Path(plan["cwd"])
         git_dirs = {}
@@ -361,7 +362,7 @@ def os_confinement_profile(plan):
                 git_dirs[flag] = Path(result.stdout.strip()).resolve()
         private = git_dirs.get("--absolute-git-dir")
         common = git_dirs.get("--git-common-dir")
-        allowed = [cwd, *add_dirs, *([run_dir] if run_dir else []), *state_writes, Path("/dev")]
+        allowed = [cwd, *add_dirs, *([run_dir] if run_dir else []), Path("/dev")]
         git_allowed = []
         if private is not None and private != common:
             git_allowed.append(private)
@@ -373,6 +374,7 @@ def os_confinement_profile(plan):
         profile = (
             "(version 1)\n(allow default)\n(deny file-write*)\n"
             + _sbpl_rule("allow", "file-write*", allowed)
+            + _sbpl_rule("allow", "file-write*", state_writes, keep_leaf=True)
             + _sbpl_rule("deny", "file-write*", [common] if common is not None else [])
             + _sbpl_rule("allow", "file-write*", git_allowed, keep_leaf=True)
             + _sbpl_rule("allow", "file-write*", literal_files, literal=True, keep_leaf=True)
@@ -416,11 +418,13 @@ def os_confinement_profile(plan):
     reads = [*state.get("read", ()), *(() if _uses_api_key(plan) else state.get("oauth_read", ()))]
     return (
         "(version 1)\n(allow default)\n(deny file-write*)\n"
-        + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), *state_writes, Path("/dev")])
+        + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), Path("/dev")])
+        + _sbpl_rule("allow", "file-write*", state_writes, keep_leaf=True)
         + _state_write_guards(home, state)
         + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
         + _sbpl_rule("deny", "file-read-data", [root, *add_dirs])
-        + _sbpl_rule("allow", "file-read-data", [*([run_dir] if run_dir else []), *state_writes])
+        + _sbpl_rule("allow", "file-read-data", [*([run_dir] if run_dir else [])])
+        + _sbpl_rule("allow", "file-read-data", state_writes, keep_leaf=True)
         + _sbpl_rule("allow", "file-read-data", [home / path for path in reads])
         + _sbpl_rule("allow", "file-read-data", [home / path for path in state.get("read_literal", ())],
                      literal=True, keep_leaf=True)
@@ -434,6 +438,17 @@ def os_confinement_profile(plan):
         + (_claude_session_reads(home, plan) if plan.get("adapter") == "claude" else "")
         + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
     )
+
+
+def _state_paths(home, entries):
+    """Writable provider state, granted by its own name. A lane can replace such an entry, so a link
+    planted there fails the launch rather than moving the next attempt's grant to the link's target."""
+    paths = [home / entry for entry in entries]
+    for path in paths:
+        if not str(path).endswith("*") and path.is_symlink():
+            raise PermissionError(f"provider state must not be a symlink: {path}; "
+                                  "fix: replace the link with the file or directory it points to")
+    return paths
 
 
 def _state_write_guards(home, state):

@@ -206,7 +206,9 @@ write there only `data.sqlite3` and `.refresh.lock`, in place, and SQLite's
 `-wal`, `-shm` and `-journal` sidecars, so its token can refresh. It cannot
 create links there, and the shell hooks and binaries beside them stay
 read-only. A confined Kiro dispatch refuses until kiro-cli has unpacked its
-engine outside the sandbox. The keychain file grant, together with the profile's unrestricted
+engine outside the sandbox. Writable provider state is granted by its own
+name, and a launch fails if any such path is a symbolic link, so a link a lane
+planted cannot move the next attempt's grant to the link's target. The keychain file grant, together with the profile's unrestricted
 `mach-lookup`, lets an OAuth Claude lane query the whole login keychain through
 the security service; SBPL has no narrower filter, and read-only Claude lanes
 have no shell. `~/.claude/projects` and `~/.codex/sessions` stay unreadable

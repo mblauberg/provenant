@@ -670,6 +670,42 @@ def test_kiro_profile_writes_only_its_sign_in_state_not_shell_hooks_or_executabl
         assert run(f"cat '{support}/data.sqlite3'").returncode == 0
 
 
+STATE_WRITE_ENTRIES = [
+    (adapter, entry)
+    for adapter, state in importlib.import_module("skills.orchestrate.scripts.provider_exec").CONFINED_STATE.items()
+    for entry in (*state.get("read_write", ()), *state.get("write_in_place", ()))
+    if not entry.endswith("*")
+]
+
+
+@pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
+@pytest.mark.parametrize("adapter,entry", STATE_WRITE_ENTRIES)
+def test_a_link_planted_at_writable_provider_state_never_moves_the_grant(monkeypatch, tmp_path, adapter,
+                                                                         entry, mode):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    workspace = home / "repo"
+    workspace.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    target = home / "Library/Application Support/kiro-cli/node"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("binary\n", encoding="utf-8")
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    plan = {"adapter": adapter, "mode": mode, "route": {}, "workspace_root": str(workspace),
+            "cwd": str(workspace), "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    # Without a link, each grant names the state path itself.
+    assert f'"{home / entry}"' in mod.os_confinement_profile(plan)
+    planted = home / entry
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    if planted.exists():
+        planted.unlink()
+    planted.symlink_to(target)
+    # An earlier lane planted a link there: the next profile refuses rather than granting its target.
+    with pytest.raises(PermissionError, match="provider state must not be a symlink"):
+        mod.os_confinement_profile(plan)
+
+
 def test_confined_kiro_refuses_a_missing_engine_with_a_fix(monkeypatch, tmp_path):
     mod = supervisor()
     home = (tmp_path / "home").resolve()
