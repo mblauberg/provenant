@@ -55,6 +55,9 @@ function fixtureProject() {
   mkdirSync(join(product, "config"), { recursive: true });
   const routing = JSON.parse(readFileSync(resolve(import.meta.dirname, "../../../config/model-routing.json"), "utf8"));
   routing.adapters.codex.models.push({ id: "fixture", names: ["fixture"] });
+  // A dispatch that names no adapter draws from a weighted pool. Every seat here is claude, so pin
+  // every pool to the fixture's codex route: a non-native member the pool always picks.
+  for (const pool of Object.keys(routing.routes)) routing.routes[pool] = [{ model: "codex/fixture", weight: "high" }];
   writeFileSync(join(product, "config/model-routing.json"), JSON.stringify(routing));
   copyFileSync(resolve(import.meta.dirname, "../../../config/adapter-compatibility.yaml"), join(product, "config/adapter-compatibility.yaml"));
   const owners = join(product, "skills/orchestrate/scripts");
@@ -69,8 +72,17 @@ function fixtureProject() {
     chmodSync(join(owners, name), 0o755);
   }
   const python = execFileSync("python3", ["-c", "import sys;print(sys.executable)"], { encoding: "utf8" }).trim();
+  // Pools see codex installed, nothing cooling and no user overlay, on any machine.
+  const bin = join(root, "pool-bin"), instance = join(root, "empty-instance");
+  mkdirSync(bin);
+  mkdirSync(instance);
+  writeFileSync(join(bin, "codex"), "#!/bin/sh\nexit 0\n");
+  chmodSync(join(bin, "codex"), 0o755);
   const env = (cwd: string, label: string, seat: string) => ({
     ...(process.env as Record<string, string>),
+    PATH: `${bin}:${process.env.PATH}`,
+    AGENT_FABRIC_INSTANCE_ROOT: instance,
+    AGENT_FABRIC_STATE_ROOT: join(root, "pool-state"),
     FABRIC_NODE: process.execPath,
     AGENT_FABRIC_TSX_LOADER: createRequire(import.meta.url).resolve("tsx"),
     AGENT_FABRIC_STATE_DIRECTORY: join(root, "state"),
@@ -99,7 +111,7 @@ function fixtureProject() {
 
 it("starts, inspects, resumes across agents, serialises and forgets a named session", async () => {
   const project = fixtureProject();
-  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  const chair = await project.connect(project.linked, "chair-seat", "claude");
   const worker = await project.connect(project.primary, "worker-seat", "claude");
   try {
     const started = await chair.call("dispatch", { session: "Review", prompt: "first", wait_seconds: 5 });
@@ -170,7 +182,7 @@ it("starts, inspects, resumes across agents, serialises and forgets a named sess
 
 it("reports continuation_unsupported and starts fresh only when asked", async () => {
   const project = fixtureProject();
-  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  const chair = await project.connect(project.linked, "chair-seat", "claude");
   try {
     const first = await chair.call("dispatch", { session: "pilot", adapter: "copilot", prompt: "first", wait_seconds: 5 });
     expect(first).toMatchObject({ status: "ok", session_turn: "start" });
@@ -236,11 +248,11 @@ it("reports continuation_unsupported and starts fresh only when asked", async ()
 it("drives a named session from the CLI", async () => {
   const project = fixtureProject();
   const cli = (...args: string[]) => spawnSync(resolve(import.meta.dirname, "../bin/fabric"), args, {
-    cwd: project.linked, env: project.env(project.linked, "cli-seat", "codex"), encoding: "utf8",
+    cwd: project.linked, env: project.env(project.linked, "cli-seat", "claude"), encoding: "utf8",
   });
   writeFileSync(join(project.linked, "prompt.md"), "first");
   const started = cli("dispatch", "--session", "cli", "--prompt-file", "prompt.md", "--wait");
-  expect(started.status, started.stderr).toBe(0);
+  expect(started.status, started.stdout + started.stderr).toBe(0);
   expect(started.stdout).toMatch(/status: ok\nsession cli codex fixture-/u);
   const resumed = cli("dispatch", "--session", "cli", "--prompt-file", "prompt.md", "--wait");
   expect(resumed.stdout).toMatch(/#2 · result/u);
@@ -252,7 +264,7 @@ it("drives a named session from the CLI", async () => {
 
 it("keeps a turn busy through the owner's fallback and advances to the attempt that succeeded", async () => {
   const project = fixtureProject();
-  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  const chair = await project.connect(project.linked, "chair-seat", "claude");
   const worker = await project.connect(project.primary, "worker-seat", "claude");
   try {
     const launched = await chair.call("dispatch", { session: "fb", prompt: "fallback-slow", wait_seconds: 0 });
@@ -279,12 +291,12 @@ it("keeps a turn busy through the owner's fallback and advances to the attempt t
 
 it("keeps a CLI turn whose waiting caller was killed after launch", async () => {
   const project = fixtureProject();
-  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  const chair = await project.connect(project.linked, "chair-seat", "claude");
   try {
     writeFileSync(join(project.linked, "slow.md"), "slow");
     const waiting = spawn(resolve(import.meta.dirname, "../bin/fabric"),
       ["dispatch", "--session", "kill", "--prompt-file", "slow.md", "--wait"],
-      { cwd: project.linked, env: project.env(project.linked, "cli-seat", "codex"), stdio: "ignore" });
+      { cwd: project.linked, env: project.env(project.linked, "cli-seat", "claude"), stdio: "ignore" });
     const active = await until(() => chair.call("session", { action: "inspect", name: "kill" }),
       (value) => typeof value.active_run_id === "string");
     const run = active.active_run_id as string;
@@ -336,7 +348,7 @@ it("refuses a claim planned from a turn another caller has since settled", () =>
 
 it("keeps a turn busy between fallback attempts when the owner's start time is unknown", async () => {
   const project = fixtureProject();
-  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  const chair = await project.connect(project.linked, "chair-seat", "claude");
   try {
     const run = (await chair.call("dispatch", { session: "gap", prompt: "fallback-gap", wait_seconds: 0 })).id as string;
     const row = (await until(() => chair.call("status", { ids: [run], detail: "full" }),
@@ -359,9 +371,9 @@ it("keeps a turn busy between fallback attempts when the owner's start time is u
 
 it("never runs a second turn on a name after a launch it could not record", async () => {
   const project = fixtureProject();
-  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  const chair = await project.connect(project.linked, "chair-seat", "claude");
   const cli = (...args: string[]) => spawnSync(resolve(import.meta.dirname, "../bin/fabric"), args, {
-    cwd: project.linked, env: project.env(project.linked, "cli-seat", "codex"), encoding: "utf8",
+    cwd: project.linked, env: project.env(project.linked, "cli-seat", "claude"), encoding: "utf8",
   });
   const live = () => (JSON.parse(cli("dispatch", "list", "--json").stdout).runs as { running: boolean }[])
     .filter((run) => run.running).length;
@@ -393,14 +405,14 @@ it("never runs a second turn on a name after a launch it could not record", asyn
 
 it("keeps a turn busy while its owner lives without an owner record", async () => {
   const project = fixtureProject();
-  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  const chair = await project.connect(project.linked, "chair-seat", "claude");
   try {
     writeFileSync(join(project.linked, "queued.md"), "admission-slow");
     // The CLI launcher cannot publish the owner record, starts the owner anyway and exits.
     const launched = spawnSync(resolve(import.meta.dirname, "../bin/fabric"),
       ["dispatch", "--session", "queue", "--prompt-file", "queued.md"], {
         cwd: project.linked, encoding: "utf8", env: {
-          ...project.env(project.linked, "cli-seat", "codex"), PROVENANT_OWNER_RECORD_FAULT: "1",
+          ...project.env(project.linked, "cli-seat", "claude"), PROVENANT_OWNER_RECORD_FAULT: "1",
           NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${resolve(import.meta.dirname, "spawn-fault-preload.mjs")}`.trim(),
         },
       });
@@ -427,13 +439,13 @@ it("keeps a turn busy while its owner lives without an owner record", async () =
 
 it("keeps a turn busy while its provider outlives an owner that had no owner record", async () => {
   const project = fixtureProject();
-  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  const chair = await project.connect(project.linked, "chair-seat", "claude");
   try {
     writeFileSync(join(project.linked, "orphan.md"), "orphan-provider");
     const launched = spawnSync(resolve(import.meta.dirname, "../bin/fabric"),
       ["dispatch", "--session", "orphan", "--prompt-file", "orphan.md"], {
         cwd: project.linked, encoding: "utf8", env: {
-          ...project.env(project.linked, "cli-seat", "codex"), PROVENANT_OWNER_RECORD_FAULT: "1",
+          ...project.env(project.linked, "cli-seat", "claude"), PROVENANT_OWNER_RECORD_FAULT: "1",
           NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${resolve(import.meta.dirname, "spawn-fault-preload.mjs")}`.trim(),
         },
       });
@@ -459,7 +471,7 @@ it("keeps a turn busy while its provider outlives an owner that had no owner rec
 
 it("keeps a turn busy while a stale owner record names a dead owner and status names the live one", async () => {
   const project = fixtureProject();
-  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  const chair = await project.connect(project.linked, "chair-seat", "claude");
   try {
     const run = (await chair.call("dispatch", { session: "stale", prompt: "slow", wait_seconds: 0 })).id as string;
     const row = (await until(() => chair.call("status", { ids: [run], detail: "full" }),
@@ -482,7 +494,7 @@ it("keeps a turn busy while a stale owner record names a dead owner and status n
 
 it("releases a finished turn whose retained provider record names a reused pid with no start time", async () => {
   const project = fixtureProject();
-  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  const chair = await project.connect(project.linked, "chair-seat", "claude");
   const reused = spawn("sleep", ["30"], { stdio: "ignore" });
   try {
     const run = (await chair.call("dispatch", { session: "reuse", prompt: "slow", wait_seconds: 0 })).id as string;
@@ -504,7 +516,7 @@ it("releases a finished turn whose retained provider record names a reused pid w
 
 it("keeps an MCP turn busy while its orphan provider with no start time outlives the owner's closure", async () => {
   const project = fixtureProject();
-  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  const chair = await project.connect(project.linked, "chair-seat", "claude");
   try {
     const run = (await chair.call("dispatch", { session: "orphan-mcp", prompt: "orphan-provider", wait_seconds: 0 })).id as string;
     // The owner exits and the MCP completion callback closes the run's metadata, but
@@ -542,13 +554,58 @@ it("keeps a named session's line in a running turn's rebuilt text", () => {
   expect(text).toBe(`running mcp-abc123 · fabric_status{ids:["mcp-abc123"],wait_seconds:55}\n  session s resume active`);
 });
 
+it("releases a resume that failed before spawning despite a finished turn's stale provider record", async () => {
+  const project = fixtureProject();
+  const chair = await project.connect(project.linked, "chair-seat", "claude");
+  const reused = spawn("sleep", ["30"], { stdio: "ignore" });
+  const faulty = (fault: string) => spawnSync(resolve(import.meta.dirname, "../bin/fabric"),
+    ["dispatch", "--session", "stale-pre", "--prompt-file", "again.md", "--wait"], {
+      cwd: project.linked, encoding: "utf8", env: {
+        ...project.env(project.linked, "cli-seat", "claude"), PROVENANT_SPAWN_FAULT: fault,
+        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${resolve(import.meta.dirname, "spawn-fault-preload.mjs")}`.trim(),
+      },
+    });
+  try {
+    // A CLI turn: its launcher exits first, so the finished run keeps its owner record.
+    writeFileSync(join(project.linked, "first.md"), "first");
+    const launched = spawnSync(resolve(import.meta.dirname, "../bin/fabric"),
+      ["dispatch", "--session", "stale-pre", "--prompt-file", "first.md"],
+      { cwd: project.linked, encoding: "utf8", env: project.env(project.linked, "cli-seat", "claude") });
+    expect(launched.status, launched.stdout + launched.stderr).toBe(0);
+    const first = (await until(() => chair.call("status", { ids: [launched.stdout.split("\n")[0]!], detail: "full" }),
+      (value) => value.runs?.[0]?.state === "terminal")).runs[0];
+    expect(first).toMatchObject({ status: "ok", attempt: 1 });
+    expect(existsSync(join(first.run_dir, "dispatch-owner.json"))).toBe(true);
+    // It also left a provider record with no start time; its pid now belongs to another process.
+    const token = JSON.parse(readFileSync(join(first.run_dir, "dispatch-status.json"), "utf8")).run_token as string;
+    writeFileSync(join(first.run_dir, "dispatch-provider.json"), JSON.stringify({
+      run_token: token, provider_pid: reused.pid, provider_pgid: reused.pid, provider_started_at: null }));
+    writeFileSync(join(project.linked, "again.md"), "again");
+    const thrown = faulty("throw");
+    expect(thrown.stdout + thrown.stderr).toContain("spawn refused");
+    expect(existsSync(join(first.run_dir, "tasks", first.task_id, "attempt-002"))).toBe(false);
+    expect(await chair.call("session", { action: "inspect", name: "stale-pre" })).toMatchObject({
+      run_id: first.run_id, attempt: 1, active_run_id: null, last_turn: { attempt: 2, status: "rejected" },
+    });
+    // A launcher that dies at the same point is closed by the run lifecycle and settles too.
+    expect(faulty("kill").signal).toBe("SIGKILL");
+    expect(await chair.call("session", { action: "inspect", name: "stale-pre" })).toMatchObject({
+      run_id: first.run_id, attempt: 1, active_run_id: null, last_turn: { attempt: 2, status: "interrupted" },
+    });
+    expect(await chair.call("session", { action: "forget", name: "stale-pre" })).toMatchObject({ forgotten: "stale-pre" });
+  } finally {
+    reused.kill("SIGKILL");
+    await chair.client.close();
+  }
+}, 60_000);
+
 it("recovers a resumed turn whose launcher failed between recording it and starting its owner", async () => {
   const project = fixtureProject();
-  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  const chair = await project.connect(project.linked, "chair-seat", "claude");
   const faulty = (fault: string) => spawnSync(resolve(import.meta.dirname, "../bin/fabric"),
     ["dispatch", "--session", "crash", "--prompt-file", "again.md", "--wait"], {
       cwd: project.linked, encoding: "utf8", env: {
-        ...project.env(project.linked, "cli-seat", "codex"), PROVENANT_SPAWN_FAULT: fault,
+        ...project.env(project.linked, "cli-seat", "claude"), PROVENANT_SPAWN_FAULT: fault,
         NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${resolve(import.meta.dirname, "spawn-fault-preload.mjs")}`.trim(),
       },
     });

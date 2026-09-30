@@ -74,10 +74,8 @@ export async function reconcileSession(store: Store, who: Identity, name: string
   if (row.turnRunId !== null) {
     const task = await taskRow(who.cwd, row.turnRunId, row.turnTaskId);
     // The owner also lives between an attempt and the fallback it chains on, when every attempt reads terminal.
-    // Status closes an attempt whose owner died; only the attempt's own receipt says its provider finished.
-    const persisted = (task?.attempts as Record<string, any>[] | undefined)
-      ?.find((attempt) => Number(attempt.attempt) === Number(task!.attempt));
-    if (task && (task.state !== "terminal" || runProcessAlive(String(task.run_dir), persisted?.state === "terminal"))) return row;
+    if (task && (task.state !== "terminal" ||
+      runProcessAlive(String(task.run_dir), String(task.task_id), Number(task.attempt)))) return row;
     runDir = String(task?.run_dir ?? "");
     const attempts = task ? turnAttempts(task, row.turnAttempt!) : [];
     final = task && (attempts.at(-1) ??

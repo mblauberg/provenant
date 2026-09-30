@@ -536,20 +536,51 @@ function liveness(runDir: string, owners: ProcessIdentity[], timedProviders = fa
 }
 
 /**
- * Whether a run whose attempts all read terminal may still be acting: its owner
- * (between fallback attempts) or a provider. A provider record with no start
- * time is ignored only once the attempt's own receipt reads terminal; a closure
- * status synthesised for a dead owner is no evidence its provider ended.
+ * Whether an attempt's own evidence says no provider of its can still run: its
+ * receipt reads terminal, or it never launched. An unlaunched attempt has no
+ * directory, its run status announced it with no owner stamped, and every
+ * earlier attempt's receipt reads terminal. A closure status synthesised for a
+ * dead owner is neither, so it is no evidence a provider ended.
  */
-export function runProcessAlive(runDir: string, attemptPersistedTerminal: boolean): boolean {
+function attemptSettled(runDir: string, taskId: string, attempt: number): boolean {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/u.test(taskId) || !Number.isInteger(attempt) || attempt < 1) return false;
+  const name = `attempt-${String(attempt).padStart(3, "0")}`;
+  const trees = ["tasks", "dispatch/tasks"].map((tree) => join(runDir, tree, taskId));
+  const receipt = trees.map((tree) => readJson(join(tree, name, "attempt.json"))).find((row) => row !== undefined);
+  if (receipt !== undefined) return receipt.state === "terminal";
+  if (trees.some((tree) => existsSync(join(tree, name)))) return false;
+  const status = readJson(join(runDir, "dispatch-status.json"));
+  if (Number(status?.next_attempt) !== attempt || status?.owner_pid !== undefined) return false;
+  return trees.every((tree) => {
+    try {
+      return readdirSync(tree).filter((entry) => /^attempt-\d+$/u.test(entry))
+        .every((entry) => readJson(join(tree, entry, "attempt.json"))?.state === "terminal");
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT";
+    }
+  });
+}
+
+/**
+ * Whether a run whose task reads terminal may still be acting: its owner
+ * (between fallback attempts) or a provider. A provider record with no start
+ * time, whose pid alone cannot tell the provider from a process that reused
+ * it, is ignored only once the task's attempt has settled by its own evidence.
+ */
+export function runProcessAlive(runDir: string, taskId: string, attempt: number): boolean {
   const live = liveness(runDir, runOwners(readOwnerRecord(runDir), readJson(join(runDir, "dispatch-status.json"))),
-    attemptPersistedTerminal);
+    attemptSettled(runDir, taskId, attempt));
   return live.owner || live.provider;
 }
 
-/** A launcher that announced an attempt and died before starting any owner: nothing will run it. */
+/**
+ * A launcher that announced an attempt and died before starting any owner: nothing will run it.
+ * The launcher stamps its owner into status before writing an owner record, so with no stamp
+ * any owner record is an earlier launch's, and it counts only while that owner still lives.
+ */
 function launcherAbandoned(status: Record<string, unknown> | undefined, owners: ProcessIdentity[]): boolean {
-  return owners.length === 0 && status?.status === "running" && status.finished_at === undefined &&
+  return status?.owner_pid === undefined && !owners.some((owner) => observedAlive(owner.pid, owner.startedAt)) &&
+    status?.status === "running" && status.finished_at === undefined &&
     positiveInteger(status.host_pid) &&
     !observedAlive(status.host_pid, typeof status.host_started_at === "string" ? status.host_started_at : null);
 }
