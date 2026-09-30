@@ -244,9 +244,11 @@ Claude lanes on OAuth sign-in (bare and endpoint routes, which use a key, do not
 get it); and for Kiro, `~/Library/Application Support/kiro-cli` and its
 `~/.local/bin` launcher links, but not its cross-project `history`. Kiro can
 write there only `data.sqlite3` and `.refresh.lock`, in place, and SQLite's
-`-wal`, `-shm` and `-journal` sidecars, so its token can refresh. It cannot
-create links there, and the shell hooks and binaries beside them stay
-read-only. A confined Kiro dispatch refuses until kiro-cli has unpacked its
+`-wal`, `-shm` and `-journal` sidecars, which it needs to read its sign-in. It
+cannot create links there, and the shell hooks and binaries beside them stay
+read-only. An expired Kiro sign-in has not been seen to renew inside the
+sandbox: the lane waits at a browser sign-in until it times out. Run
+`kiro-cli whoami` outside the sandbox to renew it. A confined Kiro dispatch refuses until kiro-cli has unpacked its
 engine outside the sandbox. Writable provider state is granted by its own
 name, and a launch fails if any such path is a symbolic link, so a link a lane
 planted cannot move the next attempt's grant to the link's target. The keychain file grant, together with the profile's unrestricted
