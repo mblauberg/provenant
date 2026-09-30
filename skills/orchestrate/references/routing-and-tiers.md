@@ -134,7 +134,8 @@ also read the project config it loads between `cwd` and the repository root.
 Every read-only profile reads the Python, uv and Node toolchain on PATH or in a
 `.venv` between `cwd` and the repository root, including one installed under
 home. A path is granted only when it resolves to a real toolchain install, and
-then only its executable and runtime `lib`, `include` and `libexec`; a repository's `.venv` link or `pyvenv.cfg` alone grants nothing, and
+then only its executable and runtime `lib`, `include` and `libexec` (plus a
+framework build's library and `Resources`); a repository's `.venv` link or `pyvenv.cfg` alone grants nothing, and
 home, its ancestors and credential stores are never granted. Use `opencode models`
 to discover a live slug when overriding with `--model`.
 Nested vendor ids attribute as that vendor; unparseable Zen free ids fall back

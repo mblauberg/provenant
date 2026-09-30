@@ -4624,6 +4624,89 @@ def test_free_threaded_interpreter_is_a_toolchain(tmp_path, monkeypatch, name):
     assert supervisor()._toolchain_grant(interpreter) == ([interpreter], [prefix / "lib"])
 
 
+def fake_framework_python(home):
+    """A framework build in home: bin/python3.13 loads <prefix>/Python and may re-exec Resources."""
+    prefix = home / "Library/Frameworks/Python.framework/Versions/3.13"
+    interpreter = fake_executable(prefix / "bin/python3.13")
+    (prefix / "lib/python3.13").mkdir(parents=True)
+    (prefix / "include/python3.13").mkdir(parents=True)
+    (prefix / "Python").write_bytes(b"dylib")
+    (prefix / "Resources/Python.app/Contents/MacOS").mkdir(parents=True)
+    (prefix / "auth.json").write_text("secret\n")
+    return prefix, interpreter
+
+
+def test_framework_python_grants_its_library_and_resources_but_not_the_prefix(tmp_path, monkeypatch):
+    home, _, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    prefix, interpreter = fake_framework_python(home)
+    files, directories = supervisor()._toolchain_grant(interpreter)
+    assert files == [interpreter, prefix / "Python"]
+    assert directories == [prefix / "lib", prefix / "include", prefix / "Resources"]
+    assert not any((prefix / "auth.json").is_relative_to(granted) for granted in [*files, *directories])
+
+
+def test_framework_python_library_or_resources_linked_out_of_the_prefix_is_not_granted(tmp_path, monkeypatch):
+    home, _, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    prefix, interpreter = fake_framework_python(home)
+    (prefix / "Python").unlink()
+    (prefix / "Python").symlink_to(home / ".ssh/id_ed25519")
+    shutil.rmtree(prefix / "Resources")
+    (prefix / "Resources").symlink_to(home / ".ssh")
+    assert supervisor()._toolchain_grant(interpreter) == (
+        [interpreter], [prefix / "lib", prefix / "include"])
+    # A link that stays inside the prefix is granted by its canonical target.
+    (prefix / "Python").unlink()
+    (prefix / "lib/Python").write_bytes(b"dylib")
+    (prefix / "Python").symlink_to(prefix / "lib/Python")
+    assert supervisor()._toolchain_grant(interpreter)[0] == [interpreter, prefix / "lib/Python"]
+
+
+@pytest.mark.skipif(sys.platform != "darwin" or not all(map(shutil.which, ("install_name_tool", "codesign", "otool"))),
+                    reason="needs sandbox-exec and the macOS binary tools")
+def test_confined_read_only_lane_runs_a_framework_python_in_home(tmp_path, monkeypatch):
+    mod = supervisor()
+    if not mod._sandbox_exec_path():
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    source = next((path.resolve() for path in sorted(Path("/opt/homebrew/opt").glob(
+        "python@3.*/Frameworks/Python.framework/Versions/3.*")) if (path / "Python").is_file()), None)
+    if source is None:
+        pytest.skip("no Homebrew framework Python to clone")
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    prefix = home / "Library/Frameworks/Python.framework/Versions" / source.name
+    prefix.parent.mkdir(parents=True)
+    subprocess.run(["cp", "-cR", str(source), str(prefix)], check=True)  # an APFS clone, not a copy
+    interpreter = prefix / "bin" / ("python" + source.name)
+    linked = subprocess.run(["otool", "-L", str(interpreter)], capture_output=True, text=True,
+                            check=True).stdout.splitlines()[1].split()[0]
+    # Load the clone's own library, so launch needs the home framework's Python file.
+    subprocess.run(["install_name_tool", "-change", linked, str(prefix / "Python"), str(interpreter)],
+                   check=True, capture_output=True)
+    subprocess.run(["codesign", "-f", "-s", "-", str(interpreter)], check=True, capture_output=True)
+    links = home / "links"
+    links.mkdir()
+    (links / "python3").symlink_to(interpreter)
+    (prefix / "auth.json").write_text("secret\n")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    plan = {"adapter": "claude", "mode": "read_only", "cwd": str(repo), "workspace_root": str(repo),
+            "run_dir": str(attempt), "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    search_path = os.pathsep.join([str(links), "/usr/bin", "/bin"])
+    profile = mod.os_confinement_profile(plan, search_path)
+
+    def run(*command):
+        return subprocess.run([mod._sandbox_exec_path(), "-p", profile, *command], cwd=repo, capture_output=True,
+                              text=True, timeout=60, env={**os.environ, "PATH": search_path})
+
+    started = run("python3", "-c", "print('framework-ran')")
+    if started.returncode and "sandbox_apply" in started.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert started.stdout == "framework-ran\n", started.stderr[-400:]
+    assert run("/bin/cat", str(prefix / "auth.json")).returncode != 0
+
+
 def test_linked_runtime_directory_is_not_granted(tmp_path, monkeypatch):
     home, tools, _ = fake_toolchain_home(tmp_path, monkeypatch)
     prefix = home / ".pyenv/versions/3.13.0"

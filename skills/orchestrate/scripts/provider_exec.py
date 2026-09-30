@@ -491,7 +491,18 @@ def _toolchain_grant(executable):
     # Linked runtime directories are left out: they are canonical only if not links.
     directories = [prefix / name for name in TOOLCHAIN_RUNTIME_DIRS
                    if (prefix / name).is_dir() and not (prefix / name).is_symlink()]
-    return [resolved], directories
+    files = [resolved]
+    if resolved.name != "node" and prefix.parent.name == "Versions" and prefix.parent.parent.suffix == ".framework":
+        # A framework build's interpreter loads <prefix>/<framework name>, the library dyld opens
+        # at launch, and may re-exec Resources/Python.app. Each is granted by its canonical path,
+        # and only if it stays inside the prefix.
+        library_file = (prefix / prefix.parent.parent.stem).resolve()
+        if library_file.is_relative_to(prefix) and _plain_file(library_file) and not credential_path(library_file):
+            files.append(library_file)
+        resources = (prefix / "Resources").resolve()
+        if resources.is_relative_to(prefix) and resources.is_dir() and not credential_path(resources):
+            directories.append(resources)
+    return files, directories
 
 
 def _toolchain_reads(plan, root, search_path=None):

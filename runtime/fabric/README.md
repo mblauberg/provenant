@@ -119,7 +119,10 @@ the `bin` of a prefix with that toolchain's `lib/python3.*` or
 `lib/node_modules`. The prefix must not be home or above it, and must not be or
 hold a credential store. Only the resolved executable and the prefix's
 `lib`, `include` and `libexec` are granted, never the prefix itself, so a file
-beside them stays unreadable. Each is emitted as the canonical path checked. A
+beside them stays unreadable. A framework build's prefix
+(`Python.framework/Versions/X.Y`) also grants its `Python` library, which dyld
+opens at launch, and `Resources`, each only if it resolves inside the prefix.
+Each is emitted as the canonical path checked. A
 resolved `uv` binary is granted alone. When it is present, `pyproject.toml`, `uv.toml`, `uv.lock`
 and `.python-version` above `cwd` are readable by unresolved name. Nothing is
 written, and nothing is run to find these paths. Codex read-only uses its native read-only sandbox, which reads
