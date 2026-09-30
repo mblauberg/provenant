@@ -572,3 +572,15 @@ def test_direct_confidential_dispatch_treats_a_live_family_model_like_its_catalo
     monkeypatch.setattr(exec_routing, "_model_route_module", lambda: router)
     assert exec_routing.disclosure_risk("codex", "gpt-6.1-sol", {})
     assert exec_routing.disclosure_risk("codex", "gpt-6.2-sol", {})
+
+
+def test_confidential_pick_of_an_effort_suffixed_live_id_keeps_its_family_traits(tmp_path, monkeypatch):
+    import copy
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    (tmp_path / "capabilities.json").write_text(json.dumps({"agy": {
+        "observed_at": datetime.now(timezone.utc).isoformat(), "models": ["gemini-3.9-flash-high"]}}))
+    catalog = copy.deepcopy(CATALOG)
+    next(item for item in catalog["adapters"]["agy"]["models"] if item["id"] == "gemini-3.8-flash")["trains_on_prompts"] = True
+    assert "trains-on-prompts" in pools.model_traits(router, catalog, "agy", "gemini-3.9-flash-high")
+    with pytest.raises(pools.PoolError):
+        pick({"models": ["agy/gemini-3.9-flash-high"], "confidential": True}, tmp_path, catalog=catalog)

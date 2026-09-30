@@ -404,6 +404,14 @@ def _live_entry(base: dict[str, Any], model: str) -> dict[str, Any]:
     return {**base, "id": model, "names": [], "default": False, "inherits": [base["id"], *base.get("names", [])]}
 
 
+def _live_base(adapter: str, model: str, catalog: dict[str, Any]) -> str:
+    """A live id without the effort suffix the catalogue defines for the adapter (gemini-3.9-flash-high -> gemini-3.9-flash)."""
+    suffixes = sorted({value for entry in catalog["adapters"][adapter].get("models", [])
+                       if entry.get("effort_transport") == "model-suffix" for value in entry.get("suffix", {}).values()},
+                      key=len, reverse=True)
+    return next((model[:-len(suffix)] for suffix in suffixes if suffix and model.casefold().endswith(suffix.casefold())), model)
+
+
 def _latest_in_family(adapter: str, requested: str, catalog: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
     """Resolve a version-free name to the newest model of its family, catalogue or fresh live listing."""
     entries = catalog["adapters"][adapter].get("models", [])
@@ -417,7 +425,8 @@ def _latest_in_family(adapter: str, requested: str, catalog: dict[str, Any]) -> 
         return None, []
     key = keys.pop()
     best = max((entry for entry in entries if _family_key(entry["id"]) == key), key=lambda item: _version(item["id"]))
-    live = [model for model in _cached_live_models(adapter) if _family_key(model) == key and _version(model) > _version(best["id"])]
+    live = [base for base in (_live_base(adapter, model, catalog) for model in _cached_live_models(adapter))
+            if _family_key(base) == key and _version(base) > _version(best["id"])]
     if not live:
         return best, []
     newest = max(live, key=_version)
@@ -427,7 +436,9 @@ def _latest_in_family(adapter: str, requested: str, catalog: dict[str, Any]) -> 
 def _live_id(adapter: str, requested: str, catalog: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
     """An explicit id the catalogue lacks but the fresh live listing has: it inherits its family's catalogue entry."""
     entries = catalog["adapters"][adapter].get("models", [])
-    live = next((model for model in _cached_live_models(adapter) if model.casefold() == requested.casefold()), None)
+    base = _live_base(adapter, requested, catalog)
+    live = base if any(_live_base(adapter, model, catalog).casefold() == base.casefold()
+                       for model in _cached_live_models(adapter)) else None
     family = [entry for entry in entries if live and _family_key(entry["id"]) == _family_key(live)]
     if not family:
         return None, []

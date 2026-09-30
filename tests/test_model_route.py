@@ -4737,3 +4737,17 @@ def test_spelling_variants_of_a_family_name_resolve_like_gpt_sol(tmp_path, monke
     catalog = router.load_catalog()
     for spelling in ("GPT_SOL", "s_o_l", "Gpt Sol", "SOL"):
         assert router._registered_match("codex", spelling, catalog)[0]["id"] == "gpt-6.1-sol", spelling
+
+
+def _agy_live(state, models):
+    (state / "capabilities.json").write_text(json.dumps({"agy": {
+        "observed_at": datetime.now(timezone.utc).isoformat(), "models": models}}))
+
+
+@pytest.mark.parametrize("model", ["flash", "gemini-flash", "gemini-3.9-flash-high", "gemini-3.9-flash"])
+def test_agy_effort_suffixed_live_ids_match_their_family_and_keep_the_dispatch_id(tmp_path, model):
+    _agy_live(tmp_path, ["gemini-3.9-flash-low", "gemini-3.9-flash-high", "gemini-3.8-flash-high"])
+    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "agy", "--model", model, "--effort", "high",
+                          "--role", "worker"], capture_output=True, text=True, env=_resolve_env(tmp_path))
+    route = json.loads(run.stdout)
+    assert run.returncode == 0 and route["resolved_model"] == "gemini-3.9-flash-high", route
