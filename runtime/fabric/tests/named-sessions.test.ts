@@ -425,6 +425,61 @@ it("keeps a turn busy while its owner lives without an owner record", async () =
   }
 }, 60_000);
 
+it("keeps a turn busy while its provider outlives an owner that had no owner record", async () => {
+  const project = fixtureProject();
+  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  try {
+    writeFileSync(join(project.linked, "orphan.md"), "orphan-provider");
+    const launched = spawnSync(resolve(import.meta.dirname, "../bin/fabric"),
+      ["dispatch", "--session", "orphan", "--prompt-file", "orphan.md"], {
+        cwd: project.linked, encoding: "utf8", env: {
+          ...project.env(project.linked, "cli-seat", "codex"), PROVENANT_OWNER_RECORD_FAULT: "1",
+          NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${resolve(import.meta.dirname, "spawn-fault-preload.mjs")}`.trim(),
+        },
+      });
+    expect(launched.status, launched.stdout + launched.stderr).toBe(0);
+    const run = launched.stdout.split("\n")[0]!;
+    const row = (await until(() => chair.call("status", { ids: [run], detail: "full" }),
+      (value) => typeof value.runs?.[0]?.run_dir === "string" && existsSync(join(value.runs[0].run_dir, "dispatch-provider.json")))).runs[0];
+    // The owner is gone and unrecorded; only its provider lives.
+    const owner = JSON.parse(readFileSync(join(row.run_dir, "dispatch-status.json"), "utf8")).owner_pid as number;
+    await until(() => { try { process.kill(owner, 0); return false; } catch { return true; } }, (gone) => gone);
+    expect(existsSync(join(row.run_dir, "dispatch-owner.json"))).toBe(false);
+    expect((await chair.call("status", { ids: [run], detail: "full" })).runs[0]).toMatchObject({ state: "running" });
+    expect(await chair.call("session", { action: "forget", name: "orphan" }))
+      .toMatchObject({ status: "rejected", error: "session_busy", active_run_id: run });
+    // Once the provider ends too, the run is interrupted and the name is released.
+    writeFileSync(join(row.run_dir, "release"), "");
+    expect(await until(() => chair.call("session", { action: "inspect", name: "orphan" }), (value) => value.active_run_id === null))
+      .toMatchObject({ active_run_id: null, last_turn: { status: "interrupted", run_id: run } });
+  } finally {
+    await chair.client.close();
+  }
+}, 60_000);
+
+it("keeps a turn busy while a stale owner record names a dead owner and status names the live one", async () => {
+  const project = fixtureProject();
+  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  try {
+    const run = (await chair.call("dispatch", { session: "stale", prompt: "slow", wait_seconds: 0 })).id as string;
+    const row = (await until(() => chair.call("status", { ids: [run], detail: "full" }),
+      (value) => value.runs?.[0]?.state === "running" && existsSync(join(String(value.runs[0].run_dir), "dispatch-owner.json")))).runs[0];
+    // A record left by an earlier owner that this launch could not replace.
+    const recordPath = join(row.run_dir, "dispatch-owner.json");
+    const dead = spawnSync("true").pid!;
+    writeFileSync(recordPath, JSON.stringify({ ...JSON.parse(readFileSync(recordPath, "utf8")),
+      owner_pid: dead, owner_pgid: dead, owner_started_at: null, run_token: "earlier-launch" }));
+    expect((await chair.call("status", { ids: [run], detail: "full" })).runs[0]).toMatchObject({ state: "running" });
+    expect(await chair.call("session", { action: "forget", name: "stale" }))
+      .toMatchObject({ status: "rejected", error: "session_busy", active_run_id: run });
+    writeFileSync(join(row.run_dir, "cancel"), "");
+    expect(await until(() => chair.call("session", { action: "inspect", name: "stale" }), (value) => value.active_run_id === null))
+      .toMatchObject({ active_run_id: null, last_turn: { status: "cancelled", run_id: run } });
+  } finally {
+    await chair.client.close();
+  }
+}, 60_000);
+
 it("keeps a named session's line in a running turn's rebuilt text", () => {
   const text = digest({ state: "running", run_id: "mcp-abc123", digest: "stale",
     session_digest: "\n  session s resume active" });

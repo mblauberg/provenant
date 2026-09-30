@@ -10,7 +10,7 @@ import { InputError, rejected, type DispatchInput } from "./execution-input.js";
 import { dispatchConfiguredProvider } from "./execution.js";
 import type { Identity } from "./identity.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
-import { runOwnerAlive, statusRows } from "./run-registry.js";
+import { runProcessAlive, statusRows } from "./run-registry.js";
 import { canonicalSuccessStatus } from "./success-status.js";
 import type { NamedSession, SessionLaunch, SessionTurnKind, Store } from "./store.js";
 
@@ -74,7 +74,7 @@ export async function reconcileSession(store: Store, who: Identity, name: string
   if (row.turnRunId !== null) {
     const task = await taskRow(who.cwd, row.turnRunId, row.turnTaskId);
     // The owner also lives between an attempt and the fallback it chains on, when every attempt reads terminal.
-    if (task && (task.state !== "terminal" || runOwnerAlive(String(task.run_dir)))) return row;
+    if (task && (task.state !== "terminal" || runProcessAlive(String(task.run_dir)))) return row;
     runDir = String(task?.run_dir ?? "");
     const attempts = task ? turnAttempts(task, row.turnAttempt!) : [];
     final = task && (attempts.at(-1) ??

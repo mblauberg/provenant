@@ -502,27 +502,43 @@ export function observedAlive(pid: number, startedAt: string | null): boolean {
   return observed === null || startMatches(pid, startedAt, observed);
 }
 
-type ProcessIdentity = { pid: number; startedAt: string | null };
+type ProcessIdentity = { pid: number; startedAt: string | null; token?: string };
 
 /**
- * A run's owner: its owner record, else the identity its launcher stamped into
- * run status after the spawn, which survives a record that could not be written.
+ * A run's owners: its owner record and the identity its launcher stamped into
+ * run status after the spawn. The stamp survives a record that could not be
+ * written; the two differ only when a record could not be replaced, so both count.
  */
-function runOwner(owner: OwnerRecord | undefined, status: Record<string, unknown> | undefined): ProcessIdentity | undefined {
-  if (owner) return { pid: owner.owner_pid, startedAt: owner.owner_started_at };
-  if (!positiveInteger(status?.owner_pid)) return undefined;
-  return { pid: status.owner_pid, startedAt: typeof status.owner_started_at === "string" ? status.owner_started_at : null };
+function runOwners(record: OwnerRecord | undefined, status: Record<string, unknown> | undefined): ProcessIdentity[] {
+  const owners: ProcessIdentity[] = record
+    ? [{ pid: record.owner_pid, startedAt: record.owner_started_at, token: record.run_token }] : [];
+  if (positiveInteger(status?.owner_pid)) {
+    const stamped = { pid: status.owner_pid, startedAt: typeof status.owner_started_at === "string" ? status.owner_started_at : null,
+      ...(typeof status.run_token === "string" ? { token: status.run_token } : {}) };
+    if (!owners.some((owner) => owner.pid === stamped.pid && owner.token === stamped.token)) owners.push(stamped);
+  }
+  return owners;
 }
 
-/** Whether the owner of a run, once started, may still be acting for it. */
-export function runOwnerAlive(runDir: string): boolean {
-  const owner = runOwner(readOwnerRecord(runDir), readJson(join(runDir, "dispatch-status.json")));
-  return owner !== undefined && observedAlive(owner.pid, owner.startedAt);
+/** Whether any owner of a run, or a provider one of them recorded, may still be acting for it. */
+function liveness(runDir: string, owners: ProcessIdentity[]): { owner: boolean; provider: boolean } {
+  const owner = owners.some((identity) => observedAlive(identity.pid, identity.startedAt));
+  const provider = owners.some((identity) => {
+    const record = identity.token === undefined ? null : readProviderRecord(runDir, identity.token);
+    return record !== null && observedAlive(record.provider_pid, record.provider_started_at);
+  });
+  return { owner, provider };
+}
+
+/** Whether a run's owner or its provider, once started, may still be acting for it. */
+export function runProcessAlive(runDir: string): boolean {
+  const live = liveness(runDir, runOwners(readOwnerRecord(runDir), readJson(join(runDir, "dispatch-status.json"))));
+  return live.owner || live.provider;
 }
 
 /** A launcher that announced an attempt and died before starting any owner: nothing will run it. */
-function launcherAbandoned(status: Record<string, unknown> | undefined, owner: ProcessIdentity | undefined): boolean {
-  return owner === undefined && status?.status === "running" && status.finished_at === undefined &&
+function launcherAbandoned(status: Record<string, unknown> | undefined, owners: ProcessIdentity[]): boolean {
+  return owners.length === 0 && status?.status === "running" && status.finished_at === undefined &&
     positiveInteger(status.host_pid) &&
     !observedAlive(status.host_pid, typeof status.host_started_at === "string" ? status.host_started_at : null);
 }
@@ -592,11 +608,8 @@ async function legacyStatus(
         : undefined;
     const rows = (id === undefined ? matches : matches.slice(0, 1)).map(
       ({ runDir, status: initialStatus, owner, started }) => {
-        const provider = owner === undefined ? null : readProviderRecord(runDir, owner.run_token);
-        const identity = runOwner(owner, initialStatus);
-        const alive =
-          (identity !== undefined && observedAlive(identity.pid, identity.startedAt)) ||
-          (provider !== null && observedAlive(provider.provider_pid, provider.provider_started_at));
+        const live = liveness(runDir, runOwners(owner, initialStatus));
+        const alive = live.owner || live.provider;
         // Once the owner is dead its attempt files are final. Read them after the probe.
         const status = readJson(join(runDir, "dispatch-status.json")) ?? initialStatus;
         const safePath = (value: unknown): string | undefined => {
@@ -801,16 +814,14 @@ function v1Rows(runDir: string): Record<string, any>[] {
   if (grouped.size === 0) return [];
   const metadata = readJson(join(runDir, "dispatch-status.json"));
   const receipt = readJson(join(runDir, "RUN_RECEIPT.json"));
-  const record = readOwnerRecord(runDir);
-  const provider = record && readProviderRecord(runDir, record.run_token);
-  const owner = runOwner(record, metadata);
-  const ownerAlive = owner !== undefined && observedAlive(owner.pid, owner.startedAt);
-  const dead = owner !== undefined && !ownerAlive &&
-    !(provider && observedAlive(provider.provider_pid, provider.provider_started_at));
+  const owners = runOwners(readOwnerRecord(runDir), metadata);
+  const live = liveness(runDir, owners);
+  const ownerAlive = live.owner;
+  const dead = owners.length > 0 && !live.owner && !live.provider;
   const closed = metadata?.finished_at !== undefined && metadata?.status !== "running";
   const interrupted = !ownerAlive && (receipt?.status === "interrupted" || dead || closed);
   // Only the attempt the dead launcher announced is closed; any attempt an owner wrote stands.
-  const abandoned = launcherAbandoned(metadata, owner);
+  const abandoned = launcherAbandoned(metadata, owners);
   const closureStatus = receipt?.status === "cancelled" || metadata?.status === "cancelled" ? "cancelled" : "interrupted";
   const summary =
     typeof metadata?.batch_id === "string" && /^[A-Za-z0-9._-]+$/u.test(metadata.batch_id)

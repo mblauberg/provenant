@@ -462,8 +462,8 @@ export function startOwner(
   if (pid !== undefined) {
     const ownerStartedAt = processStartedAt(pid);
     try {
-      // The owner's identity in run status too, so readers still see it if the record cannot be written.
-      writeFileSync(statusPath, JSON.stringify({ ...metadata, owner_pid: pid, owner_started_at: ownerStartedAt }) + "\n", { mode: 0o600 });
+      // The owner's identity and run token in run status too, so readers still see it and its provider if the record cannot be written.
+      writeFileSync(statusPath, JSON.stringify({ ...metadata, owner_pid: pid, owner_started_at: ownerStartedAt, run_token: runToken }) + "\n", { mode: 0o600 });
     } catch {
       /* The owner record below still identifies it. */
     }

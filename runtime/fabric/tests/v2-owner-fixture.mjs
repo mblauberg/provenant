@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs";
 import { join, isAbsolute } from "node:path";
 const args = process.argv.slice(2),
@@ -167,6 +167,22 @@ const write = () => writeFileSync(join(path, "attempt.json"), JSON.stringify(row
 write();
 writeFileSync(join(path, "stderr.log"), "fixture stderr");
 writeFileSync(join(path, "events.jsonl"), "{}\n");
+if (prompt === "orphan-provider") {
+  // The owner records a provider in its own process group, then dies before the attempt ends.
+  const provider = spawn(process.execPath, ["-e", `
+    const { appendFileSync, existsSync } = require("node:fs");
+    const log = process.env.PROVENANT_FIXTURE_PID_LOG;
+    if (log) appendFileSync(log, JSON.stringify({ pid: process.pid, event: "start" }) + "\\n");
+    const end = () => { if (log) appendFileSync(log, JSON.stringify({ pid: process.pid, event: "exit" }) + "\\n"); process.exit(0); };
+    setTimeout(end, 20000);
+    setInterval(() => { if (existsSync(${JSON.stringify(join(dir, "release"))})) end(); }, 20);
+  `], { detached: true, stdio: "ignore" });
+  provider.unref();
+  writeFileSync(join(dir, "dispatch-provider.json"), JSON.stringify({
+    run_token: process.env.PROVENANT_RUN_TOKEN, provider_pid: provider.pid, provider_pgid: provider.pid, provider_started_at: null,
+  }));
+  process.exit(0);
+}
 if (prompt === "admission-slow") {
   // The owner waits for memory admission, then runs once released.
   Object.assign(row, { state: "queued", queue_reason: "memory", admission: { owner_pid: process.pid, owner_start_epoch: null } });
