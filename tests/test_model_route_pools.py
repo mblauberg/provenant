@@ -484,3 +484,18 @@ def test_confidential_pick_skips_an_unregistered_free_model_at_high_weight(tmp_p
     for seed in range(10):
         private = pick({"route": "private", "confidential": True}, tmp_path, catalog=catalog, seed=seed)
         assert models(private) == ["codex/gpt-6-luna"]
+
+
+def test_confidential_pick_keeps_the_privacy_of_a_newer_live_family_model(tmp_path, monkeypatch):
+    import copy
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    (tmp_path / "capabilities.json").write_text(json.dumps({"codex": {
+        "observed_at": datetime.now(timezone.utc).isoformat(), "models": ["gpt-6.2-sol"]}}))
+    catalog = copy.deepcopy(CATALOG)
+    sol = next(item for item in catalog["adapters"]["codex"]["models"] if item["id"] == "gpt-6.1-sol")
+    sol.update(trains_on_prompts=True, plan_cap_usd=0)
+    catalog["model_traits"] = {"codex/sol": ["free"]}
+    assert {"free", "trains-on-prompts"} <= set(pools.model_traits(router, catalog, "codex", "gpt-6.2-sol"))
+    with pytest.raises(pools.PoolError):
+        pick({"models": ["codex/sol"], "confidential": True}, tmp_path, catalog=catalog)
+    assert models(pick({"models": ["codex/sol"]}, tmp_path, catalog=catalog)) == ["codex/gpt-6.2-sol"]

@@ -128,20 +128,14 @@ export function editDistance(left: string, right: string): number {
   return row[right.length]!;
 }
 
-/** The id with its version tokens removed (gpt-6.1-sol -> gptsol), matching model_route.py `_family_key`. */
-const familyKey = (id: string) => routeKey(id.split(/[-_\s]+/u).filter((part) => !/^v?\d+(\.\d+)*$/u.test(part)).join("-"));
-
-/** True when an adapter that opts in to latest_aliases resolves this version-free name to one family. */
+/** True when a latest_aliases adapter knows this version-free name; model_route.py resolves it to the newest model. */
 function isFamilySelector(entry: CatalogueSnapshot["adapters"][number], key: string): boolean {
   if (entry.latest_aliases !== true || /\d/u.test(key)) return false;
-  const details = (entry.model_details ?? []).filter((model): model is { id: string } => typeof model.id === "string");
-  const named = details.filter((model) => (Array.isArray((model as any).names) ? (model as any).names : [])
-    .some((name: unknown) => typeof name === "string" && routeKey(name) === key));
-  const pool = named.length ? named : details.filter((model) => {
-    const family = model.id.split(/[-_\s]+/u).filter((part) => !/^v?\d+(\.\d+)*$/u.test(part));
-    return familyKey(model.id) === key || routeKey(family[family.length - 1] ?? "") === key;
+  return (entry.model_details ?? []).some((model) => {
+    const family = String(model.id).split(/[-_\s]+/u).filter((part) => !/^v?\d+(\.\d+)*$/u.test(part));
+    return [family.join(""), family[family.length - 1] ?? "", ...(Array.isArray(model.names) ? model.names : [])]
+      .some((name) => routeKey(String(name)) === key);
   });
-  return new Set(pool.map((model) => familyKey(model.id))).size === 1;
 }
 
 function correctSelector(selector: string | undefined, catalogue: CatalogueSnapshot, adapter?: string, field = "model"):
@@ -156,8 +150,7 @@ function correctSelector(selector: string | undefined, catalogue: CatalogueSnaps
   ]).filter((item): item is string => typeof item === "string"))];
   const key = routeKey(selector);
   // model_route.py resolves these to the newest model (catalogue or live listing) and applies every gate.
-  if (entries.some((entry) => isFamilySelector(entry, key)) &&
-      !entries.some((entry) => (entry.model_details ?? []).some((model) => model.id === selector))) return { value: selector };
+  if (entries.some((entry) => isFamilySelector(entry, key))) return { value: selector };
   const matches = new Map<string, string>();
   for (const entry of entries) {
     const modelId = (value: string) => (entry.model_details ?? []).find((item) =>
@@ -222,7 +215,8 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
   if (roleAlias !== undefined && roleAlias !== input.alias) warnings.push(`corrected alias ${input.alias} to ${roleAlias}`);
   if (roleAlias !== undefined) input.alias = roleAlias;
   const isRoleAlias = roleAlias !== undefined;
-  const corrected = isRoleAlias ? {} : correctSelector(selector, catalogue, input.adapter, input.model === undefined ? "alias" : "model");
+  // A pool pick was already validated by model_route.py, and may be a live model the catalogue lacks.
+  const corrected = isRoleAlias || input.pick_reason !== undefined ? {} : correctSelector(selector, catalogue, input.adapter, input.model === undefined ? "alias" : "model");
   if (corrected.warning) warnings.push(corrected.warning);
   selector = corrected.value ?? selector;
   if (corrected.value !== undefined) {

@@ -127,6 +127,16 @@ describe("Fabric input corrections", () => {
     expect(normaliseRoute({ adapter: "claude", model: "claude-opus" }, identity, real).model).toBe("claude-opus");
   });
 
+  it("keeps a router-validated pool pick even when the catalogue lacks that live model", () => {
+    const snapshot = { adapters: [{ name: "codex", latest_aliases: true, aliases: {}, models: ["gpt-6.1-sol"],
+      model_details: [{ id: "gpt-6.1-sol", names: ["sol"] }] }] } as any;
+    const picked = normaliseRoute({ adapter: "codex", model: "gpt-6.2-sol", pick_reason: "top of strong" }, identity, snapshot);
+    expect(picked.model).toBe("gpt-6.2-sol");
+    expect(() => normaliseRoute({ adapter: "codex", model: "gpt-6.2-sol" }, identity, snapshot))
+      .toThrow(expect.objectContaining({ code: "model_invalid" }));
+    expect(normaliseRoute({ adapter: "codex", model: "s_o_l" }, identity, snapshot).model).toBe("s_o_l");
+  });
+
   it("resolves relative read-only cwd against the caller directory", () => {
     const base = mkdtempSync(join(tmpdir(), "fabric-cwd-"));
     const child = join(base, "child");

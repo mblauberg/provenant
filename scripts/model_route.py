@@ -365,10 +365,19 @@ def registered_model_ids(adapter: dict[str, Any]) -> list[str]:
     return ids
 
 
+def _key(text: str) -> str:
+    """Case- and punctuation-blind comparison key: GPT_SOL, gpt-sol and s_o_l agree with gptsol and sol."""
+    return re.sub(r"[^a-z0-9]", "", text.casefold())
+
+
+def _family_parts(model_id: str) -> list[str]:
+    parts = [part for part in re.split(r"[-_\s]+", model_id.casefold()) if part and not re.fullmatch(r"v?\d+(?:\.\d+)*", part)]
+    return parts or [""]
+
+
 def _family_key(model_id: str) -> str:
-    """The id with its version tokens removed: gpt-6.1-sol -> gpt-sol, claude-sonnet-5-5 -> claude-sonnet."""
-    return "-".join(part for part in re.split(r"[-_\s]+", model_id.casefold())
-                    if part and not re.fullmatch(r"v?\d+(?:\.\d+)*", part))
+    """The id with its version tokens removed: gpt-6.1-sol -> gptsol, claude-sonnet-5-5 -> claudesonnet."""
+    return _key("".join(_family_parts(model_id)))
 
 
 def _version(model_id: str) -> tuple[int, ...]:
@@ -387,27 +396,42 @@ def _cached_live_models(adapter: str) -> list[str]:
         return []
 
 
-def _latest_in_family(adapter: str, token: str, named: list[dict[str, Any]],
-                      catalog: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
-    """Resolve a version-free name to the newest model of its family, when the adapter opts in."""
+_NEWER_NOTE = "{} is newer than the catalogue; run provenant refresh-routing or add it to config/model-routing.json"
+
+
+def _live_entry(base: dict[str, Any], model: str) -> dict[str, Any]:
+    """A live model the catalogue lacks: it inherits its family's newest entry, so every gate and trait still applies."""
+    return {**base, "id": model, "names": [], "default": False, "inherits": [base["id"], *base.get("names", [])]}
+
+
+def _latest_in_family(adapter: str, requested: str, catalog: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+    """Resolve a version-free name to the newest model of its family, catalogue or fresh live listing."""
     entries = catalog["adapters"][adapter].get("models", [])
-    if re.search(r"\d", token):
+    token = _key(requested)
+    if not token or re.search(r"\d", requested):
         return None, []
-    pool = named or [entry for entry in entries
-                     if token in (_family_key(entry["id"]), _family_key(entry["id"]).rsplit("-", 1)[-1])]
+    named = [entry for entry in entries if token in (_key(name) for name in entry.get("names", []))]
+    pool = named or [entry for entry in entries if token in (_family_key(entry["id"]), _key(_family_parts(entry["id"])[-1]))]
     keys = {_family_key(entry["id"]) for entry in pool}
     if len(keys) != 1:
         return None, []
     key = keys.pop()
     best = max((entry for entry in entries if _family_key(entry["id"]) == key), key=lambda item: _version(item["id"]))
-    live = [model for model in _cached_live_models(adapter)
-            if _family_key(model) == key and _version(model) > _version(best["id"])]
+    live = [model for model in _cached_live_models(adapter) if _family_key(model) == key and _version(model) > _version(best["id"])]
     if not live:
         return best, []
     newest = max(live, key=_version)
-    # The live id inherits the catalogue entry's efforts, transport and privacy flags, so every gate still applies.
-    return ({**best, "id": newest, "names": [], "default": False},
-            [f"{newest} is newer than the catalogue; run provenant refresh-routing or add it to config/model-routing.json"])
+    return _live_entry(best, newest), [_NEWER_NOTE.format(newest)]
+
+
+def _live_id(adapter: str, requested: str, catalog: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+    """An explicit id the catalogue lacks but the fresh live listing has: it inherits its family's catalogue entry."""
+    entries = catalog["adapters"][adapter].get("models", [])
+    live = next((model for model in _cached_live_models(adapter) if model.casefold() == requested.casefold()), None)
+    family = [entry for entry in entries if live and _family_key(entry["id"]) == _family_key(live)]
+    if not family:
+        return None, []
+    return _live_entry(max(family, key=lambda item: _version(item["id"])), live), [_NEWER_NOTE.format(live)]
 
 
 def _registered_match(adapter: str, requested: str, catalog: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
@@ -428,7 +452,7 @@ def _registered_match(adapter: str, requested: str, catalog: dict[str, Any]) -> 
                         and requested_version < tuple(int(part) for part in registered.group(1).split("."))):
                     retired.append(entry)
     if not exact and not variant and catalog["adapters"][adapter].get("latest_aliases") is True:
-        latest, latest_notes = _latest_in_family(adapter, token, named, catalog)
+        latest, latest_notes = _latest_in_family(adapter, requested, catalog)
         if latest is not None:
             if len(named) > 1:
                 latest_notes.insert(0, f"{requested} is ambiguous; used {latest['id']} "
@@ -436,7 +460,7 @@ def _registered_match(adapter: str, requested: str, catalog: dict[str, Any]) -> 
             return latest, latest_notes
     matches = exact or named or variant or retired
     if not matches:
-        return None, []
+        return _live_id(adapter, requested, catalog) if catalog["adapters"][adapter].get("latest_aliases") is True else (None, [])
     chosen = next((item for item in matches if item.get("default")), None)
     if chosen is None:
         chosen = max(matches, key=lambda item: tuple(int(part) for part in re.findall(r"\d+", item["id"])))
@@ -2072,6 +2096,16 @@ def main(argv: list[str] | None = None) -> int:
         )
         if ordinary_catalog_valid and not args.endpoint and not args.task_class and not args.model_override_tier and not args.require_distinct and (ordinary_name or ordinary_model or ordinary_unknown or ordinary_broker_tier or not args.adapter):
             return resolve_ordinary(args, catalog)
+        # A plain route with an implied alias beside a model still gets a concrete id for a family name or newer live id.
+        latest_adapter = (catalog.get("adapters", {}).get(args.adapter) or {}).get("latest_aliases") is True
+        if (args.model and latest_adapter and not args.endpoint and not args.task_class
+                and not args.model_override_tier and not args.require_distinct):
+            family_match, family_notes = _latest_in_family(args.adapter, args.model, catalog)
+            if not family_match:
+                family_match, family_notes = _live_id(args.adapter, args.model, catalog)
+            if family_match:
+                args.model = family_match["id"]
+                ROUTE_WARNINGS.extend(family_notes)
         def reject(
             status: str,
             *,

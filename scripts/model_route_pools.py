@@ -124,12 +124,14 @@ def known_provider_path(text: str) -> bool:
 def model_traits(router: Any, catalog: dict[str, Any], adapter: str, model: str) -> list[str]:
     traits: set[str] = set()
     table = catalog.get("model_traits", {})
-    for key in (f"{adapter}/{model}", model):
-        value = table.get(key) if isinstance(table, dict) else None
-        if isinstance(value, list):
-            traits.update(item for item in value if isinstance(item, str))
     adapter_entry = catalog.get("adapters", {}).get(adapter, {})
     registered = router._registered_match(adapter, model, catalog)[0] if "models" in adapter_entry else None
+    # A live id the catalogue lacks inherits its family's traits, so it is never less private than its family.
+    for name in (model, *((registered or {}).get("inherits", []))):
+        for key in (f"{adapter}/{name}", name):
+            value = table.get(key) if isinstance(table, dict) else None
+            if isinstance(value, list):
+                traits.update(item for item in value if isinstance(item, str))
     if router.training_flag(adapter_entry, registered) is True:
         traits.add("trains-on-prompts")
     if isinstance(registered, dict) and registered.get("plan_cap_usd") == 0:

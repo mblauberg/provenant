@@ -1766,7 +1766,7 @@ def test_retargeting_override_occupant_ungates_previous_occupant(
     route = json.loads(capsys.readouterr().out)
     assert result == 0
     assert route["status"] == "ok"
-    assert route["resolved_model"] == "fable"
+    assert route["resolved_model"] == "claude-fable-5-1"
 
 
 def test_retargeting_one_tier_keeps_occupant_gated_by_another_tier(
@@ -4626,3 +4626,31 @@ def test_resolve_applies_effort_and_cooldown_gates_to_a_live_family_pick(tmp_pat
     until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
     (tmp_path / "cooldowns.json").write_text(json.dumps({"cooldowns": {"codex/gpt-6.2-sol": {"cooling_until": until}}}))
     assert any("cooling" in warning for warning in route()["warnings"])
+
+
+def _resolve_env(state):
+    return {**os.environ, "HARNESS_PYTHON": sys.executable, "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
+            "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT), "AGENT_FABRIC_STATE_ROOT": str(state)}
+
+
+@pytest.mark.parametrize("adapter,model,expected", [
+    ("codex", "gpt-sol", "gpt-6.2-sol"), ("codex", "sol", "gpt-6.2-sol"), ("codex", "GPT_SOL", "gpt-6.2-sol"),
+    ("codex", "s_o_l", "gpt-6.2-sol"), ("codex", "gpt-6.2-sol", "gpt-6.2-sol"),
+    ("claude", "claude-sonnet", "claude-sonnet-5-6"), ("claude", "sonnet", "claude-sonnet-5-6")])
+def test_implied_alias_beside_a_family_model_still_resolves_to_a_concrete_id(tmp_path, adapter, model, expected):
+    (tmp_path / "capabilities.json").write_text(json.dumps({
+        "codex": {"observed_at": datetime.now(timezone.utc).isoformat(), "models": ["gpt-6.2-sol"]},
+        "claude": {"observed_at": datetime.now(timezone.utc).isoformat(), "models": ["claude-sonnet-5-6"]}}))
+    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", adapter, "--model", model, "--alias", "flagship",
+                          "--role", "worker"], capture_output=True, text=True,
+                         env={**_resolve_env(tmp_path), "FABRIC_ALIAS_IMPLIED": "1"})
+    route = json.loads(run.stdout)
+    assert run.returncode == 0 and route["resolved_model"] == expected, route
+
+
+def test_spelling_variants_of_a_family_name_resolve_like_gpt_sol(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    catalog = router.load_catalog()
+    for spelling in ("GPT_SOL", "s_o_l", "Gpt Sol", "SOL"):
+        assert router._registered_match("codex", spelling, catalog)[0]["id"] == "gpt-6.1-sol", spelling
