@@ -9,6 +9,7 @@ import { join, resolve } from "node:path";
 import { afterEach, expect, it } from "vitest";
 
 import { Store } from "../src/store.js";
+import { digest } from "../src/surface.js";
 
 async function until<T>(probe: () => Promise<T> | T, done: (value: T) => boolean): Promise<T> {
   for (let tries = 0; ; tries++) {
@@ -383,3 +384,9 @@ it("never runs a second turn on a name after a launch it could not record", asyn
     await chair.client.close();
   }
 }, 60_000);
+
+it("keeps a named session's line in a running turn's rebuilt text", () => {
+  const text = digest({ state: "running", run_id: "mcp-abc123", digest: "stale",
+    session_digest: "\n  session s resume active" });
+  expect(text).toBe(`running mcp-abc123 · fabric_status{ids:["mcp-abc123"],wait_seconds:55}\n  session s resume active`);
+});
