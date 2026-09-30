@@ -46,6 +46,8 @@ scripts/worktree verify-claim
 scripts/worktree remove NAME
 ```
 
+`remove` also refuses a worktree with a live non-terminal writer lane; `--force` overrides.
+
 `validate-context` rejects invalid linked-worktree metadata before a lane
 trusts its own checkout; `verify-claim` enforces claim verification at an
 acceptance boundary.
