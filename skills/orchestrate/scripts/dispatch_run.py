@@ -1318,7 +1318,8 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                 try:
                     scan = secret_scan.scan_inputs(
                         prompt_bytes, str(task.get("prompt_file") or "<prompt>"),
-                        [str(workspace / Path(item).expanduser()) for item in task.get("add_dirs") or []])
+                        [str(workspace / Path(item).expanduser()) for item in task.get("add_dirs") or []],
+                        workspace_root=workspace)
                 except (OSError, subprocess.SubprocessError) as exc:
                     raise PreflightError("secret_scan_unavailable", "Make dispatch inputs readable for the secret scan.") from exc
                 if scan.budget_exceeded and not task.get("allow_secrets", False):
@@ -1699,7 +1700,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         return fail(run_dir, "prompt_unavailable", str(exc))
     try:
         secret_scan_result = secret_scan.scan_inputs(
-            prompt_bytes or b"", str(args.prompt_file) if args.prompt_file else "<prompt>", args.add_dirs)
+            prompt_bytes or b"", str(args.prompt_file) if args.prompt_file else "<prompt>", args.add_dirs,
+            workspace_root=workspace)
     except (OSError, subprocess.SubprocessError):
         return fail(run_dir, "secret_scan_unavailable", "Make dispatch inputs readable for the secret scan.")
     if secret_scan_result.budget_exceeded and not getattr(args, "allow_secrets", False):

@@ -193,18 +193,75 @@ def test_secret_scan_skips_ignored_regular_files_and_marks_budget_exceeded(tmp_p
     assert limited.warnings == ['secret scan budget reached']
 
 
-def test_secret_scan_skips_binary_and_untracked_system_dirs_but_refuses_oversized_files(tmp_path):
+def test_secret_scan_skips_binary_and_untracked_system_dirs(tmp_path):
     scan = load_secret_scan_module()
     secret = b'AKIA' + b'A' * 16
     (tmp_path / 'binary.dat').write_bytes(b'\0' + secret)
-    (tmp_path / 'large.txt').write_bytes(secret + b'a' * scan.MAX_FILE_BYTES)
     for name in ('node_modules', '.git'):
         directory = tmp_path / name
         directory.mkdir()
         (directory / 'secret.txt').write_bytes(secret)
     result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
     assert result.findings == []
+    assert not result.budget_exceeded
+
+
+def test_secret_scan_reads_the_head_of_a_huge_text_file_without_failing_the_budget(tmp_path):
+    scan = load_secret_scan_module()
+    secret = b'AKIA' + b'A' * 16
+    (tmp_path / 'head.txt').write_bytes(secret + b'\n' + b'a' * scan.MAX_FILE_BYTES)
+    (tmp_path / 'tail.log').write_bytes(b'a' * scan.MAX_FILE_BYTES + b'\n' + b'AKIA' + b'B' * 16)
+    result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
+    assert not result.budget_exceeded
+    assert [(item.name, Path(item.path).name) for item in result.findings] == [('AWS access key ID', 'head.txt')]
+    assert len(result.warnings) == 1
+    assert '2 files over 1 MiB' in result.warnings[0] and 'first 1 MiB' in result.warnings[0]
+
+
+def test_secret_scan_budget_fix_names_the_largest_subtree(tmp_path, monkeypatch):
+    scan = load_secret_scan_module()
+    deep = tmp_path / 'review' / 'deep'
+    deep.mkdir(parents=True)
+    for index in range(5):
+        (deep / f'{index}.txt').write_text('x' * 100)
+    (tmp_path / 'small').mkdir()
+    (tmp_path / 'small' / 'one.txt').write_text('y' * 10)
+    monkeypatch.setattr(scan, 'MAX_FILES', 3)
+    result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
     assert result.budget_exceeded
+    assert f"largest subtree {deep}" in result.fix()
+    assert 'secret_scan_exclude' in result.fix()
+
+
+def test_secret_scan_skips_excluded_directories_with_a_warning(tmp_path):
+    scan = load_secret_scan_module()
+    (tmp_path / 'fixtures').mkdir()
+    (tmp_path / 'fixtures' / 'key.pem').write_text('AKIA' + 'A' * 16)
+    (tmp_path / 'source.txt').write_text('ghp_' + 'a' * 30)
+    (tmp_path / '.agents').mkdir()
+    (tmp_path / '.agents' / 'fabric-policy.json').write_text(
+        json.dumps({'secret_scan_exclude': ['fixtures', '../outside', 7]}))
+    result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)], workspace_root=tmp_path)
+    assert [Path(item.path).name for item in result.findings] == ['source.txt']
+    assert result.warnings == [
+        ".agents/fabric-policy.json secret_scan_exclude takes relative paths inside the project; ignoring '../outside'",
+        ".agents/fabric-policy.json secret_scan_exclude takes relative paths inside the project; ignoring 7",
+        f"secret scan skipped {(tmp_path / 'fixtures').resolve()} (secret_scan_exclude)",
+    ]
+
+
+def test_preflight_honours_policy_secret_scan_exclusions(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    (tmp_path / '.agents').mkdir()
+    (tmp_path / '.agents' / 'fabric-policy.json').write_text(json.dumps({'secret_scan_exclude': ['shared/fixtures']}))
+    fixtures = tmp_path / 'shared' / 'fixtures'
+    fixtures.mkdir(parents=True)
+    (fixtures / 'key.txt').write_text('rk_live_' + 'a' * 24)
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse',
+            'prompt': 'review shared files', 'add_dirs': [str(tmp_path / 'shared')]}
+    module = load_dispatch_module()
+    assert module.preflight_tasks([task], tmp_path)['status'] == 'validated'
 
 
 def test_secret_scan_budget_skips_vendored_build_and_large_binary_before_counting(tmp_path, monkeypatch):

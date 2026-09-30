@@ -9,9 +9,11 @@ import stat
 import subprocess
 from dataclasses import dataclass, field
 
-MAX_FILE_BYTES = 1024 * 1024
-MAX_FILES = 2000
-MAX_TOTAL_BYTES = 20 * 1024 * 1024
+import fabric_policy
+
+MAX_FILE_BYTES = 1024 * 1024  # a larger text file is scanned up to here only
+MAX_FILES = 10_000
+MAX_TOTAL_BYTES = 64 * 1024 * 1024
 SKIP_DIRS = {".git", "node_modules", ".venv", "vendor", "vendors", "third_party",
              "third-party", "dist", "build", "coverage", ".agent-run"}
 SKIP_SUFFIXES = {".7z", ".a", ".bin", ".class", ".dll", ".dylib", ".exe", ".gif", ".gz",
@@ -43,11 +45,14 @@ class ScanResult:
     warnings: list[str] = field(default_factory=list)
     budget_exceeded: bool = False
     budget_path: str | None = None
+    budget_subtree: str | None = None
 
     def fix(self) -> str:
         if self.budget_exceeded:
             location = f" in {self.budget_path}" if self.budget_path else ""
-            return (f"Secret scan budget exceeded{location}; narrow the prompt or pass a narrower path "
+            subtree = f" ({self.budget_subtree})" if self.budget_subtree else ""
+            return (f"Secret scan budget exceeded{location}{subtree}; narrow the prompt or pass a narrower path, "
+                    f"list the subtree under secret_scan_exclude in {fabric_policy.POLICY}, "
                     "or pass allow_secrets: true and explain why in the prompt.")
         finding = self.findings[0]
         return (f"Remove the {finding.name} at {finding.path}:{finding.line} "
@@ -57,11 +62,18 @@ class ScanResult:
         return sorted({finding.name for finding in self.findings})
 
 
+def _shown(path) -> str:
+    shown = str(path).replace("\n", "?").replace("\r", "?")
+    return "<file>" if any(pattern.search(os.fsencode(shown)) for _, pattern in PATTERNS) else shown
+
+
+def _size(count: int) -> str:
+    return f"{count / 1024 / 1024:.3g} MiB" if count >= 1024 * 1024 else f"{count / 1024:.3g} KiB"
+
+
 def scan_bytes(content: bytes, path: str) -> list[Finding]:
     findings = []
-    shown_path = path.replace("\n", "?").replace("\r", "?")
-    if any(pattern.search(os.fsencode(shown_path)) for _, pattern in PATTERNS):
-        shown_path = "<file>"
+    shown_path = _shown(path)
     for name, pattern in PATTERNS:
         for match in pattern.finditer(content):
             candidate = match.group().upper()
@@ -77,10 +89,14 @@ def scan_bytes(content: bytes, path: str) -> list[Finding]:
     return sorted(findings, key=lambda item: item.line)
 
 
-def _files(directory: Path):
+def _files(directory: Path, excluded: set[Path], skipped: set[Path]):
     if not directory.is_dir():
         raise OSError(f"additional directory unavailable: {directory}")
     if SKIP_DIRS.intersection(directory.parts):
+        return
+    covering = [path for path in excluded if directory == path or path in directory.parents]
+    if covering:
+        skipped.update(covering)
         return
     try:
         repository = subprocess.run(
@@ -119,6 +135,8 @@ def _files(directory: Path):
 
     for root, dirs, files in os.walk(directory, followlinks=False, onerror=raise_walk_error):
         candidates = [Path(root) / name for name in dirs if name not in SKIP_DIRS]
+        skipped.update(path for path in candidates if path in excluded)
+        candidates = [path for path in candidates if path not in excluded]
         ignored_directories = ignored(candidates)
         dirs[:] = [path.name for path in candidates if path not in ignored_directories]
         files_to_check = [Path(root) / name for name in files
@@ -127,39 +145,77 @@ def _files(directory: Path):
         yield from (path for path in files_to_check if path not in ignored_files)
 
 
-def scan_inputs(prompt: bytes, prompt_path: str, add_dirs: list[str] | None = None) -> ScanResult:
+def _largest_subtree(tally: dict[tuple[str, ...], list[int]], base: Path) -> str | None:
+    """The deepest directory holding at least half of what was scanned, else the largest top-level one."""
+    top = [key for key in tally if len(key) == 1]
+    if not top:
+        return None
+    node = max(top, key=lambda key: (tally[key][1], tally[key][0]))
+    total = tally[()][1]
+    while True:
+        children = [key for key in tally if len(key) == len(node) + 1 and key[:len(node)] == node]
+        child = max(children, key=lambda key: (tally[key][1], tally[key][0]), default=None)
+        if child is None or tally[child][1] * 2 < total:
+            break
+        node = child
+    files, size = tally[node]
+    return f"largest subtree {_shown(base.joinpath(*node))}: {files} files, {_size(size)} before the limit"
+
+
+def scan_inputs(prompt: bytes, prompt_path: str, add_dirs: list[str] | None = None,
+                workspace_root=None) -> ScanResult:
+    """Scan the prompt and every readable text file in add_dirs, skipping Git-ignored, vendored, binary
+    and policy-excluded paths. A file over MAX_FILE_BYTES is scanned up to that size, with a warning."""
     result = ScanResult(scan_bytes(prompt, prompt_path))
+    excluded: set[Path] = set()
+    if workspace_root is not None and add_dirs:
+        paths, policy_warnings = fabric_policy.secret_scan_exclude(workspace_root)
+        excluded = set(paths)
+        result.warnings.extend(policy_warnings)
+    skipped: set[Path] = set()
+    truncated: list[Path] = []
     files_seen = 0
     bytes_seen = 0
+
+    def finish() -> ScanResult:
+        result.warnings.extend(f"secret scan skipped {_shown(path)} (secret_scan_exclude)" for path in sorted(skipped))
+        if truncated:
+            result.warnings.append(
+                f"secret scan read only the first {_size(MAX_FILE_BYTES)} of {len(truncated)} "
+                f"file{'s' if len(truncated) != 1 else ''} over {_size(MAX_FILE_BYTES)}, e.g. {_shown(truncated[0])}")
+        return result
+
     for raw_dir in add_dirs or []:
-        for path in _files(Path(raw_dir).expanduser().resolve()):
+        base = Path(raw_dir).expanduser().resolve()
+        tally: dict[tuple[str, ...], list[int]] = {}
+        for path in _files(base, excluded, skipped):
             try:
                 metadata = path.lstat()
                 if not stat.S_ISREG(metadata.st_mode):
                     continue
-                if metadata.st_size > MAX_FILE_BYTES:
-                    with path.open("rb") as stream:
-                        binary_probe = stream.read(8192)
-                    if b"\0" in binary_probe or path.suffix.casefold() in SKIP_SUFFIXES:
-                        continue
-                    result.budget_exceeded = True
-                    result.budget_path = str(Path(raw_dir).expanduser().resolve())
-                    result.warnings.append("secret scan budget reached")
-                    return result
                 with path.open("rb") as stream:
                     content = stream.read(MAX_FILE_BYTES + 1)
-                if len(content) > MAX_FILE_BYTES or b"\0" in content:
+                if b"\0" in content:
                     continue
-                if files_seen >= MAX_FILES or bytes_seen + metadata.st_size > MAX_TOTAL_BYTES:
+                if files_seen >= MAX_FILES or bytes_seen + min(len(content), MAX_FILE_BYTES) > MAX_TOTAL_BYTES:
                     result.budget_exceeded = True
-                    result.budget_path = str(Path(raw_dir).expanduser().resolve())
+                    result.budget_path = str(base)
+                    result.budget_subtree = _largest_subtree(tally, base)
                     result.warnings.append("secret scan budget reached")
-                    return result
+                    return finish()
+                if len(content) > MAX_FILE_BYTES:
+                    truncated.append(path)
+                    content = content[:MAX_FILE_BYTES]
                 files_seen += 1
                 bytes_seen += len(content)
+                parts = path.relative_to(base).parent.parts
+                for depth in range(len(parts) + 1):
+                    counts = tally.setdefault(parts[:depth], [0, 0])
+                    counts[0] += 1
+                    counts[1] += len(content)
                 result.findings.extend(scan_bytes(content, str(path)))
             except FileNotFoundError:
                 continue
             except OSError as exc:
                 raise OSError(f"cannot scan additional file: {path}") from exc
-    return result
+    return finish()
