@@ -44,8 +44,10 @@ def secret_scan_exclude(workspace_root) -> tuple[list[Path], list[str]]:
     root = Path(workspace_root).resolve()
     excluded = []
     for entry in entries:
-        if isinstance(entry, str) and entry and not Path(entry).is_absolute() and ".." not in Path(entry).parts:
-            excluded.append((root / entry).resolve())
+        # Canonical containment, so neither `..` nor a link can exclude a directory outside the project.
+        resolved = (root / entry).resolve() if isinstance(entry, str) and entry and not Path(entry).is_absolute() else None
+        if resolved is not None and resolved.is_relative_to(root):
+            excluded.append(resolved)
         else:
             warnings.append(f"{POLICY} secret_scan_exclude takes relative paths inside the project; ignoring {entry!r}")
     return excluded, warnings

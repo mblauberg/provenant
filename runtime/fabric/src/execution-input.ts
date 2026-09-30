@@ -323,7 +323,7 @@ export function dispatchDefaults(workspace: string): { defaults: DispatchDefault
     return { defaults: {}, warnings: [`${POLICY} dispatch_defaults is not an object; ignored`] };
   const defaults: Record<string, unknown> = {}, warnings: string[] = [];
   for (const [key, value] of Object.entries(raw)) {
-    if (DEFAULT_CHECKS[key as keyof DispatchDefaults]?.(value)) defaults[key] = value;
+    if (Object.hasOwn(DEFAULT_CHECKS, key) && DEFAULT_CHECKS[key as keyof DispatchDefaults](value)) defaults[key] = value;
     else warnings.push(`${POLICY} dispatch_defaults.${key} ignored: set add_dirs, network or timeout_seconds`);
   }
   return { defaults, warnings };

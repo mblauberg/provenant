@@ -206,6 +206,8 @@ def validate_capabilities(value, *, adapter, mode, sandbox, network):
         raise CapabilityError("capabilities_mode_invalid", "Pass capabilities only with mode=worktree_write.")
     if sandbox == "full":
         return capabilities
+    if sandbox != "workspace-write":
+        raise CapabilityError("capabilities_sandbox_invalid", "Use sandbox workspace-write or full with Codex capabilities.")
     if network is None:
         network = os.environ.get("CF_DISPATCH_CODEX_NETWORK", "1") == "1"
     checks = (
@@ -689,18 +691,19 @@ def build_plan(
     directories = safe_directories
     if any(not Path(p).is_dir() for p in directories):
         raise ValueError("add-dir must be a readable directory")
+    if mode == "worktree_write" and git_private is not None:
+        # execute() checks every writer's .agents against its start and integration branch.
+        # Read before launch from the caller's workspace, which the lane cannot rewrite.
+        metadata["instruction_policy"], policy_warnings = fabric_policy.instruction_changes(workspace_root)
+        warnings.extend(policy_warnings)
     if mode == "worktree_write" and adapter == "codex" and git_private is not None:
         # Codex's workspace-write sandbox keeps each writable root's .agents read-only, even an
         # absent one, so a rebase or merge that updates or adds a tracked skill stops half-way.
-        # Granting the directory (execute() creates an absent one) lets Git rewrite it;
-        # execute() then fails a lane that authored a change there.
+        # Granting the directory (execute() creates an absent one) lets Git rewrite it.
         instructions = Path(cwd, INSTRUCTION_DIR)
         grantable = not os.path.lexists(instructions) or (instructions.is_dir() and not instructions.is_symlink())
         if grantable and str(instructions) not in directories:
             directories.append(str(instructions))
-        # Read before launch from the caller's workspace, which the lane cannot rewrite.
-        metadata["instruction_policy"], policy_warnings = fabric_policy.instruction_changes(workspace_root)
-        warnings.extend(policy_warnings)
     model = route.get("resolved_model") or route.get("model") or ""
     effort = route.get("effort_applied", route.get("effort")) or ""
     if effort == "default":
@@ -2114,9 +2117,16 @@ def instruction_disk_state(cwd, object_format):
 def instruction_snapshot(cwd):
     head = _git_output(cwd, "rev-parse", "--verify", "HEAD^{commit}").strip()
     object_format = _git_output(cwd, "rev-parse", "--show-object-format").strip()
-    return {"head": head, "object_format": object_format,
-            "disk": instruction_disk_state(cwd, object_format),
-            "index": _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)[0]}
+    snapshot = {"head": head, "object_format": object_format,
+                "tree": _instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", head))[0],
+                "disk": instruction_disk_state(cwd, object_format),
+                "index": _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)[0]}
+    # Store starting files Git does not already hold, so a quarantine can put them back.
+    known = {entry[1] for view in ("tree", "index") for entry in snapshot[view].values()}
+    for path, entry in snapshot["disk"].items():
+        if entry[1] not in known and _store_blob(cwd, path) != entry:
+            raise ValueError(f"{path} changed during the check")
+    return snapshot
 
 
 def _integration_refs(cwd):
@@ -2150,6 +2160,11 @@ def authored_instruction_changes(cwd, start):
         for key in set(view).union(*baselines):
             if all(view.get(key) != baseline.get(key) for baseline in baselines):
                 changed.add(key)
+    # A path the lane took in from an integration branch must keep that branch's version, so a
+    # merge that discards it (git merge -s ours) is caught too.
+    restore = _restore_views(cwd, start)
+    for name, view in zip(("head", "index", "disk"), views):
+        changed.update(key for key in restore["integrated"] if view.get(key) != restore[name].get(key))
     return sorted(key + (" (unresolved conflict)" if key in conflicts else "") for key in changed | conflicts)
 
 
@@ -2208,6 +2223,40 @@ def _quarantine_target(cwd, start_head):
     return target
 
 
+def _restore_views(cwd, start):
+    """What each view of a quarantined .agents path returns to.
+
+    HEAD returns to the quarantine target. The index and files return to their starting content,
+    except a path an integration branch the lane took in changed, which takes that branch's version.
+    """
+    target = _quarantine_target(cwd, start["head"])
+    integrated = {path for path in set(target) | set(start["tree"]) if target.get(path) != start["tree"].get(path)}
+
+    def view(entries):
+        return {path: entry for path in set(entries) | integrated
+                if (entry := (target if path in integrated else entries).get(path))}
+
+    return {"head": target, "index": view(start["index"]), "disk": view(start["disk"]), "integrated": integrated}
+
+
+def _store_blob(cwd, path):
+    """Write the file or link at a worktree path to the object store without filters; None when absent."""
+    file = Path(cwd).resolve() / path
+    # A path under a link or a replaced directory is not the lane's file at that path.
+    if file.parent.resolve() != file.parent or not os.path.lexists(file):
+        return None
+    status = file.lstat()
+    if stat.S_ISLNK(status.st_mode):
+        mode, data = "120000", os.fsencode(os.readlink(file))
+    elif stat.S_ISREG(status.st_mode):
+        mode = "100755" if status.st_mode & 0o100 else "100644"
+        with open(os.open(file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as handle:
+            data = handle.read()
+    else:
+        raise ValueError(f"{path} is not a file or link")
+    return mode, os.fsdecode(_git_bytes(cwd, "hash-object", "-w", "--no-filters", "--stdin", input=data)).strip()
+
+
 def _index_info(entries, paths, zero):
     """update-index -z --index-info input setting each path to its entry, removals first."""
     removals = [f"0 {zero}\t{path}\0" for path in paths if path not in entries]
@@ -2215,70 +2264,67 @@ def _index_info(entries, paths, zero):
     return os.fsencode("".join(removals + updates))
 
 
-def quarantine_instruction_changes(cwd, start, changes, patch_path):
-    """Move a lane's authored .agents changes out of its worktree into a patch the chair applies.
+QUARANTINE_PATCHES = (("disk", "protected.patch"), ("index", "protected.index.patch"),
+                      ("head", "protected.head.patch"))
 
-    The patch runs from each path's quarantine target to the file the lane left. A commit, the index
-    and the files then return each path to that target. Blobs are hashed and written without
-    filters, so no command the repository configures runs.
+
+def quarantine_instruction_changes(cwd, start, changes, attempt_dir):
+    """Move a lane's authored .agents changes out of its worktree into patches the chair applies.
+
+    Each of the lane's files, index and HEAD is archived as a patch from the view's restore point
+    (protected.patch for files; index and HEAD patches only when they hold something else). A commit,
+    the index and the files then return to their restore points. Blobs are hashed and written
+    without filters, so no command the repository configures runs. Returns the patches written.
     """
     root = Path(cwd).resolve()
     paths = sorted(changes)
-    target = _quarantine_target(cwd, start["head"])
+    restore = _restore_views(cwd, start)
     zero = "0" * (64 if start["object_format"] == "sha256" else 40)
-    scratch_index = Path(patch_path).with_name("quarantine.index")
+    head = os.fsdecode(_git_bytes(cwd, "rev-parse", "--verify", "HEAD^{commit}")).strip()
+    lane = {"head": _instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", head))[0],
+            "index": _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)[0],
+            "disk": {path: entry for path in paths if (entry := _store_blob(cwd, path))}}
+    published = []
+    # Scratch files stay out of the attempt directory, which a lane may be able to write.
+    with tempfile.TemporaryDirectory() as private:
+        scratch_index = Path(private, "index")
 
-    def on_disk(path):
-        # A path under a link or a replaced directory is not the lane's file at that path.
-        file = root / path
-        return file if file.parent.resolve() == file.parent and os.path.lexists(file) else None
+        def tree_of(entries, base=None):
+            scratch_index.unlink(missing_ok=True)
+            environment = {"GIT_INDEX_FILE": str(scratch_index)}
+            if base is not None:
+                _git_bytes(cwd, "read-tree", base, env=environment)
+            _git_bytes(cwd, "update-index", "-z", "--index-info", input=_index_info(entries, paths, zero),
+                       env=environment)
+            return os.fsdecode(_git_bytes(cwd, "write-tree", env=environment)).strip()
 
-    def tree_of(entries, base=None):
-        scratch_index.unlink(missing_ok=True)
-        environment = {"GIT_INDEX_FILE": str(scratch_index)}
-        if base is not None:
-            _git_bytes(cwd, "read-tree", base, env=environment)
-        _git_bytes(cwd, "update-index", "-z", "--index-info", input=_index_info(entries, paths, zero), env=environment)
-        return os.fsdecode(_git_bytes(cwd, "write-tree", env=environment)).strip()
-
-    left = {}
-    for path in paths:
-        file = on_disk(path)
-        if file is None:
-            continue
-        status = file.lstat()
-        if stat.S_ISLNK(status.st_mode):
-            mode, data = "120000", os.fsencode(os.readlink(file))
-        elif stat.S_ISREG(status.st_mode):
-            mode = "100755" if status.st_mode & 0o100 else "100644"
-            with open(os.open(file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as handle:
-                data = handle.read()
-        else:
-            raise ValueError(f"{path} is not a file or link")
-        left[path] = (mode, os.fsdecode(_git_bytes(cwd, "hash-object", "-w", "--no-filters", "--stdin",
-                                                   input=data)).strip())
-    try:
-        before, after = tree_of(target), tree_of(left)
-        Path(patch_path).write_bytes(_git_bytes(
-            cwd, "diff", "--binary", "--full-index", "--no-renames", "--no-ext-diff", "--no-textconv",
-            "--no-color", "--src-prefix=a/", "--dst-prefix=b/", before, after))
-        head = os.fsdecode(_git_bytes(cwd, "rev-parse", "--verify", "HEAD^{commit}")).strip()
-        tree = tree_of(target, base=head)
+        written = set()
+        for view, name in QUARANTINE_PATCHES:
+            patch = _git_bytes(cwd, "diff", "--binary", "--full-index", "--no-renames", "--no-ext-diff",
+                               "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/",
+                               tree_of(restore[view]), tree_of(lane[view]))
+            if patch and patch not in written:
+                written.add(patch)
+                Path(private, name).write_bytes(patch)
+                # Replace, never follow, whatever the lane left at the destination.
+                install(str(Path(private, name)), str(Path(attempt_dir, name)))
+                published.append(Path(attempt_dir, name))
+        tree = tree_of(restore["head"], base=head)
         if tree != os.fsdecode(_git_bytes(cwd, "rev-parse", head + "^{tree}")).strip():
-            message = f"fabric: quarantine protected {INSTRUCTION_DIR}/ changes\n\nSaved to {patch_path}.\n"
+            message = (f"fabric: quarantine protected {INSTRUCTION_DIR}/ changes\n\n"
+                       f"Saved to {', '.join(map(str, published))}.\n")
             commit = os.fsdecode(_git_bytes(cwd, "commit-tree", tree, "-p", head, "-m", message,
                                             env=QUARANTINE_IDENTITY)).strip()
             _git_bytes(cwd, "update-ref", "-m", "fabric: quarantine", "HEAD", commit, head)
-    finally:
-        scratch_index.unlink(missing_ok=True)
-    _git_bytes(cwd, "update-index", "-z", "--index-info", input=_index_info(target, paths, zero))
+    _git_bytes(cwd, "update-index", "-z", "--index-info", input=_index_info(restore["index"], paths, zero))
     for path in paths:
-        if (file := on_disk(path)) is not None:
+        file = root / path
+        if file.parent.resolve() == file.parent and os.path.lexists(file):
             if file.is_dir() and not file.is_symlink():
                 raise ValueError(f"{path} is a directory")
             file.unlink()
     for path in paths:
-        if path not in target or target[path][0] == "160000":
+        if path not in restore["disk"] or restore["disk"][path][0] == "160000":
             continue
         file = root / path
         if file.is_dir() and not file.is_symlink():
@@ -2286,7 +2332,7 @@ def quarantine_instruction_changes(cwd, start, changes, patch_path):
         file.parent.mkdir(parents=True, exist_ok=True)
         if file.parent.resolve() != file.parent:
             raise ValueError(f"{path} lies below a link")
-        mode, oid = target[path]
+        mode, oid = restore["disk"][path]
         data = _git_bytes(cwd, "cat-file", "blob", oid)
         if mode == "120000":
             os.symlink(os.fsdecode(data), file)
@@ -2304,6 +2350,7 @@ def quarantine_instruction_changes(cwd, start, changes, patch_path):
             except OSError:
                 break
             parent = parent.parent
+    return published
 
 
 def tool_cache_environment(plan, cache, inherited):
@@ -2386,6 +2433,7 @@ def execute(
             created_instructions = Path(plan["cwd"], INSTRUCTION_DIR)
         except OSError:
             pass  # Present already; the snapshot fails anything but a real directory.
+    if plan.get("instruction_policy"):
         try:
             instruction_start = instruction_snapshot(plan["cwd"])
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -2892,13 +2940,14 @@ def execute(
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             instruction_changes = [f"{INSTRUCTION_DIR} (unverifiable: {exc})"]
     instruction_policy = plan.get("instruction_policy", "quarantine")
-    if instruction_changes and instruction_policy == "allow":
+    # Unverifiable states, special files and conflicts stay hard failures under any policy.
+    if instruction_changes and instruction_policy == "allow" and quarantinable(instruction_changes):
         warnings.append("lane changed " + INSTRUCTION_DIR + "/ (allowed by policy): " + ", ".join(instruction_changes))
         instruction_changes = []
     elif instruction_changes and instruction_policy == "quarantine" and quarantinable(instruction_changes):
-        patch = Path(plan["run_dir"]) / "protected.patch"
         try:
-            quarantine_instruction_changes(plan["cwd"], instruction_start, instruction_changes, patch)
+            patches = quarantine_instruction_changes(plan["cwd"], instruction_start, instruction_changes,
+                                                     Path(plan["run_dir"]))
             remaining = authored_instruction_changes(plan["cwd"], instruction_start)
             if remaining:
                 raise ValueError("still changed after restore: " + ", ".join(remaining))
@@ -2906,7 +2955,7 @@ def execute(
             warnings.append(f"quarantine of {INSTRUCTION_DIR}/ changes failed: {exc}")
         else:
             warnings.append("lane changed " + INSTRUCTION_DIR + "/ beyond its start and integration branch: "
-                            + ", ".join(instruction_changes) + f"; quarantined to {patch} and removed from "
+                            + ", ".join(instruction_changes) + f"; quarantined to {', '.join(map(str, patches))} and removed from "
                             "the lane; review it, then git apply it deliberately")
             instruction_changes = []
     if created_instructions is not None:

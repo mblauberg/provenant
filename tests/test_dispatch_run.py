@@ -206,16 +206,19 @@ def test_secret_scan_skips_binary_and_untracked_system_dirs(tmp_path):
     assert not result.budget_exceeded
 
 
-def test_secret_scan_reads_the_head_of_a_huge_text_file_without_failing_the_budget(tmp_path):
+def test_secret_scan_reads_whole_large_text_files_within_the_budget(tmp_path, monkeypatch):
     scan = load_secret_scan_module()
-    secret = b'AKIA' + b'A' * 16
-    (tmp_path / 'head.txt').write_bytes(secret + b'\n' + b'a' * scan.MAX_FILE_BYTES)
-    (tmp_path / 'tail.log').write_bytes(b'a' * scan.MAX_FILE_BYTES + b'\n' + b'AKIA' + b'B' * 16)
+    megabyte = 1024 * 1024
+    (tmp_path / 'head.txt').write_bytes(b'AKIA' + b'A' * 16 + b'\n' + b'a' * megabyte)
+    (tmp_path / 'tail.log').write_bytes(b'a' * 2 * megabyte + b'\n' + b'AKIA' + b'B' * 16)
     result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
     assert not result.budget_exceeded
-    assert [(item.name, Path(item.path).name) for item in result.findings] == [('AWS access key ID', 'head.txt')]
-    assert len(result.warnings) == 1
-    assert '2 files over 1 MiB' in result.warnings[0] and 'first 1 MiB' in result.warnings[0]
+    assert sorted(Path(item.path).name for item in result.findings) == ['head.txt', 'tail.log']
+    assert result.warnings == []
+    # A file the remaining budget cannot hold is not scanned in part: the scan fails closed.
+    monkeypatch.setattr(scan, 'MAX_TOTAL_BYTES', 2 * megabyte)
+    limited = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)])
+    assert limited.budget_exceeded
 
 
 def test_secret_scan_budget_fix_names_the_largest_subtree(tmp_path, monkeypatch):
@@ -239,13 +242,18 @@ def test_secret_scan_skips_excluded_directories_with_a_warning(tmp_path):
     (tmp_path / 'fixtures' / 'key.pem').write_text('AKIA' + 'A' * 16)
     (tmp_path / 'source.txt').write_text('ghp_' + 'a' * 30)
     (tmp_path / '.agents').mkdir()
+    outside = tmp_path.parent / (tmp_path.name + '-outside')
+    outside.mkdir()
+    (outside / 'key.txt').write_text('AKIA' + 'C' * 16)
+    (tmp_path / 'escape').symlink_to(outside)
     (tmp_path / '.agents' / 'fabric-policy.json').write_text(
-        json.dumps({'secret_scan_exclude': ['fixtures', '../outside', 7]}))
-    result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path)], workspace_root=tmp_path)
-    assert [Path(item.path).name for item in result.findings] == ['source.txt']
+        json.dumps({'secret_scan_exclude': ['fixtures', '../outside', 7, 'escape']}))
+    result = scan.scan_inputs(b'hello', '<prompt>', [str(tmp_path), str(outside)], workspace_root=tmp_path)
+    assert sorted(Path(item.path).name for item in result.findings) == ['key.txt', 'source.txt']
     assert result.warnings == [
         ".agents/fabric-policy.json secret_scan_exclude takes relative paths inside the project; ignoring '../outside'",
         ".agents/fabric-policy.json secret_scan_exclude takes relative paths inside the project; ignoring 7",
+        ".agents/fabric-policy.json secret_scan_exclude takes relative paths inside the project; ignoring 'escape'",
         f"secret scan skipped {(tmp_path / 'fixtures').resolve()} (secret_scan_exclude)",
     ]
 
@@ -270,7 +278,7 @@ def test_secret_scan_budget_skips_vendored_build_and_large_binary_before_countin
         target = tmp_path / dirname
         target.mkdir()
         (target / "ignored.txt").write_text("ordinary")
-    (tmp_path / "large.bin").write_bytes(b"\0" + b"x" * (scan.MAX_FILE_BYTES + 1))
+    (tmp_path / "large.bin").write_bytes(b"\0" + b"x" * (2 * 1024 * 1024))
     (tmp_path / "source.txt").write_text("ordinary")
     monkeypatch.setattr(scan, "MAX_FILES", 1)
     result = scan.scan_inputs(b"hello", "<prompt>", [str(tmp_path)])
@@ -2544,6 +2552,7 @@ def test_front_door_preflight_rejects_all_invalid_tasks_without_run(tmp_path):
     ("platform", "linux", "capabilities_platform_invalid"),
     ("sandbox_exec", None, "capabilities_confinement_unavailable"),
     ("network", False, "capabilities_network_required"),
+    ("sandbox", "read-only", "capabilities_sandbox_invalid"),
 ])
 def test_front_door_capability_preflight_fails_closed(monkeypatch, tmp_path, field, value, error):
     module = load_dispatch_module()

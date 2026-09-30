@@ -103,9 +103,9 @@ every attempt, fallbacks included, off free and prompt-training models. See
 the prompt and eligible files under `add_dirs` for common live credential shapes.
 A finding rejects with `error: secret_detected` and a location in `fix`; set
 `allow_secrets: true` explicitly to proceed. The attempt records the override
-and finding names. The scan skips Git-ignored, vendored and binary files, reads
-only the first 1 MiB of a larger text file (with a warning), and skips directories
-listed under `secret_scan_exclude` in `.agents/fabric-policy.json`. Past 10,000
+and finding names. The scan reads whole files, skipping Git-ignored, vendored and binary files
+and directories listed under `secret_scan_exclude` in `.agents/fabric-policy.json`
+(which must resolve inside the project). Past 10,000
 files or 64 MiB, dispatch rejects with `error: secret_scan_budget_exceeded`
 naming the largest subtree; narrow the inputs, exclude it, or explicitly set
 `allow_secrets: true` and explain why in the prompt. The same policy's
@@ -201,14 +201,18 @@ keeps a writable root's `.agents/` read-only even before it exists, so a
 linked-worktree Codex writer also gets the worktree's `.agents/` as an
 `add_dir` unless it is a file or link. Fabric creates an absent one for the
 attempt and removes it afterwards if still empty. Git can then rebase or merge
-the integration branch over tracked skills. When an `.agents/` path in HEAD,
-the index or on disk ends up matching neither the attempt's starting state nor
-the primary checkout's branch or its upstream, Fabric by default quarantines
-the change: it writes it to `<attempt>/protected.patch`, commits the reverse to
-the lane and finishes `ok` with a warning naming the patch. `.agents/fabric-policy.json`
-`instruction_changes` may instead be `allow` (keep it, with a warning) or `deny`
-(fail with `protected_instructions_changed`); a change quarantine cannot undo,
-such as a conflict or special file, still fails. If OS confinement is unavailable, agy write
+the integration branch over tracked skills. For every writer, when an
+`.agents/` path in HEAD, the index or on disk ends up matching neither the
+attempt's starting state nor the primary checkout's branch or its upstream, or
+drops that branch's version after taking the branch in, Fabric by default
+quarantines the change: it archives the lane's files to `<attempt>/protected.patch`
+(and its index or HEAD to `protected.index.patch` or `protected.head.patch` when
+they differ), commits the start or integration-branch version back to the lane,
+returns the index and files to their starting content and finishes `ok` with a
+warning naming the patches. `.agents/fabric-policy.json` `instruction_changes`
+may instead be `allow` (keep an ordinary edit, with a warning) or `deny` (fail
+with `protected_instructions_changed`). A conflict, special file, replaced root,
+lane process left running or failed quarantine fails under any policy. If OS confinement is unavailable, agy write
 dispatch is refused; other wrapped writer receipts warn that writes are
 unconfined. Setting `PROVENANT_NO_OS_CONFINEMENT=1` has the same effect on new
 wrapped attempts.
@@ -217,8 +221,9 @@ both distinct values; empty lists mean none. Other adapters' profiles already
 leave System V IPC and Mach services open, so they take the list without a
 grant; their browser lanes only move `MAC_CHROMIUM_TMPDIR` to `<attempt>/tmp`.
 A Codex `sandbox: "full"` lane is unsandboxed, so it applies no capabilities
-and warns. Otherwise a Codex lane needs `worktree_write`, macOS, usable
-`sandbox-exec` outside another sandbox and applied `network: true`. These lanes keep the writer's enforced guarantee
+and warns. Otherwise a Codex lane needs `worktree_write`, `sandbox:
+"workspace-write"`, macOS, usable `sandbox-exec` outside another sandbox and
+applied `network: true`. These lanes keep the writer's enforced guarantee
 and workspace-write receipt value, while running Codex's own sandbox in
 `danger-full-access` inside the OS profile. The profile allows Codex's native
 Mach services plus FSEvents, denies other Mach lookups and registrations,

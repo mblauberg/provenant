@@ -1645,9 +1645,9 @@ it('resumes a cross-project run with its saved read roots, and refuses one whose
 
 it("fills unset dispatch fields from the project policy's dispatch_defaults", async () => {
   mkdirSync(join(workspace, ".agents"));
-  writeFileSync(join(workspace, ".agents", "fabric-policy.json"), JSON.stringify({
-    dispatch_defaults: { add_dirs: ["shared"], network: false, timeout_seconds: 900, sandbox: "full" },
-  }));
+  // Written as text so the inherited names arrive as own keys, as they would from a project file.
+  writeFileSync(join(workspace, ".agents", "fabric-policy.json"), '{"dispatch_defaults": {"add_dirs": ["shared"], '
+    + '"network": false, "timeout_seconds": 900, "sandbox": "full", "__proto__": [], "constructor": 1, "toString": 2}}');
   const log = join(temporaryDirectory, "defaults-preflight.json");
   const env = { ...ownerEnvironment, FIXTURE_PREFLIGHT_LOG: log };
   const signal = new AbortController().signal;
@@ -1655,7 +1655,8 @@ it("fills unset dispatch fields from the project policy's dispatch_defaults", as
     .toMatchObject({ status: "rejected", error: "fixture_logged" });
   const [single] = JSON.parse(readFileSync(log, "utf8"));
   expect(single).toMatchObject({ add_dirs: ["shared"], network: false });
-  expect(single.warnings.join()).toMatch(/dispatch_defaults\.sandbox/u);
+  for (const key of ["sandbox", "__proto__", "constructor", "toString"])
+    expect(single.warnings.join()).toContain(`dispatch_defaults.${key} ignored`);
   await dispatchConfiguredBatch({ adapter: "codex", add_dirs: ["batch"], tasks: [
     { id: "a", prompt: "p" },
     { id: "b", prompt: "p", add_dirs: [], network: true, timeout_seconds: 60 },

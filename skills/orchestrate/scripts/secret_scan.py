@@ -11,7 +11,6 @@ from dataclasses import dataclass, field
 
 import fabric_policy
 
-MAX_FILE_BYTES = 1024 * 1024  # a larger text file is scanned up to here only
 MAX_FILES = 10_000
 MAX_TOTAL_BYTES = 64 * 1024 * 1024
 SKIP_DIRS = {".git", "node_modules", ".venv", "vendor", "vendors", "third_party",
@@ -164,8 +163,8 @@ def _largest_subtree(tally: dict[tuple[str, ...], list[int]], base: Path) -> str
 
 def scan_inputs(prompt: bytes, prompt_path: str, add_dirs: list[str] | None = None,
                 workspace_root=None) -> ScanResult:
-    """Scan the prompt and every readable text file in add_dirs, skipping Git-ignored, vendored, binary
-    and policy-excluded paths. A file over MAX_FILE_BYTES is scanned up to that size, with a warning."""
+    """Scan the prompt and every readable text file in add_dirs whole, skipping Git-ignored, vendored,
+    binary and policy-excluded paths. Past the budget the result fails closed rather than scan in part."""
     result = ScanResult(scan_bytes(prompt, prompt_path))
     excluded: set[Path] = set()
     if workspace_root is not None and add_dirs:
@@ -173,16 +172,11 @@ def scan_inputs(prompt: bytes, prompt_path: str, add_dirs: list[str] | None = No
         excluded = set(paths)
         result.warnings.extend(policy_warnings)
     skipped: set[Path] = set()
-    truncated: list[Path] = []
     files_seen = 0
     bytes_seen = 0
 
     def finish() -> ScanResult:
         result.warnings.extend(f"secret scan skipped {_shown(path)} (secret_scan_exclude)" for path in sorted(skipped))
-        if truncated:
-            result.warnings.append(
-                f"secret scan read only the first {_size(MAX_FILE_BYTES)} of {len(truncated)} "
-                f"file{'s' if len(truncated) != 1 else ''} over {_size(MAX_FILE_BYTES)}, e.g. {_shown(truncated[0])}")
         return result
 
     for raw_dir in add_dirs or []:
@@ -194,18 +188,15 @@ def scan_inputs(prompt: bytes, prompt_path: str, add_dirs: list[str] | None = No
                 if not stat.S_ISREG(metadata.st_mode):
                     continue
                 with path.open("rb") as stream:
-                    content = stream.read(MAX_FILE_BYTES + 1)
+                    content = stream.read(MAX_TOTAL_BYTES - bytes_seen + 1)
                 if b"\0" in content:
                     continue
-                if files_seen >= MAX_FILES or bytes_seen + min(len(content), MAX_FILE_BYTES) > MAX_TOTAL_BYTES:
+                if files_seen >= MAX_FILES or bytes_seen + len(content) > MAX_TOTAL_BYTES:
                     result.budget_exceeded = True
                     result.budget_path = str(base)
                     result.budget_subtree = _largest_subtree(tally, base)
                     result.warnings.append("secret scan budget reached")
                     return finish()
-                if len(content) > MAX_FILE_BYTES:
-                    truncated.append(path)
-                    content = content[:MAX_FILE_BYTES]
                 files_seen += 1
                 bytes_seen += len(content)
                 parts = path.relative_to(base).parent.parts
