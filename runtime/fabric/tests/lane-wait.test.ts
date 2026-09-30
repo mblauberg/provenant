@@ -159,7 +159,7 @@ it("bounds cursor retries under contention by the deadline and leaves the lane f
   const output: string[] = [];
   let clock = 0;
   const code = await waitForLanes({
-    who, store: stuck, timeoutSeconds: 6,
+    who, store: stuck, timeoutSeconds: 5,
     read: async () => ({ schema: "fabric.runs.v1", status: "ok", runs: [lane("kept")] }),
     write: async (text) => { output.push(text); },
     fail: (text) => { throw new Error(text); },
@@ -167,7 +167,7 @@ it("bounds cursor retries under contention by the deadline and leaves the lane f
     now: () => clock,
   });
   expect(code).toBe(124);
-  expect(clock).toBeLessThanOrEqual(8000);
+  expect(clock).toBe(5000);
   // Nothing was marked seen, so the lane is reported again.
   const again = run(opened, [[lane("kept")]]);
   expect(await again.code).toBe(0);

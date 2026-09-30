@@ -227,6 +227,31 @@ describe("task-level cancel", () => {
     expect(result.reason).toBe("not needed");
   }, 60_000);
 
+  it("rejects a task cancel whose batch scope cannot be established", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fabric-lean-scope-"));
+    roots.push(root);
+    const workspace = join(root, "workspace"), product = join(root, "product");
+    mkdirSync(workspace);
+    installFixtureOwners(product);
+    const log = join(root, "controls.jsonl");
+    writeFileSync(join(product, "skills/orchestrate/scripts/run_controls.py"),
+      `#!/usr/bin/env python3\nimport json,sys\nopen(${JSON.stringify(log)},'a').write(json.dumps(sys.argv[1:])+'\\n')\n`);
+    const runDir = join(workspace, ".agent-run", "mcp-noscope");
+    for (const task of ["one", "two"]) {
+      const dir = join(runDir, "tasks", task, "attempt-001");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "attempt.json"), JSON.stringify({ schema: "fabric.attempt.v1", run_id: "mcp-noscope", task_id: task,
+        attempt: 1, state: "running", status: null, started_at: new Date().toISOString(), paths: {}, digest: `running ${task}` }));
+    }
+    const env = { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product,
+      HARNESS_PYTHON: execFileSync("python3", ["-c", "import sys;print(sys.executable)"], { encoding: "utf8" }).trim() };
+    const identity = { project: workspace, cwd: workspace, agentId: "lean", provider: "codex" };
+    const result = await cancelConfiguredRun("two", identity, undefined, env) as any;
+    expect(result).toMatchObject({ status: "rejected", error: "task_scope_unknown" });
+    expect(result.fix).toContain("mcp-noscope");
+    expect(existsSync(log)).toBe(false);
+  }, 60_000);
+
   it("never widens a task cancel to the run when the task has not started", async () => {
     const root = mkdtempSync(join(tmpdir(), "fabric-lean-queued-"));
     roots.push(root);

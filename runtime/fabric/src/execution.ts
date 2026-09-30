@@ -1000,6 +1000,15 @@ export async function cancelConfiguredRun(
   if (unresolved)
     return { status: "rejected", error: "task_not_started",
       fix: `Task ${id} has not started; cancel the whole batch with its run id ${unresolved.run_id}.` };
+  // A task id with no readable status record cannot be told from a single dispatch: never guess.
+  const uncertain = rows.runs.find((row) => {
+    if (row.task_id !== id || row.run_id === id || row.batch_id || typeof row.run_dir !== "string") return false;
+    try { JSON.parse(readFileSync(join(row.run_dir, "dispatch-status.json"), "utf8")); return false; }
+    catch { return true; }
+  });
+  if (uncertain)
+    return { status: "rejected", error: "task_scope_unknown",
+      fix: `Cannot tell whether ${id} is a batch task; cancel the whole run with its run id ${uncertain.run_id} or inspect it first.` };
   const row = rows.runs[0]!;
   if (rows.runs.every((row) => row.state === "terminal")) return rows;
   const started = [...activeOwners].find((owner) => owner.runDir === row.run_dir);
