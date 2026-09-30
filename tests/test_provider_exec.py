@@ -155,6 +155,113 @@ def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_pat
     assert "(deny file-read-data" not in profile
 
 
+def linked_worktree(tmp_path):
+    primary = tmp_path / "primary"
+    primary.mkdir()
+    git = ["git", "-C", str(primary), "-c", "user.email=a@b", "-c", "user.name=t"]
+    subprocess.run([*git[:3], "init", "-q"], check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+    worktree = primary / ".worktrees" / "lane"
+    subprocess.run([*git, "worktree", "add", "-q", "-b", "lane", str(worktree)], check=True)
+    return primary.resolve(), worktree.resolve()
+
+
+@pytest.mark.parametrize("adapter", ["claude", "cursor", "opencode", "kiro"])
+def test_writer_profile_grants_project_locks_only(monkeypatch, tmp_path, adapter):
+    mod = supervisor()
+    primary, worktree = linked_worktree(tmp_path)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    monkeypatch.setattr(mod, "_require_kiro_engine", lambda: None)
+    plan = mod.build_plan(adapter, {}, "hello", cwd=worktree, workspace_root=worktree,
+                          worktree=worktree, mode="worktree_write")
+    locks = primary / ".agent-run/locks"
+    assert locks.is_dir()
+    assert plan["applied"]["confinement"] == "sandbox-exec"
+    assert plan["applied"]["locks_dir"] == str(locks)
+    assert str(locks) not in plan["applied"]["add_dirs"]
+    assert str(locks) in plan["applied"]["write_boundary"]["writable_paths"]
+    allow = "\n".join(line for line in mod.os_confinement_profile(plan).splitlines()
+                      if line.startswith("(allow file-write* "))
+    assert f'(subpath "{locks}")' in allow
+    for name in ("sessions", "scratch", "runs"):
+        assert str(primary / ".agent-run" / name) not in allow
+    assert f'(subpath "{primary / ".agent-run"}")' not in allow
+
+
+def test_codex_writer_native_filesystem_grants_project_locks_only(monkeypatch, tmp_path):
+    mod = supervisor()
+    primary, worktree = linked_worktree(tmp_path)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = mod.build_plan("codex", {}, "hello", cwd=worktree, workspace_root=worktree,
+                          worktree=worktree, mode="worktree_write")
+    locks = str(primary / ".agent-run/locks")
+    filesystem = plan["applied"]["write_boundary"]["filesystem"]
+    assert filesystem[locks] == "write"
+    assert locks not in plan["applied"]["add_dirs"]
+    assert not [path for path in filesystem if path.startswith(str(primary / ".agent-run"))
+                and path != locks]
+
+
+def test_swapped_locks_link_is_not_granted_on_resume(monkeypatch, tmp_path):
+    mod = supervisor()
+    primary, worktree = linked_worktree(tmp_path)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    first = mod.build_plan("claude", {}, "hello", cwd=worktree, workspace_root=worktree,
+                           worktree=worktree, mode="worktree_write")
+    target = tmp_path / "elsewhere"
+    target.mkdir()
+    locks = primary / ".agent-run/locks"
+    locks.rmdir()
+    locks.symlink_to(target)
+    again = mod.build_plan("claude", {}, "hello", cwd=worktree, workspace_root=worktree,
+                           worktree=worktree, mode="worktree_write",
+                           add_dirs=first["applied"]["add_dirs"])
+    assert again["applied"]["locks_dir"] is None
+    assert any("not grantable" in item for item in again["warnings"])
+    assert str(target) not in json.dumps(again["applied"])
+    # A plan built before the swap must not reach the link target either.
+    assert str(target) not in mod.os_confinement_profile(first)
+    assert not any(target.iterdir())
+
+
+def test_writer_without_worktree_creates_no_locks(monkeypatch, tmp_path):
+    mod = supervisor()
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = mod.build_plan("claude", {}, "hello", cwd=tmp_path, mode="worktree_write")
+    assert plan["applied"]["locks_dir"] is None
+    assert not (tmp_path / ".agent-run").exists()
+
+
+@pytest.mark.skipif(not shutil.which("sandbox-exec"), reason="sandbox-exec unavailable")
+def test_sandbox_probe_locks_writable_sessions_and_scratch_denied(monkeypatch, tmp_path):
+    mod = supervisor()
+    primary, worktree = linked_worktree(tmp_path)
+    for name in ("sessions", "scratch"):
+        (primary / ".agent-run" / name).mkdir(parents=True)
+    plan = mod.build_plan("claude", {}, "hello", cwd=worktree, workspace_root=worktree,
+                          worktree=worktree, mode="worktree_write",
+                          run_dir=tmp_path / "attempt")
+    profile = mod.os_confinement_profile(plan)
+
+    def touch(directory):
+        return subprocess.run(["sandbox-exec", "-p", profile, "/usr/bin/touch",
+                               str(primary / ".agent-run" / directory / "probe")],
+                              capture_output=True, text=True).returncode
+
+    assert touch("locks") == 0
+    assert touch("sessions") != 0
+    assert touch("scratch") != 0
+
+
+def test_read_only_plan_gets_no_locks_grant(monkeypatch, tmp_path):
+    mod = supervisor()
+    primary, worktree = linked_worktree(tmp_path)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = mod.build_plan("claude", {}, "hello", cwd=worktree, workspace_root=worktree)
+    assert not (primary / ".agent-run").exists()
+    assert plan["applied"]["locks_dir"] is None
+
+
 def test_writer_protected_path_inside_add_dir_keeps_read_and_write_denied(monkeypatch, tmp_path):
     mod = supervisor()
     worktree = tmp_path / "worktree"

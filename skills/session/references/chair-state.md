@@ -7,12 +7,20 @@ owners (issues, board, specs, ADRs) still win.
 ## Run layout
 
 One `.agent-run/` per Git common directory, shared by its linked worktrees,
-unless project instructions name another root. Its top level holds only:
+unless project instructions name another root. Its top level holds only these
+four entries; add no others:
 
-- `runs/`: Fabric-owned run directories; read them through Fabric, not by path;
-- `sessions/<session-id>/`: one per chair session, holding its `STATE.md`,
-  assumption ledger, lane briefs and any scripts the session resumes with;
-- `locks/`: shared host or project locks.
+| Path | Owner | Holds | Retention |
+|---|---|---|---|
+| `runs/<run-id>/` | Fabric | Receipts, results and logs; read them through Fabric, not by path | Per [Fabric v2](../../../docs/specs/fabric-v2.md#layout-and-retention) |
+| `sessions/<session-id>/` | One chair | `STATE.md`, assumption ledger, lane briefs, scripts the session resumes with, and evidence the chair collects | Triage-only |
+| `locks/` | Project | Lock files and small lock-guarded shared state, nothing else | Kept |
+| `scratch/` | Anyone | Disposable chair-side temp and probes | One day |
+
+A lane's temp is its attempt's `tmp/`, already its `TMPDIR`; lane evidence goes
+in its attempt or run directory. Never point `TMPDIR` at `locks/`. Fabric grants
+every write-confined lane write access to `locks/` and to no other top-level
+entry.
 
 Each chair keeps exactly one `STATE.md`; no `NOW.md`, `PICKUP.md` or parallel
 status files. A host scratchpad or temporary directory is for disposable probes
