@@ -88,6 +88,9 @@ GIT_PRIVATE_READ_ONLY = ("config.worktree", "commondir", "gitdir")
 WRITER_GIT_CONFIG = (("gc.auto", "0"), ("maintenance.auto", "false"), ("rerere.enabled", "false"))
 # Repository agent instructions and skills. Codex protects them inside a writable root.
 INSTRUCTION_DIR = ".agents"
+# A provider that has written nothing to stdout this long after launch is failed
+# as startup_timeout so the chair can re-route instead of waiting out the run.
+STARTUP_SECONDS = 300.0
 # Instructions are small text; a larger tree is refused rather than hashed at length.
 INSTRUCTION_BYTES_LIMIT = 256 * 1024 * 1024
 
@@ -441,6 +444,7 @@ def build_plan(
     capabilities=None,
     timeout_seconds=None,
     idle_seconds=None,
+    startup_seconds=None,
     preface=True,
     run_id="",
     chair="",
@@ -655,7 +659,12 @@ def build_plan(
         or os.environ.get("CF_DISPATCH_IDLE_SECONDS")
         or (config.IDLE_WRITE if mode == "worktree_write" else config.IDLE_READ)
     )
-    if not all(math.isfinite(value) and value > 0 for value in (timeout, idle)):
+    startup = float(
+        startup_seconds
+        or os.environ.get("CF_DISPATCH_STARTUP_SECONDS")
+        or STARTUP_SECONDS
+    )
+    if not all(math.isfinite(value) and value > 0 for value in (timeout, idle, startup)):
         raise ValueError("timeouts must be finite positive numbers")
     boundary = f"Workspace root: {cwd}\nResolve relative paths against this root. " + (
         "Write, run commands and commit only inside this owned worktree. Do not push or change other checkouts."
@@ -681,6 +690,7 @@ def build_plan(
         "original_prompt_file": original_path,
         "timeout_seconds": timeout,
         "idle_seconds": idle,
+        "startup_seconds": startup,
         "grace_seconds": 5.0,
         "session_id": session_id
         or (str(uuid.uuid4()) if adapter == "claude" else None),
@@ -2073,6 +2083,7 @@ def execute(
     diagnostics = BoundedCapture(stderr_path)
     started_at, started = now(), time.monotonic()
     last_progress, last_progress_at = started, started_at
+    launched, produced = started, False
     process = None
     descendants = None
     subreaper = False
@@ -2211,6 +2222,7 @@ def execute(
                 stderr=subprocess.PIPE,
                 start_new_session=True,
             )
+            launched = time.monotonic()
             descendants = _Descendants(process, attempt_marker)
             descendants.sample()
             if on_start:
@@ -2239,6 +2251,7 @@ def execute(
                         selector.unregister(key.fileobj)
                         continue
                     if key.data == "stdout":
+                        produced = True
                         raw.write(data)
                         consume(data)
                     else:
@@ -2270,6 +2283,10 @@ def execute(
                     break
                 if current - started >= plan["timeout_seconds"]:
                     forced = "timed_out"
+                    break
+                # Only provider stdout counts: a banner on stderr is not a started turn.
+                if not produced and current - launched >= plan.get("startup_seconds", STARTUP_SECONDS):
+                    forced = "startup_timeout"
                     break
                 if current >= next_sample:
                     next_sample = current + 1
@@ -2351,6 +2368,11 @@ def execute(
         )
     elif forced == "timed_out":
         diagnostics.write(b"wall clock deadline exceeded\n")
+    elif forced == "startup_timeout":
+        diagnostics.write(
+            f"no provider output within {plan.get('startup_seconds', STARTUP_SECONDS):g}s of launch; "
+            "re-route to another model or adapter\n".encode()
+        )
     stdout, stderr = (
         raw.text(),
         diagnostics.text(),
@@ -2389,6 +2411,7 @@ def execute(
         parsed["status"] = forced
         parsed["signature"] = {
             "stalled": "idle_watchdog",
+            "startup_timeout": "startup_watchdog",
             "timed_out": "wall_clock",
             "cancelled": "cancel_requested",
         }.get(forced, parsed["signature"])
@@ -2548,6 +2571,7 @@ def execute(
             "permission_blocked": "check the requested sandbox and directory grants",
             "tool_missing": "install the provider CLI",
             "stalled": "inspect events or try another model",
+            "startup_timeout": "re-route to another model or adapter",
             "usage_limited": "wait for reset or choose another model",
             "rate_limited": "retry after the recorded cooldown",
         }.get(status)
@@ -2622,7 +2646,7 @@ def execute(
         **({"spared": len(descendants.spared_at_stop)} if descendants and descendants.spared_at_stop else {}),
         "question": parsed["question"],
         "retryable": status
-        in {"usage_limited", "rate_limited", "model_unavailable", "stalled"},
+        in {"usage_limited", "rate_limited", "model_unavailable", "stalled", "startup_timeout"},
         "reset_at": parsed["reset_at"],
         "retry_after": parsed["retry_after"],
         "fix": fix,
