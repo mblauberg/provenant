@@ -107,7 +107,8 @@ writer attempt, whatever the adapter, each `.agents/` path in HEAD, the index
 and on disk must match the attempt's starting HEAD, index or files, or the
 primary checkout's branch or its upstream; a path that branch changed and the
 lane merged or rebased onto must keep the branch's version, so a merge that
-discards it (`git merge -s ours`) is caught. A starting untracked file the lane removes or hides
+discards it (`git merge -s ours`) is caught, except where the lane's branch had also changed that
+path before the attempt: its starting version then stands. A starting untracked file the lane removes or hides
 behind a link counts as changed. Files on disk are hashed without Git, so ignored, skip-worktree and
 filtered files count. An unresolved conflict, an unreadable directory, a
 special file, a replaced `.agents/` root, a tree over 256 MiB or a lane

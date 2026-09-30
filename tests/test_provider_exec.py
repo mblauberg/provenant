@@ -3812,6 +3812,18 @@ def test_a_merge_that_discards_integration_instruction_changes_is_caught(tmp_pat
         assert record["error"] == "protected_instructions_changed"
 
 
+def test_a_merge_that_keeps_the_lanes_own_earlier_change_to_a_path_both_sides_changed_passes(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    (lane / SKILL).write_text("lane v\n")
+    git(lane, "commit", "-q", "-am", "the lane's branch changed the skill before this attempt")
+    # Both sides changed the path since their merge base, so the start's version stands.
+    record = lane_attempt(tmp_path, lane, "git('merge', '-q', '-s', 'ours', '--no-edit', 'main')\n",
+                          policy={"instruction_changes": "deny"})
+    assert record["status"] == "ok", record
+    assert not any("quarantined" in warning for warning in record["warnings"])
+    assert git(lane, "show", "HEAD:" + SKILL) == "lane v\n"
+
+
 def test_other_writer_adapters_have_instruction_changes_quarantined(tmp_path):
     _, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('lane edit\\n')\n", adapter="claude")

@@ -204,7 +204,8 @@ attempt and removes it afterwards if still empty. Git can then rebase or merge
 the integration branch over tracked skills. For every writer, when an
 `.agents/` path in HEAD, the index or on disk ends up matching neither the
 attempt's starting state nor the primary checkout's branch or its upstream, or
-drops that branch's version after taking the branch in, Fabric by default
+drops that branch's version after taking the branch in (unless the lane's
+branch had changed that path too before the attempt), Fabric by default
 quarantines the change: it archives the lane's files to `<attempt>/protected.patch`
 (and its index or HEAD to `protected.index.patch` or `protected.head.patch` when
 they differ), commits the start or integration-branch version back to the lane,
