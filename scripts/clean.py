@@ -297,6 +297,9 @@ def _bulk_rows(root: Path, run: Path, ok: bool, older_than: float | None, now: d
         for attempt in sorted(task.glob("attempt-*")):
             if attempt.is_symlink() or not attempt.is_dir():
                 continue
+            state = _json(run / "tasks" / task.name / attempt.name / "attempt.json") or {}
+            if state and (state.get("state") != "terminal" or state.get("status") == "input_required"):
+                continue  # still running, or resumable
             for name in ATTEMPT_BULK:
                 path = attempt / name
                 if path.is_symlink() or not path.is_dir():
@@ -656,7 +659,9 @@ def _apply_plan(current: dict[str, Any], approved_plan: str) -> list[str]:
             # Same never-follow rule as plan: refuse when any parent below root became a link.
             if any(parent.is_symlink() for parent in path.parents if parent != root and root in parent.parents):
                 raise CleanError(f"path changed during cleanup: {path}")
-            attempt_storage.remove_tree(path)
+            left = attempt_storage.remove_tree(root, path)
+            if left:
+                raise CleanError(f"incomplete removal of {path}: {left[0]}")
         elif path.is_dir():
             shutil.rmtree(path)
         else:

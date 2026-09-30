@@ -1016,3 +1016,52 @@ def test_bulk_symlinked_task_dir_is_not_followed(tmp_path):
     old(run, 3)
     result = module.plan(root, pr_bodies=[])
     assert not [row for row in result["rows"] if row["kind"] == "attempt-bulk"]
+
+
+def test_bulk_skips_nonterminal_and_input_required_attempts(tmp_path):
+    module = cleaner()
+    root = repo(tmp_path)
+    run, attempt = _run_with_attempt(root, "ok", 3)
+    canonical = run / "tasks" / "t" / "attempt-001"
+    canonical.mkdir(parents=True)
+    (canonical / "attempt.json").write_text(json.dumps({"state": "terminal", "status": "input_required"}))
+    assert not [r for r in module.plan(root, pr_bodies=[])["rows"] if r["kind"] == "attempt-bulk"]
+    (canonical / "attempt.json").write_text(json.dumps({"state": "running"}))
+    assert not [r for r in module.plan(root, pr_bodies=[])["rows"] if r["kind"] == "attempt-bulk"]
+
+
+def test_remove_tree_never_follows_swapped_ancestor_or_crosses_mounts(tmp_path):
+    storage = cleaner().attempt_storage
+    anchor = tmp_path / "anchor"
+    victim = tmp_path / "victim"
+    (victim / "tmp").mkdir(parents=True)
+    (victim / "tmp" / "keep").write_text("keep\n")
+    anchor.mkdir()
+    os.symlink(victim, anchor / "attempt")  # ancestor swapped for a symlink
+    assert storage.remove_tree(anchor, anchor / "attempt" / "tmp")
+    assert (victim / "tmp" / "keep").is_file()
+    real = anchor / "real" / "tmp"
+    (real / "sub").mkdir(parents=True)
+    (real / "sub" / "f").write_text("x")
+    os.chmod(real / "sub", 0o500)
+    assert storage.remove_tree(anchor, real) == [] and not real.exists()
+
+
+def test_remove_tree_leaves_other_device_subtree(tmp_path, monkeypatch):
+    storage = cleaner().attempt_storage
+    tmp = tmp_path / "a" / "tmp"
+    (tmp / "mnt").mkdir(parents=True)
+    (tmp / "mnt" / "f").write_text("x")
+    (tmp / "gone").write_text("x")
+    real_stat = os.stat
+
+    def fake(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if path == "mnt":
+            return os.stat_result((result.st_mode, result.st_ino, result.st_dev + 1, *result[3:]))
+        return result
+
+    monkeypatch.setattr(storage.os, "stat", fake)
+    left = storage.remove_tree(tmp_path, tmp)
+    assert len(left) == 1 and left[0].endswith("mnt")
+    assert (tmp / "mnt" / "f").is_file() and not (tmp / "gone").exists()

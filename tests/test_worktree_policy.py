@@ -833,12 +833,13 @@ def test_git_launcher_oserror_is_reported_as_policy_error(tmp_path, monkeypatch)
         worktree_policy.git(tmp_path, "status")
 
 
-def _live_lane(repo: Path, target: Path, pgid: int, state: str = "running"):
-    attempt = repo / ".agent-run/runs/20260930-0001-dispatch-x-abc123/tasks/w/attempt-001"
-    attempt.mkdir(parents=True)
-    (attempt / "attempt.json").write_text(json.dumps({
-        "schema": "fabric.attempt.v1", "state": state, "mode": "worktree_write",
-        "cwd": str(target), "worktree": str(target), "pgid": pgid}))
+def _hold_lease(target: Path):
+    import fcntl
+    git_dir = subprocess.run(["git", "-C", str(target), "rev-parse", "--absolute-git-dir"],
+                             check=True, capture_output=True, text=True).stdout.strip()
+    handle = open(Path(git_dir) / "provenant-dispatch-writer.lock", "a+")
+    fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+    return handle
 
 
 def test_remove_refuses_worktree_with_live_writer_lane(tmp_path, capsys):
@@ -846,27 +847,23 @@ def test_remove_refuses_worktree_with_live_writer_lane(tmp_path, capsys):
     init_repo(repo)
     assert worktree_policy.main(["create", "busy", "--repo", str(repo), "--new-branch", "feature/busy"]) == 0
     target = repo / ".worktrees" / "busy"
-    _live_lane(repo, target, os.getpid())
+    handle = _hold_lease(target)
     capsys.readouterr()
     assert worktree_policy.main(["remove", "busy", "--repo", str(repo)]) == 2
     err = capsys.readouterr().err
-    assert "active lane" in err and "--force" in err
+    assert "active writer lane" in err and "--force" in err
     assert target.is_dir()
-    assert worktree_policy.main(["remove", "busy", "--repo", str(repo), "--force"]) == 0
+    handle.close()
+    assert worktree_policy.main(["remove", "busy", "--repo", str(repo)]) == 0
     assert not target.exists()
 
 
-def test_remove_ignores_terminal_or_dead_lane_records(tmp_path, capsys):
+def test_remove_force_overrides_live_writer_lane(tmp_path, capsys):
     repo = tmp_path / "project"
     init_repo(repo)
-    assert worktree_policy.main(["create", "quiet", "--repo", str(repo), "--new-branch", "feature/quiet"]) == 0
-    target = repo / ".worktrees" / "quiet"
-    dead = subprocess.Popen([sys.executable, "-c", "pass"])
-    dead.wait()
-    _live_lane(repo, target, dead.pid)
-    (repo / ".agent-run/runs/20260930-0002-dispatch-x-abc123/tasks/w/attempt-001").mkdir(parents=True)
-    (repo / ".agent-run/runs/20260930-0002-dispatch-x-abc123/tasks/w/attempt-001/attempt.json").write_text(
-        json.dumps({"state": "terminal", "cwd": str(target), "pgid": os.getpid()}))
-    capsys.readouterr()
-    assert worktree_policy.main(["remove", "quiet", "--repo", str(repo)]) == 0
+    assert worktree_policy.main(["create", "busy", "--repo", str(repo), "--new-branch", "feature/busy"]) == 0
+    target = repo / ".worktrees" / "busy"
+    handle = _hold_lease(target)
+    assert worktree_policy.main(["remove", "busy", "--repo", str(repo), "--force"]) == 0
+    handle.close()
     assert not target.exists()

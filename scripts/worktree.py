@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import importlib.util
 import json
@@ -672,28 +673,36 @@ def create(args: argparse.Namespace) -> dict[str, object]:
     }
 
 
-def active_lanes(root: Path, target: Path) -> list[str]:
-    """Live non-terminal attempts whose cwd or worktree is the target (or inside it)."""
-    policy = clean_policy()
-    found: list[str] = []
-    # A nested repo's lanes may be recorded by an enclosing project's registry.
-    registries = [base / ".agent-run" / "runs" for base in (root, *root.parents)
-                  if (base / ".agent-run" / "runs").is_dir()]
-    for path in sorted(p for registry in registries for p in registry.glob("*/tasks/*/attempt-*/attempt.json")):
-        record = policy._json(path)
-        if not record or record.get("state") == "terminal" or not policy._pid_alive(record.get("pgid"), None):
-            continue
-        for key in ("worktree", "cwd", "workspace_root"):
-            value = record.get(key)
-            if isinstance(value, str) and value:
-                place = Path(value).resolve()
-                if place == target or target in place.parents:
-                    found.append(f"{record.get('run_id')}/{record.get('task_id')}")
-                    break
-    return found
+WRITER_LOCK = "provenant-dispatch-writer.lock"  # dispatch_run.WORKTREE_WRITER_LOCK
+
+
+def hold_writer_lease(target: Path):
+    """Take the one-writer lease a live writer lane holds; refuse if it is taken."""
+    git_dir = Path(git(target, "rev-parse", "--absolute-git-dir").stdout.strip())
+    try:
+        handle = (git_dir / WRITER_LOCK).open("a+")
+    except OSError as exc:
+        raise PolicyError(f"cannot open the worktree writer lease: {exc}") from exc
+    try:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise PolicyError(
+            "worktree has an active writer lane; wait for it or cancel it (fabric_cancel), "
+            "then retry, or pass --force to remove it anyway") from None
+    return handle
 
 
 def remove(args: argparse.Namespace) -> dict[str, object]:
+    leases: list = []
+    try:
+        return _remove(args, leases)
+    finally:
+        for handle in leases:
+            handle.close()
+
+
+def _remove(args: argparse.Namespace, leases: list) -> dict[str, object]:
     validate_name(args.name)
     root = primary_root(args.repo)
     shared = root / ".worktrees"
@@ -707,11 +716,8 @@ def remove(args: argparse.Namespace) -> dict[str, object]:
     }
     if target.resolve() not in registered:
         raise PolicyError(f"not a registered project worktree: {target}")
-    lanes = [] if args.force else active_lanes(root, target.resolve())
-    if lanes:
-        raise PolicyError(
-            f"worktree has an active lane ({', '.join(lanes)}); wait for it or cancel it "
-            "(fabric_cancel), then retry, or pass --force to remove it anyway")
+    if not args.force:
+        leases.append(hold_writer_lease(target))  # held through removal
     dirty = git(target, "status", "--porcelain=v1", "--untracked-files=all").stdout
     if dirty:
         raise PolicyError("worktree is dirty; preserve or hand off its changes before removal")
