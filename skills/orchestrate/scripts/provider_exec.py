@@ -359,6 +359,30 @@ def check_protected_inputs(route, workspace_root, cwd, *, worktree=None, prompt_
     return paths
 
 
+def _real_dir_chain(locks):
+    """True when .agent-run and locks are real directories, judged without following links."""
+    try:
+        return all(stat.S_ISDIR(path.lstat().st_mode) for path in (locks.parent, locks))
+    except OSError:
+        return False
+
+
+def _ensure_locks_dir(run_root):
+    """Create missing .agent-run and locks one leaf at a time; None if a link is in the way."""
+    locks = run_root / ".agent-run" / "locks"
+    for path in (locks.parent, locks):
+        try:
+            path.lstat()
+        except FileNotFoundError:
+            try:
+                path.mkdir()
+            except FileExistsError:
+                pass
+            except OSError:
+                return None
+    return str(locks) if _real_dir_chain(locks) else None
+
+
 def os_confinement_profile(plan, search_path=None):
     """Apply the provider's read and write boundary to this attempt.
 
@@ -381,6 +405,9 @@ def os_confinement_profile(plan, search_path=None):
         private = git_dirs.get("--absolute-git-dir")
         common = git_dirs.get("--git-common-dir")
         allowed = [cwd, *add_dirs, *([run_dir] if run_dir else []), Path("/dev")]
+        locks_dir = plan.get("applied", {}).get("locks_dir")
+        if locks_dir and _real_dir_chain(Path(locks_dir)):
+            allowed.append(Path(locks_dir))
         git_allowed = []
         if private is not None and private != common:
             git_allowed.append(private)
@@ -906,19 +933,12 @@ def build_plan(
     ):
         warnings.append("additional directories unsupported by " + adapter)
         directories = []
-    if mode == "worktree_write":
-        # Every write-confined lane may take the project's lock files, which live at the run root
-        # (the primary checkout) outside its worktree. Grant only locks/, never sessions/ or scratch/.
-        locks = layout.run_root(cwd) / ".agent-run" / "locks"
-        try:
-            locks.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
-        if locks.is_dir() and not locks.is_symlink() and not locks.parent.is_symlink():
-            if str(locks) not in directories:
-                directories.append(str(locks))
-        else:
-            warnings.append(f"project locks directory is not grantable: {locks}")
+    locks_dir = None
+    if mode == "worktree_write" and git_private is not None:
+        # Recomputed for every attempt, resume included, and kept out of add_dirs.
+        locks_dir = _ensure_locks_dir(layout.run_root(cwd))
+        if locks_dir is None:
+            warnings.append("project locks directory is not grantable: a link or non-directory is in the way")
     attempt_dir = Path(run_dir or cwd).expanduser().resolve()
     codex_home = attempt_dir.parent / "codex-home" if capabilities and adapter == "codex" else None
     codex_auth_path = None
@@ -934,7 +954,7 @@ def build_plan(
             git_paths = ([str(git_private), *(str(git_common / path) for path in
                            GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)]
                          if git_private is not None else [])
-            writable_paths = [cwd, *directories, *writable_paths, *git_paths]
+            writable_paths = [cwd, *directories, *([locks_dir] if locks_dir else []), *writable_paths, *git_paths]
         if codex_home is not None:
             writable_paths.extend((str(codex_home), str(codex_auth_path)))
         write_boundary = {"kind": "sandbox-exec", "writable_paths": writable_paths}
@@ -946,7 +966,8 @@ def build_plan(
             # Codex applies the nearest entry, so the common directory reads as read-only below
             # any add_dir while the named Git paths inside it stay writable.
             # :tmpdir is the attempt's tmp, which holds XDG_CACHE_HOME, COREPACK_HOME and tool caches.
-            filesystem = {":tmpdir": "write", **{directory: "write" for directory in directories}}
+            filesystem = {":tmpdir": "write", **{directory: "write" for directory in directories},
+                          **({locks_dir: "write"} if locks_dir else {})}
             if git_private is not None:
                 filesystem[str(git_common)] = "read"
                 for path in (git_private, *(git_common / name for name in
@@ -1023,6 +1044,7 @@ def build_plan(
             "sandbox": applied_sandbox,
             "network": applied_network,
             "add_dirs": directories,
+            "locks_dir": locks_dir,
             "guarantee": guarantee,
             "confinement": confinement,
             "write_boundary": write_boundary,
