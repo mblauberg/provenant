@@ -21,6 +21,11 @@ if (process.argv.includes("--preflight-json")) {
     process.exit(0);
   }
   const tasks = JSON.parse(input).tasks;
+  if (process.env.FIXTURE_PREFLIGHT_LOG) {
+    writeFileSync(process.env.FIXTURE_PREFLIGHT_LOG, JSON.stringify(tasks));
+    process.stdout.write(JSON.stringify({ status: "rejected", error: "fixture_logged", fix: "fixture" }));
+    process.exit(0);
+  }
   if (process.env.FIXTURE_PREFLIGHT_PID) {
     writeFileSync(process.env.FIXTURE_PREFLIGHT_PID, String(process.pid));
     while (!existsSync(process.env.FIXTURE_PREFLIGHT_RELEASE)) {
@@ -128,6 +133,7 @@ if (owner === "run_controls.py") {
 }
 
 if (owner === "dispatch_run.py") {
+  if (process.env.FIXTURE_ARGV_PATH) writeFileSync(process.env.FIXTURE_ARGV_PATH, JSON.stringify(process.argv.slice(2)));
   const taskId = value("--task-id");
   const prompt = readFileSync(value("--prompt-file"), "utf8");
   if (prompt === "sleep without provider") {

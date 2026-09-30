@@ -1,7 +1,7 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import {
   chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync,
-  rmSync, utimesSync, writeFileSync,
+  renameSync, rmSync, symlinkSync, utimesSync, writeFileSync,
 } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
@@ -14,7 +14,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
-import { normaliseRoute, routeArguments, workingIdentity, type BatchTaskInput } from "../src/execution-input.js";
+import { normaliseRoute, readRoots, routeArguments, savedReadRoots, workingIdentity, type BatchTaskInput } from "../src/execution-input.js";
+import { resumeConfiguredProvider } from "../src/resume.js";
 import { databasePath } from "../src/identity.js";
 import { expandPools, nativeFirst } from "../src/pools.js";
 import { inheritedConfidential, inheritsPreviousRoute } from "../src/resume.js";
@@ -141,6 +142,35 @@ describe("Fabric input corrections", () => {
     mkdirSync(child);
     expect(workingIdentity({ cwd: "child" }, { ...identity, project: base, cwd: base }).cwd).toBe(realpathSync(child));
     rmSync(base, { recursive: true, force: true });
+  });
+
+  it("names the working route when a cwd is outside every registered project", () => {
+    const base = mkdtempSync(join(tmpdir(), "fabric-unregistered-"));
+    try {
+      expect(() => workingIdentity({ cwd: base }, { ...identity, registeredProjects: [identity.project] }))
+        .toThrow(expect.objectContaining({ code: "cwd_unavailable",
+          fix: expect.stringMatching(/fabric whoami.*or dispatch from it/u) }));
+    } finally {
+      rmSync(base, { recursive: true, force: true });
+    }
+  });
+
+  it("grants a read root only for another registered project", () => {
+    const other = realpathSync(mkdtempSync(join(tmpdir(), "fabric-read-root-")));
+    const stray = realpathSync(mkdtempSync(join(tmpdir(), "fabric-stray-")));
+    try {
+      mkdirSync(join(other, "src"));
+      const caller = { ...identity, registeredProjects: [identity.project, other] };
+      expect(readRoots(caller, join(other, "src"), join(other, "brief.md"))).toEqual([join(other, "src"), other]);
+      expect(readRoots(caller, other, join(other, "brief.md"))).toEqual([other]);
+      expect(readRoots(caller, undefined, join(stray, "brief.md"))).toEqual([]);
+      expect(readRoots(caller, undefined, join(identity.cwd, "brief.md"))).toEqual([]);
+      expect(routeArguments({ adapter: "codex", role: "worker", access_mode: "read_only", read_roots: [other] }))
+        .toEqual(expect.arrayContaining(["--read-root", other]));
+    } finally {
+      rmSync(other, { recursive: true, force: true });
+      rmSync(stray, { recursive: true, force: true });
+    }
   });
 
   it("accepts read-only cwd under another registered project", () => {
@@ -536,6 +566,28 @@ describe("dispatch CLI", () => {
     });
     expect(output).toBeTruthy();
   });
+
+  it("forwards read roots for a task manifest in another registered project", () => {
+    const otherProject = join(temporaryDirectory, "other-project");
+    mkdirSync(otherProject);
+    const store = new Store(databasePath(ownerEnvironment));
+    store.announce({ project: otherProject, cwd: otherProject, agentId: "other", provider: "codex" });
+    store.close();
+    const brief = join(otherProject, "brief.md");
+    writeFileSync(brief, "registered project task");
+    const taskPath = join(temporaryDirectory, "cross-project-tasks.json");
+    writeFileSync(taskPath, JSON.stringify({ tasks: [{ id: "cross", cwd: otherProject, prompt_file: brief }] }));
+    const cliPath = join(packageRoot, "src", "cli.ts");
+    execFileSync(process.execPath, ["--import", tsxLoader, cliPath,
+      "dispatch", "--tasks", taskPath, "--adapter", "codex", "--alias", "workhorse", "--mode", "read_only"], {
+      cwd: workspace,
+      encoding: "utf8",
+      env: ownerEnvironment,
+    });
+    const [run] = runDirectories();
+    const manifest = JSON.parse(readFileSync(join(workspace, ".agent-run", "runs", run!, "_owner", "task-manifest.json"), "utf8"));
+    expect(manifest.tasks[0]).toMatchObject({ cwd: realpathSync(otherProject), read_roots: [realpathSync(otherProject)] });
+  }, 40_000);
 
   it("keeps typed correction details when dispatch input is rejected", () => {
     const promptPath = join(temporaryDirectory, "cli-invalid-prompt.md");
@@ -1639,6 +1691,47 @@ it('selects the catalogue owner for a model-only request from another seat', asy
  copyFileSync(join(repositoryRoot,'config/model-routing.json'),join(product,'config/model-routing.json'));
  const result=await dispatchConfiguredProvider({model:'gpt-6-luna',prompt:'fixture',wait_seconds:5},{...identity,provider:'claude'},new AbortController().signal,{...ownerEnvironment,AGENT_FABRIC_INSTANCE_ROOT:product});
  expect(result).toMatchObject({status:'ok',route:{adapter:'codex',resolved_model:'gpt-6-luna'}});
+});
+
+it('runs a read-only dispatch in another registered project and records it for the caller', async () => {
+ const other=join(temporaryDirectory,'other-project');mkdirSync(join(other,'src'),{recursive:true});
+ const brief=join(other,'brief.md');writeFileSync(brief,'read the other project');
+ const argvPath=join(temporaryDirectory,'owner-argv.json');
+ const caller={...identity,registeredProjects:[workspace,other]};
+ const result=await dispatchConfiguredProvider({mode:'read_only',cwd:join(other,'src'),prompt_file:brief,task_id:'cross-project',wait_seconds:5},caller,new AbortController().signal,{...ownerEnvironment,FIXTURE_ARGV_PATH:argvPath});
+ expect(result.status,JSON.stringify(result)).toBe('ok');
+ const argv=JSON.parse(readFileSync(argvPath,'utf8')) as string[];
+ expect(argv[argv.indexOf('--cwd')+1]).toBe(realpathSync(join(other,'src')));
+ expect(argv.filter((_,index)=>argv[index-1]==='--read-root')).toEqual([realpathSync(join(other,'src')),realpathSync(other)]);
+ expect(argv[argv.indexOf('--prompt-file')+1]).toBe(realpathSync(brief));
+ const path=(result.paths as Record<string,string>).run_dir!;
+ expect(realpathSync(path)).toContain(realpathSync(join(workspace,'.agent-run/runs')));
+ expect(await fabricStatus(workspace,String(result.id))).toMatchObject({status:'ok'});
+ expect(JSON.parse(fabricCli(['lanes','--json',String(result.id)])).runs).toEqual([expect.objectContaining({run_id:result.id,task_id:'cross-project',status:'ok'})]);
+});
+
+it('resumes a cross-project run with its saved read roots, and refuses one whose root has moved', async () => {
+ const other=realpathSync(mkdtempSync(join(temporaryDirectory,'resume-other-')));mkdirSync(join(other,'src'));
+ const brief=join(other,'brief.md');writeFileSync(brief,'continue');
+ const caller={...identity,registeredProjects:[workspace,other]};
+ const dir=join(workspace,'.agent-run/mcp-resume-cross');
+ const path=join(dir,'tasks/task-1/attempt-001');mkdirSync(path,{recursive:true});
+ const row=JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
+ Object.assign(row,{run_id:'mcp-resume-cross',cwd:join(other,'src'),read_roots:[join(other,'src'),other]});
+ writeFileSync(join(path,'attempt.json'),JSON.stringify(row));
+ writeFileSync(join(dir,'dispatch-status.json'),JSON.stringify({task_id:'task-1',status:'ok',finished_at:new Date().toISOString()}));
+ const log=join(temporaryDirectory,'resume-preflight.json');
+ const env={...ownerEnvironment,FIXTURE_PREFLIGHT_LOG:log};
+ const resumed=await resumeConfiguredProvider({resume:row.run_id,prompt_file:brief,wait_seconds:0},caller,new AbortController().signal,env);
+ expect(resumed).toMatchObject({status:'rejected',error:'fixture_logged'});
+ expect(JSON.parse(readFileSync(log,'utf8'))[0]).toMatchObject({cwd:join(other,'src'),prompt_file:brief,read_roots:[join(other,'src'),other]});
+ expect(()=>savedReadRoots(caller,row.read_roots,row.cwd,[workspace])).toThrow(/registered Fabric project/u);
+ const elsewhere=mkdtempSync(join(temporaryDirectory,'resume-elsewhere-'));mkdirSync(join(elsewhere,'src'));
+ renameSync(other,`${other}-moved`);symlinkSync(elsewhere,other);
+ rmSync(log,{force:true});
+ const moved=await resumeConfiguredProvider({resume:row.run_id,prompt:'continue',wait_seconds:0},caller,new AbortController().signal,env);
+ expect(moved).toMatchObject({status:'rejected',error:'resume_read_root_changed'});
+ expect(existsSync(log)).toBe(false);
 });
 
 it('keeps non-Git cwd dispatches in the caller run root', async () => {

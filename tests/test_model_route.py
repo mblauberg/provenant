@@ -2831,7 +2831,9 @@ def test_failed_review_route_gets_one_exact_alternate(tmp_path, monkeypatch):
         "schema": "fabric.route-health.v1",
         "routes": {"codex|gpt-6-astra|critical-review": {
             "adapter": "codex", "model": "gpt-6-astra", "task_class": "critical-review",
-            "recent": [{"status": "empty_output", "at": "2026-09-23T00:00:00Z"}],
+            # Relative to now: route health only counts failures from the last seven days.
+            "recent": [{"status": "empty_output",
+                        "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}],
         }},
     }))
     result, route = resolve(

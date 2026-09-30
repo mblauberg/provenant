@@ -241,6 +241,10 @@ def _load_manifest(
             raise BatchInputError(f"task {task_id} requires exactly one of prompt_file or prompt")
         if inline_prompt is not None and not isinstance(inline_prompt, str):
             raise BatchInputError(f"task {task_id} prompt must be a string")
+        read_roots = task.get("read_roots", [])
+        if not isinstance(read_roots, list) or not all(
+                isinstance(root, str) and Path(root).is_absolute() for root in read_roots):
+            raise BatchInputError(f"task {task_id} read_roots must be a list of absolute directories")
         prompt = None
         if prompt_value is not None:
             if not isinstance(prompt_value, str) or not prompt_value:
@@ -249,10 +253,8 @@ def _load_manifest(
             if not prompt.is_absolute():
                 prompt = workspace / prompt
             prompt = _local_regular(prompt, f"task {task_id} prompt_file")
-            try:
-                prompt.relative_to(workspace)
-            except ValueError as exc:
-                raise BatchInputError(f"task {task_id} prompt_file must be inside the workspace") from exc
+            if not any(prompt.is_relative_to(Path(root).resolve()) for root in (workspace, *read_roots)):
+                raise BatchInputError(f"task {task_id} prompt_file must be inside the workspace or a read root")
 
         adapter = task.get("adapter", task.get("tool"))
         if not isinstance(adapter, str) or not adapter:
@@ -418,6 +420,7 @@ def _command(task: dict[str, Any], run_dir: Path) -> list[str]:
     if task.get("capabilities"):
         command.extend(("--capabilities", json.dumps(task["capabilities"])))
     for directory in task.get("add_dirs",[]): command.extend(("--add-dir",directory))
+    for root in task.get("read_roots",[]): command.extend(("--read-root",root))
     if task.get("allow_secrets") is True: command.append("--allow-secrets")
     if task.get("confidential") is True: command.append("--confidential")
     if task.get("preface") is False: command.append("--no-preface")

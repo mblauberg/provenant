@@ -373,6 +373,26 @@ def test_batch_forwards_lifecycle_risk_and_model_override_separately(tmp_path, m
     assert attempt['requested_route']['model_override_tier'] == 'crucial'
 
 
+def test_batch_accepts_a_prompt_file_in_a_read_root_and_forwards_the_root(tmp_path, monkeypatch):
+    workspace = tmp_path / 'caller'
+    other = tmp_path / 'other-project'
+    workspace.mkdir()
+    other.mkdir()
+    monkeypatch.chdir(workspace)
+    module = load_module()
+    prompt = other / 'brief.md'
+    prompt.write_text('read the other project\n', encoding='utf-8')
+    task = {'id': 'reader', 'prompt_file': str(prompt), 'adapter': 'claude', 'model': 'opus',
+            'cwd': str(other)}
+
+    with pytest.raises(module.BatchInputError, match='inside the workspace or a read root'):
+        module.load_manifest(task_manifest(workspace, [task]))
+    loaded = module.load_manifest(task_manifest(workspace, [{**task, 'read_roots': [str(other)]}]))
+    command = module._command(loaded[0], workspace / 'run')
+    assert command[command.index('--read-root') + 1] == str(other)
+    assert command[command.index('--cwd') + 1] == str(other)
+
+
 def test_batch_forwards_run_owned_agy_git_evidence_path(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     module = load_module()
