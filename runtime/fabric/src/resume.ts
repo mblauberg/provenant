@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
-import { preflight, validatePrompt, rejected, timeoutSeconds, InputError, type DispatchInput } from "./execution-input.js";
+import { preflight, validatePrompt, rejected, timeoutSeconds, InputError, ownerPromptPath, savedReadRoots, type DispatchInput } from "./execution-input.js";
 import {
   dispatchConfiguredProvider,
   executableOwner,
@@ -99,8 +99,9 @@ export async function resumeConfiguredProvider(
     const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
     const path =
       input.prompt === undefined
-        ? resolve(identity.cwd, input.prompt_file!)
+        ? ownerPromptPath(identity, input.prompt_file!)
         : stagingPath(runDir, `resume-${randomUUID()}.md`);
+    const roots = savedReadRoots(identity, previous.read_roots, previous.mode === "read_only" ? previous.cwd : undefined);
     const requested = previous.provenance?.requested ?? {};
     const checked = await preflight(python, owner, [{
       id: taskId, adapter: requested.adapter ?? previous.adapter ?? identity.provider,
@@ -111,6 +112,7 @@ export async function resumeConfiguredProvider(
       ...Object.fromEntries(Object.entries(previous.applied ?? {}).filter(([key, value]) =>
         ["sandbox", "network", "add_dirs", "capabilities"].includes(key) && value !== null)),
       ...(input.prompt === undefined ? { prompt_file: path } : { prompt: input.prompt }),
+      ...(roots.length ? { read_roots: roots } : {}),
       allow_secrets: input.allow_secrets ?? false,
     }], identity, env, signal);
     if (checked.status === "rejected") return { status: "rejected", error: checked.error, fix: checked.fix };
