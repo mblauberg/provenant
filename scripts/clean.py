@@ -477,7 +477,7 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
         if not parent.is_dir() or parent.is_symlink():
             continue
         for path in sorted(parent.iterdir()):
-            if parent == agent and path.name in {"runs", "scratch", "sessions", "README.md"}:
+            if parent == agent and path.name in {"runs", "scratch", "sessions", "locks", "README.md"}:
                 continue
             if parent.name == "runs" and path.name == "index.jsonl":
                 rows.append(_row(root, path, "index", "keep:provenance-index", now))

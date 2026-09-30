@@ -200,6 +200,15 @@ def test_runs_index_lock_is_kept_infrastructure(tmp_path):
     assert rows[".agent-run/runs/index.lock"]["verdict"].startswith("keep:")
 
 
+def test_agent_run_locks_directory_is_not_triaged(tmp_path):
+    root = repo(tmp_path)
+    locks = root / ".agent-run" / "locks"
+    locks.mkdir(parents=True)
+    (locks / "route-health.lock").write_text("")
+    old(locks)
+    assert not [row for row in cleaner().plan(root, pr_bodies=[])["rows"] if row["path"].startswith(".agent-run/locks")]
+
+
 def test_apply_requires_current_digest_and_respects_pins_and_acceptance(tmp_path):
     root = repo(tmp_path)
     runs = root / ".agent-run" / "runs"
