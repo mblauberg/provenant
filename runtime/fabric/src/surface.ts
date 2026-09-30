@@ -22,7 +22,9 @@ function digestBase(row: Record<string, any>): string {
       : adapter && model ? `${adapter}/${model}${effort ? `@${effort}` : ""}` : "";
     const resultPath = row.result_path ?? row.paths?.result;
     const resultText = resultPath ? ` · result ${resultPath}` : ` · fabric_status{ids:["${id}"],wait_seconds:55}`;
-    return `running ${id}${routeText ? ` ${routeText}` : ""}${resultText}`;
+    // A running row's text is rebuilt here, so a named session's line is appended explicitly.
+    const session = typeof row.session_digest === "string" ? row.session_digest : "";
+    return `running ${id}${routeText ? ` ${routeText}` : ""}${resultText}${session}`;
   }
   if (typeof row.digest === "string") return row.digest;
   if (Array.isArray(row.digest)) return row.digest.join("\n");

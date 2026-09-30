@@ -52,7 +52,8 @@ Without an MCP connection, `provenant fabric dispatch --adapter A --model M
 same dispatcher. Add `--worktree P`, `--cwd P` or `--id ID` as needed. Use
 `--tasks F` for a JSON object with `tasks[]` and shared route fields. It prints
 the Fabric run id and status. `--wait` waits up to 55 seconds; `lanes --wait`
-waits for the finish.
+waits for the finish. `--session NAME [--fresh]` runs one turn of a named
+session, and `fabric session list | inspect NAME | forget NAME` manages names.
 
 Owners are detached session leaders and outlive the CLI and MCP host. A
 CLI-started owner is recorded as its own host. An MCP host that closes or is
@@ -70,11 +71,12 @@ The next dispatch reaps a run only when its host is gone and its owner or
 provider still runs: an owner that exited and left its provider behind, or a
 run whose MCP host was killed with SIGKILL.
 
-Fourteen tools are registered by default:
+Seventeen tools are registered by default:
 
 | Tool | Purpose |
 | --- | --- |
-| `fabric_dispatch` | One prompt, `tasks[]`, `resume` or `handoff` |
+| `fabric_dispatch` | One prompt, `tasks[]`, `resume`, `handoff` or a named `session` |
+| `fabric_session` | `action: inspect`, `list` or `forget` a named session |
 | `fabric_status` | Read run/task/batch IDs; bounded wait for `any` or `all` |
 | `fabric_runs` | Versioned run and lane list with root-relative paths |
 | `fabric_events` | Cursor-based terminal, input-required and inbox events |
@@ -88,6 +90,8 @@ Fourteen tools are registered by default:
 | `fabric_note` | Append activity |
 | `fabric_activity` | Read recent activity or continue after a cursor |
 | `fabric_task` | `action: create`, `claim`, `update` or `list` |
+| `fabric_work_claim` | Advisory issue or path claim |
+| `fabric_landing_lease` | Repository landing lease |
 
 `FABRIC_LEGACY_TOOLS=1` additionally registers `fabric_batch`,
 `fabric_team_create`, `fabric_task_create`, `fabric_task_claim`,
@@ -325,6 +329,30 @@ session. `context_ceiling` (default 300,000 tokens, clamped to 100k–1M) lowers
 auto-compaction where the provider supports it; it never raises it. Each attempt records `context`,
 and the terminal Route line shows it as `ctx 212k/1M`. See
 [`docs/specs/fabric-v2.md`](../../docs/specs/fabric-v2.md#session-context).
+
+`session: "<name>"` names a provider conversation that outlives a run ID. The
+first call starts an ordinary dispatch; later calls, from any agent in the same
+project, resume its provider session through the `resume` path above. Names are
+case-sensitive, one per project. The store keeps only the alias: the actual
+adapter, provider-native session ID and the run, task, attempt and result path
+of the last clean turn (`ok` or `input_required`). A failed or cancelled turn
+leaves that pointer where it was, and the next turn resumes from the pointed-to
+attempt and its provider session, not from a later failed attempt. A turn is
+the whole owner invocation, fallback attempts included; the pointer moves to
+the attempt that ended it cleanly. A name runs one turn at a time; another call
+gets `session_busy` with the active run ID. The turn records its run before
+the owner starts, so a caller that exits or dies while waiting leaves the name
+busy until the run's owner finishes; an owner whose identity cannot be verified
+counts as alive. Busy is read from the run itself: a launcher that dies before
+starting the owner leaves an attempt that status reports `interrupted`, so the
+name, resume and `fresh` all proceed. If that record cannot be written, nothing is launched and the
+reply carries `session_unrecorded` and `session_error`. `fabric_session` with `action: inspect`, `list` or
+`forget` reads or drops a name; `forget` is refused while a turn is active and
+leaves run files and provider history in place. A provider without native
+continuation (Copilot), a last clean turn with no provider session ID, or a
+provider that no longer has the session returns `continuation_unsupported`; a
+named session is never silently relaunched. `fresh: true` then starts a new
+session primed with the last clean result, as `handoff` does.
 
 Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, `detail`,
 `tail_chars` and `fields`. Terminal brief rows end with the last 1,200 characters

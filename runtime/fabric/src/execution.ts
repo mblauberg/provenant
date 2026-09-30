@@ -101,6 +101,13 @@ export function hostOwnersInThemselves(): void {
   ownersHostThemselves = true;
 }
 
+let launcherStarted: string | null | undefined;
+
+/** This process's start time, probed once: the launcher identity a run's status records. */
+function launcherStartedAt(): string | null {
+  return (launcherStarted ??= processStartedAt(process.pid));
+}
+
 /** A self-hosted run is orphaned only once its owner is gone. */
 function selfHosted(record: OwnerRecord): OwnerRecord {
   return { ...record, host_pid: record.owner_pid, host_started_at: record.owner_started_at };
@@ -283,6 +290,14 @@ async function initialiseRun(
   return runDir;
 }
 
+/**
+ * The run a dispatch is about to launch, reported before the owner starts. A
+ * throwing observer stops the launch: nothing runs that its caller could not record.
+ */
+export interface LaunchObserver {
+  onLaunch?: (launch: { runId: string; taskId: string; attempt: number }) => void;
+}
+
 export interface OwnerIdentification {
   kind: "dispatch" | "batch";
   identifier: string;
@@ -328,41 +343,55 @@ export function startOwner(
   const stdoutPath = join(runDir, "_owner", `stdout${suffix}.jsonl`);
   const stderrPath = join(runDir, "_owner", `stderr${suffix}.log`);
   // Persist required status before spawning: a failed write cannot orphan a provider.
-  writeFileSync(
-    join(runDir, "dispatch-status.json"),
-    JSON.stringify({
-      id: shortRunId(runDir),
-      ...(identification.kind === "dispatch"
-        ? { task_id: identification.identifier, ...(identification.batchId ? { batch_id: identification.batchId } : {}) }
-        : { batch_id: identification.identifier }),
-      next_attempt: identification.nextAttempt,
-      kind: identification.kind,
-      started_at: new Date().toISOString(),
-      routes: identification.routes,
-      task_ids: identification.taskIds,
-      timeout_seconds: identification.timeout,
-      status: "running",
-      owner_stdout: stdoutPath,
-      owner_stderr: stderrPath,
-    }) + "\n",
-    { mode: 0o600 },
-  );
-  const stdout = openSync(stdoutPath, "wx", 0o600);
-  const stderr = openSync(stderrPath, "wx", 0o600);
+  const statusPath = join(runDir, "dispatch-status.json");
+  const metadata = {
+    id: shortRunId(runDir),
+    ...(identification.kind === "dispatch"
+      ? { task_id: identification.identifier, ...(identification.batchId ? { batch_id: identification.batchId } : {}) }
+      : { batch_id: identification.identifier }),
+    next_attempt: identification.nextAttempt,
+    kind: identification.kind,
+    started_at: new Date().toISOString(),
+    routes: identification.routes,
+    task_ids: identification.taskIds,
+    timeout_seconds: identification.timeout,
+    status: "running",
+    owner_stdout: stdoutPath,
+    owner_stderr: stderrPath,
+    // The launcher: if it dies before an owner is stamped below, readers close the announced attempt.
+    host_pid: process.pid,
+    host_started_at: launcherStartedAt(),
+  };
+  writeFileSync(statusPath, JSON.stringify(metadata) + "\n", { mode: 0o600 });
   let child: ChildProcess;
   try {
-    // Detached, so the owner leads its own process group: that group is what
-    // cancellation signals, and it is what makes the recorded pid actionable
-    // from a process that never spawned it.
-    child = spawn(owner, args, {
-      cwd: identity.cwd,
-      env: ownerEnv,
-      stdio: ["ignore", stdout, stderr],
-      detached: true,
-    });
-  } finally {
-    closeSync(stdout);
-    closeSync(stderr);
+    const stdout = openSync(stdoutPath, "wx", 0o600);
+    let stderr: number | undefined;
+    try {
+      stderr = openSync(stderrPath, "wx", 0o600);
+      // Detached, so the owner leads its own process group: that group is what
+      // cancellation signals, and it is what makes the recorded pid actionable
+      // from a process that never spawned it.
+      child = spawn(owner, args, {
+        cwd: identity.cwd,
+        env: ownerEnv,
+        stdio: ["ignore", stdout, stderr],
+        detached: true,
+      });
+    } finally {
+      closeSync(stdout);
+      if (stderr !== undefined) closeSync(stderr);
+    }
+  } catch (error) {
+    // No owner started: close the attempt this status announced, so no reader waits on it.
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      writeFileSync(statusPath, JSON.stringify({ ...metadata, status: "rejected", error: "owner_start_failed",
+        fix: `The run owner could not start (${message}); retry.`, finished_at: new Date().toISOString() }) + "\n", { mode: 0o600 });
+    } catch {
+      /* Readers still close it: no owner and no attempt past queued. */
+    }
+    throw error;
   }
   let started: StartedOwner;
   const completion = new Promise<OwnerCompletion>((resolveCompletion) => {
@@ -435,6 +464,13 @@ export function startOwner(
   };
   const pid = child.pid;
   if (pid !== undefined) {
+    const ownerStartedAt = processStartedAt(pid);
+    try {
+      // The owner's identity and run token in run status too, so readers still see it and its provider if the record cannot be written.
+      writeFileSync(statusPath, JSON.stringify({ ...metadata, owner_pid: pid, owner_started_at: ownerStartedAt, run_token: runToken }) + "\n", { mode: 0o600 });
+    } catch {
+      /* The owner record below still identifies it. */
+    }
     const hosted: OwnerRecord = {
       schema_version: 1,
       kind: identification.kind,
@@ -445,9 +481,9 @@ export function startOwner(
       // A detached child leads the group it was placed in, so the leader is
       // the child itself.
       owner_pgid: pid,
-      owner_started_at: processStartedAt(pid),
+      owner_started_at: ownerStartedAt,
       host_pid: process.pid,
-      host_started_at: processStartedAt(process.pid),
+      host_started_at: launcherStartedAt(),
       started_at: new Date().toISOString(),
       owner_stdout: stdoutPath,
       owner_stderr: stderrPath,
@@ -624,7 +660,8 @@ async function dispatchConfiguredProviderUnchecked(
   input: DispatchInput,
   identity: Identity,
   signal: AbortSignal,
-  env: NodeJS.ProcessEnv = process.env,
+  env: NodeJS.ProcessEnv,
+  launch: LaunchObserver,
 ): Promise<Record<string, unknown>> {
   const workspaceIdentity = identity;
   const root = productRoot(env);
@@ -718,6 +755,12 @@ async function dispatchConfiguredProviderUnchecked(
     String(timeout),
     ...routeArguments(route),
   ];
+  try {
+    launch.onLaunch?.({ runId: shortRunId(runDir), taskId, attempt: 1 });
+  } catch (error) {
+    rmSync(runDir, { recursive: true, force: true });
+    throw error;
+  }
   const started = startOwner(
     python,
     [owner, ...args],
@@ -943,9 +986,10 @@ export async function dispatchConfiguredProvider(
   identity: Identity,
   signal: AbortSignal,
   env: NodeJS.ProcessEnv = process.env,
+  launch: LaunchObserver = {},
 ): Promise<Record<string, unknown>> {
   try {
-    return await dispatchConfiguredProviderUnchecked(input, identity, signal, env);
+    return await dispatchConfiguredProviderUnchecked(input, identity, signal, env, launch);
   } catch (error) {
     if (signal.aborted && !(error instanceof InputError)) throw error;
     return rejected(error);

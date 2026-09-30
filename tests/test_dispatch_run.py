@@ -3603,6 +3603,62 @@ print(json.dumps({'type':'result','result':'DONE'}))
     assert 'resume: relaunched' in row['warnings']
 
 
+def test_named_session_resume_never_relaunches_a_missing_claude_session(tmp_path, monkeypatch):
+    code = '''import json,sys
+prompt = sys.stdin.read()
+if '--resume' in sys.argv:
+ print('No conversation found with session ID', file=sys.stderr)
+ sys.exit(1)
+print(json.dumps({'type':'system','subtype':'init','session_id':'saved-session','model':'opus'}))
+print(json.dumps({'type':'result','result':'DONE'}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    first = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True)
+    assert first.returncode == 0, first.stdout + first.stderr
+    previous = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
+    resumed = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', previous['run_id'],
+                              '--prompt-file', str(prompt), '--resume-attempt', '1',
+                              '--require-session', 'saved-session'], cwd=tmp_path, capture_output=True, text=True)
+    row = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
+    assert row['status'] == 'rejected', resumed.stdout + resumed.stderr
+    assert row['error'] == 'continuation_unsupported'
+    assert 'fresh: true' in row['fix']
+    assert 'resumed_by_relaunch' not in row['provenance']['notes']
+    assert not (run / 'tasks/dispatch-001/attempt-003').exists()
+
+
+def test_named_session_resume_continues_the_pinned_attempt_session(tmp_path, monkeypatch):
+    code = '''import json,sys
+prompt = sys.stdin.read()
+session = sys.argv[sys.argv.index('--resume') + 1] if '--resume' in sys.argv else 'saved-session'
+if prompt.strip().endswith('fail'):
+ print(json.dumps({'type':'system','subtype':'init','session_id':'other-session','model':'opus'}))
+ sys.exit(3)
+print(json.dumps({'type':'system','subtype':'init','session_id':session,'model':'opus'}))
+print(json.dumps({'type':'result','result':'RESUMED ' + session}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    assert subprocess.run(command, cwd=tmp_path, capture_output=True, text=True).returncode == 0
+    run_id = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())['run_id']
+    assert not (run / 'dispatch-provider.json').exists()  # retired once the owner reaped its provider
+    failing = tmp_path / 'failing.md'
+    failing.write_text('fail')
+    subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', run_id,
+                    '--prompt-file', str(failing)], cwd=tmp_path, capture_output=True, text=True)
+    failed = json.loads((run / 'tasks/dispatch-001/attempt-002/attempt.json').read_text())
+    assert failed['status'] != 'ok'
+    resume = [sys.executable, str(SCRIPT), '--run-dir', str(run), '--resume', run_id, '--prompt-file', str(prompt),
+              '--resume-attempt', '1']
+    mismatch = subprocess.run([*resume, '--require-session', 'not-this-one'], cwd=tmp_path, capture_output=True, text=True)
+    assert json.loads(mismatch.stdout)['error'] == 'continuation_unsupported'
+    assert not (run / 'tasks/dispatch-001/attempt-003').exists()
+    resumed = subprocess.run([*resume, '--require-session', 'saved-session'], cwd=tmp_path, capture_output=True, text=True)
+    assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+    row = json.loads((run / 'tasks/dispatch-001/attempt-003/attempt.json').read_text())
+    assert row['status'] == 'ok'
+    assert row['session_id'] == 'saved-session'
+
+
 def test_incomplete_writer_without_claude_session_returns_typed_fix(tmp_path):
     mod = load_dispatch_module()
     run = Path(subprocess.check_output([str(INIT), '--kind', 'dispatch'], cwd=tmp_path, text=True).strip())

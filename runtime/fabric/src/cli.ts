@@ -24,6 +24,7 @@ import {
 import { inspectDatabase, Store } from "./store.js";
 import { waitForLanes } from "./lane-wait.js";
 import { readEvents, readRuns } from "./run-reader.js";
+import { reconcileSession, sessionDispatch, sessionName, sessionView } from "./sessions.js";
 
 const USAGE = `fabric <command>
 
@@ -76,6 +77,9 @@ const USAGE = `fabric <command>
   An explicit --model wins over --route; see
   skills/orchestrate/references/routing-and-tiers.md#route-pools
   dispatch --tasks F [route flags]  run a JSON task manifest; flags set task defaults
+  dispatch --session NAME --prompt-file F [--fresh] [--wait]
+                              start or resume a named provider session
+  session list | inspect <name> | forget <name>
 
 Identity comes from the working directory and AGENT_FABRIC_LABEL (or
 landing-push --label for that command). Registered
@@ -87,7 +91,7 @@ const command = argv[0] ?? "whoami";
 const commands = new Set([
   "whoami", "send", "inbox", "ack", "note", "tasks", "task", "claim", "done",
   "activity", "watch", "status", "doctor", "dispatch", "adapters", "lanes", "events",
-  "work-claims", "landing-push",
+  "work-claims", "landing-push", "session",
 ]);
 
 if (command === "--help" || command === "-h" || command === "help") {
@@ -272,16 +276,16 @@ if (command === "dispatch") {
     const values = new Map<string, string>();
     const switches = new Set<string>();
     const allowed = new Set(["--adapter", "--alias", "--model", "--effort", "--mode", "--worktree", "--cwd", "--prompt-file", "--id", "--tasks",
-      "--route", "--council", "--models"]);
+      "--route", "--council", "--models", "--session"]);
     for (let index = 0; index < options.length; index += 1) {
       const option = options[index]!;
-      if (["--wait", "--rotate", "--confidential"].includes(option)) {
+      if (["--wait", "--rotate", "--confidential", "--fresh"].includes(option)) {
         if (switches.has(option)) throw new Error(`${option} may be passed once`);
         switches.add(option);
         continue;
       }
       if (!option.startsWith("--")) throw new Error(`unexpected argument: ${option}`);
-      if (!allowed.has(option)) throw new Error(`unknown option ${option}; choose ${[...allowed].join(", ")}, --rotate, --confidential or --wait`);
+      if (!allowed.has(option)) throw new Error(`unknown option ${option}; choose ${[...allowed].join(", ")}, --rotate, --confidential, --fresh or --wait`);
       const value = options[++index];
       if (value === undefined || value.startsWith("--")) throw new Error(`${option} requires a value`);
       if (values.has(option)) throw new Error(`${option} may be passed once`);
@@ -310,7 +314,30 @@ if (command === "dispatch") {
     // This process exits once the wait ends; the run must not depend on it.
     hostOwnersInThemselves();
     let result: Record<string, unknown>;
-    if (tasksFile !== undefined) {
+    let sessionLine: string | undefined;
+    if (switches.has("--fresh") && read("session") === undefined) throw new Error("--fresh requires --session");
+    if (read("session") !== undefined) {
+      if (tasksFile !== undefined) throw new Error("--session cannot be combined with --tasks");
+      const store = new Store(databasePath());
+      try {
+        store.announce(who);
+        const name = read("session")!;
+        result = await sessionDispatch({
+          ...route,
+          prompt_file: read("prompt-file"),
+          session: name,
+          ...(switches.has("--fresh") ? { fresh: true } : {}),
+          ...(read("id") === undefined ? {} : { task_id: read("id") }),
+          wait_seconds: switches.has("--wait") ? 55 : 0,
+        }, { ...who, registeredProjects: store.projects() }, store, new AbortController().signal);
+        const session = await reconcileSession(store, who, name);
+        if (session) sessionLine = String(sessionView(session).digest);
+        if (result.session_error) sessionLine = `${sessionLine ?? ""}\n! ${String(result.session_error)}`.trim();
+      } finally {
+        store.close();
+      }
+      result = { ...result, id: result.id ?? result.run_id };
+    } else if (tasksFile !== undefined) {
       if (["prompt-file", "id"].some((key) => read(key) !== undefined))
         throw new Error("--tasks cannot be combined with prompt or id flags");
       const document = JSON.parse(readFileSync(resolve(who.cwd, tasksFile), "utf8")) as unknown;
@@ -342,6 +369,7 @@ if (command === "dispatch") {
         .join("; ").replace(/\s+/gu, " ")}`
       : "";
     console.log(`status: ${String(result.status ?? "unknown")}${rejectedDetails}${rejectedTaskDetails}`);
+    if (sessionLine) console.log(sessionLine);
     process.exit(result.status === "rejected" ? 1 : 0);
   } catch (error) {
     console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
@@ -435,6 +463,29 @@ try {
     if (argv.length !== 1) throw new Error("usage: fabric whoami");
     show({ ...who, database: databasePath(), agents: store.agents(who.project) });
     break;
+
+  case "session": {
+    const [, action, name, ...extra] = argv;
+    if (extra.length || !(action === "list" ? name === undefined : ["inspect", "forget"].includes(action ?? "") && name))
+      throw new Error("usage: fabric session list | inspect <name> | forget <name>");
+    if (action === "list") {
+      const rows = [];
+      for (const row of store.sessions(who.project)) {
+        const current = await reconcileSession(store, who, row.name);
+        if (current) rows.push(sessionView(current));
+      }
+      show({ sessions: rows });
+      break;
+    }
+    const key = sessionName(name);
+    const row = await reconcileSession(store, who, key);
+    if (!row) throw new Error(`no session ${key}`);
+    if (action === "inspect") show(sessionView(row));
+    else if (row.turnStatus === null || !store.forgetSession(who, key))
+      throw new Error(`session ${key} is busy with run ${row.turnRunId ?? "launch"}; wait or cancel it, then forget`);
+    else show({ forgotten: key, run_id: row.runId ?? row.turnRunId });
+    break;
+  }
 
   case "work-claims":
     if (argv.length !== 1) throw new Error("usage: fabric work-claims");
