@@ -1,5 +1,5 @@
 /** Read the Python-owned merged routing snapshot, cached by source mtimes. */
-import { spawnSync } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -143,4 +143,62 @@ export function catalogueSnapshot(root?: string, env: NodeJS.ProcessEnv = proces
   };
   cache.set(key, { stamp, value });
   return value;
+}
+
+const LISTED: Record<string, string> = { agy: "agy", codex: "codex", cursor: "cursor-agent", kiro: "kiro-cli", opencode: "opencode" };
+const FLAT_LIMIT = 24, GROUP_LIMIT = 20;
+
+/**
+ * Live model discovery through the Python probe, which bounds the listing and
+ * caches it for a day. The digest stays short: small lists are printed whole,
+ * larger ones by family, and a large family only by count until `match` narrows it.
+ */
+export async function liveModels(adapter: string, options: { match?: string; root?: string; env?: NodeJS.ProcessEnv } = {}):
+  Promise<{ digest: string }> {
+  const env = options.env ?? process.env;
+  const snapshot = catalogueSnapshot(options.root, env);
+  const entry = snapshot.adapters.find((candidate) => candidate.name === adapter);
+  if (entry === undefined) {
+    return { digest: `${adapter}: unknown adapter; known: ${snapshot.adapters.map((item) => item.name).sort().join(", ")}` };
+  }
+  const catalogued = `catalogued: ${entry.models.join(" ") || "-"}`;
+  if (adapter === "claude") {
+    return { digest: `claude: no live list; run Claude models as native subagents (Agent tool)\n${catalogued}` };
+  }
+  const executable = LISTED[adapter];
+  if (executable === undefined) return { digest: `${adapter}: no live list\n${catalogued}` };
+  const configuredRoot = options.root || env.AGENT_FABRIC_PRODUCT_ROOT;
+  const productRoot = configuredRoot && isAbsolute(configuredRoot) ? configuredRoot : findProductRoot();
+  const configuredPython = env.HARNESS_PYTHON;
+  const python = configuredPython && isAbsolute(configuredPython) ? configuredPython : "python3";
+  const stdout = await new Promise<string>((resolveOutput) => {
+    execFile(python, [join(productRoot, "scripts", "model_route.py"), "probe", "--adapter", adapter, "--executable", executable],
+      { cwd: productRoot, env: { ...process.env, ...env }, encoding: "utf8", timeout: 40_000, maxBuffer: 4 * 1024 * 1024 },
+      (_error, output) => resolveOutput(output ?? ""));
+  });
+  let record: { models?: unknown; message?: string; status?: string; cache_hit?: boolean } = {};
+  try { record = JSON.parse(stdout); } catch { /* reported below */ }
+  const listed = Array.isArray(record.models) ? record.models.filter((model): model is string => typeof model === "string") : [];
+  if (listed.length === 0) {
+    return { digest: `${adapter}: live list unavailable (${record.message ?? record.status ?? "probe failed"})\n${catalogued}` };
+  }
+  const needle = options.match?.toLowerCase();
+  const models = needle ? listed.filter((model) => model.toLowerCase().includes(needle)) : listed;
+  const cached = record.cache_hit ? " (cached)" : "";
+  const head = needle ? `${adapter}: ${models.length} of ${listed.length} live models match ${options.match}${cached}`
+    : `${adapter}: ${listed.length} live models${cached}`;
+  let lines: string[];
+  if (models.length <= FLAT_LIMIT) {
+    lines = models.length ? [models.join(" ")] : [];
+  } else {
+    const groups = new Map<string, string[]>();
+    for (const model of models) {
+      const cut = model.includes("/") ? model.indexOf("/") : model.indexOf("-");
+      const group = cut > 0 ? model.slice(0, cut + 1) : "";
+      groups.set(group, [...(groups.get(group) ?? []), model.slice(group.length)]);
+    }
+    lines = [...groups].map(([group, names]) =>
+      `${group || "other"} (${names.length}): ${names.length > GROUP_LIMIT ? "pass match to list" : names.join(" ")}`);
+  }
+  return { digest: [head, ...lines, `dispatch any as model "${adapter}/<id>"; an uncatalogued id runs with a note`].join("\n") };
 }

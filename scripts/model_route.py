@@ -484,10 +484,13 @@ def _listed_models(raw: str) -> list[str]:
     if isinstance(data, dict):
         return list(data)
     if isinstance(data, list):
-        return list(dict.fromkeys(item if isinstance(item, str) else item.get("id", item.get("name", ""))
+        return list(dict.fromkeys(item if isinstance(item, str)
+                                  else item.get("id", item.get("slug", item.get("name", "")))
                                   for item in data if isinstance(item, (str, dict))))
     listed: list[str] = []
     for line in raw.splitlines():
+        if line.rstrip().endswith("..."):  # a progress line such as agy's "Fetching available models..."
+            continue
         match = re.search(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", line)
         if match:
             listed.append(match.group(0))
@@ -504,9 +507,11 @@ def _kiro_probe_enforced(evidence: Any) -> bool:
 
 
 def probe_capabilities(adapter: str, executable: str, deadline: float | None = None) -> tuple[dict[str, Any], int]:
-    commands = {"opencode": ["models"], "cursor": ["models"],
+    commands = {"opencode": ["models"], "cursor": ["models"], "agy": ["models"],
                 "kiro": ["chat", "--list-models", "--format", "json"],
                 "codex": ["debug", "models"]}
+    # agy and opencode refresh their lists over the network and routinely take several seconds.
+    listing_timeout = 20.0
     if adapter not in commands:
         return {"status": "unsupported_adapter", "adapter": adapter}, 2
     executable = shutil.which(executable) or executable
@@ -514,7 +519,7 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
         return max(0.01, min(limit, deadline - time.monotonic())) if deadline is not None else limit
     try:
         version = subprocess.run([executable, "--version"], capture_output=True, text=True,
-                                 timeout=remaining(2), check=True).stdout.strip()
+                                 timeout=remaining(5), check=True).stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return {"status": "probe_unavailable", "adapter": adapter,
                 "message": "CLI version unavailable; fix: check the executable"}, 1
@@ -539,9 +544,9 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
             pass
     try:
         listing = subprocess.run([executable, *commands[adapter]], capture_output=True, text=True,
-                                 timeout=remaining(3), check=True).stdout
+                                 timeout=remaining(listing_timeout), check=True).stdout
         help_text = subprocess.run([executable, "--help"], capture_output=True, text=True,
-                                   timeout=remaining(1), check=False).stdout
+                                   timeout=remaining(3), check=False).stdout
     except (OSError, subprocess.SubprocessError):
         record = {"status": "probe_unavailable", "adapter": adapter, "version": version,
                   "executable": executable_path,

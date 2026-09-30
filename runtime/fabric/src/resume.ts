@@ -269,7 +269,7 @@ export async function handoffDispatch(
       ...rest,
       ...(inherit
         ? {
-            adapter: requested.adapter,
+            adapter: requested.adapter ?? previous.adapter ?? identity.provider,
             model: previous.provenance?.resolved_model || requested.model || undefined,
             ...(rest.effort === undefined && sentEffort(previous) ? { effort: sentEffort(previous) } : {}),
           }

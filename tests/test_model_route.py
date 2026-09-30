@@ -694,6 +694,22 @@ def test_capability_probe_caches_model_list_by_cli_version(tmp_path):
     assert calls.read_text().splitlines() == ["call", "call"]
 
 
+def test_capability_probe_lists_agy_and_codex_models_for_discovery(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    agy = tmp_path / "agy"
+    agy.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.0; exit; fi\n"
+                   "if [ \"$1\" = --help ]; then exit; fi\n"
+                   "echo 'Fetching available models...'\n"
+                   "printf 'gemini-3.8-flash-high\\tGemini 3.8 Flash (High)\\nclaude-sonnet-4-6\\tClaude Sonnet 4.6\\n'\n")
+    agy.chmod(0o755)
+    record, code = router.probe_capabilities("agy", str(agy))
+    assert code == 0
+    assert record["models"] == ["gemini-3.8-flash-high", "claude-sonnet-4-6"]
+    assert router._listed_models(json.dumps({"models": [{"slug": "gpt-6-luna"}, {"slug": "gpt-6.1-sol"}]})) == [
+        "gpt-6-luna", "gpt-6.1-sol"]
+
+
 def test_failed_capability_probe_retries_after_one_hour(tmp_path, monkeypatch):
     router = load_router()
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))

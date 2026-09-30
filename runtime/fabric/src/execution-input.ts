@@ -28,6 +28,38 @@ function inside(root: string, candidate: string) {
  */
 export const DISPATCH_ADAPTERS = ["agy", "claude", "codex", "copilot", "cursor", "kiro", "opencode"] as const;
 const SUPPORTED_ADAPTERS = new Set<string>(DISPATCH_ADAPTERS);
+const ROLE_ALIASES = ["flagship", "workhorse", "scout"];
+
+/**
+ * Seats whose provider runs its own models as native subagents: Claude Code
+ * uses its Agent tool and Codex its own subagents, so Fabric carries every
+ * other provider for them. Any other or unknown seat keeps ordinary routing.
+ */
+const NATIVE_ADAPTERS: Record<string, string> = { claude: "claude", codex: "codex" };
+export function nativeAdapter(identity: Identity): string | undefined {
+  return Object.hasOwn(NATIVE_ADAPTERS, identity.provider) ? NATIVE_ADAPTERS[identity.provider] : undefined;
+}
+
+/** `opencode-go/x`, `opencode/x` and `openrouter/x` are OpenCode provider paths. */
+const providerPath = (value: string) => /^(?:opencode|opencode-go|openrouter)\//iu.test(value);
+
+/**
+ * Split an adapter prefix off an uncatalogued model (`codex/gpt-7-luna`,
+ * `opencode/opencode-go/x`), keeping an OpenCode provider path whole
+ * (`opencode/big-pickle`). A catalogued id is never split.
+ */
+function adapterPrefix(selector: string, adapter: string | undefined, catalogue: CatalogueSnapshot):
+  { adapter?: string; model: string } {
+  const catalogued = catalogue.adapters.some((entry) => entry.models.includes(selector) ||
+    (entry.model_details ?? []).some((model) => model.id === selector));
+  if (catalogued) return { adapter, model: selector };
+  const slash = selector.indexOf("/");
+  const head = selector.slice(0, slash), rest = selector.slice(slash + 1);
+  if (slash > 0 && rest && SUPPORTED_ADAPTERS.has(head) && (adapter === undefined || adapter === head))
+    return { adapter: head, model: providerPath(selector) && !rest.includes("/") ? selector : rest };
+  if (adapter === undefined && providerPath(selector)) return { adapter: "opencode", model: selector };
+  return { adapter, model: selector };
+}
 export const ACCESS_MODES = ["read_only", "worktree_write"] as const;
 export type AccessMode = (typeof ACCESS_MODES)[number];
 export const DISPATCH_CAPABILITIES = ["postgres", "browser"] as const;
@@ -62,6 +94,8 @@ export interface RouteInput {
   confidential?: boolean;
   /** Why the pool picked this model; set by the pool expansion, shown on the Route line. */
   pick_reason?: string;
+  /** Internal: the tier alias a native seat's default was rerouted from; restored when only native models remain. */
+  native_default?: string;
 }
 
 export interface DispatchInput extends RouteInput {
@@ -128,7 +162,7 @@ export function editDistance(left: string, right: string): number {
 }
 
 function correctSelector(selector: string | undefined, catalogue: CatalogueSnapshot, adapter?: string, field = "model"):
-  { value?: string; warning?: string } {
+  { value?: string; warning?: string; unknown?: true } {
   if (!selector) return {};
   const entries = catalogue.adapters.filter((entry) => adapter === undefined || entry.name === adapter);
   const choices = [...new Set(entries.flatMap((entry) => [
@@ -180,13 +214,20 @@ function correctSelector(selector: string | undefined, catalogue: CatalogueSnaps
     const value = correctSelector(near[0]!.item, catalogue, adapter, field).value ?? near[0]!.item;
     return { value, warning: `corrected ${field} ${selector} to ${value}` };
   }
-  const closest = ranked.slice(0, 3).map(({ item }) => item);
-  throw new InputError(`${field}_invalid`, `Choose a valid ${field}: ${closest.join(", ") || choices.join(", ")}.`);
+  // The catalogue is a default, never a gate: the adapter decides whether it can run the name.
+  return { value: selector, unknown: true };
 }
 
 export function normaliseRoute(input: RouteInput, identity: Identity, catalogue: CatalogueSnapshot): NormalisedRoute {
   input = { ...input, model: input.model || undefined, alias: input.alias || undefined };
   const warnings: string[] = [];
+  // `adapter/model@effort` is the models-list spelling; accept it in model too.
+  const suffixed = input.model?.match(/^(.+)@(none|minimal|low|medium|high|xhigh|max|ultra)$/u);
+  if (suffixed) {
+    if (input.effort !== undefined && input.effort !== suffixed[2])
+      warnings.push(`effort ${suffixed[2]} in model ignored: effort ${input.effort} was named`);
+    input = { ...input, model: suffixed[1], effort: input.effort ?? suffixed[2] };
+  }
   if (input.capabilities !== undefined && (
     !Array.isArray(input.capabilities) ||
     input.capabilities.some((value) => !DISPATCH_CAPABILITIES.includes(value)) ||
@@ -195,13 +236,22 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
     throw new InputError("capabilities_invalid", "Pass capabilities as a list of distinct postgres or browser values.");
   }
   let selector =
-    input.model ?? (input.alias && !["flagship", "workhorse", "scout"].includes(input.alias) ? input.alias : undefined);
+    input.model ?? (input.alias && !ROLE_ALIASES.includes(input.alias) ? input.alias : undefined);
   const roleAlias = input.model === undefined && input.alias !== undefined
-    ? ["flagship", "workhorse", "scout"].find((alias) => editDistance(routeKey(alias), routeKey(input.alias!)) <= 1)
+    ? ROLE_ALIASES.find((alias) => editDistance(routeKey(alias), routeKey(input.alias!)) <= 1)
     : undefined;
   if (roleAlias !== undefined && roleAlias !== input.alias) warnings.push(`corrected alias ${input.alias} to ${roleAlias}`);
   if (roleAlias !== undefined) input.alias = roleAlias;
   const isRoleAlias = roleAlias !== undefined;
+  if (selector !== undefined && !isRoleAlias) {
+    const prefixed = adapterPrefix(selector, input.adapter, catalogue);
+    if (prefixed.adapter !== input.adapter || prefixed.model !== selector) {
+      input.adapter = prefixed.adapter;
+      selector = prefixed.model;
+      if (input.model !== undefined) input.model = selector;
+      else input.alias = selector;
+    }
+  }
   const corrected = isRoleAlias ? {} : correctSelector(selector, catalogue, input.adapter, input.model === undefined ? "alias" : "model");
   if (corrected.warning) warnings.push(corrected.warning);
   selector = corrected.value ?? selector;
@@ -230,11 +280,18 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
           );
         });
   const inferred = candidates.find((entry) => entry.name === identity.provider)?.name ?? candidates[0]?.name;
+  if (corrected.unknown && input.adapter === undefined && inferred === undefined)
+    throw new InputError("adapter_required", `Prefix ${selector} with its adapter (${DISPATCH_ADAPTERS.join(", ")}), e.g. opencode/<id>, or pass adapter.`);
   const adapter =
     input.adapter ?? inferred ?? (SUPPORTED_ADAPTERS.has(identity.provider) ? identity.provider : undefined);
   if (adapter === undefined) throw new InputError("adapter_required", `Pass adapter ${DISPATCH_ADAPTERS.join(", ")}.`);
   if (!SUPPORTED_ADAPTERS.has(adapter)) {
     throw new InputError("adapter_invalid", `Pass adapter ${DISPATCH_ADAPTERS.join(", ")}.`);
+  }
+  if (corrected.unknown) warnings.push(`${selector} is not in the ${adapter} catalogue; passing it as given`);
+  if (adapter === nativeAdapter(identity)) {
+    warnings.unshift(`NATIVE: ${adapter}/${input.model ?? input.alias ?? "workhorse"} is this ${adapter} seat's own model; ` +
+      "spawn a native subagent instead of Fabric");
   }
   const requestedMode = input.mode ?? "read_only";
   const mode = canonicalMode(requestedMode) as AccessMode;

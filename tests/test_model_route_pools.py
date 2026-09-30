@@ -460,3 +460,62 @@ def test_routes_health_and_help_routes_print_the_same_view(tmp_path):
     assert helped.returncode == 0, helped.stderr
     assert "strong" in helped.stdout and "route health --json" in helped.stdout
     assert "--json" in model_route(env, "routes", "--help").stdout
+
+
+def native_catalog():
+    """A fixed pool so the native-first tests do not track catalogue preference edits."""
+    catalog = json.loads(json.dumps(CATALOG))
+    catalog["routes"]["strong"] = [
+        {"model": "claude/claude-opus-5-5", "weight": "high"},
+        {"model": "codex/gpt-6.1-sol", "weight": "normal"},
+        {"model": "agy/gemini-3.8-flash", "weight": "normal"},
+    ]
+    return catalog
+
+
+def test_native_seat_skips_its_own_models_in_top_and_rotate(tmp_path):
+    catalog = native_catalog()
+    top = pick({"route": "strong", "native": "claude"}, tmp_path, catalog=catalog)
+    assert models(top) == ["codex/gpt-6.1-sol"]
+    assert "claude/claude-opus-5-5 skipped: use a native subagent" in top["warnings"]
+    rotated = [models(pick({"route": "strong", "rotate": True, "native": "claude"}, tmp_path, catalog=catalog))[0]
+               for _ in range(4)]
+    assert not any(model.startswith("claude/") for model in rotated)
+    assert models(pick({"route": "strong", "native": "codex"}, tmp_path, catalog=catalog)) == [
+        "claude/claude-opus-5-5"]
+
+
+def test_native_council_hands_its_own_members_back_to_the_chair(tmp_path):
+    catalog = native_catalog()
+    for seed in range(10):
+        result = pick({"route": "strong", "council": 3, "native": "claude"}, tmp_path, catalog=catalog, seed=seed)
+        assert sorted(models(result)) == ["agy/gemini-3.8-flash", "codex/gpt-6.1-sol"]
+        assert "spawn 1 native claude member (claude-opus-5-5); Fabric runs 2 of 3" in result["warnings"]
+        assert [item["reason"] for item in result["picks"]] == ["strong council 1/2", "strong council 2/2"]
+
+
+def test_native_only_pool_names_the_native_spawn_instead_of_running_it(tmp_path):
+    catalog = native_catalog()
+    catalog["routes"]["strong"] = [{"model": "claude/claude-opus-5-5", "weight": "high"}]
+    for request in ({"route": "strong"}, {"route": "strong", "council": 2}):
+        with pytest.raises(pools.PoolError) as error:
+            pick({**request, "native": "claude"}, tmp_path, catalog=catalog)
+        assert error.value.code == "route_native_only"
+        assert "native claude member" in error.value.fix and "claude-opus-5-5" in error.value.fix
+
+
+def test_an_explicit_native_adapter_or_models_entry_still_runs(tmp_path):
+    catalog = native_catalog()
+    narrowed = pick({"route": "strong", "adapter": "claude", "native": "claude"}, tmp_path, catalog=catalog)
+    assert models(narrowed) == ["claude/claude-opus-5-5"]
+    listed = pick({"models": ["claude/claude-opus-5-5", "codex/gpt-6-luna"], "native": "claude"}, tmp_path,
+                  catalog=catalog)
+    assert models(listed) == ["claude/claude-opus-5-5", "codex/gpt-6-luna"]
+
+
+def test_models_keeps_an_opencode_provider_path_after_the_adapter_prefix(tmp_path):
+    assert models(pick({"models": ["opencode/big-pickle"]}, tmp_path)) == ["opencode/opencode/big-pickle"]
+    assert models(pick({"models": ["opencode/opencode-go/brand-new"]}, tmp_path)) == [
+        "opencode/opencode-go/brand-new"]
+    assert models(pick({"models": ["opencode/anthropic/claude-sonnet-latest"]}, tmp_path)) == [
+        "opencode/anthropic/claude-sonnet-latest"]

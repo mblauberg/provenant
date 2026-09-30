@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withoutGitRedirects, type Identity } from "./identity.js";
-import { InputError, type BatchTaskInput, type RouteInput } from "./execution-input.js";
+import { InputError, nativeAdapter, type BatchTaskInput, type RouteInput } from "./execution-input.js";
 
 export const POOL_FIELDS = ["route", "rotate", "council", "models"] as const;
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -22,6 +22,19 @@ type PickResult =
 
 export function usesPool(input: RouteInput): boolean {
   return input.route !== undefined || input.models !== undefined || input.council !== undefined || input.rotate === true;
+}
+
+/**
+ * A Claude or Codex seat that names no adapter, model or pool would land on its
+ * own models through the default or a tier alias. Take the matching pool
+ * instead, where the picker skips the seat's native models.
+ */
+export function nativeFirst<T extends RouteInput>(task: T, identity: Identity): T {
+  const alias = task.alias ?? "workhorse";
+  if (nativeAdapter(identity) === undefined || task.adapter !== undefined || task.model !== undefined ||
+      usesPool(task) || !["flagship", "workhorse", "scout"].includes(alias)) return task;
+  const { alias: _alias, ...rest } = task;
+  return { ...rest, route: alias, native_default: alias } as T;
 }
 
 function withoutPool<T extends RouteInput>(input: T): T {
@@ -128,6 +141,7 @@ export async function expandPools(
       ...(task.adapter === undefined ? {} : { adapter: task.adapter }),
       ...(task.effort === undefined ? {} : { effort: task.effort }),
       ...(task.confidential === true ? { confidential: true } : {}),
+      ...(nativeAdapter(identity) === undefined ? {} : { native: nativeAdapter(identity) }),
       project: identity.project,
     } });
   });
@@ -140,14 +154,22 @@ export async function expandPools(
     const answer = answers.get(index);
     if (answer === undefined) return [];
     const id = task.id ?? `task-${index + 1}`;
+    if (answer.status !== "ok" && answer.error === "route_native_only" && task.native_default !== undefined) {
+      // Only the seat's own models are available: keep the old default; its NATIVE warning names the subagent.
+      const { native_default: alias, ...rest } = withoutPool(task);
+      return [{ ...rest, alias }];
+    }
     if (answer.status !== "ok") {
       errors.push({ task_id: id, error: answer.error, fix: answer.fix });
       return [];
     }
+    if (task.native_default !== undefined) {
+      warnings.push(`${task.native_default} taken from the route pool: ${nativeAdapter(identity)} models run as native subagents`);
+    }
     warnings.push(...answer.warnings);
     const members = task.council !== undefined || task.models !== undefined;
     council ||= members;
-    const { alias: _alias, ...rest } = withoutPool(task);
+    const { alias: _alias, native_default: _default, ...rest } = withoutPool(task);
     return answer.picks.map((choice, member) => ({
       ...rest,
       id: members ? `${id}-${member + 1}` : id,

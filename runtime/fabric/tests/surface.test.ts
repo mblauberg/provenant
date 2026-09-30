@@ -301,6 +301,8 @@ it.each([false, true])("exposes the default tools within budget (legacy=%s)", as
     expect(dispatchInput.properties.capabilities.type).toBe("array");
     expect(dispatchInput.properties.capabilities.description).toContain("postgres or browser");
     expect(dispatchInput.properties.tasks.items.additionalProperties).toBe(false);
+    const adaptersInput = result.tools.find((tool) => tool.name === "fabric_adapters")!.inputSchema as any;
+    expect(Object.keys(adaptersInput.properties).sort()).toEqual(["detail", "match", "models"]);
     for (const schema of [dispatchInput, dispatchInput.properties.tasks.items]) {
       expect(schema.properties.route.type).toBe("string");
       expect(schema.properties.rotate.type).toBe("boolean");
