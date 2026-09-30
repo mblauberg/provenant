@@ -102,7 +102,7 @@
       },
       {
         "model": "claude/claude-opus-5-5",
-        "weight": "normal"
+        "weight": "sparing"
       },
       {
         "model": "agy/claude-opus-4-6-thinking",

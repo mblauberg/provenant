@@ -317,7 +317,7 @@ review legs and is reachable at `-high`, `-medium` and `-low`. Use
 them). `strong`: Sonnet high, Opus and Sol normal, Astra sparing. `bulk`: Luna
 high; Gemini Flash normal; Sonnet, Sol, DeepSeek and GLM sparing. `design`:
 Sonnet high; Opus normal; DeepSeek, GLM, Astra and the free models sparing.
-`writing`: Gemini Flash high, then Sonnet and Opus. When a preference here changes, change
+`writing`: Gemini Flash high, Sonnet normal, Opus sparing. When a preference here changes, change
 the pool weights in `config/model-routing.json` in the same edit.
 
 **Critical review has no fixed family.** The cross-family obligation is relative
