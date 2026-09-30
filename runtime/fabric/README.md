@@ -74,7 +74,7 @@ Fourteen tools are registered by default:
 | `fabric_events` | Cursor-based terminal, input-required and inbox events |
 | `fabric_cancel` | Cancel the owner and provider group |
 | `fabric_output` | Bounded result, stderr, events or receipt slice |
-| `fabric_adapters` | Compact catalogue, CLI availability and guarantees |
+| `fabric_adapters` | Compact catalogue, CLI availability and guarantees; `models` lists live ids |
 | `fabric_whoami` | Seat, project and server freshness |
 | `fabric_send` | Send to a seat, team, chair or all |
 | `fabric_inbox` | Peek headers or claim selected messages |
@@ -290,6 +290,14 @@ file size. Use `tail: true` for a bounded tail, including while a run is active.
 Paths must resolve to regular files inside the retained run directory. For a batch, select a task ID.
 `detail: full` adds adapter profiles or the agent list to discovery responses.
 CLI presence does not prove authentication; `auth?` makes that uncertainty explicit.
+`fabric_adapters` with `models: <adapter>` and optional `match` (CLI
+`fabric adapters --models <adapter> [--match S]`) lists that adapter's live model
+ids from `model-route probe`, cached for a day; large families show only a count
+until `match` narrows them. Dispatch any id as `model: "<adapter>/<id>"`; an id
+outside the catalogue runs with a note. A Claude or Codex seat keeps its own
+models on native subagents: pool picks and the default route skip them, a
+council hands them back as a spawn line, and an explicit request for them runs
+with a leading `NATIVE:` warning (`skills/orchestrate/references/routing-and-tiers.md#native-first`).
 
 ## Mailbox and identity
 

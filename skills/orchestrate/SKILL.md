@@ -7,8 +7,8 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
 
 ## Quickstart
 
-1. Use a native subagent for the chair's own models; use Fabric for other providers, long runs, and worktree writers.
-2. Call `fabric_dispatch` with `prompt` or `prompt_file`, `adapter` or `model`, and optional `effort`.
+1. [Native first](references/routing-and-tiers.md#native-first): run your own provider's models as native subagents (Claude Code: Agent tool `opus`/`sonnet`; Codex: its subagents), not Fabric. Use Fabric for other providers (agy's Claude 4.6 included), long or detached runs, and sandboxed worktree writers.
+2. Call `fabric_dispatch` with `prompt` or `prompt_file`, `adapter` or `model`, and optional `effort`. `model` also takes `adapter/id[@effort]`; `fabric_adapters` with `models: <adapter>` lists live ids.
 3. For writers, pass `mode: "worktree_write"` and the registered `worktree`,
    named per `setup-repo`'s branch naming doctrine; the task id defaults to that
    same branch-derived string. Before dispatch, acquire and verify an advisory
