@@ -470,3 +470,15 @@ def test_routes_health_and_help_routes_print_the_same_view(tmp_path):
     assert helped.returncode == 0, helped.stderr
     assert "strong" in helped.stdout and "route health --json" in helped.stdout
     assert "--json" in model_route(env, "routes", "--help").stdout
+
+
+def test_confidential_pick_skips_an_unregistered_free_model_at_high_weight(tmp_path):
+    unlisted = "opencode/opencode/rotated-in-free"
+    catalog = {**CATALOG, "routes": {**CATALOG["routes"], "private": [
+        {"model": unlisted, "weight": "high"},
+        {"model": "codex/gpt-6-luna", "weight": "normal"}]}}
+    assert pools.split_model(router, catalog, unlisted)[1] == "opencode/rotated-in-free"
+    assert models(pick({"route": "private"}, tmp_path, catalog=catalog)) == [unlisted]
+    for seed in range(10):
+        private = pick({"route": "private", "confidential": True}, tmp_path, catalog=catalog, seed=seed)
+        assert models(private) == ["codex/gpt-6-luna"]
