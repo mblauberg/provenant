@@ -14,7 +14,12 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CATALOG = json.loads((ROOT / "config" / "model-routing.json").read_text())
+SEED = json.loads((ROOT / "config" / "model-routing.json").read_text())
+# The selection tests pin one three-model strong pool, so seed edits to it do not move their arithmetic.
+CATALOG = {**SEED, "routes": {**SEED["routes"], "strong": [
+    {"model": "claude/claude-opus-5-5", "weight": "high"},
+    {"model": "codex/gpt-6.1-sol", "weight": "normal", "effort": ["high", "xhigh"]},
+    {"model": "codex/gpt-6-astra", "weight": "sparing"}]}}
 
 
 def load(name, path):
@@ -26,6 +31,8 @@ def load(name, path):
 
 router = load("pools_router_under_test", ROOT / "scripts" / "model_route.py")
 pools = router._pools
+for adapter_entry in SEED["adapters"].values():  # the loader's derivation, since these tests read the raw file
+    router._apply_free_pattern(adapter_entry)
 
 
 def availability(catalog=CATALOG, installed=lambda adapter: True, cooling=()):
@@ -48,6 +55,7 @@ def models(result):
 
 
 def test_seed_routes_name_registered_models_with_the_tiny_weight_vocabulary():
+    CATALOG = SEED
     assert set(CATALOG["routes"]) == {"strong", "bulk", "design", "writing"}
     for name, entries in CATALOG["routes"].items():
         for entry in entries:
@@ -122,7 +130,7 @@ def test_council_larger_than_the_pool_repeats_with_a_warning(tmp_path):
 
 def test_confidential_skips_free_training_models_and_otherwise_warns(tmp_path):
     free = "opencode/opencode/muse-spark-1.3-contributor-free"
-    open_council = [pick({"route": "design", "council": 4}, tmp_path, seed=seed) for seed in range(20)]
+    open_council = [pick({"route": "design", "council": 8}, tmp_path, seed=seed) for seed in range(20)]
     chosen = [result for result in open_council if free in models(result)]
     assert chosen, "free models stay in an ordinary pool"
     assert any("may train on prompts" in warning and "confidential" in warning for warning in chosen[0]["warnings"])
@@ -237,10 +245,12 @@ def test_instance_overlay_reorders_and_reweights_a_pool(tmp_path):
     assert run.returncode == 0, run.stderr
     document = json.loads(run.stdout)
     strong = document["routes"]["strong"]
+    listed = ["codex/gpt-6-astra", "claude/claude-opus-5-5"]
     assert [entry["model"] for entry in strong] == [
-        "codex/gpt-6-astra", "claude/claude-opus-5-5", "codex/gpt-6.1-sol"]
+        *listed, *(entry["model"] for entry in SEED["routes"]["strong"] if entry["model"] not in listed)]
     assert strong[1]["weight"] == "off" and strong[1]["availability"] == "off"
-    assert strong[2]["effort"] == "high-xhigh", "unlisted entries keep their fields"
+    sol = next(entry for entry in strong if entry["model"] == "codex/gpt-6.1-sol")
+    assert sol["effort"] == "high-xhigh", "unlisted entries keep their fields"
     assert document["routes"]["local"][0]["weight"] == "normal"
     assert "broken" not in document["routes"]
     request = json.dumps({"requests": [{"route": "deep"}, {"route": "local", "adapter": "codex"}]})

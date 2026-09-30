@@ -17,12 +17,18 @@ SCRIPT = ROOT / "scripts" / "model-route"
 CATALOG = json.loads((ROOT / "config" / "model-routing.json").read_text())
 
 
-def test_opencode_models_have_explicit_training_flags():
-    models = CATALOG["adapters"]["opencode"]["models"]
-    assert models
-    for model in models:
-        assert type(model.get("trains_on_prompts")) is bool
-        assert model["trains_on_prompts"] is ("-free" in model["id"])
+def test_free_opencode_models_are_derived_from_the_free_pattern():
+    router = load_router()
+    adapter = router.catalogue_snapshot()["adapters"]["opencode"]
+    assert adapter["free_pattern"]
+    for model in adapter["models"]:
+        free = router.is_free_model(adapter, model["id"])
+        assert router.training_flag(adapter, model) is free or model["trains_on_prompts"] is False
+        assert (model["plan_cap_usd"] == 0) is free
+        assert bool(model.get("warning")) is free
+    fixture = {"free_pattern": "-free$", "models": [{"id": "opencode/rotating-free"}]}
+    router._apply_free_pattern(fixture)
+    assert fixture["models"][0]["trains_on_prompts"] is True and fixture["models"][0]["plan_cap_usd"] == 0
 
 
 def test_required_task_classes_bind_registered_exact_models_and_supported_efforts():
@@ -59,10 +65,14 @@ def test_claude_sonnet_is_the_workhorse_default_and_opus_remains_flagship():
     assert CATALOG["task_class_routes"]["critical-review"]["models"]["claude"] == [
         "claude-opus-5-5"
     ]
+    for task_class in ("implementation", "research", "screenshots", "second-opinion", "ui-taste"):
+        assert CATALOG["task_class_routes"][task_class]["models"]["claude"][0] == "claude-sonnet-5-5"
+    for task_class in ("critical-review", "orchestration"):
+        assert CATALOG["task_class_routes"][task_class]["models"]["claude"][0] == "claude-opus-5-5"
     assert CATALOG["task_class_routes"]["implementation"]["models"]["codex"] == [
-        "gpt-6-sol"
+        "gpt-6.1-sol", "gpt-6-luna"
     ]
-    assert CATALOG["families"]["openai"]["aliases"]["workhorse"] == ["gpt-6-sol"]
+    assert CATALOG["families"]["openai"]["aliases"]["workhorse"] == ["gpt-6.1-sol", "gpt-6-luna"]
     assert CATALOG["families"]["openai"]["aliases"]["scout"] == ["gpt-6-luna"]
     result, route = resolve("--adapter", "claude", "--alias", "workhorse", "--role", "worker")
     assert result.returncode == 0, result.stderr
@@ -571,7 +581,10 @@ def test_unregistered_agy_model_passes_explicit_effort_unverified():
 
 
 def test_opencode_training_warning_and_paid_fallback_excludes_free():
-    for model in ("opencode/mimo-v2.6-flash-free", "opencode/nemotron-3-ultra-free"):
+    free_models = [item["id"] for item in CATALOG["adapters"]["opencode"]["models"]
+                   if item["id"].endswith("-free")]
+    assert free_models
+    for model in free_models:
         result, free_route = resolve("--adapter", "opencode", "--model", model, "--role", "worker")
         assert result.returncode == 0, free_route
         assert free_route["trains_on_prompts"] is True
@@ -645,12 +658,8 @@ def test_codex_workhorse_has_no_luna_fallback_when_sol_cools(tmp_path):
                                  "AGENT_FABRIC_STATE_ROOT": str(tmp_path)})
     route = json.loads(result.stdout)
     assert result.returncode == 0, route
-    assert route["resolved_model"] == "gpt-6-sol"
+    assert route["resolved_model"] == "gpt-6-luna"
     assert any("cooling" in note for note in route["notes"])
-    assert not any(
-        candidate["adapter"] == "codex" and candidate["model"] == "gpt-6-luna"
-        for candidate in route["fallback_candidates"]
-    )
     assert any(candidate["adapter"] == "opencode" for candidate in route["fallback_candidates"])
 
 

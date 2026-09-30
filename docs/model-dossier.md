@@ -90,10 +90,10 @@ not read an absent `Watch out for` as an endorsement.
 
 ### Opus 5.5 (Anthropic flagship)
 
-- **Good at:** open-ended exploration; final UI and UX design calls; leads of
-  large design efforts; chairing, because its human communication is strong.
-  The default for critical review, synthesis and adjudication at every risk
-  tier, ahead of Fable 5.1.
+- **Good at:** chairing, orchestration, hard reasoning and open-ended
+  exploration. The default for critical review, synthesis and adjudication at
+  every risk tier, ahead of Fable 5.1. Reserve it for that work; Sonnet 5.5 is
+  the cheaper default elsewhere.
 - **Watch out for:** the owner on Opus 5's long-form prose: "opus's writing is
   quite horrible". Hand human-facing prose to a voice pass (see
   [Human-facing final polish](#human-facing-final-polish)) rather than shipping
@@ -134,7 +134,7 @@ not read an absent `Watch out for` as an endorsement.
   but do not justify Astra. Very cheap for its strength.
 - **Watch out for:** new on 2026-09-23; no field record yet. Record what you see.
 - **Cost:** cheap.
-- **Reach:** `codex` adapter, `openai` family, sole `workhorse` candidate, at
+- **Reach:** `codex` adapter, `openai` family, first `workhorse` candidate (Luna is its fallback), at
   `high` by default; `low` through `ultra` in the Codex CLI (0.155.1+).
 
 ### GPT-6 Luna (OpenAI scout)
@@ -156,13 +156,26 @@ not read an absent `Watch out for` as an endorsement.
 
 ### Sonnet 5.5 (Anthropic workhorse)
 
-- **Good at:** ordinary implementation, including UI/frontend, scoping,
-  ordinary reviews, legwork and lane leads.
-- **Watch out for:** Opus remains the choice for chairing, critical review,
-  final design calls and leads of large design efforts.
-- **Cost:** workhorse-tier; not separately characterised.
-- **Reach:** `sonnet` alias resolves to `claude-sonnet-5-5` on the `claude`
-  adapter. `agy` retains its separately listed older Sonnet models.
+- **Good at:** the preferred Claude model for most work: implementation
+  (including UI/frontend), research, screenshots, second opinions, ordinary
+  review and lane leads. Roughly level with GPT-6.1 Sol, cheaper than Opus 5.5
+  for about the same result, and probably better at design and taste.
+- **Watch out for:** Opus 5.5 remains the choice for critical review,
+  orchestration, crucial and terminal synthesis and hard reasoning.
+- **Cost:** workhorse-tier.
+- **Reach:** `sonnet` resolves to `claude-sonnet-5-5` on the `claude` adapter;
+  1M-token context. `agy` keeps its separately listed Sonnet 4.6.
+
+### OpenCode models
+
+- **Good at:** `opencode-go/deepseek-v4.1-flash` is the go-to (main allowance);
+  `opencode-go/glm-5.3-flash` has a smaller monthly allowance, so use it
+  sparingly. Both suit reviews, small implementations and design opinions.
+- **Watch out for:** free models (any `opencode/*-free`) rotate often and may
+  train on prompts; keep sensitive, private or client data off them
+  (`confidential: true` skips them).
+- **Reach:** `opencode` adapter; other models stay discoverable with
+  `opencode models`.
 
 ### Gemini 3.7 Flash (Google)
 
@@ -222,9 +235,8 @@ decider.
 
 Reach for the cheapest *diverse* family (Luna, Gemini Flash, or the open models
 behind `kiro`) and confine it to objective fields. The catalogue also maps
-Anthropic's `bulk` class to Sonnet 5.5 at low effort; use that route when the
-Anthropic lane is required, while the cheaper families remain the cost-first
-choice for objective extraction and classification.
+Anthropic's `bulk` class to Sonnet 5.5 at low effort; the cheaper families
+remain the cost-first choice for objective extraction and classification.
 
 ### Human-facing final polish
 
@@ -263,9 +275,8 @@ actual task before relying on it.
 GPT-6 Luna for bulk.** Both arrived on 2026-09-23 and are very cheap for their
 strength. Reading a lot to produce a report, exhaustive inventories and
 mechanical sweeps go to Luna (`scout`); ordinary implementation, legwork that
-needs some judgement, and review go to Sol (`workhorse`). Claude's budget is
-better spent on judgement. The GPT-5.6 generation and Terra are retired from the
-catalogue.
+needs some judgement, and review go to Sol (`workhorse`). The GPT-5.6
+generation and Terra are retired from the catalogue.
 
 `openai.role_effort_defaults.worker` raises both worker aliases to `high`, which
 outranks the task-class floors of `low` and `medium`. The raise is scoped to the
@@ -283,15 +294,12 @@ automatic flagship fallback. Give Astra genuinely hard work where a miss is
 expensive or precise high-stakes judgement matters; ordinary frontend
 implementation belongs to Claude Sonnet 5.5 or Gemini legwork.
 
-**Sonnet 5.5 is Claude's workhorse; Opus 5.5 is its flagship.** Use Sonnet for
-ordinary implementation, including UI/frontend, scoping, ordinary reviews,
-legwork and lane leads. Reserve Opus for chairing, critical review, synthesis,
-adjudication, final design calls and leads of large design efforts. Prefer Opus
-over Claude Fable 5.1 (`claude-fable-5-1`) for critical judgement most of the
-time. Codex Luna remains the bulk legwork route. Gemini Flash contributes
-frontend legwork and reviews, including visual reviews and design opinions;
-OpenCode free models can help with reviews, small implementations and opinions
-where their fit and data terms allow.
+**Sonnet 5.5 is Claude's default; Opus 5.5 is for critical work.** Sonnet takes
+implementation, research, screenshots, second opinions, ordinary review and
+UI/design. Opus takes chairing, critical review, orchestration, crucial and
+terminal synthesis and hard reasoning, and still serves review. Prefer Opus over
+Claude Fable 5.1 (`claude-fable-5-1`) for critical judgement most of the time.
+Luna remains the bulk legwork route.
 
 **Orchestration stays with the chair's own family**, at flagship effort:
 Anthropic at high effort when Claude is the chair, and Astra at `xhigh` when a
@@ -304,17 +312,12 @@ it can also take frontend legwork. It is a different family for cross-family
 review legs and is reachable at `-high`, `-medium` and `-low`. Use
 `gemini-3.8-flash-high` for registers carrying legal or regulatory risk as well.
 
-**OpenCode free models help with reviews, small implementations, visual reviews
-and design opinions.** Their contributor tier may train on prompts, so do not
-send sensitive, private or client data.
-
-**Route pools carry these preferences as weights.** `strong` favours Opus 5.5,
-then Sol at `high`–`xhigh`, with Astra sparing; `bulk` favours Luna, then Gemini
-3.8 Flash, with Sol sparing; `design` spreads evenly over Opus, DeepSeek V4.1
-Flash and two free OpenCode models, with Astra sparing; `writing` favours Gemini
-3.8 Flash, then Opus. The free OpenCode models may train on prompts, so pass
-`confidential: true` to keep them out. When a preference here changes, change the
-pool weights in `config/model-routing.json` in the same edit.
+**Route pools carry these preferences as weights** (`provenant routes` prints
+them). `strong`: Opus high, Sonnet and Sol normal, Astra sparing. `bulk`: Luna
+high; Gemini Flash, Sonnet and DeepSeek normal; Sol and GLM sparing. `design`:
+Sonnet high; Opus and DeepSeek normal; GLM, Astra and the free models sparing.
+`writing`: Gemini Flash high, then Opus. When a preference here changes, change
+the pool weights in `config/model-routing.json` in the same edit.
 
 **Critical review has no fixed family.** The cross-family obligation is relative
 to whoever chairs the run, so the right second family depends on the first. Do

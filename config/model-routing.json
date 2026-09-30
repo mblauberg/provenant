@@ -11,6 +11,10 @@
         "weight": "high"
       },
       {
+        "model": "claude/claude-sonnet-5-5",
+        "weight": "normal"
+      },
+      {
         "model": "codex/gpt-6.1-sol",
         "weight": "normal",
         "effort": [
@@ -33,15 +37,31 @@
         "weight": "normal"
       },
       {
+        "model": "claude/claude-sonnet-5-5",
+        "weight": "normal"
+      },
+      {
+        "model": "opencode/opencode-go/deepseek-v4.1-flash",
+        "weight": "normal"
+      },
+      {
         "model": "codex/gpt-6.1-sol",
         "weight": "sparing",
         "effort": [
           "medium",
           "high"
         ]
+      },
+      {
+        "model": "opencode/opencode-go/glm-5.3-flash",
+        "weight": "sparing"
       }
     ],
     "design": [
+      {
+        "model": "claude/claude-sonnet-5-5",
+        "weight": "high"
+      },
       {
         "model": "claude/claude-opus-5-5",
         "weight": "normal"
@@ -51,12 +71,20 @@
         "weight": "normal"
       },
       {
+        "model": "opencode/opencode-go/glm-5.3-flash",
+        "weight": "sparing"
+      },
+      {
+        "model": "opencode/opencode/space-bunny-free",
+        "weight": "sparing"
+      },
+      {
         "model": "opencode/opencode/muse-spark-1.3-contributor-free",
-        "weight": "normal"
+        "weight": "sparing"
       },
       {
         "model": "opencode/opencode/mimo-v2.6-flash-free",
-        "weight": "normal"
+        "weight": "sparing"
       },
       {
         "model": "codex/gpt-6-astra",
@@ -97,20 +125,7 @@
     "screenshots": "bulk",
     "ui-taste": "design"
   },
-  "model_traits": {
-    "opencode/mimo-v2.6-flash-free": [
-      "free",
-      "trains-on-prompts"
-    ],
-    "opencode/muse-spark-1.3-contributor-free": [
-      "free",
-      "trains-on-prompts"
-    ],
-    "opencode/nemotron-3-ultra-free": [
-      "free",
-      "trains-on-prompts"
-    ]
-  },
+  "model_traits": {},
   "task_class_routes": {
     "mechanical": {
       "alias": "scout",
@@ -203,8 +218,8 @@
           "gpt-6-astra"
         ],
         "claude": [
-          "claude-opus-5-5",
-          "claude-sonnet-5-5"
+          "claude-sonnet-5-5",
+          "claude-opus-5-5"
         ],
         "agy": [
           "gemini-3.8-flash"
@@ -733,31 +748,22 @@
           "trains_on_prompts": false
         },
         {
+          "id": "opencode/space-bunny-free",
+          "names": [
+            "space-bunny"
+          ]
+        },
+        {
           "id": "opencode/mimo-v2.6-flash-free",
           "names": [
             "mimo-free"
-          ],
-          "plan_cap_usd": 0,
-          "trains_on_prompts": true,
-          "warning": "Contributor free tier: prompts may be used for training. Do not send sensitive, private or client data."
-        },
-        {
-          "id": "opencode/nemotron-3-ultra-free",
-          "names": [
-            "nemotron-free"
-          ],
-          "plan_cap_usd": 0,
-          "trains_on_prompts": true,
-          "warning": "Contributor free tier: prompts may be used for training. Do not send sensitive, private or client data."
+          ]
         },
         {
           "id": "opencode/muse-spark-1.3-contributor-free",
           "names": [
             "muse"
-          ],
-          "plan_cap_usd": 0,
-          "trains_on_prompts": true,
-          "warning": "Contributor free tier: prompts may be used for training. Do not send sensitive, private or client data."
+          ]
         }
       ],
       "aliases": {
@@ -772,7 +778,8 @@
         "scout": [
           "opencode-go/mimo-v2.6-flash"
         ]
-      }
+      },
+      "free_pattern": "-free$"
     }
   },
   "endpoints": {
