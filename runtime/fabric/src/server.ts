@@ -4,8 +4,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 
 import { databasePath, identify } from "./identity.js";
-import { statusRows, fabricOutput } from "./run-registry.js";
-import { reply, digest, serverBuild, mailboxView, adapterView, runView } from "./surface.js";
+import { statusRows, fabricOutput, resultTail } from "./run-registry.js";
+import { reply, digest, serverBuild, mailboxView, adapterView, runView, fullView, lanesDigest, cancelDigest } from "./surface.js";
 import { catalogueSnapshot, liveModels } from "./catalogue.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
 import { reconcileSession, sessionDispatch, sessionName, sessionView } from "./sessions.js";
@@ -62,7 +62,8 @@ const server = new McpServer(
     instructions:
       "Dispatch prompt or tasks (same prompt/route fields per task, optional id); status waits up to 55s. Copy the returned Route line for provenance. " +
       "Full output stays in files; output reads bounded slices. Inbox peeks; claim ids, then acknowledge after processing. " +
-      "Writers require an owned worktree. Resume answers input_required. detail:full expands metadata.",
+      "Writers require an owned worktree. Resume answers input_required. detail:full expands metadata. " +
+      "To block on running lanes use the shell, not polling: provenant lanes --wait --all --timeout 900.",
   },
 );
 /**
@@ -170,18 +171,55 @@ const batch = {
   concurrency: optionalNumber,
   wait_seconds: wait,
 };
-const INPUT_SYNONYMS: Record<string, string> = {
-  prompt_path: "prompt_file", file: "prompt_file",
-  dir: "cwd", path: "cwd", task: "task_id",
+// The first listed target a tool actually has wins, so run_id is `id` on status and `ids` on runs.
+const INPUT_SYNONYMS: Record<string, string[]> = {
+  prompt_path: ["prompt_file"], file: ["prompt_file"],
+  dir: ["cwd"], path: ["cwd"], task: ["task_id", "id"],
+  run_id: ["id", "ids"], task_id: ["id"], id: ["task_id", "ids"],
 };
+const NUMERIC_FIELDS = ["wait_seconds", "timeout_seconds", "concurrency", "max_bytes", "offset", "limit",
+  "claim_seconds", "seconds", "context_ceiling", "generation", "after_seq", "tail_chars"];
+const UNTYPED_NUMBERS = ["wait_seconds", "timeout_seconds", "concurrency", "max_bytes"];
+const numericText = (value: unknown): value is string => typeof value === "string" && /^\s*\d+(\.\d+)?\s*$/u.test(value);
+/** Numeric strings become numbers and a stray `until` is read for what it meant, each with a warning. */
+function coerceInput(input: Record<string, any>, warnings: string[]): Record<string, any> {
+  const result = { ...input };
+  const number = (owner: Record<string, any>, key: string) => {
+    if (numericText(owner[key])) { warnings.push(`read ${key} "${owner[key].trim()}" as a number`); owner[key] = Number(owner[key]); }
+  };
+  for (const key of NUMERIC_FIELDS) number(result, key);
+  if (Array.isArray(result.tasks))
+    result.tasks = result.tasks.map((item: unknown, index: number) => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+      const copy = { ...(item as Record<string, any>) };
+      const before = warnings.length;
+      number(copy, "timeout_seconds");
+      for (let at = before; at < warnings.length; at++) warnings[at] = `tasks[${index}]: ${warnings[at]}`;
+      return copy;
+    });
+  if (result.until !== undefined && result.until !== "any" && result.until !== "all") {
+    const seconds = typeof result.until === "number" ? String(result.until) : result.until;
+    if (numericText(seconds) && result.wait_seconds === undefined) {
+      result.wait_seconds = Number(seconds);
+      warnings.push(`until is any or all; read ${String(seconds).trim()} as wait_seconds`);
+    } else if (typeof result.until === "string" && ["any", "all"].includes(result.until.trim().toLowerCase())) {
+      warnings.push(`normalised until "${result.until}"`);
+      result.until = result.until.trim().toLowerCase();
+      return result;
+    } else warnings.push(`ignored until ${JSON.stringify(result.until)}; use any or all`);
+    delete result.until;
+  }
+  return result;
+}
 const inputKey = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/gu, "");
 function normaliseInputKeys(name: string, input: Record<string, any>, fields: string[], nestedTask = false) {
-  const aliases = nestedTask ? { ...INPUT_SYNONYMS, task_id: "id", task: "id" } : INPUT_SYNONYMS;
+  const aliases: Record<string, string[]> = nestedTask ? { ...INPUT_SYNONYMS, task_id: ["id"], task: ["id"] } : INPUT_SYNONYMS;
   const result: Record<string, any> = {};
   const warnings: string[] = [];
   for (const [key, value] of Object.entries(input)) {
     const canonical = fields.find((field) => inputKey(field) === inputKey(key));
-    const synonym = Object.entries(aliases).find(([alias]) => inputKey(alias) === inputKey(key))?.[1];
+    const synonym = Object.entries(aliases).find(([alias]) => inputKey(alias) === inputKey(key))?.[1]
+      .find((candidate) => fields.includes(candidate));
     let target = canonical ?? synonym;
     if (!target || !fields.includes(target)) {
       const matches = fields.map((field) => ({ field, score: editDistance(inputKey(key), inputKey(field)) }))
@@ -199,7 +237,11 @@ function normaliseInputKeys(name: string, input: Record<string, any>, fields: st
       if (!item || typeof item !== "object" || Array.isArray(item))
         return { id: `task-${index + 1}`, prompt: "", prompt_file: "" };
       const rawTask = item as Record<string, any>;
-      try { return normaliseInputKeys(name, rawTask, ["id", ...Object.keys(task)], true).value; }
+      try {
+        const nested = normaliseInputKeys(name, rawTask, ["id", ...Object.keys(task)], true);
+        warnings.push(...nested.warnings.map((text) => `tasks[${index}]: ${text}`));
+        return nested.value;
+      }
       catch {
         const id = rawTask.id ?? rawTask.task_id ?? rawTask.task;
         return { id: typeof id === "string" ? id : `task-${index + 1}`, prompt: "", prompt_file: "" };
@@ -218,6 +260,12 @@ function register(
   if (Object.hasOwn(accepted, "mode")) accepted.mode = z.string().optional().meta({ enum: ACCESS_MODES });
   if (Object.hasOwn(accepted, "capabilities")) accepted.capabilities = z.unknown().optional()
     .meta({ description: "Array of distinct postgres or browser values.", type: "array", items: { type: "string", enum: ["postgres", "browser"] } }) as unknown as z.ZodRawShape[string];
+  // Numeric strings and run_id/task_id spellings are normalised with a warning below, so the
+  // protocol layer must not reject them first; the strict parse still enforces the real types.
+  for (const key of NUMERIC_FIELDS.filter((field) => !UNTYPED_NUMBERS.includes(field)))
+    if (Object.hasOwn(accepted, key)) accepted[key] = z.unknown().optional().meta({ type: "number" }) as unknown as z.ZodRawShape[string];
+  if (Object.hasOwn(accepted, "until")) accepted.until = z.unknown().optional().meta({ enum: ["any", "all"] }) as unknown as z.ZodRawShape[string];
+  if (["fabric_cancel", "fabric_output"].includes(name)) accepted.id = z.string().optional();
   if (name === "fabric_dispatch" || name === "fabric_batch") {
     const acceptedTask = { id: str, ...task, mode: z.string().optional().meta({ enum: ACCESS_MODES }) };
     acceptedTask.capabilities = z.unknown().optional()
@@ -229,11 +277,12 @@ function register(
   const inputSchema = z.object(accepted).catchall(z.unknown()).meta({ additionalProperties: false });
   server.registerTool(name, { description, inputSchema }, async (rawInput, extra) => {
     const includeStructuredContent =
-      !["fabric_dispatch", "fabric_status"].includes(name) || rawInput.detail === "full";
+      !["fabric_dispatch", "fabric_status", "fabric_cancel", "fabric_runs"].includes(name) || rawInput.detail === "full";
     try {
       let corrected;
       try { corrected = normaliseInputKeys(name, rawInput, Object.keys(schema)); }
       catch (error) { return reply(error as Record<string, unknown>, includeStructuredContent); }
+      corrected.value = coerceInput(corrected.value, corrected.warnings);
       const strictFields = { ...schema };
       if (name === "fabric_dispatch") strictFields.tasks = z.array(z.strictObject(taskFields)).min(1).max(64).optional();
       if (name === "fabric_batch") strictFields.tasks = z.array(z.strictObject(taskFields)).min(1).max(64);
@@ -241,7 +290,9 @@ function register(
       if (!parsed.success) {
         if (parsed.error.issues.some((issue) => issue.path.includes("capabilities")))
           return reply({ status: "rejected", error: "capabilities_invalid", fix: "Pass capabilities as a list of distinct postgres or browser values." }, includeStructuredContent);
-        return reply({ status: "rejected", error: "invalid_input", fix: parsed.error.issues[0]?.message ?? "Check the supplied fields." }, includeStructuredContent);
+        const issue = parsed.error.issues[0];
+        const where = issue?.path.length ? `${issue.path.join(".")}: ` : "";
+        return reply({ status: "rejected", error: "invalid_input", fix: issue ? `${where}${issue.message}` : "Check the supplied fields." }, includeStructuredContent);
       }
       const input = parsed.data as any;
       const result = await handler(input, extra) as Record<string, any>;
@@ -330,12 +381,13 @@ register(
 );
 register(
   "fabric_runs",
-  "Versioned, bounded run and lane reader with root-relative paths.",
-  { ids: ids(20), wait_seconds: wait },
-  async ({ ids, wait_seconds }, { signal }) => {
+  "Versioned, bounded run and lane reader. state filters (running, terminal, active, ok, failed...); limit caps rows (default 20); detail:full adds the structured rows.",
+  { ids: ids(20), wait_seconds: wait, state: str, limit: z.number().int().min(1).max(200).optional(), detail },
+  async ({ ids, wait_seconds, state, limit, detail }, { signal }) => {
     const bounded = boundedWait(wait_seconds);
     if (bounded.error) return bounded.error;
-    return readRuns(who.project, ids, bounded.value, signal);
+    const result = await readRuns(who.project, ids, bounded.value, signal, limit ?? 20, state);
+    return { ...result, digest: lanesDigest(result) };
   },
 );
 register(
@@ -437,13 +489,17 @@ register(
     wait_seconds: wait,
     until: z.enum(["any", "all"]).optional(),
     detail,
+    tail_chars: z.number().int().min(0).max(4000).optional(),
+    fields: z.array(z.string()).optional(),
   },
-  async ({ ids, id, wait_seconds, until, detail }, { signal }) => {
+  async ({ ids, id, wait_seconds, until, detail, tail_chars, fields }, { signal }) => {
     const waitResult = boundedWait(wait_seconds);
     if (waitResult.error) return waitResult.error;
     const result = await statusRows(who.project, ids ?? (id ? [id] : undefined), waitResult.value, until, signal, detail);
     acknowledgeRuns(result);
-    const view = runView(withWarnings(result, waitResult.warnings), detail);
+    const view = detail === "full"
+      ? fullView(runView(withWarnings(result, waitResult.warnings), detail), fields)
+      : runView(withWarnings(result, waitResult.warnings), detail);
     // Claims are an addendum; run status must stay readable when the store cannot open.
     let workClaims: ReturnType<Store["workClaims"]> = [];
     let landingLease: ReturnType<Store["landingLease"]> | undefined;
@@ -454,7 +510,18 @@ register(
     } catch {
       // Fall through with no ownership rows.
     }
+    // A short answer should not cost a second call: terminal rows carry the end of their result.
+    const rows: Record<string, any>[] = Array.isArray(result.runs) ? result.runs : [];
+    const terminal = rows.filter((row) => row.state === "terminal");
+    const each = Math.min(tail_chars ?? 1200, Math.floor(Math.max(3600, tail_chars ?? 0) / Math.max(1, terminal.length)));
+    const tails = detail === "full" ? [] : terminal.flatMap((row) => {
+      const tail = resultTail(row, each);
+      return tail ? [`result tail ${row.task_id ?? row.run_id}${tail.total > tail.text.length ? " (end)" : ""}:\n${tail.text}`] : [];
+    });
+    const running = rows.some((row) => row.state === "running" || row.state === "queued");
     const ownership = [
+      ...tails,
+      ...(running ? ['hint: shell `provenant lanes --wait --all --timeout 900` blocks until they finish'] : []),
       ...workClaims.map((claim) => `claim ${claim.issue ?? claim.paths.join(",")} ${claim.holder} g${claim.generation}`),
       ...(landingLease ? [`landing ${landingLease.holder} g${landingLease.generation} ${landingLease.expectedSha}`] : []),
     ];
@@ -518,10 +585,11 @@ register(
     return { status: "ok", forgotten: key, digest: `forgot session ${key}; run ${row.runId ?? row.turnRunId} and provider history kept` };
   },
 );
-register("fabric_cancel", "Stop a run and its provider group.", { id: z.string(), reason: str }, async ({ id, reason }) => {
+register("fabric_cancel", "Stop a run and its provider group, or one task of a batch by its task id.", { id: z.string(), reason: str, detail }, async ({ id, reason, detail }) => {
   const result = await cancelConfiguredRun(id, who, reason);
   acknowledgeRuns(result);
-  return runView(result);
+  const view = runView(result);
+  return detail === "full" ? view : { ...view, digest: cancelDigest(view) };
 });
 register(
   "fabric_output",

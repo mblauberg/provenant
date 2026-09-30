@@ -27,6 +27,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  existsSync,
   readFileSync,
   realpathSync,
   statSync,
@@ -1003,14 +1004,71 @@ export async function dispatchConfiguredBatch(
   }
 }
 
+/**
+ * A task of a running batch, named by its own id: cancelling it must not stop
+ * its siblings. The owner honours a per-attempt marker that run_controls writes.
+ */
+async function cancelBatchTask(
+  target: Record<string, any>,
+  identity: Identity,
+  env: NodeJS.ProcessEnv,
+): Promise<Record<string, unknown> | undefined> {
+  // The row's own attempt is the current one (a queued resume announces attempt N before its history has it).
+  const attempt = Number(target.attempt ?? target.attempts?.at(-1)?.attempt);
+  if (!Number.isSafeInteger(attempt) || attempt < 1)
+    return { status: "rejected", error: "task_not_started",
+      fix: `Task ${target.task_id} has not started; cancel the whole batch with its run id ${target.run_id}.` };
+  const attemptId = `attempt-${String(attempt).padStart(3, "0")}`;
+  if (!["tasks", "dispatch/tasks"].some((tree) => existsSync(join(String(target.run_dir), tree, String(target.task_id), attemptId))))
+    return { status: "rejected", error: "attempt_not_started",
+      fix: `Task ${target.task_id} attempt ${attempt} is queued and not yet published; retry cancel once it starts, or cancel the whole batch with its run id ${target.run_id}.` };
+  const root = productRoot(env);
+  const python = await pythonOwner(root, identity, env);
+  const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
+  try {
+    await execFileAsync(python, [controls, "cancel", "--run-dir", String(target.run_dir), "--task-id", String(target.task_id),
+      "--attempt-id", attemptId, "--wait-seconds", "5"], {
+      cwd: dirname(runRoot(identity.cwd)), env: withoutGitRedirects(env), timeout: 10_000, maxBuffer: 64 * 1024,
+    });
+  } catch {
+    return { status: "rejected", error: "cancel_unconfirmed",
+      fix: `Task ${target.task_id} did not confirm cancellation; check fabric_status, or cancel the batch with ${target.run_id}.` };
+  }
+  return undefined;
+}
+
 export async function cancelConfiguredRun(
   id: string,
   identity: Identity,
   reason?: string,
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<Record<string, unknown>> {
   const rows = await statusRows(identity.cwd, [id]);
   if (!rows.runs) return rows;
-  const row = rows.runs[0]!;
+  // A task id names that task alone, whatever the metadata says; only a run or batch id reaches
+  // the whole-run path below. run_controls resolves the task's own scope.
+  const task = rows.runs.find((row) => row.task_id === id && row.run_id !== id);
+  if (task) {
+    if (task.state === "terminal") return rows;
+    const failure = await cancelBatchTask(task, identity, env);
+    return failure ?? { ...(await statusRows(identity.cwd, [id])), ...(reason ? { reason } : {}) };
+  }
+  // A manifest task with no published attempt resolves to a legacy run row; it is still a task.
+  const unresolved = rows.runs.find((row) => {
+    if (row.run_id === id || row.task_id === id || typeof row.run_dir !== "string") return false;
+    try {
+      const metadata = JSON.parse(readFileSync(join(row.run_dir, "dispatch-status.json"), "utf8"));
+      return Array.isArray(metadata.task_ids) && metadata.batch_id && metadata.task_ids.includes(id);
+    } catch { return false; }
+  });
+  if (unresolved)
+    return { status: "rejected", error: "task_not_started",
+      fix: `Task ${id} has not started; cancel the whole batch with its run id ${unresolved.run_id}.` };
+  // Only a positively matched run or batch identifier may stop a whole run; an unmatched id is never widened.
+  const row = rows.runs.find((r) => [r.run_id, r.batch_id, r.run_dir, typeof r.run_dir === "string" ? basename(r.run_dir) : undefined].includes(id));
+  if (!row)
+    return { status: "rejected", error: "run_not_matched",
+      fix: `${id} matches no run or batch id; pass the run id from fabric_status, or a task id whose batch has started.` };
   if (rows.runs.every((row) => row.state === "terminal")) return rows;
   const started = [...activeOwners].find((owner) => owner.runDir === row.run_dir);
   if (started) {
