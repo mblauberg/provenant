@@ -123,6 +123,9 @@ it("starts, inspects, resumes across agents, serialises and forgets a named sess
     expect(await worker.call("session", { action: "inspect", name: "Review" })).toMatchObject({
       provider_session_id: `fixture-${run}-${task}`, attempt: 2, updated_by: "worker-seat",
     });
+    // A name holds one provider session, never a council.
+    expect(await chair.call("dispatch", { session: "Board", prompt: "x", council: 2 }))
+      .toMatchObject({ status: "rejected", error: "session_invalid" });
     // Resume keeps the route; a change is the existing typed rejection.
     expect(await chair.call("dispatch", { session: "Review", prompt: "x", adapter: "claude" }))
       .toMatchObject({ status: "rejected", error: "resume_route_change" });

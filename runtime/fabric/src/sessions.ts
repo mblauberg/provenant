@@ -159,6 +159,9 @@ export async function sessionDispatch(
   let name: string;
   try {
     name = sessionName(session);
+    // A council runs several provider sessions as a batch; a name holds one.
+    if (rest.council !== undefined || rest.models !== undefined)
+      throw new InputError("session_invalid", "A named session is one provider session; drop council and models, or dispatch them without session.");
   } catch (error) {
     return rejected(error);
   }
