@@ -57,9 +57,16 @@ CONFINED_STATE = {
         # kiro-cli keeps its sign-in and refreshed tokens in data.sqlite3, guarded by .refresh.lock,
         # which it opens for writing before reading the token. The rest of its support directory holds
         # shell hooks the user's shell sources and binaries it runs, so stays read-only.
-        "read_write": (".kiro", ".cache/kiro", ".npm", "Library/Application Support/kiro-cli/data.sqlite3*",
-                       "Library/Application Support/kiro-cli/.refresh.lock"),
+        "read_write": (".kiro", ".cache/kiro", ".npm",
+                       *(f"Library/Application Support/kiro-cli/data.sqlite3-{suffix}"
+                         for suffix in ("wal", "shm", "journal"))),
+        # Rewritten in place only: a lane cannot swap either for a link its unconfined CLI would follow.
+        "write_in_place": ("Library/Application Support/kiro-cli/data.sqlite3",
+                           "Library/Application Support/kiro-cli/.refresh.lock"),
+        "no_links": ("Library/Application Support/kiro-cli",),
         "read": ("Library/Application Support/kiro-cli",),
+        # Its prompt history spans every project.
+        "read_denied": ("Library/Application Support/kiro-cli/history",),
         # Its engine finds its app bundle through the launcher links in ~/.local/bin.
         "read_literal": (".local/bin", ".local/bin/kiro-cli", ".local/bin/kiro-cli-chat",
                          ".local/bin/kiro-cli-term"),
@@ -399,6 +406,7 @@ def os_confinement_profile(plan):
             profile += _sbpl_unix_socket_allow(
                 [cwd, *add_dirs, *([run_dir] if run_dir else []), codex_home]
             )
+        profile += _state_write_guards(home, state)
         profile += _sbpl_rule("deny", "file-write*", plan.get("protected_paths", []))
         profile += _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
         return profile
@@ -409,6 +417,7 @@ def os_confinement_profile(plan):
     return (
         "(version 1)\n(allow default)\n(deny file-write*)\n"
         + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), *state_writes, Path("/dev")])
+        + _state_write_guards(home, state)
         + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
         + _sbpl_rule("deny", "file-read-data", [root, *add_dirs])
         + _sbpl_rule("allow", "file-read-data", [*([run_dir] if run_dir else []), *state_writes])
@@ -420,23 +429,55 @@ def os_confinement_profile(plan):
             Path(plan["cwd"]), *add_dirs
         ])
         # After every allow, since a state grant such as ~/.claude would otherwise reopen them.
-        + _sbpl_rule("deny", "file-read-data", [home / path for path in EXTRA_DENIED_READS])
-        # A Claude lane resumes from its own project's transcripts, and only those reopen.
-        + (f"(allow file-read-data {_claude_project_filter(home, plan['cwd'])})\n"
-           if plan.get("adapter") == "claude" else "")
+        + _sbpl_rule("deny", "file-read-data", [home / path for path in
+                                                (*EXTRA_DENIED_READS, *state.get("read_denied", ()))])
+        + (_claude_session_reads(home, plan) if plan.get("adapter") == "claude" else "")
         + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
     )
 
 
-def _claude_project_filter(home, cwd):
-    """Match Claude Code's transcript directory for cwd, which it names after the resolved path."""
-    name = re.sub(r"[^A-Za-z0-9]", "-", str(Path(cwd).resolve()))
-    projects = Path(home) / ".claude/projects"
-    if len(name) <= 200:
-        return "(subpath " + _sbpl_quote(projects / name) + ")"
-    # Claude truncates a longer name to 200 characters and appends a hash of the full path.
-    escaped = "".join("\\" + char if char in set(r'.^$*+?()[]{}|\\"') else char for char in str(projects))
-    return '(regex #"^' + escaped + "/" + name[:200] + '-[^/]*(/|$)")'
+def _state_write_guards(home, state):
+    """Rewrite-in-place grants, and no links a lane could plant for the provider's unconfined CLI."""
+    in_place = [home / path for path in state.get("write_in_place", ())]
+    rules = _sbpl_rule("allow", "file-write*", in_place, literal=True, keep_leaf=True)
+    rules += _sbpl_rule("deny", "file-write-create file-write-unlink", in_place, literal=True, keep_leaf=True)
+    for path in state.get("no_links", ()):
+        rules += f"(deny file-write-create (require-all {_sbpl_filter(home / path)} (vnode-type SYMLINK)))\n"
+    return rules
+
+
+def _claude_project_dir(home, cwd):
+    """Claude Code's transcript directory for cwd, named as Claude names it from the resolved path."""
+    encoded = str(Path(cwd).resolve()).encode("utf-16-le", "surrogatepass")
+    units = [int.from_bytes(encoded[index:index + 2], "little") for index in range(0, len(encoded), 2)]
+    name = "".join(chr(unit) if unit < 128 and chr(unit).isalnum() else "-" for unit in units)
+    if len(name) > 200:
+        # Claude keeps 200 characters and appends abs() of JavaScript's 32-bit string hash in base 36.
+        value = 0
+        for unit in units:
+            value = (value * 31 + unit) & 0xFFFFFFFF
+        value = abs(value - (1 << 32) if value >= 1 << 31 else value)
+        digits = ""
+        while True:
+            value, remainder = divmod(value, 36)
+            digits = "0123456789abcdefghijklmnopqrstuvwxyz"[remainder] + digits
+            if not value:
+                break
+        name = name[:200] + "-" + digits
+    return Path(home) / ".claude/projects" / name
+
+
+def _claude_session_reads(home, plan):
+    """A Claude lane may read back its own session's transcript, which it needs to resume."""
+    sessions = [session for session in dict.fromkeys((plan.get("resume_session"), plan.get("session_id")))
+                if session and re.fullmatch(r"[A-Za-z0-9-]+", str(session))]
+    if not sessions:
+        return ""
+    directory = _claude_project_dir(home, plan["cwd"])
+    return "(allow file-read-data " + " ".join(
+        f"(literal {_sbpl_quote(directory / (session + '.jsonl'))}) (subpath {_sbpl_quote(directory / session)})"
+        for session in sessions
+    ) + ")\n"
 
 
 def _uses_api_key(plan):
@@ -654,8 +695,9 @@ def build_plan(
         source_codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
         codex_auth_path = source_codex_home / "auth.json"
     if confinement == "sandbox-exec":
+        state = CONFINED_STATE.get(adapter, {})
         writable_paths = [str(attempt_dir), *(str(Path.home() / path) for path in
-                           CONFINED_STATE.get(adapter, {}).get("read_write", ())), "/dev"]
+                           (*state.get("read_write", ()), *state.get("write_in_place", ()))), "/dev"]
         if mode == "worktree_write":
             git_paths = ([str(git_private), *(str(git_common / path) for path in
                            GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)]
@@ -2067,8 +2109,9 @@ def execute(
     attempt_dir = Path(plan["run_dir"])
     private_tmp = attempt_dir / "tmp"
     private_cache = private_tmp / "cache"
-    private_tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
-    private_cache.mkdir(parents=True, exist_ok=True, mode=0o700)
+    for private in (private_tmp, private_cache):
+        private.mkdir(parents=True, exist_ok=True, mode=0o700)
+        private.chmod(0o700)  # mkdir leaves an existing directory's mode as it was
     environment.update(TMPDIR=str(private_tmp), TMP=str(private_tmp), TEMP=str(private_tmp),
                        XDG_CACHE_HOME=str(private_cache))
     if plan["mode"] == "worktree_write":
@@ -2080,6 +2123,7 @@ def execute(
     if plan["adapter"] == "claude":
         private_claude_tmp = private_tmp / "claude"
         private_claude_tmp.mkdir(parents=True, exist_ok=True, mode=0o700)
+        private_claude_tmp.chmod(0o700)
         environment["CLAUDE_TMPDIR"] = str(private_claude_tmp)
         # Otherwise Claude Code opens /tmp/claude-<uid>, which the read-only profile denies.
         environment["CLAUDE_CODE_TMPDIR"] = str(private_claude_tmp)

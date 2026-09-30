@@ -607,7 +607,7 @@ def test_kiro_profile_writes_only_its_sign_in_state_not_shell_hooks_or_executabl
     workspace = home / "repo"
     workspace.mkdir(parents=True)
     support = home / KIRO_SUPPORT
-    for relative in (*KIRO_EXECUTABLES, "data.sqlite3", ".refresh.lock"):
+    for relative in (*KIRO_EXECUTABLES, "data.sqlite3", ".refresh.lock", "history"):
         (support / relative).parent.mkdir(parents=True, exist_ok=True)
         (support / relative).write_text("original\n", encoding="utf-8")
     subprocess.run(["git", "init", "-q", str(workspace)], check=True)
@@ -617,7 +617,7 @@ def test_kiro_profile_writes_only_its_sign_in_state_not_shell_hooks_or_executabl
     profile = mod.os_confinement_profile(plan)
     writes = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-write* "))
     assert f'(subpath "{support}")' not in writes
-    assert "data\\.sqlite3[^/]*$" in writes
+    assert "data\\.sqlite3[^/]*$" not in writes
     if mode == "read_only":
         reads = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-read-data "))
         assert f'(subpath "{support}")' in reads
@@ -637,13 +637,37 @@ def test_kiro_profile_writes_only_its_sign_in_state_not_shell_hooks_or_executabl
     if probe.returncode and "sandbox_apply" in probe.stderr:
         pytest.skip("sandbox_apply is refused in this test environment")
     assert probe.returncode == 0, probe.stderr
+    # SQLite creates and removes its own sidecars; kiro-cli rewrites its lock and database in place.
+    assert run(f"rm '{support}/data.sqlite3-wal'").returncode == 0
+    for name in ("data.sqlite3-shm", "data.sqlite3-journal"):
+        assert run(f"printf x > '{support}/{name}' && rm '{support}/{name}'").returncode == 0, name
     # kiro-cli opens this lock for writing before it reads its token, or reports the token expired.
     assert run(f"printf x > '{support}/.refresh.lock'").returncode == 0
+    assert run(f"printf x >> '{support}/data.sqlite3'").returncode == 0
     for relative in KIRO_EXECUTABLES:
         assert run(f"printf hijack > '{support}/{relative}'").returncode != 0, relative
         assert (support / relative).read_text(encoding="utf-8") == "original\n", relative
     assert run(f"printf x > '{support}/shell/new.zsh'").returncode != 0
     assert run(f"printf x > '{support}/kas/2.24.0-new'").returncode != 0
+    assert run(f"printf x > '{support}/data.sqlite3-evil'").returncode != 0
+    # No link that the user's unconfined kiro-cli would later follow into a shell hook.
+    hook = support / "shell/zshrc.pre.zsh"
+    for name in ("data.sqlite3-wal", "data.sqlite3-journal", ".refresh.lock", "data.sqlite3"):
+        target = support / name
+        assert run(f"ln -s '{hook}' '{target}'").returncode != 0, name
+        assert run(f"ln '{hook}' '{target}'").returncode != 0, name
+        assert not target.is_symlink(), name
+    for name in (".refresh.lock", "data.sqlite3"):
+        assert run(f"rm -f '{support}/{name}'").returncode != 0, name
+        assert run(f"printf x > '{support}/data.sqlite3-wal' && mv '{support}/data.sqlite3-wal' '{support}/{name}'"
+                   ).returncode != 0, name
+        assert (support / name).is_file() and not (support / name).is_symlink(), name
+    assert hook.read_text(encoding="utf-8") == "original\n"
+    history = run(f"cat '{support}/history'")
+    if mode == "read_only":
+        # kiro-cli's prompt history spans every project; a read-only lane has no need of it.
+        assert history.returncode != 0
+        assert run(f"cat '{support}/data.sqlite3'").returncode == 0
 
 
 def test_confined_kiro_refuses_a_missing_engine_with_a_fix(monkeypatch, tmp_path):
@@ -682,16 +706,21 @@ def test_read_only_transcript_denies_follow_every_state_allow(monkeypatch, tmp_p
     monkeypatch.setattr(mod.Path, "home", lambda: home)
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     plan = {"adapter": adapter, "mode": "read_only", "route": {}, "workspace_root": str(workspace),
-            "cwd": str(workspace), "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+            "cwd": str(workspace), "session_id": "11111111-2222-3333-4444-555555555555",
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
     lines = mod.os_confinement_profile(plan).splitlines()
     denied = [f'(subpath "{home / path}")' for path in mod.EXTRA_DENIED_READS]
     last_deny = max(index for index, line in enumerate(lines)
                     if line.startswith("(deny file-read-data ") and all(rule in line for rule in denied))
     later = [line for line in lines[last_deny + 1:] if line.startswith("(allow file-read")]
-    # Only a Claude lane's own project transcripts reopen, so that it can resume its session.
-    own = str(home / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(workspace.resolve())))
-    assert all(own in line for line in later)
-    assert bool(later) is (adapter == "claude")
+    # Only a Claude lane's own session transcript reopens, so that it can resume.
+    own = home / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(workspace.resolve()))
+    session = own / plan["session_id"]
+    expected = [f'(allow file-read-data (literal "{session}.jsonl") (subpath "{session}"))']
+    assert later == (expected if adapter == "claude" else [])
+    del plan["session_id"]
+    lines = mod.os_confinement_profile(plan).splitlines()
+    assert not any(str(own) in line for line in lines)
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
@@ -707,11 +736,16 @@ def test_claude_read_only_lane_cannot_read_other_projects_transcripts(monkeypatc
     workspace = tmp_path / "repo"
     workspace.mkdir()
     own = home / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(workspace.resolve()))
-    own.mkdir(parents=True)
-    (own / "session.jsonl").write_text("mine\n", encoding="utf-8")
+    (own / "memory").mkdir(parents=True)
+    (own / "mine").mkdir()
+    (own / "mine.jsonl").write_text("mine\n", encoding="utf-8")
+    (own / "mine/subagent.jsonl").write_text("mine\n", encoding="utf-8")
+    (own / "chair.jsonl").write_text("chair\n", encoding="utf-8")
+    (own / "memory/MEMORY.md").write_text("memory\n", encoding="utf-8")
     monkeypatch.setattr(mod.Path, "home", lambda: home)
     plan = {"adapter": "claude", "mode": "read_only", "route": {}, "workspace_root": str(workspace),
-            "cwd": str(workspace), "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+            "cwd": str(workspace), "session_id": "fresh", "resume_session": "mine",
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
     profile = mod.os_confinement_profile(plan)
 
     def run(script):
@@ -723,20 +757,31 @@ def test_claude_read_only_lane_cannot_read_other_projects_transcripts(monkeypatc
         pytest.skip("sandbox_apply is refused in this test environment")
     assert probe.stdout == "{}\n"
     assert run(f"cat '{home}/.claude/projects/other/session.jsonl'").returncode != 0
-    # Its own project's transcripts stay readable, so the lane can resume.
-    assert run(f"cat '{own}/session.jsonl'").stdout == "mine\n"
+    # Its own session stays readable, so the lane can resume; the project's other sessions do not.
+    assert run(f"cat '{own}/mine.jsonl'").stdout == "mine\n"
+    assert run(f"cat '{own}/mine/subagent.jsonl'").stdout == "mine\n"
+    assert run(f"cat '{own}/chair.jsonl'").returncode != 0
+    assert run(f"cat '{own}/memory/MEMORY.md'").returncode != 0
 
 
-def test_claude_project_transcript_dir_matches_claude_naming_including_long_paths(tmp_path):
+def test_claude_project_dir_matches_claude_naming_including_long_paths():
     mod = supervisor()
     home = Path("/Users/someone")
-    short = mod._claude_project_filter(home, "/Users/someone/Repos/my_app.v2")
-    assert short == '(subpath "/Users/someone/.claude/projects/-Users-someone-Repos-my-app-v2")'
-    long_cwd = "/Users/someone/" + "a" * 220
-    long_rule = mod._claude_project_filter(home, long_cwd)
-    prefix = re.sub(r"[^A-Za-z0-9]", "-", long_cwd)[:200]
-    # Claude truncates a long name to 200 characters and appends a hash.
-    assert long_rule == f'(regex #"^/Users/someone/\\.claude/projects/{prefix}-[^/]*(/|$)")'
+    projects = home / ".claude/projects"
+    assert mod._claude_project_dir(home, "/Users/someone/Repos/my_app.v2") == (
+        projects / "-Users-someone-Repos-my-app-v2")
+    # Claude replaces each UTF-16 code unit, so a character outside the BMP becomes two dashes.
+    assert mod._claude_project_dir(home, "/Users/someone/a\U0001F600b").name == "-Users-someone-a--b"
+    # A long name keeps 200 characters plus Claude's 32-bit string hash in base 36; checked against
+    # the directory Claude Code 2.1.285 created for this path.
+    scratch = ("/private/tmp/claude-501/-Users-user-Repos-provenant/"
+               "76b874fc-49eb-4d7e-9fbb-8ff3e570ed9f/scratchpad/" + "x" * 120 + "/" + "y" * 60)
+    assert mod._claude_project_dir(home, scratch).name == (
+        re.sub(r"[^A-Za-z0-9]", "-", scratch)[:200] + "-qpcnov")
+    # Two long paths that share their first 200 characters get different, exact directories.
+    first = mod._claude_project_dir(home, "/Users/someone/" + "a" * 220 + "/one")
+    second = mod._claude_project_dir(home, "/Users/someone/" + "a" * 220 + "/two")
+    assert first != second and first.name[:200] == second.name[:200]
 
 
 def test_sbpl_filter_star_escapes_regex_without_resolving_symlink_target(tmp_path):
@@ -1655,6 +1700,10 @@ print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':
 print(json.dumps({'type':'turn.completed'}))
 """
     plan = fixture_plan(tmp_path, code, adapter="claude")
+    # A directory left by an earlier attempt is tightened, not trusted.
+    (tmp_path / "tmp/claude").mkdir(parents=True)
+    (tmp_path / "tmp").chmod(0o755)
+    (tmp_path / "tmp/claude").chmod(0o755)
     record = supervisor().execute(plan, tmp_path / "result.md")
     assert record["status"] == "ok"
     paths = json.loads((tmp_path / "result.md").read_text())

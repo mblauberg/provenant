@@ -201,15 +201,17 @@ works. Other home-directory reads remain denied apart from provider state and
 sign-in files listed by the adapter profile: the login keychain for agy and for
 Claude lanes on OAuth sign-in (bare and endpoint routes, which use a key, do not
 get it); and for Kiro, `~/Library/Application Support/kiro-cli` and its
-`~/.local/bin` launcher links. Kiro can write only `data.sqlite3*` and
-`.refresh.lock` there, so its token can refresh; the shell hooks and binaries beside it stay read-only, and a
-confined Kiro dispatch refuses until kiro-cli has unpacked its engine outside the
-sandbox. The keychain file grant, together with the profile's unrestricted
+`~/.local/bin` launcher links, but not its cross-project `history`. Kiro can
+write there only `data.sqlite3` and `.refresh.lock`, in place, and SQLite's
+`-wal`, `-shm` and `-journal` sidecars, so its token can refresh. It cannot
+create links there, and the shell hooks and binaries beside them stay
+read-only. A confined Kiro dispatch refuses until kiro-cli has unpacked its
+engine outside the sandbox. The keychain file grant, together with the profile's unrestricted
 `mach-lookup`, lets an OAuth Claude lane query the whole login keychain through
 the security service; SBPL has no narrower filter, and read-only Claude lanes
 have no shell. `~/.claude/projects` and `~/.codex/sessions` stay unreadable
-even where provider state covers them, except a Claude lane's own project
-directory there, which it needs to resume its session. Claude lanes get `CLAUDE_CODE_TMPDIR` in
+even where provider state covers them, except a Claude lane's own session
+transcript (`<session>.jsonl` and `<session>/`), which it needs to resume. Claude lanes get `CLAUDE_CODE_TMPDIR` in
 the attempt's `tmp`, which is private to the user (mode 0700), so they never
 touch `/tmp/claude-<uid>`.
 Projects declare protected paths in `.agents/fabric-policy.json`, relative to
