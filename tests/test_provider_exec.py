@@ -2803,6 +2803,8 @@ def test_nested_owner_accepts_legacy_inherited_locale_start(tmp_path, monkeypatc
         output = record["owner_started_at"] if kwargs.get("env", {}).get("LC_ALL") != "C" else module._recorded_start_time(row)
         return subprocess.CompletedProcess(argv, 0, stdout=output)
 
+    # The fake pid may be a live process on the host; force the ps path under test.
+    monkeypatch.setattr(module.process_info, "process", lambda _pid: None)
     monkeypatch.setattr(module.subprocess, "run", locale_ps)
     assert module._is_nested_fabric_owner(row)
     assert [call[1].get("env", {}).get("LC_ALL") for call in calls] == ["C", "en_AU.UTF-8"]
@@ -2825,6 +2827,8 @@ def test_nested_owner_accepts_canonical_ps_when_computed_start_differs(tmp_path,
         calls.append(kwargs.get("env", {}).get("LC_ALL"))
         return subprocess.CompletedProcess(argv, 0, stdout=canonical if calls[-1] == "C" else "other locale")
 
+    # The fake pid may be a live process on the host; force the ps path under test.
+    monkeypatch.setattr(module.process_info, "process", lambda _pid: None)
     monkeypatch.setattr(module.subprocess, "run", canonical_ps)
     assert module._is_nested_fabric_owner(row)
     assert calls == ["C"]
