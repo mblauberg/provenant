@@ -390,3 +390,41 @@ it("keeps a named session's line in a running turn's rebuilt text", () => {
     session_digest: "\n  session s resume active" });
   expect(text).toBe(`running mcp-abc123 · fabric_status{ids:["mcp-abc123"],wait_seconds:55}\n  session s resume active`);
 });
+
+it("recovers a resumed turn whose launcher failed between recording it and starting its owner", async () => {
+  const project = fixtureProject();
+  const chair = await project.connect(project.linked, "chair-seat", "codex");
+  const faulty = (fault: string) => spawnSync(resolve(import.meta.dirname, "../bin/fabric"),
+    ["dispatch", "--session", "crash", "--prompt-file", "again.md", "--wait"], {
+      cwd: project.linked, encoding: "utf8", env: {
+        ...project.env(project.linked, "cli-seat", "codex"), PROVENANT_SPAWN_FAULT: fault,
+        NODE_OPTIONS: `${process.env.NODE_OPTIONS ?? ""} --import=${resolve(import.meta.dirname, "spawn-fault-preload.mjs")}`.trim(),
+      },
+    });
+  try {
+    const first = await chair.call("dispatch", { session: "crash", prompt: "first", wait_seconds: 5 });
+    expect(first).toMatchObject({ status: "ok", attempt: 1 });
+    writeFileSync(join(project.linked, "again.md"), "again");
+
+    // A caught failure closes the turn at once; the pointer stays on the last clean attempt.
+    const thrown = faulty("throw");
+    expect(thrown.stdout + thrown.stderr).toContain("spawn refused");
+    expect(await chair.call("session", { action: "inspect", name: "crash" })).toMatchObject({
+      run_id: first.run_id, attempt: 1, active_run_id: null, last_turn: { attempt: 2, status: "rejected" },
+    });
+    expect(await chair.call("dispatch", { session: "crash", prompt: "again", wait_seconds: 5 }))
+      .toMatchObject({ status: "ok", attempt: 2, session_turn: "resume" });
+
+    // A launcher that dies at the same point leaves a recorded turn with no owner and no attempt: settled on read.
+    const killed = faulty("kill");
+    expect(killed.signal).toBe("SIGKILL");
+    expect(await chair.call("session", { action: "inspect", name: "crash" })).toMatchObject({
+      run_id: first.run_id, attempt: 2, active_run_id: null, last_turn: { attempt: 3, status: "interrupted" },
+    });
+    expect(await chair.call("session", { action: "forget", name: "crash" })).toMatchObject({ forgotten: "crash" });
+    expect(await chair.call("dispatch", { session: "crash", prompt: "first", wait_seconds: 5 }))
+      .toMatchObject({ status: "ok", attempt: 1, session_turn: "start" });
+  } finally {
+    await chair.client.close();
+  }
+}, 60_000);

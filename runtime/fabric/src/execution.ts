@@ -331,41 +331,52 @@ export function startOwner(
   const stdoutPath = join(runDir, "_owner", `stdout${suffix}.jsonl`);
   const stderrPath = join(runDir, "_owner", `stderr${suffix}.log`);
   // Persist required status before spawning: a failed write cannot orphan a provider.
-  writeFileSync(
-    join(runDir, "dispatch-status.json"),
-    JSON.stringify({
-      id: shortRunId(runDir),
-      ...(identification.kind === "dispatch"
-        ? { task_id: identification.identifier, ...(identification.batchId ? { batch_id: identification.batchId } : {}) }
-        : { batch_id: identification.identifier }),
-      next_attempt: identification.nextAttempt,
-      kind: identification.kind,
-      started_at: new Date().toISOString(),
-      routes: identification.routes,
-      task_ids: identification.taskIds,
-      timeout_seconds: identification.timeout,
-      status: "running",
-      owner_stdout: stdoutPath,
-      owner_stderr: stderrPath,
-    }) + "\n",
-    { mode: 0o600 },
-  );
-  const stdout = openSync(stdoutPath, "wx", 0o600);
-  const stderr = openSync(stderrPath, "wx", 0o600);
+  const statusPath = join(runDir, "dispatch-status.json");
+  const metadata = {
+    id: shortRunId(runDir),
+    ...(identification.kind === "dispatch"
+      ? { task_id: identification.identifier, ...(identification.batchId ? { batch_id: identification.batchId } : {}) }
+      : { batch_id: identification.identifier }),
+    next_attempt: identification.nextAttempt,
+    kind: identification.kind,
+    started_at: new Date().toISOString(),
+    routes: identification.routes,
+    task_ids: identification.taskIds,
+    timeout_seconds: identification.timeout,
+    status: "running",
+    owner_stdout: stdoutPath,
+    owner_stderr: stderrPath,
+  };
+  writeFileSync(statusPath, JSON.stringify(metadata) + "\n", { mode: 0o600 });
   let child: ChildProcess;
   try {
-    // Detached, so the owner leads its own process group: that group is what
-    // cancellation signals, and it is what makes the recorded pid actionable
-    // from a process that never spawned it.
-    child = spawn(owner, args, {
-      cwd: identity.cwd,
-      env: ownerEnv,
-      stdio: ["ignore", stdout, stderr],
-      detached: true,
-    });
-  } finally {
-    closeSync(stdout);
-    closeSync(stderr);
+    const stdout = openSync(stdoutPath, "wx", 0o600);
+    let stderr: number | undefined;
+    try {
+      stderr = openSync(stderrPath, "wx", 0o600);
+      // Detached, so the owner leads its own process group: that group is what
+      // cancellation signals, and it is what makes the recorded pid actionable
+      // from a process that never spawned it.
+      child = spawn(owner, args, {
+        cwd: identity.cwd,
+        env: ownerEnv,
+        stdio: ["ignore", stdout, stderr],
+        detached: true,
+      });
+    } finally {
+      closeSync(stdout);
+      if (stderr !== undefined) closeSync(stderr);
+    }
+  } catch (error) {
+    // No owner started: close the attempt this status announced, so no reader waits on it.
+    const message = error instanceof Error ? error.message : String(error);
+    try {
+      writeFileSync(statusPath, JSON.stringify({ ...metadata, status: "rejected", error: "owner_start_failed",
+        fix: `The run owner could not start (${message}); retry.`, finished_at: new Date().toISOString() }) + "\n", { mode: 0o600 });
+    } catch {
+      /* Readers still close it: no owner and no attempt past queued. */
+    }
+    throw error;
   }
   let started: StartedOwner;
   const completion = new Promise<OwnerCompletion>((resolveCompletion) => {

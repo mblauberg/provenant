@@ -71,15 +71,20 @@ export async function reconcileSession(store: Store, who: Identity, name: string
     final: Record<string, any> | undefined;
   // The launcher is still recording, starting or watching its run.
   if (alive(row.turnPid)) return row;
-  // A dead launcher with no recorded run launched nothing.
+  // A dead launcher with no recorded run launched nothing; one with a recorded
+  // run defers to that run's owner and the turn's own attempts.
   if (row.turnRunId !== null) {
     // Exclusion errs towards a live owner: an unknown process identity is not death.
     const owner = findRecordedRun(who.cwd, row.turnRunId);
     if (owner && observedAlive(owner.owner_pid, owner.owner_started_at)) return row;
     const task = await taskRow(who.cwd, row.turnRunId, row.turnTaskId);
-    if (task && task.state !== "terminal") return row;
+    const attempts = task ? turnAttempts(task, row.turnAttempt!) : [];
+    // With launcher and owner gone, only a turn attempt past queued can still be open;
+    // a queued placeholder for an owner that never started holds nothing.
+    if (task && task.state !== "terminal" && attempts.some((attempt) => !["terminal", "queued"].includes(attempt.state)))
+      return row;
     runDir = String(task?.run_dir ?? "");
-    final = task && (turnAttempts(task, row.turnAttempt!).at(-1) ??
+    final = task && (attempts.at(-1) ??
       // An owner that rejected the turn before its attempt existed.
       (Number(task.attempt) === row.turnAttempt ? task : undefined));
     if (final) status = final.error === "continuation_unsupported"
