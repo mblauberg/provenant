@@ -12,11 +12,16 @@ MODEL_SOURCE = "claude:init.model"  # fallback; answering models are read from t
 SIGNATURES = (("usage_limited", r"you.ve hit your (?:usage|session|weekly) limit"),)
 
 
+def uses_api_key(route):
+    """A bare or endpoint lane signs in with a key; any other lane uses Claude's OAuth sign-in."""
+    return bool(os.environ.get("ANTHROPIC_API_KEY") or route.get("endpoint_base_url"))
+
+
 def argv(p):
     command = [
         CLI,
         "-p",
-        "--bare" if os.environ.get("ANTHROPIC_API_KEY") or p["route"].get("endpoint_base_url") else "--safe-mode",
+        "--bare" if uses_api_key(p["route"]) else "--safe-mode",
         "--strict-mcp-config",
         "--disable-slash-commands",
         "--permission-prompts",
