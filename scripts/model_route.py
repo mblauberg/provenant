@@ -226,6 +226,24 @@ def _merge_catalog(base: Any, overlay: Any, path: str, drift: list[str]) -> Any:
     return overlay
 
 
+FREE_TIER_WARNING = "Free tier: prompts may be used for training. Do not send sensitive, private or client data."
+
+
+def is_free_model(adapter: dict[str, Any], model: str) -> bool:
+    """A model id matching the adapter's `free_pattern`: free, and may train on prompts."""
+    pattern = adapter.get("free_pattern") if isinstance(adapter, dict) else None
+    return isinstance(pattern, str) and re.search(pattern, model) is not None
+
+
+def _apply_free_pattern(adapter: dict[str, Any]) -> None:
+    """Free models are listed by id alone; the pattern supplies the cap, training flag and warning."""
+    for entry in adapter.get("models", []) if isinstance(adapter, dict) else []:
+        if isinstance(entry, dict) and is_free_model(adapter, entry.get("id", "")):
+            entry.setdefault("plan_cap_usd", 0)
+            entry.setdefault("trains_on_prompts", True)
+            entry.setdefault("warning", FREE_TIER_WARNING)
+
+
 def catalogue_snapshot(path: Path | None = None) -> dict[str, Any]:
     product = path or PRODUCT_CATALOG_PATH
     base = json.loads(product.read_text())
@@ -270,6 +288,8 @@ def catalogue_snapshot(path: Path | None = None) -> dict[str, Any]:
                 drift.append("instance catalogue: malformed overlay dropped; fix: use a JSON object")
         except (OSError, ValueError):
             drift.append("instance catalogue: unreadable overlay dropped; fix: refresh routing")
+    for entry in base.get("adapters", {}).values():
+        _apply_free_pattern(entry)
     models = [dict(model, adapter=adapter) for adapter, entry in base.get("adapters", {}).items()
               for model in entry.get("models", []) if isinstance(model, dict)]
     shorthands: dict[str, list[str]] = {}
@@ -834,8 +854,8 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     warning = (registered or {}).get("warning")
     if warning:
         warnings.append(warning)
-    if "muse-spark-" in model and not warning:
-        warnings.append("Contributor free tier: prompts may be used for training. Do not send sensitive, private or client data.")
+    if is_free_model(adapter, model) and not warning:
+        warnings.append(FREE_TIER_WARNING)
     cap = (registered or {}).get("plan_cap_usd")
     if explicit and cap == 15:
         notes.append(f"{model} has a $15 plan cap")

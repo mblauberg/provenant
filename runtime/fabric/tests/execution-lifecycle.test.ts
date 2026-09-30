@@ -1275,7 +1275,7 @@ describe("route pools", () => {
     ], fixturePython, product, { ...identity, provider: "agent" }, env, new AbortController().signal);
     expect(expanded.errors.map((error) => [error.task_id, error.error])).toEqual([["nope", "route_invalid"]]);
     const byId = Object.fromEntries(expanded.tasks.map((task) => [task.id, task]));
-    expect(byId.one).toMatchObject({ adapter: "claude", model: "claude-opus-5-5", pick_reason: "strong top" });
+    expect(byId.one).toMatchObject({ adapter: "claude", model: "claude-sonnet-5-5", pick_reason: "strong top" });
     expect(byId.one).not.toHaveProperty("route");
     expect([byId["pair-1"]?.pick_reason, byId["pair-2"]?.pick_reason]).toEqual(["strong council 1/2", "strong council 2/2"]);
     expect(new Set([byId["pair-1"]?.adapter, byId["pair-2"]?.adapter])).toEqual(new Set(["claude", "codex"]));

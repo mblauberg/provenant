@@ -17,17 +17,24 @@ SCRIPT = ROOT / "scripts" / "model-route"
 CATALOG = json.loads((ROOT / "config" / "model-routing.json").read_text())
 
 
-def test_opencode_models_have_explicit_training_flags():
-    models = CATALOG["adapters"]["opencode"]["models"]
-    assert models
-    for model in models:
-        assert type(model.get("trains_on_prompts")) is bool
-        assert model["trains_on_prompts"] is ("-free" in model["id"])
+def test_free_opencode_models_are_derived_from_the_free_pattern():
+    router = load_router()
+    adapter = router.catalogue_snapshot()["adapters"]["opencode"]
+    assert adapter["free_pattern"]
+    for model in adapter["models"]:
+        free = router.is_free_model(adapter, model["id"])
+        assert router.training_flag(adapter, model) is free or model["trains_on_prompts"] is False
+        assert (model["plan_cap_usd"] == 0) is free
+        assert bool(model.get("warning")) is free
+    fixture = {"free_pattern": "-free$", "models": [{"id": "opencode/rotating-free"}]}
+    router._apply_free_pattern(fixture)
+    assert fixture["models"][0]["trains_on_prompts"] is True and fixture["models"][0]["plan_cap_usd"] == 0
 
 
 def test_required_task_classes_bind_registered_exact_models_and_supported_efforts():
-    required = {"implementation", "ui-taste", "screenshots", "review",
-                "second-opinion", "research", "bulk"}
+    required = {"mechanical", "legwork", "implementation", "ui-taste",
+                "screenshots", "review", "second-opinion", "research", "bulk",
+                "critical-review", "orchestration"}
     routes = CATALOG["task_class_routes"]
     assert required <= routes.keys()
     for name in required:
@@ -39,6 +46,37 @@ def test_required_task_classes_bind_registered_exact_models_and_supported_effort
                 assert model in entries
                 assert route["effort"] in entries[model].get("efforts", [])
                 assert entries[model].get("effort_transport") != "none"
+
+
+def test_claude_sonnet_is_the_workhorse_default_and_opus_remains_flagship():
+    claude = CATALOG["adapters"]["claude"]
+    sonnet = next(model for model in claude["models"] if model["id"] == "claude-sonnet-5-5")
+    opus = next(model for model in claude["models"] if model["id"] == "claude-opus-5-5")
+    assert sonnet["default"] is True
+    assert {"sonnet", "claude-sonnet-5-5", "claude-sonnet-5"} <= set(sonnet["names"])
+    assert opus["default"] is False
+    anthropic = CATALOG["families"]["anthropic"]
+    assert anthropic["aliases"]["workhorse"] == ["sonnet", "opus"]
+    assert anthropic["aliases"]["flagship"] == ["opus"]
+    assert anthropic["role_overrides"] == {"critical-review": {"flagship": ["opus"]}}
+    assert CATALOG["task_class_routes"]["review"]["models"]["claude"] == [
+        "claude-sonnet-5-5", "claude-opus-5-5"
+    ]
+    assert CATALOG["task_class_routes"]["critical-review"]["models"]["claude"] == [
+        "claude-opus-5-5"
+    ]
+    for task_class in ("implementation", "research", "screenshots", "second-opinion", "ui-taste"):
+        assert CATALOG["task_class_routes"][task_class]["models"]["claude"][0] == "claude-sonnet-5-5"
+    for task_class in ("critical-review", "orchestration"):
+        assert CATALOG["task_class_routes"][task_class]["models"]["claude"][0] == "claude-opus-5-5"
+    assert CATALOG["task_class_routes"]["implementation"]["models"]["codex"] == [
+        "gpt-6.1-sol", "gpt-6-luna"
+    ]
+    assert CATALOG["families"]["openai"]["aliases"]["workhorse"] == ["gpt-6.1-sol", "gpt-6-luna"]
+    assert CATALOG["families"]["openai"]["aliases"]["scout"] == ["gpt-6-luna"]
+    result, route = resolve("--adapter", "claude", "--alias", "workhorse", "--role", "worker")
+    assert result.returncode == 0, result.stderr
+    assert route["resolved_model"] == "sonnet"
 
 
 def test_fallback_inherits_adapter_training_flag_without_false_default():
@@ -543,7 +581,10 @@ def test_unregistered_agy_model_passes_explicit_effort_unverified():
 
 
 def test_opencode_training_warning_and_paid_fallback_excludes_free():
-    for model in ("opencode/mimo-v2.6-flash-free", "opencode/nemotron-3-ultra-free"):
+    free_models = [item["id"] for item in CATALOG["adapters"]["opencode"]["models"]
+                   if item["id"].endswith("-free")]
+    assert free_models
+    for model in free_models:
         result, free_route = resolve("--adapter", "opencode", "--model", model, "--role", "worker")
         assert result.returncode == 0, free_route
         assert free_route["trains_on_prompts"] is True
@@ -602,7 +643,7 @@ def test_malformed_cooldown_time_cannot_break_routing(tmp_path):
     assert result.returncode == 0, result.stderr
 
 
-def test_codex_tier_returns_paid_fallbacks_and_skips_cooling_candidate(tmp_path):
+def test_codex_workhorse_has_no_luna_fallback_when_sol_cools(tmp_path):
     until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
     (tmp_path / "cooldowns.json").write_text(json.dumps({"cooldowns": {
         "codex/gpt-6.1-sol": {"cooling_until": until},
@@ -2859,6 +2900,46 @@ def test_task_class_uses_ordered_exact_models_from_catalogue(tmp_path):
     assert result.returncode == 0
     assert route["resolved_model"] == "gpt-6.1-sol"
     assert route["configured_models"] == ["gpt-6-astra", "gpt-6.1-sol"]
+
+
+@pytest.mark.parametrize(
+    ("task_class", "expected_model"),
+    [
+        (name, route["models"]["claude"][0])
+        for name, route in CATALOG["task_class_routes"].items()
+        if route.get("models", {}).get("claude")
+    ],
+)
+def test_claude_task_classes_resolve_the_first_catalogued_model(
+    tmp_path, task_class, expected_model
+):
+    task_route = CATALOG["task_class_routes"][task_class]
+    effort = task_route["effort"]
+    models = {
+        model: {
+            "resolved_model": model,
+            "requested_effort": effort,
+            "effort_verified": False,
+        }
+        for model in task_route["models"]["claude"]
+    }
+    snapshot_value = capability_snapshot(models, source="claude subscription canary")
+    snapshot_value["provenance"] = {
+        "kind": "subscription_runtime_canary",
+        "auth_method": "claude.ai",
+        "subscription_type": "pro",
+    }
+    snapshot = tmp_path / f"{task_class}-claude-caps.json"
+    snapshot.write_text(json.dumps(snapshot_value))
+
+    result, route = resolve(
+        "--adapter", "claude", "--task-class", task_class,
+        "--role", task_route["role"], "--capabilities-file", str(snapshot),
+    )
+
+    assert result.returncode == 0, route
+    assert route["task_class"] == task_class
+    assert route["resolved_model"] == expected_model
 
 
 def test_task_class_rejects_adapter_alias_instead_of_exact_model_id(tmp_path):

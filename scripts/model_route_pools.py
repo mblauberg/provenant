@@ -137,6 +137,8 @@ def model_traits(router: Any, catalog: dict[str, Any], adapter: str, model: str)
         traits.add("trains-on-prompts")
     if isinstance(registered, dict) and registered.get("plan_cap_usd") == 0:
         traits.add("free")
+    if router.is_free_model(adapter_entry, model):
+        traits.update(("free", "trains-on-prompts"))
     return sorted(traits)
 
 
