@@ -11,8 +11,9 @@ SIGNATURES = (("auth_required", r"not logged in|Login expired"),)
 
 
 def argv(p):
-    # stream-json needs the v2 engine; the v1 default rejects it.
-    command = [CLI, "chat", "--no-interactive", "--agent-engine", "v2", "--output-format", OUTPUT_FORMAT]
+    # stream-json needs the v2 or v3 engine; the v1 default rejects it, and kiro-cli 2.23's
+    # v2 engine never finishes a headless turn.
+    command = [CLI, "chat", "--no-interactive", "--agent-engine", "v3", "--output-format", OUTPUT_FORMAT]
     command += (
         ["--trust-all-tools"]
         if p["mode"] == "worktree_write"
