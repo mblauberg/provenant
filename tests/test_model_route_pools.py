@@ -584,3 +584,13 @@ def test_confidential_pick_of_an_effort_suffixed_live_id_keeps_its_family_traits
     assert "trains-on-prompts" in pools.model_traits(router, catalog, "agy", "gemini-3.9-flash-high")
     with pytest.raises(pools.PoolError):
         pick({"models": ["agy/gemini-3.9-flash-high"], "confidential": True}, tmp_path, catalog=catalog)
+
+
+def test_pool_pick_of_a_suffixed_live_id_keeps_the_effort_its_suffix_names(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    (tmp_path / "capabilities.json").write_text(json.dumps({"agy": {
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "models": ["gemini-3.9-flash-low", "gemini-3.9-flash-high"]}}))
+    low = pick({"models": ["agy/gemini-3.9-flash-low"]}, tmp_path)["picks"][0]
+    assert (low["model"], low.get("effort")) == ("gemini-3.9-flash", "low")
+    assert pick({"models": ["agy/gemini-3.9-flash-low@high"]}, tmp_path)["picks"][0]["effort"] == "high"

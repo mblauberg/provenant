@@ -412,6 +412,14 @@ def _live_base(adapter: str, model: str, catalog: dict[str, Any]) -> str:
     return next((model[:-len(suffix)] for suffix in suffixes if suffix and model.casefold().endswith(suffix.casefold())), model)
 
 
+def suffix_effort(adapter: str, requested: str, catalog: dict[str, Any]) -> str:
+    """The effort an id's catalogue-defined suffix names (gemini-3.9-flash-low -> low), or ''."""
+    tail = requested[len(_live_base(adapter, requested, catalog)):].casefold()
+    levels = {level: value.casefold() for entry in catalog["adapters"][adapter].get("models", [])
+              if entry.get("effort_transport") == "model-suffix" for level, value in entry.get("suffix", {}).items()}
+    return next((level for level, value in levels.items() if tail and value == tail), "")
+
+
 def _latest_in_family(adapter: str, requested: str, catalog: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
     """Resolve a version-free name to the newest model of its family, catalogue or fresh live listing."""
     entries = catalog["adapters"][adapter].get("models", [])

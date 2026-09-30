@@ -343,6 +343,8 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
                                 + ", ".join(effort_order) + ".")
             if not registered:
                 warnings.append(f"{text} is not in the catalogue; passing it to {adapter} as given")
+            effort = effort or (router.suffix_effort(adapter, text.partition("/")[2] if separator and head in adapters else text,
+                                                    catalog) if adapter in adapters else "")
             entries.append({"key": f"{adapter}/{model}", "adapter": adapter, "model": model, "weight": 1.0,
                             "effort": [effort] if effort else None,
                             "family": spread_family(router, catalog, model),
