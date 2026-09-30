@@ -1430,7 +1430,7 @@ describe("native-first routing", () => {
       "NATIVE: claude/haiku is this claude seat's own model; spawn a native subagent instead of Fabric");
   });
 
-  it("keeps a native seat's default on its own adapter when nothing else is available", async () => {
+  it("refuses a native seat's default when only its own models are available", async () => {
     const bin = join(temporaryDirectory, "codex-only-bin");
     mkdirSync(bin, { recursive: true });
     writeFileSync(join(bin, "codex"), "#!/bin/sh\nexit 0\n");
@@ -1440,11 +1440,20 @@ describe("native-first routing", () => {
     expect(task).toEqual({ id: "d", prompt: "p", route: "workhorse", native_default: "workhorse" });
     const expanded = await expandPools([task], fixturePython, product, codexSeat,
       { ...poolEnvironment(), PATH: bin }, new AbortController().signal);
-    expect(expanded.errors).toEqual([]);
-    expect(expanded.tasks).toEqual([{ id: "d", prompt: "p", alias: "workhorse" }]);
-    expect(expanded.warnings).toEqual([]);
-    expect(normaliseRoute(expanded.tasks[0]!, codexSeat, catalogueSnapshot(repositoryRoot)).warnings?.[0])
-      .toBe("NATIVE: codex/workhorse is this codex seat's own model; spawn a native subagent instead of Fabric");
+    expect(expanded.tasks).toEqual([]);
+    expect(expanded.errors).toEqual([expect.objectContaining({ task_id: "d", error: "route_native_only" })]);
+    expect(expanded.errors[0]!.fix).toMatch(/^spawn 1 native codex member \(.+\); .*pass adapter codex/u);
+  });
+
+  it("canonicalises a tier alias before choosing native-first", () => {
+    const codexSeat = { ...identity, provider: "codex" };
+    for (const alias of ["Workhorse", "workhorze", "WORKHORSE"])
+      expect(nativeFirst({ id: "d", prompt: "p", alias } as BatchTaskInput, codexSeat))
+        .toEqual({ id: "d", prompt: "p", route: "workhorse", native_default: "workhorse" });
+    expect(nativeFirst({ id: "d", prompt: "p", alias: "Flagshp" } as BatchTaskInput, codexSeat))
+      .toMatchObject({ route: "flagship" });
+    expect(nativeFirst({ id: "d", prompt: "p", alias: "luna" } as BatchTaskInput, codexSeat))
+      .toEqual({ id: "d", prompt: "p", alias: "luna" });
   });
 
   it("changes nothing for a seat without native subagents", async () => {
@@ -1698,7 +1707,7 @@ it('runs a read-only dispatch in another registered project and records it for t
  const brief=join(other,'brief.md');writeFileSync(brief,'read the other project');
  const argvPath=join(temporaryDirectory,'owner-argv.json');
  const caller={...identity,registeredProjects:[workspace,other]};
- const result=await dispatchConfiguredProvider({mode:'read_only',cwd:join(other,'src'),prompt_file:brief,task_id:'cross-project',wait_seconds:5},caller,new AbortController().signal,{...ownerEnvironment,FIXTURE_ARGV_PATH:argvPath});
+ const result=await dispatchConfiguredProvider({adapter:'codex',mode:'read_only',cwd:join(other,'src'),prompt_file:brief,task_id:'cross-project',wait_seconds:5},caller,new AbortController().signal,{...ownerEnvironment,FIXTURE_ARGV_PATH:argvPath});
  expect(result.status,JSON.stringify(result)).toBe('ok');
  const argv=JSON.parse(readFileSync(argvPath,'utf8')) as string[];
  expect(argv[argv.indexOf('--cwd')+1]).toBe(realpathSync(join(other,'src')));

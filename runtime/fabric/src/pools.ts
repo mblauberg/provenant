@@ -4,7 +4,7 @@ import { existsSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { withoutGitRedirects, type Identity } from "./identity.js";
-import { InputError, nativeAdapter, type BatchTaskInput, type RouteInput } from "./execution-input.js";
+import { InputError, nativeAdapter, tierAlias, type BatchTaskInput, type RouteInput } from "./execution-input.js";
 
 export const POOL_FIELDS = ["route", "rotate", "council", "models"] as const;
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
@@ -27,12 +27,14 @@ export function usesPool(input: RouteInput): boolean {
 /**
  * A Claude or Codex seat that names no adapter, model or pool would land on its
  * own models through the default or a tier alias. Take the matching pool
- * instead, where the picker skips the seat's native models.
+ * instead, where the picker skips the seat's native models; a pool holding only
+ * those is refused with `route_native_only`. An explicit adapter or model runs.
  */
 export function nativeFirst<T extends RouteInput>(task: T, identity: Identity): T {
-  const alias = task.alias ?? "workhorse";
   if (nativeAdapter(identity) === undefined || task.adapter !== undefined || task.model !== undefined ||
-      usesPool(task) || !["flagship", "workhorse", "scout"].includes(alias)) return task;
+      usesPool(task)) return task;
+  const alias = task.alias === undefined ? "workhorse" : tierAlias(task.alias);
+  if (alias === undefined) return task;
   const { alias: _alias, ...rest } = task;
   return { ...rest, route: alias, native_default: alias } as T;
 }
@@ -154,11 +156,6 @@ export async function expandPools(
     const answer = answers.get(index);
     if (answer === undefined) return [];
     const id = task.id ?? `task-${index + 1}`;
-    if (answer.status !== "ok" && answer.error === "route_native_only" && task.native_default !== undefined) {
-      // Only the seat's own models are available: keep the old default; its NATIVE warning names the subagent.
-      const { native_default: alias, ...rest } = withoutPool(task);
-      return [{ ...rest, alias }];
-    }
     if (answer.status !== "ok") {
       errors.push({ task_id: id, error: answer.error, fix: answer.fix });
       return [];

@@ -67,3 +67,20 @@ it("sends Claude to native subagents and names adapters without a live list", as
   expect((await liveModels("copilot", { root: repositoryRoot, env })).digest).toMatch(/^copilot: no live list\ncatalogued: /u);
   expect((await liveModels("nope", { root: repositoryRoot, env })).digest).toMatch(/^nope: unknown adapter; known: agy, claude, /u);
 });
+
+it("keeps a huge live list within the output budget and says what it left out", async () => {
+  const root = mkdtempSync(join(tmpdir(), "fabric-live-budget-"));
+  try {
+    const bin = join(root, "bin");
+    mkdirSync(bin);
+    const listing = Array.from({ length: 1200 }, (_, index) => `provider${index}/model-${index}`).join("\\n");
+    const script = join(bin, "opencode");
+    writeFileSync(script, `#!/bin/sh\ncase "$1" in --version) echo 1.2.3;; models) printf '${listing}\\n';; *) :;; esac\n`);
+    chmodSync(script, 0o755);
+    const env = { ...process.env, PATH: `${bin}:${process.env.PATH}`, AGENT_FABRIC_STATE_ROOT: root };
+    const { digest } = await liveModels("opencode", { root: repositoryRoot, env });
+    expect(digest.length).toBeLessThanOrEqual(4096);
+    expect(digest).toMatch(/\n\d+ more groups \(\d+ models\) omitted; pass match to narrow\n/u);
+    expect(digest.split("\n").at(-1)).toContain('dispatch any as model "opencode/<id>"');
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});

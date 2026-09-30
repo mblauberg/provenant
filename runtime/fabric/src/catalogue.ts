@@ -146,7 +146,7 @@ export function catalogueSnapshot(root?: string, env: NodeJS.ProcessEnv = proces
 }
 
 const LISTED: Record<string, string> = { agy: "agy", codex: "codex", cursor: "cursor-agent", kiro: "kiro-cli", opencode: "opencode" };
-const FLAT_LIMIT = 24, GROUP_LIMIT = 20;
+const FLAT_LIMIT = 24, GROUP_LIMIT = 20, OUTPUT_BUDGET = 4096;
 
 /**
  * Live model discovery through the Python probe, which bounds the listing and
@@ -172,7 +172,8 @@ export async function liveModels(adapter: string, options: { match?: string; roo
   const configuredPython = env.HARNESS_PYTHON;
   const python = configuredPython && isAbsolute(configuredPython) ? configuredPython : "python3";
   const stdout = await new Promise<string>((resolveOutput) => {
-    execFile(python, [join(productRoot, "scripts", "model_route.py"), "probe", "--adapter", adapter, "--executable", executable],
+    execFile(python, [join(productRoot, "scripts", "model_route.py"), "probe", "--adapter", adapter, "--executable", executable, "--listing-only"],
+      // The listing-only probe bounds each child within its own 30-second deadline, inside this one.
       { cwd: productRoot, env: { ...process.env, ...env }, encoding: "utf8", timeout: 40_000, maxBuffer: 4 * 1024 * 1024 },
       (_error, output) => resolveOutput(output ?? ""));
   });
@@ -200,5 +201,18 @@ export async function liveModels(adapter: string, options: { match?: string; roo
     lines = [...groups].map(([group, names]) =>
       `${group || "other"} (${names.length}): ${names.length > GROUP_LIMIT ? "pass match to list" : names.join(" ")}`);
   }
-  return { digest: [head, ...lines, `dispatch any as model "${adapter}/<id>"; an uncatalogued id runs with a note`].join("\n") };
+  const tail = `dispatch any as model "${adapter}/<id>"; an uncatalogued id runs with a note`;
+  // Whole lines only, within one budget; a long flat line collapses to its count.
+  const reserve = head.length + tail.length + 80;
+  const kept: string[] = [];
+  let used = reserve, omittedModels = 0;
+  for (const line of lines) {
+    if (used + line.length + 1 <= OUTPUT_BUDGET) { kept.push(line); used += line.length + 1; continue; }
+    omittedModels += models.length <= FLAT_LIMIT ? models.length : Number(/\((\d+)\)/u.exec(line)?.[1] ?? 0);
+  }
+  const omitted = lines.length - kept.length;
+  const note = omitted === 0 ? [] : [models.length <= FLAT_LIMIT
+    ? `${omittedModels} models omitted; pass match to narrow`
+    : `${omitted} more groups (${omittedModels} models) omitted; pass match to narrow`];
+  return { digest: [head, ...kept, ...note, tail].join("\n") };
 }

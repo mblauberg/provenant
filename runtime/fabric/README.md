@@ -353,11 +353,13 @@ Paths must resolve to regular files inside the retained run directory. For a bat
 CLI presence does not prove authentication; `auth?` makes that uncertainty explicit.
 `fabric_adapters` with `models: <adapter>` and optional `match` (CLI
 `fabric adapters --models <adapter> [--match S]`) lists that adapter's live model
-ids from `model-route probe`, cached for a day; large families show only a count
-until `match` narrows them. Dispatch any id as `model: "<adapter>/<id>"`; an id
+ids from a listing-only `model-route probe` (30-second deadline, cached for a
+day). A large family shows only its count, and a reply that would pass 4 KB drops
+whole groups and says how many; `match` narrows either. Dispatch any id as `model: "<adapter>/<id>"`; an id
 outside the catalogue runs with a note. A Claude or Codex seat keeps its own
-models on native subagents: pool picks and the default route skip them, a
-council hands them back as a spawn line, and an explicit request for them runs
+models on native subagents: pool picks and the default route skip them, a pool
+holding only them is refused (`route_native_only`), a council hands them back as
+a spawn line, and an explicit request for them runs
 with a leading `NATIVE:` warning (`skills/orchestrate/references/routing-and-tiers.md#native-first`).
 
 ## Mailbox and identity

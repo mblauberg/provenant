@@ -491,11 +491,12 @@ def _listed_models(raw: str) -> list[str]:
     for line in raw.splitlines():
         if line.rstrip().endswith("..."):  # a progress line such as agy's "Fetching available models..."
             continue
-        match = re.search(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+", line)
+        # A variant suffix such as `:free` is part of the id; a trailing colon is not.
+        match = re.search(r"[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)+(?::[A-Za-z0-9_.-]+)*", line)
         if match:
             listed.append(match.group(0))
             continue
-        match = re.match(r"^\s*(?:[-*]\s*)?([A-Za-z][A-Za-z0-9._/-]*)(?:\s|$)", line)
+        match = re.match(r"^\s*(?:[-*]\s*)?([A-Za-z][A-Za-z0-9._/-]*(?::[A-Za-z0-9._-]+)*)(?:\s|$)", line)
         if match and match.group(1).casefold() not in {"available", "models", "model", "name", "id"}:
             listed.append(match.group(1))
     return list(dict.fromkeys(listed))
@@ -506,7 +507,10 @@ def _kiro_probe_enforced(evidence: Any) -> bool:
             and evidence.get("permission_denied") is True and evidence.get("file_created") is False)
 
 
-def probe_capabilities(adapter: str, executable: str, deadline: float | None = None) -> tuple[dict[str, Any], int]:
+def probe_capabilities(adapter: str, executable: str, deadline: float | None = None,
+                       listing_only: bool = False) -> tuple[dict[str, Any], int]:
+    """Probe an adapter CLI. `listing_only` (discovery) lists models without Kiro's
+    model-backed safety chat, and keeps any safety evidence already cached."""
     commands = {"opencode": ["models"], "cursor": ["models"], "agy": ["models"],
                 "kiro": ["chat", "--list-models", "--format", "json"],
                 "codex": ["debug", "models"]}
@@ -532,8 +536,10 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
         cache = {}
     previous = cache.get(adapter)
     executable_path = str(Path(executable).resolve())
+    safety_missing = adapter == "kiro" and not listing_only and isinstance(previous, dict) \
+        and "read_only_probe" not in previous and previous.get("status") != "probe_unavailable"
     if (isinstance(previous, dict) and previous.get("version") == version
-            and previous.get("executable") == executable_path):
+            and previous.get("executable") == executable_path and not safety_missing):
         try:
             observed = datetime.fromisoformat(previous["observed_at"].replace("Z", "+00:00"))
             ttl = 3600 if (previous.get("status") == "probe_unavailable" or
@@ -558,8 +564,11 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
                   "observed_at": datetime.now(timezone.utc).isoformat(),
                   "probed_flags": sorted(set(re.findall(r"--[a-z][a-z-]+", help_text))),
                   "models": _listed_models(listing)}
-        if adapter == "kiro":
+        if adapter == "kiro" and not listing_only:
             record["read_only_probe"] = _probe_kiro_read_only(executable, version, deadline)
+        elif (adapter == "kiro" and isinstance(previous, dict) and previous.get("version") == version
+              and "read_only_probe" in previous):
+            record["read_only_probe"] = previous["read_only_probe"]
         code = 0
     path.parent.mkdir(parents=True, exist_ok=True)
     lock = path.with_suffix(".lock")
@@ -1887,6 +1896,8 @@ def parser() -> argparse.ArgumentParser:
     probe.add_argument("--adapter", required=True)
     probe.add_argument("--executable", required=True)
     probe.add_argument("--json", action="store_true")
+    probe.add_argument("--listing-only", action="store_true",
+                       help="list models only, within a 30-second deadline (discovery)")
     _preferences.add_selection_parser(
         commands, INSTANCE_ROOT / "config" / "model-preferences.json",
     )
@@ -1979,7 +1990,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(route_pick(requests, args.seed), sort_keys=True))
         return 0
     if args.command == "probe":
-        record, code = probe_capabilities(args.adapter, args.executable)
+        record, code = probe_capabilities(
+            args.adapter, args.executable, time.monotonic() + 30 if args.listing_only else None,
+            listing_only=args.listing_only)
         print(json.dumps(record, sort_keys=True))
         return code
     snapshot = catalogue_snapshot(Path(args.catalog) if args.catalog else None)

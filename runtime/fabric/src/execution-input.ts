@@ -94,7 +94,7 @@ export interface RouteInput {
   confidential?: boolean;
   /** Why the pool picked this model; set by the pool expansion, shown on the Route line. */
   pick_reason?: string;
-  /** Internal: the tier alias a native seat's default was rerouted from; restored when only native models remain. */
+  /** Internal: the tier alias a native seat's default was rerouted from, for the pool note. */
   native_default?: string;
 }
 
@@ -147,6 +147,11 @@ export function canonicalMode(value: string | undefined): string | undefined {
   return value === undefined ? undefined : MODE_SYNONYMS[value] ?? value;
 }
 const routeKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/gu, "");
+
+/** The tier alias a caller meant, tolerating case and a one-letter typo (`Workhorse`, `workhorze`). */
+export function tierAlias(alias: string): string | undefined {
+  return ROLE_ALIASES.find((candidate) => editDistance(routeKey(candidate), routeKey(alias)) <= 1);
+}
 
 export function editDistance(left: string, right: string): number {
   const row = Array.from({ length: right.length + 1 }, (_, index) => index);
@@ -238,9 +243,7 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
   }
   let selector =
     input.model ?? (input.alias && !ROLE_ALIASES.includes(input.alias) ? input.alias : undefined);
-  const roleAlias = input.model === undefined && input.alias !== undefined
-    ? ROLE_ALIASES.find((alias) => editDistance(routeKey(alias), routeKey(input.alias!)) <= 1)
-    : undefined;
+  const roleAlias = input.model === undefined && input.alias !== undefined ? tierAlias(input.alias) : undefined;
   if (roleAlias !== undefined && roleAlias !== input.alias) warnings.push(`corrected alias ${input.alias} to ${roleAlias}`);
   if (roleAlias !== undefined) input.alias = roleAlias;
   const isRoleAlias = roleAlias !== undefined;
