@@ -50,7 +50,10 @@ const USAGE = `fabric <command>
            [--limit N]
   watch [ids…] [--interval N] print run state changes; exit when all terminal
   lanes [--json] [id…]       run states; use an id to see rows past the 20-row cap
-  lanes --wait [id…]         wait for a lane to finish or need input
+  lanes --wait [--all] [--timeout N] [id…]
+                              wait for a lane to finish or need input; --all waits
+                              for every listed lane; exit 124 on timeout
+  lanes --project <path> …   read another project's lanes (default: from the cwd)
   events [--follow] [--until-idle]  JSON lines; follow stays open unless idle exit is requested
   status [id] [--wait-seconds N]  run status by task, batch or run directory; no id: store summary
   doctor [--json]             read-only schema and integrity diagnostics
@@ -125,27 +128,39 @@ const executionIdentity = () => {
   }
 };
 if (command === "lanes") {
+  let project: string | undefined, timeout: string | undefined;
+  try {
+    project = flag("project");
+    timeout = flag("timeout");
+  } catch (error) {
+    console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(2);
+  }
+  // A nested repository resolves to its own project; --project reads another one.
+  const laneWho = project === undefined ? who : identify(process.env, resolve(project));
   const args = argv.slice(1);
   const json = args.includes("--json");
   const wait = args.includes("--wait");
-  const ids = args.filter((value) => value !== "--json" && value !== "--wait");
-  if (args.filter((value) => value === "--json").length > 1 ||
-      args.filter((value) => value === "--wait").length > 1 ||
-      (json && wait) || ids.some((value) => value.startsWith("--"))) {
-    console.error("fabric: usage: fabric lanes [--json] [id…] | lanes --wait [id…]");
+  const all = args.includes("--all");
+  const timeoutSeconds = timeout === undefined ? undefined : Number(timeout);
+  const ids = args.filter((value) => !["--json", "--wait", "--all"].includes(value));
+  if (["--json", "--wait", "--all"].some((name) => args.filter((value) => value === name).length > 1) ||
+      (json && wait) || ((all || timeout !== undefined) && !wait) || ids.some((value) => value.startsWith("--")) ||
+      (timeoutSeconds !== undefined && !(timeoutSeconds >= 0))) {
+    console.error("fabric: usage: fabric lanes [--json] [--project P] [id…] | lanes --wait [--all] [--timeout N] [id…]");
     process.exit(2);
   }
   if (wait) {
     const watched = ids.length ? ids : undefined;
     const store = new Store(databasePath());
-    store.announce(who);
+    store.announce(laneWho);
     let code: number;
     try {
       // The registered project, not the raw cwd, owns the runs; the normal
       // retention window bounds the scan, and no row cap may hide a completion.
       code = await waitForLanes({
-        who, store,
-        read: () => readRuns(who.project, watched, 0, undefined, null),
+        who: laneWho, store, all, timeoutSeconds,
+        read: () => readRuns(laneWho.project, watched, 0, undefined, null),
         write: (text) => new Promise((resolveWrite, reject) =>
           process.stdout.write(text, (error) => (error ? reject(error) : resolveWrite()))),
         fail: (text) => console.error(text),
@@ -156,7 +171,7 @@ if (command === "lanes") {
     }
     process.exit(code);
   }
-  const result = await readRuns(who.project, ids.length ? ids : undefined);
+  const result = await readRuns(laneWho.project, ids.length ? ids : undefined);
   if (json) {
     console.log(JSON.stringify(result, null, 2));
   } else if (result.status === "ok") {
@@ -171,6 +186,9 @@ if (command === "lanes") {
       const active = (row: typeof a) => row.state === "running" ? 0 : 1;
       return active(a) - active(b) || Date.parse(b.started_at ?? "") - Date.parse(a.started_at ?? "");
     });
+    if (!rows.length)
+      console.log(`no lanes for project ${laneWho.project}` +
+        (laneWho.cwd === laneWho.project ? "" : ` (cwd ${laneWho.cwd} resolves to it; --project reads another)`));
     for (const row of rows)
       console.log(`${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${age(row.started_at)}`);
     if (result.omitted)
