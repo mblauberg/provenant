@@ -898,13 +898,49 @@ export async function dispatchConfiguredBatch(
   }
 }
 
+/**
+ * A task of a running batch, named by its own id: cancelling it must not stop
+ * its siblings. The owner honours a per-attempt marker that run_controls writes.
+ */
+async function cancelBatchTask(
+  target: Record<string, any>,
+  identity: Identity,
+  env: NodeJS.ProcessEnv,
+): Promise<Record<string, unknown> | undefined> {
+  const attempt = Number(target.attempts?.at(-1)?.attempt ?? target.attempt);
+  if (!Number.isSafeInteger(attempt) || attempt < 1)
+    return { status: "rejected", error: "task_not_started",
+      fix: `Task ${target.task_id} has not started; cancel the whole batch with its run id ${target.run_id}.` };
+  const root = productRoot(env);
+  const python = await pythonOwner(root, identity, env);
+  const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
+  try {
+    await execFileAsync(python, [controls, "cancel", "--run-dir", String(target.run_dir), "--task-id", String(target.task_id),
+      "--attempt-id", `attempt-${String(attempt).padStart(3, "0")}`, "--wait-seconds", "5"], {
+      cwd: dirname(runRoot(identity.cwd)), env: withoutGitRedirects(env), timeout: 10_000, maxBuffer: 64 * 1024,
+    });
+  } catch {
+    return { status: "rejected", error: "cancel_unconfirmed",
+      fix: `Task ${target.task_id} did not confirm cancellation; check fabric_status, or cancel the batch with ${target.run_id}.` };
+  }
+  return undefined;
+}
+
 export async function cancelConfiguredRun(
   id: string,
   identity: Identity,
   reason?: string,
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<Record<string, unknown>> {
   const rows = await statusRows(identity.cwd, [id]);
   if (!rows.runs) return rows;
+  // A task id inside a batch names that task alone; a run or batch id names the whole run.
+  const task = rows.runs.find((row) => row.batch_id && row.task_id === id && row.run_id !== id);
+  if (task) {
+    if (task.state === "terminal") return rows;
+    const failure = await cancelBatchTask(task, identity, env);
+    return failure ?? { ...(await statusRows(identity.cwd, [id])), ...(reason ? { reason } : {}) };
+  }
   const row = rows.runs[0]!;
   if (rows.runs.every((row) => row.state === "terminal")) return rows;
   const started = [...activeOwners].find((owner) => owner.runDir === row.run_dir);

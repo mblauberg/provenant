@@ -70,6 +70,7 @@ function rootPath(root: string, runDir: string, value: unknown): string | null {
 export async function readRuns(
   workspace: string, ids?: string[], waitSeconds = 0, signal?: AbortSignal,
   limit: number | null = 20,
+  state?: string,
 ): Promise<RunReadResponse> {
   try {
     const source = await statusRows(workspace, ids, waitSeconds, "all", signal, "brief", false, null);
@@ -121,11 +122,15 @@ export async function readRuns(
     });
     runs.sort((a, b) => (a.state === "running" ? 0 : 1) - (b.state === "running" ? 0 : 1) ||
       Date.parse(b.started_at ?? "") - Date.parse(a.started_at ?? ""));
+    // "active" is every lane not yet terminal; any other value matches a state or an outcome.
+    const wanted = state === undefined ? undefined : state.toLowerCase();
+    const matching = wanted === undefined ? runs : runs.filter((row) =>
+      wanted === "active" ? row.state !== "terminal" : row.state === wanted || row.status === wanted);
     const capped = !ids?.length && limit !== null;
-    const omitted = capped ? Math.max(0, runs.length - limit) : 0;
+    const omitted = capped ? Math.max(0, matching.length - limit) : 0;
     return { schema: "fabric.runs.v1", status: "ok" as const,
-      runs: capped ? runs.slice(0, limit ?? runs.length) : runs,
-      ...(omitted ? { omitted, omitted_hint: "Use provenant lanes ID to see a lane past the 20-row cap." } : {}) };
+      runs: capped ? matching.slice(0, limit ?? matching.length) : matching,
+      ...(omitted ? { omitted, omitted_hint: `Use provenant lanes ID to see a lane past the ${limit}-row cap.` } : {}) };
   } catch (error) {
     return { schema: "fabric.runs.v1", status: "unknown" as const,
       error: error instanceof Error ? error.message : String(error), runs: [] as RunRead[] };

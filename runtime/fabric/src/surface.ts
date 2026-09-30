@@ -83,6 +83,45 @@ export function runView(value: Record<string, any>, detail = "brief"): Record<st
   ));
 }
 
+/** Attempt history in `detail:"full"` keeps its outcome, not a second copy of the whole row. */
+const attemptSummary = (attempt: Record<string, any>) => Object.fromEntries(
+  ["attempt", "state", "status", "started_at", "ended_at", "question"]
+    .filter((key) => attempt[key] !== undefined && attempt[key] !== null).map((key) => [key, attempt[key]])
+    .concat(attempt.paths?.result ? [["result", attempt.paths.result]] : []));
+
+/**
+ * `detail:"full"` without the duplicated attempt history, or only the named
+ * fields per row; `fields:["attempts"]` still returns the raw history.
+ */
+export function fullView(value: Record<string, any>, fields?: string[]): Record<string, any> {
+  if (Array.isArray(value.runs)) return { ...value, runs: value.runs.map((row: Record<string, any>) => fullView(row, fields)) };
+  if (fields?.length) {
+    const wanted = new Set(["id", "run_id", "task_id", "state", "status", "digest", ...fields]);
+    return Object.fromEntries(Object.entries(value).filter(([key]) => wanted.has(key)));
+  }
+  return Array.isArray(value.attempts) ? { ...value, attempts: value.attempts.map(attemptSummary) } : value;
+}
+
+/** One line per lane: outcome, id, route, result path. */
+export function laneLine(row: Record<string, any>): string {
+  return `${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${row.result_path ?? "-"}`;
+}
+export function lanesDigest(result: Record<string, any>): string {
+  if (!Array.isArray(result.runs)) return digest(result);
+  const lines = result.runs.map(laneLine);
+  if (result.omitted) lines.push(`${result.omitted} more omitted; raise limit or pass ids`);
+  return lines.join("\n") || "no runs";
+}
+
+/** The reply to a cancel: the outcome, not the whole run record. */
+export function cancelDigest(view: Record<string, any>): string {
+  const rows: Record<string, any>[] = Array.isArray(view.runs) ? view.runs : [];
+  if (rows.length <= 4) return digest(view);
+  const counts: Record<string, number> = {};
+  for (const row of rows) counts[String(row.status ?? row.state)] = (counts[String(row.status ?? row.state)] ?? 0) + 1;
+  return `${view.runs[0]?.run_id ?? "run"} ${rows.length} tasks: ${Object.entries(counts).map(([k, n]) => `${n} ${k}`).join(" ")}`;
+}
+
 export function reply(value: unknown, includeStructuredContent = true) {
   const payload = Array.isArray(value) ? { items: value } : (value as Record<string, any>);
   return {
