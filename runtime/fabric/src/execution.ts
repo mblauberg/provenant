@@ -27,6 +27,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  existsSync,
   readFileSync,
   realpathSync,
   statSync,
@@ -955,16 +956,21 @@ async function cancelBatchTask(
   identity: Identity,
   env: NodeJS.ProcessEnv,
 ): Promise<Record<string, unknown> | undefined> {
-  const attempt = Number(target.attempts?.at(-1)?.attempt ?? target.attempt);
+  // The row's own attempt is the current one (a queued resume announces attempt N before its history has it).
+  const attempt = Number(target.attempt ?? target.attempts?.at(-1)?.attempt);
   if (!Number.isSafeInteger(attempt) || attempt < 1)
     return { status: "rejected", error: "task_not_started",
       fix: `Task ${target.task_id} has not started; cancel the whole batch with its run id ${target.run_id}.` };
+  const attemptId = `attempt-${String(attempt).padStart(3, "0")}`;
+  if (!["tasks", "dispatch/tasks"].some((tree) => existsSync(join(String(target.run_dir), tree, String(target.task_id), attemptId))))
+    return { status: "rejected", error: "attempt_not_started",
+      fix: `Task ${target.task_id} attempt ${attempt} is queued and not yet published; retry cancel once it starts, or cancel the whole batch with its run id ${target.run_id}.` };
   const root = productRoot(env);
   const python = await pythonOwner(root, identity, env);
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
   try {
     await execFileAsync(python, [controls, "cancel", "--run-dir", String(target.run_dir), "--task-id", String(target.task_id),
-      "--attempt-id", `attempt-${String(attempt).padStart(3, "0")}`, "--wait-seconds", "5"], {
+      "--attempt-id", attemptId, "--wait-seconds", "5"], {
       cwd: dirname(runRoot(identity.cwd)), env: withoutGitRedirects(env), timeout: 10_000, maxBuffer: 64 * 1024,
     });
   } catch {
@@ -1001,7 +1007,11 @@ export async function cancelConfiguredRun(
   if (unresolved)
     return { status: "rejected", error: "task_not_started",
       fix: `Task ${id} has not started; cancel the whole batch with its run id ${unresolved.run_id}.` };
-  const row = rows.runs[0]!;
+  // Only a positively matched run or batch identifier may stop a whole run; an unmatched id is never widened.
+  const row = rows.runs.find((r) => [r.run_id, r.batch_id, r.run_dir, typeof r.run_dir === "string" ? basename(r.run_dir) : undefined].includes(id));
+  if (!row)
+    return { status: "rejected", error: "run_not_matched",
+      fix: `${id} matches no run or batch id; pass the run id from fabric_status, or a task id whose batch has started.` };
   if (rows.runs.every((row) => row.state === "terminal")) return rows;
   const started = [...activeOwners].find((owner) => owner.runDir === row.run_dir);
   if (started) {

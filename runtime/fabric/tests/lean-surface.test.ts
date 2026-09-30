@@ -280,5 +280,51 @@ describe("task-level cancel", () => {
     const unknown = await cancelConfiguredRun("three", identity, undefined, env) as any;
     expect(unknown.status).toBe("rejected");
   }, 60_000);
+
+  it("rejects a task id that matches no run or batch instead of falling through to the whole run", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fabric-lean-unmatched-"));
+    roots.push(root);
+    const workspace = join(root, "workspace"), product = join(root, "product");
+    mkdirSync(workspace);
+    installFixtureOwners(product);
+    const runDir = join(workspace, ".agent-run", "mcp-unmatched");
+    // Metadata without a batch id: the task cannot be positively matched to this run, so cancellation must not widen to it.
+    mkdirSync(runDir, { recursive: true });
+    writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ id: "mcp-unmatched", task_ids: ["one", "two"],
+      started_at: new Date().toISOString(), status: "running" }));
+    const env = { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product,
+      HARNESS_PYTHON: execFileSync("python3", ["-c", "import sys;print(sys.executable)"], { encoding: "utf8" }).trim() };
+    const identity = { project: workspace, cwd: workspace, agentId: "lean", provider: "codex" };
+    const result = await cancelConfiguredRun("two", identity, undefined, env) as any;
+    expect(result.status).toBe("rejected");
+    expect(result.error).not.toBe("owner_unavailable");
+    expect(result.error).not.toBe("cancel_unconfirmed");
+  }, 60_000);
+
+  it("never cancels the previous attempt for a queued resume whose attempt is not published", async () => {
+    const root = mkdtempSync(join(tmpdir(), "fabric-lean-resume-"));
+    roots.push(root);
+    const workspace = join(root, "workspace"), product = join(root, "product");
+    mkdirSync(workspace);
+    installFixtureOwners(product);
+    const log = join(root, "controls.jsonl");
+    writeFileSync(join(product, "skills/orchestrate/scripts/run_controls.py"),
+      `#!/usr/bin/env python3\nimport json,sys\nopen(${JSON.stringify(log)},'a').write(json.dumps(sys.argv[1:])+'\\n')\n`);
+    const runDir = join(workspace, ".agent-run", "mcp-resumex");
+    const dir = join(runDir, "tasks", "two", "attempt-001");
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "attempt.json"), JSON.stringify({ schema: "fabric.attempt.v1", run_id: "mcp-resumex", task_id: "two",
+      attempt: 1, state: "terminal", status: "ok", started_at: new Date().toISOString(), paths: {}, digest: "ok two" }));
+    // Queued resume: attempt 2 is announced by the metadata but its directory is not published yet.
+    writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ id: "mcp-resumex", task_id: "two", next_attempt: 2,
+      started_at: new Date().toISOString(), status: "running" }));
+    const env = { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product,
+      HARNESS_PYTHON: execFileSync("python3", ["-c", "import sys;print(sys.executable)"], { encoding: "utf8" }).trim() };
+    const identity = { project: workspace, cwd: workspace, agentId: "lean", provider: "codex" };
+    const result = await cancelConfiguredRun("two", identity, undefined, env) as any;
+    expect(result).toMatchObject({ status: "rejected", error: "attempt_not_started" });
+    expect(result.fix).toContain("attempt 2");
+    expect(existsSync(log)).toBe(false);
+  }, 60_000);
 });
 
