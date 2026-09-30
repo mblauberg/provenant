@@ -649,6 +649,10 @@ def test_kiro_profile_writes_only_its_sign_in_state_not_shell_hooks_or_executabl
     writes = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-write* "))
     assert f'(subpath "{support}")' not in writes
     assert "data\\.sqlite3[^/]*$" not in writes
+    # SQLite's sidecars are files at fixed names, never directories a lane could fill.
+    for name in ("data.sqlite3-wal", "data.sqlite3-shm", "data.sqlite3-journal"):
+        assert f'(subpath "{support / name}")' not in writes, name
+        assert f'(literal "{support / name}")' in writes, name
     if mode == "read_only":
         reads = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-read-data "))
         assert f'(subpath "{support}")' in reads
@@ -681,6 +685,9 @@ def test_kiro_profile_writes_only_its_sign_in_state_not_shell_hooks_or_executabl
     assert run(f"printf x > '{support}/shell/new.zsh'").returncode != 0
     assert run(f"printf x > '{support}/kas/2.24.0-new'").returncode != 0
     assert run(f"printf x > '{support}/data.sqlite3-evil'").returncode != 0
+    assert run(f"mkdir '{support}/data.sqlite3-wal'").returncode != 0
+    assert run(f"mkfifo '{support}/data.sqlite3-shm'").returncode != 0
+    assert not (support / "data.sqlite3-wal").exists() and not (support / "data.sqlite3-shm").exists()
     # No link that the user's unconfined kiro-cli would later follow into a shell hook.
     hook = support / "shell/zshrc.pre.zsh"
     for name in ("data.sqlite3-wal", "data.sqlite3-journal", ".refresh.lock", "data.sqlite3"):
@@ -704,7 +711,7 @@ def test_kiro_profile_writes_only_its_sign_in_state_not_shell_hooks_or_executabl
 STATE_WRITE_ENTRIES = [
     (adapter, entry)
     for adapter, state in importlib.import_module("skills.orchestrate.scripts.provider_exec").CONFINED_STATE.items()
-    for entry in (*state.get("read_write", ()), *state.get("write_in_place", ()))
+    for entry in (*state.get("read_write", ()), *state.get("write_literal", ()), *state.get("write_in_place", ()))
     if not entry.endswith("*")
 ]
 
@@ -785,6 +792,10 @@ def test_read_only_transcript_denies_follow_every_state_allow(monkeypatch, tmp_p
     session = own / plan["session_id"]
     expected = [f'(allow file-read-data (literal "{session}.jsonl") (subpath "{session}"))']
     assert later == (expected if adapter == "claude" else [])
+    # Only a UUID names a session, so no id can reopen the project's memory or another directory.
+    for session_id in ("memory", "..", "s-1"):
+        plan["session_id"] = session_id
+        assert not any(str(own) in line for line in mod.os_confinement_profile(plan).splitlines())
     del plan["session_id"]
     lines = mod.os_confinement_profile(plan).splitlines()
     assert not any(str(own) in line for line in lines)
@@ -803,15 +814,16 @@ def test_claude_read_only_lane_cannot_read_other_projects_transcripts(monkeypatc
     workspace = tmp_path / "repo"
     workspace.mkdir()
     own = home / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(workspace.resolve()))
+    mine = "11111111-2222-3333-4444-555555555555"
     (own / "memory").mkdir(parents=True)
-    (own / "mine").mkdir()
-    (own / "mine.jsonl").write_text("mine\n", encoding="utf-8")
-    (own / "mine/subagent.jsonl").write_text("mine\n", encoding="utf-8")
+    (own / mine).mkdir()
+    (own / f"{mine}.jsonl").write_text("mine\n", encoding="utf-8")
+    (own / f"{mine}/subagent.jsonl").write_text("mine\n", encoding="utf-8")
     (own / "chair.jsonl").write_text("chair\n", encoding="utf-8")
     (own / "memory/MEMORY.md").write_text("memory\n", encoding="utf-8")
     monkeypatch.setattr(mod.Path, "home", lambda: home)
     plan = {"adapter": "claude", "mode": "read_only", "route": {}, "workspace_root": str(workspace),
-            "cwd": str(workspace), "session_id": "fresh", "resume_session": "mine",
+            "cwd": str(workspace), "session_id": "66666666-7777-8888-9999-000000000000", "resume_session": mine,
             "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
     profile = mod.os_confinement_profile(plan)
 
@@ -825,8 +837,8 @@ def test_claude_read_only_lane_cannot_read_other_projects_transcripts(monkeypatc
     assert probe.stdout == "{}\n"
     assert run(f"cat '{home}/.claude/projects/other/session.jsonl'").returncode != 0
     # Its own session stays readable, so the lane can resume; the project's other sessions do not.
-    assert run(f"cat '{own}/mine.jsonl'").stdout == "mine\n"
-    assert run(f"cat '{own}/mine/subagent.jsonl'").stdout == "mine\n"
+    assert run(f"cat '{own}/{mine}.jsonl'").stdout == "mine\n"
+    assert run(f"cat '{own}/{mine}/subagent.jsonl'").stdout == "mine\n"
     assert run(f"cat '{own}/chair.jsonl'").returncode != 0
     assert run(f"cat '{own}/memory/MEMORY.md'").returncode != 0
 
@@ -1179,6 +1191,17 @@ def test_structured_result_and_question_take_precedence_over_prose():
     assert parsed["observed_model"] == "opus"
 
 
+def test_claude_session_comes_only_from_its_own_events_not_nested_tool_output():
+    events = [
+        {"type": "system", "subtype": "init", "session_id": "s1", "model": "opus"},
+        {"type": "result", "is_error": False, "result": "done", "session_id": "s1"},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "content": {"session_id": "other"}}]},
+         "tool_use_result": {"session_id": "other"}, "session_id": "s1"},
+    ]
+    parsed = supervisor().parse_output("claude", "\n".join(map(json.dumps, events)))
+    assert parsed["session_id"] == "s1"
+
+
 def test_reconnecting_is_nonfatal_and_quota_discussion_is_not_an_error():
     events = "\n".join(
         map(
@@ -1309,12 +1332,11 @@ def test_codex_capabilities_validate_the_codex_writer_envelope(monkeypatch, tmp_
 
 
 @pytest.mark.parametrize(("field", "value", "expected"), [
-    ("adapter", "claude", "Pass capabilities only with adapter=codex."),
     ("mode", "read_only", "Pass capabilities only with mode=worktree_write."),
-    ("sandbox", "full", "Use sandbox=workspace-write with capabilities."),
     ("platform", "linux", "Pass capabilities only on macOS."),
     ("sandbox_exec", None, "Use capabilities only with usable sandbox-exec outside another sandbox."),
     ("network", False, "Pass network=true for Codex capabilities."),
+    ("sandbox", "read-only", "Use sandbox workspace-write or full with Codex capabilities."),
 ])
 def test_codex_capabilities_fail_closed_on_each_precondition(monkeypatch, tmp_path, field, value, expected):
     mod = supervisor()
@@ -1341,6 +1363,43 @@ def test_codex_capabilities_fail_closed_on_each_precondition(monkeypatch, tmp_pa
             workspace_root=tmp_path, mode=options["mode"], worktree=worktree,
             sandbox=options["sandbox"], network=options["network"], capabilities=["postgres"],
         )
+
+
+def test_codex_capabilities_with_full_sandbox_are_accepted_with_a_warning(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, lane = instruction_lane(tmp_path)
+    monkeypatch.setattr(mod.sys, "platform", "linux")  # A full sandbox needs no confinement to grant them.
+    plan = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+                          mode="worktree_write", worktree=lane, sandbox="full", network=True,
+                          capabilities=["postgres", "browser"], run_dir=tmp_path / "attempt")
+    assert plan["applied"]["sandbox"] == "full"
+    assert plan["applied"]["capabilities"] == []
+    assert plan["applied"]["confinement"] == "none"
+    assert "codex_home" not in plan
+    assert any("sandbox full" in warning and "capabilities" in warning for warning in plan["warnings"])
+
+
+@pytest.mark.parametrize("mode", ["worktree_write", "read_only"])
+def test_other_adapters_take_capabilities_without_a_grant(monkeypatch, tmp_path, mode):
+    mod = supervisor()
+    _, lane = instruction_lane(tmp_path)
+    attempt = tmp_path / "attempt"
+    attempt.mkdir()
+    plan = mod.build_plan("claude", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+                          cwd=lane if mode == "read_only" else None, mode=mode,
+                          worktree=lane if mode == "worktree_write" else None,
+                          capabilities=["browser", "postgres"], run_dir=attempt)
+    assert plan["applied"]["capabilities"] == ["browser", "postgres"]
+    assert "codex_home" not in plan
+    # Their sandbox-exec profile leaves SysV IPC and Mach services open; only Chrome's temp moves.
+    profile = mod.os_confinement_profile(plan)
+    assert "(deny mach-lookup)" not in profile and "(deny ipc-sysv*)" not in profile
+    plan["applied"]["confinement"] = "none"
+    plan["argv"] = [sys.executable, "-u", "-c", "import json, os; print(json.dumps({'type':'result',"
+                    "'result':os.environ.get('MAC_CHROMIUM_TMPDIR')}))"]
+    record = mod.execute(plan, attempt / "result.md", env={**os.environ, "MAC_CHROMIUM_TMPDIR": "ambient"})
+    assert record["status"] == "ok", record
+    assert (attempt / "result.md").read_text() == str(attempt / "tmp")
 
 
 @pytest.mark.parametrize("capabilities", [["other"], ["browser", "browser"], "browser"])
@@ -2744,6 +2803,8 @@ def test_nested_owner_accepts_legacy_inherited_locale_start(tmp_path, monkeypatc
         output = record["owner_started_at"] if kwargs.get("env", {}).get("LC_ALL") != "C" else module._recorded_start_time(row)
         return subprocess.CompletedProcess(argv, 0, stdout=output)
 
+    # The fake pid may be a live process on the host; force the ps path under test.
+    monkeypatch.setattr(module.process_info, "process", lambda _pid: None)
     monkeypatch.setattr(module.subprocess, "run", locale_ps)
     assert module._is_nested_fabric_owner(row)
     assert [call[1].get("env", {}).get("LC_ALL") for call in calls] == ["C", "en_AU.UTF-8"]
@@ -2766,6 +2827,8 @@ def test_nested_owner_accepts_canonical_ps_when_computed_start_differs(tmp_path,
         calls.append(kwargs.get("env", {}).get("LC_ALL"))
         return subprocess.CompletedProcess(argv, 0, stdout=canonical if calls[-1] == "C" else "other locale")
 
+    # The fake pid may be a live process on the host; force the ps path under test.
+    monkeypatch.setattr(module.process_info, "process", lambda _pid: None)
     monkeypatch.setattr(module.subprocess, "run", canonical_ps)
     assert module._is_nested_fabric_owner(row)
     assert calls == ["C"]
@@ -3555,16 +3618,21 @@ def instruction_lane(tmp_path):
     return repo, lane
 
 
-def lane_attempt(tmp_path, lane, script):
+def lane_attempt(tmp_path, lane, script, policy=None, adapter="codex"):
+    done = ("print('{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}')\n"
+            "print('{\"type\":\"turn.completed\"}')\n") if adapter == "codex" else (
+            "print('{\"type\":\"result\",\"result\":\"done\",\"is_error\":false,\"session_id\":\"s-1\"}')\n")
     code = ("import os, subprocess\n"
             f"def git(*args): return subprocess.run(['git', *{GIT_FIXTURE!r}, *args], check=True, "
             "capture_output=True, text=True).stdout.strip()\n"
-            + script
-            + "print('{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}')\n"
-            + "print('{\"type\":\"turn.completed\"}')\n")
+            + script + done)
     run_dir = tmp_path / "attempt"
     run_dir.mkdir()
-    plan = fixture_plan(run_dir, code, mode="worktree_write", worktree=lane)
+    if policy is not None:
+        # The plan's workspace root holds the project policy.
+        (run_dir / ".agents").mkdir()
+        (run_dir / ".agents/fabric-policy.json").write_text(json.dumps(policy))
+    plan = fixture_plan(run_dir, code, adapter, mode="worktree_write", worktree=lane, run_dir=run_dir)
     return supervisor().execute(plan, run_dir / "result.md")
 
 
@@ -3626,13 +3694,173 @@ def test_codex_writer_keeps_changes_its_branch_already_carried(tmp_path):
     "git('commit', '-q', '-m', 'plumbing')\n",
     "os.mkfifo('.agents/skills/fixture/pipe')\n",
 ], ids=["uncommitted", "committed", "untracked", "ignored", "skip-worktree", "case-variant", "fifo"])
-def test_codex_writer_authoring_instructions_fails(tmp_path, edit):
+def test_codex_writer_authoring_instructions_fails_under_deny_policy(tmp_path, edit):
     _, lane = instruction_lane(tmp_path)
-    record = lane_attempt(tmp_path, lane, edit)
+    record = lane_attempt(tmp_path, lane, edit, policy={"instruction_changes": "deny"})
     assert record["status"] == "failed"
     assert record["error"] == "protected_instructions_changed"
     assert record["evidence"]["signature"] == "protected_instructions_changed"
     assert any(".agents/skills/fixture/" in warning.casefold() for warning in record["warnings"])
+
+
+@pytest.mark.parametrize("edit, expected", [
+    (f"open({SKILL!r}, 'w').write('lane edit\\n')\n", {SKILL: "lane edit\n"}),
+    (f"open({SKILL!r}, 'w').write('lane edit\\n'); git('commit', '-q', '-am', 'edit')\n", {SKILL: "lane edit\n"}),
+    ("open('.agents/skills/fixture/extra.md', 'w').write('new\\n')\n", {".agents/skills/fixture/extra.md": "new\n"}),
+    ("common = git('rev-parse', '--path-format=absolute', '--git-common-dir')\n"
+     "open(common + '/info/exclude', 'a').write('.agents/skills/fixture/extra.md\\n')\n"
+     "open('.agents/skills/fixture/extra.md', 'w').write('new\\n')\n", {".agents/skills/fixture/extra.md": "new\n"}),
+    (f"git('update-index', '--skip-worktree', {SKILL!r}); open({SKILL!r}, 'w').write('lane edit\\n')\n",
+     {SKILL: "lane edit\n"}),
+    ("import shutil; shutil.rmtree('.agents')\n", {SKILL: None}),
+], ids=["uncommitted", "committed", "untracked", "ignored", "skip-worktree", "deleted"])
+def test_codex_writer_instruction_changes_are_quarantined_by_default(tmp_path, edit, expected):
+    _, lane = instruction_lane(tmp_path)
+    start = git(lane, "rev-parse", "HEAD").strip()
+    record = lane_attempt(tmp_path, lane, edit)
+    patch = tmp_path / "attempt" / "protected.patch"
+    assert record["status"] == "ok", record
+    assert "error" not in record
+    assert any("quarantined" in warning and str(patch) in warning for warning in record["warnings"]), record["warnings"]
+    # The lane's result no longer carries the change: HEAD, index and files match its start.
+    assert (lane / SKILL).read_text() == "v1\n"
+    assert not (lane / ".agents/skills/fixture/extra.md").exists()
+    assert git(lane, "diff", "--name-only", start, "--", ".agents") == ""
+    assert git(lane, "diff", "--cached", "--name-only", "--", ".agents") == ""
+    # The patch carries the change, for the chair to apply deliberately.
+    check = tmp_path / "check"
+    git(lane, "worktree", "add", "-q", "--detach", str(check), start)
+    git(check, "apply", str(patch))
+    for path, content in expected.items():
+        assert ((check / path).read_text() if content is not None else (check / path).exists()) == (
+            content if content is not None else False)
+
+
+def test_quarantine_keeps_the_integration_branch_version_a_lane_merged(tmp_path):
+    repo, lane = instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, "git('merge', '-q', '--no-edit', 'main')\n"
+                          f"open({SKILL!r}, 'w').write('v2 lane\\n'); git('commit', '-q', '-am', 'edit')\n")
+    assert record["status"] == "ok", record
+    assert (lane / SKILL).read_text() == "v2\n"
+    git(repo, "apply", str(tmp_path / "attempt" / "protected.patch"))
+    assert (repo / SKILL).read_text() == "v2 lane\n"
+
+
+def test_quarantine_never_follows_a_planted_patch_link(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    outside = tmp_path / "outside.txt"
+    patch = tmp_path / "attempt" / "protected.patch"
+    record = lane_attempt(tmp_path, lane, f"os.symlink({str(outside)!r}, {str(patch)!r})\n"
+                          f"open({SKILL!r}, 'w').write('lane edit\\n')\n")
+    assert not outside.exists()
+    assert record["status"] == "ok", record
+    assert not patch.is_symlink() and "lane edit" in patch.read_text()
+
+
+def test_quarantine_restores_each_starting_view(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    notes = ".agents/skills/fixture/notes.md"
+    (lane / notes).write_text("start notes\n")  # untracked at the start
+    (lane / SKILL).write_text("staged start\n")
+    git(lane, "add", SKILL)
+    (lane / SKILL).write_text("disk start\n")  # staged and unstaged edits at the start
+    record = lane_attempt(tmp_path, lane, f"open({notes!r}, 'w').write('lane notes\\n')\n"
+                          f"open({SKILL!r}, 'w').write('lane edit\\n'); git('add', {SKILL!r})\n")
+    assert record["status"] == "ok", record
+    assert (lane / notes).read_text() == "start notes\n"
+    assert (lane / SKILL).read_text() == "disk start\n"
+    assert git(lane, "show", ":" + SKILL) == "staged start\n"
+    assert git(lane, "show", "HEAD:" + SKILL) == "v1\n"
+    git(lane, "apply", str(tmp_path / "attempt" / "protected.patch"))
+    assert (lane / notes).read_text() == "lane notes\n"
+    assert (lane / SKILL).read_text() == "lane edit\n"
+
+
+@pytest.mark.parametrize("script", [
+    "os.remove('.agents/local/notes.md')\n",
+    "import shutil; shutil.rmtree('.agents/local'); os.symlink('/tmp', '.agents/local')\n",
+], ids=["removed", "link-swapped"])
+def test_quarantine_restores_and_reports_an_untracked_start_file_the_lane_removed(tmp_path, script):
+    _, lane = instruction_lane(tmp_path)
+    notes = ".agents/local/notes.md"
+    (lane / notes).parent.mkdir()
+    (lane / notes).write_text("start notes\n")  # untracked at the start
+    record = lane_attempt(tmp_path, lane, script)
+    assert record["status"] == "ok", record
+    assert not (lane / ".agents/local").is_symlink()
+    assert (lane / notes).read_text() == "start notes\n"
+    assert any("quarantined" in warning and notes in warning for warning in record["warnings"]), record["warnings"]
+
+
+def test_quarantine_archives_a_staged_change_the_disk_no_longer_shows(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('staged lane\\n'); git('add', {SKILL!r})\n"
+                          f"open({SKILL!r}, 'w').write('v1\\n')\n")
+    assert record["status"] == "ok", record
+    assert git(lane, "show", ":" + SKILL) == "v1\n"
+    archived = [warning for warning in record["warnings"] if "quarantined" in warning]
+    assert archived and "protected.index.patch" in archived[0], record["warnings"]
+    assert "staged lane" in (tmp_path / "attempt" / "protected.index.patch").read_text()
+
+
+@pytest.mark.parametrize("policy, status", [(None, "ok"), ({"instruction_changes": "deny"}, "failed")])
+def test_a_merge_that_discards_integration_instruction_changes_is_caught(tmp_path, policy, status):
+    _, lane = instruction_lane(tmp_path)
+    git(lane, "reset", "-q", "--hard", "HEAD~1")  # the lane starts from main's old commit
+    record = lane_attempt(tmp_path, lane, "git('merge', '-q', '-s', 'ours', '--no-edit', 'main')\n", policy=policy)
+    assert record["status"] == status, record
+    if status == "ok":
+        assert (lane / SKILL).read_text() == "v2\n"
+        assert git(lane, "show", "HEAD:" + SKILL) == "v2\n"
+    else:
+        assert record["error"] == "protected_instructions_changed"
+
+
+def test_a_merge_that_keeps_the_lanes_own_earlier_change_to_a_path_both_sides_changed_passes(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    (lane / SKILL).write_text("lane v\n")
+    git(lane, "commit", "-q", "-am", "the lane's branch changed the skill before this attempt")
+    # Both sides changed the path since their merge base, so the start's version stands.
+    record = lane_attempt(tmp_path, lane, "git('merge', '-q', '-s', 'ours', '--no-edit', 'main')\n",
+                          policy={"instruction_changes": "deny"})
+    assert record["status"] == "ok", record
+    assert not any("quarantined" in warning for warning in record["warnings"])
+    assert git(lane, "show", "HEAD:" + SKILL) == "lane v\n"
+
+
+def test_other_writer_adapters_have_instruction_changes_quarantined(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('lane edit\\n')\n", adapter="claude")
+    assert record["status"] == "ok", record
+    assert (lane / SKILL).read_text() == "v1\n"
+    assert any("quarantined" in warning for warning in record["warnings"])
+
+
+def test_codex_writer_instruction_changes_pass_under_allow_policy(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('lane edit\\n')\n",
+                          policy={"instruction_changes": "allow"})
+    assert record["status"] == "ok", record
+    assert (lane / SKILL).read_text() == "lane edit\n"
+    assert any("allowed by policy" in warning and SKILL in warning for warning in record["warnings"])
+    assert not (tmp_path / "attempt" / "protected.patch").exists()
+
+
+def test_unknown_instruction_policy_warns_and_quarantines(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('lane edit\\n')\n",
+                          policy={"instruction_changes": "alow"})
+    assert record["status"] == "ok", record
+    assert (lane / SKILL).read_text() == "v1\n"
+    assert any("instruction_changes" in warning for warning in record["warnings"])
+
+
+@pytest.mark.parametrize("policy", [None, {"instruction_changes": "allow"}], ids=["default", "allow"])
+def test_case_variant_and_special_instruction_changes_still_fail(tmp_path, policy):
+    _, lane = instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, "os.mkfifo('.agents/skills/fixture/pipe')\n", policy=policy)
+    assert record["status"] == "failed"
+    assert record["error"] == "protected_instructions_changed"
 
 
 def test_codex_writer_may_run_instruction_scripts(tmp_path):
@@ -3696,7 +3924,7 @@ def test_instruction_check_refuses_while_lane_processes_run(tmp_path, monkeypatc
 
     monkeypatch.setattr(module._Descendants, "stop", stop_sparing_a_process)
     _, lane = instruction_lane(tmp_path)
-    record = lane_attempt(tmp_path, lane, "")
+    record = lane_attempt(tmp_path, lane, "", policy={"instruction_changes": "allow"})
     assert record["error"] == "protected_instructions_changed"
     assert any("left running" in warning for warning in record["warnings"])
 
@@ -4453,11 +4681,13 @@ def test_codex_writer_may_merge_in_a_first_instruction_directory(tmp_path):
     assert (lane / SKILL).read_text() == "v1\n"
 
 
-def test_codex_writer_authoring_a_first_instruction_directory_fails(tmp_path):
+def test_codex_writer_authoring_a_first_instruction_directory_is_quarantined(tmp_path):
     _, lane = first_instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, "open('.agents/own.md', 'w').write('lane\\n')\n")
-    assert record["error"] == "protected_instructions_changed"
-    assert any(".agents/own.md" in warning for warning in record["warnings"])
+    assert record["status"] == "ok", record
+    assert any(".agents/own.md" in warning and "quarantined" in warning for warning in record["warnings"])
+    assert not os.path.lexists(lane / ".agents")
+    assert "+lane" in (tmp_path / "attempt" / "protected.patch").read_text()
 
 
 def test_codex_writer_leaves_no_instruction_directory_it_did_not_need(tmp_path):
@@ -4746,9 +4976,10 @@ def test_codex_writer_may_merge_away_the_last_instruction_file(tmp_path):
     assert not os.path.lexists(lane / ".agents")
 
 
-def test_codex_writer_deleting_instructions_main_keeps_fails(tmp_path):
+def test_codex_writer_deleting_instructions_main_keeps_fails_under_deny_policy(tmp_path):
     _, lane = instruction_lane(tmp_path)
-    record = lane_attempt(tmp_path, lane, "import shutil; shutil.rmtree('.agents')\n")
+    record = lane_attempt(tmp_path, lane, "import shutil; shutil.rmtree('.agents')\n",
+                          policy={"instruction_changes": "deny"})
     assert record["error"] == "protected_instructions_changed"
     assert any(SKILL in warning for warning in record["warnings"])
 

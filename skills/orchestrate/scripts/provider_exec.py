@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from adapters import profile
 from adapters import claude as claude_adapter
 from output_custody import install, verify, CustodyError
+import fabric_policy
 import context_usage
 import process_info
 
@@ -57,9 +58,10 @@ CONFINED_STATE = {
         # kiro-cli keeps its sign-in and refreshed tokens in data.sqlite3, guarded by .refresh.lock,
         # which it opens for writing before reading the token. The rest of its support directory holds
         # shell hooks the user's shell sources and binaries it runs, so stays read-only.
-        "read_write": (".kiro", ".cache/kiro", ".npm",
-                       *(f"Library/Application Support/kiro-cli/data.sqlite3-{suffix}"
-                         for suffix in ("wal", "shm", "journal"))),
+        "read_write": (".kiro", ".cache/kiro", ".npm"),
+        # SQLite creates and removes these sidecars; each is one file at its own name.
+        "write_literal": tuple(f"Library/Application Support/kiro-cli/data.sqlite3-{suffix}"
+                               for suffix in ("wal", "shm", "journal")),
         # Rewritten in place only: a lane cannot swap either for a link its unconfined CLI would follow.
         "write_in_place": ("Library/Application Support/kiro-cli/data.sqlite3",
                            "Library/Application Support/kiro-cli/.refresh.lock"),
@@ -219,15 +221,20 @@ def parse_capabilities_argument(value):
 
 
 def validate_capabilities(value, *, adapter, mode, sandbox, network):
+    """Only Codex's own sandbox withholds these. Other adapters' sandbox-exec profile leaves SysV IPC
+    and Mach services open, so they need no grant; a full Codex sandbox has no boundary at all."""
     capabilities = capability_values(value)
-    if not capabilities:
+    if not capabilities or adapter != "codex":
         return capabilities
-    if network is None and adapter == "codex":
+    if mode != "worktree_write":
+        raise CapabilityError("capabilities_mode_invalid", "Pass capabilities only with mode=worktree_write.")
+    if sandbox == "full":
+        return capabilities
+    if sandbox != "workspace-write":
+        raise CapabilityError("capabilities_sandbox_invalid", "Use sandbox workspace-write or full with Codex capabilities.")
+    if network is None:
         network = os.environ.get("CF_DISPATCH_CODEX_NETWORK", "1") == "1"
     checks = (
-        (adapter == "codex", "capabilities_adapter_invalid", "Pass capabilities only with adapter=codex."),
-        (mode == "worktree_write", "capabilities_mode_invalid", "Pass capabilities only with mode=worktree_write."),
-        (sandbox == "workspace-write", "capabilities_sandbox_invalid", "Use sandbox=workspace-write with capabilities."),
         (sys.platform == "darwin", "capabilities_platform_invalid", "Pass capabilities only on macOS."),
         (_sandbox_exec_path() is not None, "capabilities_confinement_unavailable", "Use capabilities only with usable sandbox-exec outside another sandbox."),
         (network is True, "capabilities_network_required", "Pass network=true for Codex capabilities."),
@@ -477,10 +484,14 @@ def _state_paths(home, entries):
 def _state_write_guards(home, state):
     """Rewrite-in-place grants, and no links a lane could plant for the provider's unconfined CLI."""
     in_place = _state_paths(home, state.get("write_in_place", ()))
-    rules = _sbpl_rule("allow", "file-write*", in_place, literal=True, canonical=True)
+    rules = _sbpl_rule("allow", "file-write*", _state_paths(home, state.get("write_literal", ())),
+                       literal=True, canonical=True)
+    rules += _sbpl_rule("allow", "file-write*", in_place, literal=True, canonical=True)
     rules += _sbpl_rule("deny", "file-write-create file-write-unlink", in_place, literal=True, canonical=True)
     for path in state.get("no_links", ()):
-        rules += f"(deny file-write-create (require-all {_sbpl_filter(home / path)} (vnode-type SYMLINK)))\n"
+        # Nor a directory or FIFO at a file grant, which would hold or block what the CLI opens.
+        rules += (f"(deny file-write-create (require-all {_sbpl_filter(home / path)} (require-any "
+                  "(vnode-type SYMLINK) (vnode-type DIRECTORY) (vnode-type FIFO))))\n")
     return rules
 
 
@@ -505,10 +516,13 @@ def _claude_project_dir(home, cwd):
     return Path(home) / ".claude/projects" / name
 
 
+CLAUDE_SESSION_ID = r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+
+
 def _claude_session_reads(home, plan):
     """A Claude lane may read back its own session's transcript, which it needs to resume."""
     sessions = [session for session in dict.fromkeys((plan.get("resume_session"), plan.get("session_id")))
-                if session and re.fullmatch(r"[A-Za-z0-9-]+", str(session))]
+                if session and re.fullmatch(CLAUDE_SESSION_ID, str(session))]
     if not sessions:
         return ""
     directory = _claude_project_dir(home, plan["cwd"])
@@ -783,6 +797,9 @@ def build_plan(
     capabilities = validate_capabilities(
         capabilities, adapter=adapter, mode=mode, sandbox=sandbox, network=applied_network,
     )
+    if capabilities and adapter == "codex" and sandbox == "full":
+        warnings.append("capabilities need no grant with sandbox full: the Codex lane runs unsandboxed")
+        capabilities = []
     directories = list(dict.fromkeys(
         str((candidate if candidate.is_absolute() else Path(workspace_root) / candidate).resolve())
         for candidate in (Path(p).expanduser() for p in add_dirs)
@@ -798,11 +815,15 @@ def build_plan(
     directories = safe_directories
     if any(not Path(p).is_dir() for p in directories):
         raise ValueError("add-dir must be a readable directory")
+    if mode == "worktree_write" and git_private is not None:
+        # execute() checks every writer's .agents against its start and integration branch.
+        # Read before launch from the caller's workspace, which the lane cannot rewrite.
+        metadata["instruction_policy"], policy_warnings = fabric_policy.instruction_changes(workspace_root)
+        warnings.extend(policy_warnings)
     if mode == "worktree_write" and adapter == "codex" and git_private is not None:
         # Codex's workspace-write sandbox keeps each writable root's .agents read-only, even an
         # absent one, so a rebase or merge that updates or adds a tracked skill stops half-way.
-        # Granting the directory (execute() creates an absent one) lets Git rewrite it;
-        # execute() then fails a lane that authored a change there.
+        # Granting the directory (execute() creates an absent one) lets Git rewrite it.
         instructions = Path(cwd, INSTRUCTION_DIR)
         grantable = not os.path.lexists(instructions) or (instructions.is_dir() and not instructions.is_symlink())
         if grantable and str(instructions) not in directories:
@@ -885,15 +906,16 @@ def build_plan(
         warnings.append("additional directories unsupported by " + adapter)
         directories = []
     attempt_dir = Path(run_dir or cwd).expanduser().resolve()
-    codex_home = attempt_dir.parent / "codex-home" if capabilities else None
+    codex_home = attempt_dir.parent / "codex-home" if capabilities and adapter == "codex" else None
     codex_auth_path = None
-    if capabilities:
+    if codex_home is not None:
         source_codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
         codex_auth_path = source_codex_home / "auth.json"
     if confinement == "sandbox-exec":
         state = CONFINED_STATE.get(adapter, {})
         writable_paths = [str(attempt_dir), *(str(Path.home() / path) for path in
-                           (*state.get("read_write", ()), *state.get("write_in_place", ()))), "/dev"]
+                           (*state.get("read_write", ()), *state.get("write_literal", ()),
+                            *state.get("write_in_place", ()))), "/dev"]
         if mode == "worktree_write":
             git_paths = ([str(git_private), *(str(git_common / path) for path in
                            GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)]
@@ -1192,7 +1214,8 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
                 if str(data.get("status", "success")).lower() != "success":
                     errors.append(json.dumps(data, ensure_ascii=False)[:400])
         for item in _objects(event):
-            for key in config.SESSION_KEYS:
+            # Claude nests tool output in its events, so only the event's own session id counts.
+            for key in (config.SESSION_KEYS if adapter != "claude" or item is event else ()):
                 if isinstance(item.get(key), str):
                     result["session_id"] = item[key]
             if isinstance(item.get("retry_after"), (int, float)):
@@ -2224,9 +2247,24 @@ def instruction_disk_state(cwd, object_format):
 def instruction_snapshot(cwd):
     head = _git_output(cwd, "rev-parse", "--verify", "HEAD^{commit}").strip()
     object_format = _git_output(cwd, "rev-parse", "--show-object-format").strip()
-    return {"head": head, "object_format": object_format,
-            "disk": instruction_disk_state(cwd, object_format),
-            "index": _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)[0]}
+    snapshot = {"head": head, "object_format": object_format,
+                "tree": _instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", head))[0],
+                "disk": instruction_disk_state(cwd, object_format),
+                "index": _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)[0]}
+    # Store starting files Git does not already hold, so a quarantine can put them back.
+    known = {entry[1] for view in ("tree", "index") for entry in snapshot[view].values()}
+    for path, entry in snapshot["disk"].items():
+        if entry[1] not in known and _store_blob(cwd, path) != entry:
+            raise ValueError(f"{path} changed during the check")
+    return snapshot
+
+
+def _integration_refs(cwd):
+    """The primary checkout's branch and its upstream, where set."""
+    primary = _git_output(cwd, "worktree", "list", "--porcelain").split("\n\n")[0].splitlines()
+    branch = next((line[len("branch "):] for line in primary if line.startswith("branch ")), "")
+    upstream = _git_output(cwd, "for-each-ref", "--format=%(upstream)", branch).strip() if branch else ""
+    return [ref for ref in (branch, upstream) if ref]
 
 
 def authored_instruction_changes(cwd, start):
@@ -2237,11 +2275,8 @@ def authored_instruction_changes(cwd, start):
     passes and changes the branch already carried are not re-reported. A lane can move local refs,
     so this catches an ordinary edit, not a forged integration branch.
     """
-    primary = _git_output(cwd, "worktree", "list", "--porcelain").split("\n\n")[0].splitlines()
-    branch = next((line[len("branch "):] for line in primary if line.startswith("branch ")), "")
-    upstream = _git_output(cwd, "for-each-ref", "--format=%(upstream)", branch).strip() if branch else ""
     trees = [_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", start["head"]))[0]]
-    for ref in filter(None, (branch, upstream)):
+    for ref in _integration_refs(cwd):
         try:
             trees.append(_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", ref))[0])
         except ValueError:
@@ -2255,7 +2290,200 @@ def authored_instruction_changes(cwd, start):
         for key in set(view).union(*baselines):
             if all(view.get(key) != baseline.get(key) for baseline in baselines):
                 changed.add(key)
+    # No branch tracks a starting untracked file, so only the lane can have removed one.
+    changed.update(key for key in start["disk"].keys() - start["tree"].keys() - start["index"].keys()
+                   if key not in views[2])
+    # A path the lane took in from an integration branch must keep that branch's version, so a
+    # merge that discards it (git merge -s ours) is caught too.
+    restore = _restore_views(cwd, start)
+    for name, view in zip(("head", "index", "disk"), views):
+        changed.update(key for key in restore["integrated"] if view.get(key) != restore[name].get(key))
     return sorted(key + (" (unresolved conflict)" if key in conflicts else "") for key in changed | conflicts)
+
+
+QUARANTINE_IDENTITY = {"GIT_AUTHOR_NAME": "Provenant Fabric", "GIT_AUTHOR_EMAIL": "fabric@provenant.invalid",
+                       "GIT_COMMITTER_NAME": "Provenant Fabric", "GIT_COMMITTER_EMAIL": "fabric@provenant.invalid"}
+
+
+def _git_bytes(cwd, *args, input=None, env=None):
+    """_git_output for object writes: raw bytes in and out, and no hook or signing command either."""
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    result = subprocess.run(
+        ["git", "-C", str(cwd), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+         "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", *args],
+        input=input, capture_output=True, timeout=30,
+        env={**environment, "GIT_NO_LAZY_FETCH": "1", **(env or {})},
+    )
+    if result.returncode != 0:
+        raise ValueError(os.fsdecode(result.stderr).strip() or f"git {args[0]} failed")
+    return result.stdout
+
+
+def quarantinable(changes):
+    """Ordinary paths below .agents/ the owner can take back out; anything else still fails the attempt."""
+    return all(change.startswith(INSTRUCTION_DIR + "/") and not change.endswith(" (unresolved conflict)")
+               for change in changes)
+
+
+def _is_ancestor(cwd, ancestor, descendant):
+    try:
+        _git_bytes(cwd, "merge-base", "--is-ancestor", ancestor, descendant)
+    except ValueError:
+        return False
+    return True
+
+
+def _quarantine_target(cwd, start_head):
+    """The .agents entries a quarantined path returns to.
+
+    That is the start commit's, or an integration ref's the lane has since merged or rebased onto,
+    taking each path from whichever side changed it since their merge base.
+    """
+    def tree(rev):
+        return _instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", rev))[0]
+
+    target = tree(start_head)
+    for ref in _integration_refs(cwd):
+        if not _is_ancestor(cwd, ref, "HEAD") or _is_ancestor(cwd, ref, start_head):
+            continue
+        incoming = tree(ref)
+        if _is_ancestor(cwd, start_head, ref):
+            target = incoming
+            continue
+        base = tree(_git_output(cwd, "merge-base", start_head, ref).strip())
+        target = {path: entry for path in set(target) | set(incoming)
+                  if (entry := (incoming if target.get(path) == base.get(path) else target).get(path))}
+    return target
+
+
+def _restore_views(cwd, start):
+    """What each view of a quarantined .agents path returns to.
+
+    HEAD returns to the quarantine target. The index and files return to their starting content,
+    except a path an integration branch the lane took in changed, which takes that branch's version.
+    """
+    target = _quarantine_target(cwd, start["head"])
+    integrated = {path for path in set(target) | set(start["tree"]) if target.get(path) != start["tree"].get(path)}
+
+    def view(entries):
+        return {path: entry for path in set(entries) | integrated
+                if (entry := (target if path in integrated else entries).get(path))}
+
+    return {"head": target, "index": view(start["index"]), "disk": view(start["disk"]), "integrated": integrated}
+
+
+def _store_blob(cwd, path):
+    """Write the file or link at a worktree path to the object store without filters; None when absent."""
+    file = Path(cwd).resolve() / path
+    # A path under a link or a replaced directory is not the lane's file at that path.
+    if file.parent.resolve() != file.parent or not os.path.lexists(file):
+        return None
+    status = file.lstat()
+    if stat.S_ISLNK(status.st_mode):
+        mode, data = "120000", os.fsencode(os.readlink(file))
+    elif stat.S_ISREG(status.st_mode):
+        mode = "100755" if status.st_mode & 0o100 else "100644"
+        with open(os.open(file, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as handle:
+            data = handle.read()
+    else:
+        raise ValueError(f"{path} is not a file or link")
+    return mode, os.fsdecode(_git_bytes(cwd, "hash-object", "-w", "--no-filters", "--stdin", input=data)).strip()
+
+
+def _index_info(entries, paths, zero):
+    """update-index -z --index-info input setting each path to its entry, removals first."""
+    removals = [f"0 {zero}\t{path}\0" for path in paths if path not in entries]
+    updates = [f"{entries[path][0]} {entries[path][1]}\t{path}\0" for path in paths if path in entries]
+    return os.fsencode("".join(removals + updates))
+
+
+QUARANTINE_PATCHES = (("disk", "protected.patch"), ("index", "protected.index.patch"),
+                      ("head", "protected.head.patch"))
+
+
+def quarantine_instruction_changes(cwd, start, changes, attempt_dir):
+    """Move a lane's authored .agents changes out of its worktree into patches the chair applies.
+
+    Each of the lane's files, index and HEAD is archived as a patch from the view's restore point
+    (protected.patch for files; index and HEAD patches only when they hold something else). A commit,
+    the index and the files then return to their restore points. Blobs are hashed and written
+    without filters, so no command the repository configures runs. Returns the patches written.
+    """
+    root = Path(cwd).resolve()
+    paths = sorted(changes)
+    restore = _restore_views(cwd, start)
+    zero = "0" * (64 if start["object_format"] == "sha256" else 40)
+    head = os.fsdecode(_git_bytes(cwd, "rev-parse", "--verify", "HEAD^{commit}")).strip()
+    lane = {"head": _instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", head))[0],
+            "index": _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)[0],
+            "disk": {path: entry for path in paths if (entry := _store_blob(cwd, path))}}
+    published = []
+    # Scratch files stay out of the attempt directory, which a lane may be able to write.
+    with tempfile.TemporaryDirectory() as private:
+        scratch_index = Path(private, "index")
+
+        def tree_of(entries, base=None):
+            scratch_index.unlink(missing_ok=True)
+            environment = {"GIT_INDEX_FILE": str(scratch_index)}
+            if base is not None:
+                _git_bytes(cwd, "read-tree", base, env=environment)
+            _git_bytes(cwd, "update-index", "-z", "--index-info", input=_index_info(entries, paths, zero),
+                       env=environment)
+            return os.fsdecode(_git_bytes(cwd, "write-tree", env=environment)).strip()
+
+        written = set()
+        for view, name in QUARANTINE_PATCHES:
+            patch = _git_bytes(cwd, "diff", "--binary", "--full-index", "--no-renames", "--no-ext-diff",
+                               "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/",
+                               tree_of(restore[view]), tree_of(lane[view]))
+            if patch and patch not in written:
+                written.add(patch)
+                Path(private, name).write_bytes(patch)
+                # Replace, never follow, whatever the lane left at the destination.
+                install(str(Path(private, name)), str(Path(attempt_dir, name)))
+                published.append(Path(attempt_dir, name))
+        tree = tree_of(restore["head"], base=head)
+        if tree != os.fsdecode(_git_bytes(cwd, "rev-parse", head + "^{tree}")).strip():
+            message = (f"fabric: quarantine protected {INSTRUCTION_DIR}/ changes\n\n"
+                       f"Saved to {', '.join(map(str, published))}.\n")
+            commit = os.fsdecode(_git_bytes(cwd, "commit-tree", tree, "-p", head, "-m", message,
+                                            env=QUARANTINE_IDENTITY)).strip()
+            _git_bytes(cwd, "update-ref", "-m", "fabric: quarantine", "HEAD", commit, head)
+    _git_bytes(cwd, "update-index", "-z", "--index-info", input=_index_info(restore["index"], paths, zero))
+    for path in paths:
+        file = root / path
+        if file.parent.resolve() == file.parent and os.path.lexists(file):
+            if file.is_dir() and not file.is_symlink():
+                raise ValueError(f"{path} is a directory")
+            file.unlink()
+    for path in paths:
+        if path not in restore["disk"] or restore["disk"][path][0] == "160000":
+            continue
+        file = root / path
+        if file.is_dir() and not file.is_symlink():
+            file.rmdir()  # A directory the lane put where the start had a file; its files went above.
+        file.parent.mkdir(parents=True, exist_ok=True)
+        if file.parent.resolve() != file.parent:
+            raise ValueError(f"{path} lies below a link")
+        mode, oid = restore["disk"][path]
+        data = _git_bytes(cwd, "cat-file", "blob", oid)
+        if mode == "120000":
+            os.symlink(os.fsdecode(data), file)
+            continue
+        descriptor = os.open(file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                             0o755 if mode == "100755" else 0o644)
+        with open(descriptor, "wb") as handle:
+            handle.write(data)
+    instructions = root / INSTRUCTION_DIR
+    for path in paths:  # Tidy directories the lane added and quarantine emptied.
+        parent = (root / path).parent
+        while parent != instructions and parent.is_relative_to(instructions) and parent.is_dir():
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+    return published
 
 
 def tool_cache_environment(plan, cache, inherited):
@@ -2338,6 +2566,7 @@ def execute(
             created_instructions = Path(plan["cwd"], INSTRUCTION_DIR)
         except OSError:
             pass  # Present already; the snapshot fails anything but a real directory.
+    if plan.get("instruction_policy"):
         try:
             instruction_start = instruction_snapshot(plan["cwd"])
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -2513,6 +2742,8 @@ def execute(
     selector = selectors.DefaultSelector()
     try:
         _prepare_codex_capability_home(plan, environment)
+        if plan["adapter"] != "codex" and "browser" in plan["applied"].get("capabilities", []):
+            environment["MAC_CHROMIUM_TMPDIR"] = str(private_tmp)  # Chrome's default temp is outside the boundary.
         if plan["stdin_policy"] == "prompt":
             input_file = tempfile.TemporaryFile(dir=private_tmp)
             input_file.write(plan["prompt"].encode())
@@ -2845,6 +3076,25 @@ def execute(
             instruction_changes = authored_instruction_changes(plan["cwd"], instruction_start)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             instruction_changes = [f"{INSTRUCTION_DIR} (unverifiable: {exc})"]
+    instruction_policy = plan.get("instruction_policy", "quarantine")
+    # Unverifiable states, special files and conflicts stay hard failures under any policy.
+    if instruction_changes and instruction_policy == "allow" and quarantinable(instruction_changes):
+        warnings.append("lane changed " + INSTRUCTION_DIR + "/ (allowed by policy): " + ", ".join(instruction_changes))
+        instruction_changes = []
+    elif instruction_changes and instruction_policy == "quarantine" and quarantinable(instruction_changes):
+        try:
+            patches = quarantine_instruction_changes(plan["cwd"], instruction_start, instruction_changes,
+                                                     Path(plan["run_dir"]))
+            remaining = authored_instruction_changes(plan["cwd"], instruction_start)
+            if remaining:
+                raise ValueError("still changed after restore: " + ", ".join(remaining))
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            warnings.append(f"quarantine of {INSTRUCTION_DIR}/ changes failed: {exc}")
+        else:
+            warnings.append("lane changed " + INSTRUCTION_DIR + "/ beyond its start and integration branch: "
+                            + ", ".join(instruction_changes) + f"; quarantined to {', '.join(map(str, patches))} and removed from "
+                            "the lane; review it, then git apply it deliberately")
+            instruction_changes = []
     if created_instructions is not None:
         try:
             created_instructions.rmdir()  # Only the empty directory this attempt added.

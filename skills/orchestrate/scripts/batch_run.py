@@ -829,7 +829,7 @@ def batch(args: argparse.Namespace) -> int:
             }
             continue
         try:
-            scan = scan_inputs(prompt, prompt_path, check.get("add_dirs"))
+            scan = scan_inputs(prompt, prompt_path, check.get("add_dirs"), workspace_root=Path.cwd())
             finding = scan.findings[0] if scan.findings else None
             if scan.budget_exceeded and check.get("allow_secrets") is not True:
                 error, fix = "secret_scan_budget_exceeded", scan.fix()
