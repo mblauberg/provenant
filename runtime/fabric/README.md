@@ -275,9 +275,9 @@ means a training or unresolved route; a non-training route reports
 `protected_read_expected: true`. Kiro runs its own `auto` model, because the
 catalogue has no Kiro alias, and OpenCode runs a free training route, so both
 exercise the protected-read denial; agy runs `gemini-3.8-flash` by name. Each
-row records the probe `method`: read-only Claude and OpenCode lanes have no
-shell or write tool, so their writes fail for want of a tool rather than by an
-OS denial. A missing executable, or a provider reporting a usage, rate, sign-in
+row records the probe `method`: read-only Claude, OpenCode and Kiro lanes have
+no permitted shell or write tool, so their writes fail at the tool layer rather
+than by an OS denial. A missing executable, or a provider reporting a usage, rate, sign-in
 or model limit, is reported as `skipped` with its reason, unless a forbidden
 file already exists on disk, which fails the row; the command exits nonzero only
 when a row fails. It prints JSON
