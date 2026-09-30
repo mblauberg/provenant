@@ -59,6 +59,7 @@ import memory_admission
 import secret_scan
 import exec_routing
 import context_usage
+import attempt_storage
 from fabric_records import render_digest, write_cooldown, write_route_health, append_index, TERMINAL_STATUSES
 from _shared.custody import (
     OwnedFileError, OwnedLinkError, atomic_write_contained, contained_regular_path,
@@ -2467,6 +2468,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     for sig, handler in old_handlers.items():
         signal.signal(sig, handler)
     row = terminal_contract(args,run_dir,record,adapter,attempt_number,attempt_dir)
+    left=attempt_storage.prune_private_tmp(run_dir,attempt_dir,row["status"])[1]
+    if left: row["warnings"].append("attempt tmp left in place (mount or unremovable): "+", ".join(left[:3]))
     for action in (lambda: write_cooldown(row),lambda: write_route_health(row),lambda: append_index(row,run_dir,root=run_workspace(run_dir, Path.cwd())/".agent-run")):
         try: action()
         except (OSError,ValueError) as exc: row["warnings"].append("terminal index unavailable: "+str(exc))

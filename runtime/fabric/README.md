@@ -40,7 +40,10 @@ formatter supports older receipts when no digest exists. Request errors contain
 one line with `fix:`. Recognised field names and mode synonyms are corrected;
 model names accept case and punctuation variants, and a typo is corrected with a
 warning when exactly one name is close and its version numbers match. Anything
-else is rejected with the closest valid choices. Relative `cwd` and `worktree` paths resolve from
+else is rejected with the closest valid choices. Common spellings are normalised
+with a warning rather than rejected: `run_id` or `task_id` for `id`, `id` for a
+dispatch `task_id`, numeric strings such as `wait_seconds:"30"`, and a numeric
+`until:"55"` (read as `wait_seconds`). Relative `cwd` and `worktree` paths resolve from
 the caller directory.
 No provider output is embedded in status responses.
 
@@ -59,7 +62,10 @@ Only a live host sends the inbox notice when a run finishes. `fabric_events`
 exposes retained task-state events. `lanes --wait` reports each terminal or
 input-required lane of the registered project, finished within the last day,
 once per seat, including lanes that finished between waits; named ids narrow it
-to those lanes, and a batch id to its tasks.
+to those lanes, and a batch id to its tasks. `lanes --wait --all` holds the report
+until every listed lane is terminal or needs input, and `--timeout N` ends the
+wait with exit 124 naming the lanes still running (`--timeout 0` polls once; contention on the seen-cursor is bounded by it too, and unmarked lanes are reported again next wait). An unknown id fails the wait at once with the read error (exit 1) rather than being skipped. `lanes --project P` reads
+another project; an empty listing says which project the cwd resolved to.
 The next dispatch reaps a run only when its host is gone and its owner or
 provider still runs: an owner that exited and left its provider behind, or a
 run whose MCP host was killed with SIGKILL.
@@ -74,7 +80,7 @@ Fourteen tools are registered by default:
 | `fabric_events` | Cursor-based terminal, input-required and inbox events |
 | `fabric_cancel` | Cancel the owner and provider group |
 | `fabric_output` | Bounded result, stderr, events or receipt slice |
-| `fabric_adapters` | Compact catalogue, CLI availability and guarantees |
+| `fabric_adapters` | Compact catalogue, CLI availability and guarantees; `models` lists live ids |
 | `fabric_whoami` | Seat, project and server freshness |
 | `fabric_send` | Send to a seat, team, chair or all |
 | `fabric_inbox` | Peek headers or claim selected messages |
@@ -320,7 +326,14 @@ auto-compaction where the provider supports it; it never raises it. Each attempt
 and the terminal Route line shows it as `ctx 212k/1M`. See
 [`docs/specs/fabric-v2.md`](../../docs/specs/fabric-v2.md#session-context).
 
-Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, and `detail`.
+Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, `detail`,
+`tail_chars` and `fields`. Terminal brief rows end with the last 1,200 characters
+of their result (`tail_chars` 0–4,000, 0 disables; the total across rows is
+bounded), so a short answer needs no `result.md` read. `detail: full` keeps a
+one-line summary per attempt instead of a second copy of the row; `fields`
+returns only the named keys (`fields:["attempts"]` gives the raw history).
+While lanes run, the text ends with a hint to block with `provenant lanes --wait
+--all --timeout 900` instead of polling.
 New attempts wait when available host memory is below 10% of physical RAM for
 `worktree_write` or 5% for `read_only`; set either percentage from 0 to 100 in
 `<workspace_root>/.agents/fabric-policy.json` as `{"memory_floor_percent":{"worktree_write":10,"read_only":5}}` (either key may be omitted, and 0 disables that mode's floor).
@@ -372,6 +385,13 @@ Status and output readers accept `succeeded` in older retained files.
 Unpublished batch children remain visible until an attempt or terminal batch
 summary accounts for them.
 
+`fabric_runs` also takes `state` (`running`, `terminal`, `active`, or an outcome
+such as `failed`) and `limit` (default 20); by default it replies with one line
+per lane and no structured rows, and `detail: full` adds them. `fabric_cancel`
+takes a run, batch or task id: a batch task id stops that task alone (through
+`run_controls.py cancel --task-id`) and leaves its siblings running. Its reply is
+a one-line outcome; `detail: full` adds the structured rows.
+
 `provenant lanes --json` and `fabric_runs` expose `fabric.runs.v1`. The response
 has `status: ok|unknown` and `runs`; read failure is `unknown` with an `error`,
 never an apparently empty successful list. The default list covers active and
@@ -402,6 +422,16 @@ file size. Use `tail: true` for a bounded tail, including while a run is active.
 Paths must resolve to regular files inside the retained run directory. For a batch, select a task ID.
 `detail: full` adds adapter profiles or the agent list to discovery responses.
 CLI presence does not prove authentication; `auth?` makes that uncertainty explicit.
+`fabric_adapters` with `models: <adapter>` and optional `match` (CLI
+`fabric adapters --models <adapter> [--match S]`) lists that adapter's live model
+ids from a listing-only `model-route probe` (30-second deadline, cached for a
+day). A large family shows only its count, and a reply that would pass 4 KB drops
+whole groups and says how many; `match` narrows either. Dispatch any id as `model: "<adapter>/<id>"`; an id
+outside the catalogue runs with a note. A Claude or Codex seat keeps its own
+models on native subagents: pool picks and the default route skip them, a pool
+holding only them is refused (`route_native_only`), a council hands them back as
+a spawn line, and an explicit request for them runs
+with a leading `NATIVE:` warning (`skills/orchestrate/references/routing-and-tiers.md#native-first`).
 
 ## Mailbox and identity
 

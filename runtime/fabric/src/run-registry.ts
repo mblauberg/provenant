@@ -1016,3 +1016,32 @@ export async function fabricOutput(
     if (fd !== undefined) closeSync(fd);
   }
 }
+
+/**
+ * The last `chars` characters of a terminal row's result, so the chair need not
+ * open result.md for a short answer. Same containment rules as fabricOutput;
+ * an unreadable or empty result yields nothing rather than an error.
+ */
+export function resultTail(row: Record<string, any>, chars: number): { text: string; total: number } | undefined {
+  const raw = row.paths?.result ?? row.result_path;
+  if (typeof raw !== "string" || !row.run_dir || chars < 1) return undefined;
+  let fd: number | undefined;
+  try {
+    const root = realpathSync(row.run_dir), path = realpathSync(resolve(root, raw));
+    const rel = relative(root, path);
+    if (isAbsolute(rel) || rel === ".." || rel.startsWith(`..${sep}`)) return undefined;
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size === 0) return undefined;
+    const bytes = Buffer.alloc(Math.min(stat.size, chars * 4));
+    const read = readSync(fd, bytes, 0, bytes.length, stat.size - bytes.length);
+    let start = 0;
+    while (start < read && (bytes[start]! & 0xc0) === 0x80) start++;
+    const whole = bytes.subarray(start, read).toString("utf8");
+    return { text: [...whole].slice(-chars).join("").trimStart(), total: stat.size };
+  } catch {
+    return undefined;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}

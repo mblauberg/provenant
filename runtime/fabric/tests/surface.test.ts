@@ -301,6 +301,8 @@ it.each([false, true])("exposes the default tools within budget (legacy=%s)", as
     expect(dispatchInput.properties.capabilities.type).toBe("array");
     expect(dispatchInput.properties.capabilities.description).toContain("postgres or browser");
     expect(dispatchInput.properties.tasks.items.additionalProperties).toBe(false);
+    const adaptersInput = result.tools.find((tool) => tool.name === "fabric_adapters")!.inputSchema as any;
+    expect(Object.keys(adaptersInput.properties).sort()).toEqual(["detail", "match", "models"]);
     for (const schema of [dispatchInput, dispatchInput.properties.tasks.items]) {
       expect(schema.properties.route.type).toBe("string");
       expect(schema.properties.rotate.type).toBe("boolean");
@@ -341,7 +343,7 @@ it.each([false, true])("exposes the default tools within budget (legacy=%s)", as
     expect((brief.content as any[])[0]?.text).toBe("no runs");
     const full = await client.callTool({ name: "fabric_status", arguments: { ids: [], wait_seconds: 0, detail: "full" } });
     expect(full.structuredContent).toMatchObject({ runs: [] });
-    expect((await client.callTool({ name: "fabric_runs", arguments: {} })).structuredContent)
+    expect((await client.callTool({ name: "fabric_runs", arguments: { detail: "full" } })).structuredContent)
       .toMatchObject({ schema: "fabric.runs.v1", status: "ok", runs: [] });
     expect((await client.callTool({ name: "fabric_events", arguments: {} })).structuredContent)
       .toMatchObject({ schema: "fabric.events.v1", status: "ok", events: [] });
@@ -442,11 +444,13 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     const waitInvalid = await client.callTool({ name: "fabric_dispatch", arguments: { prompt: "invalid", wait_seconds: -1 } });
     expect(waitInvalid.isError).not.toBe(true);
     expect((waitInvalid.content as any[])[0].text).toBe("rejected wait_invalid · fix: Pass wait_seconds from 0 to 55.");
-    for (const value of [1.5, null, "4"]) {
+    for (const value of [1.5, null, "soon"]) {
       const invalid = await client.callTool({ name: "fabric_status", arguments: { ids: [], wait_seconds: value } });
       expect(invalid.isError).not.toBe(true);
       expect((invalid.content as any[])[0].text).toBe("rejected wait_invalid · fix: Pass wait_seconds from 0 to 55.");
     }
+    const numericString = await client.callTool({ name: "fabric_status", arguments: { ids: [], wait_seconds: "0" } });
+    expect((numericString.content as any[])[0].text).toContain('read wait_seconds "0" as a number');
     const badTimeout = await client.callTool({ name: "fabric_dispatch", arguments: { prompt: "invalid", timeout_seconds: 0 } });
     expect((badTimeout.content as any[])[0].text).toContain("rejected timeout_invalid");
     for (const capabilities of [["unknown"], ["browser", "browser"], "browser", [1]]) {
@@ -502,12 +506,13 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect((await peerCall("whoami")).structuredContent).toMatchObject({
       project: projectRoot, cwd: projectRoot, agentId: "worker-seat",
     });
-    const workerRun = await peerCall("dispatch", { prompt: "worker context", wait_seconds: 5 });
+    const workerRun = await peerCall("dispatch", { adapter: "codex", prompt: "worker context", wait_seconds: 5 });
     const workerRow = workerRun.structuredContent as any;
     expect(workerRow, JSON.stringify(workerRow)).toHaveProperty("run_dir");
     expect(JSON.parse(readFileSync(join(workerRow.run_dir, "_owner", `${workerRow.task_id}-env-1.json`), "utf8")))
       .toMatchObject({ chair: "chair-seat" });
     const batch = await call("dispatch", {
+      adapter: "codex",
       capabilities: ["browser"],
       tasks: [
         { id: "one", prompt: "first" },
@@ -520,7 +525,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect(JSON.parse(readFileSync(join((batch.structuredContent as any).runs[0].run_dir, "_owner", "one-args-1.json"), "utf8")))
       .toEqual(expect.arrayContaining(["--capabilities", '["browser"]']));
     expect((batch.content as any[])[0].text).toMatch(/^batch mcp-.* 2 tasks: 2 ok/u);
-    const partialBatch = await call("dispatch", { tasks: [
+    const partialBatch = await call("dispatch", { adapter: "codex", tasks: [
       { id: "valid", prompt: "still runs" },
       { id: "invalid", prompt: "bad route", mode: "worktree_write" },
       { id: "preflight-invalid", prompt_file: "missing-prompt.md" },
@@ -580,7 +585,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     expect(routedRows?.[1].provenance.requested).toMatchObject({ adapter: "codex", model: "gpt-6.1-sol" });
     expect(routedRows?.[1].evidence.timeout).toBe(123);
     const writer = await call("dispatch", {
-      prompt: "writer", mode: "worktree_write", worktree: linked, capabilities: ["browser"], wait_seconds: 5,
+      adapter: "codex", prompt: "writer", mode: "worktree_write", worktree: linked, capabilities: ["browser"], wait_seconds: 5,
     });
     const writerRow = writer.structuredContent as any;
     const batchRows = (batch.structuredContent as any).runs as any[];
@@ -625,7 +630,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     mkdirSync(nested);
     writeFileSync(join(linked, "question.md"), "question");
     const first = await client.callTool({ name: "fabric_dispatch", arguments: {
-      prompt_file: "question.md", cwd: nested, timeout_seconds: 1234, wait_seconds: 5,
+      adapter: "codex", prompt_file: "question.md", cwd: nested, timeout_seconds: 1234, wait_seconds: 5,
       sandbox: "read-only", network: false, effort: "high",
     } });
     expect(first.structuredContent).toBeUndefined();
@@ -740,16 +745,16 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
     await call("status", { ids: [row.run_id] });
     const inbox = await call("inbox");
     expect((inbox.structuredContent as any).messages).toEqual([]);
-    const noControls = await call("dispatch", { prompt: "no-controls", wait_seconds: 5 });
+    const noControls = await call("dispatch", { adapter: "codex", prompt: "no-controls", wait_seconds: 5 });
     const resumedNoControls = await call("dispatch", { resume: (noControls.structuredContent as any).run_id, prompt: "main", wait_seconds: 5 });
     expect(resumedNoControls.structuredContent).toMatchObject({status:"ok",attempt:2});
-    const slow = await call("dispatch", { prompt: "slow", wait_seconds: 0 });
+    const slow = await call("dispatch", { adapter: "codex", prompt: "slow", wait_seconds: 0 });
     const active = slow.structuredContent as any;
-    const cancelled = await call("cancel", { id: active.id });
+    const cancelled = await call("cancel", { id: active.id, detail: "full" });
     expect((cancelled.structuredContent as any).runs[0].status).toBe("cancelled");
     expect((cancelled.structuredContent as any).runs[0].attempts).toBeUndefined();
     // A cancel that has to SIGKILL an owner before it writes a result stays a cancel.
-    const stubborn = (await call("dispatch", { prompt: "stubborn", wait_seconds: 0 })).structuredContent as any;
+    const stubborn = (await call("dispatch", { adapter: "codex", prompt: "stubborn", wait_seconds: 0 })).structuredContent as any;
     await call("cancel", { id: stubborn.run_id });
     const closed = await call("status", { ids: [stubborn.run_id], wait_seconds: 10 });
     expect((closed.structuredContent as any).status ?? (closed.structuredContent as any).runs?.[0]?.status).toBe("cancelled");
@@ -768,7 +773,7 @@ it("runs the linked-worktree MCP flow with fixture owners only", async () => {
       stderr: "pipe",
     }));
     try { await otherSeat.callTool({ name: "fabric_whoami", arguments: {} }); } finally { await otherSeat.close(); }
-    const crossRun = (await call("dispatch", { prompt: "cross project", cwd: other, wait_seconds: 5 })).structuredContent as any;
+    const crossRun = (await call("dispatch", { adapter: "codex", prompt: "cross project", cwd: other, wait_seconds: 5 })).structuredContent as any;
     expect(crossRun, JSON.stringify(crossRun)).toMatchObject({ status: "ok" });
     const crossResumed = await call("dispatch", { resume: crossRun.run_id, prompt: "again", wait_seconds: 5 });
     expect(crossResumed.structuredContent, JSON.stringify(crossResumed.structuredContent)).toMatchObject({ status: "ok", attempt: 2 });

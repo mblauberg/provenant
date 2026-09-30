@@ -30,6 +30,7 @@ import {
   mkdirSync,
   mkdtempSync,
   openSync,
+  existsSync,
   readFileSync,
   realpathSync,
   statSync,
@@ -41,7 +42,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { catalogueSnapshot, type CatalogueSnapshot } from "./catalogue.js";
-import { expandPools, usesPool, POOL_FIELDS } from "./pools.js";
+import { expandPools, nativeFirst, usesPool, withoutEmptySelectors, POOL_FIELDS } from "./pools.js";
 import { runRoot, databasePath, withoutGitRedirects, type Identity } from "./identity.js";
 import {
   shortRunId,
@@ -627,7 +628,9 @@ async function dispatchConfiguredProviderUnchecked(
 ): Promise<Record<string, unknown>> {
   const workspaceIdentity = identity;
   const root = productRoot(env);
-  let poolWarnings: string[] = [];
+  const preferred = nativeFirst(input, identity);
+  input = preferred.task;
+  let poolWarnings: string[] = preferred.warnings;
   if (usesPool(input)) {
     // A route pick keeps this a single dispatch; a council runs as a batch of its members.
     const taskId = input.task_id ?? (input.council === undefined && input.models === undefined ? undefined : "council");
@@ -646,14 +649,12 @@ async function dispatchConfiguredProviderUnchecked(
         concurrency: Math.min(8, expanded.tasks.length),
         wait_seconds: wait_seconds ?? DEFAULT_WAIT_SECONDS,
       }, identity, signal, env);
-      return expanded.warnings.length
-        ? { ...result, warnings: [...((result.warnings as string[] | undefined) ?? []), `warning: ${expanded.warnings.join("; ")}`] }
-        : result;
+      return withWarnings(result, [...preferred.warnings, ...expanded.warnings]);
     }
     // A single pick, or a selector that won precedence, replaces the request's own selectors.
     const { id: _id, ...picked } = expanded.tasks[0]!;
     input = { ...(picked as DispatchInput), ...(input.task_id === undefined ? {} : { task_id: input.task_id }) };
-    poolWarnings = expanded.warnings;
+    poolWarnings = [...preferred.warnings, ...expanded.warnings];
   }
   const snapshotStarted = performance.now(), catalogue = catalogueSnapshot(root, env);
   const initialRoute = normaliseRoute(input, identity, catalogue);
@@ -762,7 +763,16 @@ async function dispatchConfiguredProviderUnchecked(
   const result = completion === undefined
     ? running(started, "dispatch", identity, taskId)
     : compactDispatch(started, completion);
-  return route.warnings?.length ? { ...result, warnings: [...((result.warnings as string[] | undefined) ?? []), `warning: ${route.warnings.join("; ")}`] } : result;
+  return withWarnings(result, route.warnings ?? []);
+}
+
+/** A native-model warning gets its own line ahead of the ordinary notes, which share one. */
+function withWarnings(result: Record<string, unknown>, warnings: string[]): Record<string, unknown> {
+  if (!warnings.length) return result;
+  const native = [...new Set(warnings.filter((warning) => warning.startsWith("NATIVE: ")))];
+  const rest = [...new Set(warnings.filter((warning) => !warning.startsWith("NATIVE: ")))];
+  return { ...result, warnings: [...native, ...((result.warnings as string[] | undefined) ?? []),
+    ...(rest.length ? [`warning: ${rest.join("; ")}`] : [])] };
 }
 
 function normaliseTask(
@@ -808,9 +818,9 @@ async function dispatchConfiguredBatchUnchecked(
   const catalogue = catalogueSnapshot(root, env);
   const policy = dispatchDefaults(identity.cwd);
   const errors: Record<string, unknown>[] = [];
-  const defaults = Object.fromEntries(Object.entries(input).filter(([key]) =>
-    ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", ...POOL_FIELDS].includes(key)));
-  let merged: BatchTaskInput[] = input.tasks.flatMap((task, index) => {
+  const defaults = withoutEmptySelectors(Object.fromEntries(Object.entries(input).filter(([key]) =>
+    ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", ...POOL_FIELDS].includes(key))));
+  let merged: BatchTaskInput[] = input.tasks.map((task) => withoutEmptySelectors(task)).flatMap((task, index) => {
     const taskError = (task as BatchTaskInput & { _fabric_error?: Record<string, unknown> })._fabric_error;
     if (taskError) {
       errors.push({ task_id: task.id ?? `task-${index + 1}`, ...taskError });
@@ -824,6 +834,11 @@ async function dispatchConfiguredBatchUnchecked(
     return [{ ...own, ...task, id: task.id ?? `task-${index + 1}` }];
   });
   const poolWarnings: string[] = [];
+  merged = merged.map((task) => {
+    const preferred = nativeFirst(task, identity);
+    poolWarnings.push(...preferred.warnings);
+    return preferred.task;
+  });
   let councils = false;
   if (merged.some(usesPool)) {
     const expanded = await expandPools(merged, await pythonOwner(root, identity, env), root, identity, env, signal);
@@ -916,11 +931,10 @@ async function dispatchConfiguredBatchUnchecked(
     : compactBatch(started, completion);
   const rejectedTasks = errors.map((row) => ({ ...row, status: "rejected", state: "terminal" }));
   const warnings = [...policy.warnings, ...poolWarnings, ...tasks.flatMap((task) => Array.isArray(task.warnings) ? task.warnings : [])];
-  return {
+  return withWarnings({
     ...result,
     ...(rejectedTasks.length ? { tasks: [...((result.tasks as Record<string, unknown>[] | undefined) ?? []), ...rejectedTasks] } : {}),
-    ...(warnings.length ? { warnings: [...((result.warnings as string[] | undefined) ?? []), `warning: ${warnings.join("; ")}`] } : {}),
-  };
+  }, warnings);
 }
 
 
@@ -952,14 +966,71 @@ export async function dispatchConfiguredBatch(
   }
 }
 
+/**
+ * A task of a running batch, named by its own id: cancelling it must not stop
+ * its siblings. The owner honours a per-attempt marker that run_controls writes.
+ */
+async function cancelBatchTask(
+  target: Record<string, any>,
+  identity: Identity,
+  env: NodeJS.ProcessEnv,
+): Promise<Record<string, unknown> | undefined> {
+  // The row's own attempt is the current one (a queued resume announces attempt N before its history has it).
+  const attempt = Number(target.attempt ?? target.attempts?.at(-1)?.attempt);
+  if (!Number.isSafeInteger(attempt) || attempt < 1)
+    return { status: "rejected", error: "task_not_started",
+      fix: `Task ${target.task_id} has not started; cancel the whole batch with its run id ${target.run_id}.` };
+  const attemptId = `attempt-${String(attempt).padStart(3, "0")}`;
+  if (!["tasks", "dispatch/tasks"].some((tree) => existsSync(join(String(target.run_dir), tree, String(target.task_id), attemptId))))
+    return { status: "rejected", error: "attempt_not_started",
+      fix: `Task ${target.task_id} attempt ${attempt} is queued and not yet published; retry cancel once it starts, or cancel the whole batch with its run id ${target.run_id}.` };
+  const root = productRoot(env);
+  const python = await pythonOwner(root, identity, env);
+  const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
+  try {
+    await execFileAsync(python, [controls, "cancel", "--run-dir", String(target.run_dir), "--task-id", String(target.task_id),
+      "--attempt-id", attemptId, "--wait-seconds", "5"], {
+      cwd: dirname(runRoot(identity.cwd)), env: withoutGitRedirects(env), timeout: 10_000, maxBuffer: 64 * 1024,
+    });
+  } catch {
+    return { status: "rejected", error: "cancel_unconfirmed",
+      fix: `Task ${target.task_id} did not confirm cancellation; check fabric_status, or cancel the batch with ${target.run_id}.` };
+  }
+  return undefined;
+}
+
 export async function cancelConfiguredRun(
   id: string,
   identity: Identity,
   reason?: string,
+  env: NodeJS.ProcessEnv = process.env,
 ): Promise<Record<string, unknown>> {
   const rows = await statusRows(identity.cwd, [id]);
   if (!rows.runs) return rows;
-  const row = rows.runs[0]!;
+  // A task id names that task alone, whatever the metadata says; only a run or batch id reaches
+  // the whole-run path below. run_controls resolves the task's own scope.
+  const task = rows.runs.find((row) => row.task_id === id && row.run_id !== id);
+  if (task) {
+    if (task.state === "terminal") return rows;
+    const failure = await cancelBatchTask(task, identity, env);
+    return failure ?? { ...(await statusRows(identity.cwd, [id])), ...(reason ? { reason } : {}) };
+  }
+  // A manifest task with no published attempt resolves to a legacy run row; it is still a task.
+  const unresolved = rows.runs.find((row) => {
+    if (row.run_id === id || row.task_id === id || typeof row.run_dir !== "string") return false;
+    try {
+      const metadata = JSON.parse(readFileSync(join(row.run_dir, "dispatch-status.json"), "utf8"));
+      return Array.isArray(metadata.task_ids) && metadata.batch_id && metadata.task_ids.includes(id);
+    } catch { return false; }
+  });
+  if (unresolved)
+    return { status: "rejected", error: "task_not_started",
+      fix: `Task ${id} has not started; cancel the whole batch with its run id ${unresolved.run_id}.` };
+  // Only a positively matched run or batch identifier may stop a whole run; an unmatched id is never widened.
+  const row = rows.runs.find((r) => [r.run_id, r.batch_id, r.run_dir, typeof r.run_dir === "string" ? basename(r.run_dir) : undefined].includes(id));
+  if (!row)
+    return { status: "rejected", error: "run_not_matched",
+      fix: `${id} matches no run or batch id; pass the run id from fabric_status, or a task id whose batch has started.` };
   if (rows.runs.every((row) => row.state === "terminal")) return rows;
   const started = [...activeOwners].find((owner) => owner.runDir === row.run_dir);
   if (started) {
