@@ -113,9 +113,14 @@ every attempt, fallbacks included, off free and prompt-training models. See
 the prompt and eligible files under `add_dirs` for common live credential shapes.
 A finding rejects with `error: secret_detected` and a location in `fix`; set
 `allow_secrets: true` explicitly to proceed. The attempt records the override
-and finding names. If scanning `add_dirs` exceeds 2,000 files or 20 MB, dispatch
-rejects with `error: secret_scan_budget_exceeded`; narrow the inputs or explicitly
-set `allow_secrets: true` and explain why in the prompt. Writers use `mode: worktree_write` and an
+and finding names. The scan reads whole files, skipping Git-ignored, vendored and binary files
+and directories listed under `secret_scan_exclude` in `.agents/fabric-policy.json`
+(which must resolve inside the project). Past 10,000
+files or 64 MiB, dispatch rejects with `error: secret_scan_budget_exceeded`
+naming the largest subtree; narrow the inputs, exclude it, or explicitly set
+`allow_secrets: true` and explain why in the prompt. The same policy's
+`dispatch_defaults` may set `add_dirs`, `timeout_seconds` and `network` (Codex
+only) for dispatches that leave them unset. Writers use `mode: worktree_write` and an
 owned, registered linked worktree. The primary checkout is refused; create a linked
 worktree. `cwd` selects an existing read-only directory inside any registered
 Fabric project, and `prompt_file` may sit in the caller's directory or any
@@ -206,18 +211,30 @@ keeps a writable root's `.agents/` read-only even before it exists, so a
 linked-worktree Codex writer also gets the worktree's `.agents/` as an
 `add_dir` unless it is a file or link. Fabric creates an absent one for the
 attempt and removes it afterwards if still empty. Git can then rebase or merge
-the integration branch over tracked skills. Fabric fails the attempt with
-`protected_instructions_changed` when an `.agents/` path in HEAD, the index or
-on disk ends up matching neither the attempt's starting state nor the primary
-checkout's branch or its upstream. If OS confinement is unavailable, agy write
+the integration branch over tracked skills. For every writer, when an
+`.agents/` path in HEAD, the index or on disk ends up matching neither the
+attempt's starting state nor the primary checkout's branch or its upstream, or
+drops that branch's version after taking the branch in (unless the lane's
+branch had changed that path too before the attempt), Fabric by default
+quarantines the change: it archives the lane's files to `<attempt>/protected.patch`
+(and its index or HEAD to `protected.index.patch` or `protected.head.patch` when
+they differ), commits the start or integration-branch version back to the lane,
+returns the index and files to their starting content and finishes `ok` with a
+warning naming the patches. `.agents/fabric-policy.json` `instruction_changes`
+may instead be `allow` (keep an ordinary edit, with a warning) or `deny` (fail
+with `protected_instructions_changed`). A conflict, special file, replaced root,
+lane process left running or failed quarantine fails under any policy. If OS confinement is unavailable, agy write
 dispatch is refused; other wrapped writer receipts warn that writes are
 unconfined. Setting `PROVENANT_NO_OS_CONFINEMENT=1` has the same effect on new
 wrapped attempts.
-Codex writers may opt into `capabilities: ["postgres", "browser"]`, using
-either or both distinct values. The field is valid only for a Codex
-`worktree_write` route with `sandbox: "workspace-write"`, macOS, usable
-`sandbox-exec` outside another sandbox, and applied `network: true`. Empty
-lists mean no capabilities. These lanes keep the writer's enforced guarantee
+Any lane may pass `capabilities: ["postgres", "browser"]`, using either or
+both distinct values; empty lists mean none. Other adapters' profiles already
+leave System V IPC and Mach services open, so they take the list without a
+grant; their browser lanes only move `MAC_CHROMIUM_TMPDIR` to `<attempt>/tmp`.
+A Codex `sandbox: "full"` lane is unsandboxed, so it applies no capabilities
+and warns. Otherwise a Codex lane needs `worktree_write`, `sandbox:
+"workspace-write"`, macOS, usable `sandbox-exec` outside another sandbox and
+applied `network: true`. These lanes keep the writer's enforced guarantee
 and workspace-write receipt value, while running Codex's own sandbox in
 `danger-full-access` inside the OS profile. The profile allows Codex's native
 Mach services plus FSEvents, denies other Mach lookups and registrations,
@@ -264,7 +281,7 @@ get it); and for Kiro, `~/Library/Application Support/kiro-cli` and its
 `~/.local/bin` launcher links, but not its cross-project `history`. Kiro can
 write there only `data.sqlite3` and `.refresh.lock`, in place, and SQLite's
 `-wal`, `-shm` and `-journal` sidecars, which it needs to read its sign-in. It
-cannot create links there, and the shell hooks and binaries beside them stay
+cannot create links, directories or FIFOs there, and the shell hooks and binaries beside them stay
 read-only. An expired Kiro sign-in has not been seen to renew inside the
 sandbox: the lane waits at a browser sign-in until it times out. Run
 `kiro-cli whoami` outside the sandbox to renew it. A confined Kiro dispatch refuses until kiro-cli has unpacked its
@@ -275,7 +292,8 @@ planted cannot move the next attempt's grant to the link's target. The keychain 
 the security service; SBPL has no narrower filter, and read-only Claude lanes
 have no shell. `~/.claude/projects` and `~/.codex/sessions` stay unreadable
 even where provider state covers them, except a Claude lane's own session
-transcript (`<session>.jsonl` and `<session>/`), which it needs to resume. Claude lanes get `CLAUDE_CODE_TMPDIR` in
+transcript (`<session>.jsonl` and `<session>/`, for a UUID session id), which it needs to resume.
+These read denies apply only to read-only lanes; a writer's profile denies reads of protected paths alone. Claude lanes get `CLAUDE_CODE_TMPDIR` in
 the attempt's `tmp`, which is private to the user (mode 0700), so they never
 touch `/tmp/claude-<uid>`.
 Projects declare protected paths in `.agents/fabric-policy.json`, relative to

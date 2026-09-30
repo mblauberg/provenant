@@ -2,6 +2,8 @@ import {
   normaliseRoute,
   preflight,
   routeArguments,
+  applyDispatchDefaults,
+  dispatchDefaults,
   validatePrompt,
   timeoutSeconds,
   ownerPromptPath,
@@ -12,6 +14,7 @@ import {
   type DispatchInput,
   type BatchInput,
   type BatchTaskInput,
+  type DispatchDefaults,
 } from "./execution-input.js";
 export { ACCESS_MODES, DISPATCH_ADAPTERS } from "./execution-input.js";
 export type { AccessMode, RouteInput, DispatchInput, BatchInput, BatchTaskInput } from "./execution-input.js";
@@ -696,8 +699,9 @@ async function dispatchConfiguredProviderUnchecked(
   const providerIdentity = workingIdentity(input, identity);
   input = { ...input, ...(input.cwd === undefined ? {} : { cwd: providerIdentity.cwd }),
     ...(input.prompt_file === undefined ? {} : { prompt_file: ownerPromptPath(identity, input.prompt_file) }) };
-  const route = normaliseRoute(input, identity, catalogue);
-  route.warnings = [...new Set([...(initialRoute.warnings ?? []), ...(route.warnings ?? []), ...poolWarnings])];
+  const policy = dispatchDefaults(identity.cwd);
+  const route = applyDispatchDefaults(normaliseRoute(input, identity, catalogue), policy.defaults);
+  route.warnings = [...new Set([...(initialRoute.warnings ?? []), ...(route.warnings ?? []), ...poolWarnings, ...policy.warnings])];
   validatePrompt(input.prompt, input.prompt_file);
   const roots = readRoots(identity, input.cwd, input.prompt_file);
   if (roots.length) route.read_roots = roots;
@@ -710,7 +714,7 @@ async function dispatchConfiguredProviderUnchecked(
   }
   const callStarted = Date.now(), validateStarted = performance.now();
   const snapshotMs = performance.now() - snapshotStarted;
-  const timeout = timeoutSeconds(input.timeout_seconds, input.mode);
+  const timeout = timeoutSeconds(input.timeout_seconds ?? policy.defaults.timeout_seconds, input.mode);
   const taskId = input.task_id ?? `task-${randomUUID().slice(0, 8)}`;
   const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
@@ -819,20 +823,21 @@ function normaliseTask(
   index: number,
   identity: Identity,
   catalogue: CatalogueSnapshot,
+  defaults: DispatchDefaults = {},
 ): Record<string, unknown> {
   const initialRoute = normaliseRoute(task, identity, catalogue);
   task = { ...task, mode: initialRoute.access_mode };
   validatePrompt(task.prompt, task.prompt_file);
   const providerIdentity = workingIdentity(task, identity);
   task = { ...task, ...(task.cwd === undefined ? {} : { cwd: providerIdentity.cwd }) };
-  const route = normaliseRoute(task, identity, catalogue);
+  const route = applyDispatchDefaults(normaliseRoute(task, identity, catalogue), defaults);
   route.warnings = [...new Set([...(initialRoute.warnings ?? []), ...(route.warnings ?? [])])];
   const roots = readRoots(identity, task.cwd, task.prompt_file);
   if (roots.length) route.read_roots = roots;
   return {
     id: task.id ?? `task-${index + 1}`,
     ...(task.prompt === undefined ? { prompt_file: ownerPromptPath(identity, task.prompt_file!) } : { prompt: task.prompt }),
-    timeout: timeoutSeconds(task.timeout_seconds, task.mode),
+    timeout: timeoutSeconds(task.timeout_seconds ?? defaults.timeout_seconds, task.mode),
     ...route,
   };
 }
@@ -854,6 +859,7 @@ async function dispatchConfiguredBatchUnchecked(
   const callStarted = Date.now();
   const root = productRoot(env);
   const catalogue = catalogueSnapshot(root, env);
+  const policy = dispatchDefaults(identity.cwd);
   const errors: Record<string, unknown>[] = [];
   const defaults = withoutEmptySelectors(Object.fromEntries(Object.entries(input).filter(([key]) =>
     ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", ...POOL_FIELDS].includes(key))));
@@ -889,7 +895,7 @@ async function dispatchConfiguredBatchUnchecked(
   const concurrency = input.concurrency ?? Math.max(1, Math.min(councils ? 8 : 4, merged.length));
   const tasks = merged.flatMap((task, index) => {
     try {
-      return [normaliseTask(task, index, identity, catalogue)];
+      return [normaliseTask(task, index, identity, catalogue, policy.defaults)];
     } catch (error) {
       errors.push({ task_id: task.id ?? `task-${index + 1}`, ...rejected(error) });
       return [];
@@ -967,7 +973,7 @@ async function dispatchConfiguredBatchUnchecked(
     ? running(started, "batch", identity, FIRST_BATCH_ID)
     : compactBatch(started, completion);
   const rejectedTasks = errors.map((row) => ({ ...row, status: "rejected", state: "terminal" }));
-  const warnings = [...poolWarnings, ...tasks.flatMap((task) => Array.isArray(task.warnings) ? task.warnings : [])];
+  const warnings = [...policy.warnings, ...poolWarnings, ...tasks.flatMap((task) => Array.isArray(task.warnings) ? task.warnings : [])];
   return withWarnings({
     ...result,
     ...(rejectedTasks.length ? { tasks: [...((result.tasks as Record<string, unknown>[] | undefined) ?? []), ...rejectedTasks] } : {}),
