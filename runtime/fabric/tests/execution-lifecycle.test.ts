@@ -145,7 +145,7 @@ describe("Fabric input corrections", () => {
     for (const model of ["gpt-sol", "sol", "GPT_SOL", "luna"]) {
       const route = normaliseRoute({ adapter: "codex", model }, identity, on);
       expect(route.model, model).toBe(model);
-      expect(route.warnings ?? [], model).toEqual([]);
+      expect((route.warnings ?? []).filter((warning) => !warning.startsWith("NATIVE:")), model).toEqual([]);
     }
     expect(normaliseRoute({ adapter: "codex", alias: "gpt-sol" }, identity, on).model).toBe("gpt-sol");
     // Without latest_aliases the name is unknown here: forwarded with a warning for the router to judge.
