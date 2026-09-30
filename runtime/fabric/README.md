@@ -270,7 +270,7 @@ get it); and for Kiro, `~/Library/Application Support/kiro-cli` and its
 `~/.local/bin` launcher links, but not its cross-project `history`. Kiro can
 write there only `data.sqlite3` and `.refresh.lock`, in place, and SQLite's
 `-wal`, `-shm` and `-journal` sidecars, which it needs to read its sign-in. It
-cannot create links there, and the shell hooks and binaries beside them stay
+cannot create links, directories or FIFOs there, and the shell hooks and binaries beside them stay
 read-only. An expired Kiro sign-in has not been seen to renew inside the
 sandbox: the lane waits at a browser sign-in until it times out. Run
 `kiro-cli whoami` outside the sandbox to renew it. A confined Kiro dispatch refuses until kiro-cli has unpacked its
@@ -281,7 +281,8 @@ planted cannot move the next attempt's grant to the link's target. The keychain 
 the security service; SBPL has no narrower filter, and read-only Claude lanes
 have no shell. `~/.claude/projects` and `~/.codex/sessions` stay unreadable
 even where provider state covers them, except a Claude lane's own session
-transcript (`<session>.jsonl` and `<session>/`), which it needs to resume. Claude lanes get `CLAUDE_CODE_TMPDIR` in
+transcript (`<session>.jsonl` and `<session>/`, for a UUID session id), which it needs to resume.
+These read denies apply only to read-only lanes; a writer's profile denies reads of protected paths alone. Claude lanes get `CLAUDE_CODE_TMPDIR` in
 the attempt's `tmp`, which is private to the user (mode 0700), so they never
 touch `/tmp/claude-<uid>`.
 Projects declare protected paths in `.agents/fabric-policy.json`, relative to
