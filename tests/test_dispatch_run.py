@@ -2448,9 +2448,7 @@ def test_front_door_preflight_rejects_all_invalid_tasks_without_run(tmp_path):
 
 
 @pytest.mark.parametrize(("field", "value", "error"), [
-    ("adapter", "claude", "capabilities_adapter_invalid"),
     ("access_mode", "read_only", "capabilities_mode_invalid"),
-    ("sandbox", "full", "capabilities_sandbox_invalid"),
     ("platform", "linux", "capabilities_platform_invalid"),
     ("sandbox_exec", None, "capabilities_confinement_unavailable"),
     ("network", False, "capabilities_network_required"),
@@ -2477,6 +2475,18 @@ def test_front_door_capability_preflight_fails_closed(monkeypatch, tmp_path, fie
     assert result["error"] == error
     assert result["fix"].strip().endswith(".")
     assert "\n" not in result["fix"]
+
+
+@pytest.mark.parametrize(("field", "value"), [("adapter", "claude"), ("sandbox", "full")])
+def test_front_door_capability_preflight_accepts_other_adapters_and_full_sandbox(monkeypatch, tmp_path, field, value):
+    module = load_dispatch_module()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(module.provider_exec.sys, "platform", "linux")
+    task = {"id": "capability", "adapter": "codex", "access_mode": "worktree_write",
+            "network": True, "capabilities": ["postgres"], "prompt": "hello", field: value}
+    result = module.preflight_tasks([task], tmp_path)
+    # Later checks (here the missing worktree) may still refuse it, but not its capabilities.
+    assert not result.get("error", "").startswith("capabilities"), result
 
 
 @pytest.mark.parametrize("capabilities", [["unknown"], ["browser", "browser"], "browser", None])
