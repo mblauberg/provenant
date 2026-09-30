@@ -70,11 +70,12 @@ def test_shim_cpu_time_retains_hundredths():
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS ps locale formatting")
-def test_shim_lstart_matches_system_ps_in_the_user_locale():
+@pytest.mark.parametrize("user_locale", ["en_AU.UTF-8", "de_DE.UTF-8", "ja_JP.UTF-8", "C"])
+def test_shim_lstart_matches_system_ps_in_the_user_locale(user_locale):
     locales = subprocess.run(["locale", "-a"], capture_output=True, text=True)
-    if locales.returncode != 0 or "en_AU" not in locales.stdout:
-        pytest.skip("en_AU locale is unavailable")
-    env = {**os.environ, "LANG": "en_AU.UTF-8"}
+    if locales.returncode != 0 or user_locale not in locales.stdout.split():
+        pytest.skip(f"{user_locale} locale is unavailable")
+    env = {**os.environ, "LANG": user_locale}
     env.pop("LC_ALL", None)
     env.pop("LC_TIME", None)
     try:
@@ -88,7 +89,8 @@ def test_shim_lstart_matches_system_ps_in_the_user_locale():
         [str(SCRIPTS / "bin/ps"), "-o", "lstart=", "-p", str(os.getpid())],
         capture_output=True, text=True, env=env, check=True,
     )
-    assert shim.stdout.strip() == system.stdout.strip()
+    # Byte for byte, padding included: a lock may compare the whole line.
+    assert shim.stdout == system.stdout
 
 
 @pytest.mark.skipif(sys.platform != "darwin", reason="macOS KERN_PROC_PID layout")
@@ -129,7 +131,8 @@ def test_shim_sysctl_reports_a_foreign_pid_like_system_ps():
                 ["/bin/ps", "-o", f"{field}=", "-p", "1"],
                 capture_output=True, text=True, env=env, check=True,
             )
-            system[field] = result.stdout.strip()
+            # lstart keeps the padding macOS ps prints, which a lock may compare.
+            system[field] = result.stdout.rstrip("\n") if field == "lstart" else result.stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         pytest.skip("setuid /bin/ps cannot execute in this sandbox")
     previous_locale = locale.setlocale(locale.LC_ALL)

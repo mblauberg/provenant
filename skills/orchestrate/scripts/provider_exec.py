@@ -105,6 +105,9 @@ def credential_path(path):
     stores = [home / name for name in (
         '.ssh', '.aws', '.azure', '.gnupg', '.codex', '.claude',
         '.gemini', '.cursor', '.kiro', '.docker', '.kube', '.netrc', '.npmrc',
+        '.git-credentials', '.pypirc', '.pgpass', '.vault-token', '.password-store', '.boto',
+        '.s3cfg', '.terraform.d', '.cargo/credentials', '.cargo/credentials.toml',
+        '.gem/credentials', '.config/git/credentials', '.config/hub', '.config/op',
         '.config/gh', '.config/gcloud', '.config/claude', '.config/codex',
         '.config/openai', '.config/opencode', '.local/share/opencode', 'Library/Keychains',
         'Library/Application Support',
@@ -114,7 +117,9 @@ def credential_path(path):
     parts = [part.lower() for part in candidate.parts]
     return (
         bool(set(parts) & {".ssh", ".aws", ".azure", ".gnupg", ".codex", ".claude",
-                           ".gemini", ".cursor", ".kiro", ".docker", ".kube", ".netrc", ".npmrc"})
+                           ".gemini", ".cursor", ".kiro", ".docker", ".kube", ".netrc", ".npmrc",
+                           ".git-credentials", ".pypirc", ".pgpass", ".vault-token",
+                           ".password-store"})
         or any(
             part
             in {
@@ -210,9 +215,12 @@ def validate_capabilities(value, *, adapter, mode, sandbox, network):
     return capabilities
 
 
-def _sbpl_string(path, *, keep_leaf=False):
+def _sbpl_string(path, *, keep_leaf=False, canonical=False):
     # keep_leaf leaves a lane-replaceable final entry unresolved, so a link planted there cannot move the grant.
+    # canonical emits a path already resolved and validated, so a link swapped in since cannot move it.
     path = Path(path).expanduser()
+    if canonical:
+        return _sbpl_quote(str(path))
     value = str(path.parent.resolve() / path.name) if keep_leaf else str(path.resolve())
     return _sbpl_quote(value)
 
@@ -221,19 +229,19 @@ def _sbpl_quote(value):
     return '"' + str(value).replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def _sbpl_filter(path, *, keep_leaf=False):
+def _sbpl_filter(path, *, keep_leaf=False, canonical=False):
     text = str(path)
     if text.endswith("*"):
         pattern = text[:-1]
         regex_metacharacters = set(r'.^$*+?()[]{}|\\"')
         pattern = "".join("\\" + char if char in regex_metacharacters else char for char in pattern)
         return '(regex #"^' + pattern + '[^/]*$")'
-    return "(subpath " + _sbpl_string(path, keep_leaf=keep_leaf) + ")"
+    return "(subpath " + _sbpl_string(path, keep_leaf=keep_leaf, canonical=canonical) + ")"
 
 
-def _sbpl_rule(action, operations, paths, *, literal=False, keep_leaf=False):
-    filters = (('(literal ' + _sbpl_string(path, keep_leaf=keep_leaf) + ')') if literal
-               else _sbpl_filter(path, keep_leaf=keep_leaf) for path in paths)
+def _sbpl_rule(action, operations, paths, *, literal=False, keep_leaf=False, canonical=False):
+    filters = (('(literal ' + _sbpl_string(path, keep_leaf=keep_leaf, canonical=canonical) + ')') if literal
+               else _sbpl_filter(path, keep_leaf=keep_leaf, canonical=canonical) for path in paths)
     return f"({action} {operations} " + " ".join(filters) + ")\n" if paths else ""
 
 
@@ -320,7 +328,7 @@ def check_protected_inputs(route, workspace_root, cwd, *, worktree=None, prompt_
     return paths
 
 
-def os_confinement_profile(plan):
+def os_confinement_profile(plan, search_path=None):
     """Apply the provider's read and write boundary to this attempt.
 
     SBPL applies the last matching rule, so each later rule narrows or widens the one before.
@@ -392,6 +400,8 @@ def os_confinement_profile(plan):
     configured_xdg = Path(os.environ.get("XDG_CONFIG_HOME", "")).expanduser()
     xdg_config_home = configured_xdg if configured_xdg.is_absolute() else home / ".config"
     git_config_files = [home / ".gitconfig", xdg_config_home / "git/config"]
+    project_files, project_directories = _project_config_reads(plan, root)
+    toolchain_files, uv_project_files, toolchain_directories = _toolchain_reads(plan, root, search_path)
     return (
         "(version 1)\n(allow default)\n(deny file-write*)\n"
         + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), *state_writes, Path("/dev")])
@@ -403,17 +413,157 @@ def os_confinement_profile(plan):
         + _sbpl_rule("allow", "file-read-data", [
             Path(plan["cwd"]), *add_dirs
         ])
+        # Unresolved, so a link planted under a config name cannot carry the grant elsewhere.
+        + _sbpl_rule("allow", "file-read-data", project_files, literal=True, keep_leaf=True)
+        + _sbpl_rule("allow", "file-read-data", project_directories, keep_leaf=True)
+        + _sbpl_rule("allow", "file-read-data", toolchain_files, literal=True, canonical=True)
+        + _sbpl_rule("allow", "file-read-data", uv_project_files, literal=True, keep_leaf=True)
+        + _sbpl_rule("allow", "file-read-data", toolchain_directories, canonical=True)
         + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
     )
 
 
-def confinement_command(plan, command):
+# Project files and directories a provider loads from each directory above its cwd.
+PROJECT_CONFIG = {"opencode": (("opencode.json", "opencode.jsonc", "AGENTS.md", "CLAUDE.md"), (".opencode",))}
+
+
+def _project_config_reads(plan, root):
+    """What a read-only provider loads between its cwd and the repository (or workspace) root.
+
+    OpenCode fails at startup when it can see but not read a config file above its cwd.
+    """
+    files, directories = PROJECT_CONFIG.get(plan.get("adapter"), ((), ()))
+    if not files and not directories:
+        return [], []
+    cwd = Path(plan["cwd"]).resolve()
+    stop = _git_toplevel(cwd) or root
+    parents = [parent for parent in cwd.parents if parent.is_relative_to(stop)]
+    return ([parent / name for parent in parents for name in files],
+            [parent / name for parent in parents for name in directories])
+
+
+# Toolchain commands a read-only lane runs tests with, looked up on the provider's PATH. npm, npx
+# and corepack ship inside node's prefix.
+TOOLCHAIN_COMMANDS = ("python3", "python", "uv", "node")
+# uv looks for its project and workspace in every directory above cwd and stops on a file it
+# can see but not read.
+UV_PROJECT_FILES = ("pyproject.toml", "uv.toml", "uv.lock", ".python-version")
+
+
+def _executable_file(path):
+    return path.is_file() and not path.is_symlink() and os.access(path, os.X_OK)
+
+
+# CPython interpreter and library names, free-threaded (t) builds included.
+PYTHON_EXECUTABLE = re.compile(r"python(3(\.\d+)?t?)?")
+PYTHON_LIBRARY = re.compile(r"python3\.\d+t?")
+# Runtime directories of an install prefix. Anything else beside them, such as a stray auth.json,
+# stays unreadable.
+TOOLCHAIN_RUNTIME_DIRS = ("lib", "include", "libexec")
+
+
+def _toolchain_grant(executable):
+    """Canonical (files, directories) a resolved toolchain executable may be read through.
+
+    Only a real install counts: a regular executable with a toolchain name, in the `bin` of a
+    prefix with that toolchain's library layout (lib/python3.* or lib/node_modules), which is not
+    home, not above it and holds no credential store. The grant is the executable and the
+    prefix's runtime directories, never the prefix itself; uv is a single binary granted alone.
+    Repository content (a .venv link, a pyvenv.cfg) can name a candidate, never a grant.
+    """
+    resolved = executable.resolve()
+    if not _executable_file(resolved) or credential_path(resolved):
+        return [], []
+    if re.fullmatch(r"uvx?", resolved.name):
+        return [resolved], []
+    prefix = resolved.parent.parent
+    if resolved.parent.name != "bin":
+        return [], []
+    library = prefix / "lib"
+    if library.is_symlink() or not library.is_dir():
+        return [], []
+    if PYTHON_EXECUTABLE.fullmatch(resolved.name):
+        layout = any(PYTHON_LIBRARY.fullmatch(path.name) and path.is_dir() for path in library.iterdir())
+    elif resolved.name == "node":
+        layout = (library / "node_modules").is_dir()
+    else:
+        return [], []
+    home = Path.home().resolve()
+    if not layout or home.is_relative_to(prefix) or credential_path(prefix):
+        return [], []
+    directories = [path for name in TOOLCHAIN_RUNTIME_DIRS if (path := _runtime_component(prefix, name, directory=True))]
+    files = [resolved]
+    if resolved.name != "node" and prefix.parent.name == "Versions" and prefix.parent.parent.suffix == ".framework":
+        # A framework build's interpreter loads <prefix>/<framework name>, the library dyld opens
+        # at launch, and may re-exec Resources/Python.app.
+        if library_file := _runtime_component(prefix, prefix.parent.parent.stem, directory=False):
+            files.append(library_file)
+        if resources := _runtime_component(prefix, "Resources", directory=True):
+            directories.append(resources)
+    return files, directories
+
+
+def _runtime_component(prefix, name, *, directory):
+    """<prefix>/<name> as a canonical grant, or None.
+
+    It must be a real entry of the expected kind, not a link, so it can neither name the prefix
+    itself (a link to `.`) nor reach outside it; it must lie strictly below the prefix and hold
+    no credential store.
+    """
+    path = prefix / name
+    if path.is_symlink() or not (path.is_dir() if directory else path.is_file()):
+        return None
+    canonical = path.resolve()
+    if canonical != path or canonical == prefix or not canonical.is_relative_to(prefix) or credential_path(canonical):
+        return None
+    return canonical
+
+
+def _toolchain_reads(plan, root, search_path=None):
+    """Files, unresolved project files and directories of the toolchain a read-only lane uses.
+
+    Commands on the provider PATH, and each .venv between cwd and the repository root with the
+    interpreter it links to or its pyvenv.cfg names, are candidates; each is granted only through
+    _toolchain_grant. Nothing is run to find them, so a planted interpreter cannot act outside
+    the sandbox, and nothing is writable.
+    """
+    search_path = os.environ.get("PATH", os.defpath) if search_path is None else search_path
+    cwd = Path(plan["cwd"]).resolve()
+    stop = _git_toplevel(cwd) or root
+    candidates = [Path(found) for name in TOOLCHAIN_COMMANDS if (found := shutil.which(name, path=search_path))]
+    directories = []
+    for parent in (cwd, *(parent for parent in cwd.parents if parent.is_relative_to(stop))):
+        venv = parent / ".venv"
+        config = venv / "pyvenv.cfg"
+        if venv.is_symlink() or not venv.is_dir() or not _plain_file(config) or credential_path(venv):
+            continue
+        directories.append(venv)  # Workspace content, readable to a lane whose cwd holds it.
+        candidates.append(venv / "bin" / "python")
+        base = next((line.partition("=")[2].strip() for line in config.read_text(errors="replace").splitlines()
+                     if line.partition("=")[0].strip() == "home"), "")
+        if base and Path(base).is_absolute():
+            candidates.extend(Path(base) / name for name in ("python3", "python"))
+    files = []
+    for candidate in candidates:
+        granted_files, granted_directories = _toolchain_grant(candidate)
+        files.extend(granted_files)
+        directories.extend(granted_directories)
+    project_files = ([parent / name for parent in cwd.parents for name in UV_PROJECT_FILES]
+                     if any(path.name.startswith("uv") for path in files) else [])
+    return list(dict.fromkeys(files)), project_files, list(dict.fromkeys(directories))
+
+
+def _plain_file(path):
+    return path.is_file() and not path.is_symlink()
+
+
+def confinement_command(plan, command, search_path=None):
     if plan.get("applied", {}).get("confinement") != "sandbox-exec":
         return list(command)
     sandbox_exec = _sandbox_exec_path()
     if not sandbox_exec:
         raise RuntimeError("sandbox-exec is unavailable for a confined provider launch")
-    return [sandbox_exec, "-p", os_confinement_profile(plan), *command]
+    return [sandbox_exec, "-p", os_confinement_profile(plan, search_path), *command]
 
 
 def read_boundary(workspace_root, read_roots=()):
@@ -533,11 +683,13 @@ def build_plan(
     if any(not Path(p).is_dir() for p in directories):
         raise ValueError("add-dir must be a readable directory")
     if mode == "worktree_write" and adapter == "codex" and git_private is not None:
-        # Codex's workspace-write sandbox keeps each writable root's .agents read-only, so a
-        # rebase or merge that updates a tracked skill stops half-way. Granting the directory
-        # lets Git rewrite it; execute() then fails a lane that authored a change there.
+        # Codex's workspace-write sandbox keeps each writable root's .agents read-only, even an
+        # absent one, so a rebase or merge that updates or adds a tracked skill stops half-way.
+        # Granting the directory (execute() creates an absent one) lets Git rewrite it;
+        # execute() then fails a lane that authored a change there.
         instructions = Path(cwd, INSTRUCTION_DIR)
-        if instructions.is_dir() and not instructions.is_symlink() and str(instructions) not in directories:
+        grantable = not os.path.lexists(instructions) or (instructions.is_dir() and not instructions.is_symlink())
+        if grantable and str(instructions) not in directories:
             directories.append(str(instructions))
     model = route.get("resolved_model") or route.get("model") or ""
     effort = route.get("effort_applied", route.get("effort")) or ""
@@ -592,13 +744,19 @@ def build_plan(
         warnings.append("worktree_write writes are unconfined: Codex sandbox is full")
     if mode == "worktree_write" and adapter == "agy" and confinement != "sandbox-exec":
         raise ValueError("agy worktree_write requires usable sandbox-exec")
+    # Codex's native read-only sandbox reads everywhere whatever the cwd, so it gets no warning.
     if (
         mode == "read_only"
         and cwd != workspace_root
-        and adapter in {"codex", "claude", "cursor", "kiro", "agy", "opencode"}
+        and adapter in {"claude", "cursor", "kiro", "agy", "opencode"}
         and confinement != "sandbox-exec"
     ):
         warnings.append(f"{adapter} read_only: cwd is not a read boundary")
+    if adapter == "codex" and sandbox == "read-only":
+        writable = config.read_only_writable_dirs({"cwd": cwd, "applied": {"add_dirs": directories}})
+        warnings.extend("codex read_only add-dir stays read-only (it holds cwd or a pattern character): "
+                        + directory
+                        for directory in directories if directory not in writable)
     if adapter in {"agy", "kiro"} or (
         mode == "worktree_write" and guarantee != "enforced"
     ):
@@ -632,7 +790,8 @@ def build_plan(
         if mode == "worktree_write" and sandbox == "workspace-write":
             # Codex applies the nearest entry, so the common directory reads as read-only below
             # any add_dir while the named Git paths inside it stay writable.
-            filesystem = {directory: "write" for directory in directories}
+            # :tmpdir is the attempt's tmp, which holds XDG_CACHE_HOME, COREPACK_HOME and tool caches.
+            filesystem = {":tmpdir": "write", **{directory: "write" for directory in directories}}
             if git_private is not None:
                 filesystem[str(git_common)] = "read"
                 for path in (git_private, *(git_common / name for name in
@@ -1891,6 +2050,8 @@ def instruction_disk_state(cwd, object_format):
     process cannot redirect it by swapping a directory or file for a link, FIFO or device.
     """
     root = Path(cwd, INSTRUCTION_DIR)
+    if not os.path.lexists(root):
+        return {}  # Git removes the directory with its last file, as a merge may.
     if root.is_symlink() or not root.is_dir():
         raise ValueError(f"{INSTRUCTION_DIR} is no longer a directory")
     entries, total = {}, 0
@@ -1977,6 +2138,38 @@ def authored_instruction_changes(cwd, start):
     return sorted(key + (" (unresolved conflict)" if key in conflicts else "") for key in changed | conflicts)
 
 
+def tool_cache_environment(plan, cache, inherited):
+    """Point tool caches at the attempt cache, overriding inherited locations a sandbox denies.
+
+    A read-only lane must still run a targeted test, so tools that would write a cache beside
+    the sources it may not change are pointed at the cache or told to skip it.
+    """
+    environment = {"UV_CACHE_DIR": str(cache / "uv"), "npm_config_cache": str(cache / "npm")}
+    if plan["mode"] == "read_only":
+        addopts = inherited.get("PYTEST_ADDOPTS", "")
+        environment.update(
+            PYTEST_ADDOPTS=(addopts + " -p no:cacheprovider").strip(),
+            PYTHONPYCACHEPREFIX=str(cache / "pycache"),
+            RUFF_CACHE_DIR=str(cache / "ruff"),
+            MYPY_CACHE_DIR=str(cache / "mypy"),
+        )
+    return environment
+
+
+def stage_ps_shim(private_tmp):
+    """Copy the ps shim into the attempt's temp, which every sandbox lets the lane read.
+
+    The product checkout may sit below a denied home or outside a read-only lane's cwd.
+    """
+    source = Path(__file__).resolve().parent
+    stage = private_tmp / "provenant-shim"
+    (stage / "bin").mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source / "process_info.py", stage / "process_info.py")
+    shutil.copyfile(source / "bin" / "ps", stage / "bin" / "ps")
+    os.chmod(stage / "bin" / "ps", 0o755)
+    return stage / "bin"
+
+
 def execute(
     plan,
     output_path,
@@ -1996,10 +2189,6 @@ def execute(
     events_path = Path(events_path or output_path.parent / "events.jsonl")
     stderr_path = Path(stderr_path or output_path.parent / "stderr.log")
     environment = dict(os.environ if env is None else env)
-    if (plan["adapter"] == "codex" and sys.platform == "darwin"
-            and plan["applied"]["sandbox"] != "full"):
-        shim_dir = str(Path(__file__).resolve().parent / "bin")
-        environment["PATH"] = shim_dir + os.pathsep + environment.get("PATH", os.defpath)
     for key in list(environment):
         if key.startswith(
             ("GIT_", "PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")
@@ -2022,7 +2211,13 @@ def execute(
     attempt_marker = uuid.uuid4().hex
     environment["PROVENANT_ATTEMPT_MARKER"] = attempt_marker
     instruction_start = None
+    created_instructions = None
     if instructions_writable(plan):
+        try:
+            Path(plan["cwd"], INSTRUCTION_DIR).mkdir()
+            created_instructions = Path(plan["cwd"], INSTRUCTION_DIR)
+        except OSError:
+            pass  # Present already; the snapshot fails anything but a real directory.
         try:
             instruction_start = instruction_snapshot(plan["cwd"])
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -2035,14 +2230,24 @@ def execute(
     private_cache = private_tmp / "cache"
     private_tmp.mkdir(parents=True, exist_ok=True)
     private_cache.mkdir(parents=True, exist_ok=True)
+    # Tool caches follow XDG_CACHE_HOME; Corepack is set too, so an inherited COREPACK_HOME
+    # outside the writable roots cannot leak into child pnpm or yarn calls.
     environment.update(TMPDIR=str(private_tmp), TMP=str(private_tmp), TEMP=str(private_tmp),
-                       XDG_CACHE_HOME=str(private_cache))
+                       XDG_CACHE_HOME=str(private_cache),
+                       COREPACK_HOME=str(private_cache / "node" / "corepack"))
+    environment.update(tool_cache_environment(plan, private_cache, environment))
     if plan["mode"] == "worktree_write":
         # Inherited GIT_ variables were dropped above, so this list is the whole command-line scope.
         environment["GIT_CONFIG_COUNT"] = str(len(WRITER_GIT_CONFIG))
         for index, (key, value) in enumerate(WRITER_GIT_CONFIG):
             environment[f"GIT_CONFIG_KEY_{index}"] = key
             environment[f"GIT_CONFIG_VALUE_{index}"] = value
+    # macOS refuses to exec the setuid /bin/ps inside any sandbox, native or sandbox-exec.
+    if sys.platform == "darwin" and (
+            (plan["adapter"] == "codex" and plan["applied"]["sandbox"] != "full")
+            or plan["applied"].get("confinement") == "sandbox-exec"):
+        shim_dir = str(stage_ps_shim(private_tmp))
+        environment["PATH"] = shim_dir + os.pathsep + environment.get("PATH", os.defpath)
     if plan["adapter"] == "claude":
         private_claude_tmp = private_tmp / "claude"
         private_claude_tmp.mkdir(parents=True, exist_ok=True)
@@ -2211,7 +2416,7 @@ def execute(
             command[0] = (
                 shutil.which(command[0], path=environment.get("PATH")) or command[0]
             )
-            command = confinement_command(plan, command)
+            command = confinement_command(plan, command, environment.get("PATH"))
             subreaper = _enable_subreaper()
             process = subprocess.Popen(
                 command,
@@ -2516,6 +2721,11 @@ def execute(
             instruction_changes = authored_instruction_changes(plan["cwd"], instruction_start)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             instruction_changes = [f"{INSTRUCTION_DIR} (unverifiable: {exc})"]
+    if created_instructions is not None:
+        try:
+            created_instructions.rmdir()  # Only the empty directory this attempt added.
+        except OSError:
+            pass
     if instruction_changes:
         status = "failed"
         parsed["signature"] = "protected_instructions_changed"
