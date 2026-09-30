@@ -301,6 +301,13 @@ it.each([false, true])("exposes the default tools within budget (legacy=%s)", as
     expect(dispatchInput.properties.capabilities.type).toBe("array");
     expect(dispatchInput.properties.capabilities.description).toContain("postgres or browser");
     expect(dispatchInput.properties.tasks.items.additionalProperties).toBe(false);
+    for (const schema of [dispatchInput, dispatchInput.properties.tasks.items]) {
+      expect(schema.properties.route.type).toBe("string");
+      expect(schema.properties.rotate.type).toBe("boolean");
+      expect(schema.properties.council).toMatchObject({ type: "integer", minimum: 1, maximum: 8 });
+      expect(schema.properties.models).toMatchObject({ type: "array", maxItems: 8 });
+      expect(schema.properties.confidential.type).toBe("boolean");
+    }
     for (const name of [
         "acknowledge",
         "activity",

@@ -124,8 +124,60 @@ def model_families(model, catalogue=None):
 
 
 
-def candidates(plan, policy=None, catalogue=None):
-    """Return ordered route requests. Explicit lists may opt into training/free routes."""
+UNSAFE_TRAITS = frozenset({"free", "trains-on-prompts"})
+
+
+def _configured_traits(adapter, model):
+    """`model_traits` caveats from the merged routing catalogue, keyed adapter/model or model."""
+    try:
+        table = _model_route_module().load_catalog().get("model_traits", {})
+    except (OSError, ValueError, AttributeError, TypeError, KeyError, ImportError):
+        return set()
+    traits = set()
+    for key in (f"{adapter}/{model}", model):
+        value = table.get(key) if isinstance(table, dict) else None
+        if isinstance(value, list):
+            traits.update(item for item in value if isinstance(item, str))
+    return traits
+
+
+def disclosure_risk(adapter, model, meta=None):
+    """Why a route may keep or train on prompts, or None when it is paid and non-training."""
+    meta = meta if isinstance(meta, dict) else {}
+    model = str(model or "")
+    if meta.get("trains_on_prompts") is True:
+        return "trains on prompts"
+    if (meta.get("plan_cap_usd") == 0 or model.endswith(("-free", ":free"))
+            or model.startswith("opencode/")):
+        return "is a free tier that may train on prompts"
+    if UNSAFE_TRAITS & _configured_traits(adapter, model):
+        return "may train on prompts (model_traits)"
+    return None
+
+
+def confidential_alternatives(adapter, model, alias, catalog=None):
+    """Members of the alias the router resolved that are safe for a confidential task.
+
+    Alias order is kept; the unsafe pick, members that may train on prompts and
+    cooling members are left out. The caller re-resolves each to confirm it.
+    """
+    try:
+        catalog = catalog if catalog is not None else _model_route_module().load_catalog()
+    except (OSError, ValueError, AttributeError, TypeError, KeyError, ImportError):
+        return []
+    entry = catalog.get("adapters", {}).get(adapter, {}) if isinstance(catalog, dict) else {}
+    aliases = entry.get("aliases") if isinstance(entry, dict) else None
+    if not aliases and isinstance(entry, dict) and entry.get("fixed_model_family"):
+        aliases = catalog.get("families", {}).get(entry["fixed_model_family"], {}).get("aliases")
+    members = aliases.get(alias or "workhorse", []) if isinstance(aliases, dict) else []
+    return [member for member in members
+            if isinstance(member, str) and member != model
+            and not disclosure_risk(adapter, member, {}) and not cooling(adapter, member)]
+
+
+def candidates(plan, policy=None, catalogue=None, confidential=False):
+    """Return ordered route requests. Explicit lists may opt into training/free routes,
+    except for a confidential task, whose every candidate must be paid and non-training."""
     explicit_model = bool(plan.get("requested_model"))
     if policy is None:
         policy = not explicit_model
@@ -203,7 +255,10 @@ def candidates(plan, policy=None, catalogue=None):
             or (model.endswith("-free") or model.endswith(":free"))
             or model.startswith("opencode/")
         )
-        if not explicit and policy != "any" and (training is True or free):
+        if confidential:
+            if disclosure_risk(candidate_adapter, model, {**meta, **item}):
+                continue
+        elif not explicit and policy != "any" and (training is True or free):
             continue
         answer.append(
             {

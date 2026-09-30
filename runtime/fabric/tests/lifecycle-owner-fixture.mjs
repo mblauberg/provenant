@@ -61,6 +61,7 @@ if (owner === "run_dir_init.sh") {
 }
 
 const runDir = value("--run-dir");
+if (process.env.FIXTURE_ARGV_LOG && runDir) writeFileSync(join(runDir, `${owner}.argv.json`), JSON.stringify(process.argv.slice(2)));
 
 /**
  * A provider may lead its own session. It answers only its own SIGTERM, so a
