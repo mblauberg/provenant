@@ -41,6 +41,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { catalogueSnapshot, type CatalogueSnapshot } from "./catalogue.js";
+import { expandPools, usesPool, POOL_FIELDS } from "./pools.js";
 import { runRoot, databasePath, withoutGitRedirects, type Identity } from "./identity.js";
 import {
   shortRunId,
@@ -626,6 +627,34 @@ async function dispatchConfiguredProviderUnchecked(
 ): Promise<Record<string, unknown>> {
   const workspaceIdentity = identity;
   const root = productRoot(env);
+  let poolWarnings: string[] = [];
+  if (usesPool(input)) {
+    // A route pick keeps this a single dispatch; a council runs as a batch of its members.
+    const taskId = input.task_id ?? (input.council === undefined && input.models === undefined ? undefined : "council");
+    const expanded = await expandPools([{ ...input, ...(taskId === undefined ? {} : { id: taskId }) }],
+      await pythonOwner(root, identity, env), root, identity, env, signal);
+    if (expanded.errors.length) {
+      const error = expanded.errors[0]!;
+      return { status: "rejected", error: error.error, fix: error.fix };
+    }
+    if (expanded.council) {
+      const { task_id: _task, wait_seconds, ...controls } = input;
+      const result = await dispatchConfiguredBatchUnchecked({
+        ...Object.fromEntries(Object.entries(controls).filter(([key]) =>
+          !["prompt", "prompt_file", "resume", "handoff", "adapter", "alias", "model", "effort", "confidential", ...POOL_FIELDS].includes(key))),
+        tasks: expanded.tasks,
+        concurrency: Math.min(8, expanded.tasks.length),
+        wait_seconds: wait_seconds ?? DEFAULT_WAIT_SECONDS,
+      }, identity, signal, env);
+      return expanded.warnings.length
+        ? { ...result, warnings: [...((result.warnings as string[] | undefined) ?? []), `warning: ${expanded.warnings.join("; ")}`] }
+        : result;
+    }
+    // A single pick, or a selector that won precedence, replaces the request's own selectors.
+    const { id: _id, ...picked } = expanded.tasks[0]!;
+    input = { ...(picked as DispatchInput), ...(input.task_id === undefined ? {} : { task_id: input.task_id }) };
+    poolWarnings = expanded.warnings;
+  }
   const snapshotStarted = performance.now(), catalogue = catalogueSnapshot(root, env);
   const initialRoute = normaliseRoute(input, identity, catalogue);
   input = { ...input, mode: initialRoute.access_mode };
@@ -634,7 +663,7 @@ async function dispatchConfiguredProviderUnchecked(
     ...(input.prompt_file === undefined ? {} : { prompt_file: ownerPromptPath(identity, input.prompt_file) }) };
   const policy = dispatchDefaults(identity.cwd);
   const route = applyDispatchDefaults(normaliseRoute(input, identity, catalogue), policy.defaults);
-  route.warnings = [...new Set([...(initialRoute.warnings ?? []), ...(route.warnings ?? []), ...policy.warnings])];
+  route.warnings = [...new Set([...(initialRoute.warnings ?? []), ...(route.warnings ?? []), ...poolWarnings, ...policy.warnings])];
   validatePrompt(input.prompt, input.prompt_file);
   const roots = readRoots(identity, input.cwd, input.prompt_file);
   if (roots.length) route.read_roots = roots;
@@ -768,8 +797,7 @@ async function dispatchConfiguredBatchUnchecked(
 ): Promise<Record<string, unknown>> {
   if (input.tasks.length < 1 || input.tasks.length > 64)
     throw new InputError("invalid_input", "tasks must contain 1-64 items");
-  const concurrency = input.concurrency ?? Math.min(4, input.tasks.length);
-  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 8) {
+  if (input.concurrency !== undefined && (!Number.isInteger(input.concurrency) || input.concurrency < 1 || input.concurrency > 8)) {
     throw new InputError("invalid_input", "concurrency must be an integer from 1 to 8");
   }
   if (!Number.isInteger(input.wait_seconds ?? 0) || (input.wait_seconds ?? 0) < 0 || (input.wait_seconds ?? 0) > 55) {
@@ -780,16 +808,36 @@ async function dispatchConfiguredBatchUnchecked(
   const catalogue = catalogueSnapshot(root, env);
   const policy = dispatchDefaults(identity.cwd);
   const errors: Record<string, unknown>[] = [];
-  const tasks = input.tasks.flatMap((task, index) => {
+  const defaults = Object.fromEntries(Object.entries(input).filter(([key]) =>
+    ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", ...POOL_FIELDS].includes(key)));
+  let merged: BatchTaskInput[] = input.tasks.flatMap((task, index) => {
+    const taskError = (task as BatchTaskInput & { _fabric_error?: Record<string, unknown> })._fabric_error;
+    if (taskError) {
+      errors.push({ task_id: task.id ?? `task-${index + 1}`, ...taskError });
+      return [];
+    }
+    // A task's own selector replaces a default pool, and a task's own pool replaces a default selector.
+    const own = usesPool(task) ? Object.fromEntries(Object.entries(defaults).filter(([key]) => !["alias", "model"].includes(key)))
+      : task.alias !== undefined || task.model !== undefined
+        ? Object.fromEntries(Object.entries(defaults).filter(([key]) => !(POOL_FIELDS as readonly string[]).includes(key)))
+        : defaults;
+    return [{ ...own, ...task, id: task.id ?? `task-${index + 1}` }];
+  });
+  const poolWarnings: string[] = [];
+  let councils = false;
+  if (merged.some(usesPool)) {
+    const expanded = await expandPools(merged, await pythonOwner(root, identity, env), root, identity, env, signal);
+    errors.push(...expanded.errors);
+    poolWarnings.push(...expanded.warnings);
+    merged = expanded.tasks;
+    councils = expanded.council;
+    if (merged.length > 64) throw new InputError("invalid_input", "tasks must contain 1-64 items after councils expand");
+  }
+  // Size the default after councils expand, so a nested council does not run serially; an explicit limit stands.
+  const concurrency = input.concurrency ?? Math.max(1, Math.min(councils ? 8 : 4, merged.length));
+  const tasks = merged.flatMap((task, index) => {
     try {
-      const taskError = (task as BatchTaskInput & { _fabric_error?: Record<string, unknown> })._fabric_error;
-      if (taskError) {
-        errors.push({ task_id: task.id ?? `task-${index + 1}`, ...taskError });
-        return [];
-      }
-      const defaults = Object.fromEntries(Object.entries(input).filter(([key]) =>
-        ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets"].includes(key)));
-      return [normaliseTask({ ...defaults, ...task }, index, identity, catalogue, policy.defaults)];
+      return [normaliseTask(task, index, identity, catalogue, policy.defaults)];
     } catch (error) {
       errors.push({ task_id: task.id ?? `task-${index + 1}`, ...rejected(error) });
       return [];
@@ -867,7 +915,7 @@ async function dispatchConfiguredBatchUnchecked(
     ? running(started, "batch", identity, FIRST_BATCH_ID)
     : compactBatch(started, completion);
   const rejectedTasks = errors.map((row) => ({ ...row, status: "rejected", state: "terminal" }));
-  const warnings = [...policy.warnings, ...tasks.flatMap((task) => Array.isArray(task.warnings) ? task.warnings : [])];
+  const warnings = [...policy.warnings, ...poolWarnings, ...tasks.flatMap((task) => Array.isArray(task.warnings) ? task.warnings : [])];
   return {
     ...result,
     ...(rejectedTasks.length ? { tasks: [...((result.tasks as Record<string, unknown>[] | undefined) ?? []), ...rejectedTasks] } : {}),

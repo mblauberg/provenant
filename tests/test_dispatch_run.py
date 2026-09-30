@@ -316,6 +316,41 @@ def test_terminal_attempt_carries_nested_owner_spared_count(tmp_path: Path) -> N
     assert row["spared"] == 2
 
 
+def test_terminalised_confidential_run_stays_confidential_on_resume(tmp_path: Path) -> None:
+    module = load_dispatch_module()
+    args = SimpleNamespace(tool="codex", alias="", model="fixture", effort="low", confidential=True,
+                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
+    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
+              "outcome": "ok", "status": "ok", "result": "result.md",
+              "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
+    provider = {"requested": {"adapter": "codex", "alias": "", "model": "fixture", "effort": "low"},
+                "resolved_model": "fixture", "effort_applied": "low", "line": "Route: codex/fixture@low (openai; resolved)"}
+    row = module.terminal_contract(args, tmp_path, legacy, {"status": "ok", "provenance": provider}, 1,
+                                   tmp_path / "tasks/task-1/attempt-001")
+    assert row["provenance"]["requested"]["confidential"] is True
+    assert row["provenance"]["resolved_model"] == "fixture", "the provider's provenance still wins otherwise"
+    run_dir = make_run(tmp_path, "confidential-resume")
+    attempt_dir = run_dir / "tasks/task-1/attempt-001"
+    attempt_dir.mkdir(parents=True)
+    previous = {
+        "run_id": "resume-me", "task_id": "task-1", "attempt": 1, "state": "terminal", "status": "ok",
+        "mode": "read_only", "cwd": str(tmp_path), "worktree": None, "workspace": {"root": str(tmp_path)},
+        "session_id": "saved-session", "provenance": row["provenance"],
+        "applied": {"sandbox": "read-only", "network": None, "add_dirs": [], "capabilities": []},
+        "paths": {"events": None}, "requested_route": {},
+    }
+    (attempt_dir / "attempt.json").write_text(json.dumps(previous), encoding="utf-8")
+    resumed = SimpleNamespace(
+        run_dir=run_dir, resume="resume-me", task_id=None, tool=None, model=None, effort=None,
+        access_mode=None, worktree=None, provider_cwd=None, sandbox=None, network=None,
+        add_dirs=[], resume_session=None, fallback=None, context_ceiling=None,
+        intent="ordinary", orchestrator_family="", role="worker", risk_tier="",
+        model_override_tier="", reviewer_id="", preface=True,
+    )
+    module.prepare_resume(resumed)
+    assert resumed.confidential is True
+
+
 def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
     module = load_dispatch_module()
     run_dir = make_run(tmp_path, "resume-root")
