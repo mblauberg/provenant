@@ -623,19 +623,41 @@ def save_plan(current: dict[str, Any]) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.parent.is_symlink() or path.is_symlink():
         raise CleanError(f"refusing to write plan through a link: {path}")
-    path.write_text(json.dumps({"plan_sha256": current["plan_sha256"], "approval": current["approval"]}, sort_keys=True))
+    path.write_text(json.dumps({"plan_sha256": current["plan_sha256"], "approval": current["approval"],
+                                 "created_at": datetime.now(timezone.utc).isoformat()}, sort_keys=True))
     return path
 
 
 def _load_plan(root: Path, digest: str) -> dict[str, Any]:
     saved = _json(_plan_file(root, digest)) if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) else None
     approval = saved.get("approval") if saved else None
-    if not isinstance(approval, dict) or _digest(approval) != digest or saved.get("plan_sha256") != digest:
+    try:
+        age = datetime.now(timezone.utc) - datetime.fromisoformat(saved["created_at"]) if saved else None
+    except (KeyError, TypeError, ValueError):
+        age = None
+    if (not isinstance(approval, dict) or _digest(approval) != digest or saved.get("plan_sha256") != digest
+            or age is None or age.total_seconds() > DAY):
         raise CleanError("saved plan not found or expired; run `provenant clean` again")
     return approval
 
 
 RUN_KINDS = frozenset({"dispatch", "batch", "orch", "delivery", "mission", "review", "wf"})
+
+
+def _bulk_verdict(path: Path, older_than: float | None, now: datetime) -> str:
+    """Same rules as _bulk_rows, for one tmp/cache below <run>/dispatch/tasks/<task>/<attempt>/."""
+    run, task, attempt = path.parents[4], path.parents[1].name, path.parents[0].name
+    if _live(run):
+        return "keep:live"
+    receipt = _json(run / "RUN_RECEIPT.json") or {}
+    status = str(receipt.get("status") or receipt.get("state") or "").lower()
+    if receipt.get("resumable") is True or status == "input_required":
+        return "keep:resumable"
+    state = _json(run / "tasks" / task / attempt / "attempt.json") or {}
+    if state and (state.get("state") != "terminal" or state.get("status") == "input_required"):
+        return "keep:attempt-active"
+    threshold = max(BULK_OK_DAYS if status in OK_STATUSES else BULK_OTHER_DAYS, older_than or 0)
+    return "delete" if _activity_age(path, now) >= threshold else "keep:retention"
 
 
 def _reclassify(root: Path, row: dict[str, Any], context: dict[str, Any]) -> tuple[str, list[int]]:
@@ -660,9 +682,11 @@ def _reclassify(root: Path, row: dict[str, Any], context: dict[str, Any]) -> tup
         verdict = "delete" if _age(path, now) >= max(1.0, older_than or 0) else "keep:retention"
     else:
         # Owner logs and attempt bulk belong to a run; they are only safe while it is not live.
-        owner = path.parent.parent if kind == "owner-log" and path.parent.name == "_owner" else (
-            path.parents[3] if kind == "attempt-bulk" else None)
-        verdict = "keep:live" if owner is not None and _live(owner) else row["verdict"]
+        if kind == "attempt-bulk":
+            verdict = _bulk_verdict(path, older_than, now)
+        else:
+            owner = path.parent.parent if kind == "owner-log" and path.parent.name == "_owner" else None
+            verdict = "keep:live" if owner is not None and _live(owner) else row["verdict"]
     return verdict, identity
 
 

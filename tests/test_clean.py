@@ -187,6 +187,32 @@ def test_row_changing_after_replan_is_rechecked_before_deletion(tmp_path):
     assert run.exists()
 
 
+def test_plan_older_than_a_day_is_expired_by_its_own_timestamp(tmp_path):
+    root = repo(tmp_path)
+    _finished_run(root, "20260801-1200-dispatch-task-a1b2c3")
+    module = cleaner()
+    proposal = module.plan(root, pr_bodies=[])
+    saved = module.save_plan(proposal)
+    document = json.loads(saved.read_text())
+    document["created_at"] = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+    saved.write_text(json.dumps(document))
+    with pytest.raises(module.CleanError, match="expired"):
+        module.apply(root, proposal["plan_sha256"], pr_bodies=[])
+
+
+def test_attempt_bulk_is_rechecked_against_its_run_before_deletion(tmp_path):
+    root = repo(tmp_path)
+    module = cleaner()
+    run, _ = _run_with_attempt(root, "ok", 3)
+    approved = module.plan(root, pr_bodies=[])
+    assert [row["kind"] for row in approved["rows"] if row["verdict"] == "delete" and row["kind"] == "attempt-bulk"]
+    current = module.plan(root, pr_bodies=[])
+    (run / "dispatch-owner.json").write_text(json.dumps({"owner_pid": os.getpid()}))
+    removed, skipped = module._apply_plan(current, approved["approval"])
+    assert not [path for path in removed if path.endswith(("/tmp", "/cache"))]
+    assert skipped and all(root.joinpath(row["path"]).exists() for row in skipped)
+
+
 def test_expired_saved_plan_asks_for_a_new_plan(tmp_path):
     root = repo(tmp_path)
     _finished_run(root, "20260801-1200-dispatch-task-a1b2c3")
