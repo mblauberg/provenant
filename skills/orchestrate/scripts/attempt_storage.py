@@ -36,6 +36,17 @@ def tree_bytes(path: Path) -> int:
     return total
 
 
+def _open_dir(name: str, parent_fd: int, dev: int) -> int:
+    """Open a real directory on ``dev`` and prove it is the one just examined."""
+    before = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    after = os.fstat(fd)
+    if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino) or after.st_dev != dev:
+        os.close(fd)
+        raise OSError(f"directory changed or crosses a device: {name}")
+    return fd
+
+
 def _rm_at(parent_fd: int, name: str, dev: int, rel: str, left: list[str]) -> None:
     """Delete relative to an open directory: links are unlinked, never entered."""
     info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
@@ -45,7 +56,7 @@ def _rm_at(parent_fd: int, name: str, dev: int, rel: str, left: list[str]) -> No
     if info.st_dev != dev:  # a mount point: leave it and everything under it
         left.append(rel)
         return
-    fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent_fd)
+    fd = _open_dir(name, parent_fd, dev)
     try:
         try:
             os.fchmod(fd, 0o700)  # tools such as pytest leave read-only directories
@@ -67,7 +78,9 @@ def remove_tree(anchor: Path, path: Path) -> list[str]:
 
     Every component is opened with O_NOFOLLOW from the anchor, so a swapped
     ancestor cannot redirect the delete. Returns the paths left in place (mount
-    points, refusals, errors); an empty list means the tree is gone.
+    points, refusals, errors); an empty list means the tree is gone. Every
+    component must be on the anchor's device. Unsupported layout: a same-device
+    bind mount is indistinguishable from a directory and is not detected.
     """
     try:
         parts = Path(path).relative_to(anchor).parts
@@ -79,9 +92,9 @@ def remove_tree(anchor: Path, path: Path) -> list[str]:
     fds: list[int] = []
     try:
         fds.append(os.open(anchor, os.O_RDONLY | os.O_DIRECTORY))
+        dev = os.fstat(fds[0]).st_dev
         for part in parts[:-1]:
-            fds.append(os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[-1]))
-        dev = os.fstat(fds[-1]).st_dev
+            fds.append(_open_dir(part, fds[-1], dev))
         if not stat.S_ISDIR(os.stat(parts[-1], dir_fd=fds[-1], follow_symlinks=False).st_mode):
             return [str(path)]
         _rm_at(fds[-1], parts[-1], dev, str(path), left)

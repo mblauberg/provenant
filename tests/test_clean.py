@@ -1065,3 +1065,43 @@ def test_remove_tree_leaves_other_device_subtree(tmp_path, monkeypatch):
     left = storage.remove_tree(tmp_path, tmp)
     assert len(left) == 1 and left[0].endswith("mnt")
     assert (tmp / "mnt" / "f").is_file() and not (tmp / "gone").exists()
+
+
+def test_remove_tree_refuses_component_swapped_between_check_and_open(tmp_path, monkeypatch):
+    storage = cleaner().attempt_storage
+    target = tmp_path / "a" / "tmp"
+    (target / "sub").mkdir(parents=True)
+    (target / "sub" / "f").write_text("x")
+    victim = tmp_path / "victim"
+    victim.mkdir()
+    (victim / "keep").write_text("keep\n")
+    real_open = storage.os.open
+
+    def swap(path, flags, *args, **kwargs):
+        if path == "sub":
+            os.rename(target / "sub", tmp_path / "moved")
+            os.rename(victim, target / "sub")
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(storage.os, "open", swap)
+    assert storage.remove_tree(tmp_path, target)
+    assert (target / "sub" / "keep").is_file()
+
+
+def test_remove_tree_refuses_ancestor_on_another_device(tmp_path, monkeypatch):
+    storage = cleaner().attempt_storage
+    target = tmp_path / "a" / "b" / "tmp"
+    target.mkdir(parents=True)
+    (target / "f").write_text("x")
+    real_fstat = os.fstat
+    anchor_dev = real_fstat(os.open(tmp_path, os.O_RDONLY)).st_dev
+
+    def fake(fd):
+        result = real_fstat(fd)
+        if result.st_ino == (tmp_path / "a").stat().st_ino:
+            return os.stat_result((result.st_mode, result.st_ino, anchor_dev + 1, *result[3:]))
+        return result
+
+    monkeypatch.setattr(storage.os, "fstat", fake)
+    assert storage.remove_tree(tmp_path, target)
+    assert (target / "f").is_file()
