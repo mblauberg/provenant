@@ -92,7 +92,7 @@ preflight message; they never install automatically.
 Run `provenant clean` from the project for a dry-run classification and plan
 digest. It protects dirty, unmerged, open-PR and active worktrees; `--apply
 --plan <digest>` delegates eligible removal to `scripts/worktree remove`
-after merge proof. The digest names a saved plan; apply deletes only its rows that are still
+after merge proof. The digest names a saved plan (valid for one day); apply deletes only its rows that are still
 eligible and skips the rest, so live lanes do not void an approval. Clean merged worktrees need no
 additional authority to remove. Run artifacts and retention are described in
 [Fabric v2](specs/fabric-v2.md).

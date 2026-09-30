@@ -11,7 +11,6 @@ import json
 import os
 from pathlib import Path
 import re
-import shutil
 import subprocess
 import sys
 from typing import Any
@@ -594,6 +593,8 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
     all_size = sum(row["size_bytes"] for row in rows if row["kind"] not in {"owner-log", "index", "attempt-bulk"})
     result: dict[str, Any] = {"root": str(root), "rows": rows, "reclaimable_bytes": total, "plan_sha256": digest,
                               "approval": digest_data,
+                              "_context": {"refs": refs, "pr_unknown": pr_unknown, "open_heads": open_heads,
+                                           "integration_ref": integration_ref, "older_than": older_than},
                               "warnings": (["GitHub PR state unavailable; run deletion held, merged worktrees use Git proof"]
                                            if pr_bodies is None else [])}
     if integration_ref is not None:
@@ -630,8 +631,39 @@ def _load_plan(root: Path, digest: str) -> dict[str, Any]:
     saved = _json(_plan_file(root, digest)) if re.fullmatch(r"sha256:[0-9a-f]{64}", digest) else None
     approval = saved.get("approval") if saved else None
     if not isinstance(approval, dict) or _digest(approval) != digest or saved.get("plan_sha256") != digest:
-        raise CleanError("approved plan digest matches no saved cleanup plan; run provenant clean first")
+        raise CleanError("saved plan not found or expired; run `provenant clean` again")
     return approval
+
+
+RUN_KINDS = frozenset({"dispatch", "batch", "orch", "delivery", "mission", "review", "wf"})
+
+
+def _reclassify(root: Path, row: dict[str, Any], context: dict[str, Any]) -> tuple[str, list[int]]:
+    """Classify one approved path again, right before it is acted on."""
+    path = root / row["path"]
+    stat = path.lstat()
+    identity = [stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size]
+    now = datetime.now(timezone.utc)
+    kind, older_than = row["kind"], context["older_than"]
+    if kind in RUN_KINDS:
+        found = _run_kind(path, path.parent.name == "runs")
+        indexed = _indexed_run_ids(root / ".agent-run" / "runs" / "index.jsonl").get(path.name, set())
+        verdict = ("changed" if found != kind else
+                   _run_verdict(path, kind, _age(path, now), context["refs"], context["pr_unknown"],
+                                older_than, indexed, now))
+    elif kind == "worktree":
+        verdict = _worktree_verdict(root, path, context["open_heads"], _registered_worktrees(root),
+                                    integration_ref=context["integration_ref"])
+        if verdict == "delete" and older_than is not None and _age(path, now) < older_than:
+            verdict = "keep:retention"
+    elif kind == "scratch":
+        verdict = "delete" if _age(path, now) >= max(1.0, older_than or 0) else "keep:retention"
+    else:
+        # Owner logs and attempt bulk belong to a run; they are only safe while it is not live.
+        owner = path.parent.parent if kind == "owner-log" and path.parent.name == "_owner" else (
+            path.parents[3] if kind == "attempt-bulk" else None)
+        verdict = "keep:live" if owner is not None and _live(owner) else row["verdict"]
+    return verdict, identity
 
 
 def _apply_plan(current: dict[str, Any], approved: dict[str, Any]) -> tuple[list[str], list[dict[str, str]]]:
@@ -682,6 +714,10 @@ def _apply_plan(current: dict[str, Any], approved: dict[str, Any]) -> tuple[list
         if not path.exists():
             skipped.append({"path": row["path"], "reason": "vanished during cleanup"})
             continue
+        reclassified, identity = _reclassify(root, row, current["_context"])
+        if reclassified != verdict or identity != row["_identity"]:
+            skipped.append({"path": row["path"], "reason": "changed after the plan was rechecked"})
+            continue
         if verdict == "abandon":
             receipt_path = path / "RUN_RECEIPT.json"
             receipt = _json(receipt_path)
@@ -710,8 +746,13 @@ def _apply_plan(current: dict[str, Any], approved: dict[str, Any]) -> tuple[list
             if left:
                 raise CleanError(f"incomplete removal of {path}: {left[0]}")
         elif path.is_dir():
-            shutil.rmtree(path)
+            # Anchored, no-follow removal: a swapped component cannot redirect it.
+            left = attempt_storage.remove_tree(root, path)
+            if left:
+                raise CleanError(f"incomplete removal of {path}: {left[0]}")
         else:
+            if any(parent.is_symlink() for parent in path.parents if parent != root and root in parent.parents):
+                raise CleanError(f"path changed during cleanup: {path}")
             path.unlink()
         removed.append(row["path"])
     return removed, skipped
@@ -779,7 +820,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"provenant clean: {exc}", file=sys.stderr)
         return 2
     if args.json:
-        public = {**{key: value for key, value in report.items() if key != "approval"},
+        public = {**{key: value for key, value in report.items() if key not in {"approval", "_context"}},
                   "rows": [{key: value for key, value in row.items() if key != "_identity"}
                            for row in report["rows"]]} if not (args.apply or args.prune_merged) else report
         print(json.dumps(public, indent=2, sort_keys=True))

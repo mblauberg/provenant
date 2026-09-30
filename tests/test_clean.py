@@ -175,6 +175,28 @@ def test_apply_skips_row_that_stopped_being_eligible(tmp_path):
     assert run.exists()
 
 
+def test_row_changing_after_replan_is_rechecked_before_deletion(tmp_path):
+    root = repo(tmp_path)
+    run = _finished_run(root, "20260801-1200-dispatch-task-a1b2c3")
+    module = cleaner()
+    approved = module.plan(root, pr_bodies=[])
+    current = module.plan(root, pr_bodies=[])
+    (run / "KEEP").write_text("pinned after the replan\n")
+    removed, skipped = module._apply_plan(current, approved["approval"])
+    assert removed == [] and len(skipped) == 1
+    assert run.exists()
+
+
+def test_expired_saved_plan_asks_for_a_new_plan(tmp_path):
+    root = repo(tmp_path)
+    _finished_run(root, "20260801-1200-dispatch-task-a1b2c3")
+    module = cleaner()
+    proposal = module.plan(root, pr_bodies=[])
+    module.save_plan(proposal).unlink()
+    with pytest.raises(module.CleanError, match="expired"):
+        module.apply(root, proposal["plan_sha256"], pr_bodies=[])
+
+
 def test_apply_refuses_unsaved_or_altered_plan(tmp_path):
     root = repo(tmp_path)
     _finished_run(root, "20260801-1200-dispatch-task-a1b2c3")
