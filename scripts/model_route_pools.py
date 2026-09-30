@@ -110,6 +110,9 @@ def resolve_model(router: Any, catalog: dict[str, Any], text: str) -> tuple[str,
             match, _ = router._registered_match(head, candidate, catalog)
             if match:
                 return head, match["id"], True
+        # `opencode/big-pickle` is itself an OpenCode provider path; `opencode/<provider>/x` is prefixed.
+        if known_provider_path(text) and "/" not in rest:
+            return head, text, False
         return head, rest, False
     adapter = router._owner_adapter(text, catalog)
     match = router._registered_match(adapter, text, catalog)[0] if adapter in adapters else None
@@ -294,12 +297,19 @@ def _rotate(entries: list[dict[str, Any]], state_path: Path, project: str, route
 ROUTE_REQUIRED = "Pass route ({routes}) or models with rotate or council."
 
 
+def _spawn(native: str, entries: list[dict[str, Any]], count: int) -> str:
+    names = ", ".join(dict.fromkeys(entry["model"] for entry in entries))
+    return f"spawn {count} native {native} member{'s' if count != 1 else ''} ({names})"
+
+
 def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
          availability: Availability, state_path: Path, effort_order: dict[str, int],
          rng: random.Random | None = None) -> dict[str, Any]:
     """Resolve one request into picks; raises PoolError only for a request that cannot run."""
     rng = rng or random.Random()
     council = request.get("council")
+    # The caller's own adapter (Claude Code: claude, Codex: codex) runs as native subagents, not through Fabric.
+    native = request.get("native") if isinstance(request.get("native"), str) else None
     models = request.get("models")
     confidential = request.get("confidential") is True
     requested_effort = request.get("effort") or None
@@ -347,6 +357,7 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
             if not entries:
                 raise PoolError("route_adapter_empty", f"{label} has no {request['adapter']} entry; fix: omit "
                                 "adapter or pick another route (provenant routes lists them).")
+            native = None  # naming the native adapter is explicit; dispatch warns instead
     usable = []
     for entry in entries:
         why = availability.reason(entry["adapter"], entry["model"], entry["weight"])
@@ -361,6 +372,14 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
         raise PoolError("route_unavailable", "No available model in " + label
                         + ("" if not warnings else " (" + "; ".join(warnings) + ")")
                         + "; fix: pass another route or models; `provenant routes` shows what is available.")
+    if native and mode != "council" and models is None:
+        own = [entry for entry in usable if entry["adapter"] == native]
+        usable = [entry for entry in usable if entry["adapter"] != native]
+        warnings.extend(f"{entry['key']} skipped: use a native subagent" for entry in own)
+        if not usable:
+            top = max(own, key=lambda entry: entry["weight"])
+            raise PoolError("route_native_only", _spawn(native, [top], 1) + "; nothing else in " + label
+                            + f" is available; pass adapter {native} to run it through Fabric anyway.")
     if mode == "top":
         top = max(entry["weight"] for entry in usable)
         chosen = [next(entry for entry in usable if entry["weight"] == top)]
@@ -372,6 +391,15 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
         chosen = _council(usable, council, rng)
         if council > len(usable):
             warnings.append(f"council {council} exceeds {len(usable)} available models; some repeat")
+        if native:
+            # Pick across every family first, then hand the native members back so the council keeps its spread.
+            own = [entry for entry in chosen if entry["adapter"] == native]
+            chosen = [entry for entry in chosen if entry["adapter"] != native]
+            if own and not chosen:
+                raise PoolError("route_native_only", _spawn(native, own, len(own))
+                                + f"; Fabric has no other member to run; pass adapter {native} to run them anyway.")
+            if own:
+                warnings.append(f"{_spawn(native, own, len(own))}; Fabric runs {len(chosen)} of {council}")
     picks = []
     for index, entry in enumerate(chosen, start=1):
         if PRIVATE_UNSAFE_TRAITS.intersection(entry["traits"]):

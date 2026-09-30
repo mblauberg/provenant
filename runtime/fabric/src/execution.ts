@@ -38,7 +38,7 @@ import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import { promisify } from "node:util";
 
 import { catalogueSnapshot, type CatalogueSnapshot } from "./catalogue.js";
-import { expandPools, usesPool, POOL_FIELDS } from "./pools.js";
+import { expandPools, nativeFirst, usesPool, withoutEmptySelectors, POOL_FIELDS } from "./pools.js";
 import { runRoot, databasePath, withoutGitRedirects, type Identity } from "./identity.js";
 import {
   shortRunId,
@@ -661,7 +661,9 @@ async function dispatchConfiguredProviderUnchecked(
 ): Promise<Record<string, unknown>> {
   const workspaceIdentity = identity;
   const root = productRoot(env);
-  let poolWarnings: string[] = [];
+  const preferred = nativeFirst(input, identity);
+  input = preferred.task;
+  let poolWarnings: string[] = preferred.warnings;
   if (usesPool(input)) {
     // A route pick keeps this a single dispatch; a council runs as a batch of its members.
     const taskId = input.task_id ?? (input.council === undefined && input.models === undefined ? undefined : "council");
@@ -680,14 +682,12 @@ async function dispatchConfiguredProviderUnchecked(
         concurrency: Math.min(8, expanded.tasks.length),
         wait_seconds: wait_seconds ?? DEFAULT_WAIT_SECONDS,
       }, identity, signal, env);
-      return expanded.warnings.length
-        ? { ...result, warnings: [...((result.warnings as string[] | undefined) ?? []), `warning: ${expanded.warnings.join("; ")}`] }
-        : result;
+      return withWarnings(result, [...preferred.warnings, ...expanded.warnings]);
     }
     // A single pick, or a selector that won precedence, replaces the request's own selectors.
     const { id: _id, ...picked } = expanded.tasks[0]!;
     input = { ...(picked as DispatchInput), ...(input.task_id === undefined ? {} : { task_id: input.task_id }) };
-    poolWarnings = expanded.warnings;
+    poolWarnings = [...preferred.warnings, ...expanded.warnings];
   }
   const snapshotStarted = performance.now(), catalogue = catalogueSnapshot(root, env);
   const initialRoute = normaliseRoute(input, identity, catalogue);
@@ -801,7 +801,16 @@ async function dispatchConfiguredProviderUnchecked(
   const result = completion === undefined
     ? running(started, "dispatch", identity, taskId)
     : compactDispatch(started, completion);
-  return route.warnings?.length ? { ...result, warnings: [...((result.warnings as string[] | undefined) ?? []), `warning: ${route.warnings.join("; ")}`] } : result;
+  return withWarnings(result, route.warnings ?? []);
+}
+
+/** A native-model warning gets its own line ahead of the ordinary notes, which share one. */
+function withWarnings(result: Record<string, unknown>, warnings: string[]): Record<string, unknown> {
+  if (!warnings.length) return result;
+  const native = [...new Set(warnings.filter((warning) => warning.startsWith("NATIVE: ")))];
+  const rest = [...new Set(warnings.filter((warning) => !warning.startsWith("NATIVE: ")))];
+  return { ...result, warnings: [...native, ...((result.warnings as string[] | undefined) ?? []),
+    ...(rest.length ? [`warning: ${rest.join("; ")}`] : [])] };
 }
 
 function normaliseTask(
@@ -845,9 +854,9 @@ async function dispatchConfiguredBatchUnchecked(
   const root = productRoot(env);
   const catalogue = catalogueSnapshot(root, env);
   const errors: Record<string, unknown>[] = [];
-  const defaults = Object.fromEntries(Object.entries(input).filter(([key]) =>
-    ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", ...POOL_FIELDS].includes(key)));
-  let merged: BatchTaskInput[] = input.tasks.flatMap((task, index) => {
+  const defaults = withoutEmptySelectors(Object.fromEntries(Object.entries(input).filter(([key]) =>
+    ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", ...POOL_FIELDS].includes(key))));
+  let merged: BatchTaskInput[] = input.tasks.map((task) => withoutEmptySelectors(task)).flatMap((task, index) => {
     const taskError = (task as BatchTaskInput & { _fabric_error?: Record<string, unknown> })._fabric_error;
     if (taskError) {
       errors.push({ task_id: task.id ?? `task-${index + 1}`, ...taskError });
@@ -861,6 +870,11 @@ async function dispatchConfiguredBatchUnchecked(
     return [{ ...own, ...task, id: task.id ?? `task-${index + 1}` }];
   });
   const poolWarnings: string[] = [];
+  merged = merged.map((task) => {
+    const preferred = nativeFirst(task, identity);
+    poolWarnings.push(...preferred.warnings);
+    return preferred.task;
+  });
   let councils = false;
   if (merged.some(usesPool)) {
     const expanded = await expandPools(merged, await pythonOwner(root, identity, env), root, identity, env, signal);
@@ -953,11 +967,10 @@ async function dispatchConfiguredBatchUnchecked(
     : compactBatch(started, completion);
   const rejectedTasks = errors.map((row) => ({ ...row, status: "rejected", state: "terminal" }));
   const warnings = [...poolWarnings, ...tasks.flatMap((task) => Array.isArray(task.warnings) ? task.warnings : [])];
-  return {
+  return withWarnings({
     ...result,
     ...(rejectedTasks.length ? { tasks: [...((result.tasks as Record<string, unknown>[] | undefined) ?? []), ...rejectedTasks] } : {}),
-    ...(warnings.length ? { warnings: [...((result.warnings as string[] | undefined) ?? []), `warning: ${warnings.join("; ")}`] } : {}),
-  };
+  }, warnings);
 }
 
 

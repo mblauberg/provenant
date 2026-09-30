@@ -14,10 +14,10 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
-import { normaliseRoute, readRoots, routeArguments, savedReadRoots, workingIdentity } from "../src/execution-input.js";
+import { normaliseRoute, readRoots, routeArguments, savedReadRoots, workingIdentity, type BatchTaskInput } from "../src/execution-input.js";
 import { resumeConfiguredProvider } from "../src/resume.js";
 import { databasePath } from "../src/identity.js";
-import { expandPools } from "../src/pools.js";
+import { expandPools, nativeFirst } from "../src/pools.js";
 import { inheritedConfidential, inheritsPreviousRoute } from "../src/resume.js";
 import { catalogueSnapshot } from "../src/catalogue.js";
 import { psOutput } from "../src/ps.mjs";
@@ -64,9 +64,11 @@ describe("Fabric input corrections", () => {
     expect(result.warnings).toBeDefined();
     expect(normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, catalogue).model).toBe("gpt-6-luna");
     expect(normaliseRoute({ adapter: "codex", alias: "workhorze" }, identity, catalogue).alias).toBe("workhorse");
-    expect(() => normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, {
+    const unsure = normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, {
       adapters: [{ name: "codex", models: ["gpt-6-luna", "gpt-6-luno"], model_details: [], aliases: {} }],
-    } as any)).toThrow(expect.objectContaining({ code: "model_invalid" }));
+    } as any);
+    expect(unsure.model).toBe("gpt-6-lunx");
+    expect(unsure.warnings).toContain("gpt-6-lunx is not in the codex catalogue; passing it as given");
   });
 
   it("normalises opt-in capabilities and forwards them as a JSON list", () => {
@@ -104,8 +106,34 @@ describe("Fabric input corrections", () => {
     const typo = normaliseRoute({ adapter: "codex", model: "gpt-6-lunna" }, identity, snapshot);
     expect(typo.model).toBe("gpt-6-luna");
     expect(typo.warnings).toBeDefined();
-    expect(() => normaliseRoute({ adapter: "codex", model: "gpt-7-luna" }, identity, snapshot))
-      .toThrow(expect.objectContaining({ code: "model_invalid" }));
+    const newer = normaliseRoute({ adapter: "codex", model: "gpt-7-luna" }, identity, snapshot);
+    expect(newer.model).toBe("gpt-7-luna");
+    expect(newer.warnings).toContain("gpt-7-luna is not in the codex catalogue; passing it as given");
+  });
+
+  it("runs an uncatalogued model on the adapter its prefix names", () => {
+    const snapshot = catalogueSnapshot(repositoryRoot);
+    const agent = { ...identity, provider: "agent" };
+    const route = (model: string) => {
+      const { adapter, model: resolved } = normaliseRoute({ model }, agent, snapshot);
+      return `${adapter} ${resolved}`;
+    };
+    expect(route("opencode/opencode-go/brand-new-flash")).toBe("opencode opencode-go/brand-new-flash");
+    expect(route("opencode/big-pickle")).toBe("opencode opencode/big-pickle");
+    expect(route("opencode/anthropic/claude-sonnet-latest")).toBe("opencode anthropic/claude-sonnet-latest");
+    expect(route("opencode-go/brand-new-flash")).toBe("opencode opencode-go/brand-new-flash");
+    expect(route("codex/gpt-7-luna")).toBe("codex gpt-7-luna");
+    expect(route("codex/gpt-6.1-sol")).toBe("codex gpt-6.1-sol");
+    expect(route("opencode/opencode-go/deepseek-v4.1-flash")).toBe("opencode opencode-go/deepseek-v4.1-flash");
+    const withEffort = normaliseRoute({ model: "codex/gpt-6.1-sol@high" }, agent, snapshot);
+    expect(withEffort).toMatchObject({ adapter: "codex", model: "gpt-6.1-sol", effort: "high" });
+    expect(withEffort.warnings ?? []).toEqual([]);
+    const named = normaliseRoute({ model: "codex/gpt-6.1-sol@high", effort: "low" }, agent, snapshot);
+    expect(named).toMatchObject({ model: "gpt-6.1-sol", effort: "low" });
+    expect(named.warnings).toContain("effort high in model ignored: effort low was named");
+    expect(route("opencode/mimo-v2.6-flash-free")).toBe("opencode opencode/mimo-v2.6-flash-free");
+    expect(() => normaliseRoute({ model: "mystery-model-9" }, agent, snapshot))
+      .toThrow(expect.objectContaining({ code: "adapter_required" }));
   });
 
   it("resolves relative read-only cwd against the caller directory", () => {
@@ -500,7 +528,7 @@ describe("dispatch CLI", () => {
     writeFileSync(promptPath, "cli prompt");
     const cliPath = join(packageRoot, "src", "cli.ts");
     const output = execFileSync(process.execPath, ["--import", tsxLoader, cliPath,
-      "dispatch", "--alias", "workhorse", "--prompt-file", promptPath, "--id", "cli-prompt"], {
+      "dispatch", "--adapter", "codex", "--alias", "workhorse", "--prompt-file", promptPath, "--id", "cli-prompt"], {
       cwd: workspace,
       encoding: "utf8",
       env: ownerEnvironment,
@@ -531,7 +559,7 @@ describe("dispatch CLI", () => {
     writeFileSync(promptPath, "registered project cwd");
     const cliPath = join(packageRoot, "src", "cli.ts");
     const output = execFileSync(process.execPath, ["--import", tsxLoader, cliPath,
-      "dispatch", "--alias", "workhorse", "--cwd", otherProject, "--prompt-file", promptPath], {
+      "dispatch", "--adapter", "codex", "--alias", "workhorse", "--cwd", otherProject, "--prompt-file", promptPath], {
       cwd: workspace,
       encoding: "utf8",
       env: ownerEnvironment,
@@ -566,7 +594,7 @@ describe("dispatch CLI", () => {
     writeFileSync(promptPath, "invalid mode still gets preflighted");
     const cliPath = join(packageRoot, "src", "cli.ts");
     const result = spawnSync(process.execPath, ["--import", tsxLoader, cliPath,
-      "dispatch", "--alias", "workhorse", "--mode", "invalid", "--cwd", workspace,
+      "dispatch", "--adapter", "codex", "--alias", "workhorse", "--mode", "invalid", "--cwd", workspace,
       "--prompt-file", promptPath], {
       cwd: workspace,
       encoding: "utf8",
@@ -1244,7 +1272,7 @@ describe("route pools", () => {
       { id: "plain", prompt: "p", adapter: "codex" },
       { id: "both", prompt: "p", route: "bulk", model: "gpt-6-luna" },
       { id: "nope", prompt: "p", route: "fastest" },
-    ], fixturePython, product, identity, env, new AbortController().signal);
+    ], fixturePython, product, { ...identity, provider: "agent" }, env, new AbortController().signal);
     expect(expanded.errors.map((error) => [error.task_id, error.error])).toEqual([["nope", "route_invalid"]]);
     const byId = Object.fromEntries(expanded.tasks.map((task) => [task.id, task]));
     expect(byId.one).toMatchObject({ adapter: "claude", model: "claude-sonnet-5-5", pick_reason: "strong top" });
@@ -1299,7 +1327,7 @@ describe("route pools", () => {
     const env = { ...poolEnvironment(), FIXTURE_ARGV_LOG: "1" };
     const concurrency = async (extra: Record<string, unknown>) => {
       const done = await dispatchConfiguredBatch({ tasks: [{ id: "c", prompt: "sleep with provider", route: "strong", council: 2 }],
-        wait_seconds: 0, ...extra }, identity, new AbortController().signal, env);
+        wait_seconds: 0, ...extra }, { ...identity, provider: "agent" }, new AbortController().signal, env);
       expect(done.status, JSON.stringify(done)).toBe("running");
       spawnedPids.push(Number(done.pid));
       const log = join(String((done.paths as Record<string, unknown>).run_dir), "batch_run.py.argv.json");
@@ -1364,6 +1392,112 @@ describe("route pools", () => {
     expect(bad.status).not.toBe(0);
     expect(bad.stderr + bad.stdout).toMatch(/council/u);
   }, 60_000);
+});
+
+describe("native-first routing", () => {
+  const claudeSeat = () => ({ ...identity, provider: "claude" });
+
+  it("skips the caller's own models in a pool pick and names the native subagent", async () => {
+    const expanded = await expandPools([{ id: "one", prompt: "p", route: "strong" }],
+      fixturePython, product, claudeSeat(), poolEnvironment(), new AbortController().signal);
+    expect(expanded.errors).toEqual([]);
+    expect(expanded.tasks[0]!.adapter).not.toBe("claude");
+    expect(expanded.warnings.some((warning) => /^claude\/\S+ skipped: use a native subagent$/u.test(warning))).toBe(true);
+  });
+
+  it("hands a council's native members back to the chair with a spawn line", async () => {
+    const expanded = await expandPools([{ id: "pair", prompt: "p", route: "strong", council: 2 }],
+      fixturePython, product, claudeSeat(), poolEnvironment(), new AbortController().signal);
+    expect(expanded.tasks.map((task) => task.adapter)).toEqual(["codex"]);
+    expect(expanded.tasks[0]).toMatchObject({ id: "pair-1", pick_reason: "strong council 1/1" });
+    expect(expanded.warnings.some((warning) =>
+      /^spawn 1 native claude member \(claude-\S+\); Fabric runs 1 of 2$/u.test(warning))).toBe(true);
+  });
+
+  it("takes a Claude seat's default alias from the route pool instead of its own adapter", async () => {
+    const done = await dispatchConfiguredProvider({ prompt: "ordinary run", wait_seconds: 5 },
+      claudeSeat(), new AbortController().signal, poolEnvironment());
+    expect(done.status, JSON.stringify(done)).toBe("ok");
+    expect((done.route as Record<string, unknown>).adapter).not.toBe("claude");
+    expect(JSON.stringify(done.warnings)).toContain("workhorse taken from the route pool: claude models run as native subagents");
+  });
+
+  it("settles empty selectors and precedence before choosing native-first", async () => {
+    const seat = claudeSeat();
+    expect(nativeFirst({ id: "d", prompt: "p", model: "" } as BatchTaskInput, seat).task)
+      .toEqual({ id: "d", prompt: "p", route: "workhorse", native_default: "workhorse" });
+    expect(nativeFirst({ id: "d", prompt: "p", alias: " " } as BatchTaskInput, seat).task)
+      .toEqual({ id: "d", prompt: "p", route: "workhorse", native_default: "workhorse" });
+    const rotated = nativeFirst({ id: "d", prompt: "p", alias: "flagship", rotate: true } as BatchTaskInput, seat);
+    expect(rotated.task).toEqual({ id: "d", prompt: "p", route: "flagship", native_default: "flagship" });
+    expect(rotated.warnings).toEqual(["rotate ignored: alias flagship names one model; pass route for a pool"]);
+    const single = await dispatchConfiguredProvider({ alias: "flagship", rotate: true, model: "", prompt: "ordinary run", wait_seconds: 5 },
+      seat, new AbortController().signal, poolEnvironment());
+    expect(single.status, JSON.stringify(single)).toBe("ok");
+    expect((single.route as Record<string, unknown>).adapter).not.toBe("claude");
+    const batch = await dispatchConfiguredBatch({ tasks: [{ id: "e", prompt: "p", alias: "" }, { id: "r", prompt: "p", alias: "flagship", rotate: true }], wait_seconds: 5 },
+      seat, new AbortController().signal, poolEnvironment());
+    // Both tasks reach the pool, which skips the seat's own model, before any owner runs.
+    const noted = JSON.stringify(batch.warnings);
+    expect(noted).toContain("workhorse taken from the route pool: claude models run as native subagents");
+    expect(noted).toContain("flagship taken from the route pool: claude models run as native subagents");
+    expect(noted).toContain("rotate ignored: alias flagship names one model");
+  });
+
+  it("lets a batch task's empty selector inherit the batch default", async () => {
+    const seat = claudeSeat();
+    const adapter = await dispatchConfiguredBatch({ adapter: "codex", tasks: [{ id: "a", prompt: "p", adapter: "" }], wait_seconds: 5 },
+      seat, new AbortController().signal, poolEnvironment());
+    expect(JSON.stringify(adapter.warnings ?? [])).not.toContain("taken from the route pool");
+    const routed = await dispatchConfiguredBatch({ route: "strong", tasks: [{ id: "r", prompt: "p", model: "" }], wait_seconds: 5 },
+      seat, new AbortController().signal, poolEnvironment());
+    const noted = JSON.stringify(routed.warnings ?? []);
+    expect(noted).not.toContain("workhorse taken from the route pool");
+    expect(noted).toContain("claude/claude-opus-5-5 skipped: use a native subagent");
+  });
+
+  it("runs an explicit native model with a prominent warning of its own", async () => {
+    const done = await dispatchConfiguredProvider({ adapter: "claude", model: "haiku", prompt: "ordinary run", wait_seconds: 5 },
+      claudeSeat(), new AbortController().signal, poolEnvironment());
+    expect(done.status, JSON.stringify(done)).toBe("ok");
+    expect((done.warnings as string[])[0]).toBe(
+      "NATIVE: claude/haiku is this claude seat's own model; spawn a native subagent instead of Fabric");
+  });
+
+  it("refuses a native seat's default when only its own models are available", async () => {
+    const bin = join(temporaryDirectory, "codex-only-bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "codex"), "#!/bin/sh\nexit 0\n");
+    chmodSync(join(bin, "codex"), 0o755);
+    const codexSeat = { ...identity, provider: "codex" };
+    const { task } = nativeFirst({ id: "d", prompt: "p" } as BatchTaskInput, codexSeat);
+    expect(task).toEqual({ id: "d", prompt: "p", route: "workhorse", native_default: "workhorse" });
+    const expanded = await expandPools([task], fixturePython, product, codexSeat,
+      { ...poolEnvironment(), PATH: bin }, new AbortController().signal);
+    expect(expanded.tasks).toEqual([]);
+    expect(expanded.errors).toEqual([expect.objectContaining({ task_id: "d", error: "route_native_only" })]);
+    expect(expanded.errors[0]!.fix).toMatch(/^spawn 1 native codex member \(.+\); .*pass adapter codex/u);
+  });
+
+  it("canonicalises a tier alias before choosing native-first", () => {
+    const codexSeat = { ...identity, provider: "codex" };
+    for (const alias of ["Workhorse", "workhorze", "WORKHORSE"])
+      expect(nativeFirst({ id: "d", prompt: "p", alias } as BatchTaskInput, codexSeat).task)
+        .toEqual({ id: "d", prompt: "p", route: "workhorse", native_default: "workhorse" });
+    expect(nativeFirst({ id: "d", prompt: "p", alias: "Flagshp" } as BatchTaskInput, codexSeat).task)
+      .toMatchObject({ route: "flagship" });
+    expect(nativeFirst({ id: "d", prompt: "p", alias: "luna" } as BatchTaskInput, codexSeat).task)
+      .toEqual({ id: "d", prompt: "p", alias: "luna" });
+  });
+
+  it("changes nothing for a seat without native subagents", async () => {
+    const agent = { ...identity, provider: "agent" };
+    const expanded = await expandPools([{ id: "one", prompt: "p", route: "strong" }],
+      fixturePython, product, agent, poolEnvironment(), new AbortController().signal);
+    expect(expanded.warnings.some((warning) => warning.includes("native"))).toBe(false);
+    const route = normaliseRoute({ adapter: "claude", model: "haiku" }, agent, catalogueSnapshot(repositoryRoot));
+    expect(route.warnings ?? []).toEqual([]);
+  });
 });
 
 describe("status list bounds", () => {
@@ -1540,7 +1674,7 @@ it('reads a retained succeeded registry attempt as ok', async () => {
 });
 
 it('places logs and staging files inside a named run directory', async () => {
- const result = await dispatchConfiguredProvider({prompt:'fixture',wait_seconds:5},identity,new AbortController().signal,ownerEnvironment);
+ const result = await dispatchConfiguredProvider({adapter:'codex',prompt:'fixture',wait_seconds:5},identity,new AbortController().signal,ownerEnvironment);
  const paths=result.paths as Record<string,string>;
     expect(paths.run_dir?.split("/").at(-1)).toContain("workspace");
  expect(paths.owner_stdout).toBe(join(paths.run_dir!,'_owner/stdout.jsonl'));
@@ -1607,7 +1741,7 @@ it('runs a read-only dispatch in another registered project and records it for t
  const brief=join(other,'brief.md');writeFileSync(brief,'read the other project');
  const argvPath=join(temporaryDirectory,'owner-argv.json');
  const caller={...identity,registeredProjects:[workspace,other]};
- const result=await dispatchConfiguredProvider({mode:'read_only',cwd:join(other,'src'),prompt_file:brief,task_id:'cross-project',wait_seconds:5},caller,new AbortController().signal,{...ownerEnvironment,FIXTURE_ARGV_PATH:argvPath});
+ const result=await dispatchConfiguredProvider({adapter:'codex',mode:'read_only',cwd:join(other,'src'),prompt_file:brief,task_id:'cross-project',wait_seconds:5},caller,new AbortController().signal,{...ownerEnvironment,FIXTURE_ARGV_PATH:argvPath});
  expect(result.status,JSON.stringify(result)).toBe('ok');
  const argv=JSON.parse(readFileSync(argvPath,'utf8')) as string[];
  expect(argv[argv.indexOf('--cwd')+1]).toBe(realpathSync(join(other,'src')));
@@ -1645,7 +1779,7 @@ it('resumes a cross-project run with its saved read roots, and refuses one whose
 
 it('keeps non-Git cwd dispatches in the caller run root', async () => {
  const nested=join(workspace,'nested');mkdirSync(nested);
- const result=await dispatchConfiguredProvider({cwd:nested,prompt:'fixture',wait_seconds:5},identity,new AbortController().signal,ownerEnvironment);
+ const result=await dispatchConfiguredProvider({adapter:'codex',cwd:nested,prompt:'fixture',wait_seconds:5},identity,new AbortController().signal,ownerEnvironment);
  const path=(result.paths as Record<string,string>).run_dir!;
  expect(realpathSync(path)).toContain(realpathSync(join(workspace,'.agent-run/runs')));
  expect(await fabricStatus(workspace,String(result.id))).toMatchObject({status:'ok'});

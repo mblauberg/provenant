@@ -9,6 +9,7 @@ import { parse as parseYaml } from "yaml";
 
 import { DISPATCH_ADAPTERS, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
 import { catalogueSnapshot } from "../src/catalogue.js";
+import { normaliseRoute } from "../src/execution-input.js";
 import type { Identity } from "../src/identity.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -151,17 +152,14 @@ describe("adapter rejection", () => {
     });
   }
 
-  it("rejects unknown model and alias selectors with the matching error code", async () => {
+  it("passes unknown model and alias selectors to the named adapter with a note", () => {
+    const snapshot = catalogueSnapshot(repositoryRoot);
     for (const selector of [{ model: "missing-model" }, { alias: "missing-alias" }]) {
-      const error = "model" in selector ? "model_invalid" : "alias_invalid";
-      await expect(dispatchConfiguredProvider(
-        { adapter: "codex", ...selector, prompt: "hello" },
-        identity,
-        AbortSignal.abort(),
-        { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot },
-      )).resolves.toMatchObject({ status: "rejected", error });
+      const name = Object.values(selector)[0]!;
+      const route = normaliseRoute({ adapter: "codex", ...selector }, identity, snapshot);
+      expect(route).toMatchObject({ adapter: "codex", model: name });
+      expect(route.warnings).toContain(`${name} is not in the codex catalogue; passing it as given`);
     }
-    expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
   });
 
   it("returns each invalid task as a rejected row and creates no run when none is valid", async () => {

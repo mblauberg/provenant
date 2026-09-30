@@ -6,7 +6,7 @@ import { z } from "zod";
 import { databasePath, identify } from "./identity.js";
 import { statusRows, fabricOutput } from "./run-registry.js";
 import { reply, digest, serverBuild, mailboxView, adapterView, runView } from "./surface.js";
-import { catalogueSnapshot } from "./catalogue.js";
+import { catalogueSnapshot, liveModels } from "./catalogue.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
 import { reconcileSession, sessionDispatch, sessionName, sessionView } from "./sessions.js";
 import {
@@ -586,8 +586,12 @@ register(
         : readyStore().activityAfter(who.project, after_seq, limit ?? 20),
   }),
 );
-register("fabric_adapters", "List routes and guarantees; full includes profiles.", { detail }, ({ detail }) =>
-  adapterView(catalogueSnapshot(), detail),
+register("fabric_adapters", "List routes and guarantees; full includes profiles; models lists one adapter's live models.", {
+  detail,
+  models: z.string().max(40).optional().describe("Adapter whose live models to list (cached probe)."),
+  match: z.string().max(80).optional().describe("Substring filter for models."),
+}, ({ detail, models, match }) =>
+  models === undefined ? adapterView(catalogueSnapshot(), detail) : liveModels(models, { match }),
 );
 if (process.env.FABRIC_LEGACY_TOOLS === "1") {
   register("fabric_batch", "Run a task batch.", batch, (input, { signal }) =>
