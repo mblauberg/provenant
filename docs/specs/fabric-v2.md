@@ -45,7 +45,7 @@ Each attempt records `context: {context_tokens, input_tokens, output_tokens, cac
 
 The attempt records `applied.context_ceiling` as `enforced`, `provider_default` (the provider's own point is at or below the ceiling, with `applied.context_ceiling_source`) or `unsupported`. It also records `applied.context_ceiling_tokens`, the point in force (`null` when unknown), and `applied.context_ceiling_requested`. A resume inherits the prior requested ceiling unless the call passes a new one.
 
-On macOS, Codex providers in `read-only` and `workspace-write` resolve `ps` to the bundled libproc shim through PATH. The setuid `/bin/ps` cannot execute under seatbelt. The shim covers the forms agents type (`ps aux`, `ps -ef`, `ps ax`, `-p`, `-o`/`-O` with common fields) and names its supported subset when asked for more. Its `lstart` is `strftime("%c", localtime(start))` in the caller's locale, matching `/bin/ps`; when libproc cannot read a live PID, `sysctl(KERN_PROC_PID)` reports its PID, parent, group, user, start and elapsed times. A missing PID remains gone. Linux retains `/proc` and normal `ps` behaviour. This PATH adjustment adds no receipt field.
+On macOS, Codex providers in `read-only` and `workspace-write`, and every provider under a Fabric `sandbox-exec` profile, resolve `ps` to the bundled libproc shim through PATH. The shim and `process_info.py` are staged in `<attempt>/tmp/provenant-shim`, because the product checkout may sit below a denied home or outside a read-only lane's `cwd`. The setuid `/bin/ps` cannot execute under any sandbox. The shim covers the forms agents type (`ps aux`, `ps -ef`, `ps ax`, `-p`, `-o`/`-O` with common fields) and names its supported subset when asked for more. Its `lstart` is `strftime("%c", localtime(start))` in the caller's locale, padded to 28 bytes on macOS, matching `/bin/ps` byte for byte; when libproc cannot read a live PID, `sysctl(KERN_PROC_PID)` reports its PID, parent, group, user, start and elapsed times. A missing PID remains gone. Linux retains `/proc` and normal `ps` behaviour. This PATH adjustment adds no receipt field.
 
 A resume reads the prior attempt's context. It adds a digest warning when that context exceeds the effective ceiling (the point in force, else the requested ceiling), or when the size is unknown and the adapter has no ceiling control, for example `! resuming a ~620k-token session; fresh: fabric_dispatch{prompt, handoff:"<run id>"}`. The resume still runs. `handoff: <run id>` (with `task_id` for a batch task) is the cheaper alternative. It starts a fresh run whose prompt is prefixed with the prior task's route line and its result tail, at most 8,000 bytes in total. If the call names no adapter, alias or model, the handoff reuses the prior adapter, model and effort, and a prior writer's mode and worktree. The prior task must be terminal.
 
@@ -96,17 +96,20 @@ are unaffected. Codex writer confinement is supplied by a permissions
 profile named uniquely for each plan (`-c default_permissions="provenant-<random>"`,
 extending `:workspace`, on fresh runs and resumes), because Codex merges config
 tables and a fixed name would inherit a system config's grants. Its
-`filesystem` table grants `add_dirs` and the Git write boundary below and keeps
-the common directory and the worktree `.git` marker read-only; a fresh run
-also passes `--add-dir` and `--cd <worktree>`. Codex keeps a writable root's `.agents/` read-only, which
-stops a rebase or merge that updates a tracked skill, so a linked-worktree
-Codex writer also gets the worktree's `.agents/` in `add_dirs`. After the
+`filesystem` table grants `:tmpdir`, `add_dirs` and the Git write boundary below
+and keeps the common directory and the worktree `.git` marker read-only; a fresh
+run also passes `--add-dir` and `--cd <worktree>`. Codex keeps a writable root's
+`.agents/` read-only, even an absent one, which stops a rebase or merge that
+updates or adds a tracked skill, so a linked-worktree Codex writer also gets the
+worktree's `.agents/` in `add_dirs` unless it is a file or link; an absent one
+is created for the attempt and removed afterwards if still empty. After the
 attempt, each `.agents/` path in HEAD, the index and on disk must match the
 attempt's starting HEAD, index or files, or the primary checkout's branch or its
 upstream. Files on disk are hashed without Git, so ignored, skip-worktree and
 filtered files count. An unresolved conflict, an unreadable directory, a
 special file, a replaced `.agents/` root, a tree over 256 MiB or a lane
-process left running also fails.
+process left running also fails. An absent `.agents/` counts as empty, since Git
+removes the directory with its last file; a link or file in its place fails.
 Otherwise the attempt fails with `protected_instructions_changed` and
 lists the paths in its warnings. The check trusts local refs, which the lane can
 move. It also reports a clean three-way merge into a skill the branch already
@@ -148,6 +151,39 @@ deleting, renaming or replacing the entry. A symlinked or non-regular source
 through a symlink, fails the attempt before launch. Chrome must use `--no-sandbox` because macOS refuses its nested sandbox. PostgreSQL socket
 paths under lane `TMPDIR` exceed macOS's
 103-byte limit; use TCP or a short socket directory. Attempts set `TMPDIR`,
-`TMP` and `TEMP` to `<attempt>/tmp` and `XDG_CACHE_HOME` to `<attempt>/tmp/cache`.
+`TMP` and `TEMP` to `<attempt>/tmp`, `XDG_CACHE_HOME` to `<attempt>/tmp/cache` and
+`COREPACK_HOME` to `<attempt>/tmp/cache/node/corepack`, `UV_CACHE_DIR` to `<cache>/uv`
+and `npm_config_cache` to `<cache>/npm`. Read-only attempts also append
+`-p no:cacheprovider` to `PYTEST_ADDOPTS` and set `PYTHONPYCACHEPREFIX`,
+`RUFF_CACHE_DIR` and `MYPY_CACHE_DIR` under the cache. A Codex writer's
+permissions profile grants `:tmpdir`, so `TMPDIR` stays writable. Codex
+read-only runs use a per-plan permissions profile named the same way, which
+extends `:read-only` with writes to `:tmpdir` and to
+each `add_dir` that neither holds `cwd` nor contains a character Codex reads as a
+permission pattern (`*?[]{}`; Codex strips a trailing `/**`), and sets
+`network.enabled` to the applied network. OpenCode's
+read-only `sandbox-exec` profile reads the project config OpenCode loads at
+startup (`opencode.json`, `opencode.jsonc`, `AGENTS.md`, `CLAUDE.md`, `.opencode/`)
+between `cwd` and the repository root, granted by unresolved name. Every read-only
+`sandbox-exec` profile reads the lane's toolchain, found without running it:
+- `python3`, `python`, `uv` and `node` on the provider PATH;
+- each `.venv` between `cwd` and the repository root, its `bin/python` link and
+  the interpreter its `pyvenv.cfg` names, all treated as candidates only;
+- with a granted `uv`, `pyproject.toml`, `uv.toml`, `uv.lock` and
+  `.python-version` above `cwd`.
+
+A candidate is granted only if it resolves to a regular executable named
+`python`, `python3`, `python3.N` or `node`, each Python name optionally with
+the free-threaded `t` suffix. The file must sit in the `bin` of a prefix
+holding `lib/python3.N[t]` or `lib/node_modules`. That prefix must be neither
+home nor an ancestor of home, and must not pass `credential_path`. Only the
+executable and the prefix's real (unlinked) `lib`, `include` and `libexec` are
+granted, never the prefix itself; a framework prefix (`<Name>.framework/Versions/X.Y`)
+adds its `<Name>` library and `Resources`. Each component must be a real entry,
+not a link, strictly below the prefix, so a link to `.` cannot grant it. The profile emits the canonical paths it
+checked without resolving them again. A resolved `uv`/`uvx` binary is granted alone. `credential_path` also
+covers `.git-credentials`, `.pypirc`, `.pgpass`, `.vault-token`,
+`.password-store`, `.boto`, `.s3cfg`, `.terraform.d`, Cargo and Gem credentials,
+`.config/git/credentials`, `.config/hub` and `.config/op`.
 
 `model_route.py snapshot --json` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Every writer, Codex included, has one Git write boundary: its per-worktree Git directory (`--absolute-git-dir`) plus the common directory's `objects`, `refs`, `logs`, `packed-refs`, `packed-refs.lock` and `packed-refs.new`; the rest of the common directory (`hooks`, `config`, `info`, other lanes' `worktrees/<name>`) is never writable, and a Codex writer drops an `add_dir` at or inside it with a warning. Codex writers also keep the worktree `.git` marker and the private directory's `config.worktree`, `commondir` and `gitdir` read-only; Codex refuses to launch with a symlinked grant path. Writer attempts set `gc.auto=0`, `maintenance.auto=false` and `rerere.enabled=false` through `GIT_CONFIG_COUNT`. Because the shared `config` is read-only, a lane pushes with `git push origin HEAD` and opens its pull request with `gh pr create --head <branch>`; `git push -u` pushes but cannot record the upstream. Wrapped writer launches (agy, Claude, Cursor, OpenCode and Kiro) restrict writes to the worktree, declared `add_dirs`, the Git write boundary, attempt files, temp paths, devices and provider state. Where protected-path policy applies, its read and write denies take precedence within an `add_dir`; receipts list the writable `add_dirs` in `applied.write_boundary`. Codex writers without capabilities use its native sandbox with that permissions profile, recorded as `applied.write_boundary.filesystem`. Unavailable OS confinement refuses agy write dispatches and produces an explicit warning for other wrapped writers.

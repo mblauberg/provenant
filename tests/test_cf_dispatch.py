@@ -2686,15 +2686,17 @@ def test_codex_read_only_route_denies_writes_but_keeps_network():
     assert "--skip-git-repo-check" in recorded
 
 
-def test_codex_read_only_route_without_network_keeps_the_read_only_preset():
+def test_codex_read_only_route_without_network_writes_only_its_temp():
     result, recorded, _ = run_worktree_dispatch(
         "codex", CODEX_ARGV_STUB, extra_env={"CF_DISPATCH_CODEX_NETWORK": "0"},
     )
     assert result.returncode == 0, result.output
     record = json.loads(result.output.splitlines()[-1])
     assert record["provider_network"] is False
-    assert "-s\nread-only" in recorded
-    assert "default_permissions" not in recorded
+    assert "-s\nread-only" not in recorded
+    profile = recorded_codex_profile(recorded)
+    assert f'permissions.{profile}.filesystem={{":tmpdir" = "write"}}' in recorded
+    assert f"permissions.{profile}.network.enabled=false" in recorded
     assert "workspace-write" not in recorded
 
 

@@ -303,7 +303,6 @@ def test_routes_prints_each_pool_with_live_availability(tmp_path):
 
 
 def test_route_line_names_why_the_pool_picked_the_model():
-    sys.path.insert(0, str(ROOT / "skills" / "orchestrate" / "scripts"))
     dispatch_run = load("pools_dispatch_run_under_test", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
     line = "Route: opencode/deepseek-v4.1-flash (deepseek; observed)"
     assert dispatch_run.with_pick_reason(line, "design council 2/3") == (
@@ -327,7 +326,6 @@ def test_route_line_names_why_the_pool_picked_the_model():
 
 
 def test_refresh_routing_carries_new_route_keys_and_keeps_instance_reweighting(tmp_path):
-    sys.path.insert(0, str(ROOT / "scripts"))
     script = ROOT / "scripts" / "instance_installation.py"
     product = tmp_path / "product"
     (product / "config").mkdir(parents=True)
@@ -386,8 +384,7 @@ def test_refresh_routing_carries_new_route_keys_and_keeps_instance_reweighting(t
 
 
 def exec_routing_module():
-    sys.path.insert(0, str(ROOT / "skills" / "orchestrate" / "scripts"))
-    return load("pools_exec_routing_under_test", ROOT / "skills/orchestrate/scripts/exec_routing.py")
+    return importlib.import_module("skills.orchestrate.scripts.exec_routing")
 
 
 def test_confidential_filters_every_fallback_even_under_fallback_any():
@@ -406,7 +403,6 @@ def test_confidential_filters_every_fallback_even_under_fallback_any():
 
 
 def test_confidential_refuses_a_resolved_route_that_trains_and_names_the_fix():
-    sys.path.insert(0, str(ROOT / "skills" / "orchestrate" / "scripts"))
     dispatch_run = load("pools_dispatch_confidential_under_test", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
     refusal = dispatch_run.confidential_refusal("opencode", "opencode/mimo-v2.6-flash-free", {})
     assert refusal.startswith("opencode/opencode/mimo-v2.6-flash-free is a free tier")
@@ -446,7 +442,6 @@ def test_confidential_preflight_uses_a_mixed_alias_and_refuses_only_when_nothing
     monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(instance))
     monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "state"))
     monkeypatch.chdir(tmp_path)
-    sys.path.insert(0, str(ROOT / "skills" / "orchestrate" / "scripts"))
     dispatch_run = load("pools_dispatch_mixed_alias_under_test", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
     task = {"id": "t", "adapter": "opencode", "alias": "scout", "prompt": "hi"}
     ordinary = dispatch_run.preflight_tasks([task], tmp_path)

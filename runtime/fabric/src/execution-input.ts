@@ -99,9 +99,9 @@ export interface NormalisedRoute {
   context_ceiling?: number;
   allow_secrets?: boolean;
   capabilities?: DispatchCapability[];
-  read_roots?: string[];
   confidential?: boolean;
   pick_reason?: string;
+  read_roots?: string[];
   warnings?: string[];
 }
 
