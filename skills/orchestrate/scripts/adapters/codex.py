@@ -76,8 +76,7 @@ def argv(p):
         writable = {":tmpdir": "write", **dict.fromkeys(read_only_writable_dirs(p), "write")}
         command += permissions_profile(p, ":read-only", network, writable)
     elif sandbox == "workspace-write":
-        # A permissions profile names single Git paths inside the common directory, which
-        # sandbox_workspace_write.writable_roots cannot; the nearest entry wins.
+        # The profile grants shared writer roots and keeps the worktree .git marker read-only.
         filesystem = p["applied"].get("write_boundary", {}).get("filesystem") or {}
         command += permissions_profile(p, ":workspace", network, filesystem)
     elif p["resume_session"]:

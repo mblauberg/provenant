@@ -165,22 +165,25 @@ character Codex reads as a pattern (`*?[]{}`), stays read-only and warns.
 Inside another sandbox, where macOS refuses a nested one, the attempt records
 an explicit unconfined-write warning. Without `sandbox-exec` read confinement,
 a non-Codex `cwd` below the root warns that it is not a read boundary.
-Every writer, Codex included, has the same Git write boundary: its own
-per-worktree Git directory (`git rev-parse --absolute-git-dir`) plus the
-common directory's `objects`, `refs` and `logs` and its `packed-refs`,
-`packed-refs.lock` and `packed-refs.new` files. The rest of the common
-directory, including `hooks`, `config`, `info` and other lanes'
-`worktrees/<name>`, is never writable, because Git later runs what it names in
-the primary checkout and every lane. A Codex writer's `add_dir` at or inside
-the common directory is dropped with a warning. Codex writers also keep the
-worktree `.git` marker and the private Git directory's `config.worktree`,
-`commondir` and `gitdir` read-only. Writer attempts set `gc.auto=0`,
-`maintenance.auto=false` and `rerere.enabled=false` through
-`GIT_CONFIG_COUNT`, since those would write to the common directory. The
-shared `config` is read-only, so a lane cannot record an upstream,
-add a remote or add a worktree. `git push -u` still pushes but prints a
-config-lock error; push with `git push origin HEAD` and open the pull request
-with `gh pr create --head <branch>`.
+Codex `worktree_write` lanes may write the owning repository's entire Git
+common directory, including config, hooks and worktree metadata. This permits
+`git push -u` to save the upstream and repository setup to install hooks.
+The worktree `.git` marker remains read-only. Other adapters retain the
+narrow Git boundary: their private worktree Git directory plus common
+`objects`, `refs`, `logs`, `packed-refs`, `packed-refs.lock` and `packed-refs.new`.
+Those lanes use `git push origin HEAD` and `gh pr create --head <branch>`.
+Writer attempts still disable automatic gc, maintenance and rerere.
+
+Both Codex writer sandbox profiles also grant the repository's `.agent-run/`
+(for Fabric run files and shared locks), the Fabric database directory
+(`AGENT_FABRIC_STATE_DIRECTORY`) and catalogue state (`AGENT_FABRIC_STATE_ROOT`),
+both defaulting to `~/.local/state/agent-harness/fabric`. They grant pnpm stores
+under `PNPM_HOME`, `XDG_DATA_HOME` (default `~/.local/share`) and `~/Library/pnpm`,
+pnpm caches under `~/.cache/pnpm` and `~/Library/Caches/pnpm`, and gh config at
+`GH_CONFIG_DIR` or `${XDG_CONFIG_HOME:-~/.config}/gh`. These roots are recomputed
+for fresh attempts and resumes. Use existing `add_dirs` for other shared tool
+paths. `read_only` receives none of these automatic grants.
+
 Wrapped writer runs on macOS (agy, Claude, Cursor, OpenCode and Kiro) use
 `sandbox-exec` to restrict writes to their worktree, declared `add_dirs`,
 the Git write boundary, attempt files, device nodes and provider state. Where
@@ -200,8 +203,8 @@ without capabilities use Codex's native sandbox through a permissions profile
 named for that plan, `-c default_permissions="provenant-<random>"`, which
 extends `:workspace`, sets `network.enabled` and passes a `filesystem` table.
 The table grants `:tmpdir` (the attempt's `TMPDIR`), `add_dirs` and the Git
-write boundary and leaves the common directory and the `.git` marker
-read-only. Codex applies the nearest entry, and the same flags apply on resume.
+write boundary and shared state roots above, keeping the worktree `.git`
+marker read-only. Codex applies the nearest entry, and the same flags apply on resume.
 Codex merges config tables, so the unique name keeps a system config's grants
 under a known profile name out of the lane's policy; the read-only profile is
 named the same way. A fresh run also passes `--add-dir` for each `add_dir` and
@@ -244,8 +247,8 @@ adds the macOS browser services and the Chrome/Chromium rendezvous Mach lookup
 and registration prefixes; browser lanes set `MAC_CHROMIUM_TMPDIR` to
 `<attempt>/tmp` for Chrome's process-singleton socket. These capabilities add no
 network access beyond a Codex writer whose network is enabled; Unix-domain
-socket connects are limited to `cwd`, declared `add_dirs`, the attempt
-directory, task Codex home and mDNSResponder.
+socket connects are limited to `cwd`, declared `add_dirs`, the shared writer
+roots, the attempt directory, task Codex home and mDNSResponder.
 SBPL's `(local ip "localhost:*")` also matches every local address, so Fabric
 does not claim that an inbound loopback rule limits connections.
 
@@ -253,8 +256,7 @@ Each task keeps one `CODEX_HOME` at `<task directory>/codex-home` across its
 attempts. Existing `auth.json`, `AGENTS.md`, `HARNESS.md` and `skills` entries are symlinked
 from `CODEX_HOME` supplied by the caller, or `~/.codex`; the profile grants
 writes to the task home and the literal source `auth.json` only. It grants
-each Git write boundary path by its own name, so a link planted at one never
-moves a later grant. Fabric recreates the task home links
+the resolved Git common directory, as in the native writer profile. Fabric recreates the task home links
 every attempt and fails a symlinked or non-directory task home, while allowing
 the lane to overwrite the literal source `auth.json` for token refresh, a file
 it could already read. That grant names the unresolved source path and covers

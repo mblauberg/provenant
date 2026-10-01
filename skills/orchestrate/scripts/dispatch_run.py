@@ -2202,11 +2202,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                         observed_exit = True
                         raise InterruptedError("memory wait cancelled")
                     provider_environment = os.environ.copy()
-                    # Owners retain chair custody; provider work must discover its own
-                    # seat, state directory and checkout rather than inherit the chair's.
+                    # Providers discover their own seat and checkout; Codex writers share
+                    # the configured Fabric store so they can coordinate with the owner.
                     for name in ("AGENT_FABRIC_STATE_DIRECTORY", "AGENT_FABRIC_SEAT",
                                  "AGENT_FABRIC_CLIENT_LABEL", "AGENT_FABRIC_LABEL", "AGENT_FABRIC_PRODUCT_ROOT",
                                  "PROVENANT_FABRIC_PHASES", "PROVENANT_NO_OS_CONFINEMENT"):
+                        if name == "AGENT_FABRIC_STATE_DIRECTORY" and args.tool == "codex" and args.access_mode == "worktree_write":
+                            continue
                         provider_environment.pop(name, None)
                     for name in list(provider_environment):
                         if name.startswith(("PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")):
