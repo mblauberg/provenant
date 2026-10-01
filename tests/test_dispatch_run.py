@@ -2949,10 +2949,11 @@ print(json.dumps({'models': [{'slug': 'gpt-6-luna', 'supported_reasoning_levels'
 
 @pytest.mark.parametrize('owner', ['dispatch', 'batch'])
 @pytest.mark.parametrize('instance', ['configured', 'missing', 'unset'])
-def test_provider_does_not_inherit_chair_fabric_environment(tmp_path, owner, instance):
+@pytest.mark.parametrize('mode', ['read_only', 'worktree_write'])
+def test_provider_does_not_inherit_chair_fabric_identity(tmp_path, owner, instance, mode):
     policy = tmp_path / '.agents/fabric-policy.json'
     policy.parent.mkdir()
-    policy.write_text('{"memory_floor_percent":{"read_only":0}}')
+    policy.write_text('{"memory_floor_percent":{"read_only":0,"worktree_write":0}}')
     run_dir = make_run(tmp_path, 'isolated-provider')
     prompt = tmp_path / 'prompt.md'
     prompt.write_text('Reply OK')
@@ -2991,19 +2992,26 @@ else:
     if instance == 'unset':
         env.pop('AGENT_FABRIC_INSTANCE_ROOT', None)
     expected_instance = env.get('AGENT_FABRIC_INSTANCE_ROOT', '')
+    worktree = make_worktree(tmp_path) if mode == 'worktree_write' else None
     if owner == 'dispatch':
         command = [str(SCRIPT), '--run-dir', str(run_dir), '--adapter', 'codex',
                    '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker']
+        if worktree is not None:
+            command += ['--access-mode', mode, '--worktree', str(worktree)]
     else:
         manifest = tmp_path / 'tasks.json'
         manifest.write_text(json.dumps({'schema_version': 1, 'tasks': [
             {'id': 'isolated', 'adapter': 'codex', 'prompt_file': str(prompt),
-             'alias': 'workhorse', 'role': 'worker'}]}))
+             'alias': 'workhorse', 'role': 'worker', 'access_mode': mode,
+             **({'worktree': str(worktree)} if worktree is not None else {})}]}))
         command = [str(SCRIPT.with_name('batch_run.py')), '--run-dir', str(run_dir), '--manifest', str(manifest)]
     result = subprocess.run(command, cwd=tmp_path, env=env, capture_output=True, text=True, timeout=30)
     assert result.returncode == 0, result.stdout + result.stderr
     run_id = json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['run_id']
-    assert json.loads(capture.read_text()) == {"PROVENANT_RUN_ID": run_id}
+    expected = {"PROVENANT_RUN_ID": run_id}
+    if mode == 'worktree_write':
+        expected['AGENT_FABRIC_STATE_DIRECTORY'] = env['AGENT_FABRIC_STATE_DIRECTORY']
+    assert json.loads(capture.read_text()) == expected
     assert (tmp_path / 'provider-instance.txt').read_text() == expected_instance
     assert not (tmp_path / 'chair-state').exists()
     scratch = Path((tmp_path / 'provider-tmp.txt').read_text())

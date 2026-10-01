@@ -188,7 +188,7 @@ def test_writer_profile_grants_project_locks_only(monkeypatch, tmp_path, adapter
     assert f'(subpath "{primary / ".agent-run"}")' not in allow
 
 
-def test_codex_writer_native_filesystem_grants_project_locks_only(monkeypatch, tmp_path):
+def test_codex_writer_native_filesystem_grants_project_locks_and_runs_only(monkeypatch, tmp_path):
     mod = supervisor()
     primary, worktree = linked_worktree(tmp_path)
     monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
@@ -199,7 +199,8 @@ def test_codex_writer_native_filesystem_grants_project_locks_only(monkeypatch, t
     assert filesystem[locks] == "write"
     assert locks not in plan["applied"]["add_dirs"]
     assert not [path for path in filesystem if path.startswith(str(primary / ".agent-run"))
-                and path != locks]
+                and path not in {locks, str(primary / ".agent-run/runs")}]
+    assert filesystem[str(primary / ".agent-run/runs")] == "write"
 
 
 def test_swapped_locks_link_is_not_granted_on_resume(monkeypatch, tmp_path):
@@ -1405,6 +1406,20 @@ print(json.dumps({'type':'turn.completed'}))
     assert json.loads((tmp_path / "result.md").read_text()) == expected
 
 
+@pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
+def test_only_codex_writers_inherit_the_configured_fabric_store(monkeypatch, tmp_path, mode):
+    state = str(tmp_path / "fabric-state")
+    monkeypatch.setenv("AGENT_FABRIC_STATE_DIRECTORY", state)
+    code = """import json, os
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps(os.environ.get('AGENT_FABRIC_STATE_DIRECTORY'))}}))
+print(json.dumps({'type':'turn.completed'}))
+"""
+    plan = fixture_plan(tmp_path, code, mode=mode)
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert json.loads((tmp_path / "result.md").read_text()) == (state if mode == "worktree_write" else None)
+
+
 def test_codex_capabilities_validate_the_codex_writer_envelope(monkeypatch, tmp_path):
     mod = supervisor()
     _, lane = instruction_lane(tmp_path)
@@ -1652,6 +1667,9 @@ def test_codex_capability_profile_enforces_git_and_signal_limits(monkeypatch, tm
     home.mkdir()
     (home / "auth.json").write_text("token", encoding="utf-8")
     monkeypatch.setenv("CODEX_HOME", str(home))
+    fabric = tmp_path / "fabric-state"
+    fabric.mkdir()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_DIRECTORY", str(fabric))
     common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
     private = Path(git(lane, "rev-parse", "--path-format=absolute", "--absolute-git-dir").strip())
 
@@ -1676,6 +1694,7 @@ def test_codex_capability_profile_enforces_git_and_signal_limits(monkeypatch, tm
             script = f"""
 import os
 import socket
+import sqlite3
 def attempt(action):
     try:
         action()
@@ -1688,6 +1707,12 @@ def connect(path):
         client.connect(path)
     finally:
         client.close()
+def write_fabric():
+    with sqlite3.connect({str(fabric / "fabric.sqlite3")!r}) as db:
+        db.execute("CREATE TABLE notes (body TEXT)")
+        assert db.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
+        db.execute("INSERT INTO notes VALUES ('lane note')")
+print(attempt(write_fabric))
 print(attempt(lambda: open({str(lane / "note.txt")!r}, "w").write("x")))
 print(attempt(lambda: open({str(lane / ".git")!r}, "a").write("")))
 print(attempt(lambda: open({str(private / "config.worktree")!r}, "a").write("")))
@@ -1707,6 +1732,7 @@ print(attempt(lambda: connect({str(inside_socket)!r})))
             if result.returncode and "sandbox_apply" in result.stderr:
                 pytest.skip("sandbox_apply is refused in this test environment")
             assert result.stdout.split() == [
+                "ok",
                 "ok", "PermissionError", "PermissionError", "PermissionError", "ok",
                 "PermissionError", "PermissionError", "PermissionError", "ok", "PermissionError",
                 "PermissionError", "PermissionError", "ok",
@@ -1714,6 +1740,9 @@ print(attempt(lambda: connect({str(inside_socket)!r})))
             assert not (lane / "config-link").exists()
             assert (home / "auth.json").read_text(encoding="utf-8") == "refreshed"
             assert (private / "index.probe").read_text(encoding="utf-8") == "probe"
+            import sqlite3
+            with sqlite3.connect(fabric / "fabric.sqlite3") as db:
+                assert db.execute("SELECT body FROM notes").fetchall() == [("lane note",)]
 
 
 @pytest.mark.skipif(sys.platform != "darwin" or not Path("/usr/bin/sandbox-exec").exists(),
@@ -3601,6 +3630,80 @@ def codex_writer_plan(lane, workspace, resume=None, **controls):
         "codex", {"resolved_model": "fixture"}, "hello", mode="worktree_write",
         worktree=lane, workspace_root=workspace, resume_session=resume, **controls,
     )
+
+
+@pytest.mark.parametrize("capabilities", [[], ["postgres"]], ids=["native", "postgres"])
+@pytest.mark.parametrize("resume", [None, "thread-1"], ids=["fresh", "resume"])
+def test_codex_writer_grants_only_fabric_database_and_runs(monkeypatch, tmp_path, capabilities, resume):
+    mod = supervisor()
+    repo, lane, _ = nested_lanes(tmp_path)
+    state = tmp_path / "fabric-state"
+    monkeypatch.setenv("AGENT_FABRIC_STATE_DIRECTORY", str(state))
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "catalogue"))
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = codex_writer_plan(lane, repo, resume, capabilities=capabilities)
+    files = [state / ("fabric.sqlite3" + suffix) for suffix in ("", "-wal", "-shm", "-journal")]
+    runs = repo / ".agent-run/runs"
+    denied = [repo / ".agent-run/sessions/DIRECTION.md", state / "capabilities.json",
+              state / "cooldowns.json", state / "route-health.json", tmp_path / "catalogue",
+              mod.Path.home() / ".config/gh", mod.Path.home() / ".local/share/pnpm/store"]
+    if capabilities:
+        profile = mod.os_confinement_profile(plan)
+        grants = plan["applied"]["write_boundary"]["writable_paths"]
+        assert f'(subpath "{runs}")' in profile
+        for path in files:
+            assert f'(allow file-write* (literal "{path}"))' in profile
+        for path in denied:
+            assert not any(path == Path(root) or path.is_relative_to(Path(root)) for root in grants)
+        sockets = next(line for line in profile.splitlines() if line.startswith("(allow network-outbound"))
+        assert str(state) not in sockets and str(runs) not in sockets
+    else:
+        table = codex_filesystem(plan)
+        for path in [*files, runs / "nested/receipt.json"]:
+            assert codex_access(table, path) == "write", path
+        for path in denied:
+            assert codex_access(table, path) != "write", path
+    read = mod.build_plan("codex", {}, "hello", cwd=lane, workspace_root=repo)
+    assert str(state) not in " ".join(read["argv"])
+
+
+@pytest.mark.parametrize("target", ["credential", "home", "ancestor", "git", "git-link", "session-link", "home-link"])
+def test_codex_shared_paths_apply_add_dir_safety_checks(monkeypatch, tmp_path, target):
+    mod = supervisor()
+    repo, lane, _ = nested_lanes(tmp_path)
+    home = tmp_path / "home"
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    state = {"credential": home / ".ssh", "home": home, "ancestor": tmp_path,
+             "git": repo / ".git/hooks"}.get(target, tmp_path / "fabric-state")
+    if target.endswith("-link"):
+        state.mkdir()
+        destination = {"git-link": repo / ".git/config",
+                       "session-link": repo / ".agent-run/sessions/DIRECTION.md",
+                       "home-link": home / ".zshrc"}[target]
+        (state / "fabric.sqlite3").symlink_to(destination)
+    monkeypatch.setenv("AGENT_FABRIC_STATE_DIRECTORY", str(state))
+    plan = codex_writer_plan(lane, repo)
+    assert codex_access(codex_filesystem(plan), state / "fabric.sqlite3") != "write"
+
+
+def test_codex_shared_runs_link_does_not_grant_sessions(tmp_path):
+    repo, lane, _ = nested_lanes(tmp_path)
+    run_root = repo / ".agent-run"
+    sessions = run_root / "sessions"
+    sessions.mkdir(parents=True)
+    (run_root / "runs").symlink_to(sessions, target_is_directory=True)
+    plan = codex_writer_plan(lane, repo)
+    assert codex_access(codex_filesystem(plan), sessions / "DIRECTION.md") != "write"
+
+
+@pytest.mark.parametrize("setting", ["", "~/state"])
+def test_codex_shared_database_path_matches_fabric_resolution(monkeypatch, tmp_path, setting):
+    repo, lane, _ = nested_lanes(tmp_path)
+    monkeypatch.setenv("AGENT_FABRIC_STATE_DIRECTORY", setting)
+    plan = codex_writer_plan(lane, repo)
+    # Fabric's Node path.resolve treats empty and tilde values as cwd-relative.
+    assert codex_filesystem(plan)[lane / setting / "fabric.sqlite3"] == "write"
 
 
 @pytest.mark.parametrize("resume", [None, "thread-1"], ids=["fresh", "resume"])

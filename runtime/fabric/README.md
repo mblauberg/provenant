@@ -181,6 +181,13 @@ shared `config` is read-only, so a lane cannot record an upstream,
 add a remote or add a worktree. `git push -u` still pushes but prints a
 config-lock error; push with `git push origin HEAD` and open the pull request
 with `gh pr create --head <branch>`.
+
+Codex writers also receive write access to repository `.agent-run/runs/` and
+`fabric.sqlite3`, `fabric.sqlite3-wal`, `fabric.sqlite3-shm` and
+`fabric.sqlite3-journal` in `AGENT_FABRIC_STATE_DIRECTORY` (default
+`~/.local/state/agent-harness/fabric`). Both sandbox profiles check these paths
+like `add_dirs`; the configured state directory survives fresh and resumed
+writer launches. Sessions and the Fabric catalogue receive no automatic grant.
 Wrapped writer runs on macOS (agy, Claude, Cursor, OpenCode and Kiro) use
 `sandbox-exec` to restrict writes to their worktree, declared `add_dirs`,
 the Git write boundary, attempt files, device nodes and provider state. Where

@@ -383,6 +383,24 @@ def _ensure_locks_dir(run_root):
     return str(locks) if _real_dir_chain(locks) else None
 
 
+def codex_writer_shared_paths(cwd, safe_path):
+    """Only nested runs and Fabric's SQLite files, checked like explicit add_dirs."""
+    state = Path(os.environ.get("AGENT_FABRIC_STATE_DIRECTORY",
+                                Path.home() / ".local/state/agent-harness/fabric"))
+    paths = {}
+    for root, names in ((layout.run_root(cwd) / ".agent-run/runs", ("",)),
+                        (state, tuple("fabric.sqlite3" + suffix for suffix in ("", "-wal", "-shm", "-journal")))):
+        if names == ("",) and root != root.resolve():
+            continue  # A runs link must not turn into a grant for sessions or other state.
+        root = (Path(cwd) / root).resolve()
+        if safe_path(str(root)):
+            for name in names:
+                path = str(root / name)
+                if safe_path(path) and (not name or not os.path.lexists(path) or _plain_file(Path(path))):
+                    paths[path] = bool(name)  # Files use literal SBPL grants; runs use subpath.
+    return paths
+
+
 def os_confinement_profile(plan, search_path=None):
     """Apply the provider's read and write boundary to this attempt.
 
@@ -405,6 +423,7 @@ def os_confinement_profile(plan, search_path=None):
         private = git_dirs.get("--absolute-git-dir")
         common = git_dirs.get("--git-common-dir")
         allowed = [cwd, *add_dirs, *([run_dir] if run_dir else []), Path("/dev")]
+        shared_paths = plan["applied"].get("shared_write_paths", {})
         locks_dir = plan.get("applied", {}).get("locks_dir")
         if locks_dir and _real_dir_chain(Path(locks_dir)):
             allowed.append(Path(locks_dir))
@@ -424,6 +443,9 @@ def os_confinement_profile(plan, search_path=None):
             + _sbpl_rule("allow", "file-write*", git_allowed, keep_leaf=True)
             + _sbpl_rule("allow", "file-write*", literal_files, literal=True, keep_leaf=True)
         )
+        for path, literal in shared_paths.items():
+            profile += _sbpl_rule("allow", "file-write*", [Path(path)], literal=literal, keep_leaf=True)
+        profile += _state_write_guards(home, {"no_links": [path for path, literal in shared_paths.items() if literal]})
         if plan.get("adapter") == "codex" and capabilities:
             codex_home = Path(plan["codex_home"])
             auth_path = Path(plan["codex_auth_path"])
@@ -832,15 +854,19 @@ def build_plan(
         str((candidate if candidate.is_absolute() else Path(workspace_root) / candidate).resolve())
         for candidate in (Path(p).expanduser() for p in add_dirs)
     ))
-    safe_directories = []
-    for directory in directories:
-        if credential_path(directory) or Path.home().resolve().is_relative_to(Path(directory)):
+    def safe_write_path(directory):
+        candidate = Path(directory).resolve()
+        if credential_path(candidate) or Path.home().resolve().is_relative_to(candidate):
             warnings.append("credential or authentication add-dir dropped: " + directory)
-        elif adapter == "codex" and git_common is not None and Path(directory).is_relative_to(git_common):
+        elif adapter == "codex" and git_common is not None and candidate.is_relative_to(git_common):
             warnings.append("Codex writer drops Git common directory add-dir: " + directory)
         else:
-            safe_directories.append(directory)
-    directories = safe_directories
+            return True
+        return False
+
+    directories = [directory for directory in directories if safe_write_path(directory)]
+    shared_write_paths = (codex_writer_shared_paths(cwd, safe_write_path)
+                          if mode == "worktree_write" and adapter == "codex" else {})
     if any(not Path(p).is_dir() for p in directories):
         raise ValueError("add-dir must be a readable directory")
     if mode == "worktree_write" and git_private is not None:
@@ -954,7 +980,7 @@ def build_plan(
             git_paths = ([str(git_private), *(str(git_common / path) for path in
                            GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)]
                          if git_private is not None else [])
-            writable_paths = [cwd, *directories, *([locks_dir] if locks_dir else []), *writable_paths, *git_paths]
+            writable_paths = [cwd, *directories, *shared_write_paths, *([locks_dir] if locks_dir else []), *writable_paths, *git_paths]
         if codex_home is not None:
             writable_paths.extend((str(codex_home), str(codex_auth_path)))
         write_boundary = {"kind": "sandbox-exec", "writable_paths": writable_paths}
@@ -966,7 +992,7 @@ def build_plan(
             # Codex applies the nearest entry, so the common directory reads as read-only below
             # any add_dir while the named Git paths inside it stay writable.
             # :tmpdir is the attempt's tmp, which holds XDG_CACHE_HOME, COREPACK_HOME and tool caches.
-            filesystem = {":tmpdir": "write", **{directory: "write" for directory in directories},
+            filesystem = {":tmpdir": "write", **dict.fromkeys([*directories, *shared_write_paths], "write"),
                           **({locks_dir: "write"} if locks_dir else {})}
             if git_private is not None:
                 filesystem[str(git_common)] = "read"
@@ -1044,6 +1070,7 @@ def build_plan(
             "sandbox": applied_sandbox,
             "network": applied_network,
             "add_dirs": directories,
+            "shared_write_paths": shared_write_paths,
             "locks_dir": locks_dir,
             "guarantee": guarantee,
             "confinement": confinement,
@@ -2574,6 +2601,9 @@ def execute(
     stderr_path = Path(stderr_path or output_path.parent / "stderr.log")
     environment = dict(os.environ if env is None else env)
     for key in list(environment):
+        if (key == "AGENT_FABRIC_STATE_DIRECTORY" and plan["adapter"] == "codex"
+                and plan["mode"] == "worktree_write"):
+            continue  # Writer coordination uses the same store whose database was granted.
         if key.startswith(
             ("GIT_", "PROVENANT_RUN_", "PROVENANT_PREFLIGHT_")
         ) or key in {
