@@ -188,7 +188,7 @@ def test_writer_profile_grants_project_locks_only(monkeypatch, tmp_path, adapter
     assert f'(subpath "{primary / ".agent-run"}")' not in allow
 
 
-def test_codex_writer_native_filesystem_grants_project_run_state(monkeypatch, tmp_path):
+def test_codex_writer_native_filesystem_grants_project_locks_and_runs_only(monkeypatch, tmp_path):
     mod = supervisor()
     primary, worktree = linked_worktree(tmp_path)
     monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
@@ -198,7 +198,9 @@ def test_codex_writer_native_filesystem_grants_project_run_state(monkeypatch, tm
     filesystem = plan["applied"]["write_boundary"]["filesystem"]
     assert filesystem[locks] == "write"
     assert locks not in plan["applied"]["add_dirs"]
-    assert filesystem[str(primary / ".agent-run")] == "write"
+    assert not [path for path in filesystem if path.startswith(str(primary / ".agent-run"))
+                and path not in {locks, str(primary / ".agent-run/runs")}]
+    assert filesystem[str(primary / ".agent-run/runs")] == "write"
 
 
 def test_swapped_locks_link_is_not_granted_on_resume(monkeypatch, tmp_path):
@@ -1439,7 +1441,7 @@ def test_codex_capabilities_validate_the_codex_writer_envelope(monkeypatch, tmp_
     assert plan["applied"]["guarantee"] == "enforced"
     assert str(lane / ".agents") in plan["applied"]["add_dirs"]
     assert str(common) not in plan["applied"]["add_dirs"]
-    assert str(common) in plan["applied"]["write_boundary"]["writable_paths"]
+    assert str(common) not in plan["applied"]["write_boundary"]["writable_paths"]
     assert str(common / "objects") in plan["applied"]["write_boundary"]["writable_paths"]
     assert str(attempt.parent / "codex-home") in plan["applied"]["write_boundary"]["writable_paths"]
     explicit_common = mod.build_plan(
@@ -1447,7 +1449,8 @@ def test_codex_capabilities_validate_the_codex_writer_envelope(monkeypatch, tmp_
         mode="worktree_write", worktree=lane, sandbox="workspace-write", network=True,
         capabilities=["postgres"], run_dir=attempt, add_dirs=[str(common)],
     )
-    assert str(common) in explicit_common["applied"]["add_dirs"]
+    assert str(common) not in explicit_common["applied"]["add_dirs"]
+    assert any("drops Git common directory add-dir" in warning for warning in explicit_common["warnings"])
 
 
 @pytest.mark.parametrize(("field", "value", "expected"), [
@@ -1531,7 +1534,7 @@ def test_codex_capabilities_reject_unknown_duplicate_and_non_list_values(monkeyp
                        capabilities=capabilities)
 
 
-def test_codex_capability_profile_grants_shared_git_and_only_selected_ipc(monkeypatch, tmp_path):
+def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_features(monkeypatch, tmp_path):
     mod = supervisor()
     repo, lane = instruction_lane(tmp_path)
     home = (tmp_path / "source-codex-home").resolve()
@@ -1549,22 +1552,20 @@ def test_codex_capability_profile_grants_shared_git_and_only_selected_ipc(monkey
     profile = mod.os_confinement_profile(plan)
 
     assert '(deny network-outbound (remote unix-socket))' in profile
-    socket_roots = [lane, *plan["applied"]["add_dirs"], *plan["applied"]["shared_write_dirs"],
-                    attempt, plan["codex_home"]]
+    socket_roots = [lane, *plan["applied"]["add_dirs"], attempt, plan["codex_home"]]
     expected_socket_allow = "(allow network-outbound " + " ".join(
         ['(remote unix-socket (path-literal "/private/var/run/mDNSResponder"))']
         + [f'(remote unix-socket (subpath "{Path(root).resolve()}"))' for root in socket_roots]
     ) + ")"
     assert expected_socket_allow in profile
 
-    assert f'(deny file-write* (subpath "{common}")' not in profile
+    assert f'(deny file-write* (subpath "{common}")' in profile
     for path in (common / "objects", common / "refs", common / "logs"):
         assert f'(subpath "{path}")' in profile
         assert str(path) in plan["applied"]["write_boundary"]["writable_paths"]
     for path in (common / "packed-refs", common / "packed-refs.lock", common / "packed-refs.new"):
         assert f'(literal "{path}")' in profile
-    assert f'(subpath "{common}")' in profile
-    assert str(common) in plan["applied"]["write_boundary"]["writable_paths"]
+    assert f'(allow file-write* (subpath "{common}")' not in profile
     assert f'(subpath "{attempt.parent / "codex-home"}")' in profile
     assert f'(literal "{(home / "auth.json").resolve()}")' in profile
     assert f'(subpath "{home}")' not in profile
@@ -1582,7 +1583,7 @@ def test_codex_capability_profile_grants_shared_git_and_only_selected_ipc(monkey
     assert f'(allow file-write* (subpath "{private}")' in profile
     assert f'(deny file-write* (subpath "{lane / ".git"}"))' in profile
     for name in ("config.worktree", "commondir", "gitdir"):
-        assert f'(deny file-write* (literal "{private / name}"))' not in profile
+        assert f'(deny file-write* (literal "{private / name}"))' in profile
 
     for adapter in ("codex", "claude"):
         without_capabilities = mod.build_plan(
@@ -1709,6 +1710,7 @@ def connect(path):
 def write_fabric():
     with sqlite3.connect({str(fabric / "fabric.sqlite3")!r}) as db:
         db.execute("CREATE TABLE notes (body TEXT)")
+        assert db.execute("PRAGMA journal_mode=WAL").fetchone() == ("wal",)
         db.execute("INSERT INTO notes VALUES ('lane note')")
 print(attempt(write_fabric))
 print(attempt(lambda: open({str(lane / "note.txt")!r}, "w").write("x")))
@@ -1731,11 +1733,11 @@ print(attempt(lambda: connect({str(inside_socket)!r})))
                 pytest.skip("sandbox_apply is refused in this test environment")
             assert result.stdout.split() == [
                 "ok",
-                "ok", "PermissionError", "ok", "ok", "ok",
-                "ok", "ok", "ok", "ok", "PermissionError",
+                "ok", "PermissionError", "PermissionError", "PermissionError", "ok",
+                "PermissionError", "PermissionError", "PermissionError", "ok", "PermissionError",
                 "PermissionError", "PermissionError", "ok",
             ], result.stderr
-            assert (lane / "config-link").exists()
+            assert not (lane / "config-link").exists()
             assert (home / "auth.json").read_text(encoding="utf-8") == "refreshed"
             assert (private / "index.probe").read_text(encoding="utf-8") == "probe"
             import sqlite3
@@ -3632,39 +3634,81 @@ def codex_writer_plan(lane, workspace, resume=None, **controls):
 
 @pytest.mark.parametrize("capabilities", [[], ["postgres"]], ids=["native", "postgres"])
 @pytest.mark.parametrize("resume", [None, "thread-1"], ids=["fresh", "resume"])
-def test_codex_writer_can_write_backend_shared_state(monkeypatch, tmp_path, capabilities, resume):
+def test_codex_writer_grants_only_fabric_database_and_runs(monkeypatch, tmp_path, capabilities, resume):
+    mod = supervisor()
+    repo, lane, _ = nested_lanes(tmp_path)
+    state = tmp_path / "fabric-state"
+    monkeypatch.setenv("AGENT_FABRIC_STATE_DIRECTORY", str(state))
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path / "catalogue"))
+    monkeypatch.setattr(mod.sys, "platform", "darwin")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = codex_writer_plan(lane, repo, resume, capabilities=capabilities)
+    files = [state / ("fabric.sqlite3" + suffix) for suffix in ("", "-wal", "-shm", "-journal")]
+    runs = repo / ".agent-run/runs"
+    denied = [repo / ".agent-run/sessions/DIRECTION.md", state / "capabilities.json",
+              state / "cooldowns.json", state / "route-health.json", tmp_path / "catalogue",
+              mod.Path.home() / ".config/gh", mod.Path.home() / ".local/share/pnpm/store"]
+    if capabilities:
+        profile = mod.os_confinement_profile(plan)
+        grants = plan["applied"]["write_boundary"]["writable_paths"]
+        assert f'(subpath "{runs}")' in profile
+        for path in files:
+            assert f'(allow file-write* (literal "{path}"))' in profile
+        for path in denied:
+            assert not any(path == Path(root) or path.is_relative_to(Path(root)) for root in grants)
+        sockets = next(line for line in profile.splitlines() if line.startswith("(allow network-outbound"))
+        assert str(state) not in sockets and str(runs) not in sockets
+    else:
+        table = codex_filesystem(plan)
+        for path in [*files, runs / "nested/receipt.json"]:
+            assert codex_access(table, path) == "write", path
+        for path in denied:
+            assert codex_access(table, path) != "write", path
+    read = mod.build_plan("codex", {}, "hello", cwd=lane, workspace_root=repo)
+    assert str(state) not in " ".join(read["argv"])
+
+
+@pytest.mark.parametrize("target", ["credential", "home", "ancestor", "git", "git-link", "session-link", "home-link"])
+def test_codex_shared_paths_apply_add_dir_safety_checks(monkeypatch, tmp_path, target):
     mod = supervisor()
     repo, lane, _ = nested_lanes(tmp_path)
     home = tmp_path / "home"
     monkeypatch.setattr(mod.Path, "home", lambda: home)
-    monkeypatch.setenv("AGENT_FABRIC_STATE_DIRECTORY", str(home / "fabric-store"))
-    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(home / "fabric-pool"))
-    monkeypatch.setenv("GH_CONFIG_DIR", str(home / "gh"))
-    monkeypatch.setenv("PNPM_HOME", str(home / "pnpm"))
-    monkeypatch.setenv("XDG_DATA_HOME", str(home / "data"))
-    monkeypatch.setattr(mod.sys, "platform", "darwin")
-    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
-    plan = codex_writer_plan(lane, repo, resume, capabilities=capabilities,
-                             run_dir=repo / ".agent-run/runs/probe/attempt-001")
-    roots = [repo / ".git", repo / ".agent-run", home / "fabric-store", home / "fabric-pool",
-             home / "gh", home / "pnpm/store", home / "data/pnpm/store",
-             home / "Library/pnpm/store", home / ".cache/pnpm", home / "Library/Caches/pnpm"]
-    if capabilities:
-        profile = mod.os_confinement_profile(plan)
-        for root in roots:
-            assert str(root) in plan["applied"]["write_boundary"]["writable_paths"]
-            assert f'(subpath "{root}")' in profile
-            assert f'(deny file-write* (subpath "{root}"))' not in profile
-    else:
-        table = codex_filesystem(plan)
-        for root in roots:
-            assert codex_access(table, root / "probe") == "write", root
-    read = mod.build_plan("codex", {}, "hello", cwd=lane, workspace_root=repo)
-    assert all(str(root) not in " ".join(read["argv"]) for root in roots)
+    state = {"credential": home / ".ssh", "home": home, "ancestor": tmp_path,
+             "git": repo / ".git/hooks"}.get(target, tmp_path / "fabric-state")
+    if target.endswith("-link"):
+        state.mkdir()
+        destination = {"git-link": repo / ".git/config",
+                       "session-link": repo / ".agent-run/sessions/DIRECTION.md",
+                       "home-link": home / ".zshrc"}[target]
+        (state / "fabric.sqlite3").symlink_to(destination)
+    monkeypatch.setenv("AGENT_FABRIC_STATE_DIRECTORY", str(state))
+    plan = codex_writer_plan(lane, repo)
+    assert codex_access(codex_filesystem(plan), state / "fabric.sqlite3") != "write"
+    assert plan["warnings"]
+
+
+def test_codex_shared_runs_link_does_not_grant_sessions(tmp_path):
+    repo, lane, _ = nested_lanes(tmp_path)
+    run_root = repo / ".agent-run"
+    sessions = run_root / "sessions"
+    sessions.mkdir(parents=True)
+    (run_root / "runs").symlink_to(sessions, target_is_directory=True)
+    plan = codex_writer_plan(lane, repo)
+    assert codex_access(codex_filesystem(plan), sessions / "DIRECTION.md") != "write"
+
+
+@pytest.mark.parametrize("setting", ["", "~/state"])
+def test_codex_shared_database_path_matches_fabric_resolution(monkeypatch, tmp_path, setting):
+    repo, lane, _ = nested_lanes(tmp_path)
+    monkeypatch.setenv("AGENT_FABRIC_STATE_DIRECTORY", setting)
+    plan = codex_writer_plan(lane, repo)
+    # Fabric's Node path.resolve treats empty and tilde values as cwd-relative.
+    assert codex_filesystem(plan)[lane / setting / "fabric.sqlite3"] == "write"
 
 
 @pytest.mark.parametrize("resume", [None, "thread-1"], ids=["fresh", "resume"])
-def test_codex_writer_gets_the_full_owning_git_common_directory(tmp_path, resume):
+def test_codex_writer_gets_the_wrapped_writer_git_boundary(tmp_path, resume):
     repo, lane, other = nested_lanes(tmp_path)
     common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()).resolve()
     private = Path(git(lane, "rev-parse", "--absolute-git-dir").strip()).resolve()
@@ -3684,13 +3728,16 @@ def test_codex_writer_gets_the_full_owning_git_common_directory(tmp_path, resume
     for granted in (private, private / "index", private / "index.lock", private / "HEAD",
                     private / "ORIG_HEAD", private / "logs/HEAD",
                     common / "objects", common / "refs/heads/lane", common / "logs/refs/heads/lane",
-                    common / "packed-refs", common / "packed-refs.lock", common / "packed-refs.new",
-                    common, common / "hooks", common / "hooks/pre-commit", common / "config",
-                    common / "info/exclude", common / "worktrees", sibling, sibling / "HEAD",
-                    private / "config.worktree", private / "commondir", private / "gitdir"):
+                    common / "packed-refs", common / "packed-refs.lock", common / "packed-refs.new"):
         assert codex_access(table, granted) == "write", granted
+    for denied in (common, common / "hooks", common / "hooks/pre-commit", common / "config",
+                   common / "info/exclude", common / "worktrees", sibling, sibling / "HEAD",
+                   private / "config.worktree", private / "commondir", private / "gitdir", lane / ".git"):
+        assert codex_access(table, denied) == "read", denied
+        assert not any(denied == root or denied.is_relative_to(root) for root in add_dirs), denied
     assert table[lane.resolve() / ".git"] == "read"
-    assert common in add_dirs
+    assert common not in add_dirs
+    assert any("drops Git common directory add-dir" in warning for warning in plan["warnings"])
     assert "--ephemeral" not in argv
 
 
@@ -3732,10 +3779,10 @@ def test_codex_sandbox_commits_in_nested_lane_and_ignores_inherited_grants(tmp_p
                             text=True, timeout=60, env={**os.environ, "CODEX_HOME": str(codex_home)})
     if "commit=ok" not in result.stdout and "sandbox_apply" in result.stderr:
         pytest.skip("macOS refuses a nested sandbox here")
-    assert result.stdout.split() == ["commit=ok", "marker=denied"], result.stdout + result.stderr
+    assert result.stdout.split() == ["commit=ok", "hooks=denied", "config=denied", "sibling=denied",
+                                     "marker=denied"], result.stdout + result.stderr
     assert git(lane, "log", "-1", "--format=%s").strip() == "lane"
-    assert (common / "hooks/pre-commit").exists()
-    assert git(lane, "config", "probe.key").strip() == "1"
+    assert not (common / "hooks/pre-commit").exists()
 
 
 def test_writer_attempt_disables_git_writes_to_the_common_directory(tmp_path):

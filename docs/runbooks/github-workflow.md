@@ -130,8 +130,8 @@ with an upstream so `gh pr create` finds the branch:
 git push -u origin fix/repo-runbook-mechanics
 ```
 
-Codex Fabric writers can write shared Git config and use `git push -u`. Other
-adapters retain a narrow Git boundary: push with `git push origin HEAD` and
+A Fabric writer lane cannot write the shared Git `config`, so `-u` pushes but
+cannot record the upstream. From a lane, push with `git push origin HEAD` and
 pass `--head <branch>` to `gh pr create`.
 
 ### Pull request
