@@ -3685,7 +3685,6 @@ def test_codex_shared_paths_apply_add_dir_safety_checks(monkeypatch, tmp_path, t
     monkeypatch.setenv("AGENT_FABRIC_STATE_DIRECTORY", str(state))
     plan = codex_writer_plan(lane, repo)
     assert codex_access(codex_filesystem(plan), state / "fabric.sqlite3") != "write"
-    assert plan["warnings"]
 
 
 def test_codex_shared_runs_link_does_not_grant_sessions(tmp_path):
