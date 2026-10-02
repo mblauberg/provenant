@@ -13,6 +13,10 @@ described. Fabric is now small enough to be its own documentation: see
 [`runtime/fabric/README.md`](../../runtime/fabric/README.md) and the
 [MCP registration runbook](../runbooks/fabric-mcp-registration.md).
 
+## Fabric
+
+- [Fabric across the user's own hosts](fabric-hosts.md) (proposed)
+
 ## Harness
 
 - [Adaptive agent harness lifecycle](harness/lifecycle.md)
