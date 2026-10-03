@@ -174,7 +174,8 @@ deleting, renaming or replacing the entry. A symlinked or non-regular source
 through a symlink, fails the attempt before launch. Chrome must use `--no-sandbox` because macOS refuses its nested sandbox. PostgreSQL socket
 paths under lane `TMPDIR` exceed macOS's
 103-byte limit; use TCP or a short socket directory. Attempts set `TMPDIR`,
-`TMP` and `TEMP` to `<attempt>/tmp`, `XDG_CACHE_HOME` to `<attempt>/tmp/cache` and
+`TMP` and `TEMP` to `<attempt>/tmp`, zsh's `TMPPREFIX` to `<attempt>/tmp/zsh` (for
+here-documents), `XDG_CACHE_HOME` to `<attempt>/tmp/cache` and
 `COREPACK_HOME` to `<attempt>/tmp/cache/node/corepack`, `UV_CACHE_DIR` to `<cache>/uv`
 and `npm_config_cache` to `<cache>/npm`. Read-only attempts also append
 `-p no:cacheprovider` to `PYTEST_ADDOPTS` and set `PYTHONPYCACHEPREFIX`,

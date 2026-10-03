@@ -1393,7 +1393,7 @@ def fixture_plan(tmp_path, code, adapter="codex", **controls):
 
 def test_attempt_private_temp_and_cache_environment(tmp_path):
     code = """import json, os
-print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({key: os.environ.get(key) for key in ('TMPDIR','TMP','TEMP','XDG_CACHE_HOME')})}}))
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({key: os.environ.get(key) for key in ('TMPDIR','TMP','TEMP','TMPPREFIX','XDG_CACHE_HOME')})}}))
 print(json.dumps({'type':'turn.completed'}))
 """
     plan = fixture_plan(tmp_path, code)
@@ -1401,6 +1401,7 @@ print(json.dumps({'type':'turn.completed'}))
     assert record["status"] == "ok"
     expected = {key: str(tmp_path / "tmp" / "cache" if key == "XDG_CACHE_HOME" else tmp_path / "tmp")
                 for key in ("TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME")}
+    expected["TMPPREFIX"] = str(tmp_path / "tmp" / "zsh")
     assert (tmp_path / "tmp" / "cache").is_dir()
     assert not (tmp_path / "cache").exists()
     assert json.loads((tmp_path / "result.md").read_text()) == expected
