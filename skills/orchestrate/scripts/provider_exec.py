@@ -2647,8 +2647,10 @@ def execute(
         private.mkdir(parents=True, exist_ok=True, mode=0o700)
         private.chmod(0o700)  # mkdir leaves an existing directory's mode as it was
     # Tool caches follow XDG_CACHE_HOME; Corepack is set too, so an inherited COREPACK_HOME
-    # outside the writable roots cannot leak into child pnpm or yarn calls.
+    # outside the writable roots cannot leak into child pnpm or yarn calls. zsh ignores TMPDIR
+    # and writes here-documents under TMPPREFIX (default /tmp/zsh), outside a confined lane's writes.
     environment.update(TMPDIR=str(private_tmp), TMP=str(private_tmp), TEMP=str(private_tmp),
+                       TMPPREFIX=str(private_tmp / "zsh"),
                        XDG_CACHE_HOME=str(private_cache),
                        COREPACK_HOME=str(private_cache / "node" / "corepack"))
     environment.update(tool_cache_environment(plan, private_cache, environment))

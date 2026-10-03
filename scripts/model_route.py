@@ -445,6 +445,8 @@ def _live_id(adapter: str, requested: str, catalog: dict[str, Any]) -> tuple[dic
     """An explicit id the catalogue lacks but the fresh live listing has: it inherits its family's catalogue entry."""
     entries = catalog["adapters"][adapter].get("models", [])
     base = _live_base(adapter, requested, catalog)
+    if any(entry["id"].casefold() == base.casefold() for entry in entries):
+        return None, []  # Registered already, so not newer than the catalogue.
     live = base if any(_live_base(adapter, model, catalog).casefold() == base.casefold()
                        for model in _cached_live_models(adapter)) else None
     family = [entry for entry in entries if live and _family_key(entry["id"]) == _family_key(live)]

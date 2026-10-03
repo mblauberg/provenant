@@ -4716,6 +4716,16 @@ def _resolve_env(state):
             "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT), "AGENT_FABRIC_STATE_ROOT": str(state)}
 
 
+def test_a_registered_id_in_the_live_listing_is_not_newer_than_the_catalogue(tmp_path):
+    _live_cache(tmp_path, "codex", ["gpt-6.1-sol"])
+    run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "codex", "--model", "gpt-6.1-sol",
+                          "--alias", "workhorse", "--role", "worker"], capture_output=True, text=True,
+                         env={**_resolve_env(tmp_path), "FABRIC_ALIAS_IMPLIED": "1"})
+    route = json.loads(run.stdout)
+    assert run.returncode == 0 and route["resolved_model"] == "gpt-6.1-sol", run.stdout
+    assert not any("newer than the catalogue" in note for note in route["notes"] + route["warnings"])
+
+
 @pytest.mark.parametrize("adapter,model,expected", [
     ("codex", "gpt-sol", "gpt-6.2-sol"), ("codex", "sol", "gpt-6.2-sol"), ("codex", "GPT_SOL", "gpt-6.2-sol"),
     ("codex", "s_o_l", "gpt-6.2-sol"), ("codex", "gpt-6.2-sol", "gpt-6.2-sol"),
