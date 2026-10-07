@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "scripts/provenant.template"
 
 
-def _provider_lines(home: Path) -> tuple[list[str], bool]:
+def provider_registration_status(home: Path) -> dict[str, dict[str, bool]]:
     claude_root = Path(os.environ.get("CLAUDE_CONFIG_DIR") or home / ".claude")
     codex_root = Path(os.environ.get("CODEX_HOME") or home / ".codex")
     opencode_root = Path(os.environ.get("OPENCODE_CONFIG_DIR") or home / ".config/opencode")
@@ -33,14 +33,11 @@ def _provider_lines(home: Path) -> tuple[list[str], bool]:
         "cursor": (home / ".cursor", Path(os.environ.get("CURSOR_MCP_CONFIG") or home / ".cursor/mcp.json")),
         "kiro": (home / ".kiro", Path(os.environ.get("KIRO_MCP_CONFIG") or home / ".kiro/settings/mcp.json")),
     }
-    lines = []
-    missing = False
+    result = {}
     for provider, (root, config) in locations.items():
-        if not root.is_dir() or (
+        present = root.is_dir() and not (
             provider == "agy" and not os.environ.get("AGY_CONFIG_DIR") and shutil.which("agy") is None
-        ):
-            lines.append(f"provider {provider} present=no")
-            continue
+        )
         skills = (root / "skills/orchestrate/SKILL.md").is_file()
         try:
             content = config.read_text()
@@ -55,6 +52,18 @@ def _provider_lines(home: Path) -> tuple[list[str], bool]:
             mcp = isinstance(servers, dict) and "fabric" in servers
         except (OSError, ValueError):
             mcp = False
+        result[provider] = {"present": present, "skills": skills, "registered": mcp}
+    return result
+
+
+def _provider_lines(home: Path) -> tuple[list[str], bool]:
+    lines = []
+    missing = False
+    for provider, state in provider_registration_status(home).items():
+        if not state["present"]:
+            lines.append(f"provider {provider} present=no")
+            continue
+        skills, mcp = state["skills"], state["registered"]
         complete = skills and mcp
         missing |= not complete
         lines.append(

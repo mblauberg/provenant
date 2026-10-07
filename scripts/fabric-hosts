@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Use the existing interpreter owner even under SSH's minimal nonlogin PATH.
+set -euo pipefail
+SCRIPT_DIRECTORY="$(cd "$(dirname "$0")" && pwd)"
+source "$SCRIPT_DIRECTORY/lib/harness-python.sh"
+run_stdlib "$SCRIPT_DIRECTORY/fabric_hosts.py" "$@"

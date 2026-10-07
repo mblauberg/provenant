@@ -16,6 +16,7 @@ described. Fabric is now small enough to be its own documentation: see
 ## Fabric
 
 - [Fabric across the user's own hosts](fabric-hosts.md)
+- [Host setup and diagnostics](../runbooks/fabric-hosts.md)
 
 ## Harness
 
