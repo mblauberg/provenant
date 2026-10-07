@@ -55,11 +55,13 @@ The first deployment is a laptop (`laptop`) plus an always-on spare Mac
 
 - The chair on either host may be any supported primary harness: Claude Code,
   Codex or agy. Each drives the other host the same way, through the
-  `provenant` CLI and the Fabric MCP tools, which behave identically under
-  every harness.
+  `provenant` CLI and the Fabric MCP tools.
 - Every federated operation in this spec (dispatch, lane view and control,
   messages, tasks, activity, landing, work claims and `hosts doctor`) is
-  reachable through those two surfaces alone.
+  reachable through those two surfaces alone, and the Fabric MCP tools expose
+  the same federated operations to every registered harness.
+- `hosts doctor` reports, for the host it runs on, which harnesses have the
+  Fabric MCP server registered, so a chair can confirm its own surface.
 - No federated operation depends on a provider-specific remote feature, such
   as Claude Code Remote Control, a provider's cloud sessions or a provider's
   own SSH integration. Such a feature may be used as an optional convenience,
@@ -236,7 +238,9 @@ is usable on its own:
 
 ## Acceptance
 
-Each criterion runs against two real hosts. The peer-failure criteria also run
+Each criterion runs against two real hosts. Criteria that launch lanes use a
+Codex or agy adapter unless they name Claude, so none depends on the Claude
+sign-in spike. The peer-failure criteria also run
 with the peer made unreachable mid-test, with a stale SSH control connection,
 and across a sleep and wake of each host.
 
@@ -277,6 +281,10 @@ and across a sleep and wake of each host.
 15. The documented SSH `command=` restriction is applied in the test setup, and
     every operation above still works through it.
 16. No Provenant process listens on a network port on either host.
-17. A Codex chair and an agy chair each run criteria 2, 7, 8 and 12 from
-    either host through the `provenant` CLI or the Fabric MCP tools, with no
-    Claude Code session taking part in coordination.
+17. A Codex chair and an agy chair each run criteria 2, 7, 8, 9 and 12 in
+    both directions (a `laptop` chair driving `workshop`, and a `workshop`
+    chair driving `laptop`), using the Fabric MCP tools for dispatch, lane
+    status, messages and tasks. Landing runs from the chair but executes on
+    the home host. The lanes use a Codex or agy adapter, and no Claude
+    adapter or Claude Code session appears in either host's run, lane or
+    session records for the test.

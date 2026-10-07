@@ -60,7 +60,8 @@ over the user's existing OpenSSH configuration.
   fixed verb set including Git transfer, and never executes a caller-assembled
   shell command. One SSH key restricted to it serves every operation.
 - Coordination is provider-neutral. A Claude Code, Codex or agy chair drives
-  another host through the same `provenant` CLI and Fabric MCP surfaces. No
+  another host through the same `provenant` CLI and Fabric MCP surfaces, which
+  must expose the same federated operations to every registered harness. No
   federated operation depends on a provider's own remote-control, cloud-session
   or SSH feature; such features remain optional conveniences.
 
