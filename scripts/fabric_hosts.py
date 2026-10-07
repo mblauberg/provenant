@@ -21,7 +21,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 PRODUCT_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(PRODUCT_ROOT / 'skills'))
+for _product_path in (PRODUCT_ROOT / 'scripts', PRODUCT_ROOT / 'skills',
+                      PRODUCT_ROOT / 'skills/orchestrate/scripts'):
+    if str(_product_path) not in sys.path:
+        sys.path.insert(0, str(_product_path))
 from _shared.bounded_process import stop_process_group
 
 PROTOCOL_VERSION = 1
@@ -31,7 +34,9 @@ NAME = re.compile(r"[a-z0-9-]+")
 DESTINATION = re.compile(r"(?:[A-Za-z0-9_][A-Za-z0-9_.-]*@)?[A-Za-z0-9][A-Za-z0-9_.-]*")
 CANCELLED = threading.Event()
 ACTIVE_SSH = set()
-SSH_LOCK = threading.Lock()
+SSH_LOCK = threading.RLock()
+MAX_JSON_DEPTH = 64
+MAX_STDERR_BYTES = 4096
 
 PEER_COMMAND = re.compile(r"(?:/|~/)?[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)* peer")
 
@@ -65,6 +70,24 @@ def strict_json(raw):
         raise ValueError('non-finite JSON value')
     if isinstance(raw, (bytes, bytearray)):
         raw = raw.decode('utf-8')
+    depth = 0
+    quoted = escaped = False
+    for char in raw:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == '"':
+                quoted = False
+        elif char == '"':
+            quoted = True
+        elif char in '[{':
+            depth += 1
+            if depth > MAX_JSON_DEPTH:
+                raise ValueError('JSON nesting limit exceeded')
+        elif char in ']}':
+            depth -= 1
     return json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
 
 def fields(value, allowed, required, code):
@@ -127,9 +150,11 @@ def load_config(path=None):
             raise HostError(code, 'Local host cannot also be a peer')
         fields(settings, {'ssh_destination', 'peer_command', 'connect_timeout', 'response_deadline'}, {'ssh_destination'}, code)
         peer = PeerConfig(**settings)
-        if not isinstance(peer.ssh_destination, str) or not DESTINATION.fullmatch(peer.ssh_destination):
+        if (not isinstance(peer.ssh_destination, str) or peer.ssh_destination.startswith('-')
+                or not DESTINATION.fullmatch(peer.ssh_destination)):
             raise HostError(code, 'SSH destination must be an alias, optionally user@alias')
         if (not isinstance(peer.peer_command, str) or not PEER_COMMAND.fullmatch(peer.peer_command)
+                or any(part.startswith('-') for part in peer.peer_command.split())
                 or any(part in {'.', '..'} for part in peer.peer_command.split(' ')[0].split('/'))):
             raise HostError(code, 'Peer command must name an executable followed by peer')
         if type(peer.connect_timeout) is not int or not 0 < peer.connect_timeout <= 86_400:
@@ -172,11 +197,13 @@ def protocol_decision(remote_version):
 
 def ssh_exchange(peer, request, ssh_program, deadline):
     """Bound memory, time and child lifetime; stdin is one closed JSON document."""
+    if peer.ssh_destination.startswith('-') or any(part.startswith('-') for part in peer.peer_command.split()):
+        raise HostError('invalid_config', 'SSH destination and peer command arguments cannot start with an option')
     encoded = json.dumps(request, allow_nan=False).encode() + b'\n'
     if len(encoded) > MAX_REQUEST_BYTES:
         raise HostError('request_too_large', 'Request exceeds the byte limit')
     command = [ssh_program, '-o', 'BatchMode=yes', '-o', f'ConnectTimeout={peer.connect_timeout}',
-               peer.ssh_destination, peer.peer_command]
+               '--', peer.ssh_destination, peer.peer_command]
     with tempfile.TemporaryFile() as input_file:
         input_file.write(encoded)
         input_file.seek(0)
@@ -188,6 +215,7 @@ def ssh_exchange(peer, request, ssh_program, deadline):
         with SSH_LOCK:
             ACTIVE_SSH.add(process)
         output = bytearray()
+        stderr_tail = bytearray()
         try:
             if CANCELLED.is_set():
                 raise HostError('hosts_cancelled', 'Host check cancelled')
@@ -206,6 +234,10 @@ def ssh_exchange(peer, request, ssh_program, deadline):
                             output.extend(chunk)
                             if len(output) > MAX_RESPONSE_BYTES:
                                 raise HostError('bad_response', 'Peer response exceeds the byte limit')
+                        else:
+                            stderr_tail.extend(chunk)
+                            if len(stderr_tail) > MAX_STDERR_BYTES:
+                                del stderr_tail[:-MAX_STDERR_BYTES]
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise HostError('timeout', 'Peer response deadline exceeded')
@@ -221,8 +253,14 @@ def ssh_exchange(peer, request, ssh_program, deadline):
                 ACTIVE_SSH.discard(process)
             process.stdout.close()
             process.stderr.close()
+    stderr_text = bytes(stderr_tail).decode('utf-8', errors='ignore').strip()
+    diagnostic = f': {stderr_text}' if stderr_text else ''
     if exit_code == 255:
-        raise HostError('unreachable', 'SSH could not reach the peer')
+        raise HostError('unreachable', f'SSH could not reach the peer{diagnostic}')
+    if exit_code != 0 and not output:
+        code = 'peer_command_not_found' if exit_code == 127 else 'peer_command_failed'
+        message = 'Peer command was not found' if exit_code == 127 else f'Peer command exited with status {exit_code}'
+        raise HostError(code, f'{message}{diagnostic}')
     try:
         response = strict_json(output)
         fields(response, {'protocol_version', 'ok', 'result', 'error'}, {'protocol_version', 'ok'}, 'bad_response')
@@ -237,8 +275,8 @@ def ssh_exchange(peer, request, ssh_program, deadline):
             fields(response['error'], {'code', 'message'}, {'code', 'message'}, 'bad_response')
             if not all(isinstance(response['error'][key], str) for key in ('code', 'message')):
                 raise ValueError('invalid error')
-    except (ValueError, UnicodeError) as exc:
-        raise HostError('bad_response', 'Peer returned an invalid JSON response') from exc
+    except (ValueError, UnicodeError, RecursionError) as exc:
+        raise HostError('bad_response', f'Peer returned an invalid JSON response{diagnostic}') from exc
     return response
 
 
@@ -469,7 +507,13 @@ def hosts_doctor(config, selected):
     project_path = project_identity()
     def probe(host):
         if host == config.local_host:
-            return {'host': host, 'reachability': 'reachable', **envelope(doctor(project_path)), **protocol_decision(PROTOCOL_VERSION)}
+            try:
+                response = envelope(doctor(project_path))
+            except HostError as exc:
+                response = envelope(error=exc)
+            except Exception:
+                response = envelope(error=HostError('doctor_unavailable', 'Local host diagnostics failed'))
+            return {'host': host, 'reachability': 'reachable', **response, **protocol_decision(PROTOCOL_VERSION)}
         return PeerClient(host, config.peers[host]).call('doctor', {'project_path': project_path})
     with ThreadPoolExecutor(max_workers=max(1, min(len(selected), 8))) as executor:
         rows = list(executor.map(probe, selected))

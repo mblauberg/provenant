@@ -2,12 +2,27 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { accessSync, constants, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, resolve, sep } from "node:path";
 import { expect, it } from "vitest";
 
+function tempRoot(prefix: string) {
+  const root = resolve(mkdtempSync(join(tmpdir(), prefix)));
+  const repository = resolve(import.meta.dirname, "../../../../../");
+  if (root !== repository && !root.startsWith(repository + sep)) return root;
+  rmSync(root, { recursive: true, force: true });
+  for (const candidate of ["/private/tmp", "/var/tmp"]) {
+    try {
+      accessSync(candidate, constants.W_OK);
+      return mkdtempSync(join(candidate, prefix));
+    } catch { /* Try the next system scratch directory. */ }
+  }
+  throw new Error("$TMPDIR is inside the checkout and no external scratch directory is writable");
+}
+
 it("exposes the same host list and doctor contracts through the provider-neutral MCP facade", async () => {
-  const root = mkdtempSync("/tmp/fabric-hosts-mcp-");
+  const root = tempRoot("fabric-hosts-mcp-");
   const workspace = join(root, "Repos/project"), instance = join(root, "instance");
   mkdirSync(workspace, { recursive: true });
   mkdirSync(join(instance, ".agent-fabric"), { recursive: true });
@@ -42,7 +57,7 @@ it("cancellation reaps the SSH child before the facade returns", async () => {
   const { fabricHosts } = await import("../src/hosts.js");
   const { readFileSync, existsSync } = await import("node:fs");
   const { setTimeout: delay } = await import("node:timers/promises");
-  const root = mkdtempSync("/tmp/fabric-hosts-cancel-");
+  const root = tempRoot("fabric-hosts-cancel-");
   const instance = join(root, "instance"), pidFile = join(root, "ssh.pid"), shim = join(root, "ssh");
   mkdirSync(join(instance, ".agent-fabric"), { recursive: true });
   writeFileSync(join(instance, ".agent-fabric/hosts.json"), JSON.stringify({ schema_version: 1, local_host: "laptop",
@@ -68,6 +83,24 @@ it("cancellation reaps the SSH child before the facade returns", async () => {
     if (pid !== undefined) { try { process.kill(-pid, "SIGKILL"); } catch { /* already reaped */ } }
     for (const key of Object.keys(process.env)) if (!(key in saved)) delete process.env[key];
     Object.assign(process.env, saved);
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 10_000);
+
+it("includes the launcher's bounded stderr tail in host facade errors", async () => {
+  const { fabricHosts } = await import("../src/hosts.js");
+  const root = tempRoot("fabric-hosts-launch-error-");
+  mkdirSync(join(root, "scripts"));
+  writeFileSync(join(root, "scripts", "fabric-hosts"), "#!/bin/sh\nprintf '%05000d' 0 >&2\nexit 1\n", { mode: 0o755 });
+  const oldRoot = process.env.AGENT_FABRIC_PRODUCT_ROOT;
+  process.env.AGENT_FABRIC_PRODUCT_ROOT = root;
+  try {
+    const result = await fabricHosts("list", [], root);
+    expect(result).toMatchObject({ ok: false, error: { code: "hosts_bad_response" } });
+    expect((result.error as { message: string }).message).toBe("0".repeat(4096));
+  } finally {
+    if (oldRoot === undefined) delete process.env.AGENT_FABRIC_PRODUCT_ROOT;
+    else process.env.AGENT_FABRIC_PRODUCT_ROOT = oldRoot;
     rmSync(root, { recursive: true, force: true });
   }
 }, 10_000);

@@ -16,9 +16,10 @@ export async function fabricHosts(action: "list" | "doctor", hosts: string[], cw
   const root = process.env.AGENT_FABRIC_PRODUCT_ROOT || resolve(import.meta.dirname, "../../..");
   return await new Promise<Record<string, unknown>>((done) => {
     const child = spawn(resolve(root, "scripts/fabric-hosts"), ["hosts", action, "--json", "--", ...hosts],
-      { cwd, env: process.env, detached: true, stdio: ["ignore", "pipe", "ignore"] });
+      { cwd, env: process.env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
     active.add(child);
     let output = "", size = 0, error: string | undefined;
+    let stderrTail = Buffer.alloc(0);
     const stop = (code: string) => {
       error = code;
       terminate(child);
@@ -31,6 +32,10 @@ export async function fabricHosts(action: "list" | "doctor", hosts: string[], cw
       if (size > 4 * 1024 * 1024) stop("hosts_bad_response");
       else output += chunk.toString("utf8");
     });
+    child.stderr.on("data", (chunk: Buffer) => {
+      stderrTail = Buffer.concat([stderrTail, chunk]);
+      if (stderrTail.length > 4096) stderrTail = stderrTail.subarray(-4096);
+    });
     child.on("error", () => { error = "hosts_owner_unavailable"; });
     child.on("close", () => {
       active.delete(child);
@@ -39,7 +44,8 @@ export async function fabricHosts(action: "list" | "doctor", hosts: string[], cw
         try { done(JSON.parse(output) as Record<string, unknown>); return; }
         catch { error = "hosts_bad_response"; }
       }
-      done({ ok: false, error: { code: error, message: "Host owner did not return a JSON result" } });
+      const detail = stderrTail.toString("utf8").trim();
+      done({ ok: false, error: { code: error, message: detail || "Host owner did not return a JSON result" } });
     });
   });
 }
