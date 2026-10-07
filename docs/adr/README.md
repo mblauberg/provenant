@@ -38,4 +38,4 @@ historical evidence; the current Fabric owner is
 | [0023](0023-codex-custom-providers-inline-config.md) | Codex custom providers arrive inline, not by relaxing `--ignore-user-config` | Accepted |
 | [0024](0024-git-log-and-adrs-own-history.md) | Git history and ADRs own the change record | Accepted |
 | [0025](0025-broker-upstream-family-attribution.md) | Broker upstream family attribution for multi-family pipes | Accepted |
-| [0026](0026-federate-fabric-across-own-hosts-over-ssh.md) | Federate Fabric across the user's own hosts over SSH | Proposed |
+| [0026](0026-federate-fabric-across-own-hosts-over-ssh.md) | Federate Fabric across the user's own hosts over SSH | Accepted |

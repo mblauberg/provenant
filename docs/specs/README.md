@@ -15,7 +15,7 @@ described. Fabric is now small enough to be its own documentation: see
 
 ## Fabric
 
-- [Fabric across the user's own hosts](fabric-hosts.md) (proposed)
+- [Fabric across the user's own hosts](fabric-hosts.md)
 
 ## Harness
 

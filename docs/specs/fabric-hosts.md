@@ -1,6 +1,7 @@
 # Spec: Fabric across the user's own hosts
 
-Status: **proposed**, awaiting user approval. Decision record: [ADR
+Status: **accepted** by the user on 2026-10-07 (issue
+[#943](https://github.com/mblauberg/provenant/issues/943)). Decision record: [ADR
 0026](../adr/0026-federate-fabric-across-own-hosts-over-ssh.md). GitHub owns
 delivery state; this file owns the durable requirements. It grants no
 authority.
@@ -49,6 +50,23 @@ The first deployment is a laptop (`laptop`) plus an always-on spare Mac
   checkout path. Version 1 requires that path to be identical on every host.
 
 ## Requirements
+
+### Provider-neutral coordination
+
+- The chair on either host may be any supported primary harness: Claude Code,
+  Codex or agy. Each drives the other host the same way, through the
+  `provenant` CLI and the Fabric MCP tools, which behave identically under
+  every harness.
+- Every federated operation in this spec (dispatch, lane view and control,
+  messages, tasks, activity, landing, work claims and `hosts doctor`) is
+  reachable through those two surfaces alone.
+- No federated operation depends on a provider-specific remote feature, such
+  as Claude Code Remote Control, a provider's cloud sessions or a provider's
+  own SSH integration. Such a feature may be used as an optional convenience,
+  never as a dependency.
+- A host with only some adapters signed in is a complete peer. The peer
+  entrypoint and `hosts doctor` assume nothing about which harness runs the
+  chair or which providers the peer can run.
 
 ### Hosts and transport
 
@@ -202,8 +220,9 @@ is usable on its own:
   login keychain, which is commonly locked for SSH sessions. A timeboxed
   feasibility spike on the target host chooses between a long-lived setup
   token, unlocking the keychain at session start, and launching through a
-  console-started `tmux` session. Until it lands, only Claude placement on a
-  remote host is blocked.
+  console-started `tmux` session. Until it lands, only Claude lane placement on
+  a remote host is blocked. Coordination from or to that host is never
+  blocked by it.
 
 ## Exclusions
 
@@ -258,3 +277,6 @@ and across a sleep and wake of each host.
 15. The documented SSH `command=` restriction is applied in the test setup, and
     every operation above still works through it.
 16. No Provenant process listens on a network port on either host.
+17. A Codex chair and an agy chair each run criteria 2, 7, 8 and 12 from
+    either host through the `provenant` CLI or the Fabric MCP tools, with no
+    Claude Code session taking part in coordination.

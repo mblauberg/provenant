@@ -1,6 +1,6 @@
 # ADR 0026 — Federate Fabric across the user's own hosts over SSH
 
-**Status:** Proposed; awaiting user approval
+**Status:** Accepted 2026-10-07 (issue [#943](https://github.com/mblauberg/provenant/issues/943))
 
 **Amends:** [ADR 0020](0020-retire-the-daemon-fabric.md) and [ADR
 0022](0022-thin-fabric-mcp-execution-facade.md). Requirements:
@@ -59,6 +59,10 @@ over the user's existing OpenSSH configuration.
 - The peer entrypoint is versioned, takes JSON on standard input, accepts a
   fixed verb set including Git transfer, and never executes a caller-assembled
   shell command. One SSH key restricted to it serves every operation.
+- Coordination is provider-neutral. A Claude Code, Codex or agy chair drives
+  another host through the same `provenant` CLI and Fabric MCP surfaces. No
+  federated operation depends on a provider's own remote-control, cloud-session
+  or SSH feature; such features remain optional conveniences.
 
 The trust model is unchanged from ADR 0020 in kind: one user, on machines they
 control, authenticated by their own SSH keys. Provenant adds no listener, port,
