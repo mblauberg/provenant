@@ -953,12 +953,12 @@ def test_claude_read_only_lane_cannot_read_other_projects_transcripts(monkeypatc
 
 def test_claude_project_dir_matches_claude_naming_including_long_paths():
     mod = supervisor()
-    home = Path("/Users/someone")
+    home = Path("/srv/someone")
     projects = home / ".claude/projects"
-    assert mod._claude_project_dir(home, "/Users/someone/Repos/my_app.v2") == (
-        projects / "-Users-someone-Repos-my-app-v2")
+    assert mod._claude_project_dir(home, "/srv/someone/Repos/my_app.v2") == (
+        projects / "-srv-someone-Repos-my-app-v2")
     # Claude replaces each UTF-16 code unit, so a character outside the BMP becomes two dashes.
-    assert mod._claude_project_dir(home, "/Users/someone/a\U0001F600b").name == "-Users-someone-a--b"
+    assert mod._claude_project_dir(home, "/srv/someone/a\U0001F600b").name == "-srv-someone-a--b"
     # A long name keeps 200 characters plus Claude's 32-bit string hash in base 36; checked against
     # the directory Claude Code 2.1.285 created for this path.
     scratch = ("/private/tmp/claude-501/-Users-user-Repos-provenant/"
@@ -966,8 +966,8 @@ def test_claude_project_dir_matches_claude_naming_including_long_paths():
     assert mod._claude_project_dir(home, scratch).name == (
         re.sub(r"[^A-Za-z0-9]", "-", scratch)[:200] + "-qpcnov")
     # Two long paths that share their first 200 characters get different, exact directories.
-    first = mod._claude_project_dir(home, "/Users/someone/" + "a" * 220 + "/one")
-    second = mod._claude_project_dir(home, "/Users/someone/" + "a" * 220 + "/two")
+    first = mod._claude_project_dir(home, "/srv/someone/" + "a" * 220 + "/one")
+    second = mod._claude_project_dir(home, "/srv/someone/" + "a" * 220 + "/two")
     assert first != second and first.name[:200] == second.name[:200]
 
 
