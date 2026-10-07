@@ -193,7 +193,8 @@ Wrapped writer runs on macOS (agy, Claude, Cursor, OpenCode and Kiro) use
 the Git write boundary, attempt files, device nodes and provider state. Where
 protected-path policy applies, its read and write denies still take precedence
 inside an `add_dir`.
-Each attempt sets `TMPDIR`, `TMP` and `TEMP` to `<attempt>/tmp` and
+Each attempt sets `TMPDIR`, `TMP` and `TEMP` to `<attempt>/tmp`, zsh's
+`TMPPREFIX` to `<attempt>/tmp/zsh` so here-documents work in a confined lane, and
 `XDG_CACHE_HOME` to `<attempt>/tmp/cache`, and `COREPACK_HOME` to
 `<attempt>/tmp/cache/node/corepack`, `UV_CACHE_DIR` to `<cache>/uv` and
 `npm_config_cache` to `<cache>/npm`, replacing inherited values, so gitleaks,
