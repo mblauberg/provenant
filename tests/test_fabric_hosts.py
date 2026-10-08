@@ -19,20 +19,16 @@ REPOSITORY_ROOT = ROOT.parent.parent
 
 @contextmanager
 def git_isolated_tempdir():
-    """Avoid inheriting any enclosing project's Git identity from $TMPDIR."""
-    with tempfile.TemporaryDirectory() as directory:
-        path = Path(directory).resolve()
-        enclosing = subprocess.run(['git', '-C', str(path), 'rev-parse', '--show-toplevel'],
-                                   capture_output=True, env={key: value for key, value in os.environ.items()
-                                                            if not key.startswith('GIT_')})
-        if enclosing.returncode != 0:
-            yield directory
-            return
-    scratch = next((candidate for candidate in (Path('/private/tmp'), Path('/var/tmp'))
-                    if candidate.is_dir() and os.access(candidate, os.W_OK)), None)
-    if scratch is None:
-        raise RuntimeError('$TMPDIR is inside the checkout and no external scratch directory is writable')
+    """Keep fixtures in the worktree without inheriting its Git identity."""
+    scratch = ROOT / '.agent-run/scratch'
+    scratch.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(dir=scratch) as directory:
+        root = Path(directory)
+        # An invalid, existing Git directory stops discovery even when a peer
+        # sanitizes PATH and GIT_*; a missing target would be ignored by Git.
+        marker = root / 'not-a-git-directory'
+        marker.write_text('fixture boundary')
+        (root / '.git').write_text('gitdir: ' + str(marker) + '\n')
         yield directory
 
 
