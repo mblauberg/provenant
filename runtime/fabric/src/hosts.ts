@@ -1,6 +1,7 @@
 /** Thin facade over the single Python host/client owner. */
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolve } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 const active = new Set<ChildProcess>();
 function terminate(child: ChildProcess) {
@@ -19,6 +20,7 @@ export async function fabricHosts(action: "list" | "doctor", hosts: string[], cw
       { cwd, env: process.env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
     active.add(child);
     let output = "", size = 0, error: string | undefined;
+    const decoder = new StringDecoder("utf8");
     let stderrTail = Buffer.alloc(0);
     const stop = (code: string) => {
       error = code;
@@ -30,7 +32,7 @@ export async function fabricHosts(action: "list" | "doctor", hosts: string[], cw
     child.stdout.on("data", (chunk: Buffer) => {
       size += chunk.length;
       if (size > 4 * 1024 * 1024) stop("hosts_bad_response");
-      else output += chunk.toString("utf8");
+      else output += decoder.write(chunk);
     });
     child.stderr.on("data", (chunk: Buffer) => {
       stderrTail = Buffer.concat([stderrTail, chunk]);
@@ -41,6 +43,7 @@ export async function fabricHosts(action: "list" | "doctor", hosts: string[], cw
       active.delete(child);
       signal?.removeEventListener("abort", abort);
       if (error === undefined) {
+        output += decoder.end();
         try { done(JSON.parse(output) as Record<string, unknown>); return; }
         catch { error = "hosts_bad_response"; }
       }

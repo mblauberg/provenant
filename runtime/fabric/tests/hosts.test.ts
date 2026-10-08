@@ -4,13 +4,15 @@ import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
 import { accessSync, constants, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { join, resolve } from "node:path";
 import { expect, it } from "vitest";
 
 function tempRoot(prefix: string) {
   const root = resolve(mkdtempSync(join(tmpdir(), prefix)));
-  const repository = resolve(import.meta.dirname, "../../../../../");
-  if (root !== repository && !root.startsWith(repository + sep)) return root;
+  let insideRepository = false;
+  try { execFileSync("git", ["-C", root, "rev-parse", "--show-toplevel"], { stdio: "ignore" }); insideRepository = true; }
+  catch { /* No enclosing Git checkout. */ }
+  if (!insideRepository) return root;
   rmSync(root, { recursive: true, force: true });
   for (const candidate of ["/private/tmp", "/var/tmp"]) {
     try {
@@ -21,12 +23,19 @@ function tempRoot(prefix: string) {
   throw new Error("$TMPDIR is inside the checkout and no external scratch directory is writable");
 }
 
-it("exposes the same host list and doctor contracts through the provider-neutral MCP facade", async () => {
+it.each(["codex", "agy", "claude"])("exposes host list and peer doctor through the %s MCP seat", async (seat) => {
   const root = tempRoot("fabric-hosts-mcp-");
   const workspace = join(root, "Repos/project"), instance = join(root, "instance");
+  const peerHome = join(root, "peer"), ssh = join(root, "ssh");
+  const python = execFileSync("python3", ["-c", "import sys;print(sys.executable)"], { encoding: "utf8" }).trim();
+  mkdirSync(join(peerHome, ".agents/.agent-fabric"), { recursive: true });
+  mkdirSync(join(peerHome, "Repos/project"), { recursive: true });
+  writeFileSync(join(peerHome, ".agents/.agent-fabric/hosts.json"), JSON.stringify({ schema_version: 1, local_host: "workshop" }));
+  writeFileSync(ssh, `#!${python}\nimport os,sys\nos.environ["HOME"]=${JSON.stringify(peerHome)}\nos.environ["AGENT_FABRIC_INSTANCE_ROOT"]=${JSON.stringify(join(peerHome, ".agents"))}\nos.chdir(os.environ["HOME"])\nos.execv(${JSON.stringify(resolve(import.meta.dirname, "../../../scripts/provenant"))},["provenant","peer"])\n`, { mode: 0o755 });
   mkdirSync(workspace, { recursive: true });
   mkdirSync(join(instance, ".agent-fabric"), { recursive: true });
-  writeFileSync(join(instance, ".agent-fabric/hosts.json"), JSON.stringify({ schema_version: 1, local_host: "laptop" }));
+  writeFileSync(join(instance, ".agent-fabric/hosts.json"), JSON.stringify({ schema_version: 1, local_host: "laptop",
+    peers: { workshop: { ssh_destination: "workshop" } } }));
   const client = new Client({ name: "hosts-contract", version: "1" });
   try {
     await client.connect(new StdioClientTransport({
@@ -35,16 +44,22 @@ it("exposes the same host list and doctor contracts through the provider-neutral
       cwd: workspace,
       env: { ...process.env as Record<string, string>, HOME: root,
         AGENT_FABRIC_INSTANCE_ROOT: instance, AGENT_FABRIC_PRODUCT_ROOT: resolve(import.meta.dirname, "../../.."),
-        AGENT_FABRIC_STATE_DIRECTORY: join(root, "state"), AGENT_FABRIC_SEAT: "agy",
-        HARNESS_PYTHON: execFileSync("python3", ["-c", "import sys;print(sys.executable)"], { encoding: "utf8" }).trim() },
+        AGENT_FABRIC_STATE_DIRECTORY: join(root, "state"), AGENT_FABRIC_SEAT: seat,
+        AGENT_FABRIC_SSH_PROGRAM: ssh, HARNESS_PYTHON: python },
       stderr: "pipe",
     }));
     expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("fabric_hosts");
     const list = await client.callTool({ name: "fabric_hosts", arguments: { action: "list" } });
-    expect(list.structuredContent).toMatchObject({ schema: "fabric.hosts.v1", hosts: [{ host: "laptop", local: true }] });
+    expect(list.structuredContent).toMatchObject({ schema: "fabric.hosts.v1", hosts: [
+      { host: "laptop", local: true }, { host: "workshop", local: false, ssh_destination: "workshop" },
+    ] });
     const doctor = await client.callTool({ name: "fabric_hosts", arguments: { action: "doctor", hosts: ["laptop"] } });
     expect(doctor.structuredContent).toMatchObject({ schema: "fabric.hosts.doctor.v1", project_path: "Repos/project",
       hosts: [{ host: "laptop", reachability: "reachable", result: { project: { present: true } } }] });
+    const peer = await client.callTool({ name: "fabric_hosts", arguments: { action: "doctor", hosts: ["workshop"] } });
+    expect(peer.structuredContent).toMatchObject({ schema: "fabric.hosts.doctor.v1", project_path: "Repos/project",
+      hosts: [{ host: "workshop", reachability: "reachable", ok: true,
+        result: { host: "workshop", project: { path: "Repos/project", present: true } } }] });
     const unknown = await client.callTool({ name: "fabric_hosts", arguments: { action: "list", hosts: ["missing"] } });
     expect(unknown.structuredContent).toMatchObject({ ok: false, error: { code: "selector_not_found" } });
   } finally {
@@ -52,6 +67,22 @@ it("exposes the same host list and doctor contracts through the provider-neutral
     rmSync(root, { recursive: true, force: true });
   }
 }, 30_000);
+
+it("preserves Unicode in host output split across UTF-8 byte boundaries", async () => {
+  const { fabricHosts } = await import("../src/hosts.js");
+  const root = tempRoot("fabric-hosts-unicode-");
+  const python = execFileSync("python3", ["-c", "import sys;print(sys.executable)"], { encoding: "utf8" }).trim();
+  mkdirSync(join(root, "scripts"));
+  writeFileSync(join(root, "scripts/fabric-hosts"), `#!${python}\nimport os,time\nos.write(1,b'{"path":"caf\\xc3')\ntime.sleep(.1)\nos.write(1,b'\\xa9"}')\n`, { mode: 0o755 });
+  const previous = process.env.AGENT_FABRIC_PRODUCT_ROOT;
+  process.env.AGENT_FABRIC_PRODUCT_ROOT = root;
+  try { expect(await fabricHosts("list", [], root)).toEqual({ path: "café" }); }
+  finally {
+    if (previous === undefined) delete process.env.AGENT_FABRIC_PRODUCT_ROOT;
+    else process.env.AGENT_FABRIC_PRODUCT_ROOT = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 it("cancellation reaps the SSH child before the facade returns", async () => {
   const { fabricHosts } = await import("../src/hosts.js");

@@ -104,7 +104,8 @@ Thin front door; each command delegates to its existing owner:
                  per-step pass/fail output)
   fabric ...     runtime/fabric/bin/fabric ...
   hosts list [--json] [host…]    configured local host and SSH peers
-  hosts doctor [--json] [host…]  bounded peer and adapter diagnostics
+  hosts doctor [--json] [host…]  local and peer diagnostics; offline peers get
+                                typed rows without failing the command
   peer           fixed versioned JSON entrypoint on stdin/stdout (SSH)
   lanes [--json] [id…]  lane state; use an id to see rows past the 20-row cap
   lanes --wait [id…]    wait for a lane to finish or need input
@@ -117,7 +118,10 @@ Thin front door; each command delegates to its existing owner:
 exact attempt or batch and waits boundedly for owner-written evidence.
 
 Fabric derives who you are from the working directory, so run it from the
-project you mean. `provenant fabric --help` lists its commands."""
+project you mean. `provenant fabric --help` lists its commands.
+Hosts use per-user <instance-root>/.agent-fabric/hosts.json (default ~/.agents).
+With no peers configured, host checks stay local. Every supported MCP chair
+can use fabric_hosts with action=list|doctor and optional hosts selectors."""
     )
 
 

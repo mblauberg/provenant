@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import signal
 import socket
 import subprocess
 import sys
@@ -19,10 +20,13 @@ sys.path.insert(0, str(ROOT / 'scripts'))
 
 @contextmanager
 def git_isolated_tempdir():
-    """Use $TMPDIR unless it is nested in this checkout and inherits its Git identity."""
+    """Avoid inheriting any enclosing project's Git identity from $TMPDIR."""
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory).resolve()
-        if not path.is_relative_to(REPOSITORY_ROOT):
+        enclosing = subprocess.run(['git', '-C', str(path), 'rev-parse', '--show-toplevel'],
+                                   capture_output=True, env={key: value for key, value in os.environ.items()
+                                                            if not key.startswith('GIT_')})
+        if enclosing.returncode != 0:
             yield directory
             return
     scratch = next((candidate for candidate in (Path('/private/tmp'), Path('/var/tmp'))
@@ -200,6 +204,80 @@ class DoctorContracts(unittest.TestCase):
 
 
 class ClientContracts(unittest.TestCase):
+    def test_hangup_reaps_detached_ssh_before_returning(self):
+        with git_isolated_tempdir() as directory:
+            root = Path(directory)
+            instance = root / 'instance/.agent-fabric'
+            instance.mkdir(parents=True)
+            (root / 'Repos/project').mkdir(parents=True)
+            (instance / 'hosts.json').write_text(json.dumps({
+                'schema_version': 1, 'local_host': 'laptop',
+                'peers': {'workshop': {'ssh_destination': 'workshop', 'response_deadline': 5}}}))
+            pid_file, shim = root / 'ssh.pid', root / 'ssh'
+            shim.write_text('#!' + sys.executable + '\nimport os,time\n'
+                            'open(' + repr(str(pid_file)) + ',"w").write(str(os.getpid()))\n'
+                            'time.sleep(30)\n')
+            shim.chmod(0o755)
+            owner = subprocess.Popen([sys.executable, str(ROOT / 'scripts/fabric_hosts.py'),
+                                      'hosts', 'doctor', '--json', 'workshop'],
+                                     cwd=root / 'Repos/project', stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     env={**os.environ, 'HOME': directory,
+                                          'AGENT_FABRIC_INSTANCE_ROOT': str(instance.parent),
+                                          'AGENT_FABRIC_SSH_PROGRAM': str(shim)})
+            pid = None
+            try:
+                deadline = time.monotonic() + 3
+                while not pid_file.exists() and time.monotonic() < deadline:
+                    time.sleep(.02)
+                self.assertTrue(pid_file.exists(), 'SSH fixture did not start')
+                pid = int(pid_file.read_text())
+                owner.send_signal(signal.SIGHUP)
+                stdout, stderr = owner.communicate(timeout=5)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(pid, 0)
+                self.assertEqual(json.loads(stdout)['error']['code'], 'hosts_cancelled', stderr)
+            finally:
+                if owner.poll() is None:
+                    owner.kill()
+                owner.communicate()
+                if pid is not None:
+                    try:
+                        os.killpg(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+
+    def test_overflowing_json_number_is_a_typed_peer_error(self):
+        import fabric_hosts as hosts
+        with tempfile.TemporaryDirectory() as directory:
+            shim = Path(directory) / 'ssh'
+            shim.write_text('#!' + sys.executable + '\n'
+                            'print(\'{"protocol_version":1,"ok":true,"result":{"protocol_version":1,'
+                            '"host":"workshop","revision":"fixture","extra":1e999}}\')\n')
+            shim.chmod(0o755)
+            response = hosts.PeerClient('workshop', hosts.PeerConfig('workshop'),
+                                        ssh_program=str(shim)).call('hello')
+            self.assertEqual(response.get('error', {}).get('code'), 'bad_response')
+
+    def test_doctor_response_must_bind_the_requested_project_and_typed_identity(self):
+        import fabric_hosts as hosts
+        valid = {'protocol_version': 1, 'host': 'workshop', 'revision': 'fixture',
+                 'project': {'path': 'Repos/project', 'present': True}, 'adapters': {},
+                 'fabric_registrations': {},
+                 'lane_temporary_paths': {'fits': False, 'max_path_bytes': 200, 'limit_bytes': 103}}
+        with tempfile.TemporaryDirectory() as directory:
+            shim = Path(directory) / 'ssh'
+            for diagnostic in [{**valid, 'project': {'path': 'Repos/other', 'present': True}},
+                               {**valid, 'protocol_version': True}, {**valid, 'revision': []}]:
+                with self.subTest(diagnostic=diagnostic):
+                    shim.write_text('#!' + sys.executable + '\nimport sys,json\nr=json.load(sys.stdin)\n'
+                                    'result={"protocol_version":1,"host":"workshop","revision":"fixture"} '
+                                    'if r["verb"]=="hello" else ' + repr(diagnostic) + '\n'
+                                    'print(json.dumps({"protocol_version":1,"ok":True,"result":result}))\n')
+                    shim.chmod(0o755)
+                    response = hosts.PeerClient('workshop', hosts.PeerConfig('workshop'),
+                                                ssh_program=str(shim)).call('doctor', {'project_path': 'Repos/project'})
+                    self.assertEqual(response.get('error', {}).get('code'), 'bad_response')
+
     def test_transport_errors_and_protocol_write_decision(self):
         import fabric_hosts as hosts
         self.assertTrue(hasattr(hosts, 'PeerClient'), 'single peer client is missing')
@@ -458,6 +536,9 @@ class SshdAcceptance(unittest.TestCase):
             (remote_home / '.local/bin').mkdir(parents=True)
             (remote_home / '.agents/.agent-fabric').mkdir(parents=True)
             (local_home / '.agents/.agent-fabric').mkdir(parents=True)
+            (remote_home / 'Repos/project').mkdir(parents=True)
+            (remote_home / '.agents/.agent-fabric/hosts.json').write_text(
+                json.dumps({'schema_version': 1, 'local_host': 'workshop'}))
             shutil.copy2(ROOT / 'scripts/provenant.template', remote_home / '.local/bin/provenant')
             (remote_home / '.agents/.agent-fabric/product-root.json').write_text(
                 json.dumps({'schema_version': 1, 'product_root': str(ROOT)}))
@@ -470,7 +551,8 @@ class SshdAcceptance(unittest.TestCase):
                                            capture_output=True, text=True)
                 self.assertEqual(generated.returncode, 0, generated.stderr)
             requested_marker = root / 'malicious-command-ran'
-            forced = ('env AGENT_FABRIC_INSTANCE_ROOT=' + shlex.quote(str(remote_home / '.agents')) + ' '
+            forced = ('env HOME=' + shlex.quote(str(remote_home)) + ' AGENT_FABRIC_INSTANCE_ROOT='
+                      + shlex.quote(str(remote_home / '.agents')) + ' '
                       + shlex.quote(str(remote_home / '.local/bin/provenant')) + ' peer')
             forced_option = forced.replace('\\', '\\\\').replace('"', '\\"')
             authorized = root / 'authorized_keys'
@@ -526,6 +608,7 @@ class SshdAcceptance(unittest.TestCase):
                 self.assertEqual(rows['workshop']['reachability'], 'reachable',
                                  (rows['workshop'], server_log_path.read_text(errors='replace')))
                 self.assertTrue(rows['workshop']['ok'], rows['workshop'])
+                self.assertEqual(rows['workshop']['result']['project'], {'path': 'Repos/project', 'present': True})
                 self.assertFalse(requested_marker.exists())
             finally:
                 server.terminate()

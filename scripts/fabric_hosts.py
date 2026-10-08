@@ -68,6 +68,11 @@ def strict_json(raw):
         return result
     def constant(_value):
         raise ValueError('non-finite JSON value')
+    def finite_float(value):
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError('non-finite JSON value')
+        return parsed
     if isinstance(raw, (bytes, bytearray)):
         raw = raw.decode('utf-8')
     depth = 0
@@ -88,7 +93,7 @@ def strict_json(raw):
                 raise ValueError('JSON nesting limit exceeded')
         elif char in ']}':
             depth -= 1
-    return json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
+    return json.loads(raw, object_pairs_hook=pairs, parse_constant=constant, parse_float=finite_float)
 
 def fields(value, allowed, required, code):
     if not isinstance(value, dict) or set(value) - set(allowed) or set(required) - set(value):
@@ -300,7 +305,8 @@ class PeerClient:
                 if not response['ok']:
                     return {'host': self.host, 'reachability': 'reachable', **response}
                 contact = response['result']
-                if (contact.get('host') != self.host or contact.get('protocol_version') != response['protocol_version']
+                if (contact.get('host') != self.host or type(contact.get('protocol_version')) is not int
+                        or contact.get('protocol_version') != response['protocol_version']
                         or not (contact.get('revision') is None or isinstance(contact.get('revision'), str))):
                     raise HostError('bad_response', 'Peer hello identity or version is invalid')
                 self.contact = response
@@ -312,7 +318,7 @@ class PeerClient:
             if response['protocol_version'] != version:
                 raise HostError('bad_response', 'Peer changed protocol version after hello')
             if decision['compatible'] and response['ok'] and verb == 'doctor':
-                validate_doctor_result(response['result'], self.host)
+                validate_doctor_result(response['result'], self.host, (params or {}).get('project_path'))
             result = {'host': self.host, 'reachability': 'reachable', **response, **decision}
             if decision['reads_flagged']:
                 result['error'] = HostError('protocol_mismatch', 'Read came from a different protocol version').wire()
@@ -332,13 +338,16 @@ def hello():
         revision = None
     return {'protocol_version': PROTOCOL_VERSION, 'revision': revision, 'host': load_config().local_host}
 
-def validate_doctor_result(result, host):
+def validate_doctor_result(result, host, project_path=None):
     required = {'protocol_version', 'revision', 'host', 'project', 'adapters', 'fabric_registrations', 'lane_temporary_paths'}
-    if not required <= set(result) or result['host'] != host or result['protocol_version'] != PROTOCOL_VERSION:
+    if (not required <= set(result) or result['host'] != host
+            or type(result['protocol_version']) is not int or result['protocol_version'] != PROTOCOL_VERSION
+            or not (result['revision'] is None or isinstance(result['revision'], str))):
         raise HostError('bad_response', 'Doctor host or required fields are invalid')
     project = result['project']
     if (not isinstance(project, dict) or not isinstance(project.get('path'), str)
-            or type(project.get('present')) is not bool):
+            or type(project.get('present')) is not bool
+            or project_path is not None and project['path'] != project_path):
         raise HostError('bad_response', 'Doctor project result is invalid')
     for key in ('adapters', 'fabric_registrations', 'lane_temporary_paths'):
         if not isinstance(result[key], dict):
@@ -590,6 +599,7 @@ def main(argv=None):
 
 
 if __name__ == '__main__':
+    signal.signal(signal.SIGHUP, cancel_checks)
     signal.signal(signal.SIGTERM, cancel_checks)
     signal.signal(signal.SIGINT, cancel_checks)
     raise SystemExit(main())

@@ -41,8 +41,9 @@ record federation follow in later slices.
 3. Configure the SSH aliases yourself. The destination may be an alias or
    `user@alias`; options, whitespace and shell metacharacters are refused.
    Host names use lowercase letters, digits and hyphens. Unknown JSON fields,
-   duplicate keys and invalid versions are refused. Both timeouts must be
-   positive and at most 86,400 seconds; connect timeout is an integer.
+   duplicate keys, non-finite numbers (including exponent overflow) and invalid
+   versions are refused. Both timeouts must be positive and at most 86,400
+   seconds; connect timeout is an integer.
    `peer_command` and both timeouts are optional with the defaults above.
    A custom peer command must name one executable followed by `peer`, with
    no shell expansion or parent traversal. The default executable is relative
@@ -104,9 +105,21 @@ independently of whether the adapter executable is on PATH.
 
 Offline or timed-out peers get typed rows and leave the overall command
 successful. A deadline marks only that host unreachable for that call.
+Interrupt, termination and hangup signals cancel checks and reap their SSH
+processes before returning.
 `AGENT_FABRIC_SSH_PROGRAM` overrides the SSH executable for test shims.
-All supported MCP chairs can call `fabric_hosts` with `action: "list"` or
-`"doctor"` and optional `hosts: ["workshop"]`.
+Claude Code, Codex and agy MCP chairs call the same `fabric_hosts` tool with
+`action: "list"` or `"doctor"` and optional `hosts: ["workshop"]`. Seat selection
+does not change the host operation or require a Claude session. For example:
+
+```json
+{"action":"doctor","hosts":["workshop"]}
+```
+
+This invokes the same host client as `provenant hosts doctor --json workshop`.
+The peer hello must identify the configured host, and a successful doctor
+response must identify that host and the requested project path. Invalid
+identity, version or diagnostic fields produce `bad_response`.
 
 ## Machine contracts
 
@@ -132,4 +145,29 @@ exits nonzero. Stable request codes are `bad_json`, `request_too_large`,
 Lists use `fabric.hosts.v1`; doctor uses `fabric.hosts.doctor.v1`. The shared
 identifier helpers parse and format `id@host`; bare record IDs mean local.
 A selector matching records on multiple hosts returns `ambiguous_selector`.
+These record helpers establish the contract for later federation slices;
+this slice exposes host selectors through list and doctor.
 Host command selectors are host names, optionally written `host@host`.
+
+## Verify slice 1
+
+Run the focused checks from the product checkout, one test process at a time:
+
+```sh
+(cd runtime/fabric && npx vitest run tests/hosts.test.ts --maxWorkers=2)
+python3 -m unittest discover -s tests -p test_fabric_hosts.py -v
+.venv/bin/python -m pytest tests/test_provenant_cli.py tests/test_check_provenant_install.py -q
+npm --prefix runtime/fabric run typecheck
+```
+
+The MCP tests exercise list, local doctor and peer doctor for Codex, agy and
+Claude seats. Loopback peers use separate homes and instance roots; fixture
+directories must sit outside any Git checkout to preserve the synthetic
+home-relative project path. These checks prove slice 1 host-tool parity. Full
+acceptance criterion 17 also needs remote dispatch, control, messaging, task
+claims and landing from later slices.
+
+The real-sshd test is opt-in through `PROVENANT_SSHD_TESTS=1`. Run it outside a
+sandbox that prevents sshd from starting, with `/usr/sbin/sshd` available, to
+verify the documented `command=` restriction. A skipped test leaves that
+acceptance criterion pending; the loopback shim does not prove it.
