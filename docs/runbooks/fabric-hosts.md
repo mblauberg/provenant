@@ -7,8 +7,9 @@ Host diagnostics work over the user's OpenSSH configuration. Each host keeps
 its own instance state and provider sign-ins. The [accepted
 specification](../specs/fabric-hosts.md) and [ADR
 0026](../adr/0026-federate-fabric-across-own-hosts-over-ssh.md) own the design.
-Slices 1–2 provide configuration, diagnostics and remote read-only lanes.
-Writer code transport, messages, tasks, activity and landing follow in slices 3–5.
+Slices 1–3 provide configuration, diagnostics, remote lanes and writer code
+transport. Messages, tasks and activity follow in slice 4; home-host landing
+and work claims follow in slice 5.
 
 ## Configure each host
 
@@ -42,7 +43,7 @@ Writer code transport, messages, tasks, activity and landing follow in slices 3�
    file, the local name is `local`. Missing `peers` or an empty object means
    local-only operation. Project keys are primary checkout paths relative to
    home. An optional `modes` object overrides `default_host` for `read_only` or
-   `worktree_write`; remote writers are refused until slice 3. Defaults name
+   `worktree_write`. Defaults name
    the local host or a configured peer.
 3. Configure the SSH aliases yourself. The destination may be an alias or
    `user@alias`; options, whitespace and shell metacharacters are refused.
@@ -133,7 +134,10 @@ identity, version or diagnostic fields produce `bad_response`.
 Protocol version 1 accepts one UTF-8 JSON document on stdin, at most 65,536
 bytes, followed by EOF. The request has `protocol_version`, `verb` and optional
 `params`. The fixed verbs are `hello`, `doctor`, `dispatch`, `lanes`, `status`,
-`cancel`, `resume`, `handoff`, `output` and `operation`. Doctor accepts optional
+`cancel`, `resume`, `handoff`, `output`, `operation`, `git-upload`, `git-result`
+and `git-download`. Git verbs require an explicitly configured project and
+accept the same `project_path`/`input` envelope; callers cannot choose a ref
+namespace or shell command. Doctor accepts optional
 `project_path`; lane verbs require it and accept an `input` object. There is
 one newline-terminated JSON response on stdout:
 
@@ -221,7 +225,71 @@ Codex, agy and Claude seats use the same `fabric_dispatch`, `fabric_batch`,
 Dispatch/batch inputs accept `host` and `operation_id`; dispatch also accepts
 `resume` and `handoff`. Qualified IDs route read/control tools to their owner.
 
-## Verify slices 1–2
+## Transport a writer
+
+Configure the project key on the receiving host too, even when it has no
+placement default: `"projects": {"Repos/project": {}}`. Git transfer refuses
+unconfigured repositories. Both hosts need full, registered primary checkouts
+at that home-relative path; shallow repositories and grafts are refused.
+
+Create a chair worktree with the normal helper, using its branch-derived name,
+then dispatch it:
+
+```sh
+provenant worktree create --new-branch feat/example
+provenant fabric dispatch --host workshop --mode worktree_write \
+  --worktree .worktrees/feat-example --prompt-file brief.md \
+  --adapter codex --id example-task --operation-id example-writer
+provenant fabric lanes --wait --all example-task@workshop
+provenant fabric fetch example-writer@workshop
+```
+
+Fetch also accepts a qualified run or task ID; a batch requires one writer task at a time.
+The MCP equivalents are `fabric_dispatch`/`fabric_batch` with `host`, `mode`,
+`worktree` and `operation_id`, followed by `fabric_fetch` with `id`. These
+operations use the same owner for Codex, agy and Claude chairs.
+
+Only the chair worktree's committed HEAD and its Git history travel. The reply
+states that uncommitted changes were not transported. Bundles travel in 32 KiB
+chunks, with a 64 MiB bundle limit, through the restricted peer entrypoint;
+GitHub is not involved. References live under `refs/provenant/hosts/`. The
+peer creates the worktree with its own helper, and its dispatch owner holds the
+host-local writer lease and checks sign-in, confinement and capability policy.
+Writer operation IDs are limited to 120 characters. Replays preserve the frozen
+base and destination; changing host or request is refused, including after a
+successful launch. An interrupted upload remains `launch_unknown` and resumes
+from the frozen input before dispatch reconciliation.
+An unreachable implicit placement may fall back only at initial placement; the
+writer operation is then durably bound locally. An existing binding keeps its
+host on every retry, including when the first explicit contact failed before send.
+
+Fetch requires a terminal writer. The executing host holds the writer lease,
+checks registered worktree and branch identity, a new head descended from the
+base, and cleanliness using the normal claim verifier. Its receipt binds project,
+operation, base, head, host and worktree. Each operation and head has an immutable export. Earlier verified results stay
+fetchable after handoff; an unverified result from a superseded writer is
+refused. The
+chair selects its recorded input and continuation lineage before checking the
+receipt. It verifies the downloaded pack and ancestry in a temporary object
+repository, then imports only history reachable from the approved head into an
+owned ref. Hidden packed objects and rejected heads stay outside the chair's
+object store. Its existing branch and dirty files stay untouched. The
+reply names the imported ref for review or cherry-pick.
+
+Resume and handoff keep the transported worktree. A new writer worktree requires
+a new dispatch; explicit writer overrides in handoff are refused. Remote writer
+named sessions are refused; use qualified run IDs for continuations. Reusing a
+worktree from an earlier dispatch requires Provenant's recorded context, the
+same branch, an exact base match, cleanliness and an available writer lease.
+An unrelated or changed peer worktree is refused rather than reset or removed.
+Continuations require current ownership; the shared launch owner checks that
+ownership under the writer lease even for local resumes on the executing host.
+A resumed attempt reserves ownership through publication and completion.
+Read-only handoffs leave writer ownership intact,
+and rejected preflights restore their prior reservation. Ownership and transport
+records live in separate host-state directories outside the writer's Git directory.
+
+## Verify slices 1–3
 
 Run the focused checks from the product checkout, one test process at a time:
 
@@ -243,8 +311,11 @@ directory outside the checkout when the sandbox permits it.
 Slice 2 covers criteria 2–5 and 7, the lane portion of 10, placement checks
 in 14 and lane-tool parity in 17. Criteria 13 and 16 retain the slice 1
 contracts. Real-host sleep/connection-loss acceptance remains for the chair;
-loopback evidence cannot establish sleep behaviour. Criteria 6, 8–9, 11–12
-and the remaining record/tool portions of 10 and 17 belong to slices 3–5.
+loopback evidence cannot establish sleep behaviour. Slice 3 covers criterion 6 and writer dispatch/fetch parity in criterion 17
+with loopback peers, including unpublished input, dirty chair files, batches,
+continuations and interrupted transfers. Criteria 8–9, 11–12 and the remaining
+record/tool portions of 10 and 17 belong to slices 4–5. Two-host writer and
+forced-command acceptance remain for the owner’s spare Mac.
 
 The real-sshd test is opt-in through `PROVENANT_SSHD_TESTS=1`. Run it outside a
 sandbox that prevents sshd from starting, with `/usr/sbin/sshd` available, to

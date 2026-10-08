@@ -39,6 +39,8 @@ class LaneFederation:
         db.execute('PRAGMA secure_delete=ON')
         db.execute('CREATE TABLE IF NOT EXISTS snapshots (project TEXT, host TEXT, verb TEXT, observed REAL, payload TEXT, PRIMARY KEY(project,host,verb))')
         db.execute('CREATE TABLE IF NOT EXISTS operations (id TEXT PRIMARY KEY, request TEXT, result TEXT)')
+        db.execute('CREATE TABLE IF NOT EXISTS writer_dispatches (id TEXT PRIMARY KEY, project TEXT, host TEXT, digest TEXT, sent INTEGER)')
+        db.execute('CREATE TABLE IF NOT EXISTS writer_history (id TEXT PRIMARY KEY, project TEXT, host TEXT, bindings TEXT, result TEXT)')
         db.execute('CREATE TABLE IF NOT EXISTS pending (id TEXT PRIMARY KEY, project TEXT, host TEXT, verb TEXT, payload TEXT)')
         try:
             with db:
@@ -108,12 +110,18 @@ class LaneFederation:
             raise self.h.HostError('session_invalid', 'Pass a valid named session')
         return name, host
 
+    def code(self):
+        module = self.h._load_module('provenant_fabric_git', self.h.PRODUCT_ROOT / 'scripts/fabric_git.py')
+        return module.CodeTransport(self)
+
     def peer_call(self, verb, params):
         project = params['project_path']
         self.h.project_directory(project)
         request = params.get('input', {})
         if not isinstance(request, dict):
             raise self.h.HostError('invalid_request', 'Lane input must be an object')
+        if verb in {'git-upload', 'git-result', 'git-download'}:
+            return self.code().peer(verb, project, request)
         if verb == 'operation':
             identifier = self.operation_id(request)
             with self.database() as db:
@@ -159,9 +167,7 @@ class LaneFederation:
                 raise self.h.HostError('remote_field_unavailable', 'Git evidence transfer belongs to the code transport slice')
             clean = self.rewrite_paths(clean, receiving=True)
             clean['wait_seconds'] = 0
-            if any(item.get('mode') in {'worktree_write', 'write', 'rw', 'worktree'} or item.get('worktree')
-                   for item in [clean, *clean.get('tasks', [])]):
-                raise self.h.HostError('remote_writer_unavailable', 'Remote writer transport belongs to slice 3')
+
         encoded = json.dumps({'project': project, 'verb': verb,
             'digest': hashlib.sha256(json.dumps(clean, sort_keys=True).encode()).hexdigest()}, sort_keys=True)
         operations = self.root / 'operations'
@@ -179,8 +185,14 @@ class LaneFederation:
                 # reconciled, never blindly relaunched by the receiving host.
                 db.execute('INSERT INTO operations VALUES (?,?,NULL)', (identifier, encoded))
             launch_path = operations / f'{identifier}.json'
+            transport = self.code()
             try:
+                contexts = (transport.prepare(project, clean, identifier) if verb == 'dispatch'
+                    else transport.continuation(project, verb, clean, identifier) if verb in {'resume', 'handoff'} else [])
                 result = self.worker(verb, project, clean, launch_path)
+                if contexts:
+                    result['code_transport'] = {'writers': contexts, 'uncommitted_changes_transported': False}
+                    result['digest'] = result.get('digest', '') + '\n  committed input only; uncommitted chair changes were not transported'
             except (self.h.HostError, OSError, subprocess.SubprocessError) as exc:
                 if launch_path.exists():
                     raise self.h.HostError('lane_owner_failed', 'Owner response was lost after launch was recorded') from exc
@@ -188,6 +200,8 @@ class LaneFederation:
                 # that worker exits without a record, no lane could have started.
                 result = {'status': 'rejected', 'error': getattr(exc, 'code', 'lane_owner_unavailable'),
                     'fix': str(exc)}
+            if not launch_path.exists():
+                transport.rollback_claims()
             result['operation_id'] = identifier
             with self.database() as db:
                 db.execute('UPDATE operations SET result=? WHERE id=?', (json.dumps(result), identifier))
@@ -382,9 +396,16 @@ class LaneFederation:
                         response = self.h.envelope({'status': 'rejected', 'operation_id': identifier,
                             'error': f'{pending_verb}_not_sent', 'fix': 'Issue a new operation for the current attempt'})
                     else:
-                        response = self.h.PeerClient(host, self.config.peers[host]).call(pending_verb,
-                            {'project_path': project, 'input': json.loads(payload)}, write=True)
+                        client = self.h.PeerClient(host, self.config.peers[host])
+                        try:
+                            if pending_request.get('code_transport'):
+                                self.code().send(client, project, pending_request['code_transport'])
+                            response = client.call(pending_verb,
+                                {'project_path': project, 'input': pending_request}, write=True)
+                        except self.h.HostError as exc:
+                            response = self.h.envelope(error=exc)
                 if response.get('ok') and response['result'].get('status') != 'launch_unknown':
+                    self.code().record_result(identifier, response['result'])
                     with self.database() as db:
                         db.execute('DELETE FROM pending WHERE id=?', (identifier,))
                     # Re-read next poll: reconciliation identifies the run even if
@@ -492,10 +513,14 @@ class LaneFederation:
         if os.environ.get('PROVENANT_HOST_LOCAL_ONLY') == '1':
             return {'local': True}
         def local_result(value):
+            if action == 'fetch':
+                raise self.h.HostError('remote_host_required', 'Fetch requires a remote writer identifier qualified with its host')
             if action in WRITES and request.get('operation_id'):
                 identifier = self.operation_id(request)
                 with self.pending_lock(identifier), self.database() as db:
                     pending = db.execute('SELECT host FROM pending WHERE id=?', (identifier,)).fetchone()
+                    writer = db.execute('SELECT host FROM writer_dispatches WHERE id=?', (identifier,)).fetchone()
+                    pending = pending or writer
                 if pending:
                     raise self.h.HostError('operation_conflict', 'Operation remains owned by ' + pending[0] + '; reconcile it before changing placement')
             return value
@@ -581,13 +606,32 @@ class LaneFederation:
             raise self.h.HostError('unknown_host', 'Host is not configured')
         clean = {key: value.rsplit('@', 1)[0] if key in {'id', 'resume', 'handoff', 'session'} and isinstance(value, str) and '@' in value else value
             for key, value in request.items() if key != 'host'}
+        identifier = self.operation_id(clean)
+        if action == 'fetch':
+            return self.code().fetch(self.h.PeerClient(host, self.config.peers[host]), project, clean['id'], host)
         if action in {'dispatch', 'resume', 'handoff'}:
             clean = self.rewrite_paths(clean, cwd=cwd)
-        identifier = self.operation_id(clean)
         if action in WRITES:
             clean['operation_id'] = identifier
         client = self.h.PeerClient(host, self.config.peers[host])
         with self.pending_lock(identifier) if action in WRITES else nullcontext(True):
+            writer = None
+            bound_writer = False
+            if action == 'dispatch':
+                digest = hashlib.sha256(json.dumps(clean, sort_keys=True).encode()).hexdigest()
+                with self.database() as db:
+                    writer = db.execute('SELECT project,host,digest,sent FROM writer_dispatches WHERE id=?', (identifier,)).fetchone()
+                bound_writer = writer is not None
+                if writer and tuple(writer[:3]) != (project, host, digest):
+                    raise self.h.HostError('operation_conflict', 'Writer operation already binds another host or request')
+                clean = self.code().outgoing(project, clean, cwd, identifier, host)
+                if clean.get('code_transport') and not writer:
+                    with self.database() as db:
+                        db.execute('INSERT INTO writer_dispatches VALUES (?,?,?,?,0)', (identifier, project, host, digest))
+                    writer = (project, host, digest, 0)
+                self.code().record_request(project, host, identifier, action, clean)
+            elif action == 'handoff':
+                self.code().record_request(project, host, identifier, action, clean)
             previous = None
             if action in WRITES:
                 with self.database() as db:
@@ -599,25 +643,43 @@ class LaneFederation:
             # mutation. Only an unreachable implicit placement may fall back.
             contact = client.call('hello', write=action in WRITES)
             if not contact.get('ok') or contact.get('reads_flagged'):
-                if previous:
+                if previous or bound_writer:
                     return {**self.unknown(identifier, host), 'digest': f'launch_unknown {identifier}@{host}; reconcile by operation ID'}
                 if action == 'dispatch' and not request.get('host') and not (request.get('session') and '@' in request['session']) and contact.get('reachability') == 'unreachable':
                     reason = contact['error']['code']
+                    if writer:
+                        # Bind the first fallback before returning to the local
+                        # owner. A retry must not launch this operation remotely.
+                        with self.database() as db:
+                            db.execute('UPDATE writer_dispatches SET host=?,sent=1 WHERE id=?',
+                                (self.config.local_host, identifier))
+                            db.execute('UPDATE writer_history SET host=? WHERE id=?',
+                                (self.config.local_host, identifier))
                     return {'local': True, 'fallback': {'from_host': host, 'reason': reason},
                         'digest': f'local fallback from {host}: {reason}'}
                 return self.rejection(contact)
             if action in WRITES:
                 with self.database() as db:
                     db.execute('INSERT OR REPLACE INTO pending VALUES (?,?,?,?,?)', (identifier, *current))
+                    if writer:
+                        db.execute('UPDATE writer_dispatches SET sent=1 WHERE id=?', (identifier,))
             if action in WRITES and previous and (action != 'dispatch' or clean.get('session')):
                 response = client.call('operation', {'project_path': project, 'input': {'operation_id': identifier}})
                 if response.get('ok') and response['result'].get('status') == 'operation_missing':
                     response = self.h.envelope({'status': 'rejected', 'operation_id': identifier,
                         'error': f'{action}_not_sent', 'fix': 'Issue a new operation for the current attempt'})
             else:
+                if action == 'dispatch' and clean.get('code_transport'):
+                    try:
+                        self.code().send(client, project, clean['code_transport'])
+                    except self.h.HostError as exc:
+                        if exc.code in {'timeout', 'unreachable', 'bad_response', 'hosts_cancelled', 'peer_command_failed'}:
+                            return {**self.unknown(identifier, host), 'digest': f'launch_unknown {identifier}@{host}; retry frozen code transport'}
+                        raise
                 response = client.call(action, {'project_path': project, 'input': clean}, write=action in WRITES)
             if response.get('ok') and not response.get('reads_flagged'):
                 if action in WRITES and response['result'].get('status') != 'launch_unknown':
+                    self.code().record_result(identifier, response['result'])
                     with self.database() as db:
                         db.execute('DELETE FROM pending WHERE id=?', (identifier,))
                 return self.qualify(response['result'], host)

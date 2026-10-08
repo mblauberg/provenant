@@ -1466,15 +1466,13 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                 if task.get("prompt_file") is not None:
                     read_prompt_input(Path(task["prompt_file"]), workspace, workspace, read_roots)
                 if os.environ.get('PROVENANT_REMOTE_LANE') == '1':
-                    if mode != 'read_only':
-                        raise PreflightError('remote_writer_unavailable', 'Remote writer transport belongs to slice 3')
                     hosts = _fabric_hosts_owner()
                     diagnostic = hosts.adapter_doctor(adapter, workspace)
                     if diagnostic['signin']['status'] == 'unusable':
                         raise PreflightError('remote_signin_unusable', diagnostic['signin']['reason'])
                     plan = provider_exec.build_plan(adapter, route, '', mode=mode,
-                        cwd=str(task.get('cwd') or workspace), workspace_root=str(workspace),
-                        sandbox=task.get('sandbox'), network=task.get('network'),
+                        cwd=str(worktree if mode == 'worktree_write' else task.get('cwd') or workspace), workspace_root=str(workspace),
+                        worktree=str(worktree) if mode == 'worktree_write' else None, sandbox=task.get('sandbox'), network=task.get('network'),
                         capabilities=task.get('capabilities', []), add_dirs=task.get('add_dirs', []),
                         read_roots=read_roots)
                     if plan['applied'].get('confinement') in {None, 'none'}:
@@ -1937,6 +1935,12 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             worktree_lease = acquire_worktree_lease(args.worktree)
         except WorktreeLeaseError as exc:
             return fail(run_dir, "worktree_busy", str(exc))
+        hosts = _fabric_hosts_owner()
+        try:
+            hosts.lane_owner().code().validate_launch(args.worktree, run_identity(run_dir, run_receipt), args.task_id)
+        except hosts.HostError as exc:
+            release_worktree_lease(worktree_lease)
+            return fail(run_dir, exc.code, str(exc))
     started_at = now()
     started = time.monotonic()
     observed_exit = False

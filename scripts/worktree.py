@@ -212,11 +212,15 @@ def _run_git(
         )
     except OSError as exc:
         raise PolicyError(f"could not launch git: {exc}") from exc
-    captures = _drain_process(
-        process,
-        stdout_limit=stdout_limit,
-        stderr_limit=stderr_limit,
-    )
+    try:
+        captures = _drain_process(
+            process,
+            stdout_limit=stdout_limit,
+            stderr_limit=stderr_limit,
+        )
+    finally:
+        process.stdout.close()
+        process.stderr.close()
     return subprocess.CompletedProcess(
         command,
         process.returncode,

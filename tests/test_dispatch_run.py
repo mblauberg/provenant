@@ -3049,6 +3049,60 @@ def real_owner_fixture(tmp_path, monkeypatch, code):
     return run, prompt, command
 
 
+@pytest.mark.parametrize('ownership', ['current', 'superseded', 'unresolved'])
+def test_local_writer_resume_requires_its_durable_context_owner(tmp_path, monkeypatch, ownership):
+    code = '''import json,sys
+from pathlib import Path
+sys.stdin.read()
+Path('provider-launched.txt').write_text('writer ran')
+print(json.dumps({'type':'system','subtype':'init','session_id':'writer-session','model':'opus'}))
+print(json.dumps({'type':'result','result':'DONE'}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path)
+    instance = tmp_path / 'writer-instance'
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(instance))
+    monkeypatch.setenv('PROVENANT_HOST_LOCAL_ONLY', '1')
+    monkeypatch.delenv('PROVENANT_RUN_ID', raising=False)
+    first = subprocess.run([*command, '--access-mode', 'worktree_write', '--worktree', str(worktree)],
+                           cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert first.returncode == 0, first.stdout + first.stderr
+    previous = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
+    provider_effect = worktree / 'provider-launched.txt'
+    assert provider_effect.exists()
+    provider_effect.unlink()
+    git_dir = subprocess.check_output(
+        ['git', '-C', str(worktree), 'rev-parse', '--absolute-git-dir'], text=True).strip()
+    state = instance / '.agent-fabric'
+    owners = state / 'writer-owners'
+    owners.mkdir(parents=True)
+    marker = owners / (hashlib.sha256(git_dir.encode()).hexdigest() + '.json')
+    operation = 'current-writer' if ownership == 'current' else 'replacement-writer'
+    marker.write_text(json.dumps({'operation_id': operation}))
+    if ownership != 'unresolved':
+        operations = state / 'operations'
+        operations.mkdir()
+        (operations / (operation + '.json')).write_text(json.dumps({
+            'runId': previous['run_id'] if ownership == 'current' else 'mcp-replacement',
+            'taskId': 'dispatch-001', 'attempt': 1}))
+    resumed = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run),
+                              '--resume', previous['run_id'], '--prompt-file', str(prompt)],
+                             cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    if ownership == 'current':
+        assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+        assert provider_effect.exists()
+        assert (run / 'tasks/dispatch-001/attempt-002/attempt.json').is_file()
+    else:
+        assert resumed.returncode != 0, resumed.stdout + resumed.stderr
+        assert json.loads(resumed.stdout)['error'] == 'writer_context_superseded'
+        assert not provider_effect.exists()
+        assert not (run / 'tasks/dispatch-001/attempt-002/attempt.json').exists()
+    assert json.loads(marker.read_text()) == {'operation_id': operation}
+    lease_owner = load_dispatch_module()
+    lease = lease_owner.acquire_worktree_lease(worktree)
+    lease_owner.release_worktree_lease(lease)
+
+
 def test_normal_attempt_records_reaped_new_session_child(tmp_path, monkeypatch):
     pid_path = tmp_path / "leftover.pid"
     code = f'''import json, pathlib, subprocess, sys, time
@@ -3799,3 +3853,36 @@ def test_keep_attempt_tmp_env_retains_private_tmp(tmp_path: Path) -> None:
         {"PROVENANT_KEEP_ATTEMPT_TMP": "1"})
     assert result.returncode == 0, result.stderr + result.stdout
     assert (attempt / "tmp/note").is_file()
+
+@pytest.mark.parametrize(('signin', 'sandbox', 'expected'), [
+    (0, 'workspace-write', 'validated'),
+    (1, 'workspace-write', 'remote_signin_unusable'),
+    (0, 'full', 'remote_confinement_degraded'),
+])
+def test_remote_writer_preflight_uses_host_signin_and_effective_writer_confinement(tmp_path, monkeypatch, signin, sandbox, expected):
+    """Exercise the real preflight with only provider/routing process fixtures."""
+    module = load_dispatch_module()
+    repo = tmp_path / 'project'
+    repo.mkdir()
+    subprocess.run(['git', '-C', str(repo), 'init', '-q'], check=True)
+    subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Fixture',
+        '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base'], check=True)
+    worktree = repo / '.worktrees/feat-writer'
+    subprocess.run(['git', '-C', str(repo), 'worktree', 'add', '-qb', 'feat/writer', str(worktree)], check=True)
+    binary = tmp_path / 'bin/codex'
+    binary.parent.mkdir()
+    write_executable(binary, '#!/bin/sh\necho ' + ('Not logged in' if signin else 'Logged in') + '\nexit ' + str(signin) + '\n')
+    monkeypatch.setenv('PATH', str(binary.parent) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setenv('PROVENANT_REMOTE_LANE', '1')
+    monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
+    original_run = subprocess.run
+    def process(command, **kwargs):
+        if any(str(part).endswith('model_route.py') for part in command):
+            return subprocess.CompletedProcess(command, 0, json.dumps({
+                'status': 'ok', 'adapter': 'codex', 'resolved_model': 'gpt-6.1-sol',
+                'provider_family': 'openai', 'execution_intent': 'ordinary', 'notes': []}), '')
+        return original_run(command, **kwargs)
+    monkeypatch.setattr(module.subprocess, 'run', process)
+    value = module.preflight_tasks([{'id': 'writer', 'adapter': 'codex', 'model': 'gpt-6.1-sol',
+        'access_mode': 'worktree_write', 'worktree': str(worktree), 'sandbox': sandbox, 'prompt': 'fixture only'}], repo)
+    assert (value.get('error') or value['status']) == expected, value

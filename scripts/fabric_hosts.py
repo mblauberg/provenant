@@ -590,7 +590,8 @@ def parse_request(raw):
     verb = request['verb']
     if not isinstance(verb, str):
         raise HostError('invalid_request', 'Verb must be a string')
-    lane_verbs = {'dispatch', 'lanes', 'status', 'cancel', 'resume', 'handoff', 'output', 'operation'}
+    lane_verbs = {'dispatch', 'lanes', 'status', 'cancel', 'resume', 'handoff', 'output', 'operation',
+                  'git-upload', 'git-result', 'git-download'}
     if verb not in {'hello', 'doctor', *lane_verbs}:
         raise HostError('unknown_verb', 'Unsupported peer verb')
     if verb != 'hello' and request['protocol_version'] != PROTOCOL_VERSION:
@@ -629,7 +630,7 @@ def main(argv=None):
         try:
             request = strict_json(sys.stdin.buffer.read())
             fields(request, {'action', 'cwd', 'input'}, {'action', 'cwd', 'input'}, 'invalid_request')
-            if request['action'] not in {'dispatch', 'lanes', 'status', 'cancel', 'resume', 'handoff', 'output'}:
+            if request['action'] not in {'dispatch', 'lanes', 'status', 'cancel', 'resume', 'handoff', 'output', 'fetch'}:
                 raise HostError('unknown_verb', 'Unsupported lane operation')
             result = lane_owner().client_call(request['action'], request['cwd'], request['input'])
         except HostError as exc:
