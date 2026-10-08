@@ -71,7 +71,7 @@ The next dispatch reaps a run only when its host is gone and its owner or
 provider still runs: an owner that exited and left its provider behind, or a
 run whose MCP host was killed with SIGKILL.
 
-Seventeen tools are registered by default:
+Eighteen tools are registered by default:
 
 | Tool | Purpose |
 | --- | --- |
@@ -82,6 +82,7 @@ Seventeen tools are registered by default:
 | `fabric_events` | Cursor-based terminal, input-required and inbox events |
 | `fabric_cancel` | Cancel the owner and provider group |
 | `fabric_output` | Bounded result, stderr, events or receipt slice |
+| `fabric_hosts` | `action: list` or `doctor`, optional `hosts`; same SSH surface for every chair |
 | `fabric_adapters` | Compact catalogue, CLI availability and guarantees; `models` lists live ids |
 | `fabric_whoami` | Seat, project and server freshness |
 | `fabric_send` | Send to a seat, team, chair or all |
@@ -468,6 +469,15 @@ models on native subagents: pool picks and the default route skip them, a pool
 holding only them is refused (`route_native_only`), a council hands them back as
 a spawn line, and an explicit request for them runs
 with a leading `NATIVE:` warning (`skills/orchestrate/references/routing-and-tiers.md#native-first`).
+
+## Hosts
+
+`provenant hosts list` lists instance-owned host configuration;
+`provenant hosts doctor --json` reports local and peer diagnostics with a
+bounded SSH call per peer. `fabric_hosts` delegates to the same Python owner.
+Existing local commands remain unchanged. See the [host setup
+runbook](../../docs/runbooks/fabric-hosts.md) for configuration, restricted keys,
+protocol framing and diagnostic limits.
 
 ## Mailbox and identity
 

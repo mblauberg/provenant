@@ -901,6 +901,5 @@ def test_help_is_concise_and_names_existing_command_owners(tmp_path):
     assert "route" in result.stdout and "scripts/model-route" in result.stdout
     assert "fabric ...     runtime/fabric/bin/fabric ..." in result.stdout
     assert "batch ...      skills/orchestrate/scripts/batch_run.py ..." in result.stdout
-    assert "doctor" not in result.stdout
     assert "project ..." not in result.stdout
     assert "Fabric derives who you are from the working directory" in result.stdout

@@ -225,3 +225,22 @@ def test_check_treats_empty_root_variables_as_unset(tmp_path: Path) -> None:
 
     assert result.returncode == 0, result.stderr
     assert "provenant installed stub=ok" in result.stdout
+
+
+def test_registration_diagnostics_do_not_require_an_adapter_on_path(tmp_path, monkeypatch):
+    import importlib.util
+    monkeypatch.syspath_prepend(str(ROOT / 'scripts'))
+    spec = importlib.util.spec_from_file_location('install_check_hosts_test', SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    home = tmp_path / 'home'
+    registry = home / '.gemini/config/mcp_config.json'
+    registry.parent.mkdir(parents=True)
+    registry.write_text(json.dumps({'mcpServers': {'fabric': {'command': 'provenant'}}}))
+    monkeypatch.setenv('PATH', '/usr/bin:/bin')
+    monkeypatch.delenv('AGY_CONFIG_DIR', raising=False)
+    monkeypatch.delenv('AGY_MCP_CONFIG', raising=False)
+    assert module.provider_registration_status(home)['agy']['registered'] is True
+    # The pre-existing install check still reports provider availability as before.
+    lines, _ = module._provider_lines(home)
+    assert 'provider agy present=no' in lines

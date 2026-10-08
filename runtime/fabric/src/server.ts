@@ -3,6 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 
+import { fabricHosts, releaseHostChecks } from "./hosts.js";
 import { databasePath, identify } from "./identity.js";
 import { statusRows, fabricOutput, resultTail } from "./run-registry.js";
 import { reply, digest, serverBuild, mailboxView, adapterView, runView, fullView, lanesDigest, cancelDigest } from "./surface.js";
@@ -72,6 +73,7 @@ const server = new McpServer(
  * cancelling it; the next host reads those runs from their records.
  */
 server.server.onclose = async () => {
+  releaseHostChecks();
   releaseActiveExecutions();
   store?.close();
   store = undefined;
@@ -87,6 +89,7 @@ for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
   process.on(signal, () => {
     if (shuttingDown) return;
     shuttingDown = true;
+    releaseHostChecks();
     releaseActiveExecutions();
     store?.close();
     store = undefined;
@@ -94,6 +97,7 @@ for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
   });
 }
 process.on("exit", () => {
+  releaseHostChecks();
   releaseActiveExecutions();
 });
 
@@ -654,6 +658,10 @@ register(
         : readyStore().activityAfter(who.project, after_seq, limit ?? 20),
   }),
 );
+register("fabric_hosts", "List hosts or diagnose peers over SSH.", {
+  action: z.enum(["list", "doctor"]).default("list"),
+  hosts: z.array(z.string()).optional(),
+}, ({ action, hosts }, { signal }) => fabricHosts(action, hosts ?? [], who.cwd, signal));
 register("fabric_adapters", "List routes and guarantees; full includes profiles; models lists one adapter's live models.", {
   detail,
   models: z.string().max(40).optional().describe("Adapter whose live models to list (cached probe)."),
