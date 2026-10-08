@@ -3799,3 +3799,36 @@ def test_keep_attempt_tmp_env_retains_private_tmp(tmp_path: Path) -> None:
         {"PROVENANT_KEEP_ATTEMPT_TMP": "1"})
     assert result.returncode == 0, result.stderr + result.stdout
     assert (attempt / "tmp/note").is_file()
+
+@pytest.mark.parametrize(('signin', 'sandbox', 'expected'), [
+    (0, 'workspace-write', 'validated'),
+    (1, 'workspace-write', 'remote_signin_unusable'),
+    (0, 'full', 'remote_confinement_degraded'),
+])
+def test_remote_writer_preflight_uses_host_signin_and_effective_writer_confinement(tmp_path, monkeypatch, signin, sandbox, expected):
+    """Exercise the real preflight with only provider/routing process fixtures."""
+    module = load_dispatch_module()
+    repo = tmp_path / 'project'
+    repo.mkdir()
+    subprocess.run(['git', '-C', str(repo), 'init', '-q'], check=True)
+    subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Fixture',
+        '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base'], check=True)
+    worktree = repo / '.worktrees/feat-writer'
+    subprocess.run(['git', '-C', str(repo), 'worktree', 'add', '-qb', 'feat/writer', str(worktree)], check=True)
+    binary = tmp_path / 'bin/codex'
+    binary.parent.mkdir()
+    write_executable(binary, '#!/bin/sh\necho ' + ('Not logged in' if signin else 'Logged in') + '\nexit ' + str(signin) + '\n')
+    monkeypatch.setenv('PATH', str(binary.parent) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setenv('PROVENANT_REMOTE_LANE', '1')
+    monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
+    original_run = subprocess.run
+    def process(command, **kwargs):
+        if any(str(part).endswith('model_route.py') for part in command):
+            return subprocess.CompletedProcess(command, 0, json.dumps({
+                'status': 'ok', 'adapter': 'codex', 'resolved_model': 'gpt-6.1-sol',
+                'provider_family': 'openai', 'execution_intent': 'ordinary', 'notes': []}), '')
+        return original_run(command, **kwargs)
+    monkeypatch.setattr(module.subprocess, 'run', process)
+    value = module.preflight_tasks([{'id': 'writer', 'adapter': 'codex', 'model': 'gpt-6.1-sol',
+        'access_mode': 'worktree_write', 'worktree': str(worktree), 'sandbox': sandbox, 'prompt': 'fixture only'}], repo)
+    assert (value.get('error') or value['status']) == expected, value

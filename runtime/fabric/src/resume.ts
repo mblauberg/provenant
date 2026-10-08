@@ -87,8 +87,6 @@ export async function resumeConfiguredProvider(
       throw new InputError("resume_not_ready", "Resume one terminal task; wait for its active attempt to finish.");
     if(latest.attempts?.at(-1)?.state === "running") throw new InputError("resume_not_ready", "Dispatch a new run; the owner did not terminalise this attempt.");
     const previous = pinnedAttempt(latest, pin.attempt);
-    if (env.PROVENANT_REMOTE_LANE === "1" && previous.mode === "worktree_write")
-      throw new InputError("remote_writer_unavailable", "Remote writer transport belongs to slice 3.");
     const root = productRoot(env),
       runDir = String(previous.run_dir),
       taskId = String(previous.task_id);
@@ -294,8 +292,6 @@ export async function handoffDispatch(
     if (target.row!.state !== "terminal")
       throw new InputError("handoff_not_ready", "Wait for the prior task to finish, then hand off.");
     const previous = pinnedAttempt(target.row!, pin.attempt);
-    if (env.PROVENANT_REMOTE_LANE === "1" && previous.mode === "worktree_write")
-      throw new InputError("remote_writer_unavailable", "Remote writer transport belongs to slice 3.");
     let prompt = input.prompt;
     if (prompt === undefined) {
       try {

@@ -65,6 +65,7 @@ const USAGE = `fabric <command>
   dispatch list [--json]      configured-provider runs recorded in this workspace
   dispatch kill <run> [--json]  stop one recorded run and the group it leads
   cancel <id@host> [--operation-id ID]  stop a lane on its owning host
+  fetch <operation-or-task@host>  import a verified remote writer commit
   output <id@host> [--part P] [--offset N] [--max-bytes N] [--tail]
                               bounded output from the owning host
   dispatch --prompt-file F [--adapter A] [--alias NAME | --model M] [--effort E]
@@ -95,7 +96,7 @@ const command = argv[0] ?? "whoami";
 const commands = new Set([
   "whoami", "send", "inbox", "ack", "note", "tasks", "task", "claim", "done",
   "activity", "watch", "status", "doctor", "dispatch", "adapters", "lanes", "events",
-  "work-claims", "landing-push", "session", "cancel", "output",
+  "work-claims", "landing-push", "session", "cancel", "output", "fetch",
 ]);
 
 if (command === "--help" || command === "-h" || command === "help") {
@@ -135,6 +136,15 @@ const executionIdentity = () => {
     store.close();
   }
 };
+if (command === "fetch") {
+  const ids = argv.slice(1).filter((value) => value !== "--json");
+  if (ids.length !== 1) { console.error("Pass exactly one remote writer ID"); process.exit(2); }
+  const { federatedLane } = await import("./hosts.js");
+  const result = await federatedLane("fetch", who.cwd, { id: ids[0] }) ??
+    { status: "rejected", error: "remote_host_required", fix: "Qualify a remote writer ID with its host." };
+  console.log(JSON.stringify(result, null, 2));
+  process.exit(result.status === "ok" ? 0 : 1);
+}
 if (command === "cancel" || command === "output") {
   try {
     const operationId = flag("operation-id");

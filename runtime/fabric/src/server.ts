@@ -3,7 +3,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 
-import { fabricHosts, releaseHostChecks } from "./hosts.js";
+import { federatedLane, fabricHosts, releaseHostChecks } from "./hosts.js";
 import { databasePath, identify } from "./identity.js";
 import { federatedStatusRows as statusRows, fabricOutput, resultTail } from "./run-registry.js";
 import { reply, digest, serverBuild, mailboxView, adapterView, runView, fullView, lanesDigest, cancelDigest } from "./surface.js";
@@ -599,6 +599,11 @@ register("fabric_cancel", "Stop a run and its provider group, or one task of a b
   const view = runView(result);
   return detail === "full" ? view : { ...view, digest: cancelDigest(view) };
 });
+register("fabric_fetch", "Fetch one terminal remote writer: verify on the owning host, import its commits and compare the bound head.",
+  { id: z.string() }, async (input, { signal }) =>
+    await federatedLane("fetch", who.cwd, input, signal) ??
+      { status: "rejected", error: "remote_host_required", fix: "Qualify a remote writer ID with its host." },
+);
 register(
   "fabric_output",
   "Read output; continue at next_offset. max_bytes above 20000 is clamped with a warning; invalid numeric values return a typed rejection.",

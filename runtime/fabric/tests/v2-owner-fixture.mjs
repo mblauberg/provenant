@@ -71,7 +71,7 @@ if (owner === "batch_run.py") {
         prompt,
         "--timeout",
         String(task.timeout ?? 3600),
-        ...["adapter", "alias", "model", "effort", "cwd", "context_ceiling"].flatMap((key) => task[key] === undefined ? [] : ["--" + key, String(task[key])]),
+        ...["adapter", "alias", "model", "effort", "cwd", "context_ceiling", "worktree", "access_mode"].flatMap((key) => task[key] === undefined ? [] : ["--" + key, String(task[key])]),
         ...(task.capabilities?.length ? ["--capabilities", JSON.stringify(task.capabilities)] : []),
       ],
       { env: { ...process.env, PROVENANT_FIXTURE_OWNER: "dispatch_run.py" }, encoding: "utf8" },
@@ -140,8 +140,8 @@ const row = {
   // A resume keeps the provider session; "lose-session" models a turn that recorded none.
   session_id: prompt === "lose-session" ? null : prompt === "fail-new-session" ? `other-${attempt}`
     : prior.session_id ?? `fixture-${process.env.PROVENANT_RUN_ID}-${task}`,
-  mode: args.includes("--access-mode") ? value("--access-mode") : "read_only",
-  worktree: args.includes("--worktree") ? value("--worktree") : null,
+  mode: value("--access-mode") ?? prior.mode ?? "read_only",
+  worktree: value("--worktree") ?? prior.worktree ?? null,
   started_at: new Date().toISOString(),
   ended_at: null,
   evidence: { owner_cwd: process.cwd(), prompt_file: value("--prompt-file"), timeout: Number(value("--timeout")) },
