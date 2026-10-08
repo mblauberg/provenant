@@ -71,8 +71,20 @@ export type DispatchCapability = (typeof DISPATCH_CAPABILITIES)[number];
  * always dispatches ordinary work and cannot honour them.
  */
 export interface RouteInput {
+  intent?: "ordinary" | "assurance";
+  orchestrator_family?: string;
+  role?: string;
+  risk_tier?: string;
+  model_override_tier?: string;
+  reviewer_id?: string;
+  preface?: boolean;
+  read_roots?: string[];
+  host?: string;
+  operation_id?: string;
+  placement_fallback?: { from_host: string; reason: string };
   adapter?: string;
   alias?: string;
+  task_class?: string;
   model?: string;
   effort?: string;
   mode?: AccessMode | "write" | "worktree" | "rw" | "read" | "ro";
@@ -125,6 +137,7 @@ export interface BatchInput extends RouteInput {
 }
 
 export interface NormalisedRoute {
+  task_class?: string;
   adapter: string;
   alias?: string;
   model?: string;
@@ -324,17 +337,17 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
   }
   return {
     adapter,
-    ...(input.alias === undefined && input.model === undefined ? { alias: "workhorse" } : {}),
+    ...(input.alias === undefined && input.model === undefined && input.task_class === undefined ? { alias: "workhorse" } : {}),
     ...(input.alias === undefined ? {} : { alias: input.alias }),
     ...(input.model === undefined ? {} : { model: input.model }),
     ...(input.effort === undefined ? {} : { effort: input.effort }),
-    role: "worker",
+    role: input.role ?? "worker",
     access_mode: mode,
     ...(input.worktree === undefined ? {} : { worktree: resolve(identity.cwd, input.worktree) }),
     ...(warnings.length ? { warnings } : {}),
     ...(input.capabilities?.length ? { capabilities: [...input.capabilities].sort() } : {}),
     ...Object.fromEntries(
-      ["cwd", "network", "sandbox", "add_dirs", "fallback", "context_ceiling", "allow_secrets", "confidential", "pick_reason"]
+      ["cwd", "network", "sandbox", "add_dirs", "fallback", "context_ceiling", "allow_secrets", "confidential", "pick_reason", "task_class", "orchestrator_family", "risk_tier", "model_override_tier", "reviewer_id", "preface"]
         .filter((key) => input[key as keyof RouteInput] !== undefined)
         .map((key) => [key, input[key as keyof RouteInput]]),
     ),
@@ -346,7 +359,9 @@ export function routeArguments(route: NormalisedRoute): string[] {
   for (const [key, value] of Object.entries(route)) {
     if (key === "warnings") continue;
     if (value === undefined || (key === "alias" && route.model !== undefined)) continue;
-    if (key === "add_dirs") {
+    if (key === "preface") {
+      if (value === false) args.push("--no-preface");
+    } else if (key === "add_dirs") {
       for (const dir of value as string[]) args.push("--add-dir", dir);
     } else if (key === "read_roots") {
       for (const dir of value as string[]) args.push("--read-root", dir);

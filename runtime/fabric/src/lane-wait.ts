@@ -19,7 +19,7 @@ export interface LaneWaitDependencies {
 }
 
 const done = (row: RunRead) =>
-  row.state === "terminal" || row.state === "input_required" || row.status === "input_required";
+  row.reachability !== "unreachable" && (row.state === "terminal" || row.state === "input_required" || row.status === "input_required");
 
 /**
  * Report every completed lane this seat has not been told about, or wait for
@@ -49,7 +49,7 @@ export async function waitForLanes(deps: LaneWaitDependencies): Promise<number> 
     }
     const pending = current.runs.filter((row) => !done(row));
     const expired = now() >= deadline;
-    const timeout = () => `timeout after ${deps.timeoutSeconds}s; still running: ${pending.map((row) => row.id).join(" ")}\n`;
+    const timeout = () => `timeout after ${deps.timeoutSeconds}s; still running: ${pending.map((row) => row.id).join(" ")}${pending.some((row) => row.reachability === "unreachable") ? `; unreachable hosts: ${[...new Set(pending.filter((row) => row.reachability === "unreachable").map((row) => row.host))].join(" ")}` : ""}\n`;
     // With --all a finished lane waits for the others, unless time runs out.
     if (unseen?.length && (!deps.all || pending.length === 0 || expired)) {
       await write(unseen.map((index) => {

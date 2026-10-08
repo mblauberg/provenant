@@ -16,9 +16,10 @@ import {
   type LaunchObserver,
 } from "./execution.js";
 import type { Identity } from "./identity.js";
-import { fabricStatus, processMatches, readOwnerRecord, statusRows } from "./run-registry.js";
+import { processMatches, readOwnerRecord, statusRows } from "./run-registry.js";
 
 /** The whole injected handoff text, prefix and result tail together. */
+import { federatedLane } from "./hosts.js";
 export const HANDOFF_BYTES = 8000;
 
 /** The effort a run sent; one the provider only reported was never sent, so it is not re-sent. */
@@ -62,6 +63,9 @@ export async function resumeConfiguredProvider(
   env: NodeJS.ProcessEnv = process.env,
   pin: PinnedContinuation = {},
 ): Promise<Record<string, unknown>> {
+  const remote = env.PROVENANT_HOST_LOCAL_ONLY === "1" ? undefined : await federatedLane("resume", identity.cwd, input as Record<string, unknown>, signal);
+  if (remote) return remote;
+  env = { ...env, PROVENANT_HOST_LOCAL_ONLY: "1" };
   let lock: string | undefined,
     launched = false;
   try {
@@ -83,6 +87,8 @@ export async function resumeConfiguredProvider(
       throw new InputError("resume_not_ready", "Resume one terminal task; wait for its active attempt to finish.");
     if(latest.attempts?.at(-1)?.state === "running") throw new InputError("resume_not_ready", "Dispatch a new run; the owner did not terminalise this attempt.");
     const previous = pinnedAttempt(latest, pin.attempt);
+    if (env.PROVENANT_REMOTE_LANE === "1" && previous.mode === "worktree_write")
+      throw new InputError("remote_writer_unavailable", "Remote writer transport belongs to slice 3.");
     const root = productRoot(env),
       runDir = String(previous.run_dir),
       taskId = String(previous.task_id);
@@ -209,8 +215,8 @@ export async function resumeConfiguredProvider(
     );
     launched = true;
     await observeOwner(started, input.wait_seconds ?? 55, signal);
-    const status = await fabricStatus(identity.cwd, String(previous.run_id));
-    return Array.isArray(status.runs) ? status.runs.find((row: Record<string, any>) => row.task_id === taskId) ?? status : status;
+    const status = await statusRows(identity.cwd, [String(previous.run_id)]);
+    return status.runs?.find((row: Record<string, any>) => row.task_id === taskId) ?? status;
   } catch (error) {
     if (signal.aborted) throw error;
     return rejected(error);
@@ -277,6 +283,9 @@ export async function handoffDispatch(
   env: NodeJS.ProcessEnv = process.env,
   pin: PinnedContinuation = {},
 ): Promise<Record<string, unknown>> {
+  const remote = env.PROVENANT_HOST_LOCAL_ONLY === "1" ? undefined : await federatedLane("handoff", identity.cwd, input as Record<string, unknown>, signal);
+  if (remote) return remote;
+  env = { ...env, PROVENANT_HOST_LOCAL_ONLY: "1" };
   try {
     validatePrompt(input.prompt, input.prompt_file);
     const { handoff, task_id, ...rest } = input;
@@ -285,6 +294,8 @@ export async function handoffDispatch(
     if (target.row!.state !== "terminal")
       throw new InputError("handoff_not_ready", "Wait for the prior task to finish, then hand off.");
     const previous = pinnedAttempt(target.row!, pin.attempt);
+    if (env.PROVENANT_REMOTE_LANE === "1" && previous.mode === "worktree_write")
+      throw new InputError("remote_writer_unavailable", "Remote writer transport belongs to slice 3.");
     let prompt = input.prompt;
     if (prompt === undefined) {
       try {

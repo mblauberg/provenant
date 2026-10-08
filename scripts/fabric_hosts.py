@@ -135,10 +135,13 @@ class PeerConfig:
 class HostsConfig:
     local_host: str = 'local'
     peers: dict[str, PeerConfig] = None
+    projects: dict = None
 
     def __post_init__(self):
         if self.peers is None:
             object.__setattr__(self, 'peers', {})
+        if self.projects is None:
+            object.__setattr__(self, 'projects', {})
 
 def config_path():
     root = Path(os.environ.get('AGENT_FABRIC_INSTANCE_ROOT') or '~/.agents').expanduser()
@@ -159,7 +162,7 @@ def load_config(path=None):
     except (ValueError, UnicodeError) as exc:
         raise HostError('invalid_config', 'Host configuration must be strict JSON') from exc
     code = 'invalid_config'
-    fields(value, {'schema_version', 'local_host', 'peers'}, {'schema_version', 'local_host'}, code)
+    fields(value, {'schema_version', 'local_host', 'peers', 'projects'}, {'schema_version', 'local_host'}, code)
     if type(value['schema_version']) is not int or value['schema_version'] != 1:
         raise HostError(code, 'Unsupported host schema version')
     local = host_name(value['local_host'], code)
@@ -185,7 +188,19 @@ def load_config(path=None):
         if type(peer.response_deadline) not in {int, float} or not 0 < peer.response_deadline <= 86_400 or not math.isfinite(peer.response_deadline):
             raise HostError(code, 'Response deadline must be positive and finite')
         parsed[name] = peer
-    return HostsConfig(local, parsed)
+    projects = value.get('projects', {})
+    if not isinstance(projects, dict):
+        raise HostError(code, 'Projects must be keyed by home-relative project path')
+    for project, placement in projects.items():
+        project_directory(project)
+        fields(placement, {'default_host', 'modes'}, set(), code)
+        modes = placement.get('modes', {})
+        fields(modes, {'read_only', 'worktree_write'}, set(), code)
+        for target in [*modes.values(), *([placement['default_host']] if 'default_host' in placement else [])]:
+            host_name(target, code)
+            if target not in {local, *parsed}:
+                raise HostError(code, 'Placement host is not configured')
+    return HostsConfig(local, parsed, projects)
 
 def hosts_list(config):
     return {'schema': 'fabric.hosts.v1', 'hosts': [
@@ -575,12 +590,14 @@ def parse_request(raw):
     verb = request['verb']
     if not isinstance(verb, str):
         raise HostError('invalid_request', 'Verb must be a string')
-    if verb not in {'hello', 'doctor'}:
+    lane_verbs = {'dispatch', 'lanes', 'status', 'cancel', 'resume', 'handoff', 'output', 'operation'}
+    if verb not in {'hello', 'doctor', *lane_verbs}:
         raise HostError('unknown_verb', 'Unsupported peer verb')
     if verb != 'hello' and request['protocol_version'] != PROTOCOL_VERSION:
         raise HostError('protocol_mismatch', 'Peer protocol version differs')
     params = request.get('params', {})
-    fields(params, set() if verb == 'hello' else {'project_path'}, set(), 'invalid_request')
+    fields(params, {'project_path', 'input'} if verb in lane_verbs else set() if verb == 'hello' else {'project_path'},
+           {'project_path'} if verb in lane_verbs else set(), 'invalid_request')
     return verb, params
 
 def envelope(result=None, error=None):
@@ -591,7 +608,7 @@ def envelope(result=None, error=None):
 def peer():
     try:
         verb, params = parse_request(sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1))
-        result = hello() if verb == 'hello' else doctor(**params)
+        result = hello() if verb == 'hello' else doctor(**params) if verb == 'doctor' else lane_owner().peer_call(verb, params)
         response = envelope(result)
     except HostError as exc:
         response = envelope(error=exc)
@@ -600,10 +617,27 @@ def peer():
     print(json.dumps(response, allow_nan=False))
     return 0 if response['ok'] else 1
 
+def lane_owner():
+    module = _load_module('provenant_fabric_lanes', PRODUCT_ROOT / 'scripts/fabric_lanes.py')
+    return module.LaneFederation(sys.modules[__name__])
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv == ['peer']:
         return peer()
+    if argv == ['lane']:
+        try:
+            request = strict_json(sys.stdin.buffer.read())
+            fields(request, {'action', 'cwd', 'input'}, {'action', 'cwd', 'input'}, 'invalid_request')
+            if request['action'] not in {'dispatch', 'lanes', 'status', 'cancel', 'resume', 'handoff', 'output'}:
+                raise HostError('unknown_verb', 'Unsupported lane operation')
+            result = lane_owner().client_call(request['action'], request['cwd'], request['input'])
+        except HostError as exc:
+            result = {'status': 'rejected', 'error': exc.code, 'fix': str(exc)}
+        except (ValueError, UnicodeError, TypeError, KeyError, OSError) as exc:
+            result = {'status': 'rejected', 'error': 'invalid_request', 'fix': 'Pass a valid lane request with readable paths'}
+        print(json.dumps(result, allow_nan=False))
+        return 0
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=['hosts'])
     parser.add_argument('action', choices=['list', 'doctor'])

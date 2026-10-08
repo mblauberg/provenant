@@ -65,6 +65,7 @@ import { laneTaskId, Store } from "./store.js";
 import { digest } from "./surface.js";
 
 const execFileAsync = promisify(execFile);
+import { federatedLane } from "./hosts.js";
 export const MAX_EXECUTION_WAIT_SECONDS = 55;
 const DEFAULT_WAIT_SECONDS = 55;
 const FIRST_ATTEMPT_ID = "attempt-001";
@@ -685,7 +686,7 @@ async function dispatchConfiguredProviderUnchecked(
         tasks: expanded.tasks,
         concurrency: Math.min(8, expanded.tasks.length),
         wait_seconds: wait_seconds ?? DEFAULT_WAIT_SECONDS,
-      }, identity, signal, env);
+      }, identity, signal, env, launch);
       return withWarnings(result, [...preferred.warnings, ...expanded.warnings]);
     }
     // A single pick, or a selector that won precedence, replaces the request's own selectors.
@@ -703,7 +704,7 @@ async function dispatchConfiguredProviderUnchecked(
   const route = applyDispatchDefaults(normaliseRoute(input, identity, catalogue), policy.defaults);
   route.warnings = [...new Set([...(initialRoute.warnings ?? []), ...(route.warnings ?? []), ...poolWarnings, ...policy.warnings])];
   validatePrompt(input.prompt, input.prompt_file);
-  const roots = readRoots(identity, input.cwd, input.prompt_file);
+  const roots = [...new Set([...readRoots(identity, input.cwd, input.prompt_file), ...(input.read_roots ?? [])])];
   if (roots.length) route.read_roots = roots;
   if (
     !Number.isInteger(input.wait_seconds ?? DEFAULT_WAIT_SECONDS) ||
@@ -750,7 +751,7 @@ async function dispatchConfiguredProviderUnchecked(
     "--prompt-file",
     promptPath,
     "--intent",
-    "ordinary",
+    input.intent ?? "ordinary",
     "--timeout",
     String(timeout),
     ...routeArguments(route),
@@ -847,6 +848,7 @@ async function dispatchConfiguredBatchUnchecked(
   identity: Identity,
   signal: AbortSignal,
   env: NodeJS.ProcessEnv = process.env,
+  launch: LaunchObserver = {},
 ): Promise<Record<string, unknown>> {
   if (input.tasks.length < 1 || input.tasks.length > 64)
     throw new InputError("invalid_input", "tasks must contain 1-64 items");
@@ -942,6 +944,7 @@ async function dispatchConfiguredBatchUnchecked(
     ) + "\n",
     { flag: "wx", mode: 0o600 },
   );
+  launch.onLaunch?.({ runId: shortRunId(runDir), taskId: "*", attempt: 1 });
   const started = startOwner(
     python,
     [owner, "--run-dir", runDir, "--manifest", manifestPath, "--concurrency", String(concurrency)],
@@ -989,7 +992,18 @@ export async function dispatchConfiguredProvider(
   launch: LaunchObserver = {},
 ): Promise<Record<string, unknown>> {
   try {
-    return await dispatchConfiguredProviderUnchecked(input, identity, signal, env, launch);
+    const remote = env.PROVENANT_HOST_LOCAL_ONLY === "1" ? undefined : await federatedLane("dispatch", identity.cwd, input as Record<string, unknown>, signal);
+    if (remote) return remote;
+    const localEnv = { ...env, PROVENANT_HOST_LOCAL_ONLY: "1", ...(input.placement_fallback ? { PROVENANT_PLACEMENT_FALLBACK: JSON.stringify(input.placement_fallback) } : {}) };
+    const result = await dispatchConfiguredProviderUnchecked(input, identity, signal, localEnv, launch);
+    if (input.placement_fallback) {
+      const fallback = input.placement_fallback;
+      const note = `local fallback from ${fallback.from_host}: ${fallback.reason}`;
+      const runDir = result.run_dir;
+      return { ...result, placement_fallback: fallback, warnings: [...((result.warnings as string[]) ?? []), note],
+        digest: `${String(result.digest ?? result.status)}\n${note}` };
+    }
+    return result;
   } catch (error) {
     if (signal.aborted && !(error instanceof InputError)) throw error;
     return rejected(error);
@@ -1001,9 +1015,15 @@ export async function dispatchConfiguredBatch(
   identity: Identity,
   signal: AbortSignal,
   env: NodeJS.ProcessEnv = process.env,
+  launch: LaunchObserver = {},
 ): Promise<Record<string, unknown>> {
   try {
-    return await dispatchConfiguredBatchUnchecked(input, identity, signal, env);
+    const remote = env.PROVENANT_HOST_LOCAL_ONLY === "1" ? undefined : await federatedLane("dispatch", identity.cwd, input as unknown as Record<string, unknown>, signal);
+    if (remote) return remote;
+    const localEnv = { ...env, PROVENANT_HOST_LOCAL_ONLY: "1", ...(input.placement_fallback ? { PROVENANT_PLACEMENT_FALLBACK: JSON.stringify(input.placement_fallback) } : {}) };
+    const result = await dispatchConfiguredBatchUnchecked(input, identity, signal, localEnv, launch);
+    return input.placement_fallback ? { ...result, placement_fallback: input.placement_fallback,
+      warnings: [...((result.warnings as string[]) ?? []), `local fallback from ${input.placement_fallback.from_host}: ${input.placement_fallback.reason}`] } : result;
   } catch (error) {
     if (signal.aborted && !(error instanceof InputError)) throw error;
     return rejected(error);
@@ -1048,7 +1068,12 @@ export async function cancelConfiguredRun(
   identity: Identity,
   reason?: string,
   env: NodeJS.ProcessEnv = process.env,
+  operationId?: string,
 ): Promise<Record<string, unknown>> {
+  const request = { id, reason, operation_id: operationId };
+  const remote = await federatedLane("cancel", identity.cwd, request);
+  if (remote) return remote;
+  id = request.id;
   const rows = await statusRows(identity.cwd, [id]);
   if (!rows.runs) return rows;
   // A task id names that task alone, whatever the metadata says; only a run or batch id reaches
