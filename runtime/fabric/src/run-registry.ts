@@ -15,6 +15,7 @@
  * pretend otherwise.
  */
 import { runRoot, withoutGitRedirects } from "./identity.js";
+import { federatedLane } from "./hosts.js";
 import { canonicalSuccessStatus, isSuccessStatus } from "./success-status.js";
 export { runRoot } from "./identity.js";
 import { execFile } from "node:child_process";
@@ -974,6 +975,7 @@ export async function statusRows(
   detail: "brief" | "full" = "brief",
   includeLedger = true,
   limit: number | null = 20,
+  includeHistory = false,
 ): Promise<StatusResult> {
   if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 55)
     return { status: "rejected", error: "wait_invalid", fix: "Pass wait_seconds from 0 to 55." };
@@ -1028,7 +1030,7 @@ export async function statusRows(
         ...v1,
         ...((legacy.runs ?? []) as Record<string, any>[]).filter((row) => !v1Dirs.has(row.run_dir)).map(wrap),
       ]
-        .filter((row) => row.state !== "terminal" || Date.parse(row.ended_at ?? row.started_at) > Date.now() - 86400000)
+        .filter((row) => includeHistory || row.state !== "terminal" || Date.parse(row.ended_at ?? row.started_at) > Date.now() - 86400000)
         .sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at));
     }
     const omitted = ids?.length || limit === null ? 0 : Math.max(0, rows.length - limit);
@@ -1049,13 +1051,32 @@ export async function statusRows(
   }
 }
 
+export async function federatedStatusRows(
+  workspace: string, ids?: string[], waitSeconds = 0, until: "any" | "all" = "all",
+  signal?: AbortSignal, detail: "brief" | "full" = "brief", includeLedger = true, limit: number | null = 20,
+): Promise<StatusResult> {
+  if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 55)
+    return { status: "rejected", error: "wait_invalid", fix: "Pass wait_seconds from 0 to 55." };
+  const deadline = Date.now() + waitSeconds * 1000;
+  const request = { ids, wait_seconds: 0, until, detail, limit };
+  for (;;) {
+    const remote = await federatedLane("status", workspace, request, signal);
+    if (!remote) return statusRows(workspace, request.ids, waitSeconds, until, signal, detail, includeLedger, limit);
+    const done = (row: Record<string, any>) => row.reachability !== "unreachable" && ["terminal", "input_required"].includes(row.state);
+    const rows = remote.runs ?? [];
+    if (remote.status !== "ok" || !waitSeconds || Date.now() >= deadline || !rows.length || (until === "any" ? rows.some(done) : rows.every(done))) return remote as StatusResult;
+    await new Promise((resolveWait) => setTimeout(resolveWait, Math.min(2000, deadline - Date.now())));
+    signal?.throwIfAborted();
+  }
+}
+
 export async function fabricStatus(
   workspace: string,
   id?: string,
   waitSeconds = 0,
   signal?: AbortSignal,
 ): Promise<Record<string, any>> {
-  const result = await statusRows(workspace, id ? [id] : undefined, waitSeconds, "all", signal);
+  const result = await federatedStatusRows(workspace, id ? [id] : undefined, waitSeconds, "all", signal);
   if (id && result.runs?.length === 1) return result.runs[0]!;
   return result;
 }
@@ -1064,6 +1085,8 @@ export async function fabricOutput(
   workspace: string,
   input: { id: string; part?: string; offset?: number; max_bytes?: number; tail?: boolean },
 ) {
+  const remote = await federatedLane("output", workspace, input);
+  if (remote) return remote;
   const result = await statusRows(workspace, [input.id]);
   if (!result.runs) return result;
   if (result.runs.length !== 1)

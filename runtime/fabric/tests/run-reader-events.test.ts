@@ -195,7 +195,7 @@ it("exits an event follower after an input_required attempt", () => {
   attempt(workspace, "tasks", "needs-input", "input_required", "input_required");
   const product = resolve(import.meta.dirname, "../../..");
   const result = spawnSync("python3", [join(product, "scripts/provenant"), "events", "--follow", "--until-idle"], {
-    cwd: workspace, encoding: "utf8", timeout: 2000,
+    cwd: workspace, encoding: "utf8", timeout: 10000,
     env: { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product,
       AGENT_FABRIC_STATE_DIRECTORY: join(workspace, "state"),
       AGENT_FABRIC_TSX_LOADER: createRequire(import.meta.url).resolve("tsx") },

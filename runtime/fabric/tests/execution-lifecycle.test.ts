@@ -1361,8 +1361,12 @@ describe("route pools", () => {
       expect(done.status, JSON.stringify(done)).toBe("running");
       spawnedPids.push(Number(done.pid));
       const log = join(String((done.paths as Record<string, unknown>).run_dir), "batch_run.py.argv.json");
-      for (let tries = 0; tries < 100 && !existsSync(log); tries += 1) await delay(50);
-      const argv = JSON.parse(readFileSync(log, "utf8"));
+      let argv: string[] = [];
+      // The fixture creates the file before finishing its JSON write.
+      await waitFor(() => {
+        try { argv = JSON.parse(readFileSync(log, "utf8")); return Array.isArray(argv) && argv.length > 0; }
+        catch { return false; }
+      }, "complete batch argument log");
       return argv[argv.indexOf("--concurrency") + 1];
     };
     expect(await concurrency({})).toBe("2");
@@ -1589,11 +1593,16 @@ describe("status liveness", () => {
     const attemptDir = join(dir, "dispatch", "tasks", "silent", "attempt-001");
     mkdirSync(attemptDir, { recursive: true });
     writeFileSync(join(attemptDir, "provider-output.json"), JSON.stringify({ directory: scratch }));
-    writeFileSync(join(rawDir, "raw"), "streaming provider output");
-    expect(await fabricStatus(workspace, "silent")).toMatchObject({ status: "running", stalled: false, output_age_seconds: 0 });
-    rmSync(scratch, { recursive: true });
-    writeFileSync(`${dir}-owner.stdout.jsonl`, "new provider output");
-    expect(await fabricStatus(workspace, "silent")).toMatchObject({ status: "running", stalled: false, output_age_seconds: 0 });
+    // Filesystem/probe latency must not turn this freshness assertion into a
+    // wall-clock race; the earlier assertions still use real elapsed time.
+    const clock = vi.spyOn(Date, "now").mockReturnValue(Date.now());
+    try {
+      writeFileSync(join(rawDir, "raw"), "streaming provider output");
+      expect(await fabricStatus(workspace, "silent")).toMatchObject({ status: "running", stalled: false, output_age_seconds: 0 });
+      rmSync(scratch, { recursive: true });
+      writeFileSync(`${dir}-owner.stdout.jsonl`, "new provider output");
+      expect(await fabricStatus(workspace, "silent")).toMatchObject({ status: "running", stalled: false, output_age_seconds: 0 });
+    } finally { clock.mockRestore(); }
   });
 
   it("waits for terminal output and reads a completed batch task separately", async () => {

@@ -1465,6 +1465,22 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                     raise ValueError("protected paths require sandbox-exec read confinement; fix: use a non-training route")
                 if task.get("prompt_file") is not None:
                     read_prompt_input(Path(task["prompt_file"]), workspace, workspace, read_roots)
+                if os.environ.get('PROVENANT_REMOTE_LANE') == '1':
+                    if mode != 'read_only':
+                        raise PreflightError('remote_writer_unavailable', 'Remote writer transport belongs to slice 3')
+                    hosts = _fabric_hosts_owner()
+                    diagnostic = hosts.adapter_doctor(adapter, workspace)
+                    if diagnostic['signin']['status'] == 'unusable':
+                        raise PreflightError('remote_signin_unusable', diagnostic['signin']['reason'])
+                    plan = provider_exec.build_plan(adapter, route, '', mode=mode,
+                        cwd=str(task.get('cwd') or workspace), workspace_root=str(workspace),
+                        sandbox=task.get('sandbox'), network=task.get('network'),
+                        capabilities=task.get('capabilities', []), add_dirs=task.get('add_dirs', []),
+                        read_roots=read_roots)
+                    if plan['applied'].get('confinement') in {None, 'none'}:
+                        raise PreflightError('remote_confinement_degraded', 'Remote placement requires effective confinement')
+                    if 'browser' in task.get('capabilities', []) and not hosts.lane_socket_paths(workspace)['fits']:
+                        raise PreflightError('remote_socket_path_too_long', 'Remote attempt temporary paths exceed the socket limit')
                 routes.append(route)
             except (PreflightError, WorktreeLeaseError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
                 prompt_fixes = {
@@ -1514,7 +1530,12 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     if getattr(args,"pick_reason",None): provenance["pick_reason"]=args.pick_reason
     # Recorded so a resume or handoff keeps the task off free and prompt-training models.
     if getattr(args,"confidential",False): provenance["requested"]["confidential"]=True
-    return {"schema":"fabric.attempt.v1","run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
+    placement = json.loads(os.environ.get('PROVENANT_PLACEMENT_FALLBACK', 'null'))
+    if placement:
+        note = f'local fallback from {placement["from_host"]}: {placement["reason"]}'
+        if note not in plan.setdefault('warnings', []):
+            plan['warnings'].append(note)
+    return {"schema":"fabric.attempt.v1", **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
         "attempt":number,"state":"running","status":None,"mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
         "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
         **({"read_roots":[str(root) for root in args.read_roots]} if getattr(args,"read_roots",None) else {}),
@@ -2206,7 +2227,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     # the configured Fabric store so they can coordinate with the owner.
                     for name in ("AGENT_FABRIC_STATE_DIRECTORY", "AGENT_FABRIC_SEAT",
                                  "AGENT_FABRIC_CLIENT_LABEL", "AGENT_FABRIC_LABEL", "AGENT_FABRIC_PRODUCT_ROOT",
-                                 "PROVENANT_FABRIC_PHASES", "PROVENANT_NO_OS_CONFINEMENT"):
+                                 "PROVENANT_FABRIC_PHASES", "PROVENANT_NO_OS_CONFINEMENT",
+                                 "PROVENANT_HOST_LOCAL_ONLY", "PROVENANT_REMOTE_LANE", "PROVENANT_PLACEMENT_FALLBACK"):
                         if name == "AGENT_FABRIC_STATE_DIRECTORY" and args.tool == "codex" and args.access_mode == "worktree_write":
                             continue
                         provider_environment.pop(name, None)
@@ -2596,6 +2618,61 @@ def execute_attempt_sequence(args,custody=None):
 
 def dispatch(args: argparse.Namespace) -> int:
     """Run one attempt while serialising standalone run-ledger mutation."""
+    if os.environ.get('PROVENANT_HOST_LOCAL_ONLY') != '1':
+        hosts = _fabric_hosts_owner()
+        try:
+            config = hosts.load_config()
+        except hosts.HostError as exc:
+            print(json.dumps({'status': 'rejected', 'error': exc.code, 'fix': str(exc)}))
+            return 1
+        if config.peers or getattr(args, 'host', None) or any('@' in str(value) for value in (args.resume or '', args.task_id or '')):
+            request = {key: value for key, value in {
+                'host': getattr(args, 'host', None), 'operation_id': getattr(args, 'operation_id', None),
+                'adapter': args.tool, 'model': args.model, 'alias': args.alias, 'task_class': args.task_class, 'effort': args.effort,
+                'intent': args.intent, 'orchestrator_family': args.orchestrator_family,
+                'role': args.role, 'risk_tier': args.risk_tier, 'model_override_tier': args.model_override_tier,
+                'reviewer_id': args.reviewer_id, 'preface': args.preface, 'read_roots': args.read_roots,
+                'fallback': exec_routing.validate_policy(args.fallback), 'pick_reason': args.pick_reason,
+                'mode': args.access_mode, 'cwd': str(args.provider_cwd) if args.provider_cwd else None,
+                'worktree': str(args.worktree) if args.worktree else None,
+                'task_id': args.task_id, 'timeout_seconds': args.timeout_seconds,
+                'resume': args.resume, 'context_ceiling': args.context_ceiling,
+                'sandbox': args.sandbox, 'network': None if args.network is None else args.network == 'true',
+                'capabilities': args.capabilities, 'add_dirs': args.add_dirs,
+                'allow_secrets': args.allow_secrets, 'confidential': args.confidential,
+                'wait_seconds': 0,
+            }.items() if value is not None and value != []}
+            if args.prompt_stdin:
+                request['prompt'] = sys.stdin.buffer.read().decode('utf-8')
+            else:
+                request['prompt_file'] = str(args.prompt_file)
+            if args.resume:
+                request = {key: value for key, value in request.items() if key in {
+                    'host', 'operation_id', 'resume', 'task_id', 'prompt', 'prompt_file',
+                    'context_ceiling', 'timeout_seconds', 'allow_secrets', 'wait_seconds'}}
+                if args.resume_attempt is not None:
+                    request['resume_attempt'] = args.resume_attempt
+                if args.require_session:
+                    request['require_session'] = args.require_session
+            if args.git_evidence:
+                request['git_evidence'] = str(args.git_evidence)
+            try:
+                result = hosts.lane_owner().client_call('resume' if args.resume else 'dispatch', str(Path.cwd()), request)
+            except hosts.HostError as exc:
+                result = {'status': 'rejected', 'error': exc.code, 'fix': str(exc)}
+            if not result.get('local'):
+                print(json.dumps(result))
+                return 1 if result.get('status') == 'rejected' else 0
+            if result.get('fallback'):
+                os.environ['PROVENANT_PLACEMENT_FALLBACK'] = json.dumps(result['fallback'])
+                print(result['digest'], file=sys.stderr)
+            if result.get('input'):
+                args.resume = result['input'].get('resume', args.resume)
+                args.task_id = result['input'].get('task_id', args.task_id)
+            if args.prompt_stdin:
+                # The local owner still consumes the same original stdin bytes.
+                import io
+                sys.stdin = io.TextIOWrapper(io.BytesIO(request['prompt'].encode('utf-8')))
     # Canonical before first use, so the saved roots are what resume re-checks strictly.
     args.read_roots = [str(Path(root).expanduser().resolve()) for root in getattr(args, "read_roots", None) or []]
     if args.timeout_seconds is None:
@@ -2627,10 +2704,23 @@ def dispatch(args: argparse.Namespace) -> int:
         custody.close()
 
 
+def _fabric_hosts_owner():
+    import importlib.util
+    name = 'provenant_dispatch_hosts'
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).resolve().parents[3] / 'scripts/fabric_hosts.py')
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name]
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description=__doc__)
     root.add_argument("--run-dir", type=Path, required=True)
     root.add_argument("--task-id")
+    root.add_argument("--host")
+    root.add_argument("--operation-id")
     adapter = root.add_mutually_exclusive_group(required=False)
     adapter.add_argument("--adapter", "--tool", dest="tool")
     prompt = root.add_mutually_exclusive_group(required=True)

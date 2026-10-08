@@ -3525,7 +3525,10 @@ def test_fabric_fast_plan_rejects_invalid_git_context(tmp_path, monkeypatch):
         tmp_path, monkeypatch, 'import sys\nsys.stdin.read()\n',
     )
     monkeypatch.chdir(tmp_path)
-    (tmp_path / '.git').symlink_to(tmp_path / 'missing-git')
+    # An existing malformed target also blocks Git discovery into an enclosing
+    # checkout when the test scratch directory lives inside one.
+    (tmp_path / 'invalid-git').write_text('not a git file\n')
+    (tmp_path / '.git').symlink_to(tmp_path / 'invalid-git')
     mod = load_dispatch_module()
     args = mod.parser().parse_args(command[2:])
     args.timeout_seconds = mod.DEFAULT_TIMEOUT_SECONDS

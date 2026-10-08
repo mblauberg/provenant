@@ -1,14 +1,14 @@
 # Fabric hosts
 
 Status: current
-Applies to: `provenant hosts`, `provenant peer` and `fabric_hosts`
+Applies to: `provenant hosts`, `provenant peer`, lane commands and Fabric MCP
 
 Host diagnostics work over the user's OpenSSH configuration. Each host keeps
 its own instance state and provider sign-ins. The [accepted
 specification](../specs/fabric-hosts.md) and [ADR
 0026](../adr/0026-federate-fabric-across-own-hosts-over-ssh.md) own the design.
-This first slice provides configuration and diagnostics; remote lanes and
-record federation follow in later slices.
+Slices 1–2 provide configuration, diagnostics and remote read-only lanes.
+Writer code transport, messages, tasks, activity and landing follow in slices 3–5.
 
 ## Configure each host
 
@@ -31,13 +31,19 @@ record federation follow in later slices.
          "connect_timeout": 5,
          "response_deadline": 15
        }
+     },
+     "projects": {
+       "Repos/provenant": { "default_host": "workshop" }
      }
    }
    ```
 
    On `workshop`, use `local_host: "workshop"` and a `laptop` peer. Without a
    file, the local name is `local`. Missing `peers` or an empty object means
-   local-only operation.
+   local-only operation. Project keys are primary checkout paths relative to
+   home. An optional `modes` object overrides `default_host` for `read_only` or
+   `worktree_write`; remote writers are refused until slice 3. Defaults name
+   the local host or a configured peer.
 3. Configure the SSH aliases yourself. The destination may be an alias or
    `user@alias`; options, whitespace and shell metacharacters are refused.
    Host names use lowercase letters, digits and hyphens. Unknown JSON fields,
@@ -97,8 +103,9 @@ Sign-in states are `usable`, `unusable` or `unknown`. Bounded CLI status probes
 never launch a model or return account identifiers. Claude keychain failures
 become `unknown` or `unusable`. Adapters without a conclusive non-interactive
 status probe report `unknown`. Confinement uses the existing read-only planning
-and sandbox probes; write-mode and capability-specific checks run at placement
-in later slices. Socket checks measure an estimated v2 attempt temporary path
+and sandbox probes; the executing dispatch owner checks adapter sign-in,
+effective read-only confinement and requested browser socket paths before
+launch. Socket checks measure an estimated v2 attempt temporary path
 in bytes against the platform limit; a long project path can exceed it.
 Registration reports the existing install check's Fabric-entry presence,
 independently of whether the adapter executable is on PATH.
@@ -125,8 +132,10 @@ identity, version or diagnostic fields produce `bad_response`.
 
 Protocol version 1 accepts one UTF-8 JSON document on stdin, at most 65,536
 bytes, followed by EOF. The request has `protocol_version`, `verb` and optional
-`params`. Only `hello` and `doctor` are supported; doctor accepts optional
-`project_path`. There is one newline-terminated JSON response on stdout:
+`params`. The fixed verbs are `hello`, `doctor`, `dispatch`, `lanes`, `status`,
+`cancel`, `resume`, `handoff`, `output` and `operation`. Doctor accepts optional
+`project_path`; lane verbs require it and accept an `input` object. There is
+one newline-terminated JSON response on stdout:
 
 ```json
 {"protocol_version":1,"ok":true,"result":{"protocol_version":1,"revision":null,"host":"workshop"}}
@@ -139,33 +148,94 @@ exits nonzero. Stable request codes are `bad_json`, `request_too_large`,
 `timeout` and `bad_response`. It bounds responses to 1 MiB and exchanges
 `hello` on first contact. Different versions flag reads with
 `reads_flagged: true` and `error.code: "protocol_mismatch"`, and set
-`writes_allowed: false`. Future write callers must use the shared
+`writes_allowed: false`. Dispatch and control callers use the shared
 `protocol_decision` function and the client's `write=True` guard.
 
 Lists use `fabric.hosts.v1`; doctor uses `fabric.hosts.doctor.v1`. The shared
 identifier helpers parse and format `id@host`; bare record IDs mean local.
 A selector matching records on multiple hosts returns `ambiguous_selector`.
-These record helpers establish the contract for later federation slices;
-this slice exposes host selectors through list and doctor.
 Host command selectors are host names, optionally written `host@host`.
 
-## Verify slice 1
+## Place and control a lane
+
+```sh
+provenant fabric dispatch --host workshop --prompt-file brief.md --adapter codex
+provenant fabric lanes --json
+provenant fabric status task-id@workshop
+provenant fabric lanes --wait --all --timeout 120 task-id@workshop
+provenant fabric cancel task-id@workshop --operation-id stop-review-1
+provenant fabric output task-id@workshop --max-bytes 20000
+provenant fabric dispatch --resume run-id@workshop --prompt-file follow-up.md
+provenant fabric dispatch --handoff run-id@workshop --adapter claude --prompt-file handoff.md
+```
+
+`provenant dispatch` also accepts `--host` and `--operation-id` alongside its
+existing owner arguments. Without `--host`, the per-project default applies.
+An unreachable default host falls back locally only before a mutation is
+sent; the attempt records `placement_fallback` and a warning. Explicit host
+placement and sessions qualified with a host never fall back. A bare named
+session keeps its local owner. Resume, handoff and cancel follow the owning
+host, including qualified task selectors.
+
+Dispatch and control requests receive a bounded operation ID. Supply
+`--operation-id` to retry the same remote request; changing its content is
+refused with `operation_conflict`. A lost response after send returns
+`launch_unknown`. Subsequent lanes/status reads reconcile that ID against
+the remote journal and owner record. Launch requests retry only when the peer
+confirms the operation was never recorded. An unresolved cancel is checked
+against its original attempts. Missing cancel, resume, handoff and named-session
+operations are rejected instead of replayed against changed state. Prelaunch worker failures become
+durable rejections. The peer journal stores request digests. The caller keeps
+pending payloads until resolution. Both create the database with mode 0600.
+
+The remote peer starts the existing detached dispatch owner, then exits.
+The lane survives the SSH connection. Paths in `cwd`, `worktree`, read roots
+and additional directories are rewritten relative to home and resolved
+against the receiving home. Paths outside home or escaping through symlinks
+are refused. Prompt files use the existing protected prompt reader and cross
+the boundary as text; credential files, hard links and final symlinks are
+refused. The peer request limit also bounds transmitted prompts.
+
+`lanes`, `status`, `watch` and `lanes --wait` read each host's own attempt
+records. Rows include `host` and qualified IDs. On failure, rows preserve
+`last_known_state`, `last_known_status` and `age_seconds` while reporting
+`unreachable`; an unreachable terminal snapshot cannot satisfy a wait.
+Independent peer reads run concurrently. Default reads cap rows per host
+and then apply the combined 20-row cap; explicit IDs and waits scan the
+owner history. Output stays on its owner and returns at most 20,000 bytes
+per call with `next_offset` for continuation. Each host keeps its own SQLite
+state, operation journal and last successful observations. Remote dispatch
+returns after the owner starts; use status or a lane wait to await completion.
+
+Codex, agy and Claude seats use the same `fabric_dispatch`, `fabric_batch`,
+`fabric_runs`, `fabric_status`, `fabric_cancel` and `fabric_output` tools.
+Dispatch/batch inputs accept `host` and `operation_id`; dispatch also accepts
+`resume` and `handoff`. Qualified IDs route read/control tools to their owner.
+
+## Verify slices 1–2
 
 Run the focused checks from the product checkout, one test process at a time:
 
 ```sh
-(cd runtime/fabric && npx vitest run tests/hosts.test.ts --maxWorkers=2)
+(cd runtime/fabric && npx vitest run tests/hosts.test.ts tests/lane-wait.test.ts tests/named-sessions.test.ts tests/execution-lifecycle.test.ts tests/run-reader-events.test.ts tests/lanes-cli.test.ts tests/surface.test.ts tests/lean-surface.test.ts --maxWorkers=2)
 python3 -m unittest discover -s tests -p test_fabric_hosts.py -v
-.venv/bin/python -m pytest tests/test_provenant_cli.py tests/test_check_provenant_install.py -q
+.venv/bin/python -m pytest tests/test_dispatch_run.py tests/test_provenant_cli.py -q
 npm --prefix runtime/fabric run typecheck
 ```
 
-The MCP tests exercise list, local doctor and peer doctor for Codex, agy and
-Claude seats. Loopback peers use separate homes and instance roots; fixture
-directories must sit outside any Git checkout to preserve the synthetic
-home-relative project path. These checks prove slice 1 host-tool parity. Full
-acceptance criterion 17 also needs remote dispatch, control, messaging, task
-claims and landing from later slices.
+MCP tests exercise diagnostics, lanes, status, bounded output, cancel and
+placement rejection for Codex, agy and Claude seats. Loopback peers use
+separate homes, instance roots and project repositories. They verify detached
+launch, response loss, reconciliation, qualified selectors, fallback, stale
+snapshots and bounded waits without an sshd or live model. Existing suites
+whose scratch directories assume no enclosing checkout need a temporary
+directory outside the checkout when the sandbox permits it.
+
+Slice 2 covers criteria 2–5 and 7, the lane portion of 10, placement checks
+in 14 and lane-tool parity in 17. Criteria 13 and 16 retain the slice 1
+contracts. Real-host sleep/connection-loss acceptance remains for the chair;
+loopback evidence cannot establish sleep behaviour. Criteria 6, 8–9, 11–12
+and the remaining record/tool portions of 10 and 17 belong to slices 3–5.
 
 The real-sshd test is opt-in through `PROVENANT_SSHD_TESTS=1`. Run it outside a
 sandbox that prevents sshd from starting, with `/usr/sbin/sshd` available, to

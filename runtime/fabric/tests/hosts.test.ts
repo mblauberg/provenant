@@ -2,25 +2,14 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
-import { accessSync, constants, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, it } from "vitest";
 
 function tempRoot(prefix: string) {
-  const root = resolve(mkdtempSync(join(tmpdir(), prefix)));
-  let insideRepository = false;
-  try { execFileSync("git", ["-C", root, "rev-parse", "--show-toplevel"], { stdio: "ignore" }); insideRepository = true; }
-  catch { /* No enclosing Git checkout. */ }
-  if (!insideRepository) return root;
-  rmSync(root, { recursive: true, force: true });
-  for (const candidate of ["/private/tmp", "/var/tmp"]) {
-    try {
-      accessSync(candidate, constants.W_OK);
-      return mkdtempSync(join(candidate, prefix));
-    } catch { /* Try the next system scratch directory. */ }
-  }
-  throw new Error("$TMPDIR is inside the checkout and no external scratch directory is writable");
+  // Project fixtures own their Git roots, so scratch may live in a worktree.
+  return resolve(mkdtempSync(join(tmpdir(), prefix)));
 }
 
 it.each(["codex", "agy", "claude"])("exposes host list and peer doctor through the %s MCP seat", async (seat) => {
@@ -30,9 +19,11 @@ it.each(["codex", "agy", "claude"])("exposes host list and peer doctor through t
   const python = execFileSync("python3", ["-c", "import sys;print(sys.executable)"], { encoding: "utf8" }).trim();
   mkdirSync(join(peerHome, ".agents/.agent-fabric"), { recursive: true });
   mkdirSync(join(peerHome, "Repos/project"), { recursive: true });
+  execFileSync("git", ["-C", join(peerHome, "Repos/project"), "init", "-q"]);
   writeFileSync(join(peerHome, ".agents/.agent-fabric/hosts.json"), JSON.stringify({ schema_version: 1, local_host: "workshop" }));
   writeFileSync(ssh, `#!${python}\nimport os,sys\nos.environ["HOME"]=${JSON.stringify(peerHome)}\nos.environ["AGENT_FABRIC_INSTANCE_ROOT"]=${JSON.stringify(join(peerHome, ".agents"))}\nos.chdir(os.environ["HOME"])\nos.execv(${JSON.stringify(resolve(import.meta.dirname, "../../../scripts/provenant"))},["provenant","peer"])\n`, { mode: 0o755 });
   mkdirSync(workspace, { recursive: true });
+  execFileSync("git", ["-C", workspace, "init", "-q"]);
   mkdirSync(join(instance, ".agent-fabric"), { recursive: true });
   writeFileSync(join(instance, ".agent-fabric/hosts.json"), JSON.stringify({ schema_version: 1, local_host: "laptop",
     peers: { workshop: { ssh_destination: "workshop" } } }));
@@ -60,6 +51,25 @@ it.each(["codex", "agy", "claude"])("exposes host list and peer doctor through t
     expect(peer.structuredContent).toMatchObject({ schema: "fabric.hosts.doctor.v1", project_path: "Repos/project",
       hosts: [{ host: "workshop", reachability: "reachable", ok: true,
         result: { host: "workshop", project: { path: "Repos/project", present: true } } }] });
+    const run = join(peerHome, "Repos/project/.agent-run/runs/20261008-0000-dispatch-peer-abcdef");
+    const attempt = join(run, "tasks/peer-task/attempt-001");
+    mkdirSync(attempt, { recursive: true });
+    const row = JSON.parse(readFileSync(resolve(import.meta.dirname, "fixtures/attempt.json"), "utf8"));
+    Object.assign(row, { task_id: "peer-task", run_id: "mcp-abcdef", started_at: new Date().toISOString(), ended_at: new Date().toISOString(),
+      provenance: { requested: { adapter: "fixture" }, resolved_model: "fixture" },
+      paths: { result: "tasks/peer-task/attempt-001/result.md" } });
+    writeFileSync(join(attempt, "attempt.json"), JSON.stringify(row));
+    writeFileSync(join(attempt, "result.md"), "peer output " + "x".repeat(40000));
+    const lanes = await client.callTool({ name: "fabric_runs", arguments: { detail: "full" } });
+    expect(lanes.structuredContent, JSON.stringify(lanes.structuredContent)).toMatchObject({ schema: "fabric.runs.v2", runs: [{ host: "workshop", id: "peer-task@workshop", state: "terminal" }] });
+    const status = await client.callTool({ name: "fabric_status", arguments: { ids: ["peer-task@workshop"], detail: "full" } });
+    expect(status.structuredContent).toMatchObject({ runs: [{ host: "workshop", reachability: "reachable", state: "terminal" }] });
+    const output = await client.callTool({ name: "fabric_output", arguments: { id: "peer-task@workshop", max_bytes: 40 } });
+    expect(output.structuredContent).toMatchObject({ host: "workshop", next_offset: 40 });
+    const cancel = await client.callTool({ name: "fabric_cancel", arguments: { id: "peer-task@workshop", operation_id: "seat-stop", detail: "full" } });
+    expect(cancel.structuredContent).toMatchObject({ host: "workshop", operation_id: "seat-stop", runs: [{ state: "terminal" }] });
+    const dispatch = await client.callTool({ name: "fabric_dispatch", arguments: { host: "workshop", prompt: "fixture", cwd: "/etc", operation_id: "seat-start", detail: "full" } });
+    expect(dispatch.structuredContent).toMatchObject({ status: "rejected", error: "invalid_remote_path" });
     const unknown = await client.callTool({ name: "fabric_hosts", arguments: { action: "list", hosts: ["missing"] } });
     expect(unknown.structuredContent).toMatchObject({ ok: false, error: { code: "selector_not_found" } });
   } finally {
@@ -90,6 +100,7 @@ it("cancellation reaps the SSH child before the facade returns", async () => {
   const { setTimeout: delay } = await import("node:timers/promises");
   const root = tempRoot("fabric-hosts-cancel-");
   const instance = join(root, "instance"), pidFile = join(root, "ssh.pid"), shim = join(root, "ssh");
+  execFileSync("git", ["-C", root, "init", "-q"]);
   mkdirSync(join(instance, ".agent-fabric"), { recursive: true });
   writeFileSync(join(instance, ".agent-fabric/hosts.json"), JSON.stringify({ schema_version: 1, local_host: "laptop",
     peers: { workshop: { ssh_destination: "workshop", response_deadline: 30 } } }));

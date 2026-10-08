@@ -5,8 +5,13 @@ import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path
 import { runRoot } from "./identity.js";
 import { processMatches, processStartedAt, readOwnerRecord, readProviderRecord, statusRows } from "./run-registry.js";
 import type { Message } from "./store.js";
+import { federatedLane } from "./hosts.js";
 
 export interface RunRead {
+  host?: string;
+  reachability?: string;
+  last_known_state?: string;
+  age_seconds?: number;
   id: string;
   run_id: string;
   task_id: string | null;
@@ -27,7 +32,7 @@ export interface RunRead {
 }
 
 export interface RunReadResponse {
-  schema: "fabric.runs.v1";
+  schema: "fabric.runs.v1" | "fabric.runs.v2";
   status: "ok" | "unknown";
   error?: string;
   runs: RunRead[];
@@ -71,9 +76,22 @@ export async function readRuns(
   workspace: string, ids?: string[], waitSeconds = 0, signal?: AbortSignal,
   limit: number | null = 20,
   state?: string,
+  includeHistory = false,
 ): Promise<RunReadResponse> {
+  const deadline = Date.now() + waitSeconds * 1000;
+  const request = { ids, wait_seconds: 0, limit, state };
+  for (;;) {
+    const remote = await federatedLane("lanes", workspace, request, signal);
+    if (!remote) { ids = request.ids; break; }
+    const rows = remote.runs ?? [];
+    if (!waitSeconds || remote.status !== "ok" || Date.now() >= deadline || !rows.length ||
+        rows.every((row: RunRead) => row.reachability !== "unreachable" && ["terminal", "input_required"].includes(row.state)))
+      return remote as RunReadResponse;
+    await new Promise((done) => setTimeout(done, Math.min(2000, deadline - Date.now())));
+    signal?.throwIfAborted();
+  }
   try {
-    const source = await statusRows(workspace, ids, waitSeconds, "all", signal, "brief", false, null);
+    const source = await statusRows(workspace, ids, waitSeconds, "all", signal, "brief", false, null, includeHistory);
     if (!source.runs) return { schema: "fabric.runs.v1", status: "unknown" as const,
       error: String(source.error ?? "run_read_failed"), runs: [] as RunRead[] };
     const root = existsSync(runRoot(workspace)) ? realpathSync(runRoot(workspace)) : resolve(runRoot(workspace));

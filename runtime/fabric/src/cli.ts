@@ -19,7 +19,7 @@ import {
 } from "./execution.js";
 import type { RouteInput } from "./execution-input.js";
 import {
-  statusRows, fabricStatus, findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
+  federatedStatusRows as statusRows, fabricStatus, findRecordedRun, listRecordedRuns, retentionHours, terminateRecordedRun,
 } from "./run-registry.js";
 import { inspectDatabase, Store } from "./store.js";
 import { waitForLanes } from "./lane-wait.js";
@@ -64,8 +64,12 @@ const USAGE = `fabric <command>
                               dispatch any as --model A/<id>
   dispatch list [--json]      configured-provider runs recorded in this workspace
   dispatch kill <run> [--json]  stop one recorded run and the group it leads
+  cancel <id@host> [--operation-id ID]  stop a lane on its owning host
+  output <id@host> [--part P] [--offset N] [--max-bytes N] [--tail]
+                              bounded output from the owning host
   dispatch --prompt-file F [--adapter A] [--alias NAME | --model M] [--effort E]
            [--mode MODE] [--worktree W | --cwd D] [--id ID] [--wait]
+           [--host H] [--operation-id ID] [--resume ID | --handoff ID]
   dispatch --prompt-file F --route strong|bulk|design|writing
                               top model of a global pool; --adapter narrows it
   dispatch --prompt-file F --route R --rotate    cycle the pool per project
@@ -91,7 +95,7 @@ const command = argv[0] ?? "whoami";
 const commands = new Set([
   "whoami", "send", "inbox", "ack", "note", "tasks", "task", "claim", "done",
   "activity", "watch", "status", "doctor", "dispatch", "adapters", "lanes", "events",
-  "work-claims", "landing-push", "session",
+  "work-claims", "landing-push", "session", "cancel", "output",
 ]);
 
 if (command === "--help" || command === "-h" || command === "help") {
@@ -131,6 +135,27 @@ const executionIdentity = () => {
     store.close();
   }
 };
+if (command === "cancel" || command === "output") {
+  try {
+    const operationId = flag("operation-id");
+    const reason = flag("reason");
+    const part = flag("part"), offset = flag("offset"), maxBytes = flag("max-bytes");
+    const tail = argv.includes("--tail");
+    const rest = argv.slice(1).filter((value) => !["--json", "--tail"].includes(value));
+    if (rest.length !== 1 || rest[0]!.startsWith("--")) throw new Error("Pass exactly one lane ID");
+    const { cancelConfiguredRun } = await import("./execution.js");
+    const { fabricOutput } = await import("./run-registry.js");
+    const result = command === "cancel"
+      ? await cancelConfiguredRun(rest[0]!, who, reason, process.env, operationId)
+      : await fabricOutput(who.project, { id: rest[0]!, part, offset: offset === undefined ? undefined : Number(offset),
+        max_bytes: maxBytes === undefined ? undefined : Number(maxBytes), tail });
+    console.log(JSON.stringify(result, null, 2));
+    process.exit(result.status === "rejected" ? 1 : 0);
+  } catch (error) {
+    console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
+    process.exit(2);
+  }
+}
 if (command === "lanes") {
   let project: string | undefined, timeout: string | undefined;
   try {
@@ -256,7 +281,13 @@ if (command === "dispatch") {
       console.error("fabric: usage: fabric dispatch kill <run-id|run-dir> [--json]");
       process.exit(2);
     }
-    const run = findRecordedRun(who.project, reference);
+    const { federatedLane } = await import("./hosts.js");
+    const remote = await federatedLane("cancel", who.project, { id: reference });
+    if (remote) {
+      console.log(JSON.stringify(remote, null, 2));
+      process.exit(remote.status === "rejected" ? 1 : 0);
+    }
+    const run = findRecordedRun(who.project, reference.split("@")[0]!);
     if (run === undefined) {
       console.error(`fabric: no recorded dispatch run: ${reference}`);
       process.exit(1);
@@ -276,7 +307,7 @@ if (command === "dispatch") {
     const values = new Map<string, string>();
     const switches = new Set<string>();
     const allowed = new Set(["--adapter", "--alias", "--model", "--effort", "--mode", "--worktree", "--cwd", "--prompt-file", "--id", "--tasks",
-      "--route", "--council", "--models", "--session"]);
+      "--route", "--council", "--models", "--session", "--host", "--operation-id", "--resume", "--handoff"]);
     for (let index = 0; index < options.length; index += 1) {
       const option = options[index]!;
       if (["--wait", "--rotate", "--confidential", "--fresh"].includes(option)) {
@@ -295,6 +326,8 @@ if (command === "dispatch") {
     if (subcommand !== undefined && !subcommand.startsWith("--"))
       throw new Error(`unknown dispatch subcommand: ${subcommand}`);
     const route: RouteInput = {
+      ...(read("host") === undefined ? {} : { host: read("host") }),
+      ...(read("operation-id") === undefined ? {} : { operation_id: read("operation-id") }),
       ...(read("adapter") === undefined ? {} : { adapter: read("adapter") }),
       ...(read("alias") === undefined ? {} : { alias: read("alias") }),
       ...(read("model") === undefined ? {} : { model: read("model") }),
@@ -352,8 +385,13 @@ if (command === "dispatch") {
         ...(read("id") === undefined ? {} : { task_id: read("id") }),
         ...(read("worktree") === undefined ? {} : { worktree: read("worktree") }),
         ...(read("cwd") === undefined ? {} : { cwd: read("cwd") }),
+        ...(read("resume") === undefined ? {} : { resume: read("resume") }),
+        ...(read("handoff") === undefined ? {} : { handoff: read("handoff") }),
       };
-      result = await dispatchConfiguredProvider(input, executionIdentity(), new AbortController().signal);
+      const { resumeConfiguredProvider, handoffDispatch } = await import("./resume.js");
+      result = input.resume ? await resumeConfiguredProvider(input, executionIdentity(), new AbortController().signal)
+        : input.handoff ? await handoffDispatch(input, executionIdentity(), new AbortController().signal)
+        : await dispatchConfiguredProvider(input, executionIdentity(), new AbortController().signal);
     }
     console.log(String(result.id ?? "unassigned"));
     const taskRows = Array.isArray(result.tasks)
@@ -369,6 +407,7 @@ if (command === "dispatch") {
         .join("; ").replace(/\s+/gu, " ")}`
       : "";
     console.log(`status: ${String(result.status ?? "unknown")}${rejectedDetails}${rejectedTaskDetails}`);
+    if (result.placement_fallback || result.status === "launch_unknown") console.log(digest(result));
     if (sessionLine) console.log(sessionLine);
     process.exit(result.status === "rejected" ? 1 : 0);
   } catch (error) {

@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { fabricHosts, releaseHostChecks } from "./hosts.js";
 import { databasePath, identify } from "./identity.js";
-import { statusRows, fabricOutput, resultTail } from "./run-registry.js";
+import { federatedStatusRows as statusRows, fabricOutput, resultTail } from "./run-registry.js";
 import { reply, digest, serverBuild, mailboxView, adapterView, runView, fullView, lanesDigest, cancelDigest } from "./surface.js";
 import { catalogueSnapshot, liveModels } from "./catalogue.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
@@ -145,6 +145,8 @@ const ids = (maximum?: number) => z.union([
 const wait = z.unknown().optional();
 const optionalNumber = z.unknown().optional();
 const route = {
+  host: str,
+  operation_id: str,
   adapter: str,
   alias: str,
   model: str,
@@ -456,6 +458,7 @@ register(
         : input.tasks
         ? await dispatchConfiguredBatch({ ...input, wait_seconds: input.wait_seconds ?? 0 }, executionIdentity(), signal)
         : await dispatchConfiguredProvider(input, executionIdentity(), signal);
+    if (result.host) return runView(withWarnings(result, waitResult.warnings), input.detail);
     const runId = result.id ?? (input.session ? result.run_id : undefined);
     if (!runId) return withWarnings(result, waitResult.warnings);
     const observed = await statusRows(who.project, [String(runId)], 0, "all", signal, input.detail);
@@ -516,7 +519,8 @@ register(
     }
     // A short answer should not cost a second call: terminal rows carry the end of their result.
     const rows: Record<string, any>[] = Array.isArray(result.runs) ? result.runs : [];
-    const terminal = rows.filter((row) => row.state === "terminal");
+    const localHost = (result as Record<string, any>).hosts?.find((host: Record<string, any>) => host.local)?.host;
+    const terminal = rows.filter((row) => row.state === "terminal" && (!row.host || row.host === localHost));
     const each = Math.min(tail_chars ?? 1200, Math.floor(Math.max(3600, tail_chars ?? 0) / Math.max(1, terminal.length)));
     const tails = detail === "full" ? [] : terminal.flatMap((row) => {
       const tail = resultTail(row, each);
@@ -589,8 +593,8 @@ register(
     return { status: "ok", forgotten: key, digest: `forgot session ${key}; run ${row.runId ?? row.turnRunId} and provider history kept` };
   },
 );
-register("fabric_cancel", "Stop a run and its provider group, or one task of a batch by its task id.", { id: z.string(), reason: str, detail }, async ({ id, reason, detail }) => {
-  const result = await cancelConfiguredRun(id, who, reason);
+register("fabric_cancel", "Stop a run and its provider group, or one task of a batch by its task id.", { id: z.string(), reason: str, operation_id: str, detail }, async ({ id, reason, operation_id, detail }) => {
+  const result = await cancelConfiguredRun(id, who, reason, process.env, operation_id);
   acknowledgeRuns(result);
   const view = runView(result);
   return detail === "full" ? view : { ...view, digest: cancelDigest(view) };

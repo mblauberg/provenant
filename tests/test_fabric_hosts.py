@@ -37,6 +37,20 @@ def git_isolated_tempdir():
 
 
 class PeerContracts(unittest.TestCase):
+    def test_project_placement_configuration_and_lane_verbs(self):
+        import fabric_hosts as hosts
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'hosts.json'
+            path.write_text(json.dumps({'schema_version': 1, 'local_host': 'laptop',
+                'peers': {'workshop': {'ssh_destination': 'workshop'}},
+                'projects': {'Repos/project': {'default_host': 'workshop',
+                    'modes': {'read_only': 'laptop'}}}}))
+            config = hosts.load_config(path)
+            self.assertEqual(config.projects['Repos/project']['default_host'], 'workshop')
+            verb, params = hosts.parse_request(json.dumps({'protocol_version': 1,
+                'verb': 'lanes', 'params': {'project_path': 'Repos/project', 'input': {}}}).encode())
+            self.assertEqual(verb, 'lanes')
+
     def peer(self, request, **env):
         with tempfile.TemporaryDirectory() as directory:
             environment = {**os.environ, 'HOME': directory,
@@ -520,6 +534,440 @@ class ConfigContracts(unittest.TestCase):
                 result = self.command(config)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(json.loads(result.stdout)['error']['code'], 'invalid_config')
+
+
+
+
+class LaneLoopbackContracts(unittest.TestCase):
+    """Real peer owners against two isolated stores, without launching a provider."""
+
+    def setUp(self):
+        scratch = ROOT / '.agent-run/scratch'
+        scratch.mkdir(parents=True, exist_ok=True)
+        self.temporary = tempfile.TemporaryDirectory(prefix='hosts-lanes-', dir=scratch)
+        self.addCleanup(self.temporary.cleanup)
+        self.root = Path(self.temporary.name).resolve()
+        self.local_home = self.root / 'laptop'
+        self.peer_home = self.root / 'workshop'
+        self.workspace = self.local_home / 'Repos/project'
+        self.peer_workspace = self.peer_home / 'Repos/project'
+        self.offline = self.root / 'offline'
+        for home, workspace, host in [(self.local_home, self.workspace, 'laptop'),
+                                      (self.peer_home, self.peer_workspace, 'workshop')]:
+            workspace.mkdir(parents=True)
+            initialized = subprocess.run(['git', 'init', '-q', str(workspace)], capture_output=True, text=True)
+            self.assertEqual(initialized.returncode, 0, initialized.stderr)
+            state = home / '.agents/.agent-fabric'
+            state.mkdir(parents=True)
+            config = {'schema_version': 1, 'local_host': host}
+            if host == 'laptop':
+                config['peers'] = {'workshop': {'ssh_destination': 'workshop', 'response_deadline': 10}}
+                config['projects'] = {'Repos/project': {'default_host': 'workshop'}}
+            (state / 'hosts.json').write_text(json.dumps(config))
+        self.ssh = self.root / 'ssh'
+        self.ssh.write_text('#!' + sys.executable + '\nimport os,sys\n'
+            + 'if os.path.exists(' + repr(str(self.offline)) + '): sys.exit(255)\n'
+            + 'os.environ["HOME"]=' + repr(str(self.peer_home)) + '\n'
+            + 'os.environ["AGENT_FABRIC_INSTANCE_ROOT"]=' + repr(str(self.peer_home / '.agents')) + '\n'
+            + 'os.environ["AGENT_FABRIC_STATE_DIRECTORY"]=' + repr(str(self.peer_home / 'state')) + '\n'
+            + 'os.chdir(os.environ["HOME"])\n'
+            + 'os.execv(' + repr(str(ROOT / 'scripts/provenant')) + ',["provenant","peer"])\n')
+        self.ssh.chmod(0o755)
+        self.env = {**os.environ, 'HOME': str(self.local_home),
+            'HARNESS_PYTHON': sys.executable, 'TMPDIR': str(self.root),
+            'AGENT_FABRIC_INSTANCE_ROOT': str(self.local_home / '.agents'),
+            'AGENT_FABRIC_STATE_DIRECTORY': str(self.local_home / 'state'),
+            'AGENT_FABRIC_PRODUCT_ROOT': str(ROOT), 'AGENT_FABRIC_SSH_PROGRAM': str(self.ssh),
+            'AGENT_FABRIC_SEAT': 'codex', 'PROVENANT_HOST_LOCAL_ONLY': '0'}
+        self.local_run = self.terminal(self.workspace, 'shared-task', 'shared')
+        self.peer_run = self.terminal(self.peer_workspace, 'shared-task', 'shared')
+
+    def terminal(self, workspace, task_id, suffix, text='remote-result-' * 200):
+        run_id = 'mcp-' + suffix
+        directory = workspace / '.agent-run/runs' / ('20261008-0000-dispatch-fixture-' + suffix)
+        attempt = directory / 'tasks' / task_id / 'attempt-001'
+        attempt.mkdir(parents=True)
+        row = json.loads((ROOT / 'runtime/fabric/tests/fixtures/attempt.json').read_text())
+        # Synthetic fixture metadata does not attribute work to a guessed route.
+        row.update(run_id=run_id, task_id=task_id, cwd=str(workspace), worktree=None,
+            started_at='2026-10-08T00:00:00Z', ended_at='2026-10-08T00:00:01Z', pgid=None,
+            provenance={'requested': {'adapter': 'fixture'}, 'resolved_model': 'fixture'},
+            paths={'result': 'tasks/' + task_id + '/attempt-001/result.md'})
+        (attempt / 'attempt.json').write_text(json.dumps(row))
+        (attempt / 'result.md').write_text(text)
+        return run_id
+
+    def lanes(self, *selectors):
+        process = subprocess.run([str(ROOT / 'scripts/provenant'), 'lanes', '--json', *selectors],
+            cwd=self.workspace, env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(process.returncode, 0, process.stderr + process.stdout)
+        return json.loads(process.stdout)
+
+    def client(self, action, **request):
+        process = subprocess.run([str(ROOT / 'scripts/fabric-hosts'), 'lane'],
+            input=json.dumps({'action': action, 'cwd': str(self.workspace), 'input': request}),
+            cwd=self.workspace, env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(process.returncode, 0, process.stderr + process.stdout)
+        return json.loads(process.stdout)
+
+    def peer(self, verb, **request):
+        environment = {**self.env, 'HOME': str(self.peer_home),
+            'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents'),
+            'AGENT_FABRIC_STATE_DIRECTORY': str(self.peer_home / 'state')}
+        process = subprocess.run([str(ROOT / 'scripts/provenant'), 'peer'],
+            input=json.dumps({'protocol_version': 1, 'verb': verb,
+                'params': {'project_path': 'Repos/project', 'input': request}}),
+            cwd=self.peer_home, env=environment, capture_output=True, text=True, timeout=30)
+        value = json.loads(process.stdout)
+        self.assertEqual(process.returncode, 0 if value['ok'] else 1, process.stderr + process.stdout)
+        return value
+
+    def test_federated_lanes_and_colliding_selectors(self):
+        view = self.lanes()
+        self.assertEqual(view['schema'], 'fabric.runs.v2')
+        self.assertEqual({row['host'] for row in view['runs']}, {'laptop', 'workshop'})
+        self.assertTrue(all(row['state'] == 'terminal' for row in view['runs']))
+        selected = self.lanes('shared-task@workshop')['runs']
+        self.assertEqual(len(selected), 1)
+        self.assertEqual(selected[0]['host'], 'workshop')
+        ambiguous = self.client('lanes', ids=['shared-task'])
+        self.assertEqual(ambiguous['error'], 'ambiguous_selector')
+        status = self.client('status', ids=['shared-task@workshop'])
+        self.assertEqual(status['status'], 'ok')
+        self.assertEqual(status['runs'][0]['reachability'], 'reachable')
+
+    def test_outage_preserves_snapshot_and_success_replaces_it(self):
+        self.lanes()
+        self.offline.touch()
+        stale = self.lanes('shared-task@workshop')['runs'][0]
+        self.assertEqual(stale['state'], 'unreachable')
+        self.assertEqual(stale['last_known_state'], 'terminal')
+        self.assertEqual(stale['last_known_status'], 'ok')
+        self.assertGreaterEqual(stale['age_seconds'], 0)
+        self.assertIsNone(stale['pgid_alive'])
+        self.offline.unlink()
+        row_path = next(self.peer_workspace.glob('.agent-run/runs/*/tasks/*/attempt-001/attempt.json'))
+        row = json.loads(row_path.read_text())
+        row['status'] = 'failed'
+        row_path.write_text(json.dumps(row))
+        fresh = self.lanes('shared-task@workshop')['runs'][0]
+        self.assertEqual(fresh['status'], 'failed')
+        self.assertEqual(fresh['reachability'], 'reachable')
+        self.offline.touch()
+        self.assertEqual(self.lanes('shared-task@workshop')['runs'][0]['last_known_status'], 'failed')
+
+    def test_federated_caps_preserve_owner_omissions_and_explicit_selectors(self):
+        for index in range(25):
+            self.terminal(self.peer_workspace, f'extra-{index}', f'extra-{index}')
+        view = self.lanes()
+        self.assertEqual(len(view['runs']), 20)
+        self.assertEqual(view['omitted'], 7)
+        selected = self.lanes('extra-0@workshop')
+        self.assertEqual(len(selected['runs']), 1)
+        self.assertEqual(selected['omitted'], 0)
+
+    def test_explicit_selectors_find_retained_terminal_history(self):
+        path = next(self.peer_workspace.glob('.agent-run/runs/*/tasks/*/attempt-001/attempt.json'))
+        row = json.loads(path.read_text())
+        row['ended_at'] = '2026-01-01T00:00:00Z'
+        path.write_text(json.dumps(row))
+        self.assertFalse(any(row['host'] == 'workshop' for row in self.lanes()['runs']))
+        self.assertEqual(self.lanes('shared-task@workshop')['runs'][0]['state'], 'terminal')
+        self.assertEqual(self.client('status', ids=['shared-task@workshop'])['runs'][0]['state'], 'terminal')
+
+    def test_routed_output_is_bounded_and_continues(self):
+        first = self.client('output', id='shared-task@workshop', max_bytes=17)
+        self.assertEqual(first['id'], 'shared-task@workshop')
+        self.assertEqual(len(first['digest'].encode()), 17)
+        self.assertEqual(first['next_offset'], 17)
+        self.assertFalse(first['eof'])
+        second = self.client('output', id='shared-task@workshop', offset=first['next_offset'], max_bytes=17)
+        self.assertEqual(second['offset'], 17)
+        self.assertEqual(second['next_offset'], 34)
+        self.assertEqual(first['digest'] + second['digest'], ('remote-result-' * 200)[:34])
+
+    def test_control_operation_retry_is_idempotent_and_conflicts_are_refused(self):
+        request = {'id': self.peer_run, 'operation_id': 'cancel-repeat'}
+        first = self.peer('cancel', **request)
+        second = self.peer('cancel', **request)
+        self.assertTrue(first['ok'])
+        self.assertEqual(first, second)
+        reconciled = self.peer('operation', operation_id='cancel-repeat')
+        self.assertEqual(first, reconciled)
+        conflicting = self.peer('cancel', **{**request, 'reason': 'different request'})
+        self.assertFalse(conflicting['ok'])
+        self.assertEqual(conflicting['error']['code'], 'operation_conflict')
+        self.assertEqual(len(self.lanes('shared-task@workshop')['runs']), 1)
+
+    def test_default_dispatch_fallback_is_only_before_send(self):
+        self.offline.touch()
+        default = self.client('dispatch', prompt='fixture, no provider launch')
+        self.assertTrue(default['local'])
+        self.assertEqual(default['fallback'], {'from_host': 'workshop', 'reason': 'unreachable'})
+        self.assertIn('fallback', default['digest'])
+        explicit = self.client('dispatch', host='workshop', prompt='fixture, no provider launch')
+        self.assertEqual(explicit['status'], 'rejected')
+        self.assertEqual(explicit['error'], 'unreachable')
+
+    def test_remote_paths_outside_home_are_refused_before_launch(self):
+        rejected = self.client('dispatch', host='workshop', prompt='fixture', cwd='/etc')
+        self.assertEqual(rejected['error'], 'invalid_remote_path')
+        response = self.peer('dispatch', operation_id='bad-path', prompt='fixture', cwd='/etc')
+        self.assertFalse(response['ok'])
+        self.assertEqual(response['error']['code'], 'invalid_remote_path')
+
+    def test_prompt_credentials_and_hardlinks_never_cross_the_peer_boundary(self):
+        credential = self.workspace / '.codex/auth.json'
+        credential.parent.mkdir()
+        credential.write_text('{"access_token":"private"}')
+        rejected = self.client('dispatch', host='workshop', prompt_file=str(credential))
+        self.assertEqual(rejected['error'], 'credential_or_auth_store_denied')
+        original = self.workspace / 'prompt.md'
+        original.write_text('ordinary input')
+        linked = self.workspace / 'linked.md'
+        os.link(original, linked)
+        rejected = self.client('dispatch', host='workshop', prompt_file=str(linked))
+        self.assertEqual(rejected['error'], 'prompt_hard_link_denied')
+        target = self.workspace / 'regular.txt'
+        target.write_text('private environment')
+        link = self.workspace / '.env'
+        link.symlink_to(target)
+        rejected = self.client('dispatch', host='workshop', prompt_file=str(link))
+        self.assertEqual(rejected['error'], 'credential_or_auth_store_denied')
+
+
+    def test_prelaunch_owner_failure_is_a_durable_rejection(self):
+        import fabric_hosts as hosts
+        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+            federation = hosts.lane_owner()
+            params = {'project_path': 'Repos/project', 'input': {
+                'operation_id': 'prelaunch-failure', 'prompt': 'ordinary fixture input'}}
+            with patch.object(federation, 'worker', side_effect=hosts.HostError(
+                    'lane_owner_failed', 'fixture owner failed before recording a launch')) as worker:
+                first = federation.peer_call('dispatch', params)
+                repeated = federation.peer_call('dispatch', params)
+                reconciled = federation.peer_call('operation', {
+                    'project_path': 'Repos/project', 'input': {'operation_id': 'prelaunch-failure'}})
+            self.assertEqual(first['status'], 'rejected')
+            self.assertEqual(first['error'], 'lane_owner_failed')
+            self.assertEqual(first, repeated)
+            self.assertEqual(first, reconciled)
+            self.assertEqual(worker.call_count, 1)
+
+    def test_peer_operation_ledger_does_not_retain_confidential_prompt(self):
+        import fabric_hosts as hosts
+        marker = 'PRIVATE-PROMPT-ONLY-' + 'Q' * 300
+        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+            federation = hosts.lane_owner()
+            with patch.object(federation, 'worker', return_value={
+                    'status': 'rejected', 'error': 'fixture_refusal', 'fix': 'fixture only'}):
+                federation.peer_call('dispatch', {'project_path': 'Repos/project',
+                    'input': {'operation_id': 'private-request', 'prompt': marker, 'confidential': True}})
+            with federation.database() as database:
+                request = database.execute('SELECT request FROM operations WHERE id=?',
+                    ('private-request',)).fetchone()[0]
+            self.assertNotIn(marker, request)
+            self.assertNotIn(marker.encode(), (federation.root / 'hosts-state.sqlite3').read_bytes())
+            # Idempotence remains request-bound: changing the private prompt conflicts.
+            with self.assertRaises(hosts.HostError) as raised:
+                federation.peer_call('dispatch', {'project_path': 'Repos/project',
+                    'input': {'operation_id': 'private-request', 'prompt': marker + 'changed', 'confidential': True}})
+            self.assertEqual(raised.exception.code, 'operation_conflict')
+
+    def test_missing_cancel_operation_never_replays_on_a_later_attempt(self):
+        import sqlite3
+        from contextlib import closing
+        self.lanes()
+        state = self.local_home / '.agents/.agent-fabric/hosts-state.sqlite3'
+        payload = json.dumps({'id': self.peer_run, 'operation_id': 'lost-cancel'})
+        with closing(sqlite3.connect(state)) as database, database:
+            database.execute('INSERT INTO pending VALUES (?,?,?,?,?)',
+                ('lost-cancel', 'Repos/project', 'workshop', 'cancel', payload))
+        attempt_path = next(self.peer_workspace.glob('.agent-run/runs/*/tasks/*/attempt-001/attempt.json'))
+        later = json.loads(attempt_path.read_text())
+        later.update(attempt=2, status='ok')
+        later_dir = attempt_path.parent.parent / 'attempt-002'
+        later_dir.mkdir()
+        (later_dir / 'attempt.json').write_text(json.dumps(later))
+        verbs = self.root / 'peer-verbs.jsonl'
+        self.ssh.write_text('#!' + sys.executable + '\nimport os,sys,json,subprocess\n'
+            + 'raw=sys.stdin.buffer.read()\n'
+            + 'with open(' + repr(str(verbs)) + ',"a") as stream: stream.write(json.loads(raw)["verb"]+"\\n")\n'
+            + 'os.environ["HOME"]=' + repr(str(self.peer_home)) + '\n'
+            + 'os.environ["AGENT_FABRIC_INSTANCE_ROOT"]=' + repr(str(self.peer_home / '.agents')) + '\n'
+            + 'os.environ["AGENT_FABRIC_STATE_DIRECTORY"]=' + repr(str(self.peer_home / 'state')) + '\n'
+            + 'result=subprocess.run([' + repr(str(ROOT / 'scripts/provenant'))
+            + ',"peer"],input=raw,capture_output=True,cwd=os.environ["HOME"])\n'
+            + 'sys.stdout.buffer.write(result.stdout);sys.stderr.buffer.write(result.stderr);sys.exit(result.returncode)\n')
+        view = self.client('lanes')
+        self.assertEqual(view['status'], 'ok')
+        self.assertIn('operation', verbs.read_text().splitlines())
+        self.assertNotIn('cancel', verbs.read_text().splitlines())
+        self.assertFalse((self.peer_workspace / '.agent-run/runs' /
+            '20261008-0000-dispatch-fixture-shared/cancel').exists())
+
+    def test_mode_aliases_use_canonical_per_mode_placement(self):
+        config_path = self.local_home / '.agents/.agent-fabric/hosts.json'
+        config = json.loads(config_path.read_text())
+        config['projects']['Repos/project']['modes'] = {
+            'read_only': 'laptop', 'worktree_write': 'laptop'}
+        config_path.write_text(json.dumps(config))
+        self.offline.touch()
+        for mode in ['write', 'rw', 'worktree', 'read', 'ro']:
+            with self.subTest(mode=mode):
+                placed = self.client('dispatch', mode=mode, prompt='fixture placement only')
+                self.assertTrue(placed['local'])
+                self.assertNotIn('fallback', placed)
+
+    def test_qualified_offline_selector_without_snapshot_is_unreachable(self):
+        self.offline.touch()
+        for action in ['lanes', 'status']:
+            with self.subTest(action=action):
+                view = self.client(action, ids=['never-observed@workshop'])
+                self.assertEqual(view['status'], 'ok')
+                self.assertEqual(len(view['runs']), 1)
+                self.assertEqual(view['runs'][0]['id'], 'never-observed@workshop')
+                self.assertEqual(view['runs'][0]['host'], 'workshop')
+                self.assertEqual(view['runs'][0]['state'], 'unreachable')
+                self.assertEqual(view['runs'][0]['reachability'], 'unreachable')
+
+    def test_recovered_newer_attempt_replaces_snapshot_without_regressing_terminal(self):
+        import fabric_hosts as hosts
+        with patch.dict(os.environ, self.env):
+            federation = hosts.lane_owner()
+            old = {'id': self.peer_run, 'run_id': self.peer_run, 'task_id': 'shared-task',
+                'attempt': 1, 'state': 'terminal', 'status': 'ok'}
+            recovered = {**old, 'attempt': 2, 'state': 'running', 'status': 'running', 'session': 'named session'}
+            def pending(identifier):
+                with federation.database() as database:
+                    database.execute('INSERT INTO pending VALUES (?,?,?,?,?)', (identifier, 'Repos/project', 'workshop',
+                        'resume', json.dumps({'resume': self.peer_run, 'operation_id': identifier})))
+            def response(verb, params, **kwargs):
+                return hosts.envelope({'status': 'ok', 'runs': [recovered if verb == 'operation' else old]})
+            pending('new-attempt')
+            with patch.object(federation, 'worker', return_value={'status': 'ok', 'runs': []}), \
+                    patch.object(hosts.PeerClient, 'call', side_effect=response):
+                view = federation.reads('status', 'Repos/project', {'ids': ['shared-task@workshop']})
+            self.assertEqual(view['runs'][0]['attempt'], 2)
+            with patch.object(federation, 'worker', return_value={'status': 'ok', 'runs': []}), \
+                    patch.object(hosts.PeerClient, 'call', return_value=hosts.envelope(error=hosts.HostError('unreachable', 'offline'))):
+                stale = federation.reads('status', 'Repos/project', {'ids': ['shared-task@workshop']})
+            self.assertEqual(stale['runs'][0]['attempt'], 2)
+            self.assertEqual(stale['runs'][0]['last_known_state'], 'running')
+            self.assertEqual(stale['runs'][0]['session'], 'named session@workshop')
+            # A cached launch response for the same attempt cannot overwrite a
+            # full read that has already observed its terminal outcome.
+            old.update(attempt=2)
+            pending('same-attempt')
+            with patch.object(federation, 'worker', return_value={'status': 'ok', 'runs': []}), \
+                    patch.object(hosts.PeerClient, 'call', side_effect=response):
+                final = federation.reads('status', 'Repos/project', {'ids': ['shared-task@workshop']})
+            self.assertEqual(final['runs'][0]['state'], 'terminal')
+
+    def test_unrecognised_bare_control_selector_reaches_local_owner(self):
+        import fabric_hosts as hosts
+        with patch.dict(os.environ, self.env):
+            federation = hosts.lane_owner()
+            with patch.object(federation, 'reads', side_effect=hosts.HostError('selector_not_found', 'no matching row')):
+                result = federation.client_call('cancel', str(self.workspace), {'id': '.agent-run/runs/relative-run'})
+            self.assertTrue(result['local'])
+            self.assertEqual(result['input']['id'], '.agent-run/runs/relative-run')
+
+    def test_missing_resume_handoff_and_session_operations_never_replay(self):
+        import fabric_hosts as hosts
+        with patch.dict(os.environ, self.env):
+            federation = hosts.lane_owner()
+            for verb, payload in [('resume', {'resume': self.peer_run}), ('handoff', {'handoff': self.peer_run}),
+                    ('dispatch', {'session': 'named session', 'prompt': 'continue'})]:
+                identifier = f'lost-{verb}'
+                with federation.database() as database:
+                    database.execute('INSERT INTO pending VALUES (?,?,?,?,?)',
+                        (identifier, 'Repos/project', 'workshop', verb, json.dumps(payload)))
+            def response(verb, params, **kwargs):
+                return hosts.envelope({'status': 'operation_missing' if verb == 'operation' else 'ok', 'runs': []})
+            with patch.object(federation, 'worker', return_value={'status': 'ok', 'runs': []}), \
+                    patch.object(hosts.PeerClient, 'call', side_effect=response) as peer:
+                view = federation.reads('lanes', 'Repos/project', {})
+            self.assertTrue(all(call.args[0] in {'lanes', 'operation'} for call in peer.call_args_list))
+            self.assertEqual({row.get('error') for row in view['runs']}, {'resume_not_sent', 'handoff_not_sent', 'dispatch_not_sent'})
+
+    def fixture_product(self):
+        """Reuse existing owner fixtures, never dispatch a real provider."""
+        import shutil
+        product = self.root / 'product'
+        owners = product / 'skills/orchestrate/scripts'
+        helpers = product / 'scripts/lib'
+        owners.mkdir(parents=True)
+        helpers.mkdir(parents=True)
+        (product / 'config').mkdir()
+        for name in ['model-routing.json', 'adapter-compatibility.yaml']:
+            shutil.copyfile(ROOT / 'config' / name, product / 'config' / name)
+        shutil.copyfile(ROOT / 'scripts/lib/harness-python.sh', helpers / 'harness-python.sh')
+        fixture = ROOT / 'runtime/fabric/tests/v2-owner-fixture.mjs'
+        node = shutil.which('node')
+        for name in ['run_dir_init.sh', 'dispatch_run.py', 'run_controls.py']:
+            target = owners / name
+            if name.endswith('.sh'):
+                target.write_text('#!/bin/sh\nPROVENANT_FIXTURE_OWNER=' + shlex.quote(name)
+                    + ' exec ' + shlex.quote(node) + ' ' + shlex.quote(str(fixture)) + ' "$@"\n')
+            else:
+                if name == 'run_controls.py':
+                    target.write_text('#!' + sys.executable + '\nimport sys,json,time\nfrom pathlib import Path\n'
+                        + 'args=sys.argv[1:]\nroot=Path(args[args.index("--run-dir")+1])\n(root/"cancel").touch()\n'
+                        + 'deadline=time.monotonic()+5\n'
+                        + 'while time.monotonic()<deadline:\n'
+                        + ' rows=[json.loads(path.read_text()) for path in root.glob("tasks/*/attempt-*/attempt.json")]\n'
+                        + ' if rows and all(row["state"]=="terminal" for row in rows):sys.exit(0)\n'
+                        + ' time.sleep(.02)\nsys.exit(1)\n')
+                else:
+                    target.write_text('#!' + sys.executable + '\nimport os,sys\n'
+                        + 'os.environ["PROVENANT_FIXTURE_OWNER"]=' + repr(name) + '\n'
+                        + 'os.execv(' + repr(node) + ',[' + repr(node) + ',' + repr(str(fixture)) + ',*sys.argv[1:]])\n')
+            target.chmod(0o755)
+        self.ssh.write_text('#!' + sys.executable + '\nimport os,sys,subprocess,json\n'
+            + 'request=sys.stdin.buffer.read()\n'
+            + 'environment={**os.environ,"HOME":' + repr(str(self.peer_home))
+            + ',"AGENT_FABRIC_INSTANCE_ROOT":' + repr(str(self.peer_home / '.agents'))
+            + ',"AGENT_FABRIC_PRODUCT_ROOT":' + repr(str(product))
+            + ',"AGENT_FABRIC_STATE_DIRECTORY":' + repr(str(self.peer_home / 'state')) + '}\n'
+            + 'result=subprocess.run([' + repr(str(ROOT / 'scripts/fabric-hosts'))
+            + ',"peer"],input=request,capture_output=True,env=environment,cwd=environment["HOME"])\n'
+            + 'if json.loads(request)["verb"] == "dispatch" and os.path.exists(' + repr(str(self.root / 'drop')) + '): sys.exit(255)\n'
+            + 'sys.stdout.buffer.write(result.stdout)\nsys.stderr.buffer.write(result.stderr)\nsys.exit(result.returncode)\n')
+        return product
+
+    def test_lost_remote_launch_reconciles_once_and_owner_survives_peer_exit(self):
+        self.fixture_product()
+        (self.root / 'drop').touch()
+        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+            prompt='slow', task_id='detached', operation_id='once')
+        self.assertEqual(launched['status'], 'launch_unknown')
+        try:
+            view = self.lanes()
+            remote = [row for row in view['runs'] if row.get('task_id') == 'detached@workshop']
+            self.assertEqual(len(remote), 1, view)
+            self.assertTrue(remote[0]['pgid_alive'])
+            self.assertEqual(remote[0]['state'], 'running')
+            (self.root / 'drop').unlink()
+            repeated = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+                prompt='slow', task_id='detached', operation_id='once')
+            self.assertEqual(repeated['status'], 'running')
+            self.assertEqual(len([row for row in self.lanes()['runs'] if row.get('task_id') == 'detached@workshop']), 1)
+            cancelled = self.client('cancel', id='detached@workshop', operation_id='stop-once')
+            self.assertEqual(cancelled['runs'][0]['status'], 'cancelled', cancelled)
+        finally:
+            # Fixture cancellation is cooperative and runs on the owning host.
+            self.client('cancel', id='detached@workshop', operation_id='cleanup-stop')
+
+    def test_unreachable_wait_times_out_and_names_the_host(self):
+        self.lanes()
+        self.offline.touch()
+        result = subprocess.run([str(ROOT / 'scripts/provenant'), 'lanes', '--wait', '--all', '--timeout', '0', 'shared-task@workshop'],
+            cwd=self.workspace, env=self.env, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 124, result.stdout + result.stderr)
+        self.assertIn('unreachable hosts: workshop', result.stdout)
 
 
 @unittest.skipUnless(os.environ.get('PROVENANT_SSHD_TESTS') == '1' and Path('/usr/sbin/sshd').is_file(),

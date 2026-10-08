@@ -52,7 +52,7 @@ export function nativeFirst<T extends RouteInput>(task: T, identity: Identity): 
       return { task: current, warnings }; // expandPools reports it
     }
   }
-  if (current.adapter !== undefined || current.model !== undefined || usesPool(current)) return { task: current, warnings };
+  if (current.adapter !== undefined || current.model !== undefined || current.task_class !== undefined || usesPool(current)) return { task: current, warnings };
   const alias = current.alias === undefined ? "workhorse" : tierAlias(current.alias);
   if (alias === undefined) return { task: current, warnings };
   const { alias: _alias, ...rest } = current;

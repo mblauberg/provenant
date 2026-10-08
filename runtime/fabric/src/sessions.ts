@@ -7,7 +7,7 @@
 import { resolve } from "node:path";
 
 import { InputError, rejected, type DispatchInput } from "./execution-input.js";
-import { dispatchConfiguredProvider } from "./execution.js";
+import { dispatchConfiguredProvider, type LaunchObserver } from "./execution.js";
 import type { Identity } from "./identity.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
 import { runProcessAlive, statusRows } from "./run-registry.js";
@@ -155,7 +155,11 @@ export async function sessionDispatch(
   identity: Identity,
   store: Store,
   signal: AbortSignal,
+  observer: LaunchObserver = {},
 ): Promise<Record<string, any>> {
+  const { federatedLane } = await import("./hosts.js");
+  const remote = await federatedLane("dispatch", identity.cwd, input as Record<string, unknown>, signal);
+  if (remote) return remote;
   const { session, fresh, ...rest } = input;
   let name: string;
   try {
@@ -184,6 +188,7 @@ export async function sessionDispatch(
     attempt: prior?.attempt ?? undefined,
     // Record the run before its owner starts; if that fails, nothing launches.
     onLaunch: (launch: SessionLaunch) => {
+      observer.onLaunch?.(launch);
       try {
         store.bindSessionTurn(identity, name, claimed.claim, launch);
       } catch (error) {
@@ -194,12 +199,13 @@ export async function sessionDispatch(
     },
   };
   try {
+    const localEnv = { ...process.env, PROVENANT_HOST_LOCAL_ONLY: "1" };
     result = kind === "resume"
       ? await resumeConfiguredProvider({ ...rest, resume: prior!.runId!, task_id: prior!.taskId! }, identity, signal,
-        process.env, { ...pin, session: prior!.providerSessionId! })
+        localEnv, { ...pin, session: prior!.providerSessionId! })
       : kind === "fresh"
-        ? await handoffDispatch({ ...rest, handoff: prior!.runId!, task_id: prior!.taskId! }, identity, signal, process.env, pin)
-        : await dispatchConfiguredProvider(rest, identity, signal, process.env, pin);
+        ? await handoffDispatch({ ...rest, handoff: prior!.runId!, task_id: prior!.taskId! }, identity, signal, localEnv, pin)
+        : await dispatchConfiguredProvider(rest, identity, signal, localEnv, pin);
   } finally {
     // A recorded turn is settled from its run; one that recorded nothing ends here.
     if (!recorded) store.settleSessionTurn(identity, name, claimed.claim, "rejected");

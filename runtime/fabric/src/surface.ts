@@ -78,6 +78,7 @@ export function runView(value: Record<string, any>, detail = "brief"): Record<st
   if (detail === "full" || (value.status === "rejected" && !value.run_id)) return value;
   if (Array.isArray(value.runs)) return { ...value, runs: value.runs.map((row: Record<string, any>) => runView(row)) };
   const keys = ["schema", "id", "run_id", "task_id", "batch_id", "run_dir", "state", "status",
+    "host", "hosts", "reachability", "last_known_state", "last_known_status", "age_seconds", "observed_at", "operation_id", "placement_fallback",
     "attempt", "attempt_count", "digest", "paths", "cwd", "worktree", "mode", "applied",
     "provenance", "warnings", "notes", "reason", "question", "error", "fix", "retryable", "reset_at", "retry_after", "tasks"];
   return Object.fromEntries(keys.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]).concat(
