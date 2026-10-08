@@ -75,8 +75,9 @@ never signals a PID or writes terminal evidence. The live dispatch owner polls
 the marker during its bounded wait, stops its provider and tracked descendants
 across process groups and sessions, and writes the normal cancelled attempt.
 The owner snapshots ancestry about once per second and at termination, matching
-PID and start time before signalling even after a child is reparented. A unique
-provider-inherited marker covers a child reparented between snapshots. The same
+PID and start time before signalling even after an observed child is reparented.
+An inherited marker alone never authorises cleanup. Descendants outside the
+provider group receive individual PID signals, never signals to their whole group. The same
 cleanup runs on timeout, stall and normal exit. After observed provider exit,
 children get up to 1.5 seconds to close naturally; survivors appear in the
 attempt's `reaped` list and digest warning. A terminal event from a live CLI
@@ -88,21 +89,27 @@ Census failure warns but cannot prevent the root group kill or terminal record.
 A nested Fabric owner
 and its observed subtree are spared only when `PROVENANT_RUN_DIR/dispatch-owner.json`
 matches that process's PID, start time and `PROVENANT_RUN_TOKEN`. The owner must
-lead its own process group and have an observed non-spared parent, or retain the
-attempt marker after reparenting. A descendant with its
+lead its own process group and have an observed non-spared parent. A descendant with its
 own session and a valid owner record is spared as an independent containment
 boundary. If that owner ignores
 SIGTERM after its host dies, the next dispatch's orphan reap handles it. The
 provider's original group and the supervisor's group are never spared. Tracked
 children are rechecked before signalling to cover fork followed by exec. Once
 verified, the owner remains spared for the same PID and start time while alive,
-even if its record or environment becomes unreadable. A nonzero `spared` count
+even if its record or environment becomes unreadable. Code-mode hosts and their
+observed subtrees are always spared; if a host shares the provider group, that
+group is cleaned up by individual PID signals. A nonzero `spared` count
 is recorded. A missing owner
 yields bounded missing evidence; it never authorises a process-table search or
 inferred cancellation.
-On macOS, a child that clears the marker and reparents before the first snapshot
+A child that enters another session and reparents before its ancestry is observed
 cannot be attributed safely by this polling owner. On Linux the owner is a child
 subreaper only while an attempt runs, and restores its own setting afterwards.
+An unavailable or permission-denied host probe excludes orphan reaping; it does
+not establish host death. Unexpected signal deaths report `interrupted` with the
+signal. Matching `termination-request.json` telemetry records the controller
+source and requester, while the OS sender remains unknown. Spared processes
+do not replace the Git and disk instruction check with a tamper failure.
 An adopted orphan it cannot attribute to the attempt stays a zombie until the
 owner exits: reaping it blindly could collect another thread's child.
 

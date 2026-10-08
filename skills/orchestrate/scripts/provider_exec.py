@@ -1645,6 +1645,40 @@ def _pid_exists(pid):
     return True
 
 
+def _signal_name(signum):
+    try:
+        return signal.Signals(signum).name
+    except ValueError:
+        return f"SIG{signum}"  # Intermediate realtime signals have no enum member.
+
+
+def _termination_request(environment, process, exit_code, started_at, supervisor_signal=None):
+    """Optional controller telemetry; waitpid itself never exposes the sender."""
+    directory, token = environment.get("PROVENANT_RUN_DIR"), environment.get("PROVENANT_RUN_TOKEN")
+    signum = -exit_code if exit_code and exit_code < 0 else supervisor_signal
+    if not directory or not token or not process or not signum:
+        return {}
+    try:
+        path = Path(directory, "termination-request.json")
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                return {}
+            request = json.loads(stream.read(65537))
+        if (isinstance(request, dict) and request.get("run_token") == token
+                and request.get("provider_pid") == process.pid
+                and request.get("signal") == _signal_name(signum)
+                and request.get("source") in {"run_control", "orphan_reaper", "cancel_requested"}
+                and isinstance(request.get("requested_at"), str)
+                and started_at <= request["requested_at"] <= now()
+                and type(request.get("sender_pid")) is int and request["sender_pid"] > 1):
+            return {"termination_source": request["source"], "signal_requester_pid": request["sender_pid"],
+                    "signal_requested_at": request["requested_at"]}
+    except (OSError, ValueError):
+        pass
+    return {}
+
+
 def _is_nested_fabric_owner(row):
     try:
         values = {}
@@ -1687,21 +1721,12 @@ class _Descendants:
     def __init__(self, process, marker):
         self.process = process
         self.marker = marker
-        self.spawned_at = time.time() - 1
-        self.spawned_ticks = None
-        if sys.platform.startswith("linux"):
-            try:
-                ticks_per_second = os.sysconf("SC_CLK_TCK")
-                uptime = float(Path("/proc/uptime").read_text().split()[0])
-                self.spawned_ticks = int((uptime - 1) * ticks_per_second)
-            except (OSError, ValueError):
-                pass
         self.root = None
         self.tracked = {}
         self.spared = {}
         self.verified_owners = set()
+        self.shared_hosts = set()
         self.parents = {}
-        self.orphan_candidates = set()
         self.spared_at_stop = set()
         self.snapshot_unavailable = False
 
@@ -1747,20 +1772,9 @@ class _Descendants:
                 self.parents[identity] = rows[row.ppid].identity
                 self.tracked[identity] = row
             parents.update(newly)
-        if include_reparented:
-            for row in rows.values():
-                if (row.ppid not in {1, os.getpid()} or row.pid == self.process.pid
-                    or row.identity in self.tracked or row.identity in self.spared or row.zombie):
-                    continue
-                if sys.platform == "darwin" and float(row.started) < self.spawned_at:
-                    continue
-                if sys.platform.startswith("linux") and (
-                    self.spawned_ticks is None or int(row.started) < self.spawned_ticks
-                ):
-                    continue
-                if _has_attempt_marker(row.pid, self.marker):
-                    self.tracked[row.identity] = row
-                    self.orphan_candidates.add(row.identity)
+        # Inherited environment is not ancestry: a shared code-mode host can
+        # retain a lane's marker after reparenting and serve sibling lanes.
+        # Only identities observed below our root remain cleanup targets.
         self._refresh_spared(rows)
         return rows
 
@@ -1775,17 +1789,24 @@ class _Descendants:
                 return row.identity == identity and not row.zombie
             return _pid_exists(identity[0])
 
-        spared = {identity for identity in self.verified_owners if held(identity)}
+        # A code-mode host may have been spawned here and later serve sibling
+        # lanes. Its ancestry never grants this attempt exclusive custody.
+        # Linux's comm field truncates the same executable name to 15 bytes.
+        self.shared_hosts.update(
+            identity for identity in observed
+            if (row := rows.get(identity[0])) is not None and row.identity == identity
+            and row.command in {"codex-code-mode-host", "codex-code-mode"}
+        )
+        spared = {identity for identity in self.verified_owners | self.shared_hosts if held(identity)}
         own_groups = {self.process.pid, os.getpgrp()}
         for identity in observed:
-            if identity in self.verified_owners:
+            if identity in self.verified_owners or identity in self.shared_hosts:
                 continue
             row = rows.get(identity[0])
             parent = self.parents.get(identity)
             if (row is not None and row.identity == identity and not row.zombie
                     and row.pgid not in own_groups
-                    and (identity in self.orphan_candidates
-                         or (parent is not None and (parent == self.root or parent in observed)))
+                    and parent is not None and (parent == self.root or parent in observed)
                     and parent not in self.spared):
                 if _is_nested_fabric_owner(row):
                     self.verified_owners.add(identity)
@@ -1833,15 +1854,21 @@ class _Descendants:
             row.pgid for row in self.live_spared(rows).values()
         } | {identity[0] for identity in self.spared if identity in self.verified_owners}
         spared_groups -= {self.process.pid, os.getpgrp()}
+        # A shared host inside the original group requires PID-only cleanup,
+        # including the provider itself, so even that group cannot hit the host.
+        if self.shared_hosts.intersection(self.spared):
+            # A host can change groups between censuses. With a shared host
+            # still held, use PID-only cleanup even after a partial census.
+            spared_groups.add(self.process.pid)
         if not root_group:
             live.pop(self.root, None)
-        groups = {
-            row.pgid for row in live.values()
-            if row.pgid > 0 and row.pgid != os.getpgrp()
-            and row.pgid not in spared_groups
-            and (root_group or row.pgid != self.process.pid)
-        }
-        if root_group:
+        # A descendant can join a shared or sibling process group. Its ancestry
+        # authorises its PID, never every member of that other group.
+        groups = set()
+        root = rows.get(self.process.pid)
+        if (root_group and self.process.pid != os.getpgrp()
+                and self.process.pid not in spared_groups
+                and (root is None or self.root is None or root.identity == self.root)):
             groups.add(self.process.pid)  # The original group may outlive its leader.
         signalled_groups = set()
         for pgid in groups:
@@ -2599,7 +2626,8 @@ def execute(
     output_path = Path(output_path)
     events_path = Path(events_path or output_path.parent / "events.jsonl")
     stderr_path = Path(stderr_path or output_path.parent / "stderr.log")
-    environment = dict(os.environ if env is None else env)
+    control_environment = dict(os.environ if env is None else env)
+    environment = dict(control_environment)
     for key in list(environment):
         if (key == "AGENT_FABRIC_STATE_DIRECTORY" and plan["adapter"] == "codex"
                 and plan["mode"] == "worktree_write"):
@@ -2715,7 +2743,8 @@ def execute(
     subreaper = False
     reaped = []
     stopped = False
-    forced, terminal_at, cancel_signal = None, None, False
+    forced, terminal_at, cancel_signal = None, None, None
+    provider_exit_before_cleanup = None
     terminal_grace_break = False
     pending = b""
     dropping_line = False
@@ -2796,7 +2825,7 @@ def execute(
 
     def handle_signal(signum, frame):
         nonlocal cancel_signal
-        cancel_signal = True
+        cancel_signal = signum
 
     if threading.current_thread() is threading.main_thread():
         old_handlers = {
@@ -2897,10 +2926,14 @@ def execute(
                 if exited and not selector.get_map():
                     break
                 if exited and not stopped:
+                    provider_exit_before_cleanup = process.returncode
                     reaped.extend(descendants.stop(normal=True))  # descendants may hold output pipes
                     stopped = True
-                if cancel_signal or (cancelled and cancelled()):
+                if cancelled and cancelled():
                     forced = "cancelled"
+                    break
+                if cancel_signal:
+                    forced = "interrupted"
                     break
                 if (
                     terminal_at is not None
@@ -2960,6 +2993,7 @@ def execute(
             if process:
                 if descendants and not stopped:
                     exited_at_stop = process.poll() is not None
+                    provider_exit_before_cleanup = process.returncode if exited_at_stop else None
                     reaped.extend(descendants.stop(
                         normal=exited_at_stop,
                         terminal_grace=terminal_grace_break and not exited_at_stop,
@@ -2988,6 +3022,9 @@ def execute(
             if subreaper:
                 _release_subreaper()
     exit_code = process.returncode if process else None
+    if cancel_signal and not forced:
+        forced = "interrupted"  # EOF can precede the loop's signal check.
+    termination_request = _termination_request(control_environment, process, exit_code, started_at, cancel_signal)
     if pending:
         consume(b"\n")
     if forced == "stalled":
@@ -3012,7 +3049,7 @@ def execute(
         stdout,
         stderr,
         0
-        if terminal_at is not None
+        if terminal_grace_break and terminal_at is not None
         and not forced
         and exit_code is not None
         and exit_code < 0
@@ -3025,7 +3062,7 @@ def execute(
         if terminal_text is not None or text_chunks:
             text = terminal_text if terminal_text is not None else b"\n".join(text_chunks).decode(errors="replace")
             recovered = parse_output(plan["adapter"], json.dumps({"type": "result", "result": text}), stderr,
-                                     0 if terminal_at is not None and exit_code is not None and exit_code < 0 else (exit_code or 0))
+                                     0 if terminal_grace_break and terminal_at is not None and exit_code is not None and exit_code < 0 else (exit_code or 0))
             for key in ("text", "status", "question", "signature", "excerpt"):
                 parsed[key] = recovered[key]
         failures = dict(semantic_failures)
@@ -3042,7 +3079,17 @@ def execute(
             "startup_timeout": "startup_watchdog",
             "timed_out": "wall_clock",
             "cancelled": "cancel_requested",
+            "interrupted": "supervisor_signal",
         }.get(forced, parsed["signature"])
+    elif provider_exit_before_cleanup is not None and provider_exit_before_cleanup < 0:
+        parsed["status"] = "interrupted"
+        parsed["signature"] = "provider_signal"
+        source = termination_request.get("termination_source", "sender unknown")
+        parsed["excerpt"] = f"provider terminated by {_signal_name(-provider_exit_before_cleanup)}; {source}"
+    if (termination_request.get("termination_source") == "cancel_requested"
+            and parsed["status"] == "interrupted"):
+        parsed["status"] = "cancelled"
+        parsed["signature"] = "cancel_requested"
     if plan.get("cooldown_blocked"):
         parsed["reset_at"] = plan["cooldown_blocked"]["cooling_until"]
         parsed["signature"] = "cooldown_active"
@@ -3138,13 +3185,14 @@ def execute(
         try:
             if isinstance(instruction_start, Exception):
                 raise instruction_start
-            if descendants and descendants.spared_at_stop:
-                # A lane process still running could change .agents during or after the check.
-                raise ValueError("lane processes were left running")
             instruction_changes = authored_instruction_changes(plan["cwd"], instruction_start)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             instruction_changes = [f"{INSTRUCTION_DIR} (unverifiable: {exc})"]
-    instruction_policy = plan.get("instruction_policy", "quarantine")
+    # A signal death must retain actual instruction edits as failures rather
+    # than repairing a partial attempt and disguising its changed instructions.
+    instruction_policy = ("deny" if status == "interrupted" or
+                          (status == "cancelled" and termination_request)
+                          else plan.get("instruction_policy", "quarantine"))
     # Unverifiable states, special files and conflicts stay hard failures under any policy.
     if instruction_changes and instruction_policy == "allow" and quarantinable(instruction_changes):
         warnings.append("lane changed " + INSTRUCTION_DIR + "/ (allowed by policy): " + ", ".join(instruction_changes))
@@ -3305,6 +3353,18 @@ def execute(
         "evidence": {
             "exit": exit_code,
             "signal": -exit_code if exit_code and exit_code < 0 else None,
+            "signal_name": _signal_name(-exit_code) if exit_code and exit_code < 0 else None,
+            "termination_source": (
+                "external_signal" if provider_exit_before_cleanup is not None and provider_exit_before_cleanup < 0
+                else "supervisor_signal" if cancel_signal
+                else forced if forced
+                else "terminal_grace" if terminal_grace_break
+                else "provider_exit"
+            ),
+            "signal_sender_pid": None,  # waitpid exposes the signal, not its sender.
+            "signal_requester_pid": None,
+            "supervisor_signal": cancel_signal,
+            **termination_request,
             "signature": parsed["signature"],
             "excerpt": parsed["excerpt"][:200],
         },

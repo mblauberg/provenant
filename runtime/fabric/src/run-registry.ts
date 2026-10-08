@@ -7,12 +7,9 @@
  * and enough identity to tell that pid apart from a recycled one. Everything
  * here reads and acts on that record, from any process, with no daemon.
  *
- * Known bound: a signal to a process group cannot reach a descendant that
- * called setsid() for itself. skills/_shared/bounded_process.py documents the
- * same limit. The provider record narrows it — dispatch_run.py records the
- * provider's own group after spawning it — but a provider that starts a third
- * session of its own is beyond any group signal, and this module does not
- * pretend otherwise.
+ * Controllers signal only identity-verified owner and provider PIDs. A live
+ * owner handles its descendants. When an owner cannot finish cleanup, these
+ * records do not authorise a broader group kill that could hit a shared host.
  */
 import { runRoot, withoutGitRedirects } from "./identity.js";
 import { federatedLane } from "./hosts.js";
@@ -223,7 +220,7 @@ export function listRecordedRuns(workspace: string): RecordedRun[] {
     // whose unknown start time is not evidence of death either.
     const hostAlive = record.host_pid === record.owner_pid
       ? observedAlive(record.owner_pid, record.owner_started_at)
-      : record.host_started_at !== null && observedAlive(record.host_pid, record.host_started_at);
+      : observedAlive(record.host_pid, record.host_started_at);
     runs.push({
       ...record,
       run_id: shortRunId(runDir),
@@ -241,35 +238,37 @@ export function findRecordedRun(workspace: string, reference: string): RecordedR
   return runs.find((run) => run.run_id === reference) ?? runs.find((run) => real(run.run_dir) === real(reference));
 }
 
-/**
- * Signal a whole process group, never a bare recorded pid. The group leader is
- * verified first, so a recycled pid is left alone, and this process's own group
- * is never a target.
- */
-export function signalRunGroup(pid: number, pgid: number, startedAt: string | null, signal: NodeJS.Signals): boolean {
-  if (!processMatches(pid, startedAt)) return false;
-  if (!positiveInteger(pgid) || pgid === process.pid) return false;
+/** Signal only the recorded process; its owner handles descendant cleanup. */
+export function signalRecordedProcess(pid: number, pgid: number, startedAt: string | null,
+  signal: NodeJS.Signals): boolean {
+  if (!processMatches(pid, startedAt) || pid === process.pid || !positiveInteger(pgid)) return false;
   try {
-    process.kill(-pgid, signal);
+    const [actualGroup, ...command] = psOutput(["-o", "pgid=,comm=", "-p", String(pid)]).trim().split(/\s+/u);
+    const comm = basename(command.join(" "));
+    if (Number(actualGroup) !== pgid || !comm || comm === "?" ||
+        ["codex-code-mode-host", "codex-code-mode"].includes(comm)) return false;
+    process.kill(pid, signal);
     return true;
-  } catch {
-    // A group that has already collapsed to its leader still answers directly.
-    try {
-      process.kill(pid, signal);
-      return true;
-    } catch {
-      return false;
-    }
-  }
+  } catch { return false; }
 }
 
-/** Both groups a run can hold: the owner's, and the provider's own session. */
-export function signalRecordedRun(run: RecordedRun, signal: NodeJS.Signals): boolean {
-  const owner = signalRunGroup(run.owner_pid, run.owner_pgid, run.owner_started_at, signal);
+/** The owner cleans its descendants; controller signals never widen to a provider's group. */
+export function signalRecordedRun(run: RecordedRun, signal: NodeJS.Signals, source = "run_control"): boolean {
+  // Publish before signalling so the provider can retain the controller's reason
+  // even when its owner is terminated in the same operation.
+  const path = join(run.run_dir, "termination-request.json");
+  const temporary = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temporary, JSON.stringify({ run_token: run.run_token, signal, source,
+      sender_pid: process.pid, requested_at: new Date().toISOString(),
+      provider_pid: run.provider?.provider_pid ?? null }) + "\n", { mode: 0o600, flag: "wx" });
+    renameSync(temporary, path);
+  } catch { /* Missing telemetry must not widen signalling authority. */ }
+  const owner = signalRecordedProcess(run.owner_pid, run.owner_pgid, run.owner_started_at, signal);
   const provider =
     run.provider === null
       ? false
-      : signalRunGroup(run.provider.provider_pid, run.provider.provider_pgid, run.provider.provider_started_at, signal);
+      : signalRecordedProcess(run.provider.provider_pid, run.provider.provider_pgid, run.provider.provider_started_at, signal);
   return owner || provider;
 }
 
@@ -315,16 +314,17 @@ export async function terminateRecordedRun(
   run: RecordedRun,
   escalationMs = ESCALATION_MS,
   terminalStatus: "interrupted" | "cancelled" = "interrupted",
+  source = terminalStatus === "cancelled" ? "cancel_requested" : "run_control",
 ): Promise<TerminationOutcome> {
   if (!runStillAlive(run)) {
     closeStoppedRun(run.run_dir, terminalStatus);
     return { run_dir: run.run_dir, signalled: false, escalated: false, reason: "not running" };
   }
-  const signalled = signalRecordedRun(run, "SIGTERM");
+  const signalled = signalRecordedRun(run, "SIGTERM", source);
   await waitForRunStop(run, escalationMs);
   let escalated = false;
   if (runStillAlive(run)) {
-    escalated = signalRecordedRun(run, "SIGKILL");
+    escalated = signalRecordedRun(run, "SIGKILL", source);
     await waitForRunStop(run, STOP_CONFIRMATION_MS);
   }
   if (runStillAlive(run)) {
@@ -380,7 +380,7 @@ export async function reapOrphanedRuns(workspace: string): Promise<TerminationOu
   });
   return await Promise.all(
     orphans.map(async (run) => {
-      const outcome = await terminateRecordedRun(run);
+      const outcome = await terminateRecordedRun(run, ESCALATION_MS, "interrupted", "orphan_reaper");
       return outcome.reason === "still running" ? outcome : { ...outcome, reason: "host gone" };
     }),
   );
@@ -494,8 +494,10 @@ export function observedAlive(pid: number, startedAt: string | null): boolean {
   if (!positiveInteger(pid)) return false;
   try {
     process.kill(pid, 0);
-  } catch {
-    return false;
+  } catch (error) {
+    // A sandbox can deny kill(pid, 0) for a live host. Only ESRCH proves
+    // absence; EPERM/EACCES and other unavailable probes exclude reaping.
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
   if (startedAt === null) return true;
   const observed = processStartedAt(pid);
