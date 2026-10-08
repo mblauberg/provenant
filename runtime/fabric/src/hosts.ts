@@ -23,7 +23,7 @@ export async function fabricHosts(action: "list" | "doctor", hosts: string[], cw
     const decoder = new StringDecoder("utf8");
     let stderrTail = Buffer.alloc(0);
     const stop = (code: string) => {
-      error = code;
+      if (error === undefined) error = code;
       terminate(child);
     };
     const abort = () => stop("hosts_cancelled");

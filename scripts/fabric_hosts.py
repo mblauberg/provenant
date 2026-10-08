@@ -21,11 +21,29 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 PRODUCT_ROOT = Path(__file__).resolve().parents[1]
-for _product_path in (PRODUCT_ROOT / 'scripts', PRODUCT_ROOT / 'skills',
-                      PRODUCT_ROOT / 'skills/orchestrate/scripts'):
-    if str(_product_path) not in sys.path:
-        sys.path.insert(0, str(_product_path))
-from _shared.bounded_process import stop_process_group
+
+
+def _load_module(name, path, *, package=False):
+    """Load a product helper by file path without changing import roots."""
+    module = sys.modules.get(name)
+    if module is not None:
+        return module
+    spec = importlib.util.spec_from_file_location(
+        name,
+        path,
+        submodule_search_locations=[str(Path(path).parent)] if package else None,
+    )
+    if spec is None or spec.loader is None:
+        raise ModuleNotFoundError(f'Product helper is missing: {path}')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+stop_process_group = _load_module(
+    'provenant_bounded_process', PRODUCT_ROOT / 'skills/_shared/bounded_process.py'
+).stop_process_group
 
 PROTOCOL_VERSION = 1
 MAX_REQUEST_BYTES = 65_536
@@ -403,7 +421,9 @@ def lane_socket_paths(project):
 
 def signin_status(adapter, executable):
     """Probe only local CLI status. Never read/return credentials or launch a model."""
-    from _shared.bounded_process import run_bounded
+    run_bounded = _load_module(
+        'provenant_bounded_process', PRODUCT_ROOT / 'skills/_shared/bounded_process.py'
+    ).run_bounded
     if CANCELLED.is_set():
         return {'status': 'unknown', 'reason': 'check_cancelled'}
     if executable is None:
@@ -456,8 +476,13 @@ def signin_status(adapter, executable):
     return {'status': 'unknown', 'reason': 'status_not_proven'}
 
 def adapter_doctor(name, project):
-    from adapters import profile
-    from provider_exec import build_plan
+    adapters = _load_module(
+        'adapters', PRODUCT_ROOT / 'skills/orchestrate/scripts/adapters/__init__.py', package=True
+    )
+    profile = adapters.profile
+    build_plan = _load_module(
+        'provenant_provider_exec', PRODUCT_ROOT / 'skills/orchestrate/scripts/provider_exec.py'
+    ).build_plan
     try:
         adapter = profile(name)
     except ValueError:
@@ -475,8 +500,9 @@ def adapter_doctor(name, project):
     return {'executable': executable, 'signin': signin_status(name, executable), 'confinement': confinement}
 
 def doctor(project_path=None):
-    sys.path.insert(0, str(PRODUCT_ROOT / 'skills/orchestrate/scripts'))
-    from model_route import catalogue_snapshot
+    catalogue_snapshot = _load_module(
+        'provenant_model_route', PRODUCT_ROOT / 'scripts/model_route.py'
+    ).catalogue_snapshot
     result = hello()
     if project_path is None:
         project_path = project_identity()
@@ -486,6 +512,14 @@ def doctor(project_path=None):
         configured = catalogue_snapshot()['adapters']
     except (OSError, ValueError, KeyError):
         raise HostError('doctor_unavailable', 'Cannot load adapter catalogue') from None
+    # Resolve shared helpers before the probe workers start. Module loading is
+    # process-global, while the checks below run concurrently.
+    _load_module(
+        'adapters', PRODUCT_ROOT / 'skills/orchestrate/scripts/adapters/__init__.py', package=True
+    )
+    _load_module(
+        'provenant_provider_exec', PRODUCT_ROOT / 'skills/orchestrate/scripts/provider_exec.py'
+    )
     # A status probe runs in parallel and has its own two-second bound. The OS
     # confinement probe is cached by its existing owner, and never launches a lane.
     with ThreadPoolExecutor(max_workers=max(1, min(len(configured), 8))) as executor:

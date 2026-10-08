@@ -15,7 +15,6 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY_ROOT = ROOT.parent.parent
-sys.path.insert(0, str(ROOT / 'scripts'))
 
 
 @contextmanager
@@ -102,8 +101,9 @@ class DoctorContracts(unittest.TestCase):
 
     def test_keychain_failures_and_confinement_probe_timeouts_are_per_adapter_unknown(self):
         import fabric_hosts as hosts
-        sys.path.insert(0, str(ROOT / 'skills/orchestrate/scripts'))
-        import provider_exec
+        provider_exec = hosts._load_module(
+            'provenant_provider_exec', ROOT / 'skills/orchestrate/scripts/provider_exec.py'
+        )
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             for binary in ['sandbox-exec', 'kiro-cli', 'claude']:
@@ -440,11 +440,13 @@ class ClientContracts(unittest.TestCase):
     def test_product_import_paths_do_not_depend_on_cwd_or_argv0(self):
         script = (
             'import importlib.util, sys; '
+            'original_path = list(sys.path); '
             f'f=importlib.util.spec_from_file_location("fabric_hosts", {str(ROOT / "scripts/fabric_hosts.py")!r}); '
             'm=importlib.util.module_from_spec(f); sys.modules["fabric_hosts"]=m; f.loader.exec_module(m); '
-            'import model_route, adapters; '
-            'assert str(m.PRODUCT_ROOT / "scripts") in sys.path; '
-            'assert str(m.PRODUCT_ROOT / "skills/orchestrate/scripts") in sys.path'
+            'assert sys.path == original_path; '
+            'm._load_module("provenant_model_route", m.PRODUCT_ROOT / "scripts/model_route.py"); '
+            'm._load_module("adapters", m.PRODUCT_ROOT / "skills/orchestrate/scripts/adapters/__init__.py", package=True); '
+            'assert sys.path == original_path'
         )
         with tempfile.TemporaryDirectory() as directory:
             result = subprocess.run([sys.executable, '-c', script], cwd=directory,
