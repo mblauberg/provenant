@@ -636,6 +636,13 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertEqual(status['status'], 'ok')
         self.assertEqual(status['runs'][0]['reachability'], 'reachable')
 
+    def test_state_filter_applies_after_selector_identity_and_ambiguity(self):
+        selected = self.client('lanes', ids=['shared-task@workshop'], state='active')
+        self.assertEqual(selected['status'], 'ok')
+        self.assertEqual(selected['runs'], [])
+        ambiguous = self.client('lanes', ids=['shared-task'], state='active')
+        self.assertEqual(ambiguous['error'], 'ambiguous_selector')
+
     def test_outage_preserves_snapshot_and_success_replaces_it(self):
         self.lanes()
         self.offline.touch()
@@ -674,6 +681,89 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertFalse(any(row['host'] == 'workshop' for row in self.lanes()['runs']))
         self.assertEqual(self.lanes('shared-task@workshop')['runs'][0]['state'], 'terminal')
         self.assertEqual(self.client('status', ids=['shared-task@workshop'])['runs'][0]['state'], 'terminal')
+
+    def test_selector_reads_do_not_transfer_unrelated_large_history(self):
+        for index in range(40):
+            self.terminal(self.peer_workspace, f'history-{index}', f'history-{index}')
+        for path in self.peer_workspace.glob('.agent-run/runs/*history-*/tasks/*/attempt-001/attempt.json'):
+            row = json.loads(path.read_text())
+            row['digest'] = 'unrelated retained history ' * 2000
+            path.write_text(json.dumps(row))
+        selected = self.client('status', ids=['shared-task@workshop'], detail='full')
+        self.assertEqual(selected['runs'][0]['reachability'], 'reachable')
+        self.assertEqual(selected['runs'][0]['task_id'], 'shared-task@workshop')
+        self.assertLess(len(json.dumps(selected)), 20000)
+        self.terminal(self.workspace, 'local-only', 'local-only')
+        self.terminal(self.peer_workspace, 'peer-only', 'peer-only')
+        # A miss on one owner must not suppress another selector on that owner.
+        mixed = self.client('status', ids=['local-only', 'peer-only@workshop', 'shared-task@workshop'])
+        self.assertEqual({row['task_id'] for row in mixed['runs']},
+            {'local-only@laptop', 'peer-only@workshop', 'shared-task@workshop'})
+
+    def test_selector_observation_preserves_other_snapshot_ages(self):
+        import fabric_hosts as hosts
+        old = {'id': 'mcp-older', 'run_id': 'mcp-older', 'task_id': 'older',
+            'attempt': 1, 'state': 'terminal', 'status': 'ok'}
+        new = {**old, 'id': 'mcp-newer', 'run_id': 'mcp-newer', 'task_id': 'newer'}
+        with patch.dict(os.environ, self.env):
+            federation = hosts.lane_owner()
+            with patch.object(federation, 'worker', return_value={'status': 'ok', 'runs': []}), \
+                    patch.object(hosts.PeerClient, 'call', return_value=hosts.envelope({'status': 'ok', 'runs': [old, new]})), \
+                    patch('time.time', return_value=100):
+                federation.reads('lanes', 'Repos/project', {})
+            with patch.object(hosts.PeerClient, 'call', return_value=hosts.envelope({'status': 'ok', 'runs': [new]})), \
+                    patch('time.time', return_value=200):
+                federation.reads('lanes', 'Repos/project', {'ids': ['newer@workshop']})
+            with patch.object(hosts.PeerClient, 'call', return_value=hosts.envelope(error=hosts.HostError('unreachable', 'offline'))), \
+                    patch('time.time', return_value=300):
+                stale = federation.reads('lanes', 'Repos/project', {'ids': ['older@workshop', 'newer@workshop']})
+            ages = {row['task_id']: row['age_seconds'] for row in stale['runs']}
+            self.assertEqual(ages, {'older@workshop': 200, 'newer@workshop': 100})
+
+    def test_reachable_owner_read_failure_preserves_typed_error_and_snapshot(self):
+        import fabric_hosts as hosts
+        row = {'id': self.peer_run, 'run_id': self.peer_run, 'task_id': 'shared-task',
+            'attempt': 1, 'state': 'terminal', 'status': 'ok'}
+        with patch.dict(os.environ, self.env):
+            federation = hosts.lane_owner()
+            with patch.object(hosts.PeerClient, 'call', return_value=hosts.envelope({'status': 'ok', 'runs': [row]})):
+                federation.reads('status', 'Repos/project', {'ids': ['shared-task@workshop']})
+            failed = {'reachability': 'reachable', **hosts.envelope(error=hosts.HostError('lane_owner_failed', 'bounded owner response'))}
+            with patch.object(hosts.PeerClient, 'call', return_value=failed):
+                view = federation.reads('status', 'Repos/project', {'ids': ['shared-task@workshop', 'not-cached@workshop']})
+            self.assertEqual(view['hosts'][0]['reachability'], 'reachable')
+            self.assertEqual(len(view['runs']), 2)
+            for result in view['runs']:
+                self.assertEqual(result['state'], 'read_error')
+                self.assertEqual(result['reachability'], 'reachable')
+                self.assertEqual(result['error']['code'], 'lane_owner_failed')
+                self.assertIn('lane_owner_failed', result['digest'])
+            self.assertEqual(view['runs'][0]['last_known_state'], 'terminal')
+
+    def test_pending_default_launch_cannot_fall_back_when_retried_offline(self):
+        import fabric_hosts as hosts
+        with patch.dict(os.environ, self.env):
+            federation = hosts.lane_owner()
+            request = {'prompt': 'fixture only', 'operation_id': 'pending-default'}
+            def sent(action, params=None, **kwargs):
+                return hosts.envelope({'status': 'ok'}) if action == 'hello' else hosts.envelope(error=hosts.HostError('timeout', 'response lost'))
+            with patch.object(hosts.PeerClient, 'call', side_effect=sent):
+                first = federation.client_call('dispatch', str(self.workspace), request)
+            self.assertEqual(first['state'], 'launch_unknown')
+            offline = {'reachability': 'unreachable', **hosts.envelope(error=hosts.HostError('unreachable', 'offline'))}
+            with patch.object(hosts.PeerClient, 'call', return_value=offline):
+                retried = federation.client_call('dispatch', str(self.workspace), request)
+            self.assertEqual(retried.get('state'), 'launch_unknown')
+            self.assertNotIn('local', retried)
+            config_path = self.local_home / '.agents/.agent-fabric/hosts.json'
+            config = json.loads(config_path.read_text())
+            for peers in [config['peers'], {}]:
+                config['peers'] = peers
+                config['projects']['Repos/project']['default_host'] = 'laptop'
+                config_path.write_text(json.dumps(config))
+                with self.assertRaises(hosts.HostError) as raised:
+                    hosts.lane_owner().client_call('dispatch', str(self.workspace), request)
+                self.assertEqual(raised.exception.code, 'operation_conflict')
 
     def test_routed_output_is_bounded_and_continues(self):
         first = self.client('output', id='shared-task@workshop', max_bytes=17)
@@ -892,6 +982,126 @@ class LaneLoopbackContracts(unittest.TestCase):
                 view = federation.reads('lanes', 'Repos/project', {})
             self.assertTrue(all(call.args[0] in {'lanes', 'operation'} for call in peer.call_args_list))
             self.assertEqual({row.get('error') for row in view['runs']}, {'resume_not_sent', 'handoff_not_sent', 'dispatch_not_sent'})
+
+    def test_default_views_sort_globally_and_keep_unknown_hosts_visible(self):
+        import fabric_hosts as hosts
+        local = [{'id': f'mcp-local-{index}', 'run_id': f'mcp-local-{index}',
+            'task_id': f'local-{index}', 'attempt': 1, 'state': 'terminal', 'status': 'ok',
+            'started_at': '2026-10-07T00:00:00Z'} for index in range(20)]
+        remote = {'id': 'mcp-newest-peer', 'run_id': 'mcp-newest-peer', 'task_id': 'newest-peer',
+            'attempt': 1, 'state': 'terminal', 'status': 'ok', 'started_at': '2026-10-08T00:00:00Z'}
+        with patch.dict(os.environ, self.env):
+            federation = hosts.lane_owner()
+            with patch.object(federation, 'worker', return_value={'status': 'ok', 'runs': local}), \
+                    patch.object(hosts.PeerClient, 'call', return_value=hosts.envelope({'status': 'ok', 'runs': [remote]})):
+                view = federation.reads('lanes', 'Repos/project', {})
+            self.assertEqual(len(view['runs']), 20)
+            self.assertEqual(view['runs'][0]['id'], 'mcp-newest-peer@workshop')
+            self.assertEqual(view['omitted'], 1)
+            with federation.database() as database:
+                database.execute('INSERT INTO pending VALUES (?,?,?,?,?)',
+                    ('visibility-unknown', 'Repos/project', 'workshop', 'dispatch',
+                        json.dumps({'operation_id': 'visibility-unknown', 'prompt': 'fixture only'})))
+            with patch.object(federation, 'worker', return_value={'status': 'ok', 'runs': local}), \
+                    patch.object(hosts.PeerClient, 'call', return_value=hosts.envelope(
+                        error=hosts.HostError('unreachable', 'fixture offline'))):
+                offline = federation.reads('lanes', 'Repos/project', {})
+            # A full local window cannot conceal loss of peer reachability or
+            # a mutation whose owning launch outcome is still unknown.
+            self.assertTrue(any(row['state'] == 'unreachable' and row['host'] == 'workshop'
+                for row in offline['runs']))
+            self.assertTrue(any(row['state'] == 'launch_unknown'
+                and row['operation_id'] == 'visibility-unknown' for row in offline['runs']))
+            self.assertEqual(len(offline['runs']), 20)
+
+    def test_offline_terminal_window_cannot_hide_local_active_work(self):
+        import fabric_hosts as hosts
+        remote = [{'id': f'mcp-peer-{index}', 'run_id': f'mcp-peer-{index}',
+            'task_id': f'peer-{index}', 'attempt': 1, 'state': 'terminal', 'status': 'ok',
+            'started_at': '2026-10-08T00:00:00Z'} for index in range(20)]
+        running = {'id': 'mcp-local-running', 'run_id': 'mcp-local-running', 'task_id': 'local-running',
+            'attempt': 1, 'state': 'running', 'status': 'running', 'started_at': '2026-10-07T00:00:00Z'}
+        with patch.dict(os.environ, self.env):
+            federation = hosts.lane_owner()
+            with patch.object(federation, 'worker', return_value={'status': 'ok', 'runs': []}), \
+                    patch.object(hosts.PeerClient, 'call', return_value=hosts.envelope({'status': 'ok', 'runs': remote})):
+                federation.reads('lanes', 'Repos/project', {})
+            with patch.object(federation, 'worker', return_value={'status': 'ok', 'runs': [running]}), \
+                    patch.object(hosts.PeerClient, 'call', return_value=hosts.envelope(error=hosts.HostError('unreachable', 'offline'))):
+                view = federation.reads('lanes', 'Repos/project', {})
+            self.assertTrue(any(row['state'] == 'running' and row['host'] == 'laptop' for row in view['runs']))
+            self.assertTrue(any(row['state'] == 'unreachable' and row['host'] == 'workshop' for row in view['runs']))
+            self.assertEqual(view['omitted'], 1)
+
+    def test_reader_does_not_reconcile_an_inflight_control_send(self):
+        import fabric_hosts as hosts
+        import threading
+        cases = [('cancel', {'id': self.peer_run + '@workshop'}),
+            ('resume', {'resume': self.peer_run + '@workshop'}),
+            ('handoff', {'handoff': self.peer_run + '@workshop'}),
+            ('dispatch', {'session': 'named session@workshop', 'prompt': 'fixture only'})]
+        with patch.dict(os.environ, self.env):
+            for verb, payload in cases:
+                with self.subTest(verb=verb):
+                    sender = hosts.lane_owner()
+                    reader = hosts.lane_owner()  # Same durable root, distinct owner.
+                    started, release, recovered = threading.Event(), threading.Event(), threading.Event()
+                    calls, results, failures = [], [], []
+                    identifier = 'inflight-' + verb
+                    terminal = {'id': self.peer_run, 'run_id': self.peer_run,
+                        'task_id': 'shared-task', 'attempt': 1, 'state': 'terminal', 'status': 'ok'}
+                    def response(action, params=None, **kwargs):
+                        calls.append(action)
+                        if action == 'hello':
+                            return hosts.envelope({'status': 'ok'})
+                        if action == verb:
+                            started.set()
+                            if not release.wait(5):
+                                raise AssertionError('fixture send was not released')
+                            return hosts.envelope(error=hosts.HostError('timeout', 'lost response after send'))
+                        if action == 'operation':
+                            if recovered.is_set():
+                                return hosts.envelope({'status': 'ok', 'runs': [terminal]})
+                            return hosts.envelope({'status': 'operation_missing', 'operation_id': identifier})
+                        return hosts.envelope({'status': 'ok', 'runs': []})
+                    def send():
+                        try:
+                            results.append(sender.client_call(verb, str(self.workspace),
+                                {**payload, 'operation_id': identifier}))
+                        except BaseException as exc:
+                            failures.append(exc)
+                    with patch.object(sender, 'worker', return_value={'status': 'ok', 'runs': []}), \
+                            patch.object(reader, 'worker', return_value={'status': 'ok', 'runs': []}), \
+                            patch.object(hosts.PeerClient, 'call', side_effect=response):
+                        thread = threading.Thread(target=send)
+                        thread.start()
+                        try:
+                            self.assertTrue(started.wait(2), 'send did not reach the controlled wire boundary')
+                            with reader.database() as database:
+                                self.assertIsNotNone(database.execute('SELECT id FROM pending WHERE id=?',
+                                    (identifier,)).fetchone())
+                            view = reader.reads('lanes', 'Repos/project', {})
+                            self.assertNotIn('operation', calls,
+                                'reader queried an operation while its original send owned the pending row')
+                            self.assertEqual(calls.count(verb), 1, 'reader replayed the in-flight control')
+                            with reader.database() as database:
+                                self.assertIsNotNone(database.execute('SELECT id FROM pending WHERE id=?',
+                                    (identifier,)).fetchone(), 'reader deleted an in-flight pending record')
+                            self.assertTrue(any(row.get('operation_id') == identifier
+                                and row['state'] == 'launch_unknown' for row in view['runs']))
+                        finally:
+                            release.set()
+                            thread.join(5)
+                        self.assertFalse(thread.is_alive(), 'fixture sender did not finish')
+                        self.assertEqual(failures, [])
+                        self.assertEqual(results[0]['state'], 'launch_unknown')
+                        recovered.set()
+                        view = reader.reads('lanes', 'Repos/project', {})
+                        self.assertTrue(any(row['run_id'] == self.peer_run + '@workshop'
+                            and row['state'] == 'terminal' for row in view['runs']))
+                        with reader.database() as database:
+                            self.assertIsNone(database.execute('SELECT id FROM pending WHERE id=?',
+                                (identifier,)).fetchone(), 'completed reconciliation did not clear pending')
 
     def fixture_product(self):
         """Reuse existing owner fixtures, never dispatch a real provider."""

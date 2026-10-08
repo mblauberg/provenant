@@ -187,6 +187,9 @@ against its original attempts. Missing cancel, resume, handoff and named-session
 operations are rejected instead of replayed against changed state. Prelaunch worker failures become
 durable rejections. The peer journal stores request digests. The caller keeps
 pending payloads until resolution. Both create the database with mode 0600.
+Readers do not reconcile an operation while its original sender holds the
+pending lock. Retrying a pending operation never falls back locally, even if
+the default host is now unreachable or placement configuration has changed.
 
 The remote peer starts the existing detached dispatch owner, then exits.
 The lane survives the SSH connection. Paths in `cwd`, `worktree`, read roots
@@ -199,10 +202,16 @@ refused. The peer request limit also bounds transmitted prompts.
 `lanes`, `status`, `watch` and `lanes --wait` read each host's own attempt
 records. Rows include `host` and qualified IDs. On failure, rows preserve
 `last_known_state`, `last_known_status` and `age_seconds` while reporting
-`unreachable`; an unreachable terminal snapshot cannot satisfy a wait.
+`unreachable` for transport failures or `read_error` with the typed owner
+error when the host is reachable; neither can satisfy a terminal wait.
 Independent peer reads run concurrently. Default reads cap rows per host
-and then apply the combined 20-row cap; explicit IDs and waits scan the
-owner history. Output stays on its owner and returns at most 20,000 bytes
+and then apply the combined 20-row cap, prioritizing unknown launches,
+failed nonterminal lanes and one failure row per host before active work.
+Other cached terminal rows retain their terminal ranking, newest first across
+hosts. Explicit IDs are resolved
+individually by their owners without transferring unrelated history. Partial
+reads update only the observed rows and preserve other snapshot ages. Output
+stays on its owner and returns at most 20,000 bytes
 per call with `next_offset` for continuation. Each host keeps its own SQLite
 state, operation journal and last successful observations. Remote dispatch
 returns after the owner starts; use status or a lane wait to await completion.

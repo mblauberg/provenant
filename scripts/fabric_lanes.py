@@ -12,8 +12,9 @@ import subprocess
 import time
 import tempfile
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
 
 VERBS = {'dispatch', 'lanes', 'status', 'cancel', 'resume', 'handoff', 'output', 'operation'}
@@ -44,6 +45,23 @@ class LaneFederation:
                 yield db
         finally:
             db.close()
+
+    @contextmanager
+    def pending_lock(self, identifier, wait=True):
+        identifier = self.operation_id({'operation_id': identifier})
+        directory = self.root / 'pending-locks'
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor = os.open(directory / f'{identifier}.lock', os.O_CREAT | os.O_RDWR, 0o600)
+        with os.fdopen(descriptor, 'a') as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+            except BlockingIOError:
+                yield False
+                return
+            try:
+                yield True
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
     def worker(self, verb, project, request, launch_path=None):
         directory = self.h.project_directory(project)
@@ -250,32 +268,81 @@ class LaneFederation:
             attempt, prior_attempt = candidate.get('attempt', 0), previous.get('attempt', 0)
             return attempt > prior_attempt or (attempt == prior_attempt and candidate.get('last_known_state', candidate.get('state')) == 'terminal'
                 and previous.get('last_known_state', previous.get('state')) != 'terminal')
-        # Selectors scan owner history; default reads cap each owner and the merge.
-        clean = {**request, 'ids': None, 'wait_seconds': 0, 'include_history': bool(request.get('ids')),
+        # Owners resolve individual selectors before serialising any history.
+        selectors = request.get('ids') or []
+        clean = {**request, 'ids': None, 'wait_seconds': 0, 'include_history': bool(selectors),
             'limit': None if request.get('ids') else request.get('limit', 20)}
         rows = []
         hosts = []
         owner_omitted = 0
-        def probe(host):
+        selector_matches = {selector: set() for selector in selectors}
+        def owner_read(host, params):
             if host == self.config.local_host:
                 try:
-                    return {'ok': True, 'result': self.worker(verb, project, clean)}
+                    return {'ok': True, 'result': self.worker(verb, project, params)}
                 except self.h.HostError as exc:
                     return self.h.envelope(error=exc)
-            return self.h.PeerClient(host, self.config.peers[host]).call(verb, {'project_path': project, 'input': clean})
+            return self.h.PeerClient(host, self.config.peers[host]).call(verb, {'project_path': project, 'input': params})
+        def owner_selectors(host):
+            result = []
+            for selector in selectors:
+                if '@' in selector:
+                    name, owner = self.h.parse_identifier(selector, self.config.local_host)
+                    if owner == host:
+                        result.append((selector, name))
+                elif host == self.config.local_host or '/' not in selector:
+                    result.append((selector, selector))
+            return result
+        def probe(host):
+            if not selectors:
+                return owner_read(host, clean)
+            matched, payload = {}, []
+            # A missing selector rejects a batched owner read. Query separately
+            # so an ordinary miss on one host cannot conceal another match.
+            for selector, name in owner_selectors(host):
+                response = owner_read(host, {**{key: value for key, value in clean.items() if key != 'state'}, 'ids': [name]})
+                if response.get('ok') and not response.get('reads_flagged'):
+                    result = response['result']
+                    if result.get('error') in {'run_not_found', 'selector_not_found'}:
+                        continue
+                    if result.get('status') == 'ok' and isinstance(result.get('runs'), list):
+                        matched[selector] = [lane_key(row) for row in result['runs']]
+                        payload.extend(result['runs'])
+                        continue
+                return response
+            return {'ok': True, 'result': {'status': 'ok', 'runs': payload}, 'selector_matches': matched}
         names = [self.config.local_host, *self.config.peers]
+        if selectors:
+            for selector in selectors:
+                if '@' in selector and self.h.parse_identifier(selector, self.config.local_host)[1] not in names:
+                    raise self.h.HostError('unknown_host', 'Identifier belongs to an unconfigured host')
+            names = [host for host in names if owner_selectors(host)]
         with ThreadPoolExecutor(max_workers=min(len(names), 8)) as executor:
             responses = list(executor.map(probe, names))
         for host, response in zip(names, responses):
             observed = time.time()
             success = response.get('ok') and not response.get('reads_flagged') and isinstance(response['result'].get('runs'), list) and response['result'].get('status') == 'ok'
-            hosts.append({'host': host, 'local': host == self.config.local_host, 'reachability': 'reachable' if success else 'unreachable',
-                **({'error': response.get('error')} if not success else {})})
+            error = response.get('error')
+            if not success and not error:
+                result = response.get('result') or {}
+                error = {'code': result.get('error') or 'lane_read_failed', 'message': result.get('fix') or 'Owner did not return a lane read'}
+            reachability = response.get('reachability') or ('unreachable' if error and error.get('code') in {'timeout', 'unreachable'} else 'reachable')
+            failed_state = 'unreachable' if reachability == 'unreachable' else 'read_error'
+            hosts.append({'host': host, 'local': host == self.config.local_host, 'reachability': reachability,
+                **({'error': error} if not success else {})})
             with self.database() as db:
                 if success:
-                    payload = response['result']['runs']
+                    payload = [{**row, 'observed_at': observed} for row in response['result']['runs']]
                     owner_omitted += response['result'].get('omitted', 0)
-                    db.execute('INSERT OR REPLACE INTO snapshots VALUES (?,?,?,?,?)', (project, host, verb, observed, json.dumps(payload)))
+                    saved = payload
+                    if selectors:
+                        snapshot = db.execute('SELECT observed,payload FROM snapshots WHERE project=? AND host=? AND verb=?', (project, host, verb)).fetchone()
+                        prior = [{**row, 'observed_at': row.get('observed_at', snapshot[0])} for row in json.loads(snapshot[1])] if snapshot else []
+                        keys = {lane_key(row) for row in payload}
+                        saved = [row for row in prior if lane_key(row) not in keys] + payload
+                    db.execute('INSERT OR REPLACE INTO snapshots VALUES (?,?,?,?,?)', (project, host, verb, observed, json.dumps(saved)))
+                    for selector, keys in response.get('selector_matches', {}).items():
+                        selector_matches[selector].update((host, *key) for key in keys)
                 else:
                     snapshot = db.execute('SELECT observed,payload FROM snapshots WHERE project=? AND host=? AND verb=?', (project, host, verb)).fetchone()
                     payload = json.loads(snapshot[1]) if snapshot else []
@@ -284,60 +351,73 @@ class LaneFederation:
                 payload = [{'id': 'host', 'run_id': 'host', 'state': 'unknown', 'status': 'unknown', 'attempt': 0}]
             for row in payload:
                 item = self.qualify(row, host)
-                item.update({'reachability': 'reachable' if success else 'unreachable', 'observed_at': observed})
+                row_observed = row.get('observed_at', observed)
+                item.update({'reachability': reachability, 'observed_at': row_observed})
                 if not success:
                     item.update({'last_known_state': item.get('state'), 'last_known_status': item.get('status'),
-                        'state': 'unreachable', 'status': 'unreachable', 'age_seconds': max(0, time.time() - observed), 'pgid_alive': None})
-                    item['digest'] = f'unreachable {item["id"]}; last known {item.get("last_known_status") or item.get("last_known_state")}; age {item["age_seconds"]:.0f}s'
+                        'state': failed_state, 'status': failed_state, 'error': error,
+                        'age_seconds': max(0, time.time() - row_observed), 'pgid_alive': None})
+                    item['digest'] = f'{failed_state} {item["id"]}; {error["code"]}; last known {item.get("last_known_status") or item.get("last_known_state")}; age {item["age_seconds"]:.0f}s'
                 rows.append(item)
         with self.database() as db:
             pending = db.execute('SELECT id,host,verb,payload FROM pending WHERE project=?', (project,)).fetchall()
         for identifier, host, pending_verb, payload in pending:
-            if host not in self.config.peers:
-                rows.append(self.unknown(identifier, host))
-                continue
-            response = self.h.PeerClient(host, self.config.peers[host]).call('operation', {'project_path': project, 'input': {'operation_id': identifier}})
-            if response.get('ok') and response['result'].get('status') == 'operation_missing':
-                pending_request = json.loads(payload)
-                if pending_verb != 'dispatch' or pending_request.get('session'):
-                    response = self.h.envelope({'status': 'rejected', 'operation_id': identifier,
-                        'error': f'{pending_verb}_not_sent', 'fix': 'Issue a new operation for the current attempt'})
-                else:
-                    response = self.h.PeerClient(host, self.config.peers[host]).call(pending_verb,
-                        {'project_path': project, 'input': json.loads(payload)}, write=True)
-            if response.get('ok') and response['result'].get('status') != 'launch_unknown':
+            with self.pending_lock(identifier, wait=False) as acquired:
+                if not acquired:
+                    rows.append(self.unknown(identifier, host))
+                    continue
+                # The sender may have completed after this read loaded the list.
                 with self.database() as db:
-                    db.execute('DELETE FROM pending WHERE id=?', (identifier,))
-                # Re-read next poll: reconciliation identifies the run even if
-                # the owner's first status document has not appeared yet.
-                result = response['result']
-                if result.get('status') == 'rejected' and not result.get('id') and not result.get('run_id'):
-                    result = {**self.unknown(identifier, host), **result, 'state': 'terminal'}
-                recovered = result.get('runs') or [result]
-                for row in recovered:
-                    if row.get('id') or row.get('run_id'):
-                        raw_item = {**row, 'state': row.get('state', 'running'), 'attempt': row.get('attempt', 1)}
-                        item = self.qualify(raw_item, host)
-                        item.update({'reachability': 'reachable', 'observed_at': time.time()})
-                        rows.append(item)
-                        # Recovery is itself a successful observation. Preserve
-                        # it even if the next full read cannot reach this host.
-                        with self.database() as db:
-                            snapshot = db.execute('SELECT payload FROM snapshots WHERE project=? AND host=? AND verb=?', (project, host, verb)).fetchone()
-                            payload = json.loads(snapshot[0]) if snapshot else []
-                            matches = [existing for existing in payload if lane_key(existing) == lane_key(item)]
-                            if not matches or all(newer(item, existing) for existing in matches):
-                                payload = [existing for existing in payload if lane_key(existing) != lane_key(item)]
-                                payload.append(raw_item)
-                            db.execute('INSERT OR REPLACE INTO snapshots VALUES (?,?,?,?,?)', (project, host, verb, time.time(), json.dumps(payload)))
-            else:
-                error = response.get('error', {}).get('code')
-                if not response.get('ok') and error not in {'timeout', 'unreachable', 'bad_response', 'hosts_cancelled', 'lane_owner_failed', 'peer_command_failed'}:
+                    current = db.execute('SELECT host,verb,payload FROM pending WHERE id=? AND project=?', (identifier, project)).fetchone()
+                if not current:
+                    continue
+                host, pending_verb, payload = current
+                if host not in self.config.peers:
+                    rows.append(self.unknown(identifier, host))
+                    continue
+                response = self.h.PeerClient(host, self.config.peers[host]).call('operation', {'project_path': project, 'input': {'operation_id': identifier}})
+                if response.get('ok') and response['result'].get('status') == 'operation_missing':
+                    pending_request = json.loads(payload)
+                    if pending_verb != 'dispatch' or pending_request.get('session'):
+                        response = self.h.envelope({'status': 'rejected', 'operation_id': identifier,
+                            'error': f'{pending_verb}_not_sent', 'fix': 'Issue a new operation for the current attempt'})
+                    else:
+                        response = self.h.PeerClient(host, self.config.peers[host]).call(pending_verb,
+                            {'project_path': project, 'input': json.loads(payload)}, write=True)
+                if response.get('ok') and response['result'].get('status') != 'launch_unknown':
                     with self.database() as db:
                         db.execute('DELETE FROM pending WHERE id=?', (identifier,))
-                    rows.append({**self.unknown(identifier, host), 'state': 'terminal', 'status': 'rejected', 'error': error})
+                    # Re-read next poll: reconciliation identifies the run even if
+                    # the owner's first status document has not appeared yet.
+                    result = response['result']
+                    if result.get('status') == 'rejected' and not result.get('id') and not result.get('run_id'):
+                        result = {**self.unknown(identifier, host), **result, 'state': 'terminal'}
+                    recovered = result.get('runs') or [result]
+                    for row in recovered:
+                        if row.get('id') or row.get('run_id'):
+                            raw_item = {**row, 'state': row.get('state', 'running'), 'attempt': row.get('attempt', 1), 'observed_at': time.time()}
+                            item = self.qualify(raw_item, host)
+                            item.update({'reachability': 'reachable', 'observed_at': time.time()})
+                            rows.append(item)
+                            # Recovery is itself a successful observation. Preserve
+                            # it even if the next full read cannot reach this host.
+                            with self.database() as db:
+                                snapshot = db.execute('SELECT observed,payload FROM snapshots WHERE project=? AND host=? AND verb=?', (project, host, verb)).fetchone()
+                                payload = [{**existing, 'observed_at': existing.get('observed_at', snapshot[0])}
+                                    for existing in json.loads(snapshot[1])] if snapshot else []
+                                matches = [existing for existing in payload if lane_key(existing) == lane_key(item)]
+                                if not matches or all(newer(item, existing) for existing in matches):
+                                    payload = [existing for existing in payload if lane_key(existing) != lane_key(item)]
+                                    payload.append(raw_item)
+                                db.execute('INSERT OR REPLACE INTO snapshots VALUES (?,?,?,?,?)', (project, host, verb, time.time(), json.dumps(payload)))
                 else:
-                    rows.append(self.unknown(identifier, host))
+                    error = response.get('error', {}).get('code')
+                    if not response.get('ok') and error not in {'timeout', 'unreachable', 'bad_response', 'hosts_cancelled', 'lane_owner_failed', 'peer_command_failed'}:
+                        with self.database() as db:
+                            db.execute('DELETE FROM pending WHERE id=?', (identifier,))
+                        rows.append({**self.unknown(identifier, host), 'state': 'terminal', 'status': 'rejected', 'error': error})
+                    else:
+                        rows.append(self.unknown(identifier, host))
         # A reconciliation can recover a lane already present in the snapshot.
         unique = {}
         for row in rows:
@@ -347,7 +427,8 @@ class LaneFederation:
         rows = list(unique.values())
         selected = []
         for selector in request.get('ids') or []:
-            candidates = [row for row in rows if selector in {row.get('id'), row.get('run_id'), row.get('task_id')}
+            candidates = [row for row in rows if (row['host'], *lane_key(row)) in selector_matches[selector]
+                or selector in {row.get('id'), row.get('run_id'), row.get('task_id')}
                 or '@' not in selector and (any(isinstance(row.get(key), str) and row[key].split('@')[0] == selector for key in ('id', 'run_id', 'task_id'))
                     or row['host'] == self.config.local_host and (selector == row.get('run_dir')
                         or isinstance(row.get('run_path'), str) and (selector == Path(row['run_path']).name
@@ -366,11 +447,13 @@ class LaneFederation:
                         continue
                 if '@' in selector:
                     _, host = self.h.parse_identifier(selector, self.config.local_host)
-                    if any(row['host'] == host and row['reachability'] == 'unreachable' for row in hosts):
+                    failure = next((row for row in hosts if row['host'] == host and row.get('error')), None)
+                    if failure:
+                        failed_state = 'unreachable' if failure['reachability'] == 'unreachable' else 'read_error'
                         selected.append({'id': selector, 'run_id': selector, 'task_id': None, 'attempt': 0,
-                            'host': host, 'state': 'unreachable', 'status': 'unreachable', 'reachability': 'unreachable',
+                            'host': host, 'state': failed_state, 'status': failed_state, 'reachability': failure['reachability'], 'error': failure['error'],
                             'last_known_state': 'unknown', 'last_known_status': None, 'age_seconds': 0,
-                            'digest': f'unreachable {selector}; no last known observation'})
+                            'digest': f'{failed_state} {selector}; {failure["error"]["code"]}; no last known observation'})
                         continue
                 raise self.h.HostError('selector_not_found', 'No matching lane')
             if '@' not in selector and candidates[0]['host'] != self.config.local_host:
@@ -380,6 +463,25 @@ class LaneFederation:
         state = request.get('state')
         if state:
             rows = [row for row in rows if row.get('state') == state or row.get('status') == state or state == 'active' and row.get('state') != 'terminal']
+        if not selectors:
+            def started(row):
+                try:
+                    return datetime.fromisoformat(row.get('started_at') or '').timestamp()
+                except (TypeError, ValueError, OverflowError):
+                    return 0
+            failures = {}
+            for row in rows:
+                if row.get('state') in {'unreachable', 'read_error'}:
+                    prior = failures.get(row['host'])
+                    if prior is None or started(row) > started(prior):
+                        failures[row['host']] = row
+            def order(row):
+                failed = row.get('state') in {'unreachable', 'read_error'}
+                known_state = row.get('last_known_state', row.get('state')) if failed else row.get('state')
+                uncertain = row.get('state') == 'launch_unknown' or failed and (known_state != 'terminal' or failures.get(row['host']) is row)
+                priority = 2 if uncertain else int(known_state != 'terminal')
+                return priority, started(row)
+            rows.sort(key=order, reverse=True)
         limit = request.get('limit', 20)
         omitted = max(0, len(rows) - limit) if limit is not None and not request.get('ids') else 0
         if omitted:
@@ -389,6 +491,14 @@ class LaneFederation:
     def client_call(self, action, cwd, request):
         if os.environ.get('PROVENANT_HOST_LOCAL_ONLY') == '1':
             return {'local': True}
+        def local_result(value):
+            if action in WRITES and request.get('operation_id'):
+                identifier = self.operation_id(request)
+                with self.pending_lock(identifier), self.database() as db:
+                    pending = db.execute('SELECT host FROM pending WHERE id=?', (identifier,)).fetchone()
+                if pending:
+                    raise self.h.HostError('operation_conflict', 'Operation remains owned by ' + pending[0] + '; reconcile it before changing placement')
+            return value
         if not self.config.peers:
             explicit = request.get('host')
             if explicit and explicit != self.config.local_host:
@@ -408,7 +518,7 @@ class LaneFederation:
                         raise self.h.HostError('unknown_host', 'Identifier belongs to an unconfigured host')
                     ids.append(name)
                 normalized['ids'] = ids
-            return {'local': True, 'input': {key: value for key, value in normalized.items() if key not in {'host', 'operation_id'}}}
+            return local_result({'local': True, 'input': {key: value for key, value in normalized.items() if key not in {'host', 'operation_id'}}})
         try:
             project = self.h.project_identity(cwd)
         except self.h.HostError as exc:
@@ -422,7 +532,7 @@ class LaneFederation:
                 for key, value in request.items() if key not in {'host', 'operation_id'}}
             if clean.get('ids'):
                 clean['ids'] = [value.rsplit('@', 1)[0] if '@' in value else value for value in clean['ids']]
-            return {'local': True, 'input': clean}
+            return local_result({'local': True, 'input': clean})
         if action in {'lanes', 'status'}:
             return self.reads(action, project, request)
         if action == 'dispatch':
@@ -465,8 +575,8 @@ class LaneFederation:
                 raise self.h.HostError('host_conflict', 'Run and task must belong to the same host')
             request = {**request, 'task_id': task}
         if host == self.config.local_host:
-            return {'local': True, 'input': {key: value.rsplit('@', 1)[0] if key in {'id', 'resume', 'handoff', 'session'} and isinstance(value, str) and '@' in value else value
-                for key, value in request.items() if key not in {'host', 'operation_id'}}}
+            return local_result({'local': True, 'input': {key: value.rsplit('@', 1)[0] if key in {'id', 'resume', 'handoff', 'session'} and isinstance(value, str) and '@' in value else value
+                for key, value in request.items() if key not in {'host', 'operation_id'}}})
         if host not in self.config.peers:
             raise self.h.HostError('unknown_host', 'Host is not configured')
         clean = {key: value.rsplit('@', 1)[0] if key in {'id', 'resume', 'handoff', 'session'} and isinstance(value, str) and '@' in value else value
@@ -477,40 +587,46 @@ class LaneFederation:
         if action in WRITES:
             clean['operation_id'] = identifier
         client = self.h.PeerClient(host, self.config.peers[host])
-        # This contact and placement check happen before persisting/sending a
-        # mutation. Only an unreachable implicit placement may fall back.
-        contact = client.call('hello', write=action in WRITES)
-        if not contact.get('ok') or contact.get('reads_flagged'):
-            if action == 'dispatch' and not request.get('host') and not (request.get('session') and '@' in request['session']) and contact.get('reachability') == 'unreachable':
-                reason = contact['error']['code']
-                return {'local': True, 'fallback': {'from_host': host, 'reason': reason},
-                    'digest': f'local fallback from {host}: {reason}'}
-            return self.rejection(contact)
-        if action in WRITES:
-            with self.database() as db:
-                previous = db.execute('SELECT project,host,verb,payload FROM pending WHERE id=?', (identifier,)).fetchone()
+        with self.pending_lock(identifier) if action in WRITES else nullcontext(True):
+            previous = None
+            if action in WRITES:
+                with self.database() as db:
+                    previous = db.execute('SELECT project,host,verb,payload FROM pending WHERE id=?', (identifier,)).fetchone()
                 current = (project, host, action, json.dumps(clean, sort_keys=True))
                 if previous and tuple(previous) != current:
                     raise self.h.HostError('operation_conflict', 'Pending operation ID already belongs to another request')
-                db.execute('INSERT OR REPLACE INTO pending VALUES (?,?,?,?,?)', (identifier, *current))
-        if action in WRITES and previous and (action != 'dispatch' or clean.get('session')):
-            response = client.call('operation', {'project_path': project, 'input': {'operation_id': identifier}})
-            if response.get('ok') and response['result'].get('status') == 'operation_missing':
-                response = self.h.envelope({'status': 'rejected', 'operation_id': identifier,
-                    'error': f'{action}_not_sent', 'fix': 'Issue a new operation for the current attempt'})
-        else:
-            response = client.call(action, {'project_path': project, 'input': clean}, write=action in WRITES)
-        if response.get('ok') and not response.get('reads_flagged'):
-            if action in WRITES and response['result'].get('status') != 'launch_unknown':
+            # This contact and placement check happen before persisting/sending a
+            # mutation. Only an unreachable implicit placement may fall back.
+            contact = client.call('hello', write=action in WRITES)
+            if not contact.get('ok') or contact.get('reads_flagged'):
+                if previous:
+                    return {**self.unknown(identifier, host), 'digest': f'launch_unknown {identifier}@{host}; reconcile by operation ID'}
+                if action == 'dispatch' and not request.get('host') and not (request.get('session') and '@' in request['session']) and contact.get('reachability') == 'unreachable':
+                    reason = contact['error']['code']
+                    return {'local': True, 'fallback': {'from_host': host, 'reason': reason},
+                        'digest': f'local fallback from {host}: {reason}'}
+                return self.rejection(contact)
+            if action in WRITES:
+                with self.database() as db:
+                    db.execute('INSERT OR REPLACE INTO pending VALUES (?,?,?,?,?)', (identifier, *current))
+            if action in WRITES and previous and (action != 'dispatch' or clean.get('session')):
+                response = client.call('operation', {'project_path': project, 'input': {'operation_id': identifier}})
+                if response.get('ok') and response['result'].get('status') == 'operation_missing':
+                    response = self.h.envelope({'status': 'rejected', 'operation_id': identifier,
+                        'error': f'{action}_not_sent', 'fix': 'Issue a new operation for the current attempt'})
+            else:
+                response = client.call(action, {'project_path': project, 'input': clean}, write=action in WRITES)
+            if response.get('ok') and not response.get('reads_flagged'):
+                if action in WRITES and response['result'].get('status') != 'launch_unknown':
+                    with self.database() as db:
+                        db.execute('DELETE FROM pending WHERE id=?', (identifier,))
+                return self.qualify(response['result'], host)
+            if action in WRITES and response.get('error', {}).get('code') in {'timeout', 'unreachable', 'bad_response', 'hosts_cancelled', 'lane_owner_failed', 'peer_command_failed'}:
+                return {**self.unknown(identifier, host), 'digest': f'launch_unknown {identifier}@{host}; reconcile by operation ID'}
+            if action in WRITES:
                 with self.database() as db:
                     db.execute('DELETE FROM pending WHERE id=?', (identifier,))
-            return self.qualify(response['result'], host)
-        if action in WRITES and response.get('error', {}).get('code') in {'timeout', 'unreachable', 'bad_response', 'hosts_cancelled', 'lane_owner_failed', 'peer_command_failed'}:
-            return {**self.unknown(identifier, host), 'digest': f'launch_unknown {identifier}@{host}; reconcile by operation ID'}
-        if action in WRITES:
-            with self.database() as db:
-                db.execute('DELETE FROM pending WHERE id=?', (identifier,))
-        return self.rejection(response)
+            return self.rejection(response)
 
     @staticmethod
     def rejection(response):
