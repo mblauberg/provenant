@@ -327,8 +327,9 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
-  cancelActiveExecutions();
-  for (const pid of spawnedPids.splice(0)) {
+  await cancelActiveExecutions();
+  const pids = spawnedPids.splice(0);
+  for (const pid of pids) {
     try {
       process.kill(-pid, "SIGKILL");
     } catch { /* group already gone */ }
@@ -336,7 +337,7 @@ afterEach(async () => {
       process.kill(pid, "SIGKILL");
     } catch { /* already gone */ }
   }
-  await delay(50);
+  await waitFor(() => pids.every((pid) => !alive(pid)), "execution processes to exit before fixture cleanup");
   rmSync(temporaryDirectory, { recursive: true, force: true });
 });
 
