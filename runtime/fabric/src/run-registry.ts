@@ -222,7 +222,7 @@ export function listRecordedRuns(workspace: string): RecordedRun[] {
     // whose unknown start time is not evidence of death either.
     const hostAlive = record.host_pid === record.owner_pid
       ? observedAlive(record.owner_pid, record.owner_started_at)
-      : record.host_started_at !== null && observedAlive(record.host_pid, record.host_started_at);
+      : observedAlive(record.host_pid, record.host_started_at);
     runs.push({
       ...record,
       run_id: shortRunId(runDir),
@@ -241,13 +241,30 @@ export function findRecordedRun(workspace: string, reference: string): RecordedR
 }
 
 /**
- * Signal a whole process group, never a bare recorded pid. The group leader is
- * verified first, so a recycled pid is left alone, and this process's own group
- * is never a target.
+ * Signal a verified leader's group, or an individually verified provider that
+ * shares its owner's group. Never signal a group through a non-leader.
  */
-export function signalRunGroup(pid: number, pgid: number, startedAt: string | null, signal: NodeJS.Signals): boolean {
+export function signalRunGroup(pid: number, pgid: number, startedAt: string | null, signal: NodeJS.Signals,
+  allowGroup = true): boolean {
   if (!processMatches(pid, startedAt)) return false;
-  if (!positiveInteger(pgid) || pgid === process.pid) return false;
+  if (!positiveInteger(pgid) || pid === process.pid) return false;
+  try {
+    if (Number(psOutput(["-o", "pgid=", "-p", String(pid)]).trim()) !== pgid) return false;
+  } catch { return false; }
+  let sharedHost = true; // An unavailable census cannot authorise a group signal.
+  try {
+    const members = psOutput(["-e", "-o", "pid=,pgid=,comm="]).trim().split("\n")
+      .map((line) => line.trim().split(/\s+/u));
+    const isHost = (comm: string | undefined) =>
+      comm !== undefined && ["codex-code-mode-host", "codex-code-mode"].includes(basename(comm));
+    if (members.some(([memberPid, , comm]) => Number(memberPid) === pid && isHost(comm))) return false;
+    sharedHost = members.some(([, group, comm]) => Number(group) === pgid && isHost(comm));
+    // A partial census is also insufficient evidence for a group signal.
+    if (!members.some(([memberPid, group]) => Number(memberPid) === pid && Number(group) === pgid)) sharedHost = true;
+  } catch { /* Keep PID-only fallback. */ }
+  if (!allowGroup || pgid !== pid || sharedHost) {
+    try { process.kill(pid, signal); return true; } catch { return false; }
+  }
   try {
     process.kill(-pgid, signal);
     return true;
@@ -262,13 +279,23 @@ export function signalRunGroup(pid: number, pgid: number, startedAt: string | nu
   }
 }
 
-/** Both groups a run can hold: the owner's, and the provider's own session. */
-export function signalRecordedRun(run: RecordedRun, signal: NodeJS.Signals): boolean {
+/** The owner cleans its descendants; controller signals never widen to a provider's group. */
+export function signalRecordedRun(run: RecordedRun, signal: NodeJS.Signals, source = "run_control"): boolean {
+  // Publish before signalling so the provider can retain the controller's reason
+  // even when its owner is terminated in the same operation.
+  const path = join(run.run_dir, "termination-request.json");
+  const temporary = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temporary, JSON.stringify({ run_token: run.run_token, signal, source,
+      sender_pid: process.pid, requested_at: new Date().toISOString(),
+      provider_pid: run.provider?.provider_pid ?? null }) + "\n", { mode: 0o600, flag: "wx" });
+    renameSync(temporary, path);
+  } catch { /* Missing telemetry must not widen signalling authority. */ }
   const owner = signalRunGroup(run.owner_pid, run.owner_pgid, run.owner_started_at, signal);
   const provider =
     run.provider === null
       ? false
-      : signalRunGroup(run.provider.provider_pid, run.provider.provider_pgid, run.provider.provider_started_at, signal);
+      : signalRunGroup(run.provider.provider_pid, run.provider.provider_pgid, run.provider.provider_started_at, signal, false);
   return owner || provider;
 }
 
@@ -314,16 +341,17 @@ export async function terminateRecordedRun(
   run: RecordedRun,
   escalationMs = ESCALATION_MS,
   terminalStatus: "interrupted" | "cancelled" = "interrupted",
+  source = terminalStatus === "cancelled" ? "cancel_requested" : "run_control",
 ): Promise<TerminationOutcome> {
   if (!runStillAlive(run)) {
     closeStoppedRun(run.run_dir, terminalStatus);
     return { run_dir: run.run_dir, signalled: false, escalated: false, reason: "not running" };
   }
-  const signalled = signalRecordedRun(run, "SIGTERM");
+  const signalled = signalRecordedRun(run, "SIGTERM", source);
   await waitForRunStop(run, escalationMs);
   let escalated = false;
   if (runStillAlive(run)) {
-    escalated = signalRecordedRun(run, "SIGKILL");
+    escalated = signalRecordedRun(run, "SIGKILL", source);
     await waitForRunStop(run, STOP_CONFIRMATION_MS);
   }
   if (runStillAlive(run)) {
@@ -379,7 +407,7 @@ export async function reapOrphanedRuns(workspace: string): Promise<TerminationOu
   });
   return await Promise.all(
     orphans.map(async (run) => {
-      const outcome = await terminateRecordedRun(run);
+      const outcome = await terminateRecordedRun(run, ESCALATION_MS, "interrupted", "orphan_reaper");
       return outcome.reason === "still running" ? outcome : { ...outcome, reason: "host gone" };
     }),
   );
@@ -493,8 +521,10 @@ export function observedAlive(pid: number, startedAt: string | null): boolean {
   if (!positiveInteger(pid)) return false;
   try {
     process.kill(pid, 0);
-  } catch {
-    return false;
+  } catch (error) {
+    // A sandbox can deny kill(pid, 0) for a live host. Only ESRCH proves
+    // absence; EPERM/EACCES and other unavailable probes exclude reaping.
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
   }
   if (startedAt === null) return true;
   const observed = processStartedAt(pid);

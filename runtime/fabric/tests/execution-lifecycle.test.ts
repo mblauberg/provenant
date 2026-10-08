@@ -370,7 +370,7 @@ describe("owner records", () => {
       else process.env.LANG = priorLang;
     }
   });
-  it.skipIf(!localeCase)("keeps a live legacy-locale owner running during termination", async () => {
+  it.skipIf(!localeCase)("refuses a legacy-locale owner's unrelated recorded group", async () => {
     const { locale, legacy } = localeCase!;
     const priorAll = process.env.LC_ALL;
     const priorLang = process.env.LANG;
@@ -379,7 +379,7 @@ describe("owner records", () => {
     let ownerAlive = true;
     const signals: NodeJS.Signals[] = [];
     const probe = vi.spyOn(process, "kill").mockImplementation((_pid, signal) => {
-      if (signal === 0 && !ownerAlive) throw new Error("ESRCH");
+      if (signal === 0 && !ownerAlive) throw Object.assign(new Error("ESRCH"), { code: "ESRCH" });
       if (signal === "SIGTERM") { signals.push(signal); ownerAlive = false; }
       return true;
     });
@@ -393,8 +393,8 @@ describe("owner records", () => {
         started_at: new Date().toISOString(), owner_stdout: "", owner_stderr: "",
         running: true, orphaned: false, provider: null,
       };
-      expect((await terminateRecordedRun(run, 0)).signalled).toBe(true);
-      expect(signals).toEqual(["SIGTERM"]);
+      expect(await terminateRecordedRun(run, 0)).toMatchObject({ signalled: false, reason: "still running" });
+      expect(signals).toEqual([]);
     } finally {
       probe.mockRestore();
       if (priorAll === undefined) delete process.env.LC_ALL;
@@ -1561,7 +1561,7 @@ describe("status liveness", () => {
       writeFileSync(join(attemptDir, "attempt.json"), JSON.stringify({ task_id: "race", status: "ok",
         result: { path: "dispatch/tasks/race/attempt-001/result.md" } }));
       writeFileSync(statusPath, JSON.stringify({ id: "race", status: "ok" }));
-      throw new Error("ESRCH: owner exited");
+      throw Object.assign(new Error("ESRCH: owner exited"), { code: "ESRCH" });
     });
     try {
       expect(await fabricStatus(workspace, "race", 1)).toMatchObject({ status: "ok",

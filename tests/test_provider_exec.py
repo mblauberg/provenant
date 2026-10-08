@@ -2110,6 +2110,7 @@ child = subprocess.Popen(
 )
 pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))
 if {stop!r} == 'normal':
+    time.sleep(1.2)  # Observe ancestry before the provider exits and the child reparents.
     print(json.dumps({{'type': 'item.completed', 'item': {{'type': 'agent_message', 'text': 'DONE'}}}}), flush=True)
     print(json.dumps({{'type': 'turn.completed'}}), flush=True)
 else:
@@ -2175,7 +2176,7 @@ else:
         unrelated.wait(timeout=3)
 
 
-def test_fast_double_fork_is_reaped_after_provider_exit(tmp_path):
+def test_unobserved_double_fork_is_not_reaped_on_marker_alone(tmp_path):
     pid_path = tmp_path / "double-fork.pid"
     grandchild = f"""import os,pathlib,time
 pid = os.fork()
@@ -2199,8 +2200,8 @@ print(json.dumps({{'type':'turn.completed'}}), flush=True)
         assert record["status"] == "ok"
         assert pid_path.exists()
         pid = int(pid_path.read_text())
-        assert not _live_process(pid)
-        assert any(row["pid"] == pid for row in record["reaped"])
+        assert _live_process(pid)
+        assert not any(row["pid"] == pid for row in record["reaped"])
     finally:
         if pid_path.exists():
             try:
@@ -2803,6 +2804,150 @@ def test_token_without_owner_record_is_not_nested_owner(tmp_path, monkeypatch):
     assert not module._is_nested_fabric_owner(row)
 
 
+def test_cleanup_does_not_adopt_marker_host_or_signal_a_descendants_shared_group(monkeypatch):
+    module = supervisor()
+    root = module._ProcessRow(501, os.getpid(), 501, str(int(time.time())), "provider")
+    child = module._ProcessRow(502, 501, 900, str(int(time.time())), "node")
+    sibling = module._ProcessRow(503, 999, 900, str(int(time.time())), "sibling provider")
+    host = module._ProcessRow(504, 1, 901, str(int(time.time())), "codex-code-mode-host")
+    rows = {row.pid: row for row in (root, child, sibling, host)}
+    rows[os.getpid()] = module._ProcessRow(os.getpid(), 1, os.getpgrp(), "0", "test")
+    process = type("Process", (), {"pid": 501, "poll": lambda self: None})()
+    signals = []
+    monkeypatch.setattr(module, "_linux_tree_snapshot", lambda *_a, **_kw: None)
+    monkeypatch.setattr(module, "_process_snapshot", lambda: rows)
+    monkeypatch.setattr(module, "_has_attempt_marker", lambda *_a: True)
+    monkeypatch.setattr(module.os, "killpg", lambda pid, sig: signals.append(("group", pid, sig)))
+    monkeypatch.setattr(module.os, "kill", lambda pid, sig: signals.append(("pid", pid, sig)))
+    tracker = module._Descendants(process, "fixture")
+    tracker.spawned_at = tracker.spawned_ticks = 0
+    tracker.sample(include_reparented=True)
+    tracker.signal(signal.SIGTERM)
+    assert child.identity in tracker.tracked
+    assert host.identity not in tracker.tracked
+    assert signals == [("group", 501, signal.SIGTERM), ("pid", 502, signal.SIGTERM)]
+
+
+@pytest.mark.parametrize("host_group", [501, 504])
+@pytest.mark.parametrize("command", ["codex-code-mode-host", "codex-code-mode"])
+def test_observed_code_mode_host_and_its_sibling_lanes_are_never_signalled(monkeypatch, host_group, command):
+    module = supervisor()
+    root = module._ProcessRow(501, os.getpid(), 501, "1", "provider")
+    host = module._ProcessRow(504, 501, host_group, "2", command)
+    sibling = module._ProcessRow(505, 504, 505, "3", "sibling provider")
+    rows = {row.pid: row for row in (root, host, sibling)}
+    rows[os.getpid()] = module._ProcessRow(os.getpid(), 1, os.getpgrp(), "0", "test")
+    process = type("Process", (), {"pid": 501, "poll": lambda self: None})()
+    signals = []
+    monkeypatch.setattr(module, "_linux_tree_snapshot", lambda *_a, **_kw: None)
+    monkeypatch.setattr(module, "_process_snapshot", lambda: rows)
+    monkeypatch.setattr(module.os, "killpg", lambda pid, sig: signals.append(("group", pid)))
+    monkeypatch.setattr(module.os, "kill", lambda pid, sig: signals.append(("pid", pid)))
+    tracker = module._Descendants(process, "fixture")
+    tracker.sample()
+    tracker.signal(signal.SIGTERM)
+    assert {host.identity, sibling.identity} <= set(tracker.spared)
+    assert ("pid", host.pid) not in signals and ("pid", sibling.pid) not in signals
+    assert ("group", host_group) not in signals
+    assert ("pid", root.pid) in signals
+
+
+def test_shared_host_group_change_then_missing_census_never_allows_group_signal(monkeypatch):
+    module = supervisor()
+    root = module._ProcessRow(501, os.getpid(), 501, "1", "provider")
+    host = module._ProcessRow(504, 501, 504, "2", "codex-code-mode-host")
+    rows = {501: root, 504: host, os.getpid(): module._ProcessRow(os.getpid(), 1, os.getpgrp(), "0", "test")}
+    process = type("Process", (), {"pid": 501, "poll": lambda self: None})()
+    signals = []
+    monkeypatch.setattr(module, "_linux_tree_snapshot", lambda *_a, **_kw: None)
+    monkeypatch.setattr(module, "_process_snapshot", lambda: rows)
+    monkeypatch.setattr(module, "_probe_process_row", lambda _pid: None)
+    monkeypatch.setattr(module, "_pid_exists", lambda _pid: True)
+    monkeypatch.setattr(module.os, "killpg", lambda pid, sig: signals.append(("group", pid)))
+    monkeypatch.setattr(module.os, "kill", lambda pid, sig: signals.append(("pid", pid)))
+    tracker = module._Descendants(process, "fixture")
+    tracker.sample()
+    rows[504] = module._ProcessRow(504, 501, 501, "2", "codex-code-mode-host")
+    tracker.sample()
+    del rows[504]
+    tracker.signal(signal.SIGTERM)
+    assert signals and set(signals) == {("pid", 501)}
+
+
+@pytest.mark.parametrize("terminal_event", [False, True])
+@pytest.mark.parametrize("controller", [None, "orphan_reaper", "cancel_requested"],
+                         ids=["unknown-sender", "orphan-reaper", "markerless-cancel"])
+def test_external_provider_sigterm_reports_interrupted_even_after_terminal_event(tmp_path, terminal_event, controller):
+    module = supervisor()
+    events = [{"type": "ready"}] + ([{"type": "turn.completed"}] if terminal_event else [])
+    code = "import os,time\nos.write(1, " + repr(("\n".join(map(json.dumps, events)) + "\n").encode()) + ")\ntime.sleep(60)\n"
+    provider = []
+    signalled = []
+
+    def interrupt(_timestamp):
+        if not signalled:
+            signalled.append(True)
+            if controller:
+                (tmp_path / "termination-request.json").write_text(json.dumps({
+                    "run_token": "fixture-control", "signal": "SIGTERM", "source": controller,
+                    "sender_pid": os.getpid(), "provider_pid": provider[0].pid,
+                    "requested_at": module.now(),
+                }))
+            os.kill(provider[0].pid, signal.SIGTERM)
+
+    record = module.execute(fixture_plan(tmp_path, code), tmp_path / "result.md",
+                            on_start=provider.append, on_progress=interrupt,
+                            env={**os.environ, "PROVENANT_RUN_DIR": str(tmp_path),
+                                 "PROVENANT_RUN_TOKEN": "fixture-control"})
+    assert record["status"] == ("cancelled" if controller == "cancel_requested" else "interrupted"), record
+    assert record["exit"] == -signal.SIGTERM
+    assert record["evidence"]["signal"] == signal.SIGTERM
+    assert record["evidence"]["signal_name"] == "SIGTERM"
+    assert record["evidence"]["termination_source"] == (controller or "external_signal")
+    assert record["evidence"]["signal_requester_pid"] == (os.getpid() if controller else None)
+    assert record["evidence"]["signal_sender_pid"] is None
+    assert record["evidence"]["signature"] == ("cancel_requested" if controller == "cancel_requested" else "provider_signal")
+    assert "error" not in record
+
+
+@pytest.mark.parametrize("invalid", ["run_token", "provider_pid", "signal", "requested_at", "symlink"])
+def test_signal_receipt_does_not_attribute_mismatching_or_linked_control_telemetry(tmp_path, invalid):
+    module = supervisor()
+    provider = []
+
+    def interrupt(_timestamp):
+        request = {"run_token": "current", "signal": "SIGTERM", "source": "orphan_reaper",
+                   "sender_pid": os.getpid(), "provider_pid": provider[0].pid, "requested_at": module.now()}
+        if invalid != "symlink":
+            request[invalid] = {"run_token": "earlier", "provider_pid": -1, "signal": "SIGKILL",
+                                "requested_at": "2000-01-01T00:00:00Z"}[invalid]
+        path = tmp_path / "termination-request.json"
+        if invalid == "symlink":
+            target = tmp_path / "outside-request.json"
+            target.write_text(json.dumps(request))
+            path.symlink_to(target)
+        else:
+            path.write_text(json.dumps(request))
+        os.kill(provider[0].pid, signal.SIGTERM)
+
+    record = module.execute(fixture_plan(tmp_path, "import time\nprint('ready', flush=True)\ntime.sleep(60)"),
+                            tmp_path / "result.md", on_start=provider.append, on_progress=interrupt,
+                            env={**os.environ, "PROVENANT_RUN_DIR": str(tmp_path), "PROVENANT_RUN_TOKEN": "current"})
+    assert record["status"] == "interrupted"
+    assert record["evidence"]["termination_source"] == "external_signal"
+    assert record["evidence"]["signal_requester_pid"] is None
+
+
+def test_supervisor_signal_is_interrupted_without_a_cancel_request(tmp_path):
+    record = supervisor().execute(
+        fixture_plan(tmp_path, "import time\nprint('ready', flush=True)\ntime.sleep(60)"), tmp_path / "result.md",
+        on_progress=lambda _timestamp: os.kill(os.getpid(), signal.SIGHUP),
+    )
+    assert record["status"] == "interrupted"
+    assert record["evidence"]["supervisor_signal"] == signal.SIGHUP
+    assert record["evidence"]["termination_source"] == "supervisor_signal"
+
+
 def test_owner_validation_error_cannot_prevent_root_group_kill(monkeypatch):
     module = supervisor()
     process = type("Process", (), {"pid": 501, "poll": lambda self: None})()
@@ -2866,7 +3011,7 @@ def test_owner_without_observed_parent_is_not_spared(tmp_path, monkeypatch):
     assert row.identity not in tracker.spared
 
 
-def test_reparented_marker_owner_with_valid_record_is_spared(tmp_path, monkeypatch):
+def test_reparented_marker_owner_without_ancestry_is_not_adopted(tmp_path, monkeypatch):
     module = supervisor()
     root_pid = os.getpid() + 100000
     owner = module._ProcessRow(root_pid + 1, 1, root_pid + 1,
@@ -2890,7 +3035,8 @@ def test_reparented_marker_owner_with_valid_record_is_spared(tmp_path, monkeypat
         tracker.spawned_at = 0
         tracker.spawned_ticks = 0
         tracker.sample(include_reparented=True)
-        assert owner.identity in tracker.spared
+        assert owner.identity not in tracker.spared
+        assert owner.identity not in tracker.tracked
         tracker.signal(signal.SIGTERM)
     assert owner.pgid not in signals
     assert root_pid in signals
@@ -2979,6 +3125,8 @@ child = subprocess.Popen(['sleep', '60'], start_new_session=True,
     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 pathlib.Path('inner-child.pid').write_text(str(child.pid))
 time.sleep(2.5)
+child.terminate()
+child.wait(timeout=3)
 pathlib.Path('inner-terminal').write_text('ok')
 """
     run_dir = tmp_path / "nested-run"
@@ -3829,7 +3977,7 @@ def instruction_lane(tmp_path):
     return repo, lane
 
 
-def lane_attempt(tmp_path, lane, script, policy=None, adapter="codex"):
+def lane_attempt(tmp_path, lane, script, policy=None, adapter="codex", **execution):
     done = ("print('{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"done\"}}')\n"
             "print('{\"type\":\"turn.completed\"}')\n") if adapter == "codex" else (
             "print('{\"type\":\"result\",\"result\":\"done\",\"is_error\":false,\"session_id\":\"s-1\"}')\n")
@@ -3844,7 +3992,7 @@ def lane_attempt(tmp_path, lane, script, policy=None, adapter="codex"):
         (run_dir / ".agents").mkdir()
         (run_dir / ".agents/fabric-policy.json").write_text(json.dumps(policy))
     plan = fixture_plan(run_dir, code, adapter, mode="worktree_write", worktree=lane, run_dir=run_dir)
-    return supervisor().execute(plan, run_dir / "result.md")
+    return supervisor().execute(plan, run_dir / "result.md", **execution)
 
 
 def test_codex_writer_may_write_worktree_instructions(tmp_path):
@@ -4124,7 +4272,10 @@ def test_codex_writer_hiding_instructions_fails(tmp_path, script):
     assert any("unverifiable" in warning for warning in record["warnings"])
 
 
-def test_instruction_check_refuses_while_lane_processes_run(tmp_path, monkeypatch):
+@pytest.mark.parametrize("edit", ["", f"open({SKILL!r}, 'w').write('lane edit\\n')\n",
+                                 f"open({SKILL!r}, 'w').write('lane edit\\n'); git('commit', '-q', '-am', 'edit')\n"],
+                         ids=["unchanged", "uncommitted", "committed"])
+def test_instruction_check_verifies_git_views_with_spared_processes(tmp_path, monkeypatch, edit):
     module = supervisor()
     original = module._Descendants.stop
 
@@ -4135,9 +4286,48 @@ def test_instruction_check_refuses_while_lane_processes_run(tmp_path, monkeypatc
 
     monkeypatch.setattr(module._Descendants, "stop", stop_sparing_a_process)
     _, lane = instruction_lane(tmp_path)
-    record = lane_attempt(tmp_path, lane, "", policy={"instruction_changes": "allow"})
-    assert record["error"] == "protected_instructions_changed"
-    assert any("left running" in warning for warning in record["warnings"])
+    record = lane_attempt(tmp_path, lane, edit, policy={"instruction_changes": "deny"})
+    assert record["spared"] == 1
+    if edit:
+        assert record["error"] == "protected_instructions_changed"
+    else:
+        assert record["status"] == "ok", record
+        assert "error" not in record
+    assert not any("left running" in warning for warning in record["warnings"])
+
+
+@pytest.mark.parametrize("edit", ["", f"open({SKILL!r}, 'w').write('lane edit\\n')\n",
+                                 f"open({SKILL!r}, 'w').write('lane edit\\n'); git('commit', '-q', '-am', 'edit')\n"],
+                         ids=["unchanged", "uncommitted", "committed"])
+def test_signalled_writer_checks_instructions_with_spared_descendants(tmp_path, monkeypatch, edit):
+    module = supervisor()
+    original = module._Descendants.stop
+
+    def stop_sparing_a_process(self, *args, **kwargs):
+        reaped = original(self, *args, **kwargs)
+        self.spared_at_stop.add((999999, "fixture"))
+        return reaped
+
+    monkeypatch.setattr(module._Descendants, "stop", stop_sparing_a_process)
+    _, lane = instruction_lane(tmp_path)
+    provider, signalled = [], []
+
+    def interrupt(_timestamp):
+        if not signalled:
+            signalled.append(True)
+            os.kill(provider[0].pid, signal.SIGTERM)
+
+    record = lane_attempt(tmp_path, lane, edit + "import time\nprint('ready', flush=True)\ntime.sleep(60)\n",
+                          on_start=provider.append, on_progress=interrupt)
+    assert record["spared"] == 1
+    assert record["evidence"]["signal"] == signal.SIGTERM
+    if edit:
+        assert record["status"] == "failed"
+        assert record["error"] == "protected_instructions_changed"
+    else:
+        assert record["status"] == "interrupted", record
+        assert "error" not in record
+    assert not any("left running" in warning for warning in record["warnings"])
 
 
 def test_instruction_check_runs_no_repository_hooks(tmp_path):
