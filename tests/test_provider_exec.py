@@ -2948,6 +2948,29 @@ def test_supervisor_signal_is_interrupted_without_a_cancel_request(tmp_path):
     assert record["evidence"]["termination_source"] == "supervisor_signal"
 
 
+def test_markerless_cancel_keeps_cancelled_when_provider_flushes_and_exits_zero(tmp_path):
+    module = supervisor()
+    provider = []
+
+    def interrupt(_timestamp):
+        (tmp_path / "termination-request.json").write_text(json.dumps({
+            "run_token": "graceful", "signal": "SIGTERM", "source": "cancel_requested",
+            "sender_pid": os.getpid(), "provider_pid": provider[0].pid, "requested_at": module.now(),
+        }))
+        os.kill(os.getpid(), signal.SIGTERM)  # This execute() owns the installed signal handler.
+        os.kill(provider[0].pid, signal.SIGTERM)
+
+    code = "import signal,time\nsignal.signal(signal.SIGTERM, lambda *_: exit(0))\nprint('ready', flush=True)\ntime.sleep(60)"
+    record = module.execute(fixture_plan(tmp_path, code), tmp_path / "result.md",
+                            on_start=provider.append, on_progress=interrupt,
+                            env={**os.environ, "PROVENANT_RUN_DIR": str(tmp_path), "PROVENANT_RUN_TOKEN": "graceful"})
+    assert record["status"] == "cancelled", record
+    assert record["exit"] == 0
+    assert record["evidence"]["signal"] is None
+    assert record["evidence"]["supervisor_signal"] == signal.SIGTERM
+    assert record["evidence"]["termination_source"] == "cancel_requested"
+
+
 def test_owner_validation_error_cannot_prevent_root_group_kill(monkeypatch):
     module = supervisor()
     process = type("Process", (), {"pid": 501, "poll": lambda self: None})()

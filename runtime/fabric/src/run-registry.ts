@@ -7,12 +7,9 @@
  * and enough identity to tell that pid apart from a recycled one. Everything
  * here reads and acts on that record, from any process, with no daemon.
  *
- * Known bound: a signal to a process group cannot reach a descendant that
- * called setsid() for itself. skills/_shared/bounded_process.py documents the
- * same limit. The provider record narrows it — dispatch_run.py records the
- * provider's own group after spawning it — but a provider that starts a third
- * session of its own is beyond any group signal, and this module does not
- * pretend otherwise.
+ * Controllers signal only identity-verified owner and provider PIDs. A live
+ * owner handles its descendants. When an owner cannot finish cleanup, these
+ * records do not authorise a broader group kill that could hit a shared host.
  */
 import { runRoot, withoutGitRedirects } from "./identity.js";
 import { canonicalSuccessStatus, isSuccessStatus } from "./success-status.js";
@@ -240,43 +237,18 @@ export function findRecordedRun(workspace: string, reference: string): RecordedR
   return runs.find((run) => run.run_id === reference) ?? runs.find((run) => real(run.run_dir) === real(reference));
 }
 
-/**
- * Signal a verified leader's group, or an individually verified provider that
- * shares its owner's group. Never signal a group through a non-leader.
- */
-export function signalRunGroup(pid: number, pgid: number, startedAt: string | null, signal: NodeJS.Signals,
-  allowGroup = true): boolean {
-  if (!processMatches(pid, startedAt)) return false;
-  if (!positiveInteger(pgid) || pid === process.pid) return false;
+/** Signal only the recorded process; its owner handles descendant cleanup. */
+export function signalRecordedProcess(pid: number, pgid: number, startedAt: string | null,
+  signal: NodeJS.Signals): boolean {
+  if (!processMatches(pid, startedAt) || pid === process.pid || !positiveInteger(pgid)) return false;
   try {
-    if (Number(psOutput(["-o", "pgid=", "-p", String(pid)]).trim()) !== pgid) return false;
-  } catch { return false; }
-  let sharedHost = true; // An unavailable census cannot authorise a group signal.
-  try {
-    const members = psOutput(["-e", "-o", "pid=,pgid=,comm="]).trim().split("\n")
-      .map((line) => line.trim().split(/\s+/u));
-    const isHost = (comm: string | undefined) =>
-      comm !== undefined && ["codex-code-mode-host", "codex-code-mode"].includes(basename(comm));
-    if (members.some(([memberPid, , comm]) => Number(memberPid) === pid && isHost(comm))) return false;
-    sharedHost = members.some(([, group, comm]) => Number(group) === pgid && isHost(comm));
-    // A partial census is also insufficient evidence for a group signal.
-    if (!members.some(([memberPid, group]) => Number(memberPid) === pid && Number(group) === pgid)) sharedHost = true;
-  } catch { /* Keep PID-only fallback. */ }
-  if (!allowGroup || pgid !== pid || sharedHost) {
-    try { process.kill(pid, signal); return true; } catch { return false; }
-  }
-  try {
-    process.kill(-pgid, signal);
+    const [actualGroup, ...command] = psOutput(["-o", "pgid=,comm=", "-p", String(pid)]).trim().split(/\s+/u);
+    const comm = basename(command.join(" "));
+    if (Number(actualGroup) !== pgid || !comm || comm === "?" ||
+        ["codex-code-mode-host", "codex-code-mode"].includes(comm)) return false;
+    process.kill(pid, signal);
     return true;
-  } catch {
-    // A group that has already collapsed to its leader still answers directly.
-    try {
-      process.kill(pid, signal);
-      return true;
-    } catch {
-      return false;
-    }
-  }
+  } catch { return false; }
 }
 
 /** The owner cleans its descendants; controller signals never widen to a provider's group. */
@@ -291,11 +263,11 @@ export function signalRecordedRun(run: RecordedRun, signal: NodeJS.Signals, sour
       provider_pid: run.provider?.provider_pid ?? null }) + "\n", { mode: 0o600, flag: "wx" });
     renameSync(temporary, path);
   } catch { /* Missing telemetry must not widen signalling authority. */ }
-  const owner = signalRunGroup(run.owner_pid, run.owner_pgid, run.owner_started_at, signal);
+  const owner = signalRecordedProcess(run.owner_pid, run.owner_pgid, run.owner_started_at, signal);
   const provider =
     run.provider === null
       ? false
-      : signalRunGroup(run.provider.provider_pid, run.provider.provider_pgid, run.provider.provider_started_at, signal, false);
+      : signalRecordedProcess(run.provider.provider_pid, run.provider.provider_pgid, run.provider.provider_started_at, signal);
   return owner || provider;
 }
 

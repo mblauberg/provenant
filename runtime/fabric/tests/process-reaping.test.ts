@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { once } from "node:events";
 import * as ps from "../src/ps.mjs";
 import { afterEach, expect, it, vi } from "vitest";
-import { listRecordedRuns, processStartedAt, reapOrphanedRuns, signalRunGroup,
+import { listRecordedRuns, processStartedAt, reapOrphanedRuns, signalRecordedProcess,
   signalRecordedRun, terminateRecordedRun, writeOwnerRecord } from "../src/run-registry.js";
 
 const directories: string[] = [];
@@ -63,12 +63,12 @@ it("refuses a recorded group that does not match the verified process", () => {
     signals.push(pid);
     return true;
   });
-  expect(signalRunGroup(process.pid, process.pid + 100, processStartedAt(process.pid), "SIGTERM"))
+  expect(signalRecordedProcess(process.pid, process.pid + 100, processStartedAt(process.pid), "SIGTERM"))
     .toBe(false);
   expect(signals).toEqual([]);
 });
 
-it.each(["shared-host", "unavailable-census", "partial-census"])(
+it.each(["shared-host", "unavailable-census", "partial-census", "host-omitted"])(
   "signals only its verified provider PID with a %s", async (census) => {
     const provider = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"],
       { detached: true, stdio: "ignore" });
@@ -81,6 +81,7 @@ it.each(["shared-host", "unavailable-census", "partial-census"])(
       if (args.includes("-e")) {
         if (census === "unavailable-census") throw new Error("census unavailable");
         if (census === "partial-census") return "999999 999999 node\n";
+        if (census === "host-omitted") return `${pid} ${pid} node\n`;
         return `${pid} ${pid} node\n999999 ${pid} codex-code-mode-host\n`;
       }
       return originalPs(args, env);
@@ -92,7 +93,7 @@ it.each(["shared-host", "unavailable-census", "partial-census"])(
       signals.push(target);
       return true;
     });
-    expect(signalRunGroup(pid, pid, started, "SIGTERM")).toBe(true);
+    expect(signalRecordedProcess(pid, pid, started, "SIGTERM")).toBe(true);
     expect(signals).toEqual([pid]);
   },
 );

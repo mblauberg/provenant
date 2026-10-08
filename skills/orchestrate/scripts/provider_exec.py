@@ -1652,10 +1652,11 @@ def _signal_name(signum):
         return f"SIG{signum}"  # Intermediate realtime signals have no enum member.
 
 
-def _termination_request(environment, process, exit_code, started_at):
+def _termination_request(environment, process, exit_code, started_at, supervisor_signal=None):
     """Optional controller telemetry; waitpid itself never exposes the sender."""
     directory, token = environment.get("PROVENANT_RUN_DIR"), environment.get("PROVENANT_RUN_TOKEN")
-    if not directory or not token or not process or not exit_code or exit_code >= 0:
+    signum = -exit_code if exit_code and exit_code < 0 else supervisor_signal
+    if not directory or not token or not process or not signum:
         return {}
     try:
         path = Path(directory, "termination-request.json")
@@ -1666,7 +1667,7 @@ def _termination_request(environment, process, exit_code, started_at):
             request = json.loads(stream.read(65537))
         if (isinstance(request, dict) and request.get("run_token") == token
                 and request.get("provider_pid") == process.pid
-                and request.get("signal") == _signal_name(-exit_code)
+                and request.get("signal") == _signal_name(signum)
                 and request.get("source") in {"run_control", "orphan_reaper", "cancel_requested"}
                 and isinstance(request.get("requested_at"), str)
                 and started_at <= request["requested_at"] <= now()
@@ -3021,7 +3022,9 @@ def execute(
             if subreaper:
                 _release_subreaper()
     exit_code = process.returncode if process else None
-    termination_request = _termination_request(control_environment, process, exit_code, started_at)
+    if cancel_signal and not forced:
+        forced = "interrupted"  # EOF can precede the loop's signal check.
+    termination_request = _termination_request(control_environment, process, exit_code, started_at, cancel_signal)
     if pending:
         consume(b"\n")
     if forced == "stalled":
