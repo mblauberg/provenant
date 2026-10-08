@@ -101,6 +101,13 @@ def make_run(tmp_path: Path, name: str) -> Path:
     ).resolve()
 
 
+def disable_memory_admission_floor(workspace: Path) -> None:
+    """Keep process contract tests independent of host memory probes."""
+    policy = workspace / ".agents/fabric-policy.json"
+    policy.parent.mkdir(parents=True, exist_ok=True)
+    policy.write_text(json.dumps({"memory_floor_percent": {"read_only": 0, "worktree_write": 0}}))
+
+
 def load_dispatch_module():
     spec = importlib.util.spec_from_file_location("dispatch_run_under_test", SCRIPT)
     assert spec and spec.loader
@@ -1416,7 +1423,8 @@ def test_timeout_records_reaped_exit(tmp_path: Path) -> None:
     assert record["process"]["exit_code"] is not None
 
 
-def test_sigterm_cancels_and_reaps_provider_group(tmp_path: Path) -> None:
+def test_sigterm_interrupts_and_reaps_provider_group(tmp_path: Path) -> None:
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, "cancel")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("cancel\n", encoding="utf-8")
@@ -1455,8 +1463,10 @@ def test_sigterm_cancels_and_reaps_provider_group(tmp_path: Path) -> None:
 
     assert process.returncode == 1, stderr + stdout
     record = json.loads(stdout)
-    assert record["status"] == "cancelled"
-    assert record["failure_code"] == "cancelled"
+    assert record["status"] == "failed"
+    attempt = json.loads((run_dir / "dispatch/tasks/cancel/attempt-001/attempt.json").read_text())
+    assert attempt["status"] == "failed"
+    assert attempt["failure_code"] == "interrupted"
     assert record["process"]["observed_exit"] is True
     with pytest.raises(ProcessLookupError):
         os.kill(provider_pid, 0)
@@ -3022,6 +3032,7 @@ else:
 
 def real_owner_fixture(tmp_path, monkeypatch, code):
     """Exercise cf_dispatch --plan-only and the production supervisor, no owner stub."""
+    disable_memory_admission_floor(tmp_path)
     bindir = tmp_path / 'provider-bin'
     bindir.mkdir()
     write_executable(bindir / 'claude', '#!/usr/bin/env python3\n' + code)
@@ -3040,12 +3051,13 @@ def real_owner_fixture(tmp_path, monkeypatch, code):
 
 def test_normal_attempt_records_reaped_new_session_child(tmp_path, monkeypatch):
     pid_path = tmp_path / "leftover.pid"
-    code = f'''import json, pathlib, subprocess, sys
+    code = f'''import json, pathlib, subprocess, sys, time
 sys.stdin.read()
 child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],
                          start_new_session=True, stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 pathlib.Path({str(pid_path)!r}).write_text(str(child.pid))
+time.sleep(1.1)  # Let the supervisor's process census observe the detached child.
 print(json.dumps({{'type': 'result', 'result': 'DONE', 'is_error': False}}), flush=True)
 '''
     run, _prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
@@ -3155,7 +3167,8 @@ time.sleep(30)
             mod.create_cancellation_marker(run, run / 'dispatch/tasks/dispatch-001/attempt-001')
         stdout, stderr = process.communicate(timeout=10)
         row = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
-        assert row['status'] == ('timed_out' if stop == 'timeout' else 'cancelled'), stdout + stderr
+        expected_status = 'timed_out' if stop == 'timeout' else ('interrupted' if stop == 'SIGTERM' else 'cancelled')
+        assert row['status'] == expected_status, stdout + stderr
         assert row['evidence']['exit'] is not None
         pids = json.loads((worktree / 'provider-pids').read_text())
         for pid in pids:
@@ -3164,7 +3177,7 @@ time.sleep(30)
         lease = mod.acquire_worktree_lease(worktree)
         mod.release_worktree_lease(lease)
         receipt = json.loads((run / 'RUN_RECEIPT.json').read_text())
-        assert receipt['status'] == ('failed' if stop == 'timeout' else 'cancelled')
+        assert receipt['status'] == ('cancelled' if stop == 'marker' else 'failed')
     finally:
         if process.poll() is None:
             process.terminate()
