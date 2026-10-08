@@ -1935,6 +1935,12 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             worktree_lease = acquire_worktree_lease(args.worktree)
         except WorktreeLeaseError as exc:
             return fail(run_dir, "worktree_busy", str(exc))
+        hosts = _fabric_hosts_owner()
+        try:
+            hosts.lane_owner().code().validate_launch(args.worktree, run_identity(run_dir, run_receipt), args.task_id)
+        except hosts.HostError as exc:
+            release_worktree_lease(worktree_lease)
+            return fail(run_dir, exc.code, str(exc))
     started_at = now()
     started = time.monotonic()
     observed_exit = False

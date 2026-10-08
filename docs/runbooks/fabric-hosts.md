@@ -259,8 +259,9 @@ Writer operation IDs are limited to 120 characters. Replays preserve the frozen
 base and destination; changing host or request is refused, including after a
 successful launch. An interrupted upload remains `launch_unknown` and resumes
 from the frozen input before dispatch reconciliation.
-An unreachable implicit placement may fall back before send; the writer operation
-is then durably bound locally and retries cannot launch it again on the peer.
+An unreachable implicit placement may fall back only at initial placement; the
+writer operation is then durably bound locally. An existing binding keeps its
+host on every retry, including when the first explicit contact failed before send.
 
 Fetch requires a terminal writer. The executing host holds the writer lease,
 checks registered worktree and branch identity, a new head descended from the
@@ -268,8 +269,11 @@ base, and cleanliness using the normal claim verifier. Its receipt binds project
 operation, base, head, host and worktree. Each operation and head has an immutable export. Earlier verified results stay
 fetchable after handoff; an unverified result from a superseded writer is
 refused. The
-chair imports it into an owned ref and checks the advertised and fetched heads
-against that receipt. Its existing branch and dirty files stay untouched. The
+chair selects its recorded input and continuation lineage before checking the
+receipt. It verifies the downloaded pack and ancestry in a temporary object
+repository, then imports only history reachable from the approved head into an
+owned ref. Hidden packed objects and rejected heads stay outside the chair's
+object store. Its existing branch and dirty files stay untouched. The
 reply names the imported ref for review or cherry-pick.
 
 Resume and handoff keep the transported worktree. A new writer worktree requires
@@ -278,8 +282,10 @@ named sessions are refused; use qualified run IDs for continuations. Reusing a
 worktree from an earlier dispatch requires Provenant's recorded context, the
 same branch, an exact base match, cleanliness and an available writer lease.
 An unrelated or changed peer worktree is refused rather than reset or removed.
-Continuations require current ownership; a resumed attempt reserves it through
-publication and completion. Read-only handoffs leave writer ownership intact,
+Continuations require current ownership; the shared launch owner checks that
+ownership under the writer lease even for local resumes on the executing host.
+A resumed attempt reserves ownership through publication and completion.
+Read-only handoffs leave writer ownership intact,
 and rejected preflights restore their prior reservation. Ownership and transport
 records live in separate host-state directories outside the writer's Git directory.
 

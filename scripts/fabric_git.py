@@ -99,6 +99,26 @@ class CodeTransport:
             self.fail('code_transport_too_large', 'Git bundle limit is 64 MiB')
         return {'size': size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
 
+    def import_history(self, repo, bundle, source, head, ref, base=None):
+        """Untrusted packs stay isolated; publish only the approved reachable graph."""
+        with tempfile.TemporaryDirectory(prefix='git-quarantine-', dir=self.f.root) as scratch:
+            quarantine = Path(scratch)
+            format = self.git(repo, 'rev-parse', '--show-object-format')
+            self.git(quarantine, 'init', '--bare', '--object-format=' + format)
+            # Prerequisites and previously accepted history remain readable,
+            # while every new object is written only in this temporary repository.
+            (quarantine / 'objects/info/alternates').write_text(str(self.w.common_git_dir(repo) / 'objects') + '\n')
+            self.git(quarantine, 'bundle', 'verify', str(bundle))
+            self.git(quarantine, 'bundle', 'unbundle', str(bundle))
+            if self.git(quarantine, 'cat-file', '-t', head) != 'commit':
+                self.fail('invalid_revision', 'Transported head must be a commit')
+            if base is not None:
+                self.git(quarantine, 'merge-base', '--is-ancestor', base, head)
+            self.git(quarantine, 'update-ref', source, head)
+            approved = quarantine / 'approved.bundle'
+            self.git(quarantine, 'bundle', 'create', str(approved), source)
+            self.git(repo, 'fetch', '--no-tags', '--no-write-fetch-head', str(approved), source + ':' + ref)
+
     def outgoing(self, project, request, cwd, identifier, host):
         """Freeze one committed input for each writer task; dirty files stay local."""
         clean = dict(request)
@@ -167,6 +187,64 @@ class CodeTransport:
                     if not result.get('ok'):
                         self.fail(result['error']['code'], result['error']['message'])
                     offset += len(chunk)
+
+    def requested_bindings(self, project, host, selector, task_id=None):
+        """Select from chair-owned input and continuation records, never a receipt."""
+        with self.f.database() as db:
+            records = db.execute('SELECT id,bindings,result FROM writer_history WHERE project=? AND host=?',
+                (project, host)).fetchall()
+        matches = []
+        for identifier, encoded, result in records:
+            bindings = json.loads(encoded)
+            result = json.loads(result) if result else {}
+            run_ids = {result.get('id'), result.get('run_id')}
+            run_ids.update(row.get('run_id') for row in result.get('runs', []))
+            chosen = [binding for binding in bindings if
+                (selector == identifier or selector in run_ids or selector == binding.get('task_id')) and
+                (task_id is None or task_id == binding.get('task_id'))]
+            if chosen:
+                matches.append((identifier, chosen))
+        if len(matches) != 1:
+            self.fail('writer_binding_missing', 'Select one locally recorded writer operation or task')
+        return matches[0]
+
+    def record_request(self, project, host, identifier, action, request):
+        if action == 'dispatch':
+            tasks = request.get('tasks') or [request]
+            bindings = [{**binding, 'input_operation_id': identifier,
+                'task_id': tasks[binding['index']].get('id') or tasks[binding['index']].get('task_id')
+                    or request.get('task_id') or ('task-' + str(binding['index'] + 1) if request.get('tasks') else None)}
+                for binding in request.get('code_transport', [])]
+        elif action == 'handoff' and all(request.get(key) is None for key in ('mode', 'cwd', 'worktree')):
+            try:
+                _, bindings = self.requested_bindings(project, host, request['handoff'], request.get('task_id'))
+            except self.h.HostError as exc:
+                if exc.code == 'writer_binding_missing':
+                    return  # Ordinary read-only continuations have no code binding.
+                raise
+            bindings = [{**binding, 'task_id': request.get('task_id') or binding['task_id']} for binding in bindings]
+        else:
+            return
+        if bindings:
+            with self.f.database() as db:
+                db.execute('INSERT OR IGNORE INTO writer_history VALUES (?,?,?,?,NULL)',
+                    (identifier, project, host, json.dumps(bindings)))
+
+    def record_result(self, identifier, result):
+        with self.f.database() as db:
+            row = db.execute('SELECT bindings FROM writer_history WHERE id=?', (identifier,)).fetchone()
+            if not row:
+                return
+            bindings = json.loads(row[0])
+            # Single dispatches and handoffs allocate task IDs in the launch
+            # owner. Capture that identity without changing their frozen input.
+            task = result.get('task_id')
+            if not task and len(result.get('runs', [])) == 1:
+                task = result['runs'][0].get('task_id')
+            if len(bindings) == 1 and task:
+                bindings[0]['task_id'] = task
+            db.execute('UPDATE writer_history SET bindings=?,result=? WHERE id=?',
+                (json.dumps(bindings), json.dumps(result), identifier))
 
     def peer(self, verb, project, request):
         if verb == 'git-result':
@@ -243,10 +321,7 @@ class CodeTransport:
                 self.fail('invalid_code_transport', 'Bundle must advertise exactly the bound base commit')
             source = advertised[0].split()[1]
             ref = f'refs/provenant/hosts/{self.f.config.local_host}/{binding["transfer_id"]}/base'
-            self.git(repo, 'bundle', 'verify', str(file))
-            self.git(repo, 'fetch', '--no-tags', '--no-write-fetch-head', str(file), source + ':' + ref)
-            if self.git(repo, 'cat-file', '-t', meta['base_revision']) != 'commit':
-                self.fail('invalid_revision', 'Writer base must be a commit')
+            self.import_history(repo, file, source, meta['base_revision'], ref)
             target = repo / '.worktrees' / meta['worktree']
             try:
                 if target.exists():
@@ -280,9 +355,26 @@ class CodeTransport:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         return path / (identifier + '.json')
 
-    def context_owner(self, target):
+    def context_owner(self, target, create=True):
         git_dir = Path(self.git(target, 'rev-parse', '--absolute-git-dir'))
-        return self.state_file('writer-owners', hashlib.sha256(str(git_dir).encode()).hexdigest())
+        identifier = hashlib.sha256(str(git_dir).encode()).hexdigest()
+        return (self.state_file('writer-owners', identifier) if create else
+            self.f.root / 'writer-owners' / (identifier + '.json'))
+
+    def validate_launch(self, target, run_id, task_id):
+        """Called by the shared launch owner while holding the writer lease."""
+        marker = self.context_owner(target, create=False)
+        if not marker.exists():
+            return  # Ordinary local writers have no transported context.
+        try:
+            owner = json.loads(marker.read_text())
+            identifier = self.f.operation_id({'operation_id': owner['operation_id']})
+            launch = json.loads((self.f.root / 'operations' / (identifier + '.json')).read_text())
+            if launch['runId'] == run_id and launch['taskId'] in {task_id, '*'}:
+                return
+        except (OSError, ValueError, KeyError, TypeError):
+            pass
+        self.fail('writer_context_superseded', 'The durable writer owner does not bind this run and task')
 
     def claim_context(self, context, expected_owner=None, admission_operation=None):
         target = Path(context['worktree_path'])
@@ -429,6 +521,7 @@ class CodeTransport:
             self.fail('writer_verification_failed', str(exc))
 
     def fetch(self, client, project, selector, host):
+        expected_operation, bindings = self.requested_bindings(project, host, selector)
         response = client.call('git-result', {'project_path': project, 'input': {'id': selector}}, write=True)
         if not response.get('ok'):
             return self.f.rejection(response)
@@ -440,11 +533,12 @@ class CodeTransport:
         if receipt.get('host') != host or receipt.get('project_path') != project or receipt.get('clean') is not True:
             self.fail('bad_response', 'Writer verification does not bind the requested host and project')
         identifier = self.f.operation_id({'operation_id': receipt.get('operation_id')})
-        with self.f.database() as db:
-            requested = db.execute('SELECT host FROM writer_dispatches WHERE id=? AND project=?', (selector, project)).fetchone()
-        if requested and identifier != selector:
+        if identifier != expected_operation:
             self.fail('bad_response', 'Writer verification identifies another requested operation')
         transfer = self.f.operation_id({'operation_id': receipt.get('transfer_id')})
+        bound = next((binding for binding in bindings if binding['transfer_id'] == transfer), None)
+        if bound is None or receipt.get('input_operation_id') != bound['input_operation_id']:
+            self.fail('bad_response', 'Writer verification changed the requested input or continuation lineage')
         path = self.directory(project, transfer)
         saved = path / 'outgoing.json'
         if not saved.is_file():
@@ -488,12 +582,7 @@ class CodeTransport:
             if advertised != [head + ' ' + source]:
                 self.fail('writer_head_mismatch', 'Fetched head differs from executing-host verification')
             ref = f'refs/provenant/hosts/{host}/{result_id}/result'
-            self.git(repo, 'bundle', 'verify', file.name)
-            self.git(repo, 'bundle', 'unbundle', file.name)
-            if self.git(repo, 'cat-file', '-t', head) != 'commit':
-                self.fail('bad_response', 'Verified writer head must be a commit')
-            self.git(repo, 'merge-base', '--is-ancestor', original['base_revision'], head)
-            self.git(repo, 'fetch', '--no-tags', '--no-write-fetch-head', file.name, source + ':' + ref)
+            self.import_history(repo, Path(file.name), source, head, ref, original['base_revision'])
             if self.git(repo, 'rev-parse', ref) != head:
                 self.fail('writer_head_mismatch', 'Fetched ref differs from verified head')
         return {'status': 'ok', 'ref': ref, 'verification': receipt,
