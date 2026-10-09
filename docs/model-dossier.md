@@ -168,10 +168,11 @@ not read an absent `Watch out for` as an endorsement.
 
 ### OpenCode models
 
-- **Good at:** `opencode-go/deepseek-v4.1-flash` is the preferred go-to and
-  `opencode-go/glm-5.3-flash` the second. Both draw on one small monthly quota,
-  so use both sparingly. They suit reviews, small implementations and design
-  opinions.
+- **Good at:** not currently used for writers or reviews. Across recorded
+  runs, `opencode-go` models (`deepseek-v4.1-flash`, `glm-5.3-flash`) produced
+  no completed lane: startup timeouts, and the sandbox denying the
+  adapter's own `opencode.json`. Reviews also lacked a structured verdict.
+  Re-probe a model with one cheap dispatch before routing real work to it.
 - **Watch out for:** free models (any `opencode/*-free`) rotate often and may
   train on prompts; keep sensitive, private or client data off them
   (`confidential: true` skips them).
@@ -297,8 +298,11 @@ implementation belongs to Claude Sonnet 5.5 or Gemini legwork.
 
 **Sonnet 5.5 is Claude's default; Opus 5.5 is for critical work.** Sonnet takes
 implementation, research, screenshots, second opinions, ordinary review and
-UI/design. Opus takes chairing, critical review, orchestration, crucial and
-terminal synthesis and hard reasoning, and still serves review. Prefer Opus over
+UI/design. Claude leads frontend and taste work (Opus for hard design), with
+Gemini Flash and Claude critiquing captures blind. Opus takes chairing,
+critical review, orchestration, crucial and terminal synthesis and hard
+reasoning, and still serves review. Opus and Astra plan as peers. Count Claude
+helpers toward a cap of about four concurrent Claude agents. Prefer Opus over
 Claude Fable 5.1 (`claude-fable-5-1`) for critical judgement most of the time.
 Luna remains the bulk legwork route.
 

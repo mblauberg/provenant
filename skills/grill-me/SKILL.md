@@ -18,6 +18,10 @@ Keep the explicit decision context current: intake/revision, constraints,
 evidence, decided branches, parked owner calls and the next unresolved branch.
 Do not start a parallel interview when revising the same request.
 
+When the user is still unsure of the reasoning, give the full trade-offs in
+prose first and offer option-picker questions only once they signal they have
+enough to decide; decisions come from understanding, not option labels.
+
 Ask one question at a time. Record decided, parked and still-open branches in
 the enclosing `scope` artifact when write authority exists; otherwise keep a
 compact chat register.

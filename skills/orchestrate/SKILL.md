@@ -8,7 +8,7 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
 ## Quickstart
 
 1. [Native first](references/routing-and-tiers.md#native-first): run your own provider's models as native subagents (Claude Code: Agent tool `opus`/`sonnet`; Codex: its subagents), not Fabric. Use Fabric for other providers (agy's Claude 4.6 included), long or detached runs, and sandboxed worktree writers.
-2. Call `fabric_dispatch` with `prompt` or `prompt_file`, `adapter` or `model`, and optional `effort`. `model` also takes `adapter/id[@effort]`; `fabric_adapters` with `models: <adapter>` lists live ids.
+2. Call `fabric_dispatch` with `prompt` or `prompt_file`, `adapter` or `model`, and optional `effort`. `model` also takes `adapter/id[@effort]`, whereas `route` takes only a pool name (an explicit id there is `route_invalid`); `fabric_adapters` with `models: <adapter>` lists live ids.
 3. For writers, pass `mode: "worktree_write"` and the registered `worktree`,
    named per `setup-repo`'s branch naming doctrine; the task id defaults to that
    same branch-derived string. Before dispatch, acquire and verify an advisory
@@ -16,7 +16,7 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
    stable unique `session_id`; renew it while work continues and release it when
    finished. Do not dispatch against a conflicting live claim; dispatch does not
    enforce claims.
-4. After dispatch, keep one `provenant lanes --wait` running in the background. When it exits, read the printed lanes, act, and re-arm it. A dispatching sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
+4. After dispatch, keep one `provenant lanes --wait` running in the background. When it exits, read the printed lanes, act, and re-arm it ([chair-loop.md](references/chair-loop.md#waiting) covers `--all`). A dispatching sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
 5. Use `provenant lanes` as the source of truth after compaction or restart; inspect a terminal row with `fabric_status` and copy its `Route:` provenance line. Use `events --follow` only for foreground streaming.
 6. For a question, call `fabric_dispatch` with `resume: id` and the answer in `prompt`. To continue one provider conversation across turns or agents, pass the same `session` name each time; `fabric_session` inspects, lists or forgets it.
 7. Use `fabric_cancel` with `id` to stop; use `fabric_output` with `id` and `part` for a bounded tail.

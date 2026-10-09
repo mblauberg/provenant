@@ -64,6 +64,8 @@ before writing findings.
   do not repeat their doctrine here. For a rendered-UI change, look at light
   and dark desktop captures of the changed surfaces before the verdict
   (`ui-ux-design`).
+- Before aligning a looser validator with a stricter one, search tests for the
+  permissive values; they may be a designed route into a rejection path.
 - A structural alternative blocks only when tied to a present defect or
   material regression with a safer, validated design. Attractive redesign
   alone is not a finding.

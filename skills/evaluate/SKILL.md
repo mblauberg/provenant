@@ -48,6 +48,9 @@ receipt; link safe relative artifacts and SHA-256 digests.
 7. Preserve bounded failures and route product defects to `implement`, unclear
    requirements to `scope`, and operational regressions to `diagnose`.
 
+Never claim impossibility from a stochastic search: solve it exactly, or say
+"best found in this sample".
+
 Before you call a receipt final, read it against this checklist:
 
 - `plan.digest` still matches the plan frozen before results were seen, and

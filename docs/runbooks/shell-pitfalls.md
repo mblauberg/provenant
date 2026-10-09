@@ -34,9 +34,19 @@ clean when the command in fact never ran, or ran on the wrong input.
   it lands in front of you before you rely on it.
 - **Long waits can outlive the command window.** If a foreground shell call
   approaches its roughly ten-minute cap, the process may continue without its
-  result reaching the caller. Run longer work under `nohup`, write its exit
-  code to a file, and use a separate waiter that reports completion before
-  acting on the result.
+  result reaching the caller. Prefer the harness's own background run, which
+  re-invokes the caller on exit. Where there is none, run the job under
+  `nohup`, capture `$!`, write its exit code to a file, and wait with
+  `kill -0 <pid>`; never poll with `pgrep -f`, whose pattern matches the
+  waiting shell's own command line. Stopping a waiter can kill its process
+  group, so launch the job from its own call, not from the waiter.
+- **A wildcard git pathspec matches across slashes.** `apps/*/src/**` matches
+  the whole path, not one segment; use `:(glob)apps/*/src/**` for glob
+  semantics.
+- **Never overwrite a running script in place.** The shell reads it
+  incrementally, so write a temp file and `mv` it over.
+- **macOS has no `timeout`.** Use the tool's own timeout flag or a background
+  run with a wait.
 
 None of these are bugs in the tools involved; they are the documented
 behaviour of the shell doing exactly what it was asked. Treat a search or
