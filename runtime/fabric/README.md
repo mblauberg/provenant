@@ -375,9 +375,11 @@ named session is never silently relaunched. `fresh: true` then starts a new
 session primed with the last clean result, as `handoff` does.
 
 Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, `detail`,
-`tail_chars` and `fields`. Terminal brief rows end with the last 1,200 characters
-of their result (`tail_chars` 0–4,000, 0 disables; the total across rows is
-bounded), so a short answer needs no `result.md` read. `detail: full` keeps a
+`tail_chars` and `fields`. A terminal brief row ends with the last 1,200
+characters of its result the first time the session sees that lane, so a short
+answer needs no `result.md` read and batch polls do not resend finished lanes.
+Requesting one lane, or passing `tail_chars` (0–4,000; 0 disables; the total
+across rows is bounded), shows the tail again. `detail: full` keeps a
 one-line summary per attempt instead of a second copy of the row; `fields`
 returns only the named keys (`fields:["attempts"]` gives the raw history).
 While lanes run, the text ends with a hint to block with `provenant lanes --wait
@@ -550,7 +552,12 @@ full detail is requested or ownership is present.
 
 `fabric_landing_lease` separately acquires one repository-wide landing lease
 with the expected remote integration SHA. It has a holder, expiry, generation,
-verify and release operations. An expired lease can be taken over; the prior
+verify and release operations. To wait for another chair to land, use
+`fabric_landing_lease` with `action: "wait"` and `wait_seconds` (clamped to 55) or the
+shell `fabric landing-wait --timeout 900` (exit 124 on timeout) instead of
+sleep loops; both return when the holder, generation or release state changes.
+`expected_sha` may be short or uppercase and is resolved with Git in the
+project; ambiguous or unknown values are refused. An expired lease can be taken over; the prior
 holder and new generation are recorded in activity. Before pushing, run
 `fabric landing-push <session-id> <generation> <branch> --label <seat>` from the
 landing checkout, using the same label as the MCP lease holder. Alternatively,

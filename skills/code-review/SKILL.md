@@ -26,8 +26,8 @@ resulting system, not the changed lines alone.
    or operations only when activated by the dependency cone.
 5. For substantial+ or wide-surface work, use independent targeted agents with
    distinct primary lenses and deliberate overlap on the riskiest invariant.
-   `orchestrate` adds the required other-primary and distinct-family review
-   pressure from `HARNESS.md`. Then
+   `orchestrate` adds the other-primary leg (or its recorded same-family
+   fallback) and distinct-family review pressure from `HARNESS.md`. Then
    run an anonymised claim challenge and a fresh reduction.
    Never rank prose or majority-vote findings.
 6. Review the design delta. Look for duplicated ownership, scattered flags,

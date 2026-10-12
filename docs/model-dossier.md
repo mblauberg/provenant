@@ -166,6 +166,20 @@ not read an absent `Watch out for` as an endorsement.
 - **Reach:** `sonnet` resolves to `claude-sonnet-5-5` on the `claude` adapter;
   1M-token context. `agy` keeps its separately listed Sonnet 4.6.
 
+### Haiku 5.5 (Anthropic scout)
+
+- **Good at:** cheap, fast bulk and mechanical slices on the Claude seat:
+  extraction, classification, sweeps and bounded edits. It covers the low-effort
+  work Sonnet used to take.
+- **Watch out for:** judgement, review, design and anything where a miss is
+  expensive; those stay on Sonnet 5.5 and Opus 5.5.
+- **Cost:** cheapest Claude tier ($0.10/$0.50 per Mtok at launch).
+- **Reach:** `haiku` resolves to `claude-haiku-5-5` on the `claude` adapter;
+  1M-token context; efforts `low` to `xhigh`, default `medium`. It holds `high`
+  weight in `bulk` beside Luna (Luna is listed first and stays the top pick) and
+  serves the Claude `bulk` and `mechanical` task classes. `claude-haiku-4-5`
+  stays reachable by its full name, with no effort control.
+
 ### OpenCode models
 
 - **Good at:** `opencode-go/deepseek-v4.1-flash` is the preferred go-to and
@@ -235,8 +249,8 @@ decider.
 ### Cheap bulk and scouting
 
 Reach for the cheapest *diverse* family (Luna, Gemini Flash, or the open models
-behind `kiro`) and confine it to objective fields. The catalogue also maps
-Anthropic's `bulk` class to Sonnet 5.5 at low effort; the cheaper families
+behind `kiro`) and confine it to objective fields. The catalogue maps
+Anthropic's `bulk` and `mechanical` classes to Haiku 5.5; the cheaper families
 remain the cost-first choice for objective extraction and classification.
 
 ### Human-facing final polish
@@ -300,7 +314,7 @@ implementation, research, screenshots, second opinions, ordinary review and
 UI/design. Opus takes chairing, critical review, orchestration, crucial and
 terminal synthesis and hard reasoning, and still serves review. Prefer Opus over
 Claude Fable 5.1 (`claude-fable-5-1`) for critical judgement most of the time.
-Luna remains the bulk legwork route.
+Luna and Haiku 5.5 are the bulk legwork routes.
 
 **Orchestration stays with the chair's own family**, at flagship effort:
 Anthropic at high effort when Claude is the chair, and Astra at `xhigh` when a
@@ -358,7 +372,6 @@ assessment; until then, route these on the hard axis alone.
 
 | Model | Configured position | Status |
 |---|---|---|
-| Haiku | `anthropic` scout alias | needs owner review |
 | Grok | reachable through the `cursor` adapter, `xai` family | needs owner review |
 | Cursor Composer | reachable through the `cursor` adapter | needs owner review |
 | DeepSeek | `deepseek` endpoint, reached through the `claude` adapter | needs owner review |
