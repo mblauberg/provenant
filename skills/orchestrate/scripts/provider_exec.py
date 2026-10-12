@@ -2840,7 +2840,9 @@ def execute(
             # Only an ERROR log or an explicit period limit is fatal; other retried noise is not.
             # Classify only the qualifying lines plus reset-hint lines; the rest of the window is not evidence.
             relevant = [line for line in text.splitlines()
-                        if re.search(OPENCODE_FATAL_LOG, line, re.I) or re.search(r"\bresets?\b", line, re.I)]
+                        if re.search(OPENCODE_FATAL_LOG, line, re.I)
+                        or (re.search(r"\bresets?\b", line, re.I)
+                            and not re.match(r"\s*(?:WARN|INFO|DEBUG)\b", line, re.I))]
             parsed = parse_output(adapter, "", "\n".join(relevant), 1)
             if parsed["status"] == "usage_limited":
                 live_failure = parsed
