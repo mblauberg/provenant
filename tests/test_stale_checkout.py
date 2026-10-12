@@ -1,13 +1,9 @@
 import os
 from pathlib import Path
 import subprocess
-import sys
 import time
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "scripts"))
-
-from lib.stale_checkout import check_stale_checkout  # noqa: E402
+from lib.stale_checkout import check_stale_checkout, warn_if_stale_checkout
 
 IDENT = ["-c", "user.name=t", "-c", "user.email=t@example.com"]
 
@@ -126,14 +122,12 @@ def test_missing_fetch_head_is_silent(tmp_path):
     assert check_stale_checkout(clone) == []
 
 
-def test_dedupe_flag_suppresses_output(tmp_path):
+def test_dedupe_flag_suppresses_output(tmp_path, monkeypatch, capsys):
     clone, other = make(tmp_path)
     push_from(other, "b")
     git(clone, "fetch", "-q")
-    code = f"import sys; sys.path.insert(0, {str(ROOT / 'scripts')!r}); from lib.stale_checkout import warn_if_stale_checkout as w; w(__import__('pathlib').Path({str(clone)!r}))"
-    env = {k: v for k, v in os.environ.items() if k != "PROVENANT_STALE_CHECKED"}
-    loud = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
-    assert "behind" in loud.stderr
-    quiet = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True,
-                           env={**env, "PROVENANT_STALE_CHECKED": "1"})
-    assert quiet.stderr == ""
+    monkeypatch.setenv("PROVENANT_STALE_CHECKED", "0")  # teardown restores the caller's value
+    assert warn_if_stale_checkout(clone)
+    assert "behind" in capsys.readouterr().err
+    assert warn_if_stale_checkout(clone) == []
+    assert capsys.readouterr().err == ""
