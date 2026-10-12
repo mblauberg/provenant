@@ -318,6 +318,54 @@ def write_route_health(row, *, path=None, at=None):
             os.close(parent)
 
 
+def _store_cooldowns(path, values):
+    """Atomic write of the cooldown map; callers hold the lock."""
+    parent, leaf = store_parent(path)
+    temp = ".cooldowns-" + secrets.token_hex(12)
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(
+                {"schema": "fabric.cooldowns.v1", "cooldowns": values},
+                stream,
+                indent=2,
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, leaf, src_dir_fd=parent, dst_dir_fd=parent)
+        os.fsync(parent)
+    finally:
+        try:
+            os.unlink(temp, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        os.close(parent)
+
+
+def clear_cooldowns(selector=None, path=None):
+    """Remove cooldowns: all, one adapter (`*` and every model key), or one adapter/model."""
+    try:
+        from .exec_routing import registered_model
+    except ImportError:
+        from exec_routing import registered_model
+    adapter, slash, model = (selector or "").partition("/")
+    if selector is not None and (not adapter.strip() or adapter.startswith("-")):
+        raise ValueError("selector must be adapter or adapter/model; omit it to clear every cooldown")
+    path = Path(path or cooldown_path())
+    if slash:
+        model = registered_model(adapter, model or "*")
+    with locked(path.with_name("cooldowns.lock")):
+        values = read_cooldowns(path)
+        removed = sorted(key for key in values if not selector
+                         or (key == adapter + "/" + model if slash else key.startswith(adapter + "/")))
+        for key in removed:
+            del values[key]
+        if removed:
+            _store_cooldowns(path, values)
+    return removed
+
+
 def write_cooldown(row, *, path=None, at=None):
     if row["status"] not in {"ok", "usage_limited", "rate_limited"}:
         return
@@ -356,10 +404,24 @@ def write_cooldown(row, *, path=None, at=None):
         key = adapter + "/" + model
         if row["status"] == "ok":
             # A substitution proves the answering model recovered, not the requested one.
-            # Nor does one healthy model prove an account-wide quota has reset.
-            if model == "*" or key not in values:
+            # An account-wide `*` entry clears only for an attempt that began after it was
+            # recorded (a stale in-flight success must not clear a newer limit) and never on
+            # model_quota adapters. Accepted risk: a lighter model succeeding while a heavier
+            # one is still limited costs one attempt, which re-arms the cooldown.
+            wide = values.get(adapter + "/*")
+            try:
+                clears_wide = (not model_quota and wide is not None
+                               and parse_time(row["started_at"]) > parse_time(wide["recorded_at"]))
+            except (KeyError, ValueError, TypeError, AttributeError):
+                clears_wide = False
+            gone = {key} if model != "*" else set()
+            if clears_wide:
+                gone.add(adapter + "/*")
+            gone &= values.keys()
+            if not gone:
                 return
-            del values[key]
+            for item in gone:
+                del values[item]
         else:
             values[key] = {
                 "adapter": adapter,
@@ -371,27 +433,7 @@ def write_cooldown(row, *, path=None, at=None):
                 "recorded_at": timestamp(at),
                 "signature": row["evidence"]["signature"],
             }
-        parent, leaf = store_parent(path)
-        temp = ".cooldowns-" + secrets.token_hex(12)
-        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent)
-        try:
-            with os.fdopen(fd, "w") as stream:
-                json.dump(
-                    {"schema": "fabric.cooldowns.v1", "cooldowns": values},
-                    stream,
-                    indent=2,
-                )
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temp, leaf, src_dir_fd=parent, dst_dir_fd=parent)
-            os.fsync(parent)
-        finally:
-            try:
-                os.unlink(temp, dir_fd=parent)
-            except FileNotFoundError:
-                pass
-            os.close(parent)
+        _store_cooldowns(path, values)
 
 
 def append_index(row, run_dir, *, root=None):

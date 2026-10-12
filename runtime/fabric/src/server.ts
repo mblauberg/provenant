@@ -7,7 +7,7 @@ import { fabricHosts, releaseHostChecks } from "./hosts.js";
 import { databasePath, identify, resolveCommitSha } from "./identity.js";
 import { federatedStatusRows as statusRows, fabricOutput, resultTail } from "./run-registry.js";
 import { reply, digest, serverBuild, mailboxView, adapterView, runView, fullView, lanesDigest, cancelDigest } from "./surface.js";
-import { catalogueSnapshot, liveModels } from "./catalogue.js";
+import { catalogueSnapshot, liveModels, resetCooldowns } from "./catalogue.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
 import { reconcileSession, sessionDispatch, sessionName, sessionView } from "./sessions.js";
 import {
@@ -690,13 +690,19 @@ register("fabric_hosts", "List hosts or diagnose peers over SSH.", {
   action: z.enum(["list", "doctor"]).default("list"),
   hosts: z.array(z.string()).optional(),
 }, ({ action, hosts }, { signal }) => fabricHosts(action, hosts ?? [], who.cwd, signal));
-register("fabric_adapters", "List routes and guarantees; full includes profiles; models lists one adapter's live models.", {
+register("fabric_adapters", "List routes and guarantees; full includes profiles; models lists one adapter's live models; action reset clears cooldowns.", {
   detail,
   models: z.string().max(40).optional().describe("Adapter whose live models to list (cached probe)."),
   match: z.string().max(80).optional().describe("Substring filter for models."),
-}, ({ detail, models, match }) =>
-  models === undefined ? adapterView(catalogueSnapshot(), detail) : liveModels(models, { match }),
-);
+  action: z.enum(["reset"]).optional().describe("reset clears cooldowns (selector: adapter or adapter/model; omit for all); use after the user says usage is back or switches accounts."),
+  selector: z.string().min(1).max(80).optional(),
+}, ({ detail, models, match, action, selector }) => {
+  if (action === "reset") {
+    const removed = resetCooldowns(selector);
+    return { digest: removed.length ? `cleared: ${removed.join(" ")}` : "no cooldowns matched" };
+  }
+  return models === undefined ? adapterView(catalogueSnapshot(), detail) : liveModels(models, { match });
+});
 if (process.env.FABRIC_LEGACY_TOOLS === "1") {
   register("fabric_batch", "Run a task batch.", batch, (input, { signal }) =>
     dispatchConfiguredBatch(input, executionIdentity(), signal),

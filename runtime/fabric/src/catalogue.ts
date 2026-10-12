@@ -147,6 +147,17 @@ export function catalogueSnapshot(root?: string, env: NodeJS.ProcessEnv = proces
   return value;
 }
 
+/** Clear cooldowns through the Python owner (same lock and atomic write); returns its removed keys. */
+export function resetCooldowns(selector?: string, env: NodeJS.ProcessEnv = process.env): string[] {
+  const configuredRoot = env.AGENT_FABRIC_PRODUCT_ROOT;
+  const productRoot = configuredRoot && isAbsolute(configuredRoot) ? configuredRoot : findProductRoot();
+  const python = env.HARNESS_PYTHON && isAbsolute(env.HARNESS_PYTHON) ? env.HARNESS_PYTHON : "python3";
+  const run = spawnSync(python, [join(productRoot, "scripts", "model_route.py"), "reset", "--json", ...(selector === undefined ? [] : ["--", selector])],
+    { cwd: productRoot, env: { ...process.env, ...env }, encoding: "utf8", timeout: 10_000 });
+  if (run.status !== 0) throw new Error(`cooldown reset failed: ${(run.stderr || "unknown error").split("\n", 1)[0]}`);
+  return (JSON.parse(run.stdout) as { removed: string[] }).removed;
+}
+
 const LISTED: Record<string, string> = { agy: "agy", codex: "codex", cursor: "cursor-agent", kiro: "kiro-cli", opencode: "opencode" };
 const FLAT_LIMIT = 24, GROUP_LIMIT = 20, OUTPUT_BUDGET = 4096;
 

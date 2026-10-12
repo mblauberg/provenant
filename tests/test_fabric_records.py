@@ -1,5 +1,8 @@
 import importlib
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from datetime import UTC, datetime, timedelta
 import pytest
@@ -289,3 +292,110 @@ def test_opencode_usage_limit_stays_scoped_to_its_model(tmp_path, model, expecte
     records().write_cooldown(row, path=path)
     keys = set(records().read_cooldowns(path))
     assert keys and "opencode/*" not in keys
+
+
+def limited(adapter, model, at, path, status="usage_limited", excerpt="usage limit reached"):
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status=status, reset_at=None, retry_after=None)
+    row["evidence"] = {"signature": "quota", "excerpt": excerpt}
+    row["provenance"]["requested"]["adapter"] = adapter
+    row["provenance"].update(resolved_model=model, observed_model=None)
+    records().write_cooldown(row, path=path, at=at)
+
+
+def timestamp(value):
+    return records().timestamp(value)
+
+
+def succeed(adapter, model, started_at, path, at):
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status="ok")
+    if started_at is None:
+        row.pop("started_at", None)
+    else:
+        row["started_at"] = started_at
+    row["provenance"]["requested"]["adapter"] = adapter
+    row["provenance"].update(resolved_model=model, observed_model=model)
+    records().write_cooldown(row, path=path, at=at)
+    return records().read_cooldowns(path, at)
+
+
+def seeded(tmp_path, at):
+    path = tmp_path / "cooldowns.json"
+    limited("claude", "opus", at, path)
+    limited("claude", "sonnet", at, path, "rate_limited", "429")
+    limited("codex", "*", at, path)
+    limited("codex", "gpt-5.5", at, path, "rate_limited", "429")
+    return path
+
+
+def test_reset_selectors_remove_only_what_they_name(tmp_path):
+    at = datetime.now(UTC)
+    path = seeded(tmp_path, at)
+    claude = sorted(key for key in records().read_cooldowns(path) if key.startswith("claude/"))
+    assert len(claude) == 2 and "claude/*" in claude
+    model_key = next(key for key in claude if key != "claude/*")
+    # The alias is canonicalised the way write_cooldown keyed it.
+    assert records().clear_cooldowns("claude/sonnet", path) == [model_key]
+    assert records().clear_cooldowns("claude", path) == ["claude/*"]
+    assert set(records().read_cooldowns(path)) == {"codex/*", "codex/gpt-5.5"}
+    assert records().clear_cooldowns("gemini", path) == []
+    assert records().clear_cooldowns(None, path) == ["codex/*", "codex/gpt-5.5"]
+    assert records().read_cooldowns(path) == {}
+    assert records().clear_cooldowns(None, path) == []
+
+
+def test_success_after_account_limit_clears_it_for_claude(tmp_path):
+    at = datetime(2026, 9, 23, 10, 0, tzinfo=UTC)
+    path = tmp_path / "cooldowns.json"
+    limited("claude", "*", at, path)
+    assert "claude/*" in records().read_cooldowns(path, at)
+    later = at + timedelta(minutes=5)
+    assert "claude/*" not in succeed("claude", "sonnet", timestamp(later), path, later)
+
+
+def test_success_started_before_account_limit_keeps_it(tmp_path):
+    at = datetime(2026, 9, 23, 10, 0, tzinfo=UTC)
+    path = tmp_path / "cooldowns.json"
+    limited("claude", "*", at, path)
+    later = at + timedelta(minutes=5)
+    started = timestamp(at - timedelta(minutes=1))
+    assert "claude/*" in succeed("claude", "sonnet", started, path, later)
+
+
+def test_success_without_start_time_keeps_account_limit(tmp_path):
+    at = datetime(2026, 9, 23, 10, 0, tzinfo=UTC)
+    path = tmp_path / "cooldowns.json"
+    limited("claude", "*", at, path)
+    assert "claude/*" in succeed("claude", "sonnet", None, path, at + timedelta(minutes=5))
+
+
+def test_model_quota_adapter_success_keeps_its_wildcard(tmp_path):
+    at = datetime(2026, 9, 23, 10, 0, tzinfo=UTC)
+    path = tmp_path / "cooldowns.json"
+    limited("agy", "*", at, path, "rate_limited", "429")
+    later = at + timedelta(minutes=5)
+    assert "agy/*" in succeed("agy", "gemini-3.5-flash", timestamp(later), path, later)
+
+
+@pytest.mark.parametrize("selector", ["", " ", "--json", "-x", "/sonnet"])
+def test_reset_rejects_a_malformed_selector_without_clearing_anything(tmp_path, selector):
+    path = seeded(tmp_path, datetime.now(UTC))
+    before = records().read_cooldowns(path)
+    with pytest.raises(ValueError):
+        records().clear_cooldowns(selector, path)
+    assert records().read_cooldowns(path) == before
+
+
+def test_reset_command_prints_removed_keys_and_exits_zero(tmp_path):
+    at = datetime.now(UTC)
+    path = seeded(tmp_path, at)
+    env = {**os.environ, "FABRIC_COOLDOWNS_PATH": str(path)}
+    command = [sys.executable, str(Path(__file__).parents[1] / "scripts" / "model_route.py"), "reset"]
+    removed = subprocess.run([*command, "codex", "--json"], env=env, capture_output=True, text=True)
+    assert removed.returncode == 0
+    assert json.loads(removed.stdout)["removed"] == ["codex/*", "codex/gpt-5.5"]
+    plain = subprocess.run([*command, "codex"], env=env, capture_output=True, text=True)
+    assert plain.returncode == 0
+    assert plain.stdout.strip() == "no cooldowns matched"
+    assert "claude/*" in records().read_cooldowns(path)

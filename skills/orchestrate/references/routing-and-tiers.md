@@ -117,6 +117,10 @@ the catalogue, and effort, privacy and cooldown gates still apply (efforts come 
 Explicit versioned ids stay exact. Claude has no live listing, so a new Claude model still needs one
 catalogue line; the native Agent tool's `sonnet`/`opus` already track the latest.
 
+## Cooldowns
+
+After the user says usage is back or switches accounts, run `provenant route reset <adapter>`.
+
 ## Choosing among admissible routes
 
 The tables above decide what a route *must* be. When more than one route
