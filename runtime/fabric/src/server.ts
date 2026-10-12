@@ -489,7 +489,7 @@ register(
 );
 register(
   "fabric_status",
-  "Read or wait for runs. wait_seconds above 55 is clamped to 55; invalid numeric values return a typed rejection.",
+  "Read or wait for runs. In batch status, tails are shown for lanes completed during this wait; request one lane, detail:full, or tail_chars to include earlier tails. wait_seconds above 55 is clamped to 55; invalid numeric values return a typed rejection.",
   {
     ids: ids(),
     id: str,
@@ -502,6 +502,7 @@ register(
   async ({ ids, id, wait_seconds, until, detail, tail_chars, fields }, { signal }) => {
     const waitResult = boundedWait(wait_seconds);
     if (waitResult.error) return waitResult.error;
+    const callStarted = Date.now();
     const result = await statusRows(who.project, ids ?? (id ? [id] : undefined), waitResult.value, until, signal, detail);
     acknowledgeRuns(result);
     const view = detail === "full"
@@ -517,12 +518,19 @@ register(
     } catch {
       // Fall through with no ownership rows.
     }
-    // A short answer should not cost a second call: terminal rows carry the end of their result.
+    // A short answer should not cost a second call: newly terminal rows carry the end of their result.
     const rows: Record<string, any>[] = Array.isArray(result.runs) ? result.runs : [];
     const localHost = (result as Record<string, any>).hosts?.find((host: Record<string, any>) => host.local)?.host;
     const terminal = rows.filter((row) => row.state === "terminal" && (!row.host || row.host === localHost));
     const each = Math.min(tail_chars ?? 1200, Math.floor(Math.max(3600, tail_chars ?? 0) / Math.max(1, terminal.length)));
-    const tails = detail === "full" ? [] : terminal.flatMap((row) => {
+    const oneLaneRequested = rows.length === 1 && (
+      (id !== undefined && id !== rows[0]?.batch_id) ||
+      (ids?.length === 1 && ids[0] !== rows[0]?.batch_id)
+    );
+    const tails = terminal.flatMap((row) => {
+      const endedAt = Date.parse(String(row.ended_at ?? ""));
+      const completedDuringCall = Number.isFinite(endedAt) && endedAt > callStarted;
+      if (tail_chars === 0 || !(completedDuringCall || oneLaneRequested || detail === "full" || tail_chars !== undefined)) return [];
       const tail = resultTail(row, each);
       return tail ? [`result tail ${row.task_id ?? row.run_id}${tail.total > tail.text.length ? " (end)" : ""}:\n${tail.text}`] : [];
     });

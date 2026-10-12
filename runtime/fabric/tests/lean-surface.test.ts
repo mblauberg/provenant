@@ -163,6 +163,34 @@ describe("lean surface over the fixture owners", () => {
       await client.close();
     }
   }, 120_000);
+
+  it("tails only batch lanes that become terminal during the status wait", async () => {
+    const { client, call } = await connect();
+    try {
+      const dispatched = await call("fabric_dispatch", { adapter: "codex", tasks: [
+        { id: "already-done", prompt: "quick" },
+        { id: "finishes-during-wait", prompt: "slow" },
+      ], wait_seconds: 0 });
+      const batchId = idOf(dispatched.text);
+      const observed = (await call("fabric_status", { id: batchId, until: "any", wait_seconds: 20, detail: "full" })).result.structuredContent as any;
+      expect(observed?.runs?.find((row: any) => row.task_id === "already-done")?.state).toBe("terminal");
+      const waiting = observed?.runs?.find((row: any) => row.task_id === "finishes-during-wait");
+      expect(waiting?.state).toBe("running");
+
+      const release = setTimeout(() => writeFileSync(join(waiting.run_dir, "cancel"), ""), 100);
+      const completed = await call("fabric_status", { id: batchId, until: "all", wait_seconds: 20 });
+      clearTimeout(release);
+      expect(completed.text).not.toContain("result tail already-done");
+      expect(completed.text).toContain("result tail finishes-during-wait");
+
+      const full = await call("fabric_status", { id: batchId, detail: "full", wait_seconds: 0 });
+      expect(full.text).toContain("result tail already-done");
+      const requestedTail = await call("fabric_status", { id: batchId, tail_chars: 50, wait_seconds: 0 });
+      expect(requestedTail.text).toContain("result tail already-done");
+    } finally {
+      await client.close();
+    }
+  }, 120_000);
 });
 
 describe("lean views", () => {
@@ -327,4 +355,3 @@ describe("task-level cancel", () => {
     expect(existsSync(log)).toBe(false);
   }, 60_000);
 });
-
