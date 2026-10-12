@@ -745,7 +745,7 @@ async function legacyStatus(
         const terminal =
           attempts.length > 0 &&
           attempts.every((attempt) =>
-            ["ok", "failed", "blocked", "timed_out", "cancelled"].includes(String(canonicalSuccessStatus(attempt.status))),
+            ["ok", "quarantined", "failed", "blocked", "timed_out", "cancelled"].includes(String(canonicalSuccessStatus(attempt.status))),
           ) &&
           (batchId === undefined ||
             (Array.isArray(status?.task_ids) &&

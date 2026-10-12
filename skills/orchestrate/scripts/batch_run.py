@@ -71,7 +71,7 @@ DEFAULT_TIMEOUT_SECONDS = 3600.0
 # before the batch falls back to killing that owner.
 CANCEL_DISPATCH_GRACE_SECONDS = 2.0
 DISPATCH_WATCHDOG_GRACE_SECONDS = 5.0
-TERMINAL_TASK_STATUSES = {"blocked", "ok", "failed", "rejected", "timed_out", "cancelled"}
+TERMINAL_TASK_STATUSES = {"blocked", "ok", "quarantined", "failed", "rejected", "timed_out", "cancelled"}
 PREFLIGHT_REJECTION_CODES = {
     "access_mode_invalid", "allow_secrets_invalid", "capabilities_adapter_invalid",
     "capabilities_confinement_unavailable", "capabilities_invalid", "capabilities_mode_invalid",
@@ -447,7 +447,7 @@ def _preflight_rejection(record: dict[str, Any], process_exit: int | None) -> di
             return {"error": error, "fix": record["fix"]}
     status = record.get("status")
     typed_status = (
-        isinstance(status, str) and status not in {"ok", "failed", "timed_out", "cancelled", "blocked", "rejected"}
+        isinstance(status, str) and status not in {"ok", "quarantined", "failed", "timed_out", "cancelled", "blocked", "rejected"}
         and re.fullmatch(r"[a-z][a-z0-9_]{1,63}", status) and record.get("error") == status
     )
     if (record.get("schema_version") == 1 and isinstance(status, str) and
@@ -585,6 +585,7 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
         return {
             "task_id": task_id, "status": status, "outcome": outcome,
             "dispatch_exit": process_exit, "attempt_path": attempt_path,
+            **({"landable": False, "quarantine": attempt.get("quarantine")} if status == "quarantined" else {}),
             "attempt_digest": record.get("attempt_digest"), "result_path": result_path,
             "requested_route": requested, "route": {
                 field: route[field] for field in ("adapter", "alias", "model", "effort", "provider_family", "model_family", "resolved_model", "execution_intent")

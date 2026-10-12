@@ -3799,3 +3799,50 @@ def test_keep_attempt_tmp_env_retains_private_tmp(tmp_path: Path) -> None:
         {"PROVENANT_KEEP_ATTEMPT_TMP": "1"})
     assert result.returncode == 0, result.stderr + result.stdout
     assert (attempt / "tmp/note").is_file()
+
+
+@pytest.mark.parametrize('invalid_digest', [False, True])
+def test_dispatch_retains_quarantined_result_without_clean_success(tmp_path, monkeypatch, invalid_digest):
+    run_dir = make_run(tmp_path, 'quarantined')
+    disable_memory_admission_floor(tmp_path)
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('hello')
+    adapter = tmp_path / 'adapter'
+    write_success_adapter(adapter)
+    text = adapter.read_text().replace('"status":"ok"', '"status":"quarantined","landable":false,"quarantine":{"reason":"protected_instructions_changed","patches":["protected.patch"],"restored":false}')
+    if invalid_digest:
+        text = text.replace('digest="sha256:', 'digest="invalid-sha256:')
+    adapter.write_text(text + '\nexit 1\n')
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, 'CF_DISPATCH', adapter)
+    monkeypatch.chdir(tmp_path)
+    args = module.parser().parse_args([
+        '--run-dir', str(run_dir), '--task-id', 'review', '--adapter', 'codex',
+        '--prompt-file', str(prompt), '--alias', 'scout', '--role', 'worker'])
+    assert module.dispatch(args) == 1
+    record = json.loads((run_dir / 'dispatch/tasks/review/attempt-001/attempt.json').read_text())
+    assert record['status'] == ('failed' if invalid_digest else 'quarantined')
+    if invalid_digest:
+        assert record['outcome'] == 'adapter_receipt_invalid'
+    if not invalid_digest:
+        assert record['landable'] is False
+        assert record['quarantine']['patches'] == ['protected.patch']
+        assert (run_dir / record['result']['path']).read_text() == 'OK\n'
+        canonical = json.loads((run_dir / 'tasks/review/attempt-001/attempt.json').read_text())
+        assert canonical['status'] == 'quarantined'
+        assert canonical['landable'] is False
+        assert 'review quarantine' in canonical['digest']
+        import batch_run
+        claimed = {**record, 'attempt_digest': module.digest(run_dir / record['attempt_path'])}
+        child = batch_run._validate_child_record(
+            {'id': 'review', 'adapter': 'codex', 'alias': 'scout', 'role': 'worker'}, claimed, run_dir, 1)
+        assert child['status'] == 'quarantined'
+        assert child['landable'] is False
+        assert child['quarantine'] == record['quarantine']
+        import run_controls
+        retained, *_ = run_controls._attempt(run_dir, 'review', 'attempt-001')
+        assert retained['status'] == 'quarantined'
+        monkeypatch.setenv('PROVENANT_RUN_TOKEN', 'fixture-token')
+        monkeypatch.setenv('PROVENANT_RUN_DIR', str(run_dir))
+        module.close_mcp_run(run_dir)
+        assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'quarantined'

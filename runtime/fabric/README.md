@@ -228,11 +228,18 @@ branch had changed that path too before the attempt), Fabric by default
 quarantines the change: it archives the lane's files to `<attempt>/protected.patch`
 (and its index or HEAD to `protected.index.patch` or `protected.head.patch` when
 they differ), commits the start or integration-branch version back to the lane,
-returns the index and files to their starting content and finishes `ok` with a
-warning naming the patches. `.agents/fabric-policy.json` `instruction_changes`
-may instead be `allow` (keep an ordinary edit, with a warning) or `deny` (fail
-with `protected_instructions_changed`). A conflict, special file, replaced root,
-lane process left running or failed quarantine fails under any policy. If OS confinement is unavailable, agy write
+returns the index and files to their starting content. A successful provider
+then finishes `quarantined`: its result stays visible, `landable: false` blocks
+landing, and status/digest/lanes name the reason and patches for chair review.
+`.agents/fabric-policy.json` `instruction_changes` may instead be `allow` (keep
+an ordinary edit, with a warning) or `deny` (retain the edit for review without
+restoration). Denied edits, failed restoration and unverifiable checks also
+quarantine a successful result; incomplete or interrupted providers keep their
+failure outcomes. `protected.patch` may be empty for an index-only edit or carry
+an unavailable-diff comment for unsafe states, with `quarantine.patch_error`
+explaining capture failure. Spared processes alone do not prove instruction
+edits. Writers stage proposed instruction edits outside `.agents/` for separate
+review. If OS confinement is unavailable, agy write
 dispatch is refused; other wrapped writer receipts warn that writes are
 unconfined. Setting `PROVENANT_NO_OS_CONFINEMENT=1` has the same effect on new
 wrapped attempts.
