@@ -357,11 +357,10 @@ def main(arguments: list[str]) -> int:
         return 3
     if command == "check":
         try:
-            prod_root = resolve_product_root()
-            warn_if_stale_checkout(prod_root)
-            os.environ["PROVENANT_STALE_CHECKED"] = "1"
-        except Exception:
-            pass
+            warn_if_stale_checkout(resolve_product_root())
+        except Exception as exc:  # advisory only; PROVENANT_DEBUG shows why it failed
+            if os.environ.get("PROVENANT_DEBUG"):
+                print(f"provenant: stale-checkout check failed: {exc!r}", file=sys.stderr)
     execute(target, command_arguments, product_root, clear_git_redirects=command == "check")
 
 

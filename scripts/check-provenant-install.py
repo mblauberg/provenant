@@ -93,9 +93,7 @@ def main() -> int:
     if (pointer.exists() or pointer.is_symlink()) and pointed_product is None:
         print(f"FAIL: product-root pointer is invalid or stale at {pointer}", file=sys.stderr)
         return 1
-    if os.environ.get("PROVENANT_STALE_CHECKED") != "1":
-        warn_if_stale_checkout(pointed_product or ROOT)
-        os.environ["PROVENANT_STALE_CHECKED"] = "1"
+    warn_if_stale_checkout(pointed_product or ROOT)
     if pointed_product is None or pointed_product.resolve() != ROOT.resolve():
         print("provenant installed stub=not-owned-by-this-checkout")
         return 0
