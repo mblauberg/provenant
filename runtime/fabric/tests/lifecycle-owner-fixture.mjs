@@ -5,6 +5,7 @@
 import { spawn } from "node:child_process";
 import { psOutput } from "../src/ps.mjs";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileAtomic } from "./atomic-write.mjs";
 import { basename, join, relative } from "node:path";
 
 const value = (flag) => {
@@ -51,7 +52,7 @@ if (owner === "run_dir_init.sh") {
   if (process.argv.includes("--owner-logs")) mkdirSync(join(runDir, "_owner"));
   mkdirSync(join(runDir, "traces"), { recursive: true });
   writeFileSync(join(runDir, "MANIFEST.md"), "# fixture manifest\n");
-  writeFileSync(join(runDir, "RUN_RECEIPT.json"), JSON.stringify({
+  writeFileAtomic(join(runDir, "RUN_RECEIPT.json"), JSON.stringify({
     schema_version: 1,
     status: "active",
   }) + "\n");
@@ -61,7 +62,7 @@ if (owner === "run_dir_init.sh") {
 }
 
 const runDir = value("--run-dir");
-if (process.env.FIXTURE_ARGV_LOG && runDir) writeFileSync(join(runDir, `${owner}.argv.json`), JSON.stringify(process.argv.slice(2)));
+if (process.env.FIXTURE_ARGV_LOG && runDir) writeFileAtomic(join(runDir, `${owner}.argv.json`), JSON.stringify(process.argv.slice(2)));
 
 /**
  * A provider may lead its own session. It answers only its own SIGTERM, so a
@@ -89,7 +90,7 @@ const startProvider = ({ ignoreTerm = false, detached = false } = {}) => {
     provider.kill("SIGKILL");
     throw error;
   }
-  writeFileSync(join(runDir, "dispatch-provider.json"), JSON.stringify({
+  writeFileAtomic(join(runDir, "dispatch-provider.json"), JSON.stringify({
     run_token: process.env.PROVENANT_RUN_TOKEN,
     provider_pid: provider.pid,
     provider_pgid: detached ? provider.pid : process.pid,
@@ -180,7 +181,7 @@ if (owner === "dispatch_run.py") {
         execution_intent: "ordinary",
       },
     };
-    writeFileSync(attemptPath, JSON.stringify(record, null, 2) + "\n");
+    writeFileAtomic(attemptPath, JSON.stringify(record, null, 2) + "\n");
     process.stdout.write(JSON.stringify(record) + "\n");
     process.exit(0);
   } else if (prompt === "sleep before the attempt directory") {
@@ -213,7 +214,7 @@ if (owner === "dispatch_run.py") {
         execution_intent: "ordinary",
       },
     };
-    writeFileSync(attemptPath, JSON.stringify(record, null, 2) + "\n");
+    writeFileAtomic(attemptPath, JSON.stringify(record, null, 2) + "\n");
     process.stdout.write(JSON.stringify(record) + "\n");
     process.exit(0);
   }
@@ -228,9 +229,9 @@ if (owner === "dispatch_run.py") {
     const dir = join(runDir, "dispatch", "tasks", taskId, "attempt-001");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "result.md"), "");
-    writeFileSync(join(dir, "attempt.json"), "{}");
+    writeFileAtomic(join(dir, "attempt.json"), "{}");
     const summary = join(runDir, "summary.json");
-    writeFileSync(summary, "{}");
+    writeFileAtomic(summary, "{}");
     process.stdout.write(JSON.stringify({ schema_version: 1, record_type: "dispatch-batch", status: "completed",
       batch_id: "batch-001", task_count: 1, concurrency: 1, counts: { ok: 1 }, summary_path: "summary.json",
       tasks: [{ task_id: taskId, status: "ok", outcome: "ok", attempt_path: relative(runDir, join(dir, "attempt.json")),
