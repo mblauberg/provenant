@@ -556,6 +556,21 @@ def test_ordinary_registry_routes_names_and_nearest_effort(arguments, model, eff
     assert route["effort_applied"] == effort
 
 
+@pytest.mark.parametrize("model,asked,resolved,used", [
+    ("sonnet", "low", "claude-sonnet-5-5", "medium"),
+    ("haiku", "max", "claude-haiku-5-5", "xhigh"),
+])
+def test_tier_alias_clamps_effort_to_the_registry_efforts(model, asked, resolved, used):
+    result, route = resolve("--adapter", "claude", "--alias", "workhorse", "--model", model,
+                            "--effort", asked, "--role", "worker")
+    assert result.returncode == 0, route
+    assert route["status"] == "ok"
+    assert route["resolved_model"] == resolved
+    assert route["effort"] == used
+    assert route["effort_substitution"] == f"{asked} unsupported by {resolved}; ran at {used}"
+    assert asked not in route["supported_efforts"]
+
+
 def test_ordinary_unknown_model_passes_through_and_conflict_prefers_model():
     result, route = resolve("--adapter", "opencode", "--alias", "scout", "--model",
                             "example/new-model", "--role", "worker")

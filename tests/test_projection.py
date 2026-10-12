@@ -140,3 +140,23 @@ def test_architecture_risk_projection_matches_the_runtime_policy():
             for cell in rows[factor]
         ]
         assert actual == expected
+
+
+def _minimum_tier(policy, **overrides):
+    # Lowest-risk rating for every factor, then apply the given ratings.
+    ratings = {factor: next(iter(mapping)) for factor, mapping in policy["factors"].items()}
+    ratings.update(overrides)
+    tiers = policy["tier_order"]
+    return max(
+        (policy["factors"][factor][value] for factor, value in ratings.items()),
+        key=tiers.index,
+    )
+
+
+def test_internal_data_alone_stays_routine_but_consequences_escalate():
+    policy = json.loads((ROOT / "config" / "risk-policy.json").read_text())
+    assert _minimum_tier(policy, data_sensitivity="internal") == "routine"
+    assert _minimum_tier(
+        policy, data_sensitivity="internal", reversibility="irreversible"
+    ) == "terminal"
+    assert _minimum_tier(policy, data_sensitivity="confidential") == "crucial"

@@ -41,7 +41,8 @@ Other-primary and distinct-family lanes follow `HARNESS.md`. Targeted lenses and
 other-primary coverage are required from substantial risk up; distinct-family
 review is used when available. Terminal work adds stronger targeted and
 adversarial pressure, and a skipped distinct-family leg records its reason.
-Missing other-primary coverage remains a blocking omission. Review repair output
+Missing other-primary coverage without a recorded skip and same-family fallback
+remains a blocking omission. Review repair output
 again because it is a new surface.
 
 Each lens artifact records reviewer/family/model, source and artifact authority,

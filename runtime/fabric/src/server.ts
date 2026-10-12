@@ -4,7 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 
 import { fabricHosts, releaseHostChecks } from "./hosts.js";
-import { databasePath, identify } from "./identity.js";
+import { databasePath, identify, resolveCommitSha } from "./identity.js";
 import { federatedStatusRows as statusRows, fabricOutput, resultTail } from "./run-registry.js";
 import { reply, digest, serverBuild, mailboxView, adapterView, runView, fullView, lanesDigest, cancelDigest } from "./surface.js";
 import { catalogueSnapshot, liveModels } from "./catalogue.js";
@@ -565,20 +565,29 @@ register("fabric_work_claim", "Acquire, renew, verify or release an advisory iss
   readyStore().releaseWork(who, session_id, id, generation);
   return { released: id, generation };
 });
-register("fabric_landing_lease", "Acquire, renew, verify or release the repository landing lease.", {
-  action: z.enum(["acquire", "renew", "verify", "release"]), session_id: z.string().min(1),
+register("fabric_landing_lease",
+  "Acquire, renew, verify or release the repository landing lease. action=wait blocks up to wait_seconds (max 55) " +
+  "until the lease changes hands or frees; use it instead of sleep loops. expected_sha may be short or uppercase.", {
+  action: z.enum(["acquire", "renew", "verify", "release", "wait"]), session_id: z.string().min(1),
   expected_sha: str, generation: z.number().int().positive().optional(),
-  seconds: z.number().int().min(1).max(3600).optional(),
-}, ({ action, session_id, expected_sha, generation, seconds }) => {
-  if (action === "acquire") {
-    if (!expected_sha) throw new Error("expected_sha is required");
-    return readyStore().acquireLanding(who, session_id, expected_sha, seconds ?? 300);
+  seconds: z.number().int().min(1).max(3600).optional(), wait_seconds: z.number().optional(),
+}, async ({ action, session_id, expected_sha, generation, seconds, wait_seconds }, { signal }) => {
+  if (action === "wait") {
+    const bounded = boundedWait(wait_seconds ?? MAX_WAIT_SECONDS);
+    if (bounded.error) return bounded.error;
+    const waited = await readyStore().waitLanding(who.project, bounded.value!, signal);
+    return withWarnings({ changed: waited.changed, landing_lease: waited.lease }, bounded.warnings);
   }
-  if (generation === undefined) throw new Error("generation is required");
+  if (action === "acquire") {
+    if (!expected_sha) throw new Error("expected_sha is required: the integration branch's current remote SHA");
+    return readyStore().acquireLanding(who, session_id, resolveCommitSha(who.cwd, expected_sha), seconds ?? 300);
+  }
+  if (generation === undefined)
+    throw new Error("generation is required: pass the generation returned by action=acquire (fabric_status shows the live one)");
   if (action === "renew") return readyStore().renewLanding(who, session_id, generation, seconds ?? 300);
   if (action === "verify") {
     if (!expected_sha) throw new Error("expected_sha is required");
-    return readyStore().verifyLanding(who, session_id, generation, expected_sha);
+    return readyStore().verifyLanding(who, session_id, generation, resolveCommitSha(who.cwd, expected_sha));
   }
   readyStore().releaseLanding(who, session_id, generation);
   return { released: generation };
