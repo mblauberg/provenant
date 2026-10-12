@@ -14,8 +14,9 @@ in `skills/orchestrate`; this page records the traps.
   reviewers raise wrong findings as well as right ones.
 - Do not give a read-only or sandboxed lane write tasks outside its worktree.
   Make the complete final response the deliverable and have the chair persist it.
-- Do not route a family's models through another vendor's tool (for example
-  GPT or Claude through a Cursor seat): limits burn fast and attribution blurs.
+- Avoid spending a family's models through a tight-quota seat (for example GPT
+  or Claude through a Cursor seat): limits burn fast. Configured gateway routes,
+  such as agy-hosted Claude or Kiro, are fine; the receipt records the host.
 - Prefer a native subagent for your own family and a headless CLI for another.
   Never self-deploy through your own headless CLI.
 - Strip ANSI noise from CLIs that emit it before parsing their output.
@@ -25,23 +26,24 @@ in `skills/orchestrate`; this page records the traps.
 - Headless `-p` cannot prompt for tool permission. A denied call exits 0 with
   `{"status":"SUCCESS","response":""}` and the only real signal on stderr. One
   denial discards the whole turn, reads included. Judge the dispatcher's record
-  status, never exit code or output size, and do not merge stderr away.
+  status, never exit code or output size, and keep stderr separate.
 - `--add-dir` grants reads. Wildcard permission rules work for some categories
   (`mcp`, `command`) but not `read_file`/`write_file` paths.
 - `--model` and `--effort` are separate flags; `--effort` is mandatory and
   efforts are per model (some offer only low and high). There is no `-m` alias.
   An unknown slug can silently fall back to a cheaper model: confirm the
-  reported model. Evidence from before the release that fixed `-p` ignoring
-  `--model`/`--effort` is void.
+  reported model. Re-verify older agy evidence gathered without explicit
+  `--model` and `--effort` flags: earlier `-p` releases ignored them.
 - The prompt is one argv value. `--print -` treats the dash as the literal
   prompt. Linux caps one argv string at 128 KiB, macOS does not, so a large
   brief works on a Mac and fails on a Linux runner: keep briefs under about
   124 KiB and put bulk material behind `--add-dir`.
 - Large or code-heavy prompts have hung with zero output, and `--print-timeout`
   is not honoured. Send compact per-region prompts and wrap the call in an
-  external watchdog. Treat agy as advisory.
-- Quota errors are account-wide and name the reset window: read it rather than
-  retrying. Probe quota with the model the real lane will use.
+  external watchdog. Treat agy output as advisory until checked independently.
+- Quota errors name the reset window and may cover one hosted-model pool:
+  read the window rather than retrying, and switch to another available pool.
+  Probe quota with the model the real lane will use.
 
 ## Codex
 

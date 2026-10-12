@@ -39,8 +39,8 @@ goes to `scope` whatever the artefact. Then follow the chain.
 **Routine fast path.** A `routine` change (reversible, one slice, an objective
 check available) needs no run record, separate scope pass or subagent unless
 fan-out saves attention: act, run the check, self-check once. Escalate to the
-full chain when authority, irreversibility, external action or unclear
-acceptance criteria appear.
+full chain when the work needs new authority, becomes irreversible, takes an
+external action or lacks clear acceptance criteria.
 
 `[session] → [scope → user spec/one-way-door gate → deliver profile] → implement/domain execution
 [name governing skill; invoke tdd for observable change | diagnose] → deterministic verification → [evaluate] → [independent review +

@@ -13,7 +13,7 @@ The primary checkout is the live harness for every project that uses it:
 installed skills and scripts run from it. Keep it on the default branch and do
 all branch, integration and lane work in linked worktrees. Fast-forward the
 primary checkout only on an approved merge. If a session starts with it on
-another branch, say so before working.
+another branch, tell the user before working.
 
 ## Canonical location
 
