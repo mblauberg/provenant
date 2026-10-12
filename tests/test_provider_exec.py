@@ -3993,6 +3993,7 @@ def test_codex_permissions_profile_name_is_unique_to_each_plan(tmp_path):
     assert all(re.fullmatch(r"provenant-[0-9a-f]{32}", name) for name in names), names
 
 
+@pytest.mark.live_provider
 @pytest.mark.skipif(sys.platform != "darwin" or shutil.which("codex") is None,
                     reason="needs the codex CLI's macOS sandbox")
 @pytest.mark.parametrize("resume", [None, "thread-1"], ids=["fresh", "resume"])
@@ -4151,8 +4152,14 @@ def test_codex_writer_authoring_instructions_fails_under_deny_policy(tmp_path, e
     _, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, edit, policy={"instruction_changes": "deny"})
     assert record["status"] == "failed"
-    assert record["error"] == "protected_instructions_changed"
-    assert record["evidence"]["signature"] == "protected_instructions_changed"
+    assert record["landable"] is False
+    assert record["quarantine"]["restored"] is False
+    assert "instruction edits remain on the lane branch" in record["fix"]
+    assert (tmp_path / "attempt/protected.patch").is_file()
+    assert str(tmp_path / "attempt/protected.patch") in record["quarantine"]["patches"]
+    assert Path(record["output_path"]).read_text() == "done"
+    assert record["error"] == record["evidence"]["signature"] == (
+        "protected_instructions_unverifiable" if "pipe" in edit else "protected_instructions_changed")
     assert any(".agents/skills/fixture/" in warning.casefold() for warning in record["warnings"])
 
 
@@ -4172,7 +4179,14 @@ def test_codex_writer_instruction_changes_are_quarantined_by_default(tmp_path, e
     start = git(lane, "rev-parse", "HEAD").strip()
     record = lane_attempt(tmp_path, lane, edit)
     patch = tmp_path / "attempt" / "protected.patch"
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
+    assert record["exit"] == 0
+    assert record["landable"] is False
+    assert record["retryable"] is False
+    assert record["quarantine"]["restored"] is True
+    assert str(patch) in record["quarantine"]["patches"]
+    assert Path(record["output_path"]).read_text() == "done"
+    assert record["certification_eligible"] is False
     assert "error" not in record
     assert any("quarantined" in warning and str(patch) in warning for warning in record["warnings"]), record["warnings"]
     # The lane's result no longer carries the change: HEAD, index and files match its start.
@@ -4193,7 +4207,7 @@ def test_quarantine_keeps_the_integration_branch_version_a_lane_merged(tmp_path)
     repo, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, "git('merge', '-q', '--no-edit', 'main')\n"
                           f"open({SKILL!r}, 'w').write('v2 lane\\n'); git('commit', '-q', '-am', 'edit')\n")
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
     assert (lane / SKILL).read_text() == "v2\n"
     git(repo, "apply", str(tmp_path / "attempt" / "protected.patch"))
     assert (repo / SKILL).read_text() == "v2 lane\n"
@@ -4206,7 +4220,7 @@ def test_quarantine_never_follows_a_planted_patch_link(tmp_path):
     record = lane_attempt(tmp_path, lane, f"os.symlink({str(outside)!r}, {str(patch)!r})\n"
                           f"open({SKILL!r}, 'w').write('lane edit\\n')\n")
     assert not outside.exists()
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
     assert not patch.is_symlink() and "lane edit" in patch.read_text()
 
 
@@ -4219,7 +4233,7 @@ def test_quarantine_restores_each_starting_view(tmp_path):
     (lane / SKILL).write_text("disk start\n")  # staged and unstaged edits at the start
     record = lane_attempt(tmp_path, lane, f"open({notes!r}, 'w').write('lane notes\\n')\n"
                           f"open({SKILL!r}, 'w').write('lane edit\\n'); git('add', {SKILL!r})\n")
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
     assert (lane / notes).read_text() == "start notes\n"
     assert (lane / SKILL).read_text() == "disk start\n"
     assert git(lane, "show", ":" + SKILL) == "staged start\n"
@@ -4239,7 +4253,7 @@ def test_quarantine_restores_and_reports_an_untracked_start_file_the_lane_remove
     (lane / notes).parent.mkdir()
     (lane / notes).write_text("start notes\n")  # untracked at the start
     record = lane_attempt(tmp_path, lane, script)
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
     assert not (lane / ".agents/local").is_symlink()
     assert (lane / notes).read_text() == "start notes\n"
     assert any("quarantined" in warning and notes in warning for warning in record["warnings"]), record["warnings"]
@@ -4249,20 +4263,22 @@ def test_quarantine_archives_a_staged_change_the_disk_no_longer_shows(tmp_path):
     _, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('staged lane\\n'); git('add', {SKILL!r})\n"
                           f"open({SKILL!r}, 'w').write('v1\\n')\n")
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
     assert git(lane, "show", ":" + SKILL) == "v1\n"
     archived = [warning for warning in record["warnings"] if "quarantined" in warning]
     assert archived and "protected.index.patch" in archived[0], record["warnings"]
     assert "staged lane" in (tmp_path / "attempt" / "protected.index.patch").read_text()
+    assert (tmp_path / "attempt" / "protected.patch").read_bytes() == b""
+    assert len(record["quarantine"]["patches"]) == 2
 
 
-@pytest.mark.parametrize("policy, status", [(None, "ok"), ({"instruction_changes": "deny"}, "failed")])
+@pytest.mark.parametrize("policy, status", [(None, "quarantined"), ({"instruction_changes": "deny"}, "failed")])
 def test_a_merge_that_discards_integration_instruction_changes_is_caught(tmp_path, policy, status):
     _, lane = instruction_lane(tmp_path)
     git(lane, "reset", "-q", "--hard", "HEAD~1")  # the lane starts from main's old commit
     record = lane_attempt(tmp_path, lane, "git('merge', '-q', '-s', 'ours', '--no-edit', 'main')\n", policy=policy)
     assert record["status"] == status, record
-    if status == "ok":
+    if policy is None:
         assert (lane / SKILL).read_text() == "v2\n"
         assert git(lane, "show", "HEAD:" + SKILL) == "v2\n"
     else:
@@ -4284,7 +4300,7 @@ def test_a_merge_that_keeps_the_lanes_own_earlier_change_to_a_path_both_sides_ch
 def test_other_writer_adapters_have_instruction_changes_quarantined(tmp_path):
     _, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('lane edit\\n')\n", adapter="claude")
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
     assert (lane / SKILL).read_text() == "v1\n"
     assert any("quarantined" in warning for warning in record["warnings"])
 
@@ -4303,17 +4319,21 @@ def test_unknown_instruction_policy_warns_and_quarantines(tmp_path):
     _, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('lane edit\\n')\n",
                           policy={"instruction_changes": "alow"})
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
     assert (lane / SKILL).read_text() == "v1\n"
     assert any("instruction_changes" in warning for warning in record["warnings"])
 
 
 @pytest.mark.parametrize("policy", [None, {"instruction_changes": "allow"}], ids=["default", "allow"])
-def test_case_variant_and_special_instruction_changes_still_fail(tmp_path, policy):
+def test_special_instruction_changes_fail_a_successful_result(tmp_path, policy):
     _, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, "os.mkfifo('.agents/skills/fixture/pipe')\n", policy=policy)
     assert record["status"] == "failed"
-    assert record["error"] == "protected_instructions_changed"
+    assert "instruction edits remain on the lane branch" in record["fix"]
+    assert record["error"] == "protected_instructions_unverifiable"
+    assert record["landable"] is False
+    assert record["quarantine"]["patch_error"]
+    assert Path(record["output_path"]).read_text() == "done"
 
 
 def test_codex_writer_may_run_instruction_scripts(tmp_path):
@@ -4339,11 +4359,12 @@ def test_codex_writer_committing_an_instruction_root_entry_fails(tmp_path):
     assert any(warning.endswith(": .agents") for warning in record["warnings"])
 
 
-def test_codex_writer_unresolved_instruction_conflict_fails(tmp_path):
+def test_codex_writer_unresolved_instruction_conflict_fails_with_instruction_changes(tmp_path):
     _, lane = instruction_lane(tmp_path)
     (lane / SKILL).write_text("branch edit\n")
     git(lane, "commit", "-q", "-am", "reviewed skill edit")
     record = lane_attempt(tmp_path, lane, f"subprocess.run(['git', *{GIT_FIXTURE!r}, 'merge', '-q', 'main'])\n")
+    assert record["status"] == "failed"
     assert record["error"] == "protected_instructions_changed"
     assert any(SKILL + " (unresolved conflict)" in warning for warning in record["warnings"])
 
@@ -4354,7 +4375,7 @@ def test_codex_writer_unresolved_instruction_conflict_fails(tmp_path):
     "os.symlink('../elsewhere', '.agents')\n",
     "open('.agents/big', 'wb').truncate(1 << 40)\n",
 ], ids=["unreadable", "root-symlink", "oversized"])
-def test_codex_writer_hiding_instructions_fails(tmp_path, script):
+def test_codex_writer_unverifiable_instructions_fail_a_successful_result(tmp_path, script):
     _, lane = instruction_lane(tmp_path)
     hidden = lane / ".agents" / "hidden"
     try:
@@ -4362,7 +4383,9 @@ def test_codex_writer_hiding_instructions_fails(tmp_path, script):
     finally:
         if hidden.exists():
             hidden.chmod(0o755)
-    assert record["error"] == "protected_instructions_changed"
+    assert record["status"] == "failed"
+    assert record["error"] == "protected_instructions_unverifiable"
+    assert record["landable"] is False
     assert any("unverifiable" in warning for warning in record["warnings"])
 
 
@@ -5182,7 +5205,7 @@ def test_codex_writer_may_merge_in_a_first_instruction_directory(tmp_path):
 def test_codex_writer_authoring_a_first_instruction_directory_is_quarantined(tmp_path):
     _, lane = first_instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, "open('.agents/own.md', 'w').write('lane\\n')\n")
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
     assert any(".agents/own.md" in warning and "quarantined" in warning for warning in record["warnings"])
     assert not os.path.lexists(lane / ".agents")
     assert "+lane" in (tmp_path / "attempt" / "protected.patch").read_text()
@@ -5245,6 +5268,7 @@ def test_codex_read_only_writes_its_temp_and_add_dirs_but_not_the_cwd(tmp_path):
     assert "permissions.NAME.network.enabled=true" in codex_read_only_permissions(networked["argv"])
 
 
+@pytest.mark.live_provider
 @pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("codex"), reason="needs the Codex seatbelt")
 def test_codex_read_only_profile_writes_only_temp_and_lock_dirs(tmp_path):
     repo = tmp_path / "repo"
@@ -5309,6 +5333,7 @@ def test_opencode_read_only_profile_reads_project_config_above_its_cwd(tmp_path)
     assert cat(repo / "opencode.jsonc").returncode != 0
 
 
+@pytest.mark.live_provider
 @pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("opencode"), reason="needs OpenCode")
 def test_opencode_starts_below_a_repository_config(tmp_path):
     mod = supervisor()
@@ -5446,6 +5471,7 @@ def test_codex_read_only_never_grants_a_directory_named_like_a_pattern(tmp_path,
     assert any(warning.endswith(str(literal)) and "pattern character" in warning for warning in plan["warnings"])
 
 
+@pytest.mark.live_provider
 @pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("codex"), reason="needs the Codex seatbelt")
 def test_codex_read_only_directory_named_like_a_pattern_leaves_cwd_unwritable(tmp_path):
     repo = tmp_path / "repo"
@@ -5975,6 +6001,32 @@ def test_toolchain_rules_emit_the_validated_path_without_resolving_again(tmp_pat
 def test_credential_path_covers_common_host_secrets(tmp_path, monkeypatch, secret):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     assert supervisor().credential_path(tmp_path / "home" / secret)
+
+
+def test_failed_writer_with_instruction_edits_is_not_usable(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('lane edit\\n')\n"
+                          "import sys; sys.exit(3)\n", policy={"instruction_changes": "deny"})
+    assert record["status"] == "failed"
+    assert record["exit"] == 3
+    assert record["landable"] is False
+
+
+def test_failed_instruction_restoration_fails_but_keeps_output_and_patch(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('staged edit\\n'); git('add', {SKILL!r})\n"
+                          f"open({SKILL!r}, 'w').write('lane edit\\n')\n"
+                          "directory = git('rev-parse', '--absolute-git-dir')\n"
+                          "open(directory + '/index.lock', 'w').close()\n")
+    assert record["status"] == "failed"
+    assert record["error"] == "protected_instructions_changed"
+    assert "restore .agents/ to the start commit" in record["fix"]
+    assert record["landable"] is False
+    assert record["quarantine"]["restored"] is False
+    assert record["quarantine"]["patch_error"]
+    assert 'lane edit' in (tmp_path / 'attempt/protected.patch').read_text()
+    assert str(tmp_path / 'attempt/protected.index.patch') in record['quarantine']['patches']
+    assert Path(record["output_path"]).read_text() == 'done'
 
 
 def _stderr_run(tmp_path, lines, delays=0.05):

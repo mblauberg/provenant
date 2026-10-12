@@ -3,6 +3,8 @@ import stat
 import subprocess
 import sys
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 CHECKER = ROOT / "skills" / "orchestrate" / "scripts" / "check_herdr_cli.py"
 REFERENCE = ROOT / "skills" / "orchestrate" / "references" / "herdr-panes.md"
@@ -227,6 +229,7 @@ def test_cli_gate_rejects_a_documented_status_absent_from_help(tmp_path: Path) -
     assert "documented status tokens are absent from help: ['paused']" in result.stdout
 
 
+@pytest.mark.live_provider
 def test_installed_herdr_capabilities_pass_or_skip_cleanly() -> None:
     result = subprocess.run(
         [sys.executable, str(CHECKER)],

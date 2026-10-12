@@ -28,6 +28,10 @@ function digestBase(row: Record<string, any>): string {
   }
   if (typeof row.digest === "string") return row.digest;
   if (Array.isArray(row.digest)) return row.digest.join("\n");
+  if (row.status === "quarantined" && !Array.isArray(row.runs)) {
+    const result = row.result_path ?? row.paths?.result;
+    return `quarantined ${row.run_id ?? row.id ?? row.task_id ?? "?"}${result ? ` · result ${result}` : ""} · ${quarantineAction(row)}`;
+  }
   if (row.error || row.status === "rejected")
     return `rejected ${row.error ?? "request"} · fix: ${row.fix ?? "Inspect the run receipt."}`;
   if (Array.isArray(row.runs)) {
@@ -80,7 +84,7 @@ export function runView(value: Record<string, any>, detail = "brief"): Record<st
   const keys = ["schema", "id", "run_id", "task_id", "batch_id", "run_dir", "state", "status",
     "host", "hosts", "reachability", "last_known_state", "last_known_status", "age_seconds", "observed_at", "operation_id", "placement_fallback",
     "attempt", "attempt_count", "digest", "paths", "cwd", "worktree", "mode", "applied",
-    "provenance", "warnings", "notes", "reason", "question", "error", "fix", "retryable", "reset_at", "retry_after", "tasks"];
+    "provenance", "warnings", "notes", "landable", "quarantine", "reason", "question", "error", "fix", "retryable", "reset_at", "retry_after", "tasks"];
   return Object.fromEntries(keys.filter((key) => value[key] !== undefined).map((key) => [key, value[key]]).concat(
     value.digest === undefined ? [["digest", digest(value)]] : [],
   ));
@@ -105,9 +109,14 @@ export function fullView(value: Record<string, any>, fields?: string[]): Record<
   return Array.isArray(value.attempts) ? { ...value, attempts: value.attempts.map(attemptSummary) } : value;
 }
 
-/** One line per lane: outcome, id, route, result path. */
+export function quarantineAction(row: Record<string, any>): string {
+  const quarantine = row.quarantine ?? {};
+  return `not landable; review quarantine: ${quarantine.reason ?? "inspect receipt"}; patches: ${(quarantine.patches ?? []).join(", ") || "unavailable"}${quarantine.patch_error ? `; ${quarantine.patch_error}` : ""}`;
+}
+
+/** One line per lane: outcome, id, route, result path and any landing block. */
 export function laneLine(row: Record<string, any>): string {
-  return `${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${row.result_path ?? "-"}`;
+  return `${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${row.result_path ?? "-"}${row.status === "quarantined" ? ` · ${quarantineAction(row)}` : ""}`;
 }
 export function lanesDigest(result: Record<string, any>): string {
   if (!Array.isArray(result.runs)) return digest(result);

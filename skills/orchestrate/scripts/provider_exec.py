@@ -1090,7 +1090,10 @@ def build_plan(
     if not all(math.isfinite(value) and value > 0 for value in (timeout, idle, startup)):
         raise ValueError("timeouts must be finite positive numbers")
     boundary = f"Workspace root: {cwd}\nResolve relative paths against this root. " + (
-        "Write, run commands and commit only inside this owned worktree. Do not push or change other checkouts."
+        "Write, run commands and commit only inside this owned worktree. Do not push or change other checkouts. "
+        + ("" if metadata.get("instruction_policy") == "allow" else
+           "Do not author changes under .agents/; stage proposed instruction edits elsewhere for chair review. ")
+        + "Protected instruction changes or unverifiable checks quarantine a completed result: review it before landing."
         if mode == "worktree_write"
         else "Do not modify files or run commands that mutate state. Use file-reading tools only."
     )
@@ -2475,7 +2478,7 @@ def _git_bytes(cwd, *args, input=None, env=None):
 
 
 def quarantinable(changes):
-    """Ordinary paths below .agents/ the owner can take back out; anything else still fails the attempt."""
+    """Ordinary paths below .agents/ the owner can archive and restore safely."""
     return all(change.startswith(INSTRUCTION_DIR + "/") and not change.endswith(" (unresolved conflict)")
                for change in changes)
 
@@ -2556,13 +2559,14 @@ QUARANTINE_PATCHES = (("disk", "protected.patch"), ("index", "protected.index.pa
                       ("head", "protected.head.patch"))
 
 
-def quarantine_instruction_changes(cwd, start, changes, attempt_dir):
+def quarantine_instruction_changes(cwd, start, changes, attempt_dir, *, restore_changes=True, published=None):
     """Move a lane's authored .agents changes out of its worktree into patches the chair applies.
 
     Each of the lane's files, index and HEAD is archived as a patch from the view's restore point
     (protected.patch for files; index and HEAD patches only when they hold something else). A commit,
     the index and the files then return to their restore points. Blobs are hashed and written
-    without filters, so no command the repository configures runs. Returns the patches written.
+    without filters, so no command the repository configures runs. With restore_changes=False,
+    archive only. Returns the patches written; protected.patch may be empty for an index-only edit.
     """
     root = Path(cwd).resolve()
     paths = sorted(changes)
@@ -2572,7 +2576,8 @@ def quarantine_instruction_changes(cwd, start, changes, attempt_dir):
     lane = {"head": _instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", head))[0],
             "index": _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)[0],
             "disk": {path: entry for path in paths if (entry := _store_blob(cwd, path))}}
-    published = []
+    if published is None:
+        published = []
     # Scratch files stay out of the attempt directory, which a lane may be able to write.
     with tempfile.TemporaryDirectory() as private:
         scratch_index = Path(private, "index")
@@ -2591,12 +2596,14 @@ def quarantine_instruction_changes(cwd, start, changes, attempt_dir):
             patch = _git_bytes(cwd, "diff", "--binary", "--full-index", "--no-renames", "--no-ext-diff",
                                "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/",
                                tree_of(restore[view]), tree_of(lane[view]))
-            if patch and patch not in written:
+            if name == "protected.patch" or (patch and patch not in written):
                 written.add(patch)
                 Path(private, name).write_bytes(patch)
                 # Replace, never follow, whatever the lane left at the destination.
                 install(str(Path(private, name)), str(Path(attempt_dir, name)))
                 published.append(Path(attempt_dir, name))
+        if not restore_changes:
+            return published
         tree = tree_of(restore["head"], base=head)
         if tree != os.fsdecode(_git_bytes(cwd, "rev-parse", head + "^{tree}")).strip():
             message = (f"fabric: quarantine protected {INSTRUCTION_DIR}/ changes\n\n"
@@ -3289,6 +3296,7 @@ def execute(
         "line": line,
     }
     status = parsed["status"]
+    quarantine = None
     instruction_changes = []
     if instruction_start is not None:
         try:
@@ -3302,42 +3310,67 @@ def execute(
     instruction_policy = ("deny" if status == "interrupted" or
                           (status == "cancelled" and termination_request)
                           else plan.get("instruction_policy", "quarantine"))
-    # Unverifiable states, special files and conflicts stay hard failures under any policy.
+    # Assurance failure blocks landing, independently of a usable provider result.
     if instruction_changes and instruction_policy == "allow" and quarantinable(instruction_changes):
         warnings.append("lane changed " + INSTRUCTION_DIR + "/ (allowed by policy): " + ", ".join(instruction_changes))
         instruction_changes = []
-    elif instruction_changes and instruction_policy == "quarantine" and quarantinable(instruction_changes):
+    if instruction_changes:
+        unverifiable = any("(unverifiable:" in change for change in instruction_changes)
+        signature = "protected_instructions_unverifiable" if unverifiable else "protected_instructions_changed"
+        quarantine = {"reason": signature + ": " + ", ".join(instruction_changes),
+                      "patches": [], "restored": False, "patch_error": None}
+        patch = Path(plan["run_dir"], "protected.patch")
+        patches = []
         try:
-            patches = quarantine_instruction_changes(plan["cwd"], instruction_start, instruction_changes,
-                                                     Path(plan["run_dir"]))
-            remaining = authored_instruction_changes(plan["cwd"], instruction_start)
-            if remaining:
-                raise ValueError("still changed after restore: " + ", ".join(remaining))
+            # Retain an explicit unavailable marker even if safe diff capture fails.
+            with tempfile.TemporaryDirectory() as marker_dir:
+                marker = Path(marker_dir, "protected.patch")
+                marker.write_text("# Instruction diff unavailable: " + quarantine["reason"] + "\n")
+                install(str(marker), str(patch))
+            quarantine["patches"] = [str(patch)]
+            if not quarantinable(instruction_changes) or not isinstance(instruction_start, dict):
+                raise ValueError("no safe instruction diff can be captured; inspect the retained worktree")
+            patches = quarantine_instruction_changes(
+                plan["cwd"], instruction_start, instruction_changes, Path(plan["run_dir"]),
+                restore_changes=instruction_policy == "quarantine", published=patches)
+            quarantine["patches"] = list(map(str, patches))
+            if instruction_policy == "quarantine":
+                remaining = authored_instruction_changes(plan["cwd"], instruction_start)
+                if remaining:
+                    raise ValueError("still changed after restore: " + ", ".join(remaining))
+                quarantine["restored"] = True
+                warnings.append("lane changed " + INSTRUCTION_DIR + "/ beyond its start and integration branch: "
+                                + ", ".join(instruction_changes) + f"; quarantined to {', '.join(map(str, patches))} "
+                                "and removed from the lane; review before landing")
+                instruction_changes = []
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            quarantine["patch_error"] = str(exc)
             warnings.append(f"quarantine of {INSTRUCTION_DIR}/ changes failed: {exc}")
-        else:
-            warnings.append("lane changed " + INSTRUCTION_DIR + "/ beyond its start and integration branch: "
-                            + ", ".join(instruction_changes) + f"; quarantined to {', '.join(map(str, patches))} and removed from "
-                            "the lane; review it, then git apply it deliberately")
-            instruction_changes = []
+        if patches:
+            quarantine["patches"] = list(map(str, patches))
+        if instruction_changes:  # Edits remain on the lane: fail, as without quarantine.
+            status = "failed"
+        elif status == "ok":
+            status = "quarantined"
+        parsed["signature"] = signature
     if created_instructions is not None:
         try:
             created_instructions.rmdir()  # Only the empty directory this attempt added.
         except OSError:
             pass
     if instruction_changes:
-        status = "failed"
-        parsed["signature"] = "protected_instructions_changed"
-        warnings.append("lane changed " + INSTRUCTION_DIR + "/ beyond its start and integration branch: "
+        warnings.append(("instruction assurance unavailable: " if unverifiable else
+                         "lane changed " + INSTRUCTION_DIR + "/ beyond its start and integration branch: ")
                         + ", ".join(instruction_changes))
-    if plan["adapter"] == "agy" and status not in {"ok", "input_required", "partial"}:
+    if (plan["adapter"] == "agy" and status not in {"ok", "input_required", "partial", "quarantined"}
+            and not (quarantine and parsed["status"] == "ok")):
         parsed["text"] = ""
         stderr = "agy dispatch failed: status=" + status + "\n" + stderr
         if parsed["excerpt"]:
             parsed["excerpt"] = "provider error: " + parsed["excerpt"]
     output = (
         parsed["text"]
-        if status in {"ok", "input_required", "partial"}
+        if status in {"ok", "input_required", "partial", "quarantined"} or quarantine and parsed["status"] == "ok"
         else (parsed["text"] + "\n" if parsed["text"] else "")
         + stderr
         + ("\n" + parsed["excerpt"] if parsed["excerpt"] else "")
@@ -3388,9 +3421,15 @@ def execute(
             "rate_limited": "retry after the recorded cooldown",
         }.get(status)
     )
-    if instruction_changes:
-        fix = ("restore " + INSTRUCTION_DIR + "/ to the start commit or the integration branch; "
-               "a Codex lane may carry that branch's instruction changes but not author its own")
+    if quarantine and status == "failed" and instruction_changes:
+        fix = ("instruction edits remain on the lane branch; restore " + INSTRUCTION_DIR
+               + "/ to the start commit before landing; patches: "
+               + (", ".join(quarantine["patches"]) or "unavailable")
+               + ("; " + quarantine["patch_error"] if quarantine["patch_error"] else ""))
+    elif quarantine:
+        fix = ("not landable; review quarantine: " + quarantine["reason"] + "; patches: "
+               + (", ".join(quarantine["patches"]) or "unavailable")
+               + ("; " + quarantine["patch_error"] if quarantine["patch_error"] else ""))
     record = {
         **{
             key: route.get(key, "")
@@ -3417,10 +3456,11 @@ def execute(
         "effort": plan["effort"],
         "status": status,
         **({"error": "invalid_input"} if status == "rejected" and parsed["signature"] == "invalid_input" else {}),
-        **({"error": "protected_instructions_changed"} if instruction_changes else {}),
+        **({"error": parsed["signature"]} if instruction_changes else {}),
+        **({"landable": False, "quarantine": quarantine} if quarantine else {}),
         "reason": parsed["excerpt"],
         "exit": 0
-        if status in {"ok", "input_required"} and terminal_at is not None
+        if status in {"ok", "input_required", "quarantined"} and terminal_at is not None
         else exit_code,
         "output_path": output_value,
         "output_digest": digest_value,

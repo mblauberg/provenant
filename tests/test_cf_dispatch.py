@@ -2625,6 +2625,7 @@ def test_claude_worktree_writer_route_runs_inside_the_owned_worktree():
     assert f"PWD={worktree}" in recorded
     assert "owned worktree" in recorded
     assert "run commands and commit only inside this owned worktree" in recorded
+    assert "Do not author changes under .agents/" in recorded
 
 
 def test_claude_read_only_route_remains_the_default():

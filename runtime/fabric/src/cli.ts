@@ -9,7 +9,7 @@
  *   fabric tasks [state]
  *   fabric watch [--interval 2]
  */
-import { digest } from "./surface.js";
+import { digest, quarantineAction } from "./surface.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -220,7 +220,7 @@ if (command === "lanes") {
       console.log(`no lanes for project ${laneWho.project}` +
         (laneWho.cwd === laneWho.project ? "" : ` (cwd ${laneWho.cwd} resolves to it; --project reads another)`));
     for (const row of rows)
-      console.log(`${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${age(row.started_at)}`);
+      console.log(`${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${age(row.started_at)}${row.status === "quarantined" ? ` · ${quarantineAction(row)}` : ""}`);
     if (result.omitted)
       console.log(`${result.omitted} lanes omitted; use provenant lanes ID to see a lane past the 20-row cap`);
   } else {

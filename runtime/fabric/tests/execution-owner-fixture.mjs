@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { writeFileAtomic } from "./atomic-write.mjs";
 import { basename, join, relative } from "node:path";
 
 const value = (flag) => {
@@ -39,7 +40,7 @@ if (owner === "run_dir_init.sh") {
   mkdirSync(join(runDir, "crossfamily"), { recursive: true });
   mkdirSync(join(runDir, "traces"), { recursive: true });
   writeFileSync(join(runDir, "MANIFEST.md"), "# fixture manifest\n");
-  writeFileSync(join(runDir, "RUN_RECEIPT.json"), JSON.stringify({
+  writeFileAtomic(join(runDir, "RUN_RECEIPT.json"), JSON.stringify({
     schema_version: 1,
     status: "active",
   }) + "\n");
@@ -48,7 +49,7 @@ if (owner === "run_dir_init.sh") {
 }
 
 const runDir = value("--run-dir");
-writeFileSync(join(runDir, `${owner}.invocation.json`), JSON.stringify({
+writeFileAtomic(join(runDir, `${owner}.invocation.json`), JSON.stringify({
   argv: process.argv.slice(2),
   cwd: process.cwd(),
 }, null, 2) + "\n");
@@ -164,7 +165,7 @@ if (owner === "run_controls.py") {
           execution_intent: "ordinary",
         };
       }
-      writeFileSync(attemptPath, JSON.stringify(record, null, 2) + "\n");
+      writeFileAtomic(attemptPath, JSON.stringify(record, null, 2) + "\n");
       process.stdout.write(JSON.stringify(record) + "\n");
       process.exit(0);
     });
@@ -222,7 +223,7 @@ if (owner === "run_controls.py") {
       route,
     };
     if (prompt === "emit incomplete route success") record.route = { adapter: "codex" };
-    writeFileSync(attemptPath, JSON.stringify(record, null, 2) + "\n");
+    writeFileAtomic(attemptPath, JSON.stringify(record, null, 2) + "\n");
     process.stdout.write(JSON.stringify(record) + "\n");
     if (prompt === "claim success then fail") process.exitCode = 1;
   }
@@ -256,7 +257,7 @@ if (owner === "run_controls.py") {
           execution_intent: "ordinary",
         };
       }
-      writeFileSync(attemptPath, JSON.stringify({ status: taskStatus }) + "\n");
+      writeFileAtomic(attemptPath, JSON.stringify({ status: taskStatus }) + "\n");
       const summaryPath = join(batchDir, "summary.json");
       const summary = {
         schema_version: 1,
@@ -269,7 +270,7 @@ if (owner === "run_controls.py") {
         tasks: [taskRecord],
         summary_path: relative(runDir, summaryPath),
       };
-      writeFileSync(summaryPath, JSON.stringify(summary, null, 2) + "\n");
+      writeFileAtomic(summaryPath, JSON.stringify(summary, null, 2) + "\n");
       process.stdout.write(JSON.stringify(summary) + "\n");
       process.exit(0);
     });
@@ -338,7 +339,7 @@ if (owner === "run_controls.py") {
     mkdirSync(attemptDir, { recursive: true });
     const attemptPath = join(attemptDir, "attempt.json");
     const resultPath = join(attemptDir, "result.md");
-    writeFileSync(attemptPath, "{}\n");
+    writeFileAtomic(attemptPath, "{}\n");
     writeFileSync(resultPath, `fixture result for: ${task.prompt}`);
     return {
       task_id: task.id,
@@ -366,7 +367,7 @@ if (owner === "run_controls.py") {
     tasks,
     summary_path: relative(runDir, summaryPath),
   };
-  writeFileSync(summaryPath, JSON.stringify(summary, null, 2) + "\n");
+  writeFileAtomic(summaryPath, JSON.stringify(summary, null, 2) + "\n");
   process.stdout.write(JSON.stringify(summary) + "\n");
   if (manifest.tasks[0]?.prompt === "claim batch success then fail") process.exitCode = 7;
   }

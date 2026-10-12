@@ -206,6 +206,29 @@ def test_agy_quota_cools_only_the_exhausted_model(tmp_path):
     assert "claude/*" in json.loads(path.read_text())["cooldowns"]
 
 
+def test_quarantined_digest_keeps_result_and_review_action(tmp_path):
+    row = json.loads((FIX / 'attempt.json').read_text())
+    row.update(status='quarantined', landable=False, run_dir=str(tmp_path),
+               quarantine={'reason': 'unverifiable: instruction snapshot unavailable',
+                           'patches': [str(tmp_path / 'protected.patch')], 'restored': False})
+    text = records().render_digest(row)
+    assert text.startswith('quarantined ')
+    assert str(tmp_path / row['paths']['result']) in text
+    assert 'not landable' in text and 'review' in text
+    assert row['quarantine']['reason'] in text
+    assert row['quarantine']['patches'][0] in text
+
+
+def test_quarantined_route_does_not_count_as_provider_failure(tmp_path):
+    row = json.loads((FIX / 'attempt.json').read_text())
+    row['status'] = 'quarantined'
+    path = tmp_path / 'route-health.json'
+    at = datetime.now(UTC)
+    records().write_route_health(row, path=path, at=at)
+    health = records().read_route_health(path, cooldowns_path=tmp_path / 'cooldowns.json', at=at)
+    assert next(iter(health.values()))['recent_failures'] == 0
+
+
 @pytest.mark.parametrize("status", ["ok", "partial", "failed", "input_required"])
 def test_only_success_clears_its_own_cooldown(tmp_path, status):
     path = tmp_path / "cooldowns.json"
