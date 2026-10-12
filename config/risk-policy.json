@@ -16,7 +16,7 @@
     },
     "data_sensitivity": {
       "public": "routine",
-      "internal": "substantial",
+      "internal": "routine",
       "confidential": "crucial",
       "regulated": "terminal"
     },

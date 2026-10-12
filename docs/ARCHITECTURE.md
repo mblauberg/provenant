@@ -33,7 +33,10 @@ The tier is derived rather than declared. `scope` rates every factor in
 `config/risk-policy.json`, the highest tier any rating maps to is the run's
 minimum tier, and a lower declared tier needs a user-approved override carrying
 an approver, a reason and evidence. The table between the markers records the
-current policy and is maintained with that source file.
+current policy and is maintained with that source file. Internal data sets
+disclosure limits (`confidential` routing, no secrets), not review pressure;
+consequence factors such as reversibility, external effects and critical
+surface raise the tier.
 
 <!-- risk-factor-table:start -->
 
@@ -41,7 +44,7 @@ current policy and is maintained with that source file.
 |---|---|---|---|---|
 | blast radius | `local` | `multi-module` | `shared-system` | `production` |
 | reversibility | `easy` | `moderate` | `hard` | `irreversible` |
-| data sensitivity | `public` | `internal` | `confidential` | `regulated` |
+| data sensitivity | `public`, `internal` |  | `confidential` | `regulated` |
 | migration | `none` | `reversible` | `stateful` | `destructive` |
 | oracle quality | `strong` | `mixed` | `weak` |  |
 | external effects | `none` |  | `reversible` | `irreversible` |
