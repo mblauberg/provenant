@@ -1309,7 +1309,12 @@ def resolve_effort(
         supported = {item.lower() for item in args.available_effort}
         capability_source = "caller-runtime"
     else:
-        return requested_effort, "", "", "provider-unverified"
+        # No runtime probe: the registry catalogue still bounds what the model takes.
+        listed = {value.lower() for value in (registered or {}).get("efforts", []) if value.lower() in EFFORT_ORDER}
+        if not listed or requested_effort in listed:
+            return requested_effort, "", "", "provider-unverified"
+        supported = listed
+        capability_source = "registry"
 
     if requested_effort in supported:
         return requested_effort, "", "", capability_source

@@ -1311,7 +1311,7 @@ describe("route pools", () => {
     expect([byId["pair-1"]?.pick_reason, byId["pair-2"]?.pick_reason]).toEqual(["strong council 1/2", "strong council 2/2"]);
     expect(new Set([byId["pair-1"]?.adapter, byId["pair-2"]?.adapter])).toEqual(new Set(["claude", "codex"]));
     expect(byId["adhoc-1"]).toMatchObject({ adapter: "codex", model: "gpt-6-luna", effort: "low", pick_reason: "ad-hoc council 1/2" });
-    expect(byId["adhoc-2"]).toMatchObject({ adapter: "claude", model: "haiku", pick_reason: "ad-hoc council 2/2" });
+    expect(byId["adhoc-2"]).toMatchObject({ adapter: "claude", model: "claude-haiku-5-5", pick_reason: "ad-hoc council 2/2" });
     expect(byId.plain).toEqual({ id: "plain", prompt: "p", adapter: "codex" });
     expect(byId.both).toEqual({ id: "both", prompt: "p", model: "gpt-6-luna" });
     expect(expanded.warnings).toContain("route ignored: model gpt-6-luna was named explicitly");
@@ -1401,7 +1401,7 @@ describe("route pools", () => {
     const runDir = String((done.paths as Record<string, unknown>).run_dir);
     const manifest = JSON.parse(readFileSync(join(runDir, "_owner", "task-manifest.json"), "utf8"));
     expect(manifest.tasks.map((task: Record<string, unknown>) => [task.id, task.adapter, task.model, task.pick_reason])).toEqual([
-      ["council-1", "codex", "gpt-6-luna", "ad-hoc council 1/2"], ["council-2", "claude", "haiku", "ad-hoc council 2/2"]]);
+      ["council-1", "codex", "gpt-6-luna", "ad-hoc council 1/2"], ["council-2", "claude", "claude-haiku-5-5", "ad-hoc council 2/2"]]);
   });
 
   it("lets an explicit model win over a pool, with a warning", async () => {
