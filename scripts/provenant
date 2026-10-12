@@ -10,6 +10,7 @@ import sys
 from typing import NoReturn
 
 from lib.product_root_resolver import POINTER_RELATIVE_PATH, load_pointer_file
+from lib.stale_checkout import warn_if_stale_checkout
 
 
 REPAIR = (
@@ -354,6 +355,13 @@ def main(arguments: list[str]) -> int:
     except (OSError, ValueError) as exc:
         print(f"provenant: {exc}", file=sys.stderr)
         return 3
+    if command == "check":
+        try:
+            prod_root = resolve_product_root()
+            warn_if_stale_checkout(prod_root)
+            os.environ["PROVENANT_STALE_CHECKED"] = "1"
+        except Exception:
+            pass
     execute(target, command_arguments, product_root, clear_git_redirects=command == "check")
 
 
