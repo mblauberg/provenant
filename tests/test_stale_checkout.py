@@ -65,6 +65,17 @@ def test_ahead_only_is_silent(tmp_path):
     assert check_stale_checkout(clone) == []
 
 
+def test_off_default_branch(tmp_path):
+    clone, _ = make(tmp_path)
+    git(clone, "switch", "-q", "-c", "feature")
+    commit(clone, "local")
+    [line] = check_stale_checkout(clone)
+    assert "on feature, not main" in line and f"git -C {clone} switch main" in line
+    git(clone, "switch", "-q", "--detach")
+    [line] = check_stale_checkout(clone)
+    assert "detached HEAD" in line
+
+
 def test_diverged(tmp_path):
     clone, other = make(tmp_path)
     commit(clone, "local")

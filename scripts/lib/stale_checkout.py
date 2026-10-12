@@ -43,6 +43,10 @@ def check_stale_checkout(root: Path, *, now: float | None = None) -> list[str]:
         pass  # never fetched is fine
     head = _git(root, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
     default = head[0].removeprefix("origin/") if head else "main"
+    branch = _git(root, "branch", "--show-current")
+    if branch is not None and branch != [default]:
+        where = f"on {branch[0]}" if branch else "on a detached HEAD"
+        lines.append(f"warning: product checkout is {where}, not {default}; run: git -C {root} switch {default}")
     counts = _git(root, "rev-list", "--left-right", "--count", f"HEAD...origin/{default}")
     try:
         ahead, behind = map(int, counts[0].split()) if counts else (0, 0)
