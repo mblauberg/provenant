@@ -5988,6 +5988,11 @@ def test_opencode_non_error_stderr_quota_noise_is_not_fatal(tmp_path):
     assert record["status"] != "usage_limited"
 
 
+def test_opencode_warn_quota_line_beside_unrelated_error_is_not_fatal(tmp_path):
+    record = _stderr_run(tmp_path, ["WARN retrying: Individual quota reached", "ERROR service=bus unrelated failure"])
+    assert record["status"] != "usage_limited"
+
+
 def test_opencode_reset_hint_on_a_separate_earlier_line_is_kept(tmp_path):
     record = _stderr_run(tmp_path, ["Resets in 2 days.", "ERROR error=Monthly usage limit reached."])
     assert record["status"] == "usage_limited"

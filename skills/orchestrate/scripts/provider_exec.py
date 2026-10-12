@@ -2838,7 +2838,10 @@ def execute(
                                 "excerpt": "Opening browser...", "reset_at": None, "retry_after": None}
         elif re.search(OPENCODE_FATAL_LOG, text, re.I | re.M):
             # Only an ERROR log or an explicit period limit is fatal; other retried noise is not.
-            parsed = parse_output(adapter, "", text, 1)
+            # Classify only the qualifying lines plus reset-hint lines; the rest of the window is not evidence.
+            relevant = [line for line in text.splitlines()
+                        if re.search(OPENCODE_FATAL_LOG, line, re.I) or re.search(r"\bresets?\b", line, re.I)]
+            parsed = parse_output(adapter, "", "\n".join(relevant), 1)
             if parsed["status"] == "usage_limited":
                 live_failure = parsed
         # Keep the unfinished line and a few before it, so a reset hint on its own line is not lost.
