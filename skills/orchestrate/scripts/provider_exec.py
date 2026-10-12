@@ -9,6 +9,7 @@ import ctypes
 import functools
 import hashlib
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -683,8 +684,26 @@ def _runtime_component(prefix, name, *, directory):
     return canonical
 
 
+OPENCODE_FATAL_LOG = r"^\s*ERROR\b|(?:monthly|weekly|5.hour) (?:usage )?limit"
+
+
+def _pyenv_version_dir(root, selected):
+    """versions/<selected>, or the highest installed versions/<selected>.* for a prefix like 3.12."""
+    versions = root / "versions"
+    if (versions / selected).is_dir():
+        return versions / selected
+    prefix = selected + "."
+    matches = [path for path in versions.glob(selected + ".*") if path.is_dir() and path.name.startswith(prefix)]
+    key = lambda path: [(0, int(part), "") if part.isdigit() else (-1, 0, part) for part in re.split(r"[.-]", path.name)]
+    return max(matches, key=key, default=None)
+
+
 def _pyenv_shim(executable, cwd, search_path):
-    """Resolve ordinary pyenv selections from data, never by executing a shim or hook."""
+    """Resolve ordinary pyenv selections from data, never by executing a shim or hook.
+
+    Returns (None, [], []) with a warning when the selection cannot be resolved, so the caller
+    skips that candidate; an unsafe shim, root or version name still raises ValueError.
+    """
     root = Path(os.environ.get("PYENV_ROOT") or Path.home() / ".pyenv").expanduser().resolve()
     if executable.parent.resolve() != root / "shims":
         return executable, [], []
@@ -697,27 +716,30 @@ def _pyenv_shim(executable, cwd, search_path):
         start = Path(os.environ.get("PYENV_DIR") or cwd).expanduser().resolve()
         source = next((parent / ".python-version" for parent in (start, *start.parents)
                        if _plain_file(parent / ".python-version")), root / "version")
-        if not _plain_file(source) or credential_path(source):
-            raise ValueError(error)
-        version = ":".join(line.partition("#")[0].strip().split()[0]
-                           for line in source.read_text(errors="replace").splitlines()
-                           if line.partition("#")[0].strip())
-        files.append(source.resolve())
-    for selected in version.split(":"):
+        if _plain_file(source):
+            if credential_path(source):
+                raise ValueError(error)
+            version = ":".join(line.partition("#")[0].strip().split()[0]
+                               for line in source.read_text(errors="replace").splitlines()
+                               if line.partition("#")[0].strip())
+            files.append(source.resolve())
+    for selected in (version or "system").split(":"):
         if selected == "system":
             without_shims = os.pathsep.join(part for part in search_path.split(os.pathsep)
                                            if Path(part).resolve() != root / "shims")
             found = shutil.which(executable.name, path=without_shims)
             target = Path(found) if found else None
         elif re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", selected):
-            target = root / "versions" / selected / "bin" / executable.name
+            directory = _pyenv_version_dir(root, selected)
+            target = directory / "bin" / executable.name if directory else None
         else:
             raise ValueError(error)
         if target is not None and _toolchain_grant(target)[0]:
             # The shim and pyenv's scripts still run inside the lane's sandbox.
             libexec = _runtime_component(root, "libexec", directory=True)
             return target, files, [libexec] if libexec else []
-    raise ValueError(error)
+    logging.getLogger(__name__).warning("skipping toolchain candidate: %s", error)
+    return None, [], []
 
 
 def _toolchain_reads(plan, root, search_path=None):
@@ -747,6 +769,8 @@ def _toolchain_reads(plan, root, search_path=None):
     files = []
     for candidate in candidates:
         candidate, shim_files, shim_directories = _pyenv_shim(candidate, cwd, search_path)
+        if candidate is None:
+            continue
         granted_files, granted_directories = _toolchain_grant(candidate)
         files.extend([*granted_files, *shim_files])
         directories.extend([*granted_directories, *shim_directories])
@@ -2812,12 +2836,13 @@ def execute(
             if re.search(r"(?m)^\s*Opening browser(?:\.\.\.|…)\s*$", text):
                 live_failure = {"status": "auth_required", "signature": "auth_expired",
                                 "excerpt": "Opening browser...", "reset_at": None, "retry_after": None}
-        else:
+        elif re.search(OPENCODE_FATAL_LOG, text, re.I | re.M):
+            # Only an ERROR log or an explicit period limit is fatal; other retried noise is not.
             parsed = parse_output(adapter, "", text, 1)
             if parsed["status"] == "usage_limited":
                 live_failure = parsed
-        # Keep the unfinished line for the next read.
-        diagnostic_pending[stream] = diagnostic_pending[stream].rsplit(b"\n", 1)[-1]
+        # Keep the unfinished line and a few before it, so a reset hint on its own line is not lost.
+        diagnostic_pending[stream] = b"\n".join(diagnostic_pending[stream].split(b"\n")[-6:])
 
     def consume(data):
         nonlocal pending, terminal_at, text_size, retry_failure, terminal_text, text_truncated, dropping_line
@@ -3051,6 +3076,9 @@ def execute(
     except FileNotFoundError as exc:
         forced = "tool_missing"
         diagnostics.write(str(exc).encode())
+    except ValueError as exc:
+        forced = "rejected"
+        diagnostics.write(str(exc).encode())
     except OSError as exc:
         forced = "failed"
         diagnostics.write(str(exc).encode())
@@ -3145,8 +3173,9 @@ def execute(
     if plan["adapter"] == "opencode" and parsed["status"] == "usage_limited":
         parsed["signature"] = "quota_exhausted"
         if not parsed["reset_at"] and re.search(r"monthly usage limit", parsed.get("failure_text") or parsed["excerpt"], re.I):
-            # Billing anniversary is unknown: use an expiring upper bound, never disable a route.
-            parsed["retry_after"] = 31 * 86400
+            # Billing anniversary is unknown: re-probe after a day. The next attempt is the probe;
+            # success clears the entry and failure re-arms it.
+            parsed["retry_after"] = 24 * 3600
     if forced:
         parsed["status"] = forced
         parsed["signature"] = {

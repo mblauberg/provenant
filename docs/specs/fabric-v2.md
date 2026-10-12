@@ -198,8 +198,9 @@ between `cwd` and the repository root, granted by unresolved name. Every read-on
 - `python3`, `python`, `uv` and `node` on the provider PATH;
 - pyenv shims resolved from `PYENV_VERSION`, the nearest `.python-version`
   (starting at `PYENV_DIR` or `cwd`), then `PYENV_ROOT/version`. Discovery
-  never executes a shim or hook. Missing versions or unsafe targets fail
-  before launch with a fix hint; put the selected interpreter's `bin` on
+  never executes a shim or hook. No selection means `system`; a prefix such
+  as `3.12` uses the highest installed `3.12.*`. An unresolvable candidate is
+  skipped with a warning; unsafe targets fail before launch with a fix hint. Put the selected interpreter's `bin` on
   PATH when a custom pyenv hook controls selection. The shim, selected
   version file and pyenv's real `libexec` directory are readable in the
   confined lane, together with the validated interpreter runtime;
@@ -228,8 +229,9 @@ cooldowns remain intact. OpenCode runs with error logs on stderr so a quota
 retry cannot silently sleep until the run timeout. Quota diagnostics end the
 attempt as retryable `usage_limited`, with `quota_exhausted` evidence.
 OpenCode Go cooldowns apply to the exhausted model. A reported reset takes
-precedence; a monthly limit without a reset hint uses an expiring 31-day
-cooldown, which a successful explicit run can clear earlier. Silence alone
+precedence; a monthly limit without a reset hint uses a 24-hour re-probe window: the
+next attempt after expiry is the probe, success clears the entry and failure
+re-arms it. OpenCode quotas of any model never widen to the whole adapter. Silence alone
 remains a timeout. Kiro's plain `Opening browser...` login diagnostic ends
 the attempt as `auth_required`, with `auth_expired` evidence and a hint to
 run `kiro-cli whoami` outside the sandbox.

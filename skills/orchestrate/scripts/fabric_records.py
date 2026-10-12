@@ -327,8 +327,9 @@ def write_cooldown(row, *, path=None, at=None):
     model = registered_model(adapter, (prov.get("observed_model") if row["status"] == "ok" else None)
                              or prov["resolved_model"] or "*", warnings=row.setdefault("warnings", []))
     excerpt = row.get("evidence", {}).get("excerpt", "")
-    # Antigravity and OpenCode Go meter each hosted model pool separately.
-    model_quota = adapter == "agy" or (adapter == "opencode" and model.startswith("opencode-go/"))
+    # Antigravity and OpenCode (Go or otherwise) meter each model separately; a limit there says
+    # nothing about the account's other models, so only other adapters' account limits widen.
+    model_quota = adapter in {"agy", "opencode"}
     if not model_quota and row["status"] == "usage_limited" and re.search(
         r"(?:usage|session|weekly|account|plan) limit|individual quota reached|insufficient_quota", excerpt, re.I
     ):

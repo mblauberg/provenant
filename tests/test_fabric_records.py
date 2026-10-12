@@ -236,3 +236,33 @@ def test_substituted_success_clears_only_the_model_that_answered(tmp_path):
     row["provenance"].update(resolved_model="opus", observed_model="sonnet")
     records().write_cooldown(row, path=path)
     assert set(records().read_cooldowns(path)) == {"claude/claude-opus-5-5"}
+
+
+def test_cooldown_expires_after_its_window_and_reprobe_rearms_it(tmp_path):
+    path = tmp_path / "cooldowns.json"
+    at = datetime(2026, 9, 23, tzinfo=UTC)
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status="usage_limited", reset_at=None, retry_after=24 * 3600)
+    row["provenance"]["requested"]["adapter"] = "opencode"
+    row["provenance"]["resolved_model"] = "opencode-go/glm-5"
+    records().write_cooldown(row, path=path, at=at)
+    assert "opencode/opencode-go/glm-5" in records().read_cooldowns(path, at + timedelta(hours=23))
+    assert not records().read_cooldowns(path, at + timedelta(hours=25))
+    records().write_cooldown(row, path=path, at=at + timedelta(hours=25))  # failed probe re-arms
+    assert "opencode/opencode-go/glm-5" in records().read_cooldowns(path, at + timedelta(hours=26))
+
+
+@pytest.mark.parametrize("model,expected", [
+    ("opencode-go/glm-5", "opencode/opencode-go/glm-5"),
+    ("opencode/some-free-model", "opencode/some-free-model"),
+])
+def test_opencode_usage_limit_stays_scoped_to_its_model(tmp_path, model, expected):
+    path = tmp_path / "cooldowns.json"
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status="usage_limited", reset_at=None, retry_after=None)
+    row["evidence"]["excerpt"] = "Monthly usage limit reached"
+    row["provenance"]["requested"]["adapter"] = "opencode"
+    row["provenance"]["resolved_model"] = model
+    records().write_cooldown(row, path=path)
+    keys = set(records().read_cooldowns(path))
+    assert keys and "opencode/*" not in keys
