@@ -85,6 +85,8 @@ server.server.onclose = async () => {
  * run left that way is reaped by the next dispatch in the same workspace.
  */
 let shuttingDown = false;
+// Lanes whose result tail this session has already shown; bounded, oldest evicted first.
+const tailedLanes = new Set<string>();
 for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
   process.on(signal, () => {
     if (shuttingDown) return;
@@ -489,7 +491,7 @@ register(
 );
 register(
   "fabric_status",
-  "Read or wait for runs. In batch status, tails are shown for lanes completed during this wait; request one lane, detail:full, or tail_chars to include earlier tails. wait_seconds above 55 is clamped to 55; invalid numeric values return a typed rejection.",
+  "Read or wait for runs. Batch status shows each finished lane's tail once per session; request one lane or pass tail_chars to see it again. wait_seconds above 55 is clamped to 55; invalid numeric values return a typed rejection.",
   {
     ids: ids(),
     id: str,
@@ -502,7 +504,6 @@ register(
   async ({ ids, id, wait_seconds, until, detail, tail_chars, fields }, { signal }) => {
     const waitResult = boundedWait(wait_seconds);
     if (waitResult.error) return waitResult.error;
-    const callStarted = Date.now();
     const result = await statusRows(who.project, ids ?? (id ? [id] : undefined), waitResult.value, until, signal, detail);
     acknowledgeRuns(result);
     const view = detail === "full"
@@ -518,19 +519,25 @@ register(
     } catch {
       // Fall through with no ownership rows.
     }
-    // A short answer should not cost a second call: newly terminal rows carry the end of their result.
+    // A short answer should not cost a second call: a terminal row carries the end of its result
+    // the first time this session sees it, so batch polls do not resend finished lanes.
     const rows: Record<string, any>[] = Array.isArray(result.runs) ? result.runs : [];
     const localHost = (result as Record<string, any>).hosts?.find((host: Record<string, any>) => host.local)?.host;
     const terminal = rows.filter((row) => row.state === "terminal" && (!row.host || row.host === localHost));
-    const each = Math.min(tail_chars ?? 1200, Math.floor(Math.max(3600, tail_chars ?? 0) / Math.max(1, terminal.length)));
     const oneLaneRequested = rows.length === 1 && (
       (id !== undefined && id !== rows[0]?.batch_id) ||
       (ids?.length === 1 && ids[0] !== rows[0]?.batch_id)
     );
-    const tails = terminal.flatMap((row) => {
-      const endedAt = Date.parse(String(row.ended_at ?? ""));
-      const completedDuringCall = Number.isFinite(endedAt) && endedAt > callStarted;
-      if (tail_chars === 0 || !(completedDuringCall || oneLaneRequested || detail === "full" || tail_chars !== undefined)) return [];
+    const laneKey = (row: Record<string, any>) => `${who.project}:${row.run_id}:${row.task_id}:${row.attempt}`;
+    const tailed = tail_chars === 0 || (detail === "full" && tail_chars === undefined) ? [] : terminal.filter((row) =>
+      oneLaneRequested || tail_chars !== undefined || !tailedLanes.has(laneKey(row)));
+    for (const row of tailed) {
+      tailedLanes.delete(laneKey(row));
+      tailedLanes.add(laneKey(row));
+    }
+    while (tailedLanes.size > 4096) tailedLanes.delete(tailedLanes.values().next().value as string);
+    const each = Math.min(tail_chars ?? 1200, Math.floor(Math.max(3600, tail_chars ?? 0) / Math.max(1, tailed.length)));
+    const tails = tailed.flatMap((row) => {
       const tail = resultTail(row, each);
       return tail ? [`result tail ${row.task_id ?? row.run_id}${tail.total > tail.text.length ? " (end)" : ""}:\n${tail.text}`] : [];
     });
