@@ -128,23 +128,28 @@ published through the attempt directory's descriptor with an atomic replace
 that never follows a planted link. It then commits the start or
 integration-branch version of each path back to the lane as Provenant Fabric,
 returns the index and files to their starting content (or the integration
-branch's version), rechecks, and ends `quarantined` when the provider succeeded;
-starting files Git did not hold are stored as objects before launch so they
-can be restored. `allow` keeps an ordinary edit with a warning. `deny`, a failed
-quarantine, and anything quarantine cannot express (a conflict, special file,
-case variant or unverifiable state) also end `quarantined` when the provider
-produced a successful result. This status retains the result, sets `landable: false` and `retryable: false`, and records `quarantine` with the reason, patch
-paths, whether restoration succeeded and any patch capture error. It is never
-`ok` for landing, certification or session success. Digests, status and lanes
-show the result and a review action; chairs review the quarantine and verify the
-branch diff before landing any application work. Proposed instruction edits
-belong outside `.agents/` for separate chair review, as the default writer brief
-states.
+branch's version), rechecks, and ends `quarantined` only when the provider
+succeeded and restoration was verified (`restored: true`); starting files Git did
+not hold are stored as objects before launch so they can be restored. `allow`
+keeps an ordinary edit with a warning. When edits remain on the lane branch or
+worktree (`deny`, a failed restore, or a conflict, special file, case variant or
+unverifiable state quarantine cannot express) the lane ends `failed` as without
+quarantine, with `fix: instruction edits remain on the lane branch; restore
+.agents/ to the start commit before landing`; its output and patches stay
+retained and listed. A `quarantined` lane retains the result, sets
+`landable: false` and `retryable: false`, and records `quarantine` with the
+reason, patch paths, whether restoration succeeded and any patch capture error.
+`landable: false` is an advisory marker for the chair, not enforced landing. It
+is never `ok` for landing, certification or session success. Digests, status and
+lanes show the result and a review action; chairs review the quarantine and
+verify the branch diff before landing any application work. Proposed instruction
+edits belong outside `.agents/` for separate chair review, as the default writer
+brief states (omitted when the policy is `allow`).
 
 `protected.patch` is retained even for an index-only change (empty disk patch)
 or an unverifiable check (a comment explaining that the diff is unavailable).
-If the attempt path cannot safely be written, patches are listed as unavailable
-with a capture error; no patch is claimed as complete in that case. The check
+If that marker cannot be installed, patches are listed as unavailable with a
+capture error; no patch is claimed as complete in that case. The check
 reports `protected_instructions_unverifiable` separately from actual changes.
 A failed or signal-interrupted provider is never promoted to `quarantined`.
 Signal-interrupted attempts retain their changed files without restoration and

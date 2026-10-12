@@ -1565,6 +1565,7 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     if legacy["outcome"] in {"result_invalid_path","result_integrity_error","adapter_receipt_invalid","manifest_write_error","terminal_envelope_invalid"}: status="failed"
     elif legacy["status"] in {"cancelled","timed_out"}: status=legacy["status"]
     elif legacy["status"]=="blocked": status="input_required"
+    elif status=="quarantined" and legacy["status"]=="failed": status="failed"
     refusal=route_refusal(adapter,args.tool)
     if refusal: status=refusal["status"]
     if status not in TERMINAL_STATUSES: status="failed"
@@ -2371,7 +2372,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     question: dict[str, Any] | None = None
     terminal_envelope_error = False
     result_integrity_error = False
-    if observed_exit and exit_code == 0 and adapter_status == "ok" and not receipt_error and result_nonempty:
+    if (observed_exit and (exit_code == 0 and adapter_status == "ok"
+                           or adapter_status == "quarantined" and adapter.get("exit") == 0)
+            and not receipt_error and result_nonempty):
         try:
             question = worker_question_envelope(result_path, result_digest)
         except TerminalEnvelopeIntegrityError:

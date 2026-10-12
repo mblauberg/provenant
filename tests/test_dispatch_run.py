@@ -922,6 +922,33 @@ def test_worker_question_detection_is_exact_and_fail_closed(
         assert "question" not in attempt
 
 
+@pytest.mark.parametrize(("result", "status", "outcome"), [
+    (None, "blocked", "question"),
+    ('{"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"x"},"extra":true}\n',
+     "failed", "terminal_envelope_invalid"),
+    ("plain result\n", "quarantined", "quarantined"),
+], ids=["question", "invalid-envelope", "plain"])
+def test_quarantined_lane_gets_the_same_question_and_envelope_checks(tmp_path: Path, monkeypatch, result, status, outcome) -> None:
+    run_dir = make_run(tmp_path, "quarantine-envelope")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("prompt\n", encoding="utf-8")
+    adapter = tmp_path / "adapter"
+    write_question_adapter(adapter, result=result)
+    adapter.write_text(adapter.read_text().replace(
+        '"status":"ok"', '"status":"quarantined","landable":false,"quarantine":{"reason":"protected_instructions_changed","patches":[],"restored":true}'))
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+    module.dispatch(args)
+    attempt = json.loads((run_dir / "dispatch/tasks/case/attempt-001/attempt.json").read_text())
+    assert attempt["status"] == status
+    assert attempt["outcome"] == outcome
+
+
 def test_valid_worker_question_cannot_override_nonzero_provider_exit(tmp_path: Path, monkeypatch) -> None:
     run_dir = make_run(tmp_path, "question-nonzero")
     prompt = tmp_path / "prompt.md"
@@ -3824,6 +3851,8 @@ def test_dispatch_retains_quarantined_result_without_clean_success(tmp_path, mon
     assert record['status'] == ('failed' if invalid_digest else 'quarantined')
     if invalid_digest:
         assert record['outcome'] == 'adapter_receipt_invalid'
+        canonical = json.loads((run_dir / 'tasks/review/attempt-001/attempt.json').read_text())
+        assert canonical['status'] == 'failed'
     if not invalid_digest:
         assert record['landable'] is False
         assert record['quarantine']['patches'] == ['protected.patch']

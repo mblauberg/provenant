@@ -109,7 +109,7 @@ export function fullView(value: Record<string, any>, fields?: string[]): Record<
   return Array.isArray(value.attempts) ? { ...value, attempts: value.attempts.map(attemptSummary) } : value;
 }
 
-function quarantineAction(row: Record<string, any>): string {
+export function quarantineAction(row: Record<string, any>): string {
   const quarantine = row.quarantine ?? {};
   return `not landable; review quarantine: ${quarantine.reason ?? "inspect receipt"}; patches: ${(quarantine.patches ?? []).join(", ") || "unavailable"}${quarantine.patch_error ? `; ${quarantine.patch_error}` : ""}`;
 }

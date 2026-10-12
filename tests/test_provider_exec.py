@@ -4076,15 +4076,18 @@ def test_codex_writer_keeps_changes_its_branch_already_carried(tmp_path):
     "git('commit', '-q', '-m', 'plumbing')\n",
     "os.mkfifo('.agents/skills/fixture/pipe')\n",
 ], ids=["uncommitted", "committed", "untracked", "ignored", "skip-worktree", "case-variant", "fifo"])
-def test_codex_writer_authoring_instructions_is_quarantined_under_deny_policy(tmp_path, edit):
+def test_codex_writer_authoring_instructions_fails_under_deny_policy(tmp_path, edit):
     _, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, edit, policy={"instruction_changes": "deny"})
-    assert record["status"] == "quarantined"
+    assert record["status"] == "failed"
     assert record["landable"] is False
     assert record["quarantine"]["restored"] is False
+    assert "instruction edits remain on the lane branch" in record["fix"]
     assert (tmp_path / "attempt/protected.patch").is_file()
+    assert str(tmp_path / "attempt/protected.patch") in record["quarantine"]["patches"]
     assert Path(record["output_path"]).read_text() == "done"
-    assert record["evidence"]["signature"] in {"protected_instructions_changed", "protected_instructions_unverifiable"}
+    assert record["error"] == record["evidence"]["signature"] == (
+        "protected_instructions_unverifiable" if "pipe" in edit else "protected_instructions_changed")
     assert any(".agents/skills/fixture/" in warning.casefold() for warning in record["warnings"])
 
 
@@ -4197,7 +4200,7 @@ def test_quarantine_archives_a_staged_change_the_disk_no_longer_shows(tmp_path):
     assert len(record["quarantine"]["patches"]) == 2
 
 
-@pytest.mark.parametrize("policy, status", [(None, "quarantined"), ({"instruction_changes": "deny"}, "quarantined")])
+@pytest.mark.parametrize("policy, status", [(None, "quarantined"), ({"instruction_changes": "deny"}, "failed")])
 def test_a_merge_that_discards_integration_instruction_changes_is_caught(tmp_path, policy, status):
     _, lane = instruction_lane(tmp_path)
     git(lane, "reset", "-q", "--hard", "HEAD~1")  # the lane starts from main's old commit
@@ -4250,10 +4253,11 @@ def test_unknown_instruction_policy_warns_and_quarantines(tmp_path):
 
 
 @pytest.mark.parametrize("policy", [None, {"instruction_changes": "allow"}], ids=["default", "allow"])
-def test_special_instruction_changes_quarantine_a_successful_result(tmp_path, policy):
+def test_special_instruction_changes_fail_a_successful_result(tmp_path, policy):
     _, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, "os.mkfifo('.agents/skills/fixture/pipe')\n", policy=policy)
-    assert record["status"] == "quarantined"
+    assert record["status"] == "failed"
+    assert "instruction edits remain on the lane branch" in record["fix"]
     assert record["error"] == "protected_instructions_unverifiable"
     assert record["landable"] is False
     assert record["quarantine"]["patch_error"]
@@ -4283,11 +4287,12 @@ def test_codex_writer_committing_an_instruction_root_entry_fails(tmp_path):
     assert any(warning.endswith(": .agents") for warning in record["warnings"])
 
 
-def test_codex_writer_unresolved_instruction_conflict_fails(tmp_path):
+def test_codex_writer_unresolved_instruction_conflict_fails_with_instruction_changes(tmp_path):
     _, lane = instruction_lane(tmp_path)
     (lane / SKILL).write_text("branch edit\n")
     git(lane, "commit", "-q", "-am", "reviewed skill edit")
     record = lane_attempt(tmp_path, lane, f"subprocess.run(['git', *{GIT_FIXTURE!r}, 'merge', '-q', 'main'])\n")
+    assert record["status"] == "failed"
     assert record["error"] == "protected_instructions_changed"
     assert any(SKILL + " (unresolved conflict)" in warning for warning in record["warnings"])
 
@@ -4298,7 +4303,7 @@ def test_codex_writer_unresolved_instruction_conflict_fails(tmp_path):
     "os.symlink('../elsewhere', '.agents')\n",
     "open('.agents/big', 'wb').truncate(1 << 40)\n",
 ], ids=["unreadable", "root-symlink", "oversized"])
-def test_codex_writer_unverifiable_instructions_quarantine_a_successful_result(tmp_path, script):
+def test_codex_writer_unverifiable_instructions_fail_a_successful_result(tmp_path, script):
     _, lane = instruction_lane(tmp_path)
     hidden = lane / ".agents" / "hidden"
     try:
@@ -4306,7 +4311,7 @@ def test_codex_writer_unverifiable_instructions_quarantine_a_successful_result(t
     finally:
         if hidden.exists():
             hidden.chmod(0o755)
-    assert record["status"] == "quarantined"
+    assert record["status"] == "failed"
     assert record["error"] == "protected_instructions_unverifiable"
     assert record["landable"] is False
     assert any("unverifiable" in warning for warning in record["warnings"])
@@ -5818,13 +5823,15 @@ def test_failed_writer_with_instruction_edits_is_not_usable(tmp_path):
     assert record["landable"] is False
 
 
-def test_failed_instruction_restoration_keeps_successful_output_and_patch(tmp_path):
+def test_failed_instruction_restoration_fails_but_keeps_output_and_patch(tmp_path):
     _, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('staged edit\\n'); git('add', {SKILL!r})\n"
                           f"open({SKILL!r}, 'w').write('lane edit\\n')\n"
                           "directory = git('rev-parse', '--absolute-git-dir')\n"
                           "open(directory + '/index.lock', 'w').close()\n")
-    assert record["status"] == "quarantined"
+    assert record["status"] == "failed"
+    assert record["error"] == "protected_instructions_changed"
+    assert "restore .agents/ to the start commit" in record["fix"]
     assert record["landable"] is False
     assert record["quarantine"]["restored"] is False
     assert record["quarantine"]["patch_error"]

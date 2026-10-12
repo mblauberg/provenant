@@ -93,6 +93,15 @@ it("keys a legacy lane without a task id the same way as fabric_status", async (
   expect(waiter.output.join("")).toBe("no lanes are running\n");
 });
 
+it("prints a quarantined lane's review action", async () => {
+  const waiter = run(store(), [[{ ...lane("review", "terminal", "quarantined"),
+    quarantine: { reason: "protected_instructions_changed", patches: ["/attempt/protected.patch"] } } as RunRead]]);
+  expect(await waiter.code).toBe(0);
+  const text = waiter.output.join("");
+  expect(text).toContain("not landable; review quarantine: protected_instructions_changed");
+  expect(text).toContain("/attempt/protected.patch");
+});
+
 function timed(opened: Store, runs: RunRead[][], options: { all?: boolean; timeoutSeconds?: number }) {
   const output: string[] = [];
   let reads = 0, clock = 0;

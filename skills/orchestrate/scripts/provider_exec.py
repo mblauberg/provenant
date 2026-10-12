@@ -1029,8 +1029,9 @@ def build_plan(
         raise ValueError("timeouts must be finite positive numbers")
     boundary = f"Workspace root: {cwd}\nResolve relative paths against this root. " + (
         "Write, run commands and commit only inside this owned worktree. Do not push or change other checkouts. "
-        "Do not author changes under .agents/; stage proposed instruction edits elsewhere for chair review. "
-        "Protected instruction changes or unverifiable checks quarantine a completed result: review it before landing."
+        + ("" if metadata.get("instruction_policy") == "allow" else
+           "Do not author changes under .agents/; stage proposed instruction edits elsewhere for chair review. ")
+        + "Protected instruction changes or unverifiable checks quarantine a completed result: review it before landing."
         if mode == "worktree_write"
         else "Do not modify files or run commands that mutate state. Use file-reading tools only."
     )
@@ -3213,10 +3214,10 @@ def execute(
         patches = []
         try:
             # Retain an explicit unavailable marker even if safe diff capture fails.
-            with tempfile.NamedTemporaryFile(dir=private_tmp) as staged:
-                staged.write(("# Instruction diff unavailable: " + quarantine["reason"] + "\n").encode())
-                staged.flush()
-                install(staged.name, str(patch))
+            with tempfile.TemporaryDirectory() as marker_dir:
+                marker = Path(marker_dir, "protected.patch")
+                marker.write_text("# Instruction diff unavailable: " + quarantine["reason"] + "\n")
+                install(str(marker), str(patch))
             quarantine["patches"] = [str(patch)]
             if not quarantinable(instruction_changes) or not isinstance(instruction_start, dict):
                 raise ValueError("no safe instruction diff can be captured; inspect the retained worktree")
@@ -3238,10 +3239,10 @@ def execute(
             warnings.append(f"quarantine of {INSTRUCTION_DIR}/ changes failed: {exc}")
         if patches:
             quarantine["patches"] = list(map(str, patches))
-        if status == "ok":
-            status = "quarantined"
-        elif instruction_changes:
+        if instruction_changes:  # Edits remain on the lane: fail, as without quarantine.
             status = "failed"
+        elif status == "ok":
+            status = "quarantined"
         parsed["signature"] = signature
     if created_instructions is not None:
         try:
@@ -3252,14 +3253,15 @@ def execute(
         warnings.append(("instruction assurance unavailable: " if unverifiable else
                          "lane changed " + INSTRUCTION_DIR + "/ beyond its start and integration branch: ")
                         + ", ".join(instruction_changes))
-    if plan["adapter"] == "agy" and status not in {"ok", "input_required", "partial", "quarantined"}:
+    if (plan["adapter"] == "agy" and status not in {"ok", "input_required", "partial", "quarantined"}
+            and not (quarantine and parsed["status"] == "ok")):
         parsed["text"] = ""
         stderr = "agy dispatch failed: status=" + status + "\n" + stderr
         if parsed["excerpt"]:
             parsed["excerpt"] = "provider error: " + parsed["excerpt"]
     output = (
         parsed["text"]
-        if status in {"ok", "input_required", "partial", "quarantined"}
+        if status in {"ok", "input_required", "partial", "quarantined"} or quarantine and parsed["status"] == "ok"
         else (parsed["text"] + "\n" if parsed["text"] else "")
         + stderr
         + ("\n" + parsed["excerpt"] if parsed["excerpt"] else "")
@@ -3307,7 +3309,12 @@ def execute(
             "rate_limited": "retry after the recorded cooldown",
         }.get(status)
     )
-    if quarantine:
+    if quarantine and status == "failed" and instruction_changes:
+        fix = ("instruction edits remain on the lane branch; restore " + INSTRUCTION_DIR
+               + "/ to the start commit before landing; patches: "
+               + (", ".join(quarantine["patches"]) or "unavailable")
+               + ("; " + quarantine["patch_error"] if quarantine["patch_error"] else ""))
+    elif quarantine:
         fix = ("not landable; review quarantine: " + quarantine["reason"] + "; patches: "
                + (", ".join(quarantine["patches"]) or "unavailable")
                + ("; " + quarantine["patch_error"] if quarantine["patch_error"] else ""))
