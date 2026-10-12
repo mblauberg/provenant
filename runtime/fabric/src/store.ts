@@ -77,6 +77,10 @@ export interface WorkClaim {
   expiresAtMs: number;
 }
 
+const STALE_LANDING =
+  "stale landing lease: it expired, was released, or belongs to another session or generation; " +
+  "re-acquire with fabric_landing_lease action=acquire (or wait for it first)";
+
 export interface LandingLease {
   holder: string;
   generation: number;
@@ -339,6 +343,25 @@ export class Store {
       expiresAtMs: row.expires_at, ...(row.pushing_until === null ? {} : { pushingUntilMs: row.pushing_until }) } : null;
   }
 
+  /**
+   * Resolve when the landing lease changes hands or frees (new holder or
+   * generation, released or expired) or after `seconds`. A push starting under
+   * the same holder is not a change: the lease is still unavailable.
+   */
+  async waitLanding(project: string, seconds: number, signal?: AbortSignal, pollMs = 500):
+    Promise<{ changed: boolean; lease: LandingLease | null }> {
+    const key = (lease: LandingLease | null) => lease ? `${lease.holder}:${lease.generation}` : "";
+    const start = key(this.landingLease(project)), deadline = Date.now() + seconds * 1000;
+    for (;;) {
+      const lease = this.landingLease(project);
+      if (key(lease) !== start) return { changed: true, lease };
+      // A held lease also changes when it lapses, which the time-based read above reports.
+      const remaining = deadline - Date.now();
+      if (remaining <= 0 || signal?.aborted) return { changed: false, lease };
+      await new Promise((done) => setTimeout(done, Math.min(pollMs, remaining)));
+    }
+  }
+
   acquireLanding(who: Identity, session: string, expectedSha: string, seconds: number, now = Date.now()): LandingLease {
     const owner = holder(who, session), until = expiry(seconds, now);
     if (!/^[0-9a-f]{40}$/u.test(expectedSha)) throw new Error("expected integration SHA must be 40 lowercase hex digits");
@@ -363,7 +386,7 @@ export class Store {
   verifyLanding(who: Identity, session: string, generation: number, expectedSha: string, now = Date.now()): LandingLease {
     const lease = this.landingLease(who.project, now);
     if (!lease || lease.holder !== holder(who, session) || lease.generation !== generation)
-      throw new Error("stale landing lease");
+      throw new Error(STALE_LANDING);
     if (lease.expectedSha !== expectedSha) throw new Error("integration SHA does not match landing lease");
     return lease;
   }
@@ -374,7 +397,7 @@ export class Store {
       const changed = this.#db.prepare(`UPDATE landing_leases SET expires_at = MAX(expires_at, ?) WHERE project = ?
         AND holder = ? AND generation = ? AND released_at IS NULL AND expires_at > ?`)
         .run(until, who.project, owner, generation, now);
-      if (changed.changes !== 1) throw new Error("stale landing lease");
+      if (changed.changes !== 1) throw new Error(STALE_LANDING);
       this.#log(who, "landing_renew", `${owner} generation ${generation}`);
       return this.landingLease(who.project, now)!;
     }).immediate();
@@ -421,7 +444,7 @@ export class Store {
         AND holder = ? AND generation = ? AND released_at IS NULL AND expires_at > ?
         AND (pushing_until IS NULL OR pushing_until <= ?)`)
         .run(Date.now(), who.project, owner, generation, Date.now(), Date.now());
-      if (changed.changes !== 1) throw new Error("stale landing lease");
+      if (changed.changes !== 1) throw new Error(STALE_LANDING);
       this.#log(who, "landing_release", `${owner} generation ${generation}`);
     }).immediate();
   }
