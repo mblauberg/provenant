@@ -204,3 +204,35 @@ def test_agy_quota_cools_only_the_exhausted_model(tmp_path):
     row["evidence"]["excerpt"] = "You've hit your session limit"
     records().write_cooldown(row, path=path, at=at)
     assert "claude/*" in json.loads(path.read_text())["cooldowns"]
+
+
+@pytest.mark.parametrize("status", ["ok", "partial", "failed", "input_required"])
+def test_only_success_clears_its_own_cooldown(tmp_path, status):
+    path = tmp_path / "cooldowns.json"
+    at = datetime(2026, 9, 23, tzinfo=UTC)
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status="rate_limited")
+    row["provenance"]["requested"]["adapter"] = "agy"
+    for model in ("claude-sonnet-4-6", "gemini-3.5-flash", "*"):
+        row["provenance"]["resolved_model"] = model
+        records().write_cooldown(row, path=path, at=at)
+    row["provenance"].update(resolved_model="claude-sonnet-4-6", observed_model="claude-sonnet-4-6")
+    row.update(status=status)
+    records().write_cooldown(row, path=path, at=at + timedelta(minutes=1))
+    remaining = records().read_cooldowns(path, at)
+    assert ("agy/claude-sonnet-4-6" in remaining) is (status != "ok")
+    assert {"agy/gemini-3.5-flash", "agy/*"} <= remaining.keys()
+
+
+def test_substituted_success_clears_only_the_model_that_answered(tmp_path):
+    path = tmp_path / "cooldowns.json"
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status="rate_limited")
+    row["provenance"]["requested"]["adapter"] = "claude"
+    for model in ("opus", "sonnet"):
+        row["provenance"]["resolved_model"] = model
+        records().write_cooldown(row, path=path)
+    row.update(status="ok")
+    row["provenance"].update(resolved_model="opus", observed_model="sonnet")
+    records().write_cooldown(row, path=path)
+    assert set(records().read_cooldowns(path)) == {"claude/claude-opus-5-5"}

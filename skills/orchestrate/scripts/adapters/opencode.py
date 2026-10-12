@@ -9,12 +9,13 @@ SESSION_KEYS = ("sessionID", "session_id")
 MODEL_SOURCE = "opencode:export.modelID"
 SIGNATURES = (
     ("model_unavailable", r"FreeTierError|free tier can only be used from within OpenCode"),
-    ("usage_limited", r"Individual quota reached|exhausted your capacity"),
+    ("usage_limited", r"Individual quota reached|exhausted your capacity|(?:monthly|weekly|5.hour) usage limit reached"),
 )
 
 
 def argv(p):
-    command = [CLI, "run", "--format", "json", "--auto"]
+    # Quota retries can sleep for days without a JSON event; errors still reach the logger.
+    command = [CLI, "run", "--format", "json", "--auto", "--print-logs", "--log-level", "ERROR"]
     command += ["--dir", p["cwd"]]
     if p["resume_session"]:
         command += ["-s", p["resume_session"]]
