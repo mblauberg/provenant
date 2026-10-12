@@ -3993,6 +3993,7 @@ def test_codex_permissions_profile_name_is_unique_to_each_plan(tmp_path):
     assert all(re.fullmatch(r"provenant-[0-9a-f]{32}", name) for name in names), names
 
 
+@pytest.mark.live_provider
 @pytest.mark.skipif(sys.platform != "darwin" or shutil.which("codex") is None,
                     reason="needs the codex CLI's macOS sandbox")
 @pytest.mark.parametrize("resume", [None, "thread-1"], ids=["fresh", "resume"])
@@ -5267,6 +5268,7 @@ def test_codex_read_only_writes_its_temp_and_add_dirs_but_not_the_cwd(tmp_path):
     assert "permissions.NAME.network.enabled=true" in codex_read_only_permissions(networked["argv"])
 
 
+@pytest.mark.live_provider
 @pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("codex"), reason="needs the Codex seatbelt")
 def test_codex_read_only_profile_writes_only_temp_and_lock_dirs(tmp_path):
     repo = tmp_path / "repo"
@@ -5331,6 +5333,7 @@ def test_opencode_read_only_profile_reads_project_config_above_its_cwd(tmp_path)
     assert cat(repo / "opencode.jsonc").returncode != 0
 
 
+@pytest.mark.live_provider
 @pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("opencode"), reason="needs OpenCode")
 def test_opencode_starts_below_a_repository_config(tmp_path):
     mod = supervisor()
@@ -5468,6 +5471,7 @@ def test_codex_read_only_never_grants_a_directory_named_like_a_pattern(tmp_path,
     assert any(warning.endswith(str(literal)) and "pattern character" in warning for warning in plan["warnings"])
 
 
+@pytest.mark.live_provider
 @pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("codex"), reason="needs the Codex seatbelt")
 def test_codex_read_only_directory_named_like_a_pattern_leaves_cwd_unwritable(tmp_path):
     repo = tmp_path / "repo"

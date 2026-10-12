@@ -25,3 +25,4 @@ package = false
 # top-level script modules from here, so no test and no script has to
 # repair `sys.path` itself.
 pythonpath = [".", "scripts", "skills"]
+markers = ["live_provider: explicitly opts a test into real provider CLI execution"]

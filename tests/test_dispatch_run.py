@@ -7,6 +7,7 @@ import io
 import importlib.util
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -2263,11 +2264,20 @@ def test_writer_branch_name_warns_in_receipt_without_refusing(tmp_path: Path) ->
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Make a change\n", encoding="utf-8")
     worktree = make_worktree(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    write_executable(
+        bin_dir / "claude",
+        """#!/usr/bin/env bash
+        cat >/dev/null
+        printf 'PWD=%s\\n' "$PWD"
+        """,
+    )
     result = run_writer_dispatch(tmp_path, run_dir, prompt, "--access-mode", "worktree_write",
                                  "--worktree", str(worktree))
     receipt = json.loads(result.stdout.splitlines()[-1])
-    assert result.returncode in {0, 1}, result.stderr + result.stdout
-    assert receipt["status"] != "invalid_worktree"
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert receipt["status"] == "ok"
     assert any("branch writer is outside" in note for note in receipt["fabric"]["warnings"])
     attempt = json.loads((run_dir / "tasks/task-1/attempt-001/attempt.json").read_text())
     assert any("branch writer is outside" in note for note in attempt["warnings"])
@@ -2279,6 +2289,18 @@ def test_writer_branch_name_warns_in_receipt_without_refusing(tmp_path: Path) ->
     receipt = json.loads(result.stdout.splitlines()[-1])
     assert receipt["status"] != "invalid_worktree"
     assert not any("branch " in note and "outside" in note for note in receipt["fabric"]["warnings"])
+
+
+@pytest.mark.parametrize("executable", [
+    "claude", "codex", "herdr", "pi", "agy", "cursor-agent", "copilot", "kiro-cli", "opencode",
+])
+def test_default_suite_blocks_provider_clis(executable: str, _provider_cli_stub_dir: Path) -> None:
+    path = shutil.which(executable)
+    assert path is not None
+    assert Path(path).parent == _provider_cli_stub_dir
+    result = subprocess.run([path], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert result.returncode == 97
+    assert "blocked real provider CLI" in result.stderr
 
 
 def test_primary_checkout_writer_is_rejected(tmp_path: Path) -> None:
