@@ -162,6 +162,17 @@ describe("run directory pruning", () => {
     pruneDispatchRuns(workspace, ownerEnvironment);
     expect(existsSync(runDir)).toBe(true);
   });
+  it("keeps a quarantined run for the failed retention", () => {
+    const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-review-a1b2c3");
+    mkdirSync(runDir, { recursive: true });
+    const receipt = join(runDir, "RUN_RECEIPT.json");
+    writeFileSync(receipt, JSON.stringify({ status: "quarantined" }));
+    const past = new Date(Date.now() - 10 * 86400000);
+    utimesSync(receipt, past, past);
+    utimesSync(runDir, past, past);
+    pruneDispatchRuns(workspace, ownerEnvironment);
+    expect(existsSync(runDir)).toBe(true);
+  });
   function ageRun(name: string, hoursOld: number): { runDir: string; stdout: string; stderr: string } {
     const runRoot = join(workspace, ".agent-run");
     mkdirSync(runRoot, { recursive: true });

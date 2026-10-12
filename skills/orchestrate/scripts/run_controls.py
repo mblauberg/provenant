@@ -18,7 +18,7 @@ from typing import Any
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?:\d{3}|[1-9]\d{3,})$")
 TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 BATCH_ID_RE = re.compile(r"^batch-(?:\d{3}|[1-9]\d{3,})$")
-TERMINAL_STATUSES = {"blocked", "ok", "failed", "timed_out", "cancelled"}
+TERMINAL_STATUSES = {"blocked", "ok", "quarantined", "failed", "timed_out", "cancelled"}
 DISPATCH_RUN = Path(__file__).with_name("dispatch_run.py")
 MAX_WORKER_QUESTION_PROMPT = 4096
 MAX_OPERATOR_RESPONSE_BYTES = 64 * 1024

@@ -22,6 +22,7 @@ except ImportError:
 TERMINAL_STATUSES = {
     "ok",
     "partial",
+    "quarantined",
     "failed",
     "usage_limited",
     "rate_limited",
@@ -106,7 +107,13 @@ def render_digest(row):
     if result and row.get("run_dir"):
         result = str(Path(row["run_dir"]) / result)
     detail = " · result " + result if result else ""
-    if status not in {"ok", "partial"}:
+    if status == "quarantined":
+        quarantine = row.get("quarantine") or {}
+        detail += " · not landable; review quarantine: " + str(quarantine.get("reason") or "inspect receipt")
+        detail += "; patches: " + (", ".join(quarantine.get("patches") or []) or "unavailable")
+        if quarantine.get("patch_error"):
+            detail += "; " + str(quarantine["patch_error"])
+    elif status not in {"ok", "partial"}:
         excerpt = row.get("evidence", {}).get("excerpt") or ""
         excerpt_line = next(
             (" ".join(line.split())[:120] for line in excerpt.splitlines() if line.strip()),
@@ -270,7 +277,7 @@ def write_route_health(row, *, path=None, at=None):
     status = row.get("status", "failed")
     if row.get("evidence", {}).get("signature") == "empty_output":
         status = "empty_output"
-    if status not in {"ok", "failed", "empty_output", "cancelled", "rate_limited", "usage_limited"}:
+    if status not in {"ok", "quarantined", "failed", "empty_output", "cancelled", "rate_limited", "usage_limited"}:
         status = "failed"
     key = f"{adapter}|{model}|{task_class}"
     entry = {"status": status, "task_class": task_class, "at": timestamp(at), "run_id": row.get("run_id", "")}
