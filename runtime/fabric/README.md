@@ -364,9 +364,11 @@ named session is never silently relaunched. `fresh: true` then starts a new
 session primed with the last clean result, as `handoff` does.
 
 Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, `detail`,
-`tail_chars` and `fields`. Terminal brief rows end with the last 1,200 characters
-of their result (`tail_chars` 0–4,000, 0 disables; the total across rows is
-bounded), so a short answer needs no `result.md` read. `detail: full` keeps a
+`tail_chars` and `fields`. A terminal brief row ends with the last 1,200
+characters of its result the first time the session sees that lane, so a short
+answer needs no `result.md` read and batch polls do not resend finished lanes.
+Requesting one lane, or passing `tail_chars` (0–4,000; 0 disables; the total
+across rows is bounded), shows the tail again. `detail: full` keeps a
 one-line summary per attempt instead of a second copy of the row; `fields`
 returns only the named keys (`fields:["attempts"]` gives the raw history).
 While lanes run, the text ends with a hint to block with `provenant lanes --wait
