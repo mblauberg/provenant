@@ -1309,7 +1309,14 @@ def resolve_effort(
         supported = {item.lower() for item in args.available_effort}
         capability_source = "caller-runtime"
     else:
-        return requested_effort, "", "", "provider-unverified"
+        # No runtime probe: the registry catalogue still bounds what the model takes.
+        listed = {value.lower() for value in (registered or {}).get("efforts", []) if value.lower() in EFFORT_ORDER}
+        if not listed or requested_effort in listed:
+            return requested_effort, "", "", "provider-unverified"
+        rank = EFFORT_ORDER.get(requested_effort, EFFORT_ORDER["medium"])
+        used = max((value for value in listed if EFFORT_ORDER[value] <= rank),
+                   key=lambda value: EFFORT_ORDER[value], default=min(listed, key=lambda value: EFFORT_ORDER[value]))
+        return used, f"{requested_effort} unsupported by {model}; ran at {used}", "", "registry"
 
     if requested_effort in supported:
         return requested_effort, "", "", capability_source

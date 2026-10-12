@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import tomllib
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -3296,6 +3297,76 @@ time.sleep(60)
         pytest.fail("provider child survived startup_timeout")
 
 
+@pytest.mark.parametrize("stream", ["stderr", "error_event"])
+@pytest.mark.parametrize("reset", ["Resets in 2 days.", ""])
+def test_opencode_quota_hang_fails_fast_and_cools_only_its_model(tmp_path, stream, reset):
+    message = "Monthly usage limit reached. " + reset
+    payload = (json.dumps({"type": "error", "error": {"message": message}})
+               if stream == "error_event" else "ERROR " + "context=" + "x" * 220 + " error=" + message)
+    code = f"""import sys,time
+sys.{ 'stdout' if stream == 'error_event' else 'stderr' }.write({payload[:25]!r})
+sys.{ 'stdout' if stream == 'error_event' else 'stderr' }.flush()
+time.sleep(0.1)
+sys.{ 'stdout' if stream == 'error_event' else 'stderr' }.write({(payload[25:] + chr(10))!r})
+sys.{ 'stdout' if stream == 'error_event' else 'stderr' }.flush()
+time.sleep(30)
+"""
+    plan = fixture_plan(tmp_path, code, "opencode", startup_seconds=0.6, idle_seconds=0.6, timeout_seconds=3)
+    plan["model"] = "opencode-go/glm-5"
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "usage_limited"
+    assert record["evidence"]["signature"] == "quota_exhausted"
+    assert record["evidence"]["termination_source"] == "usage_limited"
+    assert record["retryable"] is True
+    assert record["retry_after"] == (None if reset else 24 * 3600)
+    from skills.orchestrate.scripts import fabric_records
+    record["run_id"] = "fixture"
+    path = tmp_path / "cooldowns.json"
+    at = datetime.now(UTC)
+    fabric_records.write_cooldown(record, path=path, at=at)
+    cooldown = fabric_records.read_cooldowns(path, at)
+    assert set(cooldown) == {"opencode/opencode-go/glm-5"}
+    until = fabric_records.parse_time(cooldown["opencode/opencode-go/glm-5"]["cooling_until"])
+    if reset:
+        assert timedelta(days=1) < until - at < timedelta(days=3)
+    else:
+        assert until - at == timedelta(hours=24)
+
+
+def test_opencode_launch_exposes_error_logs_for_silent_quota_hangs(tmp_path):
+    from adapters import opencode
+    plan = fixture_plan(tmp_path, "pass", "opencode")
+    command = opencode.argv(plan)
+    assert "--print-logs" in command
+    assert command[command.index("--log-level") + 1] == "ERROR"
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_kiro_browser_login_hang_fails_fast_with_auth_fix(tmp_path, stream):
+    code = f"""import sys,time
+sys.{stream}.write('Opening brow')
+sys.{stream}.flush()
+time.sleep(0.1)
+sys.{stream}.write('ser...\\n')
+sys.{stream}.flush()
+time.sleep(30)
+"""
+    plan = fixture_plan(tmp_path, code, "kiro", startup_seconds=0.6, idle_seconds=0.6, timeout_seconds=3)
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "auth_required"
+    assert record["evidence"]["signature"] == "auth_expired"
+    assert record["evidence"]["termination_source"] == "auth_required"
+    assert record["fix"] == "run `kiro-cli whoami` outside the sandbox"
+
+
+@pytest.mark.parametrize("adapter,text", [("opencode", "Monthly usage limit reached. Resets in 2 days."),
+                                          ("kiro", "Opening browser...")])
+def test_failure_phrases_in_assistant_prose_are_not_live_errors(tmp_path, adapter, text):
+    event = json.dumps({"type": "text", "text": text})
+    plan = fixture_plan(tmp_path, f"print({event!r})", adapter)
+    assert supervisor().execute(plan, tmp_path / "result.md")["status"] == "ok"
+
+
 def test_provider_output_before_startup_window_keeps_running(tmp_path):
     code = """import json,time
 print(json.dumps({'type':'thread.started','thread_id':'t1'}), flush=True)
@@ -4965,7 +5036,10 @@ def test_kiro_v2_engine_stream_is_parsed_and_auto_is_not_passed():
 
 def test_claude_reported_ids_match_their_aliases():
     module = supervisor()
-    assert module._same_model("claude", "haiku", "claude-haiku-4-5-20251001")
+    assert module._same_model("claude", "haiku", "claude-haiku-5-5")
+    assert not module._same_model("claude", "haiku", "claude-haiku-4-5-20251001")
+    assert module._same_model("claude", "claude-haiku-4-5", "claude-haiku-4-5-20251001")
+    assert not module._same_model("claude", "claude-haiku-4-5", "claude-haiku-5-5")
     assert module._same_model("claude", "sonnet", "claude-sonnet-5-5")
     assert module._same_model("claude", "claude-sonnet-5-5", "claude-sonnet-5")
     assert not module._same_model("claude", "haiku", "claude-sonnet-5-5")
@@ -5467,6 +5541,117 @@ def test_toolchain_reads_resolve_path_commands_to_their_runtime_components(tmp_p
         assert not (home / ".local").is_relative_to(granted)
 
 
+@pytest.mark.parametrize("selection", ["environment", "local", "global"])
+def test_toolchain_reads_resolve_pyenv_shims_without_running_them(tmp_path, monkeypatch, selection):
+    home, tools, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    monkeypatch.delenv("PYENV_VERSION", raising=False)
+    monkeypatch.delenv("PYENV_DIR", raising=False)
+    root = home / ".pyenv"
+    monkeypatch.setenv("PYENV_ROOT", str(root))
+    (root / "shims").mkdir()
+    shim = root / "shims/python3"
+    marker = tmp_path / "shim-ran"
+    shim.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
+    shim.chmod(0o755)
+    (tools["python3"].parent / "python3").symlink_to(tools["python3"])
+    repo = tmp_path / "repo"
+    cwd = repo / "sub"
+    cwd.mkdir(parents=True)
+    (root / "version").write_text("missing-version\n")
+    if selection == "environment":
+        monkeypatch.setenv("PYENV_VERSION", "3.13.0")
+    elif selection == "local":
+        (repo / ".python-version").write_text("3.13.0\n")
+    else:
+        (root / "version").write_text("3.13.0\n")
+    plan = {"adapter": "claude", "mode": "read_only", "cwd": str(cwd), "applied": {"add_dirs": []}}
+    files, _, directories = supervisor()._toolchain_reads(plan, repo, str(root / "shims"))
+    assert tools["python3"] in files
+    assert tools["python3"].parent.parent / "lib" in directories
+    assert tools["python3"].parent.parent not in directories
+    assert root not in directories
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("version", ["../../.ssh", "shim-link"])
+def test_unsafe_pyenv_shim_fails_clearly(tmp_path, monkeypatch, version):
+    home, tools, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    root = home / ".pyenv"
+    monkeypatch.setenv("PYENV_ROOT", str(root))
+    monkeypatch.setenv("PYENV_VERSION", "3.13.0" if version == "shim-link" else version)
+    (root / "shims").mkdir()
+    shim = root / "shims/python3"
+    if version == "shim-link":
+        credentials = home / ".ssh/id_ed25519"
+        credentials.chmod(0o755)
+        shim.symlink_to(credentials)
+        (tools["python3"].parent / "python3").symlink_to(tools["python3"])
+    else:
+        shim.write_text("#!/bin/sh\nexit 1\n")
+        shim.chmod(0o755)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    plan = {"adapter": "claude", "mode": "read_only", "cwd": str(repo), "applied": {"add_dirs": []}}
+    with pytest.raises(ValueError, match="pyenv shim.*fix:"):
+        supervisor()._toolchain_reads(plan, repo, str(root / "shims"))
+
+
+@pytest.mark.parametrize("version", ["missing-version", "3.13.0", None])
+def test_unresolvable_pyenv_selection_is_skipped_with_a_warning(tmp_path, monkeypatch, caplog, version):
+    home, tools, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    root = home / ".pyenv"
+    monkeypatch.setenv("PYENV_ROOT", str(root))
+    monkeypatch.delenv("PYENV_DIR", raising=False)
+    if version is None:
+        monkeypatch.delenv("PYENV_VERSION", raising=False)  # no file either: pyenv means "system"
+    else:
+        monkeypatch.setenv("PYENV_VERSION", version)
+    (root / "shims").mkdir()
+    shim = root / "shims/python3"
+    shim.write_text("#!/bin/sh\nexit 1\n")
+    shim.chmod(0o755)
+    if version == "3.13.0":
+        # An executable without a Python runtime layout must not earn a grant.
+        shutil.rmtree(tools["python3"].parent.parent / "lib")
+        (tools["python3"].parent / "python3").symlink_to(tools["python3"])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    plan = {"adapter": "claude", "mode": "read_only", "cwd": str(repo), "applied": {"add_dirs": []}}
+    files, _, _ = supervisor()._toolchain_reads(plan, repo, str(root / "shims"))
+    assert shim.resolve() not in files
+    if version:
+        assert "skipping toolchain candidate" in caplog.text
+
+
+def test_pyenv_prefix_selection_uses_the_highest_installed_patch(tmp_path, monkeypatch):
+    home, tools, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    root = home / ".pyenv"
+    monkeypatch.setenv("PYENV_ROOT", str(root))
+    monkeypatch.setenv("PYENV_VERSION", "3.13")
+    (root / "shims").mkdir()
+    shim = root / "shims/python3"
+    shim.write_text("#!/bin/sh\nexit 1\n")
+    shim.chmod(0o755)
+    (root / "versions/3.13.9").symlink_to(root / "versions/3.13.0")
+    # 3.13.10 outranks 3.13.9 numerically, 3.130.0 is not a 3.13 patch.
+    assert supervisor()._pyenv_version_dir(root, "3.13").name == "3.13.9"
+    (root / "versions/3.13.10").symlink_to(root / "versions/3.13.0")
+    (root / "versions/3.130.0").symlink_to(root / "versions/3.13.0")
+    assert supervisor()._pyenv_version_dir(root, "3.13").name == "3.13.10"
+    assert supervisor()._pyenv_version_dir(root, "3.13.0").name == "3.13.0"
+    assert supervisor()._pyenv_version_dir(root, "3.99") is None
+
+
+def test_unsafe_pyenv_shim_is_rejected_by_execute(tmp_path, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise ValueError("cannot resolve pyenv shim x; fix: select an installed Python version")
+    monkeypatch.setattr(supervisor(), "confinement_command", refuse)
+    plan = fixture_plan(tmp_path, "pass", "claude")
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "rejected"
+    assert "fix: select an installed Python version" in (record["evidence"]["excerpt"] + str(record))
+
+
 def test_toolchain_reads_follow_a_workspace_venv_to_its_base_interpreter(tmp_path, monkeypatch):
     home, tools, _ = fake_toolchain_home(tmp_path, monkeypatch)
     repo = tmp_path / "repo"
@@ -5790,3 +5975,66 @@ def test_toolchain_rules_emit_the_validated_path_without_resolving_again(tmp_pat
 def test_credential_path_covers_common_host_secrets(tmp_path, monkeypatch, secret):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     assert supervisor().credential_path(tmp_path / "home" / secret)
+
+
+def _stderr_run(tmp_path, lines, delays=0.05):
+    code = "import sys,time\n" + "".join(
+        f"sys.stderr.write({line + chr(10)!r});sys.stderr.flush();time.sleep({delays})\n" for line in lines
+    ) + "time.sleep(30)\n"
+    plan = fixture_plan(tmp_path, code, "opencode", startup_seconds=0.6, idle_seconds=0.6, timeout_seconds=3)
+    plan["model"] = "opencode-go/glm-5"
+    return supervisor().execute(plan, tmp_path / "result.md")
+
+
+def test_opencode_non_error_stderr_quota_noise_is_not_fatal(tmp_path):
+    record = _stderr_run(tmp_path, ["WARN retrying: Individual quota reached"])
+    assert record["status"] != "usage_limited"
+
+
+def test_opencode_warn_quota_line_beside_unrelated_error_is_not_fatal(tmp_path):
+    record = _stderr_run(tmp_path, ["WARN retrying: Individual quota reached", "ERROR service=bus unrelated failure"])
+    assert record["status"] != "usage_limited"
+
+
+def test_opencode_warn_quota_line_with_reset_hint_beside_unrelated_error_is_not_fatal(tmp_path):
+    record = _stderr_run(tmp_path, ["WARN retrying: Individual quota reached, resets in 30s",
+                                    "ERROR service=bus unrelated failure"])
+    assert record["status"] != "usage_limited"
+
+
+def test_opencode_reset_hint_on_a_separate_earlier_line_is_kept(tmp_path):
+    record = _stderr_run(tmp_path, ["Resets in 2 days.", "ERROR error=Monthly usage limit reached."])
+    assert record["status"] == "usage_limited"
+    assert record["retry_after"] is None
+    assert record["reset_at"]
+
+
+def test_opencode_explicit_period_limit_phrase_is_fatal_without_error_prefix(tmp_path):
+    record = _stderr_run(tmp_path, ["retrying: weekly usage limit reached"])
+    assert record["status"] == "usage_limited"
+
+
+def test_explicit_model_runs_despite_a_cooldown_with_a_warning(tmp_path):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    cli = bindir / "claude"
+    cli.write_text("#!/usr/bin/env python3\nimport json,sys\nsys.stdin.read()\n"
+                   "print(json.dumps({'type':'result','is_error':False,'result':'DONE'}))\n")
+    cli.chmod(0o755)
+    until = (datetime.now(UTC) + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    (tmp_path / "cooldowns.json").write_text(json.dumps({"schema": "fabric.cooldowns.v1", "cooldowns": {
+        "claude/*": {"adapter": "claude", "model": "*", "account": None, "status": "usage_limited",
+                     "cooling_until": until, "source_run": "r", "recorded_at": until, "signature": "quota_exhausted"}}}))
+    env = {**os.environ, "PROVENANT_NO_OS_CONFINEMENT": "1", "PATH": str(bindir) + ":" + os.environ["PATH"],
+           "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+           "FABRIC_COOLDOWNS_PATH": str(tmp_path / "cooldowns.json")}
+    run = Path(subprocess.check_output([str(SCRIPTS / "run_dir_init.sh"), "--kind", "dispatch"],
+                                       cwd=tmp_path, text=True).strip())
+    (tmp_path / "prompt.md").write_text("Reply DONE")
+    result = subprocess.run([sys.executable, str(SCRIPTS / "dispatch_run.py"), "--run-dir", str(run), "--tool", "claude",
+                             "--model", "opus", "--prompt-file", str(tmp_path / "prompt.md")],
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
+    row = json.loads(next((run / "tasks").glob("*/attempt-*/attempt.json")).read_text())
+    assert row["status"] == "ok"
+    assert any("explicit model is cooling" in warning for warning in row.get("warnings", []))
