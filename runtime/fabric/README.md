@@ -539,7 +539,12 @@ full detail is requested or ownership is present.
 
 `fabric_landing_lease` separately acquires one repository-wide landing lease
 with the expected remote integration SHA. It has a holder, expiry, generation,
-verify and release operations. An expired lease can be taken over; the prior
+verify and release operations. To wait for another chair to land, use
+`fabric_landing_lease` with `action: "wait"` and `wait_seconds` (clamped to 55) or the
+shell `fabric landing-wait --timeout 900` (exit 124 on timeout) instead of
+sleep loops; both return when the holder, generation or release state changes.
+`expected_sha` may be short or uppercase and is resolved with Git in the
+project; ambiguous or unknown values are refused. An expired lease can be taken over; the prior
 holder and new generation are recorded in activity. Before pushing, run
 `fabric landing-push <session-id> <generation> <branch> --label <seat>` from the
 landing checkout, using the same label as the MCP lease holder. Alternatively,

@@ -44,7 +44,8 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
   for the final push; it checks the holder, generation and remote SHA immediately
   before pushing. The label must match the MCP lease holder; a matching
   `AGENT_FABRIC_LABEL` export also works. Renew an expiring lease and release it
-  after an aborted landing.
+  after an aborted landing. To wait for another chair's lease, use
+  `fabric_landing_lease` `action: "wait"` (or shell `fabric landing-wait --timeout N`), not sleep loops.
 - Keep full worker output in run files and return only the digest and path; brief native subagents to the [~150-word result digest](references/orchestration-contract.md#native-result-digest). For liveness, use `fabric_status`; see [worker-liveness.md](references/worker-liveness.md) for degraded runs. Size alone proves nothing.
 - On a terminal result, record `adapter/model@effort` from the receipt; derive family from it. Native subagents record `claude/<model>@<effort> (anthropic; resolved)` from the Agent tool's model parameter, never from self-report.
 
