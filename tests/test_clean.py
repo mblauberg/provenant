@@ -466,6 +466,19 @@ def test_mixed_case_dispatch_run_names_are_classified(tmp_path):
     assert rows[f".agent-run/runs/{run.name}"]["verdict"] == "delete"
 
 
+def test_quarantined_run_uses_failed_retention(tmp_path):
+    root = repo(tmp_path)
+    run = root / ".agent-run" / "runs" / "20260801-1200-dispatch-task-a1b2c3"
+    run.mkdir(parents=True)
+    (run / "RUN_RECEIPT.json").write_text('{"status":"quarantined"}\n')
+    old(run, 10)
+    rows = {row["path"]: row for row in cleaner().plan(root, pr_bodies=[])["rows"]}
+    assert rows[f".agent-run/runs/{run.name}"]["verdict"].startswith("keep:retention")
+    old(run, 15)
+    rows = {row["path"]: row for row in cleaner().plan(root, pr_bodies=[])["rows"]}
+    assert rows[f".agent-run/runs/{run.name}"]["verdict"] == "delete"
+
+
 def test_sessions_are_triage_only_even_when_old(tmp_path):
     root = repo(tmp_path)
     session = root / ".agent-run" / "sessions" / "20260801-chair"

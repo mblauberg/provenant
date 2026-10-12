@@ -1,6 +1,7 @@
 import type { Identity } from "./identity.js";
 import type { RunRead, RunReadResponse } from "./run-reader.js";
 import { isSQLiteContention, laneTaskId, type LaneAttempt, type Store } from "./store.js";
+import { laneLine } from "./surface.js";
 
 export interface LaneWaitDependencies {
   who: Identity;
@@ -54,7 +55,7 @@ export async function waitForLanes(deps: LaneWaitDependencies): Promise<number> 
     if (unseen?.length && (!deps.all || pending.length === 0 || expired)) {
       await write(unseen.map((index) => {
         const row = completed[index]!;
-        return `${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${row.result_path ?? "-"}\n`;
+        return `${laneLine(row)}\n`;
       }).join(""));
       if (expired && pending.length) await write(timeout());
       for (let first = true; ; first = false) {

@@ -18,6 +18,8 @@ export interface RunRead {
   run_path: string;
   state: string;
   status: string | null;
+  landable?: false;
+  quarantine?: Record<string, unknown>;
   route: string | null;
   model: string | null;
   started_at: string | null;
@@ -123,6 +125,7 @@ export async function readRuns(
         run_path: rootPath(root, root, runDir) ?? "",
         state: String(row.state ?? "unknown"),
         status: typeof row.status === "string" ? row.status : null,
+        ...(row.landable === false ? { landable: false as const, quarantine: row.quarantine } : {}),
         route: typeof adapter === "string" && typeof model === "string"
           ? `${adapter}/${model}${typeof effort === "string" ? `@${effort}` : ""}` : null,
         model: typeof model === "string" ? model : null,
