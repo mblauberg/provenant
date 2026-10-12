@@ -51,17 +51,18 @@ def _has_reason(leg: Mapping[str, Any]) -> bool:
 
 
 def _covers_other_primary(checked: list[Mapping[str, Any]], chair_family: str | None) -> bool:
-    """A passing same-family targeted leg that adds a lens no other passing targeted leg counted."""
+    """A passing same-family targeted leg whose lenses differ from each other passing targeted leg's.
+
+    Overlap is allowed; only a duplicate of another review's lenses does not count.
+    """
     if not chair_family:
         return False
     targeted = [leg for leg in checked if leg.get("role") == "targeted" and leg.get("status") == "pass"]
-    for leg in targeted:
-        if _provider_family(leg) != chair_family:
-            continue
-        others = set().union(*(_lenses(other) for other in targeted if other is not leg))
-        if _lenses(leg) - others:
-            return True
-    return False
+    return any(
+        _provider_family(leg) == chair_family
+        and all(_lenses(leg) != _lenses(other) for other in targeted if other is not leg)
+        for leg in targeted
+    )
 
 
 def check_review_ladder(

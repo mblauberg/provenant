@@ -46,3 +46,25 @@ def test_other_primary_skip_without_covering_same_family_leg_is_rejected():
     assert errors == [
         "other-primary skip requires a passing same-family targeted review with a distinct lens"
     ]
+
+
+def test_overlapping_review_does_not_invalidate_fallback_coverage():
+    legs = [
+        targeted(CHAIR, ["correctness"]),
+        targeted(CHAIR, ["adversarial"]),
+        targeted("anthropic", ["correctness", "adversarial"]),
+        other_primary_skip("provider-unavailable"),
+    ]
+    assert check_review_ladder("substantial", legs, chair_family=CHAIR) == []
+
+
+def test_duplicate_same_family_review_does_not_cover_the_skip():
+    legs = [
+        targeted("anthropic", ["correctness", "tests"]),
+        targeted(CHAIR, ["correctness", "tests"]),
+        other_primary_skip("provider-unavailable"),
+    ]
+    errors = check_review_ladder("substantial", legs, chair_family=CHAIR)
+    assert errors == [
+        "other-primary skip requires a passing same-family targeted review with a distinct lens"
+    ]
