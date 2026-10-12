@@ -14,7 +14,9 @@ no test reads or writes the host's live route state.
 
 from __future__ import annotations
 
+import atexit
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,6 +31,18 @@ PROVIDER_EXECUTABLES = (
 )
 
 
+_SESSION_SCRATCH: list[Path] = []
+LIVE_PROVIDER_ENV = "PROVENANT_TEST_ALLOW_LIVE_PROVIDER_CLI"
+
+
+def _remove_session_scratch() -> None:
+    for path in _SESSION_SCRATCH:
+        shutil.rmtree(path, ignore_errors=True)
+
+
+atexit.register(_remove_session_scratch)
+
+
 def _keep_tmpdir_outside_git() -> None:
     """Relocate TMPDIR when it sits inside a git work tree.
 
@@ -38,12 +52,19 @@ def _keep_tmpdir_outside_git() -> None:
     probe = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=tempfile.gettempdir(),
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     if probe.returncode == 0:
-        os.environ["TMPDIR"] = str(Path(tempfile.mkdtemp(prefix="provenant-pytest-", dir="/tmp")).resolve())
+        relocated = Path(tempfile.mkdtemp(prefix="provenant-pytest-", dir="/tmp")).resolve()
+        os.environ["TMPDIR"] = str(relocated)
         tempfile.tempdir = None
+        _SESSION_SCRATCH.append(relocated)
 
 
 def pytest_configure(config) -> None:
     _keep_tmpdir_outside_git()
+    # Before collection: modules cache the product root at import. Per-test
+    # monkeypatch overrides still apply on top of this.
+    os.environ["AGENT_FABRIC_PRODUCT_ROOT"] = str(ROOT)
+    for inherited in ("PROVENANT_SCRIPTS_ROOT", "PROVENANT_SKILLS_ROOT", "PROVENANT_TESTS_ROOT"):
+        os.environ.pop(inherited, None)
     resolved = {Path(entry).resolve() for entry in sys.path if entry}
     missing = [str(root) for root in DECLARED_IMPORT_ROOTS if root not in resolved]
     if missing:
@@ -52,6 +73,20 @@ def pytest_configure(config) -> None:
             f"{missing}. Restore `pythonpath` in pyproject.toml rather than "
             "repairing sys.path inside a test."
         )
+
+
+def pytest_collection_modifyitems(config, items) -> None:
+    """Real-CLI tests run only when opted in; the default PATH holds fail-loud stubs."""
+    if os.environ.get(LIVE_PROVIDER_ENV) == "1":
+        return
+    skip = pytest.mark.skip(reason=f"real provider CLI test; set {LIVE_PROVIDER_ENV}=1 to run")
+    for item in items:
+        if item.get_closest_marker("live_provider"):
+            item.add_marker(skip)
+
+
+def pytest_unconfigure(config) -> None:
+    _remove_session_scratch()
 
 
 @pytest.fixture(autouse=True)
@@ -91,7 +126,7 @@ def _provider_cli_stub_dir(tmp_path_factory):
 @pytest.fixture(autouse=True)
 def _block_live_provider_clis(_provider_cli_stub_dir, monkeypatch, request):
     """Shadow installed provider CLIs unless this test explicitly opts into live use."""
-    if (os.environ.get("PROVENANT_TEST_ALLOW_LIVE_PROVIDER_CLI") == "1"
+    if (os.environ.get(LIVE_PROVIDER_ENV) == "1"
             or request.node.get_closest_marker("live_provider")):
         return
     monkeypatch.setenv(

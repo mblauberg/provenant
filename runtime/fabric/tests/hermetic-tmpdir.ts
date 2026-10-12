@@ -3,7 +3,7 @@
 // live product checkout's .agent-run, so git (and runRoot) would resolve every
 // mkdtemp workspace to that live checkout and write fixture runs into it.
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, realpathSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,11 +14,19 @@ function insideGitWorkTree(dir: string): boolean {
   } catch { return false; }
 }
 
+const scratchRoots: string[] = [];
+
 if (insideGitWorkTree(tmpdir())) {
   process.env.TMPDIR = realpathSync(mkdtempSync(join("/tmp", "fabric-test-tmp-")));
+  scratchRoots.push(process.env.TMPDIR);
 }
 
-// Tests that do not name a state location must never read the live project store.
+// An inherited live state location is always replaced; tests that set their own win.
 const stateScratch = mkdtempSync(join(tmpdir(), "fabric-test-state-"));
-process.env.AGENT_FABRIC_STATE_DIRECTORY ??= join(stateScratch, "state");
-process.env.AGENT_FABRIC_STATE_ROOT ??= join(stateScratch, "root");
+scratchRoots.push(stateScratch);
+process.env.AGENT_FABRIC_STATE_DIRECTORY = join(stateScratch, "state");
+process.env.AGENT_FABRIC_STATE_ROOT = join(stateScratch, "root");
+
+process.on("exit", () => {
+  for (const root of scratchRoots) rmSync(root, { recursive: true, force: true });
+});
