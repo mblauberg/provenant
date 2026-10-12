@@ -580,13 +580,17 @@ class LaneLoopbackContracts(unittest.TestCase):
 
     def terminal(self, workspace, task_id, suffix, text='remote-result-' * 200):
         run_id = 'mcp-' + suffix
-        directory = workspace / '.agent-run/runs' / ('20261008-0000-dispatch-fixture-' + suffix)
+        # Relative to now: the default lanes view hides terminal rows older than a day.
+        now = time.time()
+        stamp = lambda seconds: time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(seconds))
+        directory = workspace / '.agent-run/runs' / (
+            time.strftime('%Y%m%d-%H%M', time.gmtime(now - 60)) + '-dispatch-fixture-' + suffix)
         attempt = directory / 'tasks' / task_id / 'attempt-001'
         attempt.mkdir(parents=True)
         row = json.loads((ROOT / 'runtime/fabric/tests/fixtures/attempt.json').read_text())
         # Synthetic fixture metadata does not attribute work to a guessed route.
         row.update(run_id=run_id, task_id=task_id, cwd=str(workspace), worktree=None,
-            started_at='2026-10-08T00:00:00Z', ended_at='2026-10-08T00:00:01Z', pgid=None,
+            started_at=stamp(now - 60), ended_at=stamp(now - 59), pgid=None,
             provenance={'requested': {'adapter': 'fixture'}, 'resolved_model': 'fixture'},
             paths={'result': 'tasks/' + task_id + '/attempt-001/result.md'})
         (attempt / 'attempt.json').write_text(json.dumps(row))
