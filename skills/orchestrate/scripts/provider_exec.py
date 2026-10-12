@@ -9,6 +9,7 @@ import ctypes
 import functools
 import hashlib
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -683,6 +684,64 @@ def _runtime_component(prefix, name, *, directory):
     return canonical
 
 
+OPENCODE_FATAL_LOG = r"^\s*ERROR\b|(?:monthly|weekly|5.hour) (?:usage )?limit"
+
+
+def _pyenv_version_dir(root, selected):
+    """versions/<selected>, or the highest installed versions/<selected>.* for a prefix like 3.12."""
+    versions = root / "versions"
+    if (versions / selected).is_dir():
+        return versions / selected
+    prefix = selected + "."
+    matches = [path for path in versions.glob(selected + ".*") if path.is_dir() and path.name.startswith(prefix)]
+    key = lambda path: [(0, int(part), "") if part.isdigit() else (-1, 0, part) for part in re.split(r"[.-]", path.name)]
+    return max(matches, key=key, default=None)
+
+
+def _pyenv_shim(executable, cwd, search_path):
+    """Resolve ordinary pyenv selections from data, never by executing a shim or hook.
+
+    Returns (None, [], []) with a warning when the selection cannot be resolved, so the caller
+    skips that candidate; an unsafe shim, root or version name still raises ValueError.
+    """
+    root = Path(os.environ.get("PYENV_ROOT") or Path.home() / ".pyenv").expanduser().resolve()
+    if executable.parent.resolve() != root / "shims":
+        return executable, [], []
+    error = f"cannot resolve pyenv shim {executable}; fix: select an installed Python version or put its bin on PATH"
+    if not _executable_file(executable) or credential_path(root) or credential_path(executable):
+        raise ValueError(error)
+    version = os.environ.get("PYENV_VERSION", "")
+    files = [executable.resolve()]
+    if not version:
+        start = Path(os.environ.get("PYENV_DIR") or cwd).expanduser().resolve()
+        source = next((parent / ".python-version" for parent in (start, *start.parents)
+                       if _plain_file(parent / ".python-version")), root / "version")
+        if _plain_file(source):
+            if credential_path(source):
+                raise ValueError(error)
+            version = ":".join(line.partition("#")[0].strip().split()[0]
+                               for line in source.read_text(errors="replace").splitlines()
+                               if line.partition("#")[0].strip())
+            files.append(source.resolve())
+    for selected in (version or "system").split(":"):
+        if selected == "system":
+            without_shims = os.pathsep.join(part for part in search_path.split(os.pathsep)
+                                           if Path(part).resolve() != root / "shims")
+            found = shutil.which(executable.name, path=without_shims)
+            target = Path(found) if found else None
+        elif re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", selected):
+            directory = _pyenv_version_dir(root, selected)
+            target = directory / "bin" / executable.name if directory else None
+        else:
+            raise ValueError(error)
+        if target is not None and _toolchain_grant(target)[0]:
+            # The shim and pyenv's scripts still run inside the lane's sandbox.
+            libexec = _runtime_component(root, "libexec", directory=True)
+            return target, files, [libexec] if libexec else []
+    logging.getLogger(__name__).warning("skipping toolchain candidate: %s", error)
+    return None, [], []
+
+
 def _toolchain_reads(plan, root, search_path=None):
     """Files, unresolved project files and directories of the toolchain a read-only lane uses.
 
@@ -709,9 +768,12 @@ def _toolchain_reads(plan, root, search_path=None):
             candidates.extend(Path(base) / name for name in ("python3", "python"))
     files = []
     for candidate in candidates:
+        candidate, shim_files, shim_directories = _pyenv_shim(candidate, cwd, search_path)
+        if candidate is None:
+            continue
         granted_files, granted_directories = _toolchain_grant(candidate)
-        files.extend(granted_files)
-        directories.extend(granted_directories)
+        files.extend([*granted_files, *shim_files])
+        directories.extend([*granted_directories, *shim_directories])
     project_files = ([parent / name for parent in cwd.parents for name in UV_PROJECT_FILES]
                      if any(path.name.startswith("uv") for path in files) else [])
     return list(dict.fromkeys(files)), project_files, list(dict.fromkeys(directories))
@@ -1170,6 +1232,9 @@ def reset_time(text, events, at=None):
                     )
                 except (ValueError, OverflowError, OSError):
                     pass
+    days = re.search(r"Resets in\s+(\d+)\s*d(?:ays?)?\b", text, re.I)
+    if days:
+        return (at + timedelta(days=int(days[1]))).astimezone(UTC).isoformat().replace("+00:00", "Z")
     hours = re.search(r"Resets in\s+(\d+)h(?:\s*(\d+)m)?", text, re.I)
     if hours:
         return (
@@ -2751,11 +2816,38 @@ def execute(
     semantic = {}
     text_chunks, text_size = deque(), 0
     semantic_failures = {}
+    live_failure = None
+    diagnostic_pending = {"stdout": b"", "stderr": b""}
     retry_failure = None
     terminal_text = None
     text_truncated = False
     old_handlers = {}
     meter = context_usage.Meter(plan["adapter"])
+
+    def consume_diagnostic(data, stream):
+        nonlocal live_failure
+        adapter = plan["adapter"]
+        if adapter not in {"opencode", "kiro"} or (adapter == "opencode" and stream != "stderr"):
+            return
+        # Preserve split diagnostics without buffering an unbounded log or interpreting answers.
+        diagnostic_pending[stream] = (diagnostic_pending[stream] + data)[-65536:]
+        text = diagnostic_pending[stream].decode(errors="replace")
+        if adapter == "kiro":
+            if re.search(r"(?m)^\s*Opening browser(?:\.\.\.|…)\s*$", text):
+                live_failure = {"status": "auth_required", "signature": "auth_expired",
+                                "excerpt": "Opening browser...", "reset_at": None, "retry_after": None}
+        elif re.search(OPENCODE_FATAL_LOG, text, re.I | re.M):
+            # Only an ERROR log or an explicit period limit is fatal; other retried noise is not.
+            # Classify only the qualifying lines plus reset-hint lines; the rest of the window is not evidence.
+            relevant = [line for line in text.splitlines()
+                        if re.search(OPENCODE_FATAL_LOG, line, re.I)
+                        or (re.search(r"\bresets?\b", line, re.I)
+                            and not re.match(r"\s*(?:WARN|INFO|DEBUG)\b", line, re.I))]
+            parsed = parse_output(adapter, "", "\n".join(relevant), 1)
+            if parsed["status"] == "usage_limited":
+                live_failure = parsed
+        # Keep the unfinished line and a few before it, so a reset hint on its own line is not lost.
+        diagnostic_pending[stream] = b"\n".join(diagnostic_pending[stream].split(b"\n")[-6:])
 
     def consume(data):
         nonlocal pending, terminal_at, text_size, retry_failure, terminal_text, text_truncated, dropping_line
@@ -2913,6 +3005,7 @@ def execute(
                         consume(data)
                     else:
                         diagnostics.write(data)
+                    consume_diagnostic(data, key.data)
                     last_progress = time.monotonic()
                     last_progress_at = now()
                     warned = False
@@ -2934,6 +3027,11 @@ def execute(
                     break
                 if cancel_signal:
                     forced = "interrupted"
+                    break
+                if plan["adapter"] == "opencode" and "usage_limited" in semantic_failures:
+                    live_failure = semantic_failures["usage_limited"]
+                if live_failure:
+                    forced = live_failure["status"]
                     break
                 if (
                     terminal_at is not None
@@ -2982,6 +3080,9 @@ def execute(
                     warned = True
     except FileNotFoundError as exc:
         forced = "tool_missing"
+        diagnostics.write(str(exc).encode())
+    except ValueError as exc:
+        forced = "rejected"
         diagnostics.write(str(exc).encode())
     except OSError as exc:
         forced = "failed"
@@ -3072,6 +3173,14 @@ def execute(
             priority = [status for status, _ in (SIGNATURES[0], *profile(plan["adapter"]).SIGNATURES, *SIGNATURES[1:])]
             selected = next((failures[status] for status in priority if status in failures), next(iter(failures.values())))
             parsed.update(selected)
+    if live_failure and forced == live_failure["status"]:
+        parsed.update({key: live_failure[key] for key in ("status", "signature", "excerpt", "reset_at", "retry_after")})
+    if plan["adapter"] == "opencode" and parsed["status"] == "usage_limited":
+        parsed["signature"] = "quota_exhausted"
+        if not parsed["reset_at"] and re.search(r"monthly usage limit", parsed.get("failure_text") or parsed["excerpt"], re.I):
+            # Billing anniversary is unknown: re-probe after a day. The next attempt is the probe;
+            # success clears the entry and failure re-arms it.
+            parsed["retry_after"] = 24 * 3600
     if forced:
         parsed["status"] = forced
         parsed["signature"] = {
@@ -3253,6 +3362,9 @@ def execute(
     )
     guarantee = plan["applied"]["guarantee"]
     fix = (
+        "run `kiro-cli whoami` outside the sandbox"
+        if status == "auth_required" and parsed["signature"] == "auth_expired"
+        else
         parsed["failure_text"].strip()[:400]
         if status == "rejected" and parsed["signature"] == "invalid_input"
         else

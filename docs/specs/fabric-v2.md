@@ -196,6 +196,14 @@ startup (`opencode.json`, `opencode.jsonc`, `AGENTS.md`, `CLAUDE.md`, `.opencode
 between `cwd` and the repository root, granted by unresolved name. Every read-only
 `sandbox-exec` profile reads the lane's toolchain, found without running it:
 - `python3`, `python`, `uv` and `node` on the provider PATH;
+- pyenv shims resolved from `PYENV_VERSION`, the nearest `.python-version`
+  (starting at `PYENV_DIR` or `cwd`), then `PYENV_ROOT/version`. Discovery
+  never executes a shim or hook. No selection means `system`; a prefix such
+  as `3.12` uses the highest installed `3.12.*`. An unresolvable candidate is
+  skipped with a warning; unsafe targets fail before launch with a fix hint. Put the selected interpreter's `bin` on
+  PATH when a custom pyenv hook controls selection. The shim, selected
+  version file and pyenv's real `libexec` directory are readable in the
+  confined lane, together with the validated interpreter runtime;
 - each `.venv` between `cwd` and the repository root, its `bin/python` link and
   the interpreter its `pyvenv.cfg` names, all treated as candidates only;
 - with a granted `uv`, `pyproject.toml`, `uv.toml`, `uv.lock` and
@@ -214,5 +222,18 @@ checked without resolving them again. A resolved `uv`/`uvx` binary is granted al
 covers `.git-credentials`, `.pypirc`, `.pgpass`, `.vault-token`,
 `.password-store`, `.boto`, `.s3cfg`, `.terraform.d`, Cargo and Gem credentials,
 `.config/git/credentials`, `.config/hub` and `.config/op`.
+
+An `ok` attempt clears the cooldown for the model that answered, using the
+resolved model when the provider reports no model. Other model and account
+cooldowns remain intact. OpenCode runs with error logs on stderr so a quota
+retry cannot silently sleep until the run timeout. Quota diagnostics end the
+attempt as retryable `usage_limited`, with `quota_exhausted` evidence.
+OpenCode Go cooldowns apply to the exhausted model. A reported reset takes
+precedence; a monthly limit without a reset hint uses a 24-hour re-probe window: the
+next attempt after expiry is the probe, success clears the entry and failure
+re-arms it. OpenCode quotas of any model never widen to the whole adapter. Silence alone
+remains a timeout. Kiro's plain `Opening browser...` login diagnostic ends
+the attempt as `auth_required`, with `auth_expired` evidence and a hint to
+run `kiro-cli whoami` outside the sandbox.
 
 `model_route.py snapshot --json` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Every writer, Codex included, has one Git write boundary: its per-worktree Git directory (`--absolute-git-dir`) plus the common directory's `objects`, `refs`, `logs`, `packed-refs`, `packed-refs.lock` and `packed-refs.new`; the rest of the common directory (`hooks`, `config`, `info`, other lanes' `worktrees/<name>`) is never writable, and a Codex writer drops an `add_dir` at or inside it with a warning. Codex writers also keep the worktree `.git` marker and the private directory's `config.worktree`, `commondir` and `gitdir` read-only; Codex refuses to launch with a symlinked grant path. Writer attempts set `gc.auto=0`, `maintenance.auto=false` and `rerere.enabled=false` through `GIT_CONFIG_COUNT`. Because the shared `config` is read-only, a lane pushes with `git push origin HEAD` and opens its pull request with `gh pr create --head <branch>`; `git push -u` pushes but cannot record the upstream. Wrapped writer launches (agy, Claude, Cursor, OpenCode and Kiro) restrict writes to the worktree, declared `add_dirs`, the Git write boundary, attempt files, temp paths, devices and provider state. Where protected-path policy applies, its read and write denies take precedence within an `add_dir`; receipts list the writable `add_dirs` in `applied.write_boundary`. Codex writers without capabilities use its native sandbox with that permissions profile, recorded as `applied.write_boundary.filesystem`. Unavailable OS confinement refuses agy write dispatches and produces an explicit warning for other wrapped writers.
