@@ -33,10 +33,11 @@ The tier is derived rather than declared. `scope` rates every factor in
 `config/risk-policy.json`, the highest tier any rating maps to is the run's
 minimum tier, and a lower declared tier needs a user-approved override carrying
 an approver, a reason and evidence. The table between the markers records the
-current policy and is maintained with that source file. Internal data sets
-disclosure limits (`confidential` routing, no secrets), not review pressure;
-consequence factors such as reversibility, external effects and critical
-surface raise the tier.
+current policy and is maintained with that source file. Internal data alone
+leaves the minimum tier routine: consequence factors such as reversibility,
+external effects and critical surface raise it. Disclosure is scoped
+separately; pass `confidential: true` (`--confidential`) to keep content off
+free and prompt-training routes.
 
 <!-- risk-factor-table:start -->
 
