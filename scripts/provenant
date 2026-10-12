@@ -91,7 +91,8 @@ def help_text() -> None:
 Thin front door; each command delegates to its existing owner:
   root           print the resolved product checkout
   route ...      scripts/model-route ... (low-level resolver; capability-bound
-                 aliases need a fresh snapshot, normally supplied by dispatch)
+                 aliases need a fresh snapshot, normally supplied by dispatch);
+                 `route reset [adapter[/model]]` clears cooldowns
   routes [--json] [--health]
                  each global route pool with live availability; --health adds
                  task-class routes and recent health (same as `help routes`)

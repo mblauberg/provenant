@@ -26,6 +26,11 @@ Fabric records the 20 latest outcomes per adapter, model and task class in
 The health view also includes the active cooldown from `cooldowns.json`; expired
 cooldown markers are ignored even when an old marker remains on disk.
 
+`provenant route reset [adapter[/model]]` (MCP: `fabric_adapters` with `action: "reset"`
+and optional `selector`) clears cooldowns: a bare adapter clears `adapter/*` and its model keys, no
+argument clears all. Run it after switching accounts. An `ok` attempt on a non-per-model adapter
+also clears `adapter/*` when it started after that entry was recorded.
+
 Global route pools (`routes`: `strong`, `bulk`, `design`, `writing`) sit
 beside the task classes. Each entry names `adapter/model`, a `weight` (`high`,
 `normal`, `sparing`, `off` or a number) and an optional two-value `effort`

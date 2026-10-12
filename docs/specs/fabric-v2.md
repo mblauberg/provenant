@@ -242,8 +242,10 @@ covers `.git-credentials`, `.pypirc`, `.pgpass`, `.vault-token`,
 `.config/git/credentials`, `.config/hub` and `.config/op`.
 
 An `ok` attempt clears the cooldown for the model that answered, using the
-resolved model when the provider reports no model. Other model and account
-cooldowns remain intact. OpenCode runs with error logs on stderr so a quota
+resolved model when the provider reports no model. It also clears the adapter's
+account-wide `*` cooldown when the attempt started after that entry was recorded
+(never for per-model adapters `agy` and `opencode`). Other model cooldowns remain
+intact; `provenant route reset` clears them explicitly. OpenCode runs with error logs on stderr so a quota
 retry cannot silently sleep until the run timeout. Quota diagnostics end the
 attempt as retryable `usage_limited`, with `quota_exhausted` evidence.
 OpenCode Go cooldowns apply to the exhausted model. A reported reset takes

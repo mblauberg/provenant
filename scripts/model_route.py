@@ -2037,6 +2037,9 @@ def parser() -> argparse.ArgumentParser:
     routes.add_argument("--json", action="store_true", help="print one fabric.routes.v1 JSON document")
     routes.add_argument("--health", action="store_true",
                         help="also print task-class routes and recent route health (the `route health` view)")
+    reset = commands.add_parser("reset", help="clear cooldowns: all, one adapter, or adapter/model")
+    reset.add_argument("selector", nargs="?", help="adapter or adapter/model; omit to clear every cooldown")
+    reset.add_argument("--json", action="store_true")
     pick = commands.add_parser("pick", help="pick models from route pools; JSON requests on stdin")
     pick.add_argument("--seed", type=int, help=argparse.SUPPRESS)
     return root
@@ -2049,19 +2052,23 @@ def _router() -> Any:
     return sys.modules.get(__name__) or types.SimpleNamespace(**globals())
 
 
+def _fabric_records() -> Any:
+    path = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts" / "fabric_records.py"
+    spec = importlib.util.spec_from_file_location(
+        "provenant_fabric_records", path, submodule_search_locations=[str(path.parent)]
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _health_record(catalog: dict[str, Any]) -> dict[str, Any]:
     """Task-class routes plus the recent outcome health Fabric records."""
     record = {"schema": "fabric.route-health.v1", "task_class_routes": catalog.get("task_class_routes", {})}
     try:
-        path = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts" / "fabric_records.py"
-        spec = importlib.util.spec_from_file_location(
-            "provenant_fabric_records", path, submodule_search_locations=[str(path.parent)]
-        )
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
-        spec.loader.exec_module(module)
-        record["routes"] = module.read_route_health()
+        record["routes"] = _fabric_records().read_route_health()
     except (ImportError, OSError, AttributeError, TypeError, ValueError):
         record["routes"] = {}
     return record
@@ -2110,6 +2117,11 @@ def main(argv: list[str] | None = None) -> int:
             if args.health:
                 print("\ntask-class routes and recent health (route health --json):")
                 print(json.dumps(document["health"], indent=2, sort_keys=True))
+        return 0
+    if args.command == "reset":
+        removed = _fabric_records().clear_cooldowns(args.selector)
+        print(json.dumps({"schema": "fabric.cooldown-reset.v1", "removed": removed}, sort_keys=True) if args.json
+              else "\n".join(removed) or "no cooldowns matched")
         return 0
     if args.command == "pick":
         try:

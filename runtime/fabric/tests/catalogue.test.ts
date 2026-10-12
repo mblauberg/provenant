@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 
 import { expect, it } from "vitest";
 
-import { catalogueSnapshot, liveModels } from "../src/catalogue.js";
+import { catalogueSnapshot, liveModels, resetCooldowns } from "../src/catalogue.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -99,5 +99,18 @@ it("keeps the failure and no-live-list replies within the output budget too", as
     }
     const narrowed = await liveModels("copilot", { root: repositoryRoot, env, snapshot, match: "model-119" });
     expect(narrowed.digest).toMatch(/^copilot: no live list\ncatalogued \(11 of 1200 match model-119\): vendor\/catalogued-model-119 /u);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+it("resets cooldowns through the Python owner", () => {
+  const root = mkdtempSync(join(tmpdir(), "fabric-reset-"));
+  try {
+    const path = join(root, "cooldowns.json");
+    const entry = { cooling_until: "2999-01-01T00:00:00Z" };
+    writeFileSync(path, JSON.stringify({ schema: "fabric.cooldowns.v1", cooldowns: { "claude/*": entry, "codex/*": entry } }));
+    const env = { ...process.env, FABRIC_COOLDOWNS_PATH: path, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot };
+    expect(resetCooldowns("claude", env)).toEqual(["claude/*"]);
+    expect(resetCooldowns("claude", env)).toEqual([]);
+    expect(resetCooldowns(undefined, env)).toEqual(["codex/*"]);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
