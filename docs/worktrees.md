@@ -7,6 +7,14 @@ are kept; force removal and deleting an unmerged branch remain separately
 gated. Merge authority is repo-based; see the repository's
 workflow runbook (for this repo, `docs/runbooks/github-workflow.md`).
 
+## Primary checkout stays on main
+
+The primary checkout is the live harness for every project that uses it:
+installed skills and scripts run from it. Keep it on the default branch and do
+all branch, integration and lane work in linked worktrees. Fast-forward the
+primary checkout only on an approved merge. If a session starts with it on
+another branch, tell the user before working.
+
 ## Canonical location
 
 Every authorised linked worktree is a direct child of the owning repository's

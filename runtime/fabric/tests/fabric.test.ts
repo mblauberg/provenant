@@ -153,6 +153,55 @@ describe("work ownership", () => {
     } finally { db.close(); }
   });
 
+  it("keeps waiting through a push start and wakes on release", async () => {
+    const store = openStore(), who = agent("alice"), sha = "a".repeat(40);
+    announce(store, "alice");
+    const lease = store.acquireLanding(who, "session-a", sha, 60);
+    const db = new Database(databasePath);
+    try {
+      const pushing = store.waitLanding(who.project, 0.3, undefined, 20);
+      db.prepare("UPDATE landing_leases SET pushing_until = ? WHERE project = ?").run(Date.now() + 60_000, who.project);
+      expect(await pushing).toMatchObject({ changed: false });
+      db.prepare("UPDATE landing_leases SET pushing_until = NULL WHERE project = ?").run(who.project);
+      const released = store.waitLanding(who.project, 5, undefined, 20);
+      store.releaseLanding(who, "session-a", lease.generation);
+      expect(await released).toMatchObject({ changed: true, lease: null });
+    } finally { db.close(); }
+  });
+
+  it("waits for a landing lease change and resolves short or uppercase SHAs", async () => {
+    const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repositoryRoot, encoding: "utf8" }).stdout.trim();
+    const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
+    const tsxLoader = createRequire(import.meta.url).resolve("tsx");
+    const client = new Client({ name: "landing-wait-test", version: "1" });
+    await client.connect(new StdioClientTransport({
+      command: process.execPath, args: ["--import", tsxLoader, serverPath], cwd: repositoryRoot,
+      env: { ...process.env, AGENT_FABRIC_STATE_DIRECTORY: temporaryDirectory,
+        AGENT_FABRIC_SEAT: "claude", AGENT_FABRIC_LABEL: "chair-wait", NODE_NO_WARNINGS: "1" },
+    }));
+    try {
+      const call = (arguments_: Record<string, unknown>) => client.callTool({ name: "fabric_landing_lease", arguments: arguments_ });
+      const idle = await call({ action: "wait", session_id: "s1", wait_seconds: 0 });
+      expect(idle.structuredContent).toMatchObject({ changed: false, landing_lease: null });
+      const acquired = await call({ action: "acquire", session_id: "s1", expected_sha: head.slice(0, 10).toUpperCase(), seconds: 60 });
+      expect(acquired.structuredContent).toMatchObject({ expectedSha: head, generation: 1 });
+      const bad = await call({ action: "acquire", session_id: "s2", expected_sha: "zzzz" });
+      expect(bad.isError).toBe(true);
+      expect(JSON.stringify(bad.content)).toContain("not a commit SHA");
+      const missing = await call({ action: "renew", session_id: "s1" });
+      expect(JSON.stringify(missing.content)).toContain("pass the generation returned by action=acquire");
+      const waiting = call({ action: "wait", session_id: "s2", wait_seconds: 10 });
+      await new Promise((done) => setTimeout(done, 300));
+      await call({ action: "release", session_id: "s1", generation: 1 });
+      expect((await waiting).structuredContent).toMatchObject({ changed: true, landing_lease: null });
+      const cli = runCli(["landing-wait", "--timeout", "0"]);
+      expect(cli.status).toBe(124);
+      expect(cli.stdout).toContain('"changed": false');
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  });
+
   it("exposes claims and landing through MCP and refuses a push without a lease", async () => {
     const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
     const tsxLoader = createRequire(import.meta.url).resolve("tsx");

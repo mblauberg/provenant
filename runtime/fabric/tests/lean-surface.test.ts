@@ -163,6 +163,43 @@ describe("lean surface over the fixture owners", () => {
       await client.close();
     }
   }, 120_000);
+
+  it("tails each finished batch lane once per session", async () => {
+    const { client, call } = await connect();
+    try {
+      const dispatched = await call("fabric_dispatch", { adapter: "codex", tasks: [
+        { id: "already-done", prompt: "quick" },
+        { id: "finishes-later", prompt: "slow" },
+      ], wait_seconds: 0 });
+      const batchId = idOf(dispatched.text);
+      let observed = (await call("fabric_status", { id: batchId, until: "any", wait_seconds: 20, detail: "full" })).result.structuredContent as any;
+      const lane = (task: string) => observed?.runs?.find((row: any) => row.task_id === task);
+      for (let tries = 0; lane("finishes-later")?.state !== "running" && tries < 40; tries++) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        observed = (await call("fabric_status", { id: batchId, wait_seconds: 0, detail: "full" })).result.structuredContent;
+      }
+      expect(lane("already-done")?.state).toBe("terminal");
+      const waiting = lane("finishes-later");
+      expect(waiting?.state).toBe("running");
+      expect(JSON.stringify(observed)).not.toContain("result tail");
+
+      // First brief read after an unwatched finish still shows the tail.
+      const first = await call("fabric_status", { id: batchId, wait_seconds: 0 });
+      expect(first.text).toContain("result tail already-done");
+
+      writeFileSync(join(waiting.run_dir, "cancel"), "");
+      const completed = await call("fabric_status", { id: batchId, until: "all", wait_seconds: 20 });
+      expect(completed.text).not.toContain("result tail already-done");
+      expect(completed.text).toContain("result tail finishes-later");
+
+      const repeat = await call("fabric_status", { id: batchId, wait_seconds: 0 });
+      expect(repeat.text).not.toContain("result tail");
+      const requestedTail = await call("fabric_status", { id: batchId, tail_chars: 50, wait_seconds: 0 });
+      expect(requestedTail.text).toContain("result tail already-done");
+    } finally {
+      await client.close();
+    }
+  }, 120_000);
 });
 
 describe("lean views", () => {
@@ -327,4 +364,3 @@ describe("task-level cancel", () => {
     expect(existsSync(log)).toBe(false);
   }, 60_000);
 });
-

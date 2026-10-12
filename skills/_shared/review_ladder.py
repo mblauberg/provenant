@@ -25,6 +25,9 @@ REVIEW_PLAN_STATUSES = frozenset({
     "omitted",
 })
 SKIPPED_STATUSES = REVIEW_PLAN_STATUSES - {REVIEW_PLAN_COMPLETE_STATUS}
+# HARNESS.md: a skipped (omitted) or unavailable other-primary leg may be
+# covered by same-family review, but a failed leg never is.
+OTHER_PRIMARY_FALLBACK_STATUSES = frozenset({"omitted", "unavailable"})
 
 
 def _lenses(leg: Mapping[str, Any]) -> set[str]:
@@ -40,6 +43,26 @@ def _provider_family(leg: Mapping[str, Any]) -> object:
     """Use validated endpoint lineage when the caller has retained it."""
     provider = leg.get("provider_family")
     return provider if isinstance(provider, str) and provider else leg.get("family")
+
+
+def _has_reason(leg: Mapping[str, Any]) -> bool:
+    reason = leg.get("reason")
+    return isinstance(reason, str) and bool(reason.strip())
+
+
+def _covers_other_primary(checked: list[Mapping[str, Any]], chair_family: str | None) -> bool:
+    """A passing same-family targeted leg whose lenses differ from each other passing targeted leg's.
+
+    Overlap is allowed; only a duplicate of another review's lenses does not count.
+    """
+    if not chair_family:
+        return False
+    targeted = [leg for leg in checked if leg.get("role") == "targeted" and leg.get("status") == "pass"]
+    return any(
+        _provider_family(leg) == chair_family
+        and all(_lenses(leg) != _lenses(other) for other in targeted if other is not leg)
+        for leg in targeted
+    )
 
 
 def check_review_ladder(
@@ -67,14 +90,20 @@ def check_review_ladder(
 
     other_primary = [leg for leg in checked if leg.get("role") == "other-primary"]
     passing_primary = [leg for leg in other_primary if leg.get("status") == "pass"]
-    if not passing_primary:
-        errors.append("substantial+ review requires passing other-primary coverage")
-    else:
+    if passing_primary:
         family = _provider_family(passing_primary[0])
         if family not in PRIMARY_FAMILIES:
             errors.append("other-primary review must use a primary family")
         if chair_family and family == chair_family:
             errors.append("other-primary review must use a distinct primary family")
+    elif other_primary and all(leg.get("status") in OTHER_PRIMARY_FALLBACK_STATUSES for leg in other_primary):
+        # Fallback: the recorded skip must carry a reason and be covered by same-family targeted review.
+        if not all(_has_reason(leg) for leg in other_primary):
+            errors.append("other-primary skip requires a recorded reason")
+        elif not _covers_other_primary(checked, chair_family):
+            errors.append("other-primary skip requires a passing same-family targeted review with a distinct lens")
+    else:
+        errors.append("substantial+ review requires passing other-primary coverage")
 
     distinct = [leg for leg in checked if leg.get("role") == "distinct-family" and leg.get("status") == "pass"]
     for leg in distinct:
