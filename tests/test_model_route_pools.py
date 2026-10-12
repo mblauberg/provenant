@@ -82,6 +82,10 @@ def test_top_is_the_highest_weight_available_and_deterministic(tmp_path):
     assert first["picks"][0]["reason"] == "strong top"
     assert models(pick({"route": "strong"}, tmp_path, seed=99)) == models(first)
     assert models(pick({"route": "bulk"}, tmp_path)) == ["codex/gpt-6-luna"]
+    # Haiku 5.5 ties Luna at high weight; listing order keeps Luna the single-mode top pick.
+    bulk = {entry["model"]: entry for entry in SEED["routes"]["bulk"]}
+    assert bulk["claude/claude-haiku-5-5"]["weight"] == bulk["codex/gpt-6-luna"]["weight"] == "high"
+    assert [e["model"] for e in SEED["routes"]["bulk"]][:2] == ["codex/gpt-6-luna", "claude/claude-haiku-5-5"]
 
 
 def test_every_mode_filters_cooling_uninstalled_and_disabled_models(tmp_path):
@@ -162,8 +166,8 @@ def test_rotate_cycles_by_weight_with_a_per_project_cursor(tmp_path):
 
 
 def test_explicit_models_bypass_routes_and_keep_their_effort(tmp_path):
-    result = pick({"models": ["codex/gpt-6-luna@low", "claude/haiku"]}, tmp_path)
-    assert models(result) == ["codex/gpt-6-luna", "claude/haiku"]
+    result = pick({"models": ["codex/gpt-6-luna@low", "claude/claude-haiku-4-5"]}, tmp_path)
+    assert models(result) == ["codex/gpt-6-luna", "claude/claude-haiku-4-5"]
     assert result["picks"][0]["effort"] == "low" and "effort" not in result["picks"][1]
     assert [item["reason"] for item in result["picks"]] == ["ad-hoc council 1/2", "ad-hoc council 2/2"]
     assert models(pick({"models": ["opencode/mimo-v2.6-flash-free"]}, tmp_path)) == [
