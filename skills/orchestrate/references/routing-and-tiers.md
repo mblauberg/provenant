@@ -222,7 +222,9 @@ adversarial pressure, and any skipped distinct-family leg records its reason.
 The chair schedules these legs under a per-run configurable concurrency ceiling
 and may sequence them around deterministic checks. It need not wait for a
 particular model. A missing distinct-family leg requires an omitted-leg reason;
-the other-primary leg remains required at substantial and above. Overlap creates
+the other-primary leg is expected at substantial and above. A skipped or
+unavailable leg records a reason and is covered by same-family targeted review
+with a distinct lens. Overlap creates
 defect pressure, not votes; objective checks and source evidence remain
 authoritative.
 
