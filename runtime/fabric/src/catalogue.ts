@@ -152,7 +152,7 @@ export function resetCooldowns(selector?: string, env: NodeJS.ProcessEnv = proce
   const configuredRoot = env.AGENT_FABRIC_PRODUCT_ROOT;
   const productRoot = configuredRoot && isAbsolute(configuredRoot) ? configuredRoot : findProductRoot();
   const python = env.HARNESS_PYTHON && isAbsolute(env.HARNESS_PYTHON) ? env.HARNESS_PYTHON : "python3";
-  const run = spawnSync(python, [join(productRoot, "scripts", "model_route.py"), "reset", "--json", ...(selector ? [selector] : [])],
+  const run = spawnSync(python, [join(productRoot, "scripts", "model_route.py"), "reset", "--json", ...(selector === undefined ? [] : ["--", selector])],
     { cwd: productRoot, env: { ...process.env, ...env }, encoding: "utf8", timeout: 10_000 });
   if (run.status !== 0) throw new Error(`cooldown reset failed: ${(run.stderr || "unknown error").split("\n", 1)[0]}`);
   return (JSON.parse(run.stdout) as { removed: string[] }).removed;

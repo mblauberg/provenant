@@ -378,6 +378,15 @@ def test_model_quota_adapter_success_keeps_its_wildcard(tmp_path):
     assert "agy/*" in succeed("agy", "gemini-3.5-flash", timestamp(later), path, later)
 
 
+@pytest.mark.parametrize("selector", ["", " ", "--json", "-x", "/sonnet"])
+def test_reset_rejects_a_malformed_selector_without_clearing_anything(tmp_path, selector):
+    path = seeded(tmp_path, datetime.now(UTC))
+    before = records().read_cooldowns(path)
+    with pytest.raises(ValueError):
+        records().clear_cooldowns(selector, path)
+    assert records().read_cooldowns(path) == before
+
+
 def test_reset_command_prints_removed_keys_and_exits_zero(tmp_path):
     at = datetime.now(UTC)
     path = seeded(tmp_path, at)

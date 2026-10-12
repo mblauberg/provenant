@@ -349,8 +349,10 @@ def clear_cooldowns(selector=None, path=None):
         from .exec_routing import registered_model
     except ImportError:
         from exec_routing import registered_model
-    path = Path(path or cooldown_path())
     adapter, slash, model = (selector or "").partition("/")
+    if selector is not None and (not adapter.strip() or adapter.startswith("-")):
+        raise ValueError("selector must be adapter or adapter/model; omit it to clear every cooldown")
+    path = Path(path or cooldown_path())
     if slash:
         model = registered_model(adapter, model or "*")
     with locked(path.with_name("cooldowns.lock")):

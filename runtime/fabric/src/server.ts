@@ -695,7 +695,7 @@ register("fabric_adapters", "List routes and guarantees; full includes profiles;
   models: z.string().max(40).optional().describe("Adapter whose live models to list (cached probe)."),
   match: z.string().max(80).optional().describe("Substring filter for models."),
   action: z.enum(["reset"]).optional().describe("reset clears cooldowns (selector: adapter or adapter/model; omit for all); use after the user says usage is back or switches accounts."),
-  selector: z.string().max(80).optional(),
+  selector: z.string().min(1).max(80).optional(),
 }, ({ detail, models, match, action, selector }) => {
   if (action === "reset") {
     const removed = resetCooldowns(selector);

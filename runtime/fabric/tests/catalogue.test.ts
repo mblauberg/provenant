@@ -109,6 +109,9 @@ it("resets cooldowns through the Python owner", () => {
     const entry = { cooling_until: "2999-01-01T00:00:00Z" };
     writeFileSync(path, JSON.stringify({ schema: "fabric.cooldowns.v1", cooldowns: { "claude/*": entry, "codex/*": entry } }));
     const env = { ...process.env, FABRIC_COOLDOWNS_PATH: path, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot };
+    // A flag-shaped or empty selector is refused, never read as "clear all".
+    expect(() => resetCooldowns("--json", env)).toThrow(/cooldown reset failed/);
+    expect(() => resetCooldowns("", env)).toThrow(/cooldown reset failed/);
     expect(resetCooldowns("claude", env)).toEqual(["claude/*"]);
     expect(resetCooldowns("claude", env)).toEqual([]);
     expect(resetCooldowns(undefined, env)).toEqual(["codex/*"]);

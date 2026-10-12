@@ -2119,7 +2119,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(json.dumps(document["health"], indent=2, sort_keys=True))
         return 0
     if args.command == "reset":
-        removed = _fabric_records().clear_cooldowns(args.selector)
+        try:
+            removed = _fabric_records().clear_cooldowns(args.selector)
+        except ValueError as exc:
+            print(f"model-route reset: {exc}", file=sys.stderr)
+            return 2
         print(json.dumps({"schema": "fabric.cooldown-reset.v1", "removed": removed}, sort_keys=True) if args.json
               else "\n".join(removed) or "no cooldowns matched")
         return 0
