@@ -15,7 +15,9 @@ no test reads or writes the host's live route state.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -27,7 +29,21 @@ PROVIDER_EXECUTABLES = (
 )
 
 
+def _keep_tmpdir_outside_git() -> None:
+    """Relocate TMPDIR when it sits inside a git work tree.
+
+    A dispatched agent's TMPDIR is under the live product checkout's
+    `.agent-run`, so every temp workspace would resolve its run root there.
+    """
+    probe = subprocess.run(["git", "rev-parse", "--git-dir"], cwd=tempfile.gettempdir(),
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if probe.returncode == 0:
+        os.environ["TMPDIR"] = str(Path(tempfile.mkdtemp(prefix="provenant-pytest-", dir="/tmp")).resolve())
+        tempfile.tempdir = None
+
+
 def pytest_configure(config) -> None:
+    _keep_tmpdir_outside_git()
     resolved = {Path(entry).resolve() for entry in sys.path if entry}
     missing = [str(root) for root in DECLARED_IMPORT_ROOTS if root not in resolved]
     if missing:
@@ -36,6 +52,12 @@ def pytest_configure(config) -> None:
             f"{missing}. Restore `pythonpath` in pyproject.toml rather than "
             "repairing sys.path inside a test."
         )
+
+
+@pytest.fixture(autouse=True)
+def _checkout_under_test_is_product_root(monkeypatch):
+    """Resolve the product root to this checkout, never an inherited live one."""
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
 
 
 @pytest.fixture(autouse=True)
