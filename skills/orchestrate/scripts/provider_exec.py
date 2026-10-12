@@ -958,7 +958,7 @@ def build_plan(
     if preface:
         prompt = (
             f"You are {route_label} via Fabric. Attribute work to exactly this route; never guess a model name. "
-            "This is a headless run that ends when you reply: run commands in the foreground and finish before answering; processes left running are then stopped.\n\n"
+            "This is a headless run that ends when you reply: run commands in the foreground and finish before answering; processes left running are then stopped. Keep tool output bounded: redirect large output to a file and read slices.\n\n"
             + prompt
         )
     guarantee = (

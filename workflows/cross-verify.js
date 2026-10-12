@@ -46,7 +46,7 @@
 
 export const meta = {
   name: 'cross-verify',
-  description: 'Read-only artifact/claim verification. Doctrine: the orchestration contract and Claude Workflow adapter in the orchestrate skill.',
+  description: 'Use for a decorrelated, source-anchored verdict on one artifact or claim, standalone or as another workflow\'s cross-family leg; it is orchestrate\'s read-only verification. Not for editing or broad review; use implement or code-review.',
   whenToUse: 'To get a decorrelated, source/quote-anchored verdict on an artifact or a single claim — standalone or as the cross-family leg of another workflow.',
   phases: [
     { title: 'Bootstrap' },

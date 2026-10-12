@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_date": "2026-09-29",
+  "catalog_date": "2026-10-12",
   "context": {
     "ceiling_tokens": 300000
   },
@@ -33,6 +33,14 @@
         "weight": "high"
       },
       {
+        "model": "claude/claude-haiku-5-5",
+        "weight": "high",
+        "effort": [
+          "low",
+          "medium"
+        ]
+      },
+      {
         "model": "agy/gemini-3.8-flash",
         "weight": "normal"
       },
@@ -58,7 +66,11 @@
       },
       {
         "model": "claude/claude-sonnet-5-5",
-        "weight": "sparing"
+        "weight": "sparing",
+        "effort": [
+          "medium",
+          "high"
+        ]
       },
       {
         "model": "codex/gpt-6.1-sol",
@@ -92,11 +104,11 @@
       },
       {
         "model": "agy/claude-opus-4-6-thinking",
-        "weight": "normal"
+        "weight": "sparing"
       },
       {
         "model": "agy/claude-sonnet-4-6",
-        "weight": "normal"
+        "weight": "sparing"
       }
     ],
     "writing": [
@@ -110,11 +122,11 @@
       },
       {
         "model": "agy/claude-opus-4-6-thinking",
-        "weight": "normal"
+        "weight": "sparing"
       },
       {
         "model": "agy/claude-sonnet-4-6",
-        "weight": "normal"
+        "weight": "sparing"
       },
       {
         "model": "claude/claude-opus-5-5",
@@ -148,7 +160,7 @@
           "gpt-6-luna"
         ],
         "claude": [
-          "claude-sonnet-5-5"
+          "claude-haiku-5-5"
         ],
         "agy": [
           "gemini-3.8-flash"
@@ -316,7 +328,7 @@
           "gpt-6-luna"
         ],
         "claude": [
-          "claude-sonnet-5-5"
+          "claude-haiku-5-5"
         ],
         "agy": [
           "gemini-3.8-flash"
@@ -486,7 +498,6 @@
             "claude-sonnet-5"
           ],
           "efforts": [
-            "low",
             "medium",
             "high",
             "xhigh",
@@ -495,9 +506,23 @@
           "default": true
         },
         {
-          "id": "haiku",
+          "id": "claude-haiku-5-5",
           "names": [
             "haiku",
+            "haiku-5.5",
+            "claude-haiku-5-5"
+          ],
+          "efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh"
+          ],
+          "default_effort": "medium"
+        },
+        {
+          "id": "claude-haiku-4-5",
+          "names": [
             "claude-haiku-4-5",
             "claude-haiku-4-5-20251001"
           ],

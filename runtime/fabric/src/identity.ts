@@ -135,6 +135,25 @@ function runGit(cwd: string, args: string[], env: NodeJS.ProcessEnv): string {
   });
 }
 
+/**
+ * Resolve a short or uppercase commit SHA to the full lowercase one. A full
+ * lowercase SHA passes through untouched; anything git cannot resolve to a
+ * single commit (unknown, ambiguous, not hex) is refused with what to pass.
+ */
+export function resolveCommitSha(cwd: string, input: string): string {
+  const sha = input.trim();
+  if (/^[0-9a-f]{40}$/u.test(sha)) return sha;
+  const fix = "pass the full 40-digit commit SHA (git rev-parse <branch>)";
+  if (!/^[0-9a-f]{4,40}$/iu.test(sha)) throw new Error(`"${input}" is not a commit SHA; ${fix}`);
+  try {
+    const full = stripLineEnding(runGit(cwd, ["rev-parse", "--verify", "--quiet", `${sha.toLowerCase()}^{commit}`], {}));
+    if (/^[0-9a-f]{40}$/u.test(full)) return full;
+  } catch {
+    // Unknown or ambiguous: fall through to the actionable message.
+  }
+  throw new Error(`"${input}" is not a unique commit in ${cwd}; ${fix}`);
+}
+
 function gitPath(cwd: string, field: string, env: NodeJS.ProcessEnv): string {
   const output = runGit(cwd, ["rev-parse", "--path-format=absolute", field], env);
   const path = stripLineEnding(output);
