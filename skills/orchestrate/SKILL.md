@@ -7,7 +7,7 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
 
 ## Quickstart
 
-1. [Native first](references/routing-and-tiers.md#native-first): run your own provider's models as native subagents (Claude Code: Agent tool `opus`/`sonnet`; Codex: its subagents), not Fabric. Use Fabric for other providers (agy's Claude 4.6 included), long or detached runs, and sandboxed worktree writers.
+1. [Native first](references/routing-and-tiers.md#native-first): run your own provider's models as native subagents (Claude Code: Agent tool `opus`/`sonnet`/`haiku`; Codex: its subagents), not Fabric. Use Fabric for other providers (agy's Claude 4.6 included), long or detached runs, and sandboxed worktree writers.
 2. Call `fabric_dispatch` with `prompt` or `prompt_file`, `adapter` or `model`, and optional `effort`. `model` also takes `adapter/id[@effort]`; `fabric_adapters` with `models: <adapter>` lists live ids.
 3. For writers, pass `mode: "worktree_write"` and the registered `worktree`,
    named per `setup-repo`'s branch naming doctrine; the task id defaults to that
@@ -38,7 +38,8 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
   for the final push; it checks the holder, generation and remote SHA immediately
   before pushing. The label must match the MCP lease holder; a matching
   `AGENT_FABRIC_LABEL` export also works. Renew an expiring lease and release it
-  after an aborted landing.
+  after an aborted landing. To wait for another chair's lease, use
+  `fabric_landing_lease` `action: "wait"` (or shell `fabric landing-wait --timeout N`), not sleep loops.
 - Keep full worker output in run files and return only the digest and path; brief native subagents to the [~150-word result digest](references/orchestration-contract.md#native-result-digest). For liveness, use `fabric_status`; see [worker-liveness.md](references/worker-liveness.md) for degraded runs. Size alone proves nothing.
 - On a terminal result, record `adapter/model@effort` from the receipt; derive family from it. Native subagents record `claude/<model>@<effort> (anthropic; resolved)` from the Agent tool's model parameter, never from self-report.
 
