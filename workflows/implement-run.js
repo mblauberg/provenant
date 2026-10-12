@@ -30,7 +30,7 @@
 
 export const meta = {
   name: 'implement-run',
-  description: 'Claude accelerator for the installed implement skill: approved contract, routed implementation, independent review, bounded repair, serial apply/escalation, human gate.',
+  description: 'Use for an approved ordinary software change with acceptance criteria, as a Claude workflow over the implement skill (routed build, independent review, bounded repair, serial apply, human gate). Not for unresolved requirements or tiny edits; use scope or implement directly.',
   whenToUse: 'an approved ordinary software change with acceptance criteria; unresolved requirements route to scope',
   phases: [
     { title: 'Bootstrap' },

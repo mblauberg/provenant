@@ -42,7 +42,7 @@
 
 export const meta = {
   name: 'codebase-polish',
-  description: 'Project-agnostic code-polish accelerator. Doctrine: the code-review skill and the orchestration contract plus Claude Workflow adapter in the orchestrate skill.',
+  description: 'Use for a bounded code-quality cleanup of one repo slice, auto-applying low-risk edits and escalating the rest; it adds an apply step to code-review. Not for read-only review, new behaviour or diagnosis; use code-review, implement or diagnose.',
   whenToUse: 'when you want a bounded code-quality cleanup of one repo slice with low-risk auto-apply and high-risk escalation',
   phases: [
     { title: 'Bootstrap' },

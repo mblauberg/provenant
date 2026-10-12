@@ -6,20 +6,18 @@ memory; the objective is quality per user attention-hour. Change rules live in `
 An owner-set project cadence, such as when tests execute or how decisions are recorded for
 confirmation, is not a weakening while every gate still holds before merge or promotion.
 Skills ship in the product checkout and install into `~/.claude/skills/` and `~/.codex/skills/`;
-a named skill means read its `SKILL.md`, which discloses its references; names bind.
+a named skill means read its `SKILL.md`; names bind.
 
 ## Accountable topology
 
 Claude Code and Codex are equal primary orchestrators; the harness the user started is chair
-and owns authority, user communication, run state, gates and final synthesis; equal-primary
-is not concurrent bosses. For substantial work use native subagents and the other primary;
+and owns authority, user communication, run state, gates and final synthesis. For substantial work use native subagents and the other primary;
 approved authority may permit paired-primary mode, but one chair and one stage owner remain.
 Agent Fabric owns project-scoped durable messages, shared tasks and activity. Its thin MCP
 dispatch/batch front door delegates to the same orchestration owners that execute direct provider
 CLIs; it does not implement provider mechanics. Answer-bearing coordination uses a correlated Fabric exchange where
 available, otherwise a named degraded artefact records the direct result and collection path.
-Fabric claim/ack records enforce message-delivery ownership and redelivery, not provider liveness
-or completion. Herdr observes and sends fire-and-forget steering only. Partition concurrent
+Fabric claim/ack records enforce message-delivery ownership, not provider liveness or completion. Herdr observes and sends fire-and-forget steering only. Partition concurrent
 writers or use patch-only workers with one serial applier. Authors and decision-makers must not
 certify their own surface. Receipts declare independence and record
 `adapter/model@effort` from the attempt receipt; provider family is derived
@@ -38,9 +36,16 @@ for a defect, `session` when context hygiene is the problem, `deliver` to carry
 an already-approved non-software outcome through to acceptance. Unsettled scope
 goes to `scope` whatever the artefact. Then follow the chain.
 
-`session → scope → user spec/one-way-door gate → deliver profile → implement/domain execution
-[name governing skill; invoke tdd for observable change | diagnose] → deterministic verification → evaluate when needed → independent review +
-bounded repair → user acceptance → release authority → release + observe → retrospect`; on
+**Routine fast path.** A `routine` change (reversible, one slice, an objective
+check available) needs no run record, separate scope pass or subagent unless
+fan-out saves attention: act, run the check, self-check once. Escalate to the
+full chain when authority, irreversibility, external action or unclear
+acceptance criteria appear.
+
+`[session] → [scope → user spec/one-way-door gate → deliver profile] → implement/domain execution
+[name governing skill; invoke tdd for observable change | diagnose] → deterministic verification → [evaluate] → [independent review +
+bounded repair] → user acceptance → [release authority → release + observe] → [retrospect]`;
+bracketed links apply by tier, scope or need, and user gates bind regardless. On
 failure diagnose or implement and route evidence back to scope. `deliver` owns the neutral
 delivery-run receipt, `implement` is the software front door, `session` owns context hygiene,
 compaction and retention. User approval is mandatory for specs and one-way doors, risk-tier
@@ -49,8 +54,8 @@ destructive or irreversible actions and external communications.
 
 ## Risk, authority, routing and memory
 
-Scope emits the minimum tier (`routine`, `substantial`, `crucial`, `terminal`) plus machine-readable
-authority for paths, actions, disclosure, secrets, deployment, irreversible actions, expiry and
+Scope emits the minimum tier (`routine`, `substantial`, `crucial`, `terminal`; criteria in
+`config/risk-policy.json`) plus machine-readable authority for paths, actions, disclosure, secrets, deployment, irreversible actions, expiry and
 approver; delegation only narrows it, and host access, credentials or subscriptions never grant
 permission. A standing user-approved envelope covers routine version control: implementation
 branches and linked worktrees (parallel included) need no per-instance approval, one writer
@@ -65,7 +70,7 @@ never invent task-class, role or effort fields. Runtime governs, catalogues
 cache, mechanics live in `orchestrate`.
 Prefer per-dispatch controls. Editing global provider configuration (for example
 `~/.codex/config.toml`) requires explicit authority for that path and action.
-Run artifacts live under `.agent-run/`; `provenant clean` classifies retention.
+Run artifacts live under `.agent-run/`.
 Durable knowledge belongs in project state, specs, ADRs and runbooks; harness-private memory
 holds only cross-project preferences. Once a memory file's content is promoted to its
 owning project doc or skill, delete the memory file and its `MEMORY.md` entry; do not leave a
@@ -90,12 +95,11 @@ The other-primary leg is expected from substantial upwards when a route is avail
 - intake / specification → `scope`; defect investigation → `diagnose`
 - orchestration / routing / Herdr → `orchestrate`; implementation / review → `implement`, `code-review`; lifecycle / profile → `deliver`
 - context hygiene / compaction → `session`; promotion / assurance → `release`, `evaluate`; retrospect → `retrospect`; governance → `MAINTAINING.md`
-- any reader-facing prose, including correspondence → `natural-writing`, which routes on to its specialists; drafting under another skill's lead does not exempt the prose
+- reader-facing prose → the owning specialist (`engineering-writing` for commits, PRs, READMEs, specs; `legal-writing` for Australian legal), else `natural-writing`, the router; drafting under another skill's lead does not exempt the prose
+- terms (chair, lane, front door, one-way door, receipt, envelope, stage owner) → `docs/glossary.md`
 
 ## Portable fallback
 
-Optional adapters do not displace canonical project artifacts. A skill's
-portable artifact proves only that its declared context existed; retain the
-canonical context separately. It is not evidence, route or task state,
-acceptance, or authority, and its schema must require
-`accepted_artifact_identity`.
+Optional adapters do not displace canonical project artifacts. A skill's portable
+artifact proves only that its declared context existed; it is not evidence, route or
+task state, acceptance or authority. Its schema must require `accepted_artifact_identity`.

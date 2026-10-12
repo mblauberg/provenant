@@ -29,6 +29,12 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
 - Use the [HARNESS.md](../../HARNESS.md) risk ladder for review. It also governs provider choice and claim/ack; do not duplicate those policies here.
 - Send answer-bearing external work through Fabric request/reply when available. If unavailable, mark `FABRIC-ROUNDTRIP-UNAVAILABLE` and keep the direct result in a named artifact. Herdr observes and sends steering only.
 - Choose an explicit model when the user or task names one. Otherwise pass `route: "strong"`, `"bulk"`, `"design"` or `"writing"`; add `rotate: true` to spread load, `council: N` for N runs across families, or `models: [...]` for an ad-hoc council. `flagship`, `workhorse` and `scout` still work. `provenant routes` shows each pool with live availability, and `fabric_adapters` shows the current catalogue and health. Unknown models and unsupported effort should run with a reported note or substitution when executable; see [routing-and-tiers.md](references/routing-and-tiers.md).
+- Dispatch defaults:
+  - Fan out 2-4 independent lanes; go wider only for independent, checkable slices.
+  - Set the route (or model) and effort on every spawn, native subagents included, never the session default. Pick by task class (`bulk`, `strong`, `design`, `writing`), not a hardcoded model name.
+  - Brief in five fields: goal, scope/paths, constraints, output shape and length, verification.
+  - Keep tool output bounded: redirect large output to a file and read slices. Avoid unbounded `gh ... --limit 1000` and `rg --files` over run directories.
+  - Wait once: one blocking `provenant lanes --wait` in the background or one status wait. Never sleep or poll loops.
 - Prefer per-dispatch flags. Editing global provider configuration requires explicit authority.
 - A chair running lanes across many wakes follows [chair-loop.md](references/chair-loop.md), including its reviewer git-verb denylist and decision council.
 - Before landing, acquire a work claim if none is live for this session, verify
