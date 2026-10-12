@@ -76,7 +76,7 @@ def resume(run, row, prompt, *extra):
 
 def test_attempt_records_observed_context_and_enforced_ceiling(tmp_path, monkeypatch):
     run, _prompt, command, log = replay_owner(tmp_path, monkeypatch, "claude", FIX / "claude.jsonl",
-                                              FIX / "claude.jsonl", "session-0003", "haiku")
+                                              FIX / "claude.jsonl", "session-0003", "claude-haiku-4-5")
     first = subprocess.run([*command, "--context-ceiling", "150000"], cwd=tmp_path, capture_output=True, text=True)
     assert first.returncode == 0, first.stdout + first.stderr
     row = attempt(run, 1)
@@ -90,9 +90,9 @@ def test_attempt_records_observed_context_and_enforced_ceiling(tmp_path, monkeyp
 
 
 def test_plan_mode_haiku_ceiling_stays_below_the_requested_window(tmp_path, monkeypatch):
-    """claude-sonnet-5 (1M) answered, but the requested haiku window (200k) bounds the flag."""
+    """claude-sonnet-5 (1M) answered, but the requested haiku-4-5 window (200k) bounds the flag."""
     run, _prompt, command, log = replay_owner(tmp_path, monkeypatch, "claude", FIX / "claude.jsonl",
-                                              FIX / "claude.jsonl", "session-0003", "haiku")
+                                              FIX / "claude.jsonl", "session-0003", "claude-haiku-4-5")
     done = subprocess.run([*command, "--context-ceiling", "250000"], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout + done.stderr
     row = attempt(run, 1)
@@ -103,7 +103,7 @@ def test_plan_mode_haiku_ceiling_stays_below_the_requested_window(tmp_path, monk
 
 def test_resume_of_a_large_session_warns_with_handoff_and_keeps_the_ceiling(tmp_path, monkeypatch):
     run, prompt, command, log = replay_owner(tmp_path, monkeypatch, "claude", FIX / "claude.jsonl",
-                                             FIX / "claude.jsonl", "session-0003", "haiku")
+                                             FIX / "claude.jsonl", "session-0003", "claude-haiku-4-5")
     assert subprocess.run([*command, "--context-ceiling", "150000"], cwd=tmp_path, capture_output=True).returncode == 0
     path = run / "tasks/dispatch-001/attempt-001/attempt.json"
     row = json.loads(path.read_text())
@@ -140,7 +140,7 @@ def test_resume_warning_uses_the_provider_compaction_point_below_the_requested_c
 
 def test_resume_targets_one_task_of_a_multi_task_run(tmp_path, monkeypatch):
     run, prompt, command, log = replay_owner(tmp_path, monkeypatch, "claude", FIX / "claude.jsonl",
-                                             FIX / "claude.jsonl", "session-0003", "haiku")
+                                             FIX / "claude.jsonl", "session-0003", "claude-haiku-4-5")
     for task in ("one", "two"):
         receipt = json.loads((run / "RUN_RECEIPT.json").read_text())
         (run / "RUN_RECEIPT.json").write_text(json.dumps({**receipt, "status": "active", "closed_at": None}))
@@ -159,7 +159,7 @@ def test_resume_targets_one_task_of_a_multi_task_run(tmp_path, monkeypatch):
 def test_resume_never_redirects_a_task_without_an_attempt(tmp_path, monkeypatch):
     """A batch with one finished task and one never started: resuming the second must not resume the first."""
     run, prompt, command, log = replay_owner(tmp_path, monkeypatch, "claude", FIX / "claude.jsonl",
-                                             FIX / "claude.jsonl", "session-0003", "haiku")
+                                             FIX / "claude.jsonl", "session-0003", "claude-haiku-4-5")
     done = subprocess.run([*command, "--task-id", "one"], cwd=tmp_path, capture_output=True, text=True)
     assert done.returncode == 0, done.stdout + done.stderr
     row = attempt(run, 1, "one")
