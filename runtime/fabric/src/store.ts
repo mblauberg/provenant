@@ -344,12 +344,13 @@ export class Store {
   }
 
   /**
-   * Resolve when the landing lease differs from how it looked on entry (new
-   * holder or generation, push started, released or expired) or after `seconds`.
+   * Resolve when the landing lease changes hands or frees (new holder or
+   * generation, released or expired) or after `seconds`. A push starting under
+   * the same holder is not a change: the lease is still unavailable.
    */
   async waitLanding(project: string, seconds: number, signal?: AbortSignal, pollMs = 500):
     Promise<{ changed: boolean; lease: LandingLease | null }> {
-    const key = (lease: LandingLease | null) => lease ? `${lease.holder}:${lease.generation}:${lease.pushingUntilMs ?? ""}` : "";
+    const key = (lease: LandingLease | null) => lease ? `${lease.holder}:${lease.generation}` : "";
     const start = key(this.landingLease(project)), deadline = Date.now() + seconds * 1000;
     for (;;) {
       const lease = this.landingLease(project);

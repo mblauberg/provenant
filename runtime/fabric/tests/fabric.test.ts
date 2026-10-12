@@ -153,6 +153,22 @@ describe("work ownership", () => {
     } finally { db.close(); }
   });
 
+  it("keeps waiting through a push start and wakes on release", async () => {
+    const store = openStore(), who = agent("alice"), sha = "a".repeat(40);
+    announce(store, "alice");
+    const lease = store.acquireLanding(who, "session-a", sha, 60);
+    const db = new Database(databasePath);
+    try {
+      const pushing = store.waitLanding(who.project, 0.3, undefined, 20);
+      db.prepare("UPDATE landing_leases SET pushing_until = ? WHERE project = ?").run(Date.now() + 60_000, who.project);
+      expect(await pushing).toMatchObject({ changed: false });
+      db.prepare("UPDATE landing_leases SET pushing_until = NULL WHERE project = ?").run(who.project);
+      const released = store.waitLanding(who.project, 5, undefined, 20);
+      store.releaseLanding(who, "session-a", lease.generation);
+      expect(await released).toMatchObject({ changed: true, lease: null });
+    } finally { db.close(); }
+  });
+
   it("waits for a landing lease change and resolves short or uppercase SHAs", async () => {
     const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repositoryRoot, encoding: "utf8" }).stdout.trim();
     const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
