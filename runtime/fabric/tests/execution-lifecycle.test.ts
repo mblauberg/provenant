@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeFileAtomic } from "./atomic-write.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -743,7 +744,7 @@ describe("cancellation", () => {
     }) + "\n");
     // The CLI refuses to signal its own process group, leaving this provider
     // live and making the recorded stop outcome explicitly unconfirmed.
-    writeFileSync(join(runDir, "dispatch-provider.json"), JSON.stringify({
+    writeFileAtomic(join(runDir, "dispatch-provider.json"), JSON.stringify({
       run_token: runToken,
       provider_pid: providerPid,
       provider_pgid: cliPid,
@@ -823,7 +824,7 @@ describe("cancellation", () => {
       owner_stderr: `${runDir}-owner.stderr.log`,
       task_id: "cli-signalled-owner-task",
     }) + "\n");
-    writeFileSync(join(runDir, "dispatch-provider.json"), JSON.stringify({
+    writeFileAtomic(join(runDir, "dispatch-provider.json"), JSON.stringify({
       run_token: runToken,
       provider_pid: providerPid,
       provider_pgid: cliPid,
@@ -997,7 +998,7 @@ describe("orphan reaping", () => {
       task_id: "still-running-task",
     }) + "\n");
     // This protected group makes the reaper refuse to signal the test host.
-    writeFileSync(join(runDir, "dispatch-provider.json"), JSON.stringify({
+    writeFileAtomic(join(runDir, "dispatch-provider.json"), JSON.stringify({
       run_token: runToken,
       provider_pid: providerPid,
       provider_pgid: process.pid,
