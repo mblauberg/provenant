@@ -228,11 +228,22 @@ branch had changed that path too before the attempt), Fabric by default
 quarantines the change: it archives the lane's files to `<attempt>/protected.patch`
 (and its index or HEAD to `protected.index.patch` or `protected.head.patch` when
 they differ), commits the start or integration-branch version back to the lane,
-returns the index and files to their starting content and finishes `ok` with a
-warning naming the patches. `.agents/fabric-policy.json` `instruction_changes`
-may instead be `allow` (keep an ordinary edit, with a warning) or `deny` (fail
-with `protected_instructions_changed`). A conflict, special file, replaced root,
-lane process left running or failed quarantine fails under any policy. If OS confinement is unavailable, agy write
+returns the index and files to their starting content. A successful provider
+then finishes `quarantined` only when the restore was verified: its result
+stays visible, `landable: false` is an advisory marker for the chair (not
+enforced landing), and status/digest/lanes name the reason and patches for chair
+review.
+`.agents/fabric-policy.json` `instruction_changes` may instead be `allow` (keep
+an ordinary edit, with a warning) or `deny` (retain the edit for review without
+restoration). Denied edits, failed restoration and unverifiable checks leave
+edits on the lane, so the lane ends `failed` (fix: restore `.agents/` to the
+start commit before landing) with its output and patches retained and listed;
+incomplete or interrupted providers keep their failure outcomes.
+`protected.patch` may be empty for an index-only edit or carry
+an unavailable-diff comment for unsafe states, with `quarantine.patch_error`
+explaining capture failure. Spared processes alone do not prove instruction
+edits. Writers stage proposed instruction edits outside `.agents/` for separate
+review. If OS confinement is unavailable, agy write
 dispatch is refused; other wrapped writer receipts warn that writes are
 unconfined. Setting `PROVENANT_NO_OS_CONFINEMENT=1` has the same effect on new
 wrapped attempts.
@@ -364,9 +375,11 @@ named session is never silently relaunched. `fresh: true` then starts a new
 session primed with the last clean result, as `handoff` does.
 
 Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, `detail`,
-`tail_chars` and `fields`. Terminal brief rows end with the last 1,200 characters
-of their result (`tail_chars` 0–4,000, 0 disables; the total across rows is
-bounded), so a short answer needs no `result.md` read. `detail: full` keeps a
+`tail_chars` and `fields`. A terminal brief row ends with the last 1,200
+characters of its result the first time the session sees that lane, so a short
+answer needs no `result.md` read and batch polls do not resend finished lanes.
+Requesting one lane, or passing `tail_chars` (0–4,000; 0 disables; the total
+across rows is bounded), shows the tail again. `detail: full` keeps a
 one-line summary per attempt instead of a second copy of the row; `fields`
 returns only the named keys (`fields:["attempts"]` gives the raw history).
 While lanes run, the text ends with a hint to block with `provenant lanes --wait

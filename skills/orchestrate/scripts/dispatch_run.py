@@ -1565,10 +1565,11 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     if legacy["outcome"] in {"result_invalid_path","result_integrity_error","adapter_receipt_invalid","manifest_write_error","terminal_envelope_invalid"}: status="failed"
     elif legacy["status"] in {"cancelled","timed_out"}: status=legacy["status"]
     elif legacy["status"]=="blocked": status="input_required"
+    elif status=="quarantined" and legacy["status"]=="failed": status="failed"
     refusal=route_refusal(adapter,args.tool)
     if refusal: status=refusal["status"]
     if status not in TERMINAL_STATUSES: status="failed"
-    for field in ("session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","warnings","reaped","spared","provenance","pgid","last_progress_at"):
+    for field in ("session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","warnings","reaped","spared","provenance","pgid","last_progress_at","landable","quarantine"):
         if field in adapter: row[field]=adapter[field]
     # The provider's provenance replaces the recorded one; keep the confidential request so resume and handoff honour it.
     if getattr(args,"confidential",False) and isinstance(row.get("provenance"),dict):
@@ -2364,14 +2365,16 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     result_digest = digest(result_path) if result_exists else ""
     adapter_status = str(adapter.get("status", "")) if adapter else "adapter_receipt_invalid"
     receipt_error = (
-        success_receipt_error(adapter, args, result_path, result_digest)
-        if adapter_status == "ok" and result_exists
+        success_receipt_error({**adapter, "status": "ok"}, args, result_path, result_digest)
+        if adapter_status in {"ok", "quarantined"} and result_exists
         else None
     )
     question: dict[str, Any] | None = None
     terminal_envelope_error = False
     result_integrity_error = False
-    if observed_exit and exit_code == 0 and adapter_status == "ok" and not receipt_error and result_nonempty:
+    if (observed_exit and (exit_code == 0 and adapter_status == "ok"
+                           or adapter_status == "quarantined" and adapter.get("exit") == 0)
+            and not receipt_error and result_nonempty):
         try:
             question = worker_question_envelope(result_path, result_digest)
         except TerminalEnvelopeIntegrityError:
@@ -2384,7 +2387,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     # answered inside its budget out of the timeout arm even when it finished at
     # the boundary.
     completed_cleanly = (
-        observed_exit and exit_code == 0 and adapter_status == "ok"
+        observed_exit and (exit_code == 0 and adapter_status == "ok"
+                           or adapter_status == "quarantined" and adapter.get("exit") == 0)
         and result_nonempty and not receipt_error
         and not result_integrity_error and not terminal_envelope_error
     )
@@ -2412,7 +2416,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     elif deadline_reached and not completed_cleanly:
         status = "timed_out"
         outcome = "deadline_exceeded"
-    elif adapter_status == "ok" and receipt_error:
+    elif adapter_status in {"ok", "quarantined"} and receipt_error:
         status = "failed"
         outcome = "adapter_receipt_invalid"
     elif result_integrity_error:
@@ -2428,6 +2432,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     elif question is not None:
         status = "blocked"
         outcome = "question"
+    elif adapter_status == "quarantined" and adapter.get("exit") == 0 and result_nonempty:
+        status = "quarantined"
+        outcome = "quarantined"
     elif exit_code == 0 and adapter_status == "ok" and result_nonempty:
         status = "ok"
         outcome = "ok"
@@ -2447,6 +2454,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     record: dict[str, Any] = {
         "schema_version": 1,
         "record_type": "dispatch-attempt",
+        **({"landable": False, "quarantine": adapter.get("quarantine")} if adapter_status == "quarantined" else {}),
         "run_id": run_dir.name,
         "task_id": args.task_id,
         "attempt_id": attempt_id,
@@ -2579,12 +2587,12 @@ def close_mcp_run(run_dir: Path) -> None:
             receipt["resumable"]=any(row.get("status")=="input_required" for row in latest.values())
             statuses_by_task.update({task_id: canonical_success_status(row["status"])
                                      for task_id, row in latest.items()})
-        elif any(canonical_success_status(record.get("status")) not in {"ok", "failed", "blocked", "timed_out", "cancelled"} for record in records):
+        elif any(canonical_success_status(record.get("status")) not in {"ok", "quarantined", "failed", "blocked", "timed_out", "cancelled"} for record in records):
             return
         statuses = set(statuses_by_task.values())
         if not statuses:
             return
-        receipt.update(status="ok" if statuses == {"ok"} else "cancelled" if statuses == {"cancelled"} else "input_required" if receipt.get("resumable") else "failed",
+        receipt.update(status="ok" if statuses == {"ok"} else "quarantined" if statuses <= {"ok", "quarantined"} else "cancelled" if statuses == {"cancelled"} else "input_required" if receipt.get("resumable") else "failed",
                        closed_at=now(), terminal_reason=None if statuses == {"ok"} else "MCP execution attempts are terminal")
         write_owned(run_dir, run_dir / "RUN_RECEIPT.json", json.dumps(receipt, indent=2) + "\n")
     except (OSError, ValueError, OwnedFileError):

@@ -22,6 +22,7 @@ except ImportError:
 TERMINAL_STATUSES = {
     "ok",
     "partial",
+    "quarantined",
     "failed",
     "usage_limited",
     "rate_limited",
@@ -106,7 +107,13 @@ def render_digest(row):
     if result and row.get("run_dir"):
         result = str(Path(row["run_dir"]) / result)
     detail = " · result " + result if result else ""
-    if status not in {"ok", "partial"}:
+    if status == "quarantined":
+        quarantine = row.get("quarantine") or {}
+        detail += " · not landable; review quarantine: " + str(quarantine.get("reason") or "inspect receipt")
+        detail += "; patches: " + (", ".join(quarantine.get("patches") or []) or "unavailable")
+        if quarantine.get("patch_error"):
+            detail += "; " + str(quarantine["patch_error"])
+    elif status not in {"ok", "partial"}:
         excerpt = row.get("evidence", {}).get("excerpt") or ""
         excerpt_line = next(
             (" ".join(line.split())[:120] for line in excerpt.splitlines() if line.strip()),
@@ -270,7 +277,7 @@ def write_route_health(row, *, path=None, at=None):
     status = row.get("status", "failed")
     if row.get("evidence", {}).get("signature") == "empty_output":
         status = "empty_output"
-    if status not in {"ok", "failed", "empty_output", "cancelled", "rate_limited", "usage_limited"}:
+    if status not in {"ok", "quarantined", "failed", "empty_output", "cancelled", "rate_limited", "usage_limited"}:
         status = "failed"
     key = f"{adapter}|{model}|{task_class}"
     entry = {"status": status, "task_class": task_class, "at": timestamp(at), "run_id": row.get("run_id", "")}
@@ -312,7 +319,7 @@ def write_route_health(row, *, path=None, at=None):
 
 
 def write_cooldown(row, *, path=None, at=None):
-    if row["status"] not in {"usage_limited", "rate_limited"}:
+    if row["status"] not in {"ok", "usage_limited", "rate_limited"}:
         return
     if row.get("evidence", {}).get("signature") == "cooldown_active":
         return
@@ -324,11 +331,13 @@ def write_cooldown(row, *, path=None, at=None):
     at = at or datetime.now(UTC)
     prov = row["provenance"]
     adapter = prov["requested"]["adapter"]
-    model = registered_model(adapter, prov["resolved_model"] or "*", warnings=row.setdefault("warnings", []))
+    model = registered_model(adapter, (prov.get("observed_model") if row["status"] == "ok" else None)
+                             or prov["resolved_model"] or "*", warnings=row.setdefault("warnings", []))
     excerpt = row.get("evidence", {}).get("excerpt", "")
-    # Antigravity meters each hosted model pool separately; its quota message
-    # names one pool, so it never cools the whole adapter.
-    if adapter != "agy" and row["status"] == "usage_limited" and re.search(
+    # Antigravity and OpenCode (Go or otherwise) meter each model separately; a limit there says
+    # nothing about the account's other models, so only other adapters' account limits widen.
+    model_quota = adapter in {"agy", "opencode"}
+    if not model_quota and row["status"] == "usage_limited" and re.search(
         r"(?:usage|session|weekly|account|plan) limit|individual quota reached|insufficient_quota", excerpt, re.I
     ):
         model = "*"
@@ -344,16 +353,24 @@ def write_cooldown(row, *, path=None, at=None):
         until = at + timedelta(seconds=delay)
     with locked(path.with_name("cooldowns.lock")):
         values = read_cooldowns(path, at)
-        values[adapter + "/" + model] = {
-            "adapter": adapter,
-            "model": model,
-            "account": None,
-            "status": row["status"],
-            "cooling_until": timestamp(until),
-            "source_run": row["run_id"],
-            "recorded_at": timestamp(at),
-            "signature": row["evidence"]["signature"],
-        }
+        key = adapter + "/" + model
+        if row["status"] == "ok":
+            # A substitution proves the answering model recovered, not the requested one.
+            # Nor does one healthy model prove an account-wide quota has reset.
+            if model == "*" or key not in values:
+                return
+            del values[key]
+        else:
+            values[key] = {
+                "adapter": adapter,
+                "model": model,
+                "account": None,
+                "status": row["status"],
+                "cooling_until": timestamp(until),
+                "source_run": row["run_id"],
+                "recorded_at": timestamp(at),
+                "signature": row["evidence"]["signature"],
+            }
         parent, leaf = store_parent(path)
         temp = ".cooldowns-" + secrets.token_hex(12)
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent)

@@ -204,3 +204,88 @@ def test_agy_quota_cools_only_the_exhausted_model(tmp_path):
     row["evidence"]["excerpt"] = "You've hit your session limit"
     records().write_cooldown(row, path=path, at=at)
     assert "claude/*" in json.loads(path.read_text())["cooldowns"]
+
+
+def test_quarantined_digest_keeps_result_and_review_action(tmp_path):
+    row = json.loads((FIX / 'attempt.json').read_text())
+    row.update(status='quarantined', landable=False, run_dir=str(tmp_path),
+               quarantine={'reason': 'unverifiable: instruction snapshot unavailable',
+                           'patches': [str(tmp_path / 'protected.patch')], 'restored': False})
+    text = records().render_digest(row)
+    assert text.startswith('quarantined ')
+    assert str(tmp_path / row['paths']['result']) in text
+    assert 'not landable' in text and 'review' in text
+    assert row['quarantine']['reason'] in text
+    assert row['quarantine']['patches'][0] in text
+
+
+def test_quarantined_route_does_not_count_as_provider_failure(tmp_path):
+    row = json.loads((FIX / 'attempt.json').read_text())
+    row['status'] = 'quarantined'
+    path = tmp_path / 'route-health.json'
+    at = datetime.now(UTC)
+    records().write_route_health(row, path=path, at=at)
+    health = records().read_route_health(path, cooldowns_path=tmp_path / 'cooldowns.json', at=at)
+    assert next(iter(health.values()))['recent_failures'] == 0
+
+
+@pytest.mark.parametrize("status", ["ok", "partial", "failed", "input_required"])
+def test_only_success_clears_its_own_cooldown(tmp_path, status):
+    path = tmp_path / "cooldowns.json"
+    at = datetime(2026, 9, 23, tzinfo=UTC)
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status="rate_limited")
+    row["provenance"]["requested"]["adapter"] = "agy"
+    for model in ("claude-sonnet-4-6", "gemini-3.5-flash", "*"):
+        row["provenance"]["resolved_model"] = model
+        records().write_cooldown(row, path=path, at=at)
+    row["provenance"].update(resolved_model="claude-sonnet-4-6", observed_model="claude-sonnet-4-6")
+    row.update(status=status)
+    records().write_cooldown(row, path=path, at=at + timedelta(minutes=1))
+    remaining = records().read_cooldowns(path, at)
+    assert ("agy/claude-sonnet-4-6" in remaining) is (status != "ok")
+    assert {"agy/gemini-3.5-flash", "agy/*"} <= remaining.keys()
+
+
+def test_substituted_success_clears_only_the_model_that_answered(tmp_path):
+    path = tmp_path / "cooldowns.json"
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status="rate_limited")
+    row["provenance"]["requested"]["adapter"] = "claude"
+    for model in ("opus", "sonnet"):
+        row["provenance"]["resolved_model"] = model
+        records().write_cooldown(row, path=path)
+    row.update(status="ok")
+    row["provenance"].update(resolved_model="opus", observed_model="sonnet")
+    records().write_cooldown(row, path=path)
+    assert set(records().read_cooldowns(path)) == {"claude/claude-opus-5-5"}
+
+
+def test_cooldown_expires_after_its_window_and_reprobe_rearms_it(tmp_path):
+    path = tmp_path / "cooldowns.json"
+    at = datetime(2026, 9, 23, tzinfo=UTC)
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status="usage_limited", reset_at=None, retry_after=24 * 3600)
+    row["provenance"]["requested"]["adapter"] = "opencode"
+    row["provenance"]["resolved_model"] = "opencode-go/glm-5"
+    records().write_cooldown(row, path=path, at=at)
+    assert "opencode/opencode-go/glm-5" in records().read_cooldowns(path, at + timedelta(hours=23))
+    assert not records().read_cooldowns(path, at + timedelta(hours=25))
+    records().write_cooldown(row, path=path, at=at + timedelta(hours=25))  # failed probe re-arms
+    assert "opencode/opencode-go/glm-5" in records().read_cooldowns(path, at + timedelta(hours=26))
+
+
+@pytest.mark.parametrize("model,expected", [
+    ("opencode-go/glm-5", "opencode/opencode-go/glm-5"),
+    ("opencode/some-free-model", "opencode/some-free-model"),
+])
+def test_opencode_usage_limit_stays_scoped_to_its_model(tmp_path, model, expected):
+    path = tmp_path / "cooldowns.json"
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status="usage_limited", reset_at=None, retry_after=None)
+    row["evidence"]["excerpt"] = "Monthly usage limit reached"
+    row["provenance"]["requested"]["adapter"] = "opencode"
+    row["provenance"]["resolved_model"] = model
+    records().write_cooldown(row, path=path)
+    keys = set(records().read_cooldowns(path))
+    assert keys and "opencode/*" not in keys

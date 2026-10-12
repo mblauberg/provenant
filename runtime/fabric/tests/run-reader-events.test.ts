@@ -494,3 +494,16 @@ it("writes a report larger than the pipe buffer in full before advancing the cur
   expect(first.stdout.trim().split("\n")).toHaveLength(250);
   expect(wait().stdout).toBe("no lanes are running\n");
 }, 120_000);
+
+it("keeps a quarantined lane's result, landing block and patch location", async () => {
+  const workspace = fixture();
+  const { row, run } = attempt(workspace, "tasks", "quarantined", "terminal", "quarantined");
+  row.landable = false;
+  row.quarantine = { reason: "protected_instructions_unverifiable: unavailable snapshot", patches: ["/attempt/protected.patch"], restored: false };
+  writeFileSync(join(workspace, ".agent-run", "runs", run, "tasks/quarantined/attempt-001/attempt.json"), JSON.stringify(row));
+  const result = await readRuns(workspace);
+  expect(result.runs[0]?.status).toBe("quarantined");
+  expect(result.runs[0]?.result_path).toContain("result.md");
+  expect(result.runs[0]?.landable).toBe(false);
+  expect(result.runs[0]?.quarantine).toEqual(row.quarantine);
+});

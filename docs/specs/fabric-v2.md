@@ -24,7 +24,7 @@ A named session is an alias over that resume path ([ADR 0022](../adr/0022-thin-f
 
 Dispatch scans prompt text, prompt files and eligible regular files in `add_dirs` before provider launch. A high-signal secret finding rejects with `error: secret_detected` and a one-line removal or `allow_secrets: true` fix. The boolean override applies at the top level or per task, and an attempt records the override and finding names. Directory scans read each file whole and skip Git-ignored files, `.git`, `node_modules` and other vendored or build directories, binary files (a NUL in the first 8,000 bytes), and directories listed under `secret_scan_exclude` in `<workspace_root>/.agents/fabric-policy.json` (each with a warning); an entry must resolve, links included, inside the workspace root. A scan the budget cannot finish never passes in part: past 10,000 files or 64 MiB the dispatch rejects with `secret_scan_budget_exceeded`, naming the deepest subtree holding at least half the scanned bytes, else the largest top-level one. The same policy's `dispatch_defaults` may set `add_dirs`, positive `timeout_seconds` and boolean `network` (Codex routes only); an explicit dispatch, batch or task field wins, and an invalid key warns and is ignored.
 
-A run has `queued`, `running` and attempt-terminal states. Terminal statuses are `ok`, `partial`, `failed`, `usage_limited`, `rate_limited`, `auth_required`, `model_unavailable`, `permission_blocked`, `stalled`, `startup_timeout`, `timed_out`, `cancelled`, `interrupted`, `rejected`, `tool_missing`, and `input_required`. A provider that writes nothing to stdout within `CF_DISPATCH_STARTUP_SECONDS` (default 300) of launch ends as `startup_timeout` with signature `startup_watchdog`, and its process tree is stopped; stderr banners do not count as output, and time queued for memory admission comes before launch. It is retryable, except for a `worktree_write` attempt that was not provably untouched. Such an attempt falls back only when the worktree was clean at launch (`git status --porcelain`) and, at the timeout, has the same HEAD and status. A bounded walk must also find no file or directory, ignored ones included, whose mtime or ctime is at or after one second before launch. The walk skips `.git`, `.agent-run`, `node_modules`, `.venv`, `__pycache__`, `.pytest_cache`, `dist` and `build`. It counts as changed at 200,000 entries, 5 seconds, or an unreadable directory. Otherwise the receipt says to inspect the worktree instead of falling back. Structured provider events take precedence over text signatures. Fallback creates another attempt under the same run id. Alias routes default to fallback through allowed paid non-training routes; an explicit model defaults to no fallback. Free or prompt-training routes require explicit opt-in.
+A run has `queued`, `running` and attempt-terminal states. Terminal statuses are `ok`, `quarantined`, `partial`, `failed`, `usage_limited`, `rate_limited`, `auth_required`, `model_unavailable`, `permission_blocked`, `stalled`, `startup_timeout`, `timed_out`, `cancelled`, `interrupted`, `rejected`, `tool_missing`, and `input_required`. A provider that writes nothing to stdout within `CF_DISPATCH_STARTUP_SECONDS` (default 300) of launch ends as `startup_timeout` with signature `startup_watchdog`, and its process tree is stopped; stderr banners do not count as output, and time queued for memory admission comes before launch. It is retryable, except for a `worktree_write` attempt that was not provably untouched. Such an attempt falls back only when the worktree was clean at launch (`git status --porcelain`) and, at the timeout, has the same HEAD and status. A bounded walk must also find no file or directory, ignored ones included, whose mtime or ctime is at or after one second before launch. The walk skips `.git`, `.agent-run`, `node_modules`, `.venv`, `__pycache__`, `.pytest_cache`, `dist` and `build`. It counts as changed at 200,000 entries, 5 seconds, or an unreadable directory. Otherwise the receipt says to inspect the worktree instead of falling back. Structured provider events take precedence over text signatures. Fallback creates another attempt under the same run id. Alias routes default to fallback through allowed paid non-training routes; an explicit model defaults to no fallback. Free or prompt-training routes require explicit opt-in.
 
 Before each new attempt starts its provider, the owner compares available host memory with total physical RAM: free, inactive and speculative pages from macOS `vm_stat` using its reported page size against `sysctl -n hw.memsize`, or Linux `MemAvailable` against `MemTotal`. The default floors are 10% for `worktree_write` and 5% for `read_only`; `<workspace_root>/.agents/fabric-policy.json` may set either value under `memory_floor_percent` to a number from 0 to 100, with 0 disabling that mode's floor. Below the floor, the attempt remains `queued` and is checked every 15 seconds. Owners serialise this decision with a per-user host lock at `$XDG_STATE_HOME/provenant/admission.lock` (default `~/.local/state/provenant/admission.lock`), held until 20 seconds after provider start or attempt end; lock creation failure admits with a warning, while a failed or unknown probe holds and retries. Within a project, queued attempts are admitted in order of queue entry: each queued receipt publishes its `queued_since` time, floor and owner identity, and an attempt yields only to an earlier live waiter whose floor the current reading meets. Waiters republish at least once per poll. Ordering is best effort and liveness wins: a receipt holds no place when its owner has exited, its process start time no longer matches (for example after a reboot), or it has not been republished for three polls (a zombie, suspended or stuck owner) or is dated more than a few seconds ahead of the clock. Receipts are scanned only while the host lock is not held. `fabric_status` and `fabric status` show available percentage, floor and elapsed/total wait, which is bounded by that attempt's `timeout_seconds`. On expiry, the attempt fails with error code `memory_unavailable` and a fix. Queued time does not count against execution timeout; cancellation remains available. The parent also excludes published queued time from its child-owner watchdog. An invalid floor records a failed attempt with a one-line fix. Admission only affects new attempts and does not stop running providers.
 
@@ -116,10 +116,10 @@ discards it (`git merge -s ours`) is caught, except where the lane's branch had 
 path before the attempt: its starting version then stands. A starting untracked file the lane removes or hides
 behind a link counts as changed. Files on disk are hashed without Git, so ignored, skip-worktree and
 filtered files count. An unresolved conflict, an unreadable directory, a
-special file, a replaced `.agents/` root or a tree over 256 MiB also fails.
+special file, a replaced `.agents/` root or a tree over 256 MiB blocks landing.
 Spared processes do not imply instruction edits: the check still compares
 HEAD, index and disk against the starting and integration references. An absent `.agents/` counts as empty, since Git
-removes the directory with its last file; a link or file in its place fails.
+removes the directory with its last file; a link or file in its place blocks landing.
 Otherwise `instruction_changes` in `<workspace_root>/.agents/fabric-policy.json`
 decides. The default `quarantine` archives the lane's files as a binary patch
 at `<attempt>/protected.patch`, plus `protected.index.patch` or
@@ -128,21 +128,39 @@ published through the attempt directory's descriptor with an atomic replace
 that never follows a planted link. It then commits the start or
 integration-branch version of each path back to the lane as Provenant Fabric,
 returns the index and files to their starting content (or the integration
-branch's version), rechecks, and ends `ok` with a warning naming the patches;
-starting files Git did not hold are stored as objects before launch so they
-can be restored. `allow` keeps an ordinary edit with a warning. `deny`, a failed
-quarantine, and anything quarantine cannot express (a conflict, special file,
-case variant or any unverifiable state above) fail with
-`protected_instructions_changed` under every policy and list the paths in the
-warnings. A signal-interrupted attempt also fails for an actual instruction
-change, retaining the signal evidence and the changed files without quarantine.
+branch's version), rechecks, and ends `quarantined` only when the provider
+succeeded and restoration was verified (`restored: true`); starting files Git did
+not hold are stored as objects before launch so they can be restored. `allow`
+keeps an ordinary edit with a warning. When edits remain on the lane branch or
+worktree (`deny`, a failed restore, or a conflict, special file, case variant or
+unverifiable state quarantine cannot express) the lane ends `failed` as without
+quarantine, with `fix: instruction edits remain on the lane branch; restore
+.agents/ to the start commit before landing`; its output and patches stay
+retained and listed. A `quarantined` lane retains the result, sets
+`landable: false` and `retryable: false`, and records `quarantine` with the
+reason, patch paths, whether restoration succeeded and any patch capture error.
+`landable: false` is an advisory marker for the chair, not enforced landing. It
+is never `ok` for landing, certification or session success. Digests, status and
+lanes show the result and a review action; chairs review the quarantine and
+verify the branch diff before landing any application work. Proposed instruction
+edits belong outside `.agents/` for separate chair review, as the default writer
+brief states (omitted when the policy is `allow`).
+
+`protected.patch` is retained even for an index-only change (empty disk patch)
+or an unverifiable check (a comment explaining that the diff is unavailable).
+If that marker cannot be installed, patches are listed as unavailable with a
+capture error; no patch is claimed as complete in that case. The check
+reports `protected_instructions_unverifiable` separately from actual changes.
+A failed or signal-interrupted provider is never promoted to `quarantined`.
+Signal-interrupted attempts retain their changed files without restoration and
+fail for actual instruction edits, preserving the provider exit and signal.
 An unknown value warns and quarantines. The check trusts local refs, which the lane can
 move. It also reports a clean three-way merge into a skill the branch already
 changed, a refresh overtaken by a newer integration-branch change to the same
 file, a refresh under line-ending conversion, and any refresh in a repository
-that tracks a case variant such as `.Agents/`. Applying the saved patch from
-the primary checkout lands such a refresh, and a retry clears an overtaken one. Review of the branch diff
-remains the backstop.
+that tracks a case variant such as `.Agents/`. A separately authorised review
+can adopt the saved patch for such a refresh. Review of the branch
+diff remains the backstop.
 
 `capabilities` is an optional list with distinct values from `postgres` and
 `browser`; an empty list means absent. Non-Codex adapters apply it without a
@@ -196,6 +214,14 @@ startup (`opencode.json`, `opencode.jsonc`, `AGENTS.md`, `CLAUDE.md`, `.opencode
 between `cwd` and the repository root, granted by unresolved name. Every read-only
 `sandbox-exec` profile reads the lane's toolchain, found without running it:
 - `python3`, `python`, `uv` and `node` on the provider PATH;
+- pyenv shims resolved from `PYENV_VERSION`, the nearest `.python-version`
+  (starting at `PYENV_DIR` or `cwd`), then `PYENV_ROOT/version`. Discovery
+  never executes a shim or hook. No selection means `system`; a prefix such
+  as `3.12` uses the highest installed `3.12.*`. An unresolvable candidate is
+  skipped with a warning; unsafe targets fail before launch with a fix hint. Put the selected interpreter's `bin` on
+  PATH when a custom pyenv hook controls selection. The shim, selected
+  version file and pyenv's real `libexec` directory are readable in the
+  confined lane, together with the validated interpreter runtime;
 - each `.venv` between `cwd` and the repository root, its `bin/python` link and
   the interpreter its `pyvenv.cfg` names, all treated as candidates only;
 - with a granted `uv`, `pyproject.toml`, `uv.toml`, `uv.lock` and
@@ -214,5 +240,18 @@ checked without resolving them again. A resolved `uv`/`uvx` binary is granted al
 covers `.git-credentials`, `.pypirc`, `.pgpass`, `.vault-token`,
 `.password-store`, `.boto`, `.s3cfg`, `.terraform.d`, Cargo and Gem credentials,
 `.config/git/credentials`, `.config/hub` and `.config/op`.
+
+An `ok` attempt clears the cooldown for the model that answered, using the
+resolved model when the provider reports no model. Other model and account
+cooldowns remain intact. OpenCode runs with error logs on stderr so a quota
+retry cannot silently sleep until the run timeout. Quota diagnostics end the
+attempt as retryable `usage_limited`, with `quota_exhausted` evidence.
+OpenCode Go cooldowns apply to the exhausted model. A reported reset takes
+precedence; a monthly limit without a reset hint uses a 24-hour re-probe window: the
+next attempt after expiry is the probe, success clears the entry and failure
+re-arms it. OpenCode quotas of any model never widen to the whole adapter. Silence alone
+remains a timeout. Kiro's plain `Opening browser...` login diagnostic ends
+the attempt as `auth_required`, with `auth_expired` evidence and a hint to
+run `kiro-cli whoami` outside the sandbox.
 
 `model_route.py snapshot --json` is the single merged catalogue source. Unknown model IDs pass through with a note when runnable; unsupported effort substitutes to the nearest supported value. Explicit cooling models run with a warning. A hard rejection is reserved for impossible execution or a hard boundary. Per-run flags are preferred; editing global provider configuration requires explicit authority. Credentials never appear in argv, receipts or logs. Provider guarantees are reported as `enforced`, `best_effort` or `prompt_only` according to observed controls. On macOS, read-only agy and OpenCode launches use `sandbox-exec` when available to deny workspace reads outside `cwd` and `add_dirs`, and deny workspace writes. Every writer, Codex included, has one Git write boundary: its per-worktree Git directory (`--absolute-git-dir`) plus the common directory's `objects`, `refs`, `logs`, `packed-refs`, `packed-refs.lock` and `packed-refs.new`; the rest of the common directory (`hooks`, `config`, `info`, other lanes' `worktrees/<name>`) is never writable, and a Codex writer drops an `add_dir` at or inside it with a warning. Codex writers also keep the worktree `.git` marker and the private directory's `config.worktree`, `commondir` and `gitdir` read-only; Codex refuses to launch with a symlinked grant path. Writer attempts set `gc.auto=0`, `maintenance.auto=false` and `rerere.enabled=false` through `GIT_CONFIG_COUNT`. Because the shared `config` is read-only, a lane pushes with `git push origin HEAD` and opens its pull request with `gh pr create --head <branch>`; `git push -u` pushes but cannot record the upstream. Wrapped writer launches (agy, Claude, Cursor, OpenCode and Kiro) restrict writes to the worktree, declared `add_dirs`, the Git write boundary, attempt files, temp paths, devices and provider state. Where protected-path policy applies, its read and write denies take precedence within an `add_dir`; receipts list the writable `add_dirs` in `applied.write_boundary`. Codex writers without capabilities use its native sandbox with that permissions profile, recorded as `applied.write_boundary.filesystem`. Unavailable OS confinement refuses agy write dispatches and produces an explicit warning for other wrapped writers.

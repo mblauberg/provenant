@@ -125,7 +125,8 @@ behaviour is stochastic or judgement bearing, so deterministic checks come
 before judgement and the two are never fused into one box. Review is independent:
 fresh targeted reviewers and the other primary never author the surface they
 certify. From `substantial` up, a receipt reaching acceptance without multiple
-targeted lenses or other-primary coverage fails the machine gate.
+targeted lenses, or without other-primary coverage or a recorded skip covered by
+same-family targeted review, fails the machine gate.
 
 The lifecycle loops. A failed check returns to execution; a structural review
 finding may return to scope; production evidence may open a diagnosis and a new
@@ -223,12 +224,13 @@ state and synthesis. On substantial work it combines:
 3. the other primary family for independent review;
 4. an available distinct family for dissent and blind-spot discovery.
 
-Distinct-family failure never replaces the required other-primary leg. The other
-primary is required for the substantial review contract, and there is no
-degradation note that buys past it: a run may execute without that leg, but
-`validate_delivery.py` rejects the receipt once it reaches acceptance. The only
-relief is a user-approved risk downgrade carrying an approver, a reason and
-evidence. Provider-backed external workers, including the other primary and
+Distinct-family failure never replaces the other-primary leg. The other primary is
+expected from the substantial tier up; when it is skipped or unavailable, the
+skip must record a reason and a passing same-family targeted review with a
+distinct lens covers it. A bare degradation note does not buy past it, and
+`validate_delivery.py` rejects the receipt once it reaches acceptance without
+both. The only additional relief is a user-approved risk downgrade carrying an
+approver, a reason and evidence. Provider-backed external workers, including the other primary and
 distinct families, are dispatched through Fabric MCP or the direct command
 line. Both front doors delegate to the same `orchestrate` owners; Fabric does
 not implement provider mechanics. Dispatching a worker and claiming
@@ -284,8 +286,10 @@ flowchart TB
 Solid legs can block a run; dashed legs cannot. The targeted and other-primary
 requirements are load-bearing from the substantial tier upwards:
 `validate_delivery.py` rejects a receipt that reaches acceptance without multiple
-targeted lenses *and* passing other-primary review, on a distinct primary family
-with distinct evidence. It also requires each review row to declare
+targeted lenses *and* either passing other-primary review, on a distinct primary
+family with distinct evidence, or a recorded other-primary skip covered by a
+passing same-family targeted review with a distinct lens. It also requires each
+review row to declare
 `independent_of_authorship: true`, but does not bind the certifier's agent
 identity to authorship or decision custody. Validator success therefore proves
 declared topology and family separation, not actor-level independence. Policy

@@ -820,3 +820,37 @@ it('keeps terminal status readable when the notice database cannot open', async 
   expect(result.isError).not.toBe(true);expect(result.structuredContent).toBeUndefined();expect((result.content as any[])[0]?.text).toBeTruthy();
  } finally {await client.close();rmSync(root,{recursive:true,force:true});}
 });
+
+it("shows quarantined output with its review action in status and lanes", async () => {
+  const { digest, runView, laneLine } = await import("../src/surface.js");
+  const row = { id: "review", status: "quarantined", landable: false,
+    quarantine: { reason: "protected_instructions_unverifiable", patches: ["/attempt/protected.patch"], restored: false },
+    error: "protected_instructions_unverifiable", paths: { result: "/attempt/result.md" }, result_path: "/attempt/result.md" };
+  expect(runView(row).landable).toBe(false);
+  expect(runView(row).quarantine).toEqual(row.quarantine);
+  for (const text of [digest(row), laneLine(row)]) {
+    expect(text).toContain("quarantined");
+    expect(text).toContain("not landable");
+    expect(text).toContain("review");
+    expect(text).toContain(row.quarantine.reason);
+    expect(text).toContain(row.quarantine.patches[0]);
+    expect(text).toContain(row.result_path);
+  }
+});
+
+
+it("keeps each quarantine review action in a completed batch digest", async () => {
+  const { compactBatch } = await import("../src/owner-output.js");
+  const { digest } = await import("../src/surface.js");
+  const runDir = mkdtempSync(join(tmpdir(), "fabric-quarantined-batch-"));
+  fixtureRoots.add(runDir);
+  const stdoutPath = join(runDir, "stdout.json");
+  const row = { status: "quarantined", task_id: "review", landable: false,
+    paths: { result: "/attempt/result.md" },
+    quarantine: { reason: "protected_instructions_changed", patches: ["/attempt/protected.patch"] } };
+  writeFileSync(stdoutPath, JSON.stringify({ schema: "fabric.batch.v1", runs: [row] }));
+  const batch = compactBatch({ runDir, stdoutPath, stderrPath: join(runDir, "stderr.log") }, { exitCode: 1, signal: null });
+  expect(batch.status).toBe("quarantined");
+  expect(digest(batch)).toContain("/attempt/result.md");
+  expect(digest(batch)).toContain("/attempt/protected.patch");
+});
