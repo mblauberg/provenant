@@ -3098,6 +3098,25 @@ def real_owner_fixture(tmp_path, monkeypatch, code):
     return run, prompt, command
 
 
+def test_local_writer_launch_does_not_read_the_host_configuration(tmp_path, monkeypatch):
+    code = '''import json,sys
+sys.stdin.read()
+print(json.dumps({'type':'system','subtype':'init','session_id':'writer-session','model':'opus'}))
+print(json.dumps({'type':'result','result':'DONE'}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path)
+    instance = tmp_path / 'writer-instance'
+    (instance / '.agent-fabric/writer-owners').mkdir(parents=True)
+    (instance / '.agent-fabric/hosts.json').write_text('{broken')
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(instance))
+    monkeypatch.setenv('PROVENANT_HOST_LOCAL_ONLY', '1')
+    monkeypatch.delenv('PROVENANT_RUN_ID', raising=False)
+    result = subprocess.run([*command, '--access-mode', 'worktree_write', '--worktree', str(worktree)],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 @pytest.mark.parametrize('ownership', ['current', 'superseded', 'unresolved'])
 def test_local_writer_resume_requires_its_durable_context_owner(tmp_path, monkeypatch, ownership):
     code = '''import json,sys

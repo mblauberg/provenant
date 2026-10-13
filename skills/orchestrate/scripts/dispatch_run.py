@@ -1938,7 +1938,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             return fail(run_dir, "worktree_busy", str(exc))
         hosts = _fabric_hosts_owner()
         try:
-            hosts.lane_owner().code().validate_launch(args.worktree, run_identity(run_dir, run_receipt), args.task_id)
+            transport = hosts._load_module('provenant_fabric_git', hosts.PRODUCT_ROOT / 'scripts/fabric_git.py')
+            transport.validate_launch(hosts, hosts.config_path().parent, args.worktree,
+                run_identity(run_dir, run_receipt), args.task_id)
         except hosts.HostError as exc:
             release_worktree_lease(worktree_lease)
             return fail(run_dir, exc.code, str(exc))

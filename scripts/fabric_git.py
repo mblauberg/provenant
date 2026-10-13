@@ -16,6 +16,38 @@ MAX_BUNDLE_BYTES = 64 * 1024 * 1024
 GIT_VERBS = {'git-upload', 'git-result', 'git-download'}
 WRITER_MODES = {'worktree_write', 'write', 'rw', 'worktree'}
 
+def owner_marker(root, git_dir):
+    return Path(root) / 'writer-owners' / (hashlib.sha256(str(git_dir).encode()).hexdigest() + '.json')
+
+
+def validate_launch(hosts, root, target, run_id, task_id):
+    """Refuse a launch that a transported writer context no longer binds.
+
+    Needs only the instance root, never the host configuration, so a missing or
+    broken peer setup cannot block an ordinary local writer.
+    """
+    if not (Path(root) / 'writer-owners').is_dir():
+        return
+    helper = hosts._load_module('provenant_host_worktree', hosts.PRODUCT_ROOT / 'scripts/worktree.py')
+    probe = subprocess.run(['git', '-C', str(target), 'rev-parse', '--absolute-git-dir'],
+        capture_output=True, text=True, timeout=30, env={**helper.git_environment(), 'GIT_NO_REPLACE_OBJECTS': '1'})
+    if probe.returncode:
+        raise hosts.HostError('worktree_invalid', 'Writer worktree Git directory is unreadable')
+    marker = owner_marker(root, probe.stdout.strip())
+    if not marker.exists():
+        return  # Ordinary local writers have no transported context.
+    try:
+        owner = json.loads(marker.read_text())
+        identifier = owner['operation_id']
+        if not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,127}', identifier):
+            raise ValueError(identifier)
+        launch = json.loads((Path(root) / 'operations' / (identifier + '.json')).read_text())
+        if launch['runId'] == run_id and launch['taskId'] in {task_id, '*'}:
+            return
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
+    raise hosts.HostError('writer_context_superseded', 'The durable writer owner does not bind this run and task')
+
 
 class CodeTransport:
     def __init__(self, federation):
@@ -355,26 +387,10 @@ class CodeTransport:
         path.mkdir(parents=True, exist_ok=True, mode=0o700)
         return path / (identifier + '.json')
 
-    def context_owner(self, target, create=True):
-        git_dir = Path(self.git(target, 'rev-parse', '--absolute-git-dir'))
-        identifier = hashlib.sha256(str(git_dir).encode()).hexdigest()
-        return (self.state_file('writer-owners', identifier) if create else
-            self.f.root / 'writer-owners' / (identifier + '.json'))
-
-    def validate_launch(self, target, run_id, task_id):
-        """Called by the shared launch owner while holding the writer lease."""
-        marker = self.context_owner(target, create=False)
-        if not marker.exists():
-            return  # Ordinary local writers have no transported context.
-        try:
-            owner = json.loads(marker.read_text())
-            identifier = self.f.operation_id({'operation_id': owner['operation_id']})
-            launch = json.loads((self.f.root / 'operations' / (identifier + '.json')).read_text())
-            if launch['runId'] == run_id and launch['taskId'] in {task_id, '*'}:
-                return
-        except (OSError, ValueError, KeyError, TypeError):
-            pass
-        self.fail('writer_context_superseded', 'The durable writer owner does not bind this run and task')
+    def context_owner(self, target):
+        marker = owner_marker(self.f.root, self.git(target, 'rev-parse', '--absolute-git-dir'))
+        marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        return marker
 
     def claim_context(self, context, expected_owner=None, admission_operation=None):
         target = Path(context['worktree_path'])
