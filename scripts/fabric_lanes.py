@@ -27,7 +27,16 @@ TRANSIENT = {'timeout', 'unreachable', 'bad_response', 'hosts_cancelled', 'peer_
 class LaneFederation:
     def __init__(self, owner):
         self.h = owner
-        self.config = owner.load_config()
+        self.config_error = None
+        try:
+            self.config = owner.load_config()
+        except owner.HostError as exc:
+            if exc.code != 'invalid_config':
+                raise
+            # A broken placement file must never stop local work; run as a standalone
+            # host and report the error with every local dispatch so it stays visible.
+            self.config = owner.HostsConfig()
+            self.config_error = str(exc)
         self.root = owner.config_path().parent
 
     @contextmanager
@@ -554,6 +563,14 @@ class LaneFederation:
         return {'schema': 'fabric.runs.v2' if verb == 'lanes' else 'fabric.status.v2', 'status': 'ok', 'runs': rows, 'hosts': hosts, 'omitted': omitted + owner_omitted}
 
     def client_call(self, action, cwd, request):
+        result = self.placed_call(action, cwd, request)
+        if (self.config_error and action == 'dispatch' and result.get('local') and 'fallback' not in result
+                and os.environ.get('PROVENANT_HOST_LOCAL_ONLY') != '1'):
+            result = {**result, 'fallback': {'from_host': 'hosts.json', 'reason': 'invalid_config', 'detail': self.config_error},
+                'digest': 'local fallback: hosts.json invalid_config: ' + self.config_error}
+        return result
+
+    def placed_call(self, action, cwd, request):
         if os.environ.get('PROVENANT_HOST_LOCAL_ONLY') == '1':
             return {'local': True}
         def local_result(value):

@@ -1530,7 +1530,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     if getattr(args,"confidential",False): provenance["requested"]["confidential"]=True
     placement = json.loads(os.environ.get('PROVENANT_PLACEMENT_FALLBACK', 'null'))
     if placement:
-        note = f'local fallback from {placement["from_host"]}: {placement["reason"]}'
+        note = f'local fallback from {placement["from_host"]}: {placement["reason"]}' + (f': {placement["detail"]}' if placement.get('detail') else '')
         if note not in plan.setdefault('warnings', []):
             plan['warnings'].append(note)
     return {"schema":"fabric.attempt.v1", **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
@@ -2635,11 +2635,11 @@ def dispatch(args: argparse.Namespace) -> int:
     if os.environ.get('PROVENANT_HOST_LOCAL_ONLY') != '1':
         hosts = _fabric_hosts_owner()
         try:
-            config = hosts.load_config()
+            owner = hosts.lane_owner()
         except hosts.HostError as exc:
             print(json.dumps({'status': 'rejected', 'error': exc.code, 'fix': str(exc)}))
             return 1
-        if config.peers or getattr(args, 'host', None) or any('@' in str(value) for value in (args.resume or '', args.task_id or '')):
+        if owner.config.peers or owner.config_error or getattr(args, 'host', None) or any('@' in str(value) for value in (args.resume or '', args.task_id or '')):
             request = {key: value for key, value in {
                 'host': getattr(args, 'host', None), 'operation_id': getattr(args, 'operation_id', None),
                 'adapter': args.tool, 'model': args.model, 'alias': args.alias, 'task_class': args.task_class, 'effort': args.effort,
@@ -2671,7 +2671,7 @@ def dispatch(args: argparse.Namespace) -> int:
             if args.git_evidence:
                 request['git_evidence'] = str(args.git_evidence)
             try:
-                result = hosts.lane_owner().client_call('resume' if args.resume else 'dispatch', str(Path.cwd()), request)
+                result = owner.client_call('resume' if args.resume else 'dispatch', str(Path.cwd()), request)
             except hosts.HostError as exc:
                 result = {'status': 'rejected', 'error': exc.code, 'fix': str(exc)}
             if not result.get('local'):

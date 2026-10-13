@@ -678,6 +678,22 @@ def test_explicit_model_receipt_does_not_record_an_implied_alias(tmp_path):
     assert row["provenance"]["requested"]["alias"] == ""
 
 
+def test_config_fallback_detail_is_persisted_in_the_attempt_record(tmp_path, monkeypatch):
+    mod = load_dispatch_module()
+    args = SimpleNamespace(
+        tool="opencode", alias="workhorse", model="gpt-6-luna", alias_supplied=True,
+        effort=None, task_id="dispatch-001", access_mode="read_only", worktree=None,
+        _phase_timings={}, reviewer_id=None, risk_tier=None,
+        model_override_tier=None,
+    )
+    fallback = {"from_host": "hosts.json", "reason": "invalid_config", "detail": "Response deadline must be positive and finite"}
+    monkeypatch.setenv("PROVENANT_PLACEMENT_FALLBACK", json.dumps(fallback))
+    plan = {}
+    row = mod.contract_row(args, tmp_path, 1, tmp_path / "attempt", plan, "now")
+    assert row["placement_fallback"] == fallback
+    assert plan["warnings"] == ["local fallback from hosts.json: invalid_config: Response deadline must be positive and finite"]
+
+
 def test_explicit_model_and_alias_are_both_recorded_in_receipt(tmp_path):
     mod = load_dispatch_module()
     args = SimpleNamespace(
@@ -3906,6 +3922,42 @@ def _run_fake_codex(tmp_path: Path, name: str, body: str, extra_env: dict[str, s
          "--role", "worker"],
         cwd=tmp_path, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     return run_dir / "dispatch/tasks/task-1/attempt-001", result
+
+
+def _invalid_hosts_env(tmp_path: Path, config: dict) -> dict[str, str]:
+    state = tmp_path / ".agents/.agent-fabric"
+    state.mkdir(parents=True)
+    (state / "hosts.json").write_text(json.dumps(config))
+    return {"HOME": str(tmp_path), "AGENT_FABRIC_INSTANCE_ROOT": str(tmp_path / ".agents"),
+            "AGENT_FABRIC_STATE_DIRECTORY": str(tmp_path / "state"), "PROVENANT_HOST_LOCAL_ONLY": "0"}
+
+
+@pytest.mark.parametrize("config", [
+    {"schema_version": 1, "local_host": "here", "peers": {"there": {"ssh_destination": "there", "response_deadline": 0}}},
+    {"schema_version": 1, "local_host": "here", "projects": {"/absolute/project": {}}},
+])
+def test_cli_dispatch_runs_locally_and_reports_an_invalid_hosts_config(tmp_path: Path, config) -> None:
+    env = _invalid_hosts_env(tmp_path, config)
+    attempt, result = _run_fake_codex(tmp_path, "badcfg", "printf 'OK\\n'\n", env)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "local fallback" in result.stderr and "invalid_config" in result.stderr
+    row = json.loads((attempt.parents[3] / "tasks/task-1/attempt-001/attempt.json").read_text())
+    assert row["placement_fallback"]["reason"] == "invalid_config"
+    assert row["placement_fallback"]["detail"]
+
+
+def test_cli_dispatch_to_an_explicit_peer_still_rejects_with_invalid_hosts_config(tmp_path: Path) -> None:
+    env = _invalid_hosts_env(tmp_path, {"schema_version": 1, "local_host": "here", "peers": {
+        "there": {"ssh_destination": "there", "response_deadline": 0}}})
+    run_dir = make_run(tmp_path, "explicit")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("hi\n")
+    result = subprocess.run(
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "task-1", "--adapter", "codex", "--host", "there",
+         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "workhorse", "--role", "worker"],
+        cwd=tmp_path, env={**os.environ, **env}, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["error"] == "unknown_host"
 
 
 def test_terminal_ok_attempt_prunes_private_tmp_but_keeps_records(tmp_path: Path) -> None:

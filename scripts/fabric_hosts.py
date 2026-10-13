@@ -192,7 +192,10 @@ def load_config(path=None):
     if not isinstance(projects, dict):
         raise HostError(code, 'Projects must be keyed by home-relative project path')
     for project, placement in projects.items():
-        project_directory(project)
+        try:
+            project_directory(project)
+        except HostError as exc:
+            raise HostError(code, 'Project key is invalid: ' + str(exc)) from exc
         fields(placement, {'default_host', 'modes'}, set(), code)
         modes = placement.get('modes', {})
         fields(modes, {'read_only', 'worktree_write'}, set(), code)
@@ -403,7 +406,8 @@ def validate_doctor_result(result, host, project_path=None):
         raise HostError('bad_response', 'Doctor socket path result is invalid')
 
 def project_identity(cwd=None):
-    from worktree import primary_root, PolicyError
+    worktree = _load_module('provenant_worktree', PRODUCT_ROOT / 'scripts/worktree.py')
+    primary_root, PolicyError = worktree.primary_root, worktree.PolicyError
     path = Path(cwd or Path.cwd()).resolve()
     try:
         path = primary_root(path)

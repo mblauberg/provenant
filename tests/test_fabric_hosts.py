@@ -1612,6 +1612,81 @@ class LaneLoopbackContracts(unittest.TestCase):
                 self.assertTrue(placed['local'])
                 self.assertNotIn('fallback', placed)
 
+    def owner_process(self, script, cwd=None):
+        """Run like the dispatch owner: fabric_hosts loaded by path, scripts/ not on sys.path."""
+        program = ('import importlib.util,json,sys\n'
+            'sys.path[:] = [p for p in sys.path if p not in {"", ' + repr(str(ROOT / 'scripts')) + '}]\n'
+            'spec = importlib.util.spec_from_file_location("provenant_fabric_hosts", '
+            + repr(str(ROOT / 'scripts/fabric_hosts.py')) + ')\n'
+            'hosts = importlib.util.module_from_spec(spec); sys.modules[spec.name] = hosts\n'
+            'spec.loader.exec_module(hosts)\n' + script)
+        process = subprocess.run([sys.executable, '-c', program], cwd=cwd or self.workspace, env=self.env,
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        return json.loads(process.stdout)
+
+    def test_owner_process_resolves_project_identity_without_scripts_on_path(self):
+        value = self.owner_process('print(json.dumps(hosts.project_identity()))')
+        self.assertEqual(value, 'Repos/project')
+
+    def broken_config_dispatch(self, mutate, **request):
+        config_path = self.local_home / '.agents/.agent-fabric/hosts.json'
+        config = json.loads(config_path.read_text())
+        mutate(config)
+        config_path.write_text(json.dumps(config))
+        return self.owner_process('print(json.dumps(hosts.lane_owner().client_call("dispatch", '
+            + repr(str(self.workspace)) + ', ' + repr({"prompt": "placement only", **request}) + ')))')
+
+    def test_owner_process_runs_locally_when_hosts_config_is_unparseable(self):
+        (self.local_home / '.agents/.agent-fabric/hosts.json').write_text('{not json')
+        value = self.owner_process('print(json.dumps(hosts.lane_owner().client_call("dispatch", '
+            + repr(str(self.workspace)) + ', {"prompt": "placement only"})))')
+        self.assertTrue(value['local'])
+        self.assertEqual(value['fallback']['reason'], 'invalid_config')
+
+    def test_invalid_peer_config_falls_back_locally_with_visible_detail(self):
+        def mutate(config):
+            config['peers'][next(iter(config['peers']))]['response_deadline'] = 0
+        value = self.broken_config_dispatch(mutate)
+        self.assertTrue(value['local'])
+        self.assertEqual(value['fallback']['reason'], 'invalid_config')
+        self.assertIn('Response deadline', value['fallback']['detail'])
+        self.assertIn('invalid_config', value['digest'])
+
+    def test_invalid_project_key_falls_back_locally_instead_of_rejecting(self):
+        def mutate(config):
+            config['projects'] = {'/absolute/project': {'default_host': config['local_host']}}
+        for request in [{}, {'mode': 'worktree_write'}]:
+            with self.subTest(request=request):
+                value = self.broken_config_dispatch(mutate, **request)
+                self.assertTrue(value['local'])
+                self.assertEqual(value['fallback']['reason'], 'invalid_config')
+
+    def test_explicit_remote_request_stays_fail_closed_with_invalid_config(self):
+        def mutate(config):
+            config['peers'][next(iter(config['peers']))]['response_deadline'] = 0
+        peer = next(iter(json.loads((self.local_home / '.agents/.agent-fabric/hosts.json').read_text())['peers']))
+        config_path = self.local_home / '.agents/.agent-fabric/hosts.json'
+        config = json.loads(config_path.read_text()); mutate(config); config_path.write_text(json.dumps(config))
+        process = subprocess.run([str(ROOT / 'scripts/fabric-hosts'), 'lane'],
+            input=json.dumps({'action': 'dispatch', 'cwd': str(self.workspace), 'input': {'host': peer, 'prompt': 'x'}}),
+            cwd=self.workspace, env=self.env, capture_output=True, text=True, timeout=30)
+        value = json.loads(process.stdout)
+        self.assertNotIn('local', value)
+        self.assertEqual(value['error'], 'unknown_host')
+
+    def test_owner_process_runs_worktree_write_locally_when_read_only_peer_is_offline(self):
+        config_path = self.local_home / '.agents/.agent-fabric/hosts.json'
+        config = json.loads(config_path.read_text())
+        peer = next(iter(config['peers']))
+        config['projects']['Repos/project'] = {'default_host': config['local_host'], 'modes': {'read_only': peer}}
+        config_path.write_text(json.dumps(config))
+        self.offline.touch()
+        value = self.owner_process('print(json.dumps(hosts.lane_owner().client_call("dispatch", '
+            + repr(str(self.workspace)) + ', {"mode": "worktree_write", "prompt": "placement only"})))')
+        self.assertTrue(value['local'])
+        self.assertNotIn('fallback', value)
+
     def test_qualified_offline_selector_without_snapshot_is_unreachable(self):
         self.offline.touch()
         for action in ['lanes', 'status']:
