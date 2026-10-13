@@ -66,9 +66,9 @@ export function projectRoot(
     gitDirectory = canonicalPath(gitPath(current, "--absolute-git-dir", env));
     commonDirectory = canonicalPath(gitPath(current, "--git-common-dir", env));
   } catch {
-    return requested;
+    return current;
   }
-  if (!contains(top, current)) return requested;
+  if (!contains(top, current)) return current;
 
   try {
     const records = runGit(current, ["worktree", "list", "--porcelain", "-z"], env)
@@ -94,7 +94,7 @@ export function projectRoot(
 
 function canonicalPath(path: string): string {
   try {
-    return realpathSync(path);
+    return realpathSync.native(path);
   } catch {
     return resolve(path);
   }
