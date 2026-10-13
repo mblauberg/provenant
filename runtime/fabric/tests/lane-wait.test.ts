@@ -28,7 +28,7 @@ function store() {
 
 function lane(id: string, state = "terminal", status: string | null = "ok", taskId: string | null = id): RunRead {
   return { id, run_id: `mcp-${id}`, task_id: taskId, run_path: `runs/${id}`, state, status, route: null, model: null,
-    started_at: null, last_progress_at: null, pgid: null, pgid_alive: null, result_path: null, receipt_path: null,
+    started_at: null, ended_at: null, last_progress_at: null, pgid: null, pgid_alive: null, result_path: null, receipt_path: null,
     writer: false, worktree: null, attempt: 1 };
 }
 

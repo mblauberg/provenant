@@ -447,9 +447,10 @@ has `status: ok|unknown` and `runs`; read failure is `unknown` with an `error`,
 never an apparently empty successful list. The default list covers active and
 recent runs (at most 20 task rows); an ID reads that run or task. Each row has
 `id`, `run_id`, `task_id`, `run_path`, `state`, `status`, `route`, `model`,
-`started_at`, `last_progress_at`, `pgid`, `pgid_alive`, `result_path`,
-`receipt_path`, `writer`, `worktree` and `attempt`. Paths are relative to the
-project's `.agent-run` root. Missing facts are `null`; `pgid_alive: null` means
+`started_at`, `ended_at`, `last_progress_at`, `pgid`, `pgid_alive`,
+`result_path`, `receipt_path`, `writer`, `worktree` and `attempt`. Paths are
+relative to the project's `.agent-run` root. `ended_at` is `null` until the
+attempt is terminal. Missing facts are `null`; `pgid_alive: null` means
 the process identity cannot be verified. Both `tasks/<id>/attempt-NNN/` and
 `dispatch/tasks/<id>/attempt-NNN/` receipts are read internally. Fabric's status
 and output readers use the same underlying receipt scanner; consumers should

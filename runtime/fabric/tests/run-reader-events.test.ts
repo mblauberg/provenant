@@ -228,14 +228,14 @@ it("keeps an event follower open by default", async () => {
 
 it("exposes the same run schema through the provenant lanes command", () => {
   const workspace = fixture();
-  attempt(workspace, "tasks", "cli-task", "terminal", "ok");
+  const { row } = attempt(workspace, "tasks", "cli-task", "terminal", "ok");
   const product = resolve(import.meta.dirname, "../../..");
   const result = spawnSync("python3", [join(product, "scripts/provenant"), "lanes", "--json"], {
     cwd: workspace, encoding: "utf8", env: { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product,
       AGENT_FABRIC_TSX_LOADER: createRequire(import.meta.url).resolve("tsx") },
   });
   expect(result.status, result.stderr).toBe(0);
-  expect(JSON.parse(result.stdout)).toMatchObject({ schema: "fabric.runs.v1", status: "ok", runs: [{ task_id: "cli-task" }] });
+  expect(JSON.parse(result.stdout)).toMatchObject({ schema: "fabric.runs.v1", status: "ok", runs: [{ task_id: "cli-task", status: "ok", started_at: row.started_at, ended_at: row.ended_at }] });
 });
 
 it("reports omitted lanes in text and JSON and lets an id select a lane past the cap", () => {
