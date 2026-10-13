@@ -300,6 +300,8 @@ export interface LaunchObserver {
   onLaunch?: (launch: { runId: string; taskId: string; attempt: number }) => void;
   /** Set by a handoff: its route is inherited, so the own-seat guard for new explicit dispatches does not apply. */
   continuation?: boolean;
+  /** Set by a single dispatch's council: its members come from the caller's own `models`/selectors. */
+  guardedCouncil?: boolean;
 }
 
 export interface OwnerIdentification {
@@ -687,10 +689,10 @@ async function dispatchConfiguredProviderUnchecked(
       const result = await dispatchConfiguredBatchUnchecked({
         ...Object.fromEntries(Object.entries(controls).filter(([key]) =>
           !["prompt", "prompt_file", "resume", "handoff", "adapter", "alias", "model", "effort", "confidential", ...POOL_FIELDS].includes(key))),
-        tasks: expanded.tasks.map((task) => ({ ...task, [OWN_SEAT_GUARD]: ownSeatGuard || (!launch.continuation && input.models !== undefined) })),
+        tasks: expanded.tasks,
         concurrency: Math.min(8, expanded.tasks.length),
         wait_seconds: wait_seconds ?? DEFAULT_WAIT_SECONDS,
-      }, identity, signal, env, launch);
+      }, identity, signal, env, { ...launch, guardedCouncil: ownSeatGuard || input.models !== undefined });
       return withWarnings(result, [...preferred.warnings, ...expanded.warnings]);
     }
     // A single pick, or a selector that won precedence, replaces the request's own selectors.
@@ -889,8 +891,9 @@ async function dispatchConfiguredBatchUnchecked(
   });
   const poolWarnings: string[] = [];
   merged = merged.map((task) => {
-    const marked = { ...task, [OWN_SEAT_GUARD]: (task as Record<string, unknown>)[OWN_SEAT_GUARD] ?? (!launch.continuation &&
-      (namesExplicitRoute(task) || task.models !== undefined)) };
+    // Never trust the field from the caller: it is recomputed here and only ever set by this function.
+    const marked = { ...task, [OWN_SEAT_GUARD]: !launch.continuation &&
+      (namesExplicitRoute(task) || task.models !== undefined || launch.guardedCouncil === true) };
     const preferred = nativeFirst(marked, identity);
     poolWarnings.push(...preferred.warnings);
     return preferred.task;

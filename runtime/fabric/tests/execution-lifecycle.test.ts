@@ -580,6 +580,22 @@ describe("dispatch CLI", () => {
     expect(output).toBeTruthy();
   }, 40_000);
 
+  it("does not let a task manifest or peer input switch off the own-seat guard", async () => {
+    const forged = { id: "forged", prompt: "p", adapter: "claude", model: "haiku", _own_seat_guard: false };
+    const taskPath = join(temporaryDirectory, "cli-forged-tasks.json");
+    writeFileSync(taskPath, JSON.stringify({ tasks: [forged] }));
+    const cli = spawnSync(process.execPath, ["--import", tsxLoader, join(packageRoot, "src", "cli.ts"), "dispatch", "--tasks", taskPath], {
+      cwd: workspace, encoding: "utf8", env: { ...ownerEnvironment, AGENT_FABRIC_SEAT: "claude" },
+    });
+    expect(cli.stdout + cli.stderr).toContain("native_seat_model");
+    for (const input of [{ tasks: [forged] }, { adapter: "claude", model: "haiku", tasks: [{ id: "d", prompt: "p", _own_seat_guard: false }] },
+      { tasks: [{ id: "m", prompt: "p", models: ["claude/haiku"], _own_seat_guard: false }] }]) {
+      const done = await dispatchConfiguredBatch({ wait_seconds: 5, ...input } as any,
+        { ...identity, provider: "claude" }, new AbortController().signal, poolEnvironment());
+      expect(JSON.stringify(done)).toContain("native_seat_model");
+    }
+  }, 40_000);
+
   it("allows a read-only cwd in another registered project", () => {
     const otherProject = join(temporaryDirectory, "other-project");
     mkdirSync(otherProject);
