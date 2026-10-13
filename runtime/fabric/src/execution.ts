@@ -1056,7 +1056,13 @@ export async function dispatchConfiguredBatch(
   launch: LaunchObserver = {},
 ): Promise<Record<string, unknown>> {
   try {
-    rejectOwnSeatClaude(input as unknown as Record<string, any>, identity, env, launch);
+    try {
+      rejectOwnSeatClaude(input as unknown as Record<string, any>, identity, env, launch);
+    } catch (error) {
+      // Refused before placement: every task of the batch is reported, as for any rejected batch.
+      const refusal = rejected(error);
+      return { ...refusal, tasks: (input.tasks ?? []).map((task, index) => ({ ...refusal, task_id: task.id ?? `task-${index + 1}`, state: "terminal" })) };
+    }
     const remote = env.PROVENANT_HOST_LOCAL_ONLY === "1" ? undefined : await federatedLane("dispatch", identity.cwd, input as unknown as Record<string, unknown>, signal);
     if (remote) return remote;
     const localEnv = { ...env, PROVENANT_HOST_LOCAL_ONLY: "1", ...(input.placement_fallback ? { PROVENANT_PLACEMENT_FALLBACK: JSON.stringify(input.placement_fallback) } : {}) };
