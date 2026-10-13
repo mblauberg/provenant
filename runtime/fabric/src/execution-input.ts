@@ -7,7 +7,7 @@ import type { CatalogueSnapshot } from "./catalogue.js";
 const DEFAULT_TIMEOUT_SECONDS = 3600;
 function canonical(path: string) {
   try {
-    return realpathSync(path);
+    return realpathSync.native(path);
   } catch {
     return resolve(path);
   }
@@ -81,7 +81,7 @@ export interface RouteInput {
   read_roots?: string[];
   host?: string;
   operation_id?: string;
-  placement_fallback?: { from_host: string; reason: string };
+  placement_fallback?: { from_host: string; reason: string; detail?: string };
   adapter?: string;
   alias?: string;
   task_class?: string;

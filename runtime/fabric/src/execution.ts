@@ -150,7 +150,7 @@ export function releaseActiveExecutions(): void {
 
 function canonical(path: string): string {
   try {
-    return realpathSync(path);
+    return realpathSync.native(path);
   } catch {
     return resolve(path);
   }
@@ -1058,7 +1058,7 @@ export async function dispatchConfiguredProvider(
     const result = await dispatchConfiguredProviderUnchecked(input, identity, signal, localEnv, launch);
     if (input.placement_fallback) {
       const fallback = input.placement_fallback;
-      const note = `local fallback from ${fallback.from_host}: ${fallback.reason}`;
+      const note = `local fallback from ${fallback.from_host}: ${fallback.reason}${fallback.detail ? `: ${fallback.detail}` : ""}`;
       const runDir = result.run_dir;
       return { ...result, placement_fallback: fallback, warnings: [...((result.warnings as string[]) ?? []), note],
         digest: `${String(result.digest ?? result.status)}\n${note}` };
@@ -1090,7 +1090,7 @@ export async function dispatchConfiguredBatch(
     const localEnv = { ...env, PROVENANT_HOST_LOCAL_ONLY: "1", ...(input.placement_fallback ? { PROVENANT_PLACEMENT_FALLBACK: JSON.stringify(input.placement_fallback) } : {}) };
     const result = await dispatchConfiguredBatchUnchecked(input, identity, signal, localEnv, launch);
     return input.placement_fallback ? { ...result, placement_fallback: input.placement_fallback,
-      warnings: [...((result.warnings as string[]) ?? []), `local fallback from ${input.placement_fallback.from_host}: ${input.placement_fallback.reason}`] } : result;
+      warnings: [...((result.warnings as string[]) ?? []), `local fallback from ${input.placement_fallback.from_host}: ${input.placement_fallback.reason}${input.placement_fallback.detail ? `: ${input.placement_fallback.detail}` : ""}`] } : result;
   } catch (error) {
     if (signal.aborted && !(error instanceof InputError)) throw error;
     return rejected(error);

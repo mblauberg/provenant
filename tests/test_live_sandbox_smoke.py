@@ -40,7 +40,7 @@ def test_fixture_branch_follows_repository_convention():
 
 
 def test_every_writer_adapter_including_agy_is_covered():
-    assert [route[0] for route in smoke().ROUTES] == ["codex", "claude", "agy", "kiro", "opencode"]
+    assert [route[0] for route in smoke().ROUTES] == ["codex", "claude", "agy", "cursor", "kiro", "opencode"]
 
 
 def test_read_probe_accepts_fenced_json_and_rejects_prose():
