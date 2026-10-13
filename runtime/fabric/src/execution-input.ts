@@ -322,8 +322,11 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
   }
   if (corrected.unknown) warnings.push(`${selector} is not in the ${adapter} catalogue; passing it as given`);
   if (adapter === nativeAdapter(identity)) {
-    warnings.unshift(`NATIVE: ${adapter}/${input.model ?? input.alias ?? "workhorse"} is this ${adapter} seat's own model; ` +
-      "spawn a native subagent instead of Fabric");
+    const own = `${adapter}/${input.model ?? input.alias ?? "workhorse"} is this ${adapter} seat's own model; `;
+    // Claude subagents are first-class on the host; a Codex seat still runs with a warning.
+    if (adapter === "claude")
+      throw new InputError("native_seat_model", `${own}use the host's native subagents instead of Fabric (or pass another adapter).`);
+    warnings.unshift(`NATIVE: ${own}spawn a native subagent instead of Fabric`);
   }
   const requestedMode = input.mode ?? "read_only";
   const mode = canonicalMode(requestedMode) as AccessMode;

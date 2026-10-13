@@ -482,8 +482,8 @@ whole groups and says how many; `match` narrows either. Dispatch any id as `mode
 outside the catalogue runs with a note. A Claude or Codex seat keeps its own
 models on native subagents: pool picks and the default route skip them, a pool
 holding only them is refused (`route_native_only`), a council hands them back as
-a spawn line, and an explicit request for them runs
-with a leading `NATIVE:` warning (`skills/orchestrate/references/routing-and-tiers.md#native-first`).
+a spawn line, and an explicit request for them is rejected as
+`native_seat_model` on a Claude seat and runs with a leading `NATIVE:` warning on a Codex seat (`skills/orchestrate/references/routing-and-tiers.md#native-first`).
 
 ## Hosts
 

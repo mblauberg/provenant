@@ -26,6 +26,16 @@ change depends on it, worsens it, or makes it newly dangerous.
 - Does the change preserve public API, schema, protocol and behavioural
   compatibility?
 
+## Aligning a looser rule with a stricter one
+
+Before approving a change that tightens a permissive validator or boundary to
+match its stricter counterpart, search the tests for the permissive values
+themselves, not just the function name. A permissive boundary in front of a
+strict one is often a designed funnel into a rejection path that no other test
+can reach. Ask what becomes unreachable, not only what becomes impossible. When
+the intent is recorded nowhere near the site, require a test that pins it there.
+For absence or impossibility claims in a review, see `diagnose`'s evidence rules.
+
 ## Ownership and structure
 
 - Is logic placed with its canonical data or policy owner?

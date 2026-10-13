@@ -36,6 +36,7 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
   - Brief in five fields: goal, scope/paths, constraints, output shape and length, verification.
   - Keep tool output bounded: redirect large output to a file and read slices. Avoid unbounded `gh ... --limit 1000` and `rg --files` over run directories.
   - Wait once: run one `provenant lanes --wait` in the background, or one status wait. Never sleep or poll loops.
+- A dispatched lane has no inbox. Peers message sessions, not lanes; a lane gets new instructions only through `resume` or a new dispatch.
 - Prefer per-dispatch flags. Editing global provider configuration requires explicit authority.
 - A chair running lanes across many wakes follows [chair-loop.md](references/chair-loop.md), including its reviewer git-verb denylist and decision council.
 - Before landing, acquire a work claim if none is live for this session, verify
@@ -58,6 +59,6 @@ Preflight authority, isolation, disclosure and receipts. Dispatch independent wa
 
 ## Depth on demand
 
-Use [orchestration-contract.md](references/orchestration-contract.md) for worker contracts, [routing-and-tiers.md](references/routing-and-tiers.md) for catalogue choices, [direct-cli-fallback.md](references/direct-cli-fallback.md) only when Fabric cannot express the task, and [codex-capabilities.md](references/codex-capabilities.md) for Codex capability probing. Other references in `references/` cover paired primary work, Herdr, verification, memory and domain adaptation. Direct CLI is a degraded path; record its route and result artifact.
+Use [orchestration-contract.md](references/orchestration-contract.md) for worker contracts, [routing-and-tiers.md](references/routing-and-tiers.md) for catalogue choices, [direct-cli-fallback.md](references/direct-cli-fallback.md) only when Fabric cannot express the task, and [codex-capabilities.md](references/codex-capabilities.md) for Codex capability probing. [lane-safety.md](references/lane-safety.md) for lane and reviewer failure modes and false greens. Other references in `references/` cover paired primary work, Herdr, verification, memory and domain adaptation. Direct CLI is a degraded path; record its route and result artifact.
 
 The portable artifact is [coordination summary schema](portable-workflow.v1.json).

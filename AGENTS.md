@@ -17,6 +17,11 @@ orchestration, routing, delegation or memory decisions.
   directory; registered worktrees share their repository's project while
   keeping their own cwd. `AGENT_FABRIC_LABEL` gives several agents of one provider separate
   inboxes.
+- **Checks:** heavy checks (`scripts/check-harness`, full test suites) run in
+  GitHub Actions, not on a contributor or agent machine. Push the branch, open
+  the pull request and let CI run them; run only fast targeted checks locally
+  (static lint, typecheck, the test files you touched). Gate merges on the
+  PR's CI run.
 - **CLI:** use `provenant help` for discovery; route answer-bearing external
   work through the `orchestrate` skill and Fabric.
 - **Style:** terse for inter-agent, mechanical and status traffic;

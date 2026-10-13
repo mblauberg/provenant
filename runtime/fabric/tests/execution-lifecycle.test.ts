@@ -1492,12 +1492,14 @@ describe("native-first routing", () => {
     expect(noted).toContain("claude/claude-opus-5-5 skipped: use a native subagent");
   });
 
-  it("runs an explicit native model with a prominent warning of its own", async () => {
+  it("rejects an explicit native model and points at the host's native subagents", async () => {
     const done = await dispatchConfiguredProvider({ adapter: "claude", model: "haiku", prompt: "ordinary run", wait_seconds: 5 },
       claudeSeat(), new AbortController().signal, poolEnvironment());
-    expect(done.status, JSON.stringify(done)).toBe("ok");
-    expect((done.warnings as string[])[0]).toBe(
-      "NATIVE: claude/haiku is this claude seat's own model; spawn a native subagent instead of Fabric");
+    expect(done).toMatchObject({ status: "rejected", error: "native_seat_model" });
+    expect(done.fix).toContain("use the host's native subagents instead of Fabric");
+    const other = await dispatchConfiguredProvider({ adapter: "codex", prompt: "ordinary run", wait_seconds: 5 },
+      claudeSeat(), new AbortController().signal, poolEnvironment());
+    expect(other.error).not.toBe("native_seat_model");
   });
 
   it("refuses a native seat's default when only its own models are available", async () => {
