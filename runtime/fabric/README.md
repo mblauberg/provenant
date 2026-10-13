@@ -137,7 +137,10 @@ applies controls; Fabric does not claim a stronger guarantee than its receipt.
 On macOS, non-Codex read-only launches use `sandbox-exec` when available. The
 profile limits writes to the attempt directory and provider state. It denies
 reads of home, shared temp and the workspace outside `cwd` and `add_dirs`, with
-provider sign-in paths re-allowed. Training routes also deny reads of protected
+provider sign-in paths re-allowed. Each read-only profile also reads the provider's
+own executable: the PATH entry, every link hop to the real file and, when that file
+sits in an install folder rather than a plain `bin` directory (cursor-agent's
+`~/.local/share/cursor-agent/versions/<version>`), that folder. Training routes also deny reads of protected
 paths. OpenCode's profile also reads, by their unresolved names,
 `opencode.json`, `opencode.jsonc`, `AGENTS.md`, `CLAUDE.md` and `.opencode/`
 in each directory from `cwd` up to the repository root, since OpenCode loads
