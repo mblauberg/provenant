@@ -15,7 +15,7 @@ function inside(root: string, candidate: string) {
 }
 function canonical(path: string) {
   try {
-    return realpathSync(path);
+    return realpathSync.native(path);
   } catch {
     return resolve(path);
   }
@@ -59,7 +59,7 @@ function retainedRegularFile(runDir: string, value: unknown): string | null {
   if (path === null) return null;
   try {
     const metadata = lstatSync(path);
-    return metadata.isFile() && !metadata.isSymbolicLink() && inside(canonical(runDir), realpathSync(path))
+    return metadata.isFile() && !metadata.isSymbolicLink() && inside(canonical(runDir), realpathSync.native(path))
       ? path
       : null;
   } catch {

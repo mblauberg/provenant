@@ -65,8 +65,8 @@ function rootPath(root: string, runDir: string, value: unknown): string | null {
   let canonicalRunDir: string;
   try {
     if (missing.length && !statSync(ancestor).isDirectory()) return null;
-    candidate = resolve(realpathSync(ancestor), ...missing);
-    canonicalRunDir = realpathSync(runDir);
+    candidate = resolve(realpathSync.native(ancestor), ...missing);
+    canonicalRunDir = realpathSync.native(runDir);
   } catch { return null; }
   const local = relative(canonicalRunDir, candidate);
   const rel = relative(root, candidate);
@@ -97,7 +97,7 @@ export async function readRuns(
     const source = await statusRows(workspace, ids, waitSeconds, "all", signal, "brief", false, null, includeHistory);
     if (!source.runs) return { schema: "fabric.runs.v1", status: "unknown" as const,
       error: String(source.error ?? "run_read_failed"), runs: [] as RunRead[] };
-    const root = existsSync(runRoot(workspace)) ? realpathSync(runRoot(workspace)) : resolve(runRoot(workspace));
+    const root = existsSync(runRoot(workspace)) ? realpathSync.native(runRoot(workspace)) : resolve(runRoot(workspace));
     const runs: RunRead[] = source.runs.map((row) => {
       const runDir = String(row.run_dir);
       const latest = Array.isArray(row.attempts) ? row.attempts.at(-1) : undefined;
@@ -167,7 +167,7 @@ export async function readEvents(workspace: string, cursor?: string, messages: M
     : { runs: {}, messages: [] };
   const source = await statusRows(workspace, undefined, 0, "all", undefined, "brief", false);
   if (!source.runs) return { schema: "fabric.events.v1", status: "unknown", error: source.error, events: [], cursor: cursor ?? "" };
-  const root = existsSync(runRoot(workspace)) ? realpathSync(runRoot(workspace)) : resolve(runRoot(workspace));
+  const root = existsSync(runRoot(workspace)) ? realpathSync.native(runRoot(workspace)) : resolve(runRoot(workspace));
   const key = (id: string) => createHash("sha256").update(id).digest("hex").slice(0, 16);
   const runMarks: Record<string, [number, string]> = {};
   const events: Record<string, unknown>[] = [];
