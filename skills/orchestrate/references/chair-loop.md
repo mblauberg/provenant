@@ -76,6 +76,46 @@ A dispatching sub-agent still blocks in the foreground on its own worker; see
 project, so the waiter works from any cwd in that project. Start inbox triage
 with `fabric_inbox{digest:true}`; fetch selected bodies by message ID.
 
+## Peers and relay discipline
+
+A project may run one chair or specialised peer chairs (a lead that lands plus
+domain chairs). Peer relays dominate attention if left loose:
+
+- batch updates into one message per event; no acknowledgement-only replies;
+- keep state in shared state files or Fabric tasks, not in chat;
+- message a peer only when it must act or decide. Before each send, ask
+  whether it must; if not, write it to state.
+
+Peers message sessions, not lanes: a dispatched lane has no inbox and receives
+new instructions only through `resume` or a new dispatch (see
+[lane safety](lane-safety.md)).
+
+## Blocked steps
+
+When a subagent's routine step is refused by a permission classifier, the chair
+runs it itself and reports it; it does not ask the owner or re-route the step to
+another agent, which would launder the refusal. Routine means staging and
+committing lane files, regenerating artifacts, merging and pushing lane or
+integration branches, stopping idle local servers, pruning merged branches and
+worktrees, and removing orphaned processes after checking them. Check the
+target first; standing limits (no force-push, no shared-branch rewrites, no
+deletion beyond authorised pruning, protected paths untouched) still hold. If
+the classifier refuses the chair too, do not retry variants: batch the step into
+one owner action list with a ready-to-run command and keep working.
+
+## Delivery shape
+
+Choose by size. Small fixes and features go **vertical**: one issue or a few,
+end to end. Large related features, restructures and big refactors go
+**horizontal**: layers in dependency order (for a front end, tokens, then
+primitives, then blocks, then composites, then templates; for a back end, data
+and read models, then API and contracts), each layer one cohesive PR the next
+builds on, with vertical adoptions batched on top. Parallel vertical work on a
+large related change creates overlap, redundancy and debt. Multi-issue PRs are
+fine under either shape and cut the merge churn of parallel lanes. Classify the
+work before batching it. When an epic is nearly done, re-home its leftover work
+as leaves where it belongs, then close it once its done-when is verified.
+
 ## Token hygiene
 
 - Delegate inspection. Exploration beyond a few files or commands goes to a
@@ -121,9 +161,15 @@ owner already answered; the newest owner decision wins.
 The evidence council in [verification.md](verification.md) adjudicates claims;
 this council makes a choice.
 
-## Waiting on the owner
+## Waiting on the owner or other sessions
 
 When an item waits on the owner, such as a prototype review or a question, park
 it with a ledger row or tracker comment and refill with other work. Never idle
 the loop on it. If it truly blocks, lies inside authority and is not a user
 gate, convene a decision council.
+
+A chair whose remaining work is mostly waiting (another session's train, a
+change window, owner applies) builds what it can now and hands the rest to the
+owning session rather than idling: write a handoff file in the session
+directory listing the pull requests, heads, lanes and close-out order, send
+each owner its slice, mark the state file retired, then stop.

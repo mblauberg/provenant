@@ -13,6 +13,7 @@ import {
   pythonOwner,
   stagingPath,
   startOwner,
+  rejectOwnSeatClaude,
   type LaunchObserver,
 } from "./execution.js";
 import type { Identity } from "./identity.js";
@@ -283,6 +284,11 @@ export async function handoffDispatch(
   env: NodeJS.ProcessEnv = process.env,
   pin: PinnedContinuation = {},
 ): Promise<Record<string, unknown>> {
+  try {
+    rejectOwnSeatClaude(input, identity, env, { continuation: inheritsPreviousRoute(input) });
+  } catch (error) {
+    return rejected(error);
+  }
   const remote = env.PROVENANT_HOST_LOCAL_ONLY === "1" ? undefined : await federatedLane("handoff", identity.cwd, input as Record<string, unknown>, signal);
   if (remote) return remote;
   env = { ...env, PROVENANT_HOST_LOCAL_ONLY: "1" };
@@ -322,7 +328,7 @@ export async function handoffDispatch(
       ...inheritedConfidential(rest, requested),
       prompt: brief + prompt,
       prompt_file: undefined,
-    }, identity, signal, env, pin);
+    }, identity, signal, env, { ...pin, continuation: inherit });
   } catch (error) {
     if (signal.aborted) throw error;
     return rejected(error);
