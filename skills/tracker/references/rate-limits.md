@@ -7,7 +7,7 @@ account's quota is blocked until the reset.
 
 - **Prefer REST.** Issue and PR state, labels, comments, search, closing, and
   sub-issues (`/issues/{n}/sub_issues`, `/sub_issue`) all go through REST.
-  Reserve GraphQL for Projects v2 field reads/writes (Status, Horizon) REST
+  Reserve GraphQL for Projects v2 field reads/writes (Status, priority) REST
   cannot reach.
 - **Read cheaply.** Ask for the one field you need
   (`fieldValueByName(name: "Status")`) rather than every field on every item,

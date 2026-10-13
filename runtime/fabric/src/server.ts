@@ -4,10 +4,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 
 import { federatedLane, fabricHosts, releaseHostChecks } from "./hosts.js";
-import { databasePath, identify } from "./identity.js";
+import { databasePath, identify, resolveCommitSha } from "./identity.js";
 import { federatedStatusRows as statusRows, fabricOutput, resultTail } from "./run-registry.js";
 import { reply, digest, serverBuild, mailboxView, adapterView, runView, fullView, lanesDigest, cancelDigest } from "./surface.js";
-import { catalogueSnapshot, liveModels } from "./catalogue.js";
+import { catalogueSnapshot, liveModels, resetCooldowns } from "./catalogue.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
 import { reconcileSession, sessionDispatch, sessionName, sessionView } from "./sessions.js";
 import {
@@ -85,6 +85,8 @@ server.server.onclose = async () => {
  * run left that way is reaped by the next dispatch in the same workspace.
  */
 let shuttingDown = false;
+// Lanes whose result tail this session has already shown; bounded, oldest evicted first.
+const tailedLanes = new Set<string>();
 for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
   process.on(signal, () => {
     if (shuttingDown) return;
@@ -489,7 +491,7 @@ register(
 );
 register(
   "fabric_status",
-  "Read or wait for runs. wait_seconds above 55 is clamped to 55; invalid numeric values return a typed rejection.",
+  "Read or wait for runs. Batch status shows each finished lane's tail once per session; request one lane or pass tail_chars to see it again. wait_seconds above 55 is clamped to 55; invalid numeric values return a typed rejection.",
   {
     ids: ids(),
     id: str,
@@ -517,12 +519,25 @@ register(
     } catch {
       // Fall through with no ownership rows.
     }
-    // A short answer should not cost a second call: terminal rows carry the end of their result.
+    // A short answer should not cost a second call: a terminal row carries the end of its result
+    // the first time this session sees it, so batch polls do not resend finished lanes.
     const rows: Record<string, any>[] = Array.isArray(result.runs) ? result.runs : [];
     const localHost = (result as Record<string, any>).hosts?.find((host: Record<string, any>) => host.local)?.host;
     const terminal = rows.filter((row) => row.state === "terminal" && (!row.host || row.host === localHost));
-    const each = Math.min(tail_chars ?? 1200, Math.floor(Math.max(3600, tail_chars ?? 0) / Math.max(1, terminal.length)));
-    const tails = detail === "full" ? [] : terminal.flatMap((row) => {
+    const oneLaneRequested = rows.length === 1 && (
+      (id !== undefined && id !== rows[0]?.batch_id) ||
+      (ids?.length === 1 && ids[0] !== rows[0]?.batch_id)
+    );
+    const laneKey = (row: Record<string, any>) => `${who.project}:${row.run_id}:${row.task_id}:${row.attempt}`;
+    const tailed = tail_chars === 0 || (detail === "full" && tail_chars === undefined) ? [] : terminal.filter((row) =>
+      oneLaneRequested || tail_chars !== undefined || !tailedLanes.has(laneKey(row)));
+    for (const row of tailed) {
+      tailedLanes.delete(laneKey(row));
+      tailedLanes.add(laneKey(row));
+    }
+    while (tailedLanes.size > 4096) tailedLanes.delete(tailedLanes.values().next().value as string);
+    const each = Math.min(tail_chars ?? 1200, Math.floor(Math.max(3600, tail_chars ?? 0) / Math.max(1, tailed.length)));
+    const tails = tailed.flatMap((row) => {
       const tail = resultTail(row, each);
       return tail ? [`result tail ${row.task_id ?? row.run_id}${tail.total > tail.text.length ? " (end)" : ""}:\n${tail.text}`] : [];
     });
@@ -550,20 +565,29 @@ register("fabric_work_claim", "Acquire, renew, verify or release an advisory iss
   readyStore().releaseWork(who, session_id, id, generation);
   return { released: id, generation };
 });
-register("fabric_landing_lease", "Acquire, renew, verify or release the repository landing lease.", {
-  action: z.enum(["acquire", "renew", "verify", "release"]), session_id: z.string().min(1),
+register("fabric_landing_lease",
+  "Acquire, renew, verify or release the repository landing lease. action=wait blocks up to wait_seconds (max 55) " +
+  "until the lease changes hands or frees; use it instead of sleep loops. expected_sha may be short or uppercase.", {
+  action: z.enum(["acquire", "renew", "verify", "release", "wait"]), session_id: z.string().min(1),
   expected_sha: str, generation: z.number().int().positive().optional(),
-  seconds: z.number().int().min(1).max(3600).optional(),
-}, ({ action, session_id, expected_sha, generation, seconds }) => {
-  if (action === "acquire") {
-    if (!expected_sha) throw new Error("expected_sha is required");
-    return readyStore().acquireLanding(who, session_id, expected_sha, seconds ?? 300);
+  seconds: z.number().int().min(1).max(3600).optional(), wait_seconds: z.number().optional(),
+}, async ({ action, session_id, expected_sha, generation, seconds, wait_seconds }, { signal }) => {
+  if (action === "wait") {
+    const bounded = boundedWait(wait_seconds ?? MAX_WAIT_SECONDS);
+    if (bounded.error) return bounded.error;
+    const waited = await readyStore().waitLanding(who.project, bounded.value!, signal);
+    return withWarnings({ changed: waited.changed, landing_lease: waited.lease }, bounded.warnings);
   }
-  if (generation === undefined) throw new Error("generation is required");
+  if (action === "acquire") {
+    if (!expected_sha) throw new Error("expected_sha is required: the integration branch's current remote SHA");
+    return readyStore().acquireLanding(who, session_id, resolveCommitSha(who.cwd, expected_sha), seconds ?? 300);
+  }
+  if (generation === undefined)
+    throw new Error("generation is required: pass the generation returned by action=acquire (fabric_status shows the live one)");
   if (action === "renew") return readyStore().renewLanding(who, session_id, generation, seconds ?? 300);
   if (action === "verify") {
     if (!expected_sha) throw new Error("expected_sha is required");
-    return readyStore().verifyLanding(who, session_id, generation, expected_sha);
+    return readyStore().verifyLanding(who, session_id, generation, resolveCommitSha(who.cwd, expected_sha));
   }
   readyStore().releaseLanding(who, session_id, generation);
   return { released: generation };
@@ -671,13 +695,19 @@ register("fabric_hosts", "List hosts or diagnose peers over SSH.", {
   action: z.enum(["list", "doctor"]).default("list"),
   hosts: z.array(z.string()).optional(),
 }, ({ action, hosts }, { signal }) => fabricHosts(action, hosts ?? [], who.cwd, signal));
-register("fabric_adapters", "List routes and guarantees; full includes profiles; models lists one adapter's live models.", {
+register("fabric_adapters", "List routes and guarantees; full includes profiles; models lists one adapter's live models; action reset clears cooldowns.", {
   detail,
   models: z.string().max(40).optional().describe("Adapter whose live models to list (cached probe)."),
   match: z.string().max(80).optional().describe("Substring filter for models."),
-}, ({ detail, models, match }) =>
-  models === undefined ? adapterView(catalogueSnapshot(), detail) : liveModels(models, { match }),
-);
+  action: z.enum(["reset"]).optional().describe("reset clears cooldowns (selector: adapter or adapter/model; omit for all); use after the user says usage is back or switches accounts."),
+  selector: z.string().min(1).max(80).optional(),
+}, ({ detail, models, match, action, selector }) => {
+  if (action === "reset") {
+    const removed = resetCooldowns(selector);
+    return { digest: removed.length ? `cleared: ${removed.join(" ")}` : "no cooldowns matched" };
+  }
+  return models === undefined ? adapterView(catalogueSnapshot(), detail) : liveModels(models, { match });
+});
 if (process.env.FABRIC_LEGACY_TOOLS === "1") {
   register("fabric_batch", "Run a task batch.", batch, (input, { signal }) =>
     dispatchConfiguredBatch(input, executionIdentity(), signal),

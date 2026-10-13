@@ -9,7 +9,7 @@
  *   fabric tasks [state]
  *   fabric watch [--interval 2]
  */
-import { digest } from "./surface.js";
+import { digest, quarantineAction } from "./surface.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -45,6 +45,7 @@ const USAGE = `fabric <command>
   task <objective...>         open a task
   claim <task-id>             atomically claim an open, unowned task
   work-claims                 active work claims and landing lease
+  landing-wait [--timeout N]  block until the landing lease changes or frees (default 900s; exit 124 on timeout)
   landing-push <session> <generation> <branch> [--label <seat>]  verify lease and remote SHA, then push HEAD
   done <task-id>              close a task
   activity [--after-seq N]    list activity, optionally after a cursor
@@ -96,7 +97,7 @@ const command = argv[0] ?? "whoami";
 const commands = new Set([
   "whoami", "send", "inbox", "ack", "note", "tasks", "task", "claim", "done",
   "activity", "watch", "status", "doctor", "dispatch", "adapters", "lanes", "events",
-  "work-claims", "landing-push", "session", "cancel", "output", "fetch",
+  "work-claims", "landing-wait", "landing-push", "session", "cancel", "output", "fetch",
 ]);
 
 if (command === "--help" || command === "-h" || command === "help") {
@@ -229,7 +230,7 @@ if (command === "lanes") {
       console.log(`no lanes for project ${laneWho.project}` +
         (laneWho.cwd === laneWho.project ? "" : ` (cwd ${laneWho.cwd} resolves to it; --project reads another)`));
     for (const row of rows)
-      console.log(`${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${age(row.started_at)}`);
+      console.log(`${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${age(row.started_at)}${row.status === "quarantined" ? ` · ${quarantineAction(row)}` : ""}`);
     if (result.omitted)
       console.log(`${result.omitted} lanes omitted; use provenant lanes ID to see a lane past the 20-row cap`);
   } else {
@@ -540,6 +541,15 @@ try {
     if (argv.length !== 1) throw new Error("usage: fabric work-claims");
     show({ work_claims: store.workClaims(who.project), landing_lease: store.landingLease(who.project) });
     break;
+
+  case "landing-wait": {
+    const timeout = flag("timeout") ?? "900";
+    if (argv.length !== 1 || !/^\d+$/u.test(timeout)) throw new Error("usage: fabric landing-wait [--timeout N]");
+    const waited = await store.waitLanding(who.project, Number(timeout));
+    show({ changed: waited.changed, landing_lease: waited.lease });
+    if (!waited.changed) process.exitCode = 124;
+    break;
+  }
 
   case "landing-push": {
     const session = argv[1], generation = Number(argv[2]), branch = argv[3];

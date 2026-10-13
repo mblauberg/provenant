@@ -42,6 +42,10 @@ Both branches follow this without restating it in two voices:
   reusable trigger, artifact, fixture and ownership boundary. When evidence is
   limited, keep it opt-in and provisional. Follow the repository gate in
   [MAINTAINING.md](../../MAINTAINING.md).
+- **Project skills that extend a global skill** state their own hard rules, so
+  they work without the global skill installed; name each changed default
+  under `Project overrides:`; and keep harness and Fabric mechanics out of
+  everything but coordination skills. Global skills stay project-agnostic.
 - **Trigger fixtures:** positive, negative, boundary and composition cases.
   A keyword match is a candidate, not ground truth. Changes to routing text
   re-run the held-out set.

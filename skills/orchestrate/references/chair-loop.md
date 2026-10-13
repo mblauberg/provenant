@@ -16,6 +16,7 @@ wake, in this order:
    requests, free memory. Evidence wins; correct the state file.
 2. **Land** what is ready under the repository's merge workflow, then prune.
 3. **Review** finished lanes; adjudicate returned reviews.
+   A `quarantined` lane kept its result but not its `.agents/` edits: review the listed `protected.patch`, apply it deliberately in a worktree if adopted; `landable: false` is advisory, so the chair must hold the lane. A `failed` lane with a restore fix still carries the edits: restore `.agents/` to the start commit first.
 4. **Refill** from the frontier up to the resource budget.
 5. **Tracker:** make issues and the board match what started and landed, when
    tracker writes are authorised — following `tracker`'s filing, linking and
@@ -105,7 +106,8 @@ owner already answered; the newest owner decision wins.
 
 1. **Packet.** One file: question, options, constraints, prior owner
    decisions, evidence links.
-2. **Members.** At least three, across at least two model families.
+2. **Members.** At least three, across at least two model families. A project
+   may declare a smaller council; it still spans two families.
 3. **Independent first round.** Members see only the packet. Each returns a
    choice, rationale and what would change its mind.
 4. **Chair reconciles.** State the choice with its rationale, the strongest

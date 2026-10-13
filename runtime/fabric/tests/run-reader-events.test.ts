@@ -82,6 +82,33 @@ it("reads both receipt layouts through one versioned root-relative run interface
   }
 });
 
+function closure(workspace: string, taskId: string, state: string, status: string | null, files: Record<string, unknown>) {
+  const { row, run } = attempt(workspace, "tasks", taskId, state, status);
+  const runDir = join(workspace, ".agent-run", "runs", run);
+  if (state !== "terminal") {
+    row.ended_at = null;
+    writeFileSync(join(runDir, "tasks", taskId, "attempt-001", "attempt.json"), JSON.stringify(row));
+  }
+  for (const [name, value] of Object.entries(files)) writeFileSync(join(runDir, name), JSON.stringify(value));
+}
+
+it("reports when a lane finished, including closures the owner never wrote", async () => {
+  const workspace = fixture();
+  const finished = new Date(Date.now() - 60_000).toISOString();
+  closure(workspace, "unfinished", "running", null, {});
+  closure(workspace, "interrupted", "running", null, { "dispatch-status.json": { status: "interrupted", finished_at: finished } });
+  closure(workspace, "cancelled", "running", null, { "dispatch-status.json": { status: "cancelled", finished_at: finished } });
+  closure(workspace, "unknown-end", "running", null, { "RUN_RECEIPT.json": { status: "interrupted" } });
+  closure(workspace, "resumed", "terminal", "ok", { "dispatch-status.json": { task_id: "resumed", next_attempt: 2,
+    status: "rejected", fix: "dispatch a new run", started_at: finished, finished_at: finished } });
+  const rows = Object.fromEntries((await readRuns(workspace)).runs.map((row) => [row.task_id, row]));
+  expect(rows.unfinished).toMatchObject({ state: "running", ended_at: null });
+  expect(rows.interrupted).toMatchObject({ state: "terminal", status: "interrupted", ended_at: finished });
+  expect(rows.cancelled).toMatchObject({ state: "terminal", status: "cancelled", ended_at: finished });
+  expect(rows["unknown-end"]).toMatchObject({ state: "terminal", status: "interrupted", ended_at: null });
+  expect(rows.resumed).toMatchObject({ state: "terminal", status: "rejected", ended_at: finished });
+});
+
 it("emits terminal and input_required changes with a cursor", async () => {
   const workspace = fixture();
   attempt(workspace, "tasks", "done", "terminal", "ok");
@@ -228,14 +255,14 @@ it("keeps an event follower open by default", async () => {
 
 it("exposes the same run schema through the provenant lanes command", () => {
   const workspace = fixture();
-  attempt(workspace, "tasks", "cli-task", "terminal", "ok");
+  const { row } = attempt(workspace, "tasks", "cli-task", "terminal", "ok");
   const product = resolve(import.meta.dirname, "../../..");
   const result = spawnSync("python3", [join(product, "scripts/provenant"), "lanes", "--json"], {
     cwd: workspace, encoding: "utf8", env: { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: product,
       AGENT_FABRIC_TSX_LOADER: createRequire(import.meta.url).resolve("tsx") },
   });
   expect(result.status, result.stderr).toBe(0);
-  expect(JSON.parse(result.stdout)).toMatchObject({ schema: "fabric.runs.v1", status: "ok", runs: [{ task_id: "cli-task" }] });
+  expect(JSON.parse(result.stdout)).toMatchObject({ schema: "fabric.runs.v1", status: "ok", runs: [{ task_id: "cli-task", status: "ok", started_at: row.started_at, ended_at: row.ended_at }] });
 });
 
 it("reports omitted lanes in text and JSON and lets an id select a lane past the cap", () => {
@@ -494,3 +521,16 @@ it("writes a report larger than the pipe buffer in full before advancing the cur
   expect(first.stdout.trim().split("\n")).toHaveLength(250);
   expect(wait().stdout).toBe("no lanes are running\n");
 }, 120_000);
+
+it("keeps a quarantined lane's result, landing block and patch location", async () => {
+  const workspace = fixture();
+  const { row, run } = attempt(workspace, "tasks", "quarantined", "terminal", "quarantined");
+  row.landable = false;
+  row.quarantine = { reason: "protected_instructions_unverifiable: unavailable snapshot", patches: ["/attempt/protected.patch"], restored: false };
+  writeFileSync(join(workspace, ".agent-run", "runs", run, "tasks/quarantined/attempt-001/attempt.json"), JSON.stringify(row));
+  const result = await readRuns(workspace);
+  expect(result.runs[0]?.status).toBe("quarantined");
+  expect(result.runs[0]?.result_path).toContain("result.md");
+  expect(result.runs[0]?.landable).toBe(false);
+  expect(result.runs[0]?.quarantine).toEqual(row.quarantine);
+});

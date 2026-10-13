@@ -228,11 +228,22 @@ branch had changed that path too before the attempt), Fabric by default
 quarantines the change: it archives the lane's files to `<attempt>/protected.patch`
 (and its index or HEAD to `protected.index.patch` or `protected.head.patch` when
 they differ), commits the start or integration-branch version back to the lane,
-returns the index and files to their starting content and finishes `ok` with a
-warning naming the patches. `.agents/fabric-policy.json` `instruction_changes`
-may instead be `allow` (keep an ordinary edit, with a warning) or `deny` (fail
-with `protected_instructions_changed`). A conflict, special file, replaced root,
-lane process left running or failed quarantine fails under any policy. If OS confinement is unavailable, agy write
+returns the index and files to their starting content. A successful provider
+then finishes `quarantined` only when the restore was verified: its result
+stays visible, `landable: false` is an advisory marker for the chair (not
+enforced landing), and status/digest/lanes name the reason and patches for chair
+review.
+`.agents/fabric-policy.json` `instruction_changes` may instead be `allow` (keep
+an ordinary edit, with a warning) or `deny` (retain the edit for review without
+restoration). Denied edits, failed restoration and unverifiable checks leave
+edits on the lane, so the lane ends `failed` (fix: restore `.agents/` to the
+start commit before landing) with its output and patches retained and listed;
+incomplete or interrupted providers keep their failure outcomes.
+`protected.patch` may be empty for an index-only edit or carry
+an unavailable-diff comment for unsafe states, with `quarantine.patch_error`
+explaining capture failure. Spared processes alone do not prove instruction
+edits. Writers stage proposed instruction edits outside `.agents/` for separate
+review. If OS confinement is unavailable, agy write
 dispatch is refused; other wrapped writer receipts warn that writes are
 unconfined. Setting `PROVENANT_NO_OS_CONFINEMENT=1` has the same effect on new
 wrapped attempts.
@@ -364,9 +375,11 @@ named session is never silently relaunched. `fresh: true` then starts a new
 session primed with the last clean result, as `handoff` does.
 
 Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, `detail`,
-`tail_chars` and `fields`. Terminal brief rows end with the last 1,200 characters
-of their result (`tail_chars` 0–4,000, 0 disables; the total across rows is
-bounded), so a short answer needs no `result.md` read. `detail: full` keeps a
+`tail_chars` and `fields`. A terminal brief row ends with the last 1,200
+characters of its result the first time the session sees that lane, so a short
+answer needs no `result.md` read and batch polls do not resend finished lanes.
+Requesting one lane, or passing `tail_chars` (0–4,000; 0 disables; the total
+across rows is bounded), shows the tail again. `detail: full` keeps a
 one-line summary per attempt instead of a second copy of the row; `fields`
 returns only the named keys (`fields:["attempts"]` gives the raw history).
 While lanes run, the text ends with a hint to block with `provenant lanes --wait
@@ -434,9 +447,11 @@ has `status: ok|unknown` and `runs`; read failure is `unknown` with an `error`,
 never an apparently empty successful list. The default list covers active and
 recent runs (at most 20 task rows); an ID reads that run or task. Each row has
 `id`, `run_id`, `task_id`, `run_path`, `state`, `status`, `route`, `model`,
-`started_at`, `last_progress_at`, `pgid`, `pgid_alive`, `result_path`,
-`receipt_path`, `writer`, `worktree` and `attempt`. Paths are relative to the
-project's `.agent-run` root. Missing facts are `null`; `pgid_alive: null` means
+`started_at`, `ended_at`, `last_progress_at`, `pgid`, `pgid_alive`,
+`result_path`, `receipt_path`, `writer`, `worktree` and `attempt`. Paths are
+relative to the project's `.agent-run` root. `ended_at` is `null` until the
+attempt is terminal; a closure the owner never wrote takes the run's recorded
+finish time. Missing facts are `null`; `pgid_alive: null` means
 the process identity cannot be verified. Both `tasks/<id>/attempt-NNN/` and
 `dispatch/tasks/<id>/attempt-NNN/` receipts are read internally. Fabric's status
 and output readers use the same underlying receipt scanner; consumers should
@@ -539,7 +554,12 @@ full detail is requested or ownership is present.
 
 `fabric_landing_lease` separately acquires one repository-wide landing lease
 with the expected remote integration SHA. It has a holder, expiry, generation,
-verify and release operations. An expired lease can be taken over; the prior
+verify and release operations. To wait for another chair to land, use
+`fabric_landing_lease` with `action: "wait"` and `wait_seconds` (clamped to 55) or the
+shell `fabric landing-wait --timeout 900` (exit 124 on timeout) instead of
+sleep loops; both return when the holder, generation or release state changes.
+`expected_sha` may be short or uppercase and is resolved with Git in the
+project; ambiguous or unknown values are refused. An expired lease can be taken over; the prior
 holder and new generation are recorded in activity. Before pushing, run
 `fabric landing-push <session-id> <generation> <branch> --label <seat>` from the
 landing checkout, using the same label as the MCP lease holder. Alternatively,

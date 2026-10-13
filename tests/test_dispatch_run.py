@@ -7,6 +7,7 @@ import io
 import importlib.util
 import json
 import os
+import shutil
 import signal
 import stat
 import subprocess
@@ -920,6 +921,33 @@ def test_worker_question_detection_is_exact_and_fail_closed(
     assert attempt["outcome"] == outcome
     if status == "ok":
         assert "question" not in attempt
+
+
+@pytest.mark.parametrize(("result", "status", "outcome"), [
+    (None, "blocked", "question"),
+    ('{"record_type":"provenant-worker-terminal","classification":"question","question":{"code":"needs_input","prompt":"x"},"extra":true}\n',
+     "failed", "terminal_envelope_invalid"),
+    ("plain result\n", "quarantined", "quarantined"),
+], ids=["question", "invalid-envelope", "plain"])
+def test_quarantined_lane_gets_the_same_question_and_envelope_checks(tmp_path: Path, monkeypatch, result, status, outcome) -> None:
+    run_dir = make_run(tmp_path, "quarantine-envelope")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("prompt\n", encoding="utf-8")
+    adapter = tmp_path / "adapter"
+    write_question_adapter(adapter, result=result)
+    adapter.write_text(adapter.read_text().replace(
+        '"status":"ok"', '"status":"quarantined","landable":false,"quarantine":{"reason":"protected_instructions_changed","patches":[],"restored":true}'))
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, "CF_DISPATCH", adapter)
+    args = module.parser().parse_args([
+        "--run-dir", str(run_dir), "--task-id", "case", "--adapter", "codex",
+        "--prompt-file", str(prompt), "--alias", "workhorse", "--role", "worker",
+    ])
+    monkeypatch.chdir(tmp_path)
+    module.dispatch(args)
+    attempt = json.loads((run_dir / "dispatch/tasks/case/attempt-001/attempt.json").read_text())
+    assert attempt["status"] == status
+    assert attempt["outcome"] == outcome
 
 
 def test_valid_worker_question_cannot_override_nonzero_provider_exit(tmp_path: Path, monkeypatch) -> None:
@@ -2236,11 +2264,20 @@ def test_writer_branch_name_warns_in_receipt_without_refusing(tmp_path: Path) ->
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Make a change\n", encoding="utf-8")
     worktree = make_worktree(tmp_path)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(exist_ok=True)
+    write_executable(
+        bin_dir / "claude",
+        """#!/usr/bin/env bash
+        cat >/dev/null
+        printf 'PWD=%s\\n' "$PWD"
+        """,
+    )
     result = run_writer_dispatch(tmp_path, run_dir, prompt, "--access-mode", "worktree_write",
                                  "--worktree", str(worktree))
     receipt = json.loads(result.stdout.splitlines()[-1])
-    assert result.returncode in {0, 1}, result.stderr + result.stdout
-    assert receipt["status"] != "invalid_worktree"
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert receipt["status"] == "ok"
     assert any("branch writer is outside" in note for note in receipt["fabric"]["warnings"])
     attempt = json.loads((run_dir / "tasks/task-1/attempt-001/attempt.json").read_text())
     assert any("branch writer is outside" in note for note in attempt["warnings"])
@@ -2252,6 +2289,18 @@ def test_writer_branch_name_warns_in_receipt_without_refusing(tmp_path: Path) ->
     receipt = json.loads(result.stdout.splitlines()[-1])
     assert receipt["status"] != "invalid_worktree"
     assert not any("branch " in note and "outside" in note for note in receipt["fabric"]["warnings"])
+
+
+@pytest.mark.parametrize("executable", [
+    "claude", "codex", "herdr", "pi", "agy", "cursor-agent", "copilot", "kiro-cli", "opencode",
+])
+def test_default_suite_blocks_provider_clis(executable: str, _provider_cli_stub_dir: Path) -> None:
+    path = shutil.which(executable)
+    assert path is not None
+    assert Path(path).parent == _provider_cli_stub_dir
+    result = subprocess.run([path], text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert result.returncode == 97
+    assert "blocked real provider CLI" in result.stderr
 
 
 def test_primary_checkout_writer_is_rejected(tmp_path: Path) -> None:
@@ -3886,3 +3935,52 @@ def test_remote_writer_preflight_uses_host_signin_and_effective_writer_confineme
     value = module.preflight_tasks([{'id': 'writer', 'adapter': 'codex', 'model': 'gpt-6.1-sol',
         'access_mode': 'worktree_write', 'worktree': str(worktree), 'sandbox': sandbox, 'prompt': 'fixture only'}], repo)
     assert (value.get('error') or value['status']) == expected, value
+
+
+@pytest.mark.parametrize('invalid_digest', [False, True])
+def test_dispatch_retains_quarantined_result_without_clean_success(tmp_path, monkeypatch, invalid_digest):
+    run_dir = make_run(tmp_path, 'quarantined')
+    disable_memory_admission_floor(tmp_path)
+    prompt = tmp_path / 'prompt.md'
+    prompt.write_text('hello')
+    adapter = tmp_path / 'adapter'
+    write_success_adapter(adapter)
+    text = adapter.read_text().replace('"status":"ok"', '"status":"quarantined","landable":false,"quarantine":{"reason":"protected_instructions_changed","patches":["protected.patch"],"restored":false}')
+    if invalid_digest:
+        text = text.replace('digest="sha256:', 'digest="invalid-sha256:')
+    adapter.write_text(text + '\nexit 1\n')
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, 'CF_DISPATCH', adapter)
+    monkeypatch.chdir(tmp_path)
+    args = module.parser().parse_args([
+        '--run-dir', str(run_dir), '--task-id', 'review', '--adapter', 'codex',
+        '--prompt-file', str(prompt), '--alias', 'scout', '--role', 'worker'])
+    assert module.dispatch(args) == 1
+    record = json.loads((run_dir / 'dispatch/tasks/review/attempt-001/attempt.json').read_text())
+    assert record['status'] == ('failed' if invalid_digest else 'quarantined')
+    if invalid_digest:
+        assert record['outcome'] == 'adapter_receipt_invalid'
+        canonical = json.loads((run_dir / 'tasks/review/attempt-001/attempt.json').read_text())
+        assert canonical['status'] == 'failed'
+    if not invalid_digest:
+        assert record['landable'] is False
+        assert record['quarantine']['patches'] == ['protected.patch']
+        assert (run_dir / record['result']['path']).read_text() == 'OK\n'
+        canonical = json.loads((run_dir / 'tasks/review/attempt-001/attempt.json').read_text())
+        assert canonical['status'] == 'quarantined'
+        assert canonical['landable'] is False
+        assert 'review quarantine' in canonical['digest']
+        import batch_run
+        claimed = {**record, 'attempt_digest': module.digest(run_dir / record['attempt_path'])}
+        child = batch_run._validate_child_record(
+            {'id': 'review', 'adapter': 'codex', 'alias': 'scout', 'role': 'worker'}, claimed, run_dir, 1)
+        assert child['status'] == 'quarantined'
+        assert child['landable'] is False
+        assert child['quarantine'] == record['quarantine']
+        import run_controls
+        retained, *_ = run_controls._attempt(run_dir, 'review', 'attempt-001')
+        assert retained['status'] == 'quarantined'
+        monkeypatch.setenv('PROVENANT_RUN_TOKEN', 'fixture-token')
+        monkeypatch.setenv('PROVENANT_RUN_DIR', str(run_dir))
+        module.close_mcp_run(run_dir)
+        assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'quarantined'

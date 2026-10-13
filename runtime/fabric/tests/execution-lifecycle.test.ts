@@ -7,6 +7,7 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeFileAtomic } from "./atomic-write.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -743,7 +744,7 @@ describe("cancellation", () => {
     }) + "\n");
     // The CLI refuses to signal its own process group, leaving this provider
     // live and making the recorded stop outcome explicitly unconfirmed.
-    writeFileSync(join(runDir, "dispatch-provider.json"), JSON.stringify({
+    writeFileAtomic(join(runDir, "dispatch-provider.json"), JSON.stringify({
       run_token: runToken,
       provider_pid: providerPid,
       provider_pgid: cliPid,
@@ -823,7 +824,7 @@ describe("cancellation", () => {
       owner_stderr: `${runDir}-owner.stderr.log`,
       task_id: "cli-signalled-owner-task",
     }) + "\n");
-    writeFileSync(join(runDir, "dispatch-provider.json"), JSON.stringify({
+    writeFileAtomic(join(runDir, "dispatch-provider.json"), JSON.stringify({
       run_token: runToken,
       provider_pid: providerPid,
       provider_pgid: cliPid,
@@ -997,7 +998,7 @@ describe("orphan reaping", () => {
       task_id: "still-running-task",
     }) + "\n");
     // This protected group makes the reaper refuse to signal the test host.
-    writeFileSync(join(runDir, "dispatch-provider.json"), JSON.stringify({
+    writeFileAtomic(join(runDir, "dispatch-provider.json"), JSON.stringify({
       run_token: runToken,
       provider_pid: providerPid,
       provider_pgid: process.pid,
@@ -1311,7 +1312,7 @@ describe("route pools", () => {
     expect([byId["pair-1"]?.pick_reason, byId["pair-2"]?.pick_reason]).toEqual(["strong council 1/2", "strong council 2/2"]);
     expect(new Set([byId["pair-1"]?.adapter, byId["pair-2"]?.adapter])).toEqual(new Set(["claude", "codex"]));
     expect(byId["adhoc-1"]).toMatchObject({ adapter: "codex", model: "gpt-6-luna", effort: "low", pick_reason: "ad-hoc council 1/2" });
-    expect(byId["adhoc-2"]).toMatchObject({ adapter: "claude", model: "haiku", pick_reason: "ad-hoc council 2/2" });
+    expect(byId["adhoc-2"]).toMatchObject({ adapter: "claude", model: "claude-haiku-5-5", pick_reason: "ad-hoc council 2/2" });
     expect(byId.plain).toEqual({ id: "plain", prompt: "p", adapter: "codex" });
     expect(byId.both).toEqual({ id: "both", prompt: "p", model: "gpt-6-luna" });
     expect(expanded.warnings).toContain("route ignored: model gpt-6-luna was named explicitly");
@@ -1401,7 +1402,7 @@ describe("route pools", () => {
     const runDir = String((done.paths as Record<string, unknown>).run_dir);
     const manifest = JSON.parse(readFileSync(join(runDir, "_owner", "task-manifest.json"), "utf8"));
     expect(manifest.tasks.map((task: Record<string, unknown>) => [task.id, task.adapter, task.model, task.pick_reason])).toEqual([
-      ["council-1", "codex", "gpt-6-luna", "ad-hoc council 1/2"], ["council-2", "claude", "haiku", "ad-hoc council 2/2"]]);
+      ["council-1", "codex", "gpt-6-luna", "ad-hoc council 1/2"], ["council-2", "claude", "claude-haiku-5-5", "ad-hoc council 2/2"]]);
   });
 
   it("lets an explicit model win over a pool, with a warning", async () => {

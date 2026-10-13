@@ -28,7 +28,7 @@ function store() {
 
 function lane(id: string, state = "terminal", status: string | null = "ok", taskId: string | null = id): RunRead {
   return { id, run_id: `mcp-${id}`, task_id: taskId, run_path: `runs/${id}`, state, status, route: null, model: null,
-    started_at: null, last_progress_at: null, pgid: null, pgid_alive: null, result_path: null, receipt_path: null,
+    started_at: null, ended_at: null, last_progress_at: null, pgid: null, pgid_alive: null, result_path: null, receipt_path: null,
     writer: false, worktree: null, attempt: 1 };
 }
 
@@ -91,6 +91,15 @@ it("keys a legacy lane without a task id the same way as fabric_status", async (
   const waiter = run(opened, [[lane("legacy-display-id", "terminal", "ok", null)].map((row) => ({ ...row, run_id: "mcp-legacy" }))]);
   expect(await waiter.code).toBe(0);
   expect(waiter.output.join("")).toBe("no lanes are running\n");
+});
+
+it("prints a quarantined lane's review action", async () => {
+  const waiter = run(store(), [[{ ...lane("review", "terminal", "quarantined"),
+    quarantine: { reason: "protected_instructions_changed", patches: ["/attempt/protected.patch"] } } as RunRead]]);
+  expect(await waiter.code).toBe(0);
+  const text = waiter.output.join("");
+  expect(text).toContain("not landable; review quarantine: protected_instructions_changed");
+  expect(text).toContain("/attempt/protected.patch");
 });
 
 function timed(opened: Store, runs: RunRead[][], options: { all?: boolean; timeoutSeconds?: number }) {

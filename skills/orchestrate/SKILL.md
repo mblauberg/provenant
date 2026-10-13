@@ -7,11 +7,12 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
 
 ## Quickstart
 
-1. [Native first](references/routing-and-tiers.md#native-first): run your own provider's models as native subagents (Claude Code: Agent tool `opus`/`sonnet`; Codex: its subagents), not Fabric. Use Fabric for other providers (agy's Claude 4.6 included), long or detached runs, and sandboxed worktree writers.
+1. [Native first](references/routing-and-tiers.md#native-first): run your own provider's models as native subagents (Claude Code: Agent tool `opus`/`sonnet`/`haiku`; Codex: its subagents), not Fabric. Use Fabric for other providers (agy's Claude 4.6 included), long or detached runs, and sandboxed worktree writers.
 2. Call `fabric_dispatch` with `prompt` or `prompt_file`, `adapter` or `model`, and optional `effort`. `model` also takes `adapter/id[@effort]`; `fabric_adapters` with `models: <adapter>` lists live ids.
 3. For writers, pass `mode: "worktree_write"` and the registered `worktree`,
    named per `setup-repo`'s branch naming doctrine; the task id defaults to that
-   same branch-derived string. Before dispatch, acquire and verify an advisory
+   same branch-derived string. Before dispatch, [confirm the connection's
+   project](references/fabric-identity.md), then acquire and verify an advisory
    `fabric_work_claim` for the issue or repository-relative path set with a
    stable unique `session_id`; renew it while work continues and release it when
    finished. Do not dispatch against a conflicting live claim; dispatch does not
@@ -28,7 +29,13 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
 - Partition writers into separate registered worktrees. The chair owns authority, decisions, user communication and the final synthesis. A worker's report is a claim: verify commits, counts and tests against the live tree and transcript.
 - Use the [HARNESS.md](../../HARNESS.md) risk ladder for review. It also governs provider choice and claim/ack; do not duplicate those policies here.
 - Send answer-bearing external work through Fabric request/reply when available. If unavailable, mark `FABRIC-ROUNDTRIP-UNAVAILABLE` and keep the direct result in a named artifact. Herdr observes and sends steering only.
-- Choose an explicit model when the user or task names one. Otherwise pass `route: "strong"`, `"bulk"`, `"design"` or `"writing"`; add `rotate: true` to spread load, `council: N` for N runs across families, or `models: [...]` for an ad-hoc council. `flagship`, `workhorse` and `scout` still work. `provenant routes` shows each pool with live availability, and `fabric_adapters` shows the current catalogue and health. Unknown models and unsupported effort should run with a reported note or substitution when executable; see [routing-and-tiers.md](references/routing-and-tiers.md).
+- Choose an explicit model when the user or task names one. Otherwise pass `route: "strong"`, `"bulk"`, `"design"` or `"writing"`; add `rotate: true` to spread load, `council: N` for N runs across families, or `models: [...]` for an ad-hoc council. `flagship`, `workhorse` and `scout` still work. `provenant routes` shows each pool with live availability, and `fabric_adapters` shows the current catalogue and health. An unknown model or unsupported effort runs with a recorded note or substitution when executable; see [routing-and-tiers.md](references/routing-and-tiers.md).
+- Dispatch defaults:
+  - Fan out 2-4 independent lanes; go wider only for independent, checkable slices.
+  - Set the route or model on every spawn, native subagents included, rather than inheriting the session default; set effort where the tool exposes it, otherwise record the limit. Pick by task class (`bulk`, `strong`, `design`, `writing`), not a hardcoded model name.
+  - Brief in five fields: goal, scope/paths, constraints, output shape and length, verification.
+  - Keep tool output bounded: redirect large output to a file and read slices. Avoid unbounded `gh ... --limit 1000` and `rg --files` over run directories.
+  - Wait once: run one `provenant lanes --wait` in the background, or one status wait. Never sleep or poll loops.
 - Prefer per-dispatch flags. Editing global provider configuration requires explicit authority.
 - A chair running lanes across many wakes follows [chair-loop.md](references/chair-loop.md), including its reviewer git-verb denylist and decision council.
 - Before landing, acquire a work claim if none is live for this session, verify
@@ -38,7 +45,10 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
   for the final push; it checks the holder, generation and remote SHA immediately
   before pushing. The label must match the MCP lease holder; a matching
   `AGENT_FABRIC_LABEL` export also works. Renew an expiring lease and release it
-  after an aborted landing.
+  after an aborted landing. To wait for another chair's lease, use
+  `fabric_landing_lease` `action: "wait"` (or shell `fabric landing-wait --timeout N`), not sleep loops.
+  A project whose landing tool takes and releases the lease itself says so in
+  its project skill; the chair then leaves the lease to that tool.
 - Keep full worker output in run files and return only the digest and path; brief native subagents to the [~150-word result digest](references/orchestration-contract.md#native-result-digest). For liveness, use `fabric_status`; see [worker-liveness.md](references/worker-liveness.md) for degraded runs. Size alone proves nothing.
 - On a terminal result, record `adapter/model@effort` from the receipt; derive family from it. Native subagents record `claude/<model>@<effort> (anthropic; resolved)` from the Agent tool's model parameter, never from self-report.
 

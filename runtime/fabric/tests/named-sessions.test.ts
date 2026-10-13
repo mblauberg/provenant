@@ -3,6 +3,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import Database from "better-sqlite3";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { writeFileAtomic } from "./atomic-write.mjs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -502,7 +503,7 @@ it("releases a finished turn whose retained provider record names a reused pid w
       (value) => value.runs?.[0]?.state === "running")).runs[0];
     // The provider's record outlives it, and its pid now belongs to another process.
     const token = JSON.parse(readFileSync(join(row.run_dir, "dispatch-status.json"), "utf8")).run_token as string;
-    writeFileSync(join(row.run_dir, "dispatch-provider.json"), JSON.stringify({
+    writeFileAtomic(join(row.run_dir, "dispatch-provider.json"), JSON.stringify({
       run_token: token, provider_pid: reused.pid, provider_pgid: reused.pid, provider_started_at: null }));
     writeFileSync(join(row.run_dir, "cancel"), "");
     expect(await until(() => chair.call("session", { action: "inspect", name: "reuse" }), (value) => value.active_run_id === null))
@@ -584,7 +585,7 @@ it("releases a resume that failed before spawning despite a finished turn's stal
       started_at: first.started_at, finished_at: new Date().toISOString() }));
     // It also left a provider record with no start time; its pid now belongs to another process.
     const token = JSON.parse(readFileSync(join(first.run_dir, "dispatch-status.json"), "utf8")).run_token as string;
-    writeFileSync(join(first.run_dir, "dispatch-provider.json"), JSON.stringify({
+    writeFileAtomic(join(first.run_dir, "dispatch-provider.json"), JSON.stringify({
       run_token: token, provider_pid: reused.pid, provider_pgid: reused.pid, provider_started_at: null }));
     writeFileSync(join(project.linked, "again.md"), "again");
     const thrown = faulty("throw");
