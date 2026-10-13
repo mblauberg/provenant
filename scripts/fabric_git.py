@@ -13,8 +13,11 @@ from pathlib import Path
 
 CHUNK_BYTES = 32 * 1024
 MAX_BUNDLE_BYTES = 64 * 1024 * 1024
-GIT_VERBS = {'git-upload', 'git-result', 'git-download'}
+MAX_HAVE_CANDIDATES = 64
+MAX_BUNDLE_HEADER_BYTES = 64 * 1024
+GIT_VERBS = {'git-have', 'git-upload', 'git-result', 'git-download'}
 WRITER_MODES = {'worktree_write', 'write', 'rw', 'worktree'}
+
 
 def owner_marker(root, git_dir):
     return Path(root) / 'writer-owners' / (hashlib.sha256(str(git_dir).encode()).hexdigest() + '.json')
@@ -118,11 +121,12 @@ class CodeTransport:
             temporary = Path(file.name)
         temporary.replace(path)
 
-    def bundle(self, repo, ref, path):
+    def bundle(self, repo, ref, path, exclude=None):
+        """Thin when the receiver already holds `exclude`; never more than 64 MiB."""
         if not path.exists():
             with tempfile.TemporaryDirectory(dir=path.parent) as scratch:
                 temporary = Path(scratch) / 'bundle'
-                self.git(repo, 'bundle', 'create', str(temporary), ref)
+                self.git(repo, 'bundle', 'create', str(temporary), ref, *(['^' + exclude] if exclude else []))
                 if temporary.stat().st_size > MAX_BUNDLE_BYTES:
                     self.fail('code_transport_too_large', 'Git bundle limit is 64 MiB')
                 temporary.replace(path)
@@ -131,8 +135,26 @@ class CodeTransport:
             self.fail('code_transport_too_large', 'Git bundle limit is 64 MiB')
         return {'size': size, 'sha256': hashlib.sha256(path.read_bytes()).hexdigest()}
 
+    def prerequisites(self, bundle):
+        """Read the bounded bundle header; prerequisites are commits the receiver must hold."""
+        with open(bundle, 'rb') as handle:
+            header = handle.read(MAX_BUNDLE_HEADER_BYTES)
+        if b'\n\n' not in header:
+            self.fail('invalid_code_transport', 'Bundle header is missing or too large')
+        lines = header.split(b'\n\n', 1)[0].decode('ascii', errors='replace').splitlines()
+        if lines[:1] not in (['# v2 git bundle'], ['# v3 git bundle']):
+            self.fail('invalid_code_transport', 'Unsupported bundle format')
+        values = [line[1:].split(' ', 1)[0] for line in lines[1:] if line.startswith('-')]
+        if len(values) > MAX_HAVE_CANDIDATES:
+            self.fail('invalid_code_transport', 'Bundle names too many prerequisites')
+        return [self.oid(value) for value in values]
+
     def import_history(self, repo, bundle, source, head, ref, base=None):
         """Untrusted packs stay isolated; publish only the approved reachable graph."""
+        prerequisites = self.prerequisites(bundle)
+        # Read-only check against the real repository: every prerequisite must
+        # already be complete here before any object is accepted.
+        self.git(repo, 'bundle', 'verify', str(bundle))
         with tempfile.TemporaryDirectory(prefix='git-quarantine-', dir=self.f.root) as scratch:
             quarantine = Path(scratch)
             format = self.git(repo, 'rev-parse', '--show-object-format')
@@ -140,6 +162,8 @@ class CodeTransport:
             # Prerequisites and previously accepted history remain readable,
             # while every new object is written only in this temporary repository.
             (quarantine / 'objects/info/alternates').write_text(str(self.w.common_git_dir(repo) / 'objects') + '\n')
+            for index, prerequisite in enumerate(prerequisites):
+                self.git(quarantine, 'update-ref', f'refs/prerequisites/{index}', prerequisite)
             self.git(quarantine, 'bundle', 'verify', str(bundle))
             self.git(quarantine, 'bundle', 'unbundle', str(bundle))
             if self.git(quarantine, 'cat-file', '-t', head) != 'commit':
@@ -148,10 +172,36 @@ class CodeTransport:
                 self.git(quarantine, 'merge-base', '--is-ancestor', base, head)
             self.git(quarantine, 'update-ref', source, head)
             approved = quarantine / 'approved.bundle'
-            self.git(quarantine, 'bundle', 'create', str(approved), source)
+            self.git(quarantine, 'bundle', 'create', str(approved), source, *('^' + value for value in prerequisites))
             self.git(repo, 'fetch', '--no-tags', '--no-write-fetch-head', str(approved), source + ':' + ref)
 
-    def outgoing(self, project, request, cwd, identifier, host):
+    @staticmethod
+    def writer_tasks(request):
+        tasks = request.get('tasks') or [request]
+        base = {k: v for k, v in request.items() if k != 'tasks'}
+        return [index for index, task in enumerate(tasks)
+            if str({**base, **task}.get('mode', 'read_only')).lower() in WRITER_MODES]
+
+    def common_base(self, client, project, repo, base):
+        """Ask the peer which first-parent ancestor of `base` it already holds."""
+        depth = int(self.git(repo, 'rev-list', '--first-parent', '--count', base))
+        offsets = []
+        step = 1
+        while step < depth and len(offsets) < MAX_HAVE_CANDIDATES:
+            offsets.append(step)
+            step *= 2
+        if not offsets:
+            return None
+        candidates = self.git(repo, 'rev-parse', *(f'{base}~{offset}' for offset in offsets)).split()
+        response = client.call('git-have', {'project_path': project, 'input': {'candidates': candidates}}, write=True)
+        if not response.get('ok'):
+            self.fail(response['error']['code'], response['error']['message'])
+        have = response['result'].get('have')
+        if not isinstance(have, list) or len(have) > 1 or any(value not in candidates for value in have):
+            self.fail('bad_response', 'Peer named a commit outside the offered candidates')
+        return have[0] if have else None
+
+    def outgoing(self, project, request, cwd, identifier, host, client):
         """Freeze one committed input for each writer task; dirty files stay local."""
         clean = dict(request)
         tasks = clean.get('tasks') or [clean]
@@ -198,8 +248,9 @@ class CodeTransport:
                     base = self.oid(existing.stdout.strip())
                 else:
                     self.git(repo, 'update-ref', ref, base, '0' * len(base))
+                exclude = None if (path / 'input.bundle').exists() else self.common_base(client, project, repo, base)
                 meta = self.metadata({'base_revision': base, 'branch': branch, 'worktree': local.name,
-                    **self.bundle(repo, ref, path / 'input.bundle')})
+                    **self.bundle(repo, ref, path / 'input.bundle', exclude)})
                 self.write_json(saved, {'host': host, 'operation_id': identifier, 'metadata': meta})
             bindings.append({'index': index, 'transfer_id': transfer_id, **meta})
         if bindings:
@@ -282,6 +333,19 @@ class CodeTransport:
         if verb == 'git-result':
             self.h.fields(request, {'id'}, {'id'}, 'invalid_request')
             return self.result(project, request['id'])
+        if verb == 'git-have':
+            self.h.fields(request, {'candidates'}, {'candidates'}, 'invalid_request')
+            candidates = request['candidates']
+            if not isinstance(candidates, list) or len(candidates) > MAX_HAVE_CANDIDATES:
+                self.fail('invalid_code_transport', 'Offer at most 64 candidate commits')
+            candidates = [self.oid(value) for value in candidates]
+            repo = self.repo(project, receiving=True)
+            present = self.git(repo, 'rev-list', '--no-walk=unsorted', '--ignore-missing', *candidates).split() if candidates else []
+            # Only a commit reachable from a ref is complete enough to be a
+            # bundle prerequisite; with none, the sender ships full history.
+            nearest = next((value for value in candidates if value in present and
+                self.git(repo, 'for-each-ref', '--count=1', '--format=%(objectname)', '--contains', value)), None)
+            return {'have': [nearest] if nearest else []}
         allowed = {'operation_id', 'metadata', 'offset', 'data'} if verb == 'git-upload' else {'operation_id', 'offset'}
         self.h.fields(request, allowed, allowed, 'invalid_request')
         identifier = self.f.operation_id(request)
@@ -515,6 +579,8 @@ class CodeTransport:
                 if self.git(target, 'symbolic-ref', '--short', 'HEAD') != context['branch']:
                     self.fail('writer_verification_failed', 'Writer worktree changed its branch identity')
                 head = self.oid(self.git(target, 'rev-parse', 'HEAD'))
+                if head == context['base_revision']:
+                    self.fail('writer_verification_failed', 'Writer has not committed beyond its transported base')
                 verification = self.w.verify_claim(target, target, head, self.w.common_git_dir(repo), base_revision=context['base_revision'])
                 if verification['status'] != 'accepted':
                     self.fail('writer_verification_failed', verification['reason'])
@@ -528,7 +594,7 @@ class CodeTransport:
                     self.fail('writer_result_changed', 'Writer changed after its result was verified')
                 ref = f'refs/provenant/hosts/{self.f.config.local_host}/{result_id}/result'
                 self.git(repo, 'update-ref', ref, head)
-                info = self.bundle(repo, ref, path / 'result.bundle')
+                info = self.bundle(repo, ref, path / 'result.bundle', context['base_revision'])
                 self.write_json(saved, receipt)
                 value = {'status': 'ok', 'verification': receipt, **info}
                 self.write_json(self.state_file('verified-writers', f'{context["operation_id"]}-{context["index"]}'), value)

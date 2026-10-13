@@ -120,7 +120,7 @@ class LaneFederation:
         request = params.get('input', {})
         if not isinstance(request, dict):
             raise self.h.HostError('invalid_request', 'Lane input must be an object')
-        if verb in {'git-upload', 'git-result', 'git-download'}:
+        if verb in {'git-have', 'git-upload', 'git-result', 'git-download'}:
             return self.code().peer(verb, project, request)
         if verb == 'operation':
             identifier = self.operation_id(request)
@@ -624,20 +624,23 @@ class LaneFederation:
                 bound_writer = writer is not None
                 if writer and tuple(writer[:3]) != (project, host, digest):
                     raise self.h.HostError('operation_conflict', 'Writer operation already binds another host or request')
-                clean = self.code().outgoing(project, clean, cwd, identifier, host)
-                if clean.get('code_transport') and not writer:
+                if self.code().writer_tasks(clean) and not writer:
                     with self.database() as db:
                         db.execute('INSERT INTO writer_dispatches VALUES (?,?,?,?,0)', (identifier, project, host, digest))
                     writer = (project, host, digest, 0)
-                self.code().record_request(project, host, identifier, action, clean)
             elif action == 'handoff':
                 self.code().record_request(project, host, identifier, action, clean)
             previous = None
             if action in WRITES:
                 with self.database() as db:
                     previous = db.execute('SELECT project,host,verb,payload FROM pending WHERE id=?', (identifier,)).fetchone()
-                current = (project, host, action, json.dumps(clean, sort_keys=True))
-                if previous and tuple(previous) != current:
+                # Code transport bindings are frozen per operation, so a retry
+                # compares the request without them.
+                stored = json.loads(previous[3]) if previous else None
+                if stored:
+                    stored.pop('code_transport', None)
+                if previous and (tuple(previous[:3]) != (project, host, action)
+                        or stored != json.loads(json.dumps(clean))):
                     raise self.h.HostError('operation_conflict', 'Pending operation ID already belongs to another request')
             # This contact and placement check happen before persisting/sending a
             # mutation. Only an unreachable implicit placement may fall back.
@@ -658,7 +661,19 @@ class LaneFederation:
                     return {'local': True, 'fallback': {'from_host': host, 'reason': reason},
                         'digest': f'local fallback from {host}: {reason}'}
                 return self.rejection(contact)
+            if writer:
+                # Bundles are built only after contact, from what the peer
+                # already holds; nothing has been sent yet, so a failure here
+                # is an ordinary rejection.
+                try:
+                    clean = self.code().outgoing(project, clean, cwd, identifier, host, client)
+                except self.h.HostError as exc:
+                    if exc.code in {'timeout', 'unreachable', 'bad_response', 'hosts_cancelled', 'peer_command_failed'}:
+                        return {'status': 'rejected', 'host': host, 'error': exc.code, 'fix': str(exc)}
+                    raise
+                self.code().record_request(project, host, identifier, action, clean)
             if action in WRITES:
+                current = (project, host, action, json.dumps(clean, sort_keys=True))
                 with self.database() as db:
                     db.execute('INSERT OR REPLACE INTO pending VALUES (?,?,?,?,?)', (identifier, *current))
                     if writer:

@@ -1001,6 +1001,55 @@ class LaneLoopbackContracts(unittest.TestCase):
         config.pop('projects')
         config_path.write_text(json.dumps(config))
         self.assertEqual(self.peer('git-upload', **request)['error']['code'], 'project_not_configured')
+        self.assertEqual(self.peer('git-have', candidates=[base])['error']['code'], 'project_not_configured')
+
+    def test_peer_git_have_offers_only_ref_reachable_candidates(self):
+        git, base, _ = self.writer_fixture()
+        missing = 'f' * len(base)
+        for changed, code in [
+            ({'candidates': [base] * 65}, 'invalid_code_transport'),
+            ({'candidates': ['HEAD']}, 'invalid_revision'),
+            ({'candidates': [base], 'ref': 'refs/heads/main'}, 'invalid_request')]:
+            with self.subTest(code=code):
+                self.assertEqual(self.peer('git-have', **changed)['error']['code'], code)
+        self.assertEqual(self.peer('git-have', candidates=[missing, base])['result']['have'], [])
+        git(self.peer_workspace, 'fetch', '-q', str(self.workspace), 'HEAD:refs/heads/main')
+        self.assertEqual(self.peer('git-have', candidates=[missing, base])['result']['have'], [base])
+        # An object that no ref reaches is never offered as a bundle prerequisite.
+        dangling = git(self.peer_workspace, 'commit-tree', base + '^{tree}', '-p', base, '-m', 'dangling')
+        self.assertEqual(self.peer('git-have', candidates=[dangling, base])['result']['have'], [base])
+
+    def test_writer_bundles_only_history_the_peer_lacks(self):
+        git, _, local = self.writer_fixture()
+        (local / 'large.bin').write_bytes(os.urandom(200_000))
+        git(local, 'add', 'large.bin')
+        git(local, 'commit', '-qm', 'history the peer already holds')
+        git(self.peer_workspace, 'fetch', '-q', str(local), 'HEAD:refs/heads/main')
+        (local / 'new.txt').write_text('new chair commit\n')
+        git(local, 'add', 'new.txt')
+        git(local, 'commit', '-qm', 'chair base the peer lacks')
+        base = git(local, 'rev-parse', 'HEAD')
+        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+            prompt='fixture only', mode='worktree_write', worktree=str(local),
+            task_id='writer', operation_id='thin-writer')
+        self.assertEqual(launched['status'], 'running', launched)
+        sent = next(self.local_home.rglob('thin-writer-0/input.bundle'))
+        self.assertLess(sent.stat().st_size, 50_000)
+        self.assertIn(b'\n-', sent.read_bytes().split(b'\n\n', 1)[0])
+        remote = self.peer_workspace / '.worktrees/feat-writer'
+        self.assertEqual(git(remote, 'rev-parse', 'HEAD'), base)
+        self.assertEqual(len((remote / 'large.bin').read_bytes()), 200_000)
+        self.wait_writer('writer@workshop')
+        (remote / 'result.txt').write_text('remote implementation\n')
+        git(remote, 'add', 'result.txt')
+        git(remote, 'commit', '-qm', 'remote implementation')
+        head = git(remote, 'rev-parse', 'HEAD')
+        fetched = self.client('fetch', id='thin-writer@workshop')
+        self.assertEqual(fetched['status'], 'ok', fetched)
+        self.assertEqual(git(self.workspace, 'rev-parse', fetched['ref']), head)
+        returned = next(self.peer_home.rglob('result.bundle'))
+        self.assertLess(returned.stat().st_size, 50_000)
+        self.assertIn(('-' + base).encode(), returned.read_bytes().split(b'\n\n', 1)[0])
 
     def test_rejected_writer_worktree_can_be_reused_only_at_exact_clean_base(self):
         git, base, local = self.writer_fixture()

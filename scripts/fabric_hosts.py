@@ -591,7 +591,7 @@ def parse_request(raw):
     if not isinstance(verb, str):
         raise HostError('invalid_request', 'Verb must be a string')
     lane_verbs = {'dispatch', 'lanes', 'status', 'cancel', 'resume', 'handoff', 'output', 'operation',
-                  'git-upload', 'git-result', 'git-download'}
+                  'git-have', 'git-upload', 'git-result', 'git-download'}
     if verb not in {'hello', 'doctor', *lane_verbs}:
         raise HostError('unknown_verb', 'Unsupported peer verb')
     if verb != 'hello' and request['protocol_version'] != PROTOCOL_VERSION:
