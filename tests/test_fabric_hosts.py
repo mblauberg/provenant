@@ -10,7 +10,7 @@ import sys
 import tempfile
 import time
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, closing
 from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -163,6 +163,8 @@ class DoctorContracts(unittest.TestCase):
             self.assertEqual(value['adapters']['claude']['signin']['status'], 'unusable')
             self.assertIn(value['adapters']['codex']['confinement']['status'], ['effective','degraded','unknown'])
             self.assertIsInstance(value['lane_temporary_paths']['fits'], bool)
+            self.assertTrue(value['python']['supported'])
+            self.assertEqual(value['python']['minimum'], '3.11')
             self.assertTrue(value['fabric_registrations']['codex']['registered'])
             self.assertFalse(json.loads(peer('Repos/missing').stdout)['result']['project']['present'])
             for path in ['/tmp', '../outside', 'Repos/../../outside']:
@@ -272,7 +274,7 @@ class ClientContracts(unittest.TestCase):
         import fabric_hosts as hosts
         valid = {'protocol_version': 1, 'host': 'workshop', 'revision': 'fixture',
                  'project': {'path': 'Repos/project', 'present': True}, 'adapters': {},
-                 'fabric_registrations': {},
+                 'fabric_registrations': {}, 'python': {'version':'3.11.0','minimum':'3.11','supported':True},
                  'lane_temporary_paths': {'fits': False, 'max_path_bytes': 200, 'limit_bytes': 103}}
         with tempfile.TemporaryDirectory() as directory:
             shim = Path(directory) / 'ssh'
@@ -327,15 +329,45 @@ class ClientContracts(unittest.TestCase):
             self.assertEqual(write['error']['code'], 'protocol_mismatch')
             self.assertNotIn('result', write)
 
+    def test_old_protocol_v1_doctor_keeps_diagnostics_and_marks_python_unknown(self):
+        import fabric_hosts as hosts
+        diagnostic = {'protocol_version': 1, 'host': 'workshop', 'revision': 'previous',
+            'project': {'path': 'Repos/project', 'present': True}, 'adapters': {},
+            'fabric_registrations': {}, 'lane_temporary_paths':
+            {'fits': True, 'max_path_bytes': 90, 'limit_bytes': 103}}
+        with tempfile.TemporaryDirectory() as directory:
+            shim = Path(directory) / 'ssh'
+            shim.write_text('#!' + sys.executable + '\nimport sys,json\nr=json.load(sys.stdin)\n'
+                + 'result={"protocol_version":1,"host":"workshop","revision":"previous"} '
+                + 'if r["verb"]=="hello" else ' + repr(diagnostic) + '\n'
+                + 'print(json.dumps({"protocol_version":1,"ok":True,"result":result}))\n')
+            shim.chmod(0o755)
+            response = hosts.PeerClient('workshop', hosts.PeerConfig('workshop'),
+                ssh_program=str(shim)).call('doctor', {'project_path': 'Repos/project'})
+            self.assertTrue(response['ok'], response)
+            self.assertTrue(response['compatible'], response)
+            self.assertEqual(response['result']['project'], diagnostic['project'])
+            self.assertEqual(response['result']['lane_temporary_paths'], diagnostic['lane_temporary_paths'])
+            runtime = response['result']['python']
+            self.assertEqual(runtime['status'], 'unknown')
+            self.assertIsNone(runtime['supported'])
+            self.assertEqual(runtime['minimum'], '3.11')
+            self.assertEqual(runtime['error']['code'], 'python_check_unavailable')
+            self.assertIn('upgrade', runtime['error']['message'].lower())
+            self.assertIn('3.11', runtime['error']['message'])
+
     def test_doctor_rejects_missing_or_malformed_diagnostic_fields_after_hello(self):
         import fabric_hosts as hosts
         valid = {'protocol_version':1, 'host':'workshop', 'revision':'fixture',
                  'project':{'path':'Repos/project','present':True}, 'adapters':{},
-                 'fabric_registrations':{}, 'lane_temporary_paths':{'fits':False,'max_path_bytes':120,'limit_bytes':103}}
+                 'python':{'version':'3.11.0','minimum':'3.11','supported':True}, 'fabric_registrations':{}, 'lane_temporary_paths':{'fits':False,'max_path_bytes':120,'limit_bytes':103}}
         malformed = [{}, {**valid, 'adapters':{'codex':{'executable':'codex','signin':{'status':'probably'},'confinement':{'status':'effective'}}}},
                      {**valid, 'fabric_registrations':{'codex':{'registered':'yes'}}},
                      {**valid, 'adapters':{'codex':{'executable':None,'signin':{'status':[]},'confinement':{'status':'effective'}}}},
-                     {**valid, 'lane_temporary_paths':{'fits':True,'limit_bytes':'103'}}]
+                     {**valid, 'lane_temporary_paths':{'fits':True,'limit_bytes':'103'}},
+                     {**valid, 'python':{'version':'3.10.0','minimum':'3.11','supported':True}},
+                     {**valid, 'python':{'version':'3.10.0','minimum':'3.11','supported':False}},
+                     {**valid, 'python':None}]
         with tempfile.TemporaryDirectory() as directory:
             shim = Path(directory) / 'ssh'
             for diagnostic in malformed:
@@ -415,7 +447,7 @@ class ClientContracts(unittest.TestCase):
                 ' sys.stdout.write(\'{"protocol_version":1,"ok":true,"result":\' + "[" * 10000 + "0" + "]" * 10000 + "}\\n")\n'
                 'else:\n'
                 ' result={"protocol_version":1,"host":"healthy","revision":None} if request["verb"]=="hello" else '
-                '{"protocol_version":1,"host":"healthy","revision":None,"project":{"path":"Repos/project","present":True},"adapters":{},"fabric_registrations":{},"lane_temporary_paths":{"fits":True,"max_path_bytes":90,"limit_bytes":103}}\n'
+                '{"protocol_version":1,"host":"healthy","revision":None,"project":{"path":"Repos/project","present":True},"adapters":{},"fabric_registrations":{},"python":{"version":"3.11.0","minimum":"3.11","supported":true},"lane_temporary_paths":{"fits":True,"max_path_bytes":90,"limit_bytes":103}}\n'
                 ' print(json.dumps({"protocol_version":1,"ok":True,"result":result}))\n')
             shim.chmod(0o755)
             config = hosts.HostsConfig('laptop', {'broken': hosts.PeerConfig('broken'),
@@ -528,9 +560,183 @@ class ConfigContracts(unittest.TestCase):
         for config in bad:
             with self.subTest(config=config):
                 result = self.command(config)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertEqual(json.loads(result.stdout)['error']['code'], 'invalid_config')
+                self.assertEqual(result.returncode, 0)
+                value = json.loads(result.stdout)
+                self.assertEqual(value['error']['code'], 'invalid_config')
+                self.assertEqual(value['hosts'], [{'host': 'local', 'local': True}])
 
+
+
+
+class HostDiagnosticsContracts(unittest.TestCase):
+    def test_invalid_configuration_keeps_local_row_and_visible_note(self):
+        with git_isolated_tempdir() as directory:
+            root = Path(directory)
+            (root / 'project').mkdir()
+            config = root / 'instance/.agent-fabric'
+            config.mkdir(parents=True)
+            (config / 'hosts.json').write_text('{broken')
+            environment = {**os.environ, 'HOME': directory,
+                           'AGENT_FABRIC_INSTANCE_ROOT': str(root / 'instance')}
+            for action in ('list', 'doctor'):
+                for json_output in (False, True):
+                    with self.subTest(action=action, json=json_output):
+                        command = [str(ROOT / 'scripts/provenant'), 'hosts', action]
+                        if json_output:
+                            command.append('--json')
+                        result = subprocess.run(command, capture_output=True, text=True,
+                                                cwd=root / 'project', env=environment)
+                        self.assertEqual(result.returncode, 1 if action == 'doctor' else 0,
+                                         result.stdout + result.stderr)
+                        if json_output:
+                            value = json.loads(result.stdout)
+                            self.assertEqual([row['host'] for row in value['hosts']], ['local'])
+                            self.assertEqual(value['error']['code'], 'invalid_config')
+                        else:
+                            self.assertIn('local ', result.stdout)
+                            self.assertIn('invalid_config', result.stdout)
+
+    def test_temporary_directory_estimate_uses_filesystem_path_limits(self):
+        import fabric_hosts as hosts
+        with tempfile.TemporaryDirectory() as directory:
+            result = hosts.lane_socket_paths(Path(directory) / 'project')
+            self.assertTrue(result['fits'], result)
+            self.assertEqual(result['constraint'], 'filesystem_path')
+            self.assertGreater(result['limit_bytes'], 103)
+            with patch.object(os, 'pathconf', side_effect=lambda path, name: 128 if name == 'PC_PATH_MAX' else 255):
+                self.assertFalse(hosts.lane_socket_paths(Path(directory) / 'project')['fits'])
+            with patch.object(os, 'pathconf', side_effect=lambda path, name: 4096 if name == 'PC_PATH_MAX' else 16):
+                self.assertFalse(hosts.lane_socket_paths(Path(directory) / 'project')['fits'])
+
+    def test_doctor_interpreter_probe_failure_names_python_minimum(self):
+        with tempfile.TemporaryDirectory() as directory:
+            interpreter = Path(directory) / 'python'
+            interpreter.write_text('#!/bin/sh\nexit 1\n')
+            interpreter.chmod(0o755)
+            result = subprocess.run([str(ROOT / 'scripts/fabric-hosts'), 'hosts', 'doctor', '--json'],
+                                    capture_output=True, text=True,
+                                    env={**os.environ, 'HARNESS_PYTHON': str(interpreter)})
+            self.assertEqual(result.returncode, 3, result.stdout + result.stderr)
+            self.assertIn('Python 3.11 or newer', result.stderr)
+
+    def test_doctor_reports_python_minimum_and_clear_failure(self):
+        import fabric_hosts as hosts
+        with tempfile.TemporaryDirectory() as directory:
+            environment = {'HOME': directory, 'AGENT_FABRIC_INSTANCE_ROOT': directory}
+            with patch.dict(os.environ, environment):
+                for version, supported in [((3, 10, 14), False), ((3, 11, 0), True)]:
+                    with self.subTest(version=version), patch.object(sys, 'version_info', version):
+                        result = hosts.doctor('project')
+                        self.assertEqual(result['python']['version'], '.'.join(map(str, version)))
+                        self.assertEqual(result['python']['minimum'], '3.11')
+                        self.assertEqual(result['python']['supported'], supported)
+                        if not supported:
+                            self.assertEqual(result['python']['error']['code'], 'python_too_old')
+                            self.assertIn('3.11', result['python']['error']['message'])
+
+
+class TransportFilesystemContracts(unittest.TestCase):
+    def test_project_root_accepts_case_different_git_toplevel_for_same_directory(self):
+        import fabric_hosts as hosts
+        import fabric_lanes
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            repo = home / 'Repos/project'
+            repo.mkdir(parents=True)
+            subprocess.run(['git', 'init', '-q', str(repo)], check=True)
+            alias = repo.with_name('PROJECT')
+            if not alias.exists():
+                alias.symlink_to(repo, target_is_directory=True)
+            binary = home / 'bin'
+            binary.mkdir()
+            executable = binary / 'git'
+            import shutil
+            actual_git = shutil.which('git')
+            executable.write_text('#!' + sys.executable + '\nimport os,sys\n'
+                + 'if "--show-toplevel" in sys.argv: print(' + repr(str(alias)) + '); sys.exit(0)\n'
+                + 'os.execv(' + repr(actual_git) + ', ["git", *sys.argv[1:]])\n')
+            executable.chmod(0o755)
+            resolve = Path.resolve
+            def keep_git_spelling(path, *args, **kwargs):
+                # Emulate a case-insensitive filesystem preserving Git's spelling.
+                return path if path == alias else resolve(path, *args, **kwargs)
+            environment = {'HOME': str(home), 'PATH': str(binary) + os.pathsep + os.environ['PATH'],
+                'AGENT_FABRIC_INSTANCE_ROOT': str(home / '.agents')}
+            real_popen = subprocess.Popen
+            def popen(command, *args, **kwargs):
+                if command[0] == 'git':
+                    command = [str(executable), *command[1:]]
+                return real_popen(command, *args, **kwargs)
+            with patch.dict(os.environ, environment), patch.object(Path, 'resolve', keep_git_spelling), \
+                    patch.object(subprocess, 'Popen', side_effect=popen):
+                federation = fabric_lanes.LaneFederation(hosts)
+                federation.config = hosts.HostsConfig(projects={'Repos/project': {}})
+                code = federation.code()
+                self.assertEqual(code.repo('Repos/project'), repo)
+                self.assertEqual(code.repo('Repos/project', receiving=True), repo)
+                self.assertEqual(hosts.project_identity(repo), 'Repos/project')
+
+    def test_linked_root_accepts_case_alias_for_its_git_backlink(self):
+        import fabric_hosts as hosts
+        helper = hosts.lane_owner().code().w
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / 'project'
+            repo.mkdir()
+            def git(*args):
+                subprocess.run(['git', '-C', str(repo), *args], check=True, capture_output=True,
+                    env={**os.environ, 'GIT_AUTHOR_NAME': 'Fixture', 'GIT_AUTHOR_EMAIL': 'fixture@example.invalid',
+                         'GIT_COMMITTER_NAME': 'Fixture', 'GIT_COMMITTER_EMAIL': 'fixture@example.invalid'})
+            git('init', '-q')
+            git('commit', '--allow-empty', '-qm', 'base')
+            linked = repo / '.worktrees/review'
+            git('worktree', 'add', '--detach', str(linked), 'HEAD')
+            alias = linked.with_name('REVIEW')
+            if not alias.exists():
+                alias.symlink_to(linked, target_is_directory=True)
+            resolve = Path.resolve
+            def case_spelling(path, *args, **kwargs):
+                return path if path in {alias, alias / '.git'} else resolve(path, *args, **kwargs)
+            real_git = helper.git
+            def case_git(path, *args, **kwargs):
+                result = real_git(path, *args, **kwargs)
+                if args == ('rev-parse', '--show-toplevel'):
+                    result.stdout = str(alias) + '\n'
+                return result
+            with patch.object(Path, 'resolve', case_spelling), patch.object(helper, 'git', side_effect=case_git):
+                self.assertTrue(helper.same_directory(helper.owning_root(linked), linked))
+
+    def test_git_directory_sync_accepts_unsupported_filesystems_only(self):
+        import errno
+        import fabric_git
+        with tempfile.TemporaryDirectory() as directory:
+            for failure in (errno.EINVAL, errno.ENOTSUP):
+                with self.subTest(errno=failure), patch.object(os, 'fsync', side_effect=OSError(failure, 'unsupported')):
+                    fabric_git.CodeTransport.sync_directory(Path(directory))
+            with patch.object(os, 'fsync', side_effect=OSError(errno.EIO, 'I/O error')):
+                with self.assertRaises(OSError):
+                    fabric_git.CodeTransport.sync_directory(Path(directory))
+
+    def test_custody_write_and_unlink_accept_unsupported_directory_sync(self):
+        import errno
+        import stat
+        import fabric_hosts as hosts
+        custody = hosts._load_module('provenant_fabric_custody', ROOT / 'skills/_shared/custody.py')
+        real_fsync = os.fsync
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for failure in (errno.EINVAL, errno.ENOTSUP):
+                def fsync(descriptor):
+                    if stat.S_ISDIR(os.fstat(descriptor).st_mode):
+                        raise OSError(failure, 'unsupported')
+                    real_fsync(descriptor)
+                with self.subTest(errno=failure), patch.object(os, 'fsync', side_effect=fsync):
+                    custody.atomic_write_contained(root, 'input.json', b'{}')
+                    self.assertEqual((root / 'input.json').read_bytes(), b'{}')
+                    custody.unlink_contained_regular(root, 'input.json')
+                    self.assertFalse((root / 'input.json').exists())
+            with patch.object(os, 'fsync', side_effect=OSError(errno.EINVAL, 'file sync failed')):
+                with self.assertRaises(custody.OwnedFileError):
+                    custody.atomic_write_contained(root, 'input.json', b'{}')
 
 
 
@@ -543,6 +749,11 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix='hosts-lanes-', dir=scratch)
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name).resolve()
+        # In-process transport uses tempfile while HOME/TMPDIR are patched.
+        # Keep its cached default owned by this fixture and restore it before cleanup.
+        temporary_default = patch.object(tempfile, 'tempdir', str(self.root))
+        temporary_default.start()
+        self.addCleanup(temporary_default.stop)
         self.local_home = self.root / 'laptop'
         self.peer_home = self.root / 'workshop'
         self.workspace = self.local_home / 'Repos/project'
@@ -665,6 +876,242 @@ class LaneLoopbackContracts(unittest.TestCase):
         config = json.loads(path.read_text())
         config['peers']['workshop']['response_deadline'] = seconds
         path.write_text(json.dumps(config))
+
+    def test_read_only_peer_uses_chair_head_in_detached_worktree_and_cleans_up(self):
+        git, _, local = self.writer_fixture()
+        (local / 'code.txt').write_text('chair committed review input\n')
+        git(local, 'add', 'code.txt')
+        git(local, 'commit', '-qm', 'chair review head')
+        head = git(local, 'rev-parse', 'HEAD')
+        brief = self.root / 'scratch-review.md'
+        brief.write_text('slow')
+        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+            prompt_file=str(brief), mode='read_only', cwd=str(local),
+            task_id='review', operation_id='review-head')
+        self.assertEqual(launched['status'], 'running', launched)
+        context = launched['code_transport']['readers'][0]
+        remote = Path(context['worktree_path'])
+        try:
+            self.assertEqual(git(remote, 'rev-parse', 'HEAD'), head)
+            self.assertEqual((remote / 'code.txt').read_text(), 'chair committed review input\n')
+            self.assertNotEqual(remote, self.peer_workspace)
+            symbolic = subprocess.run(['git', '-C', str(remote), 'symbolic-ref', '-q', 'HEAD'], capture_output=True)
+            self.assertNotEqual(symbolic.returncode, 0)
+            rows = self.client('status', ids=['review@workshop'], detail='full')['runs']
+            self.assertEqual(rows[0]['cwd'], str(remote))
+            import fabric_hosts as hosts
+            with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                    'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+                hosts.lane_owner().code().cleanup_readers([{**rows[0], 'state': 'terminal',
+                    'run_id': launched['id'].rsplit('@', 1)[0], 'task_id': 'review', 'pgid_alive': True}])
+                self.assertTrue(remote.exists(), 'a live sequence owner still needs its frozen input')
+        finally:
+            self.client('cancel', id='review@workshop', operation_id='stop-review-head')
+        self.wait_writer(launched['id'])
+        self.assertFalse(remote.exists())
+        self.assertNotIn(str(remote), git(self.peer_workspace, 'worktree', 'list', '--porcelain'))
+
+    def test_reader_polling_preserves_input_between_fallback_attempts(self):
+        self.writer_fixture()
+        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+            prompt='fallback-gap', task_id='reader-gap', operation_id='reader-gap')
+        remote = Path(launched['code_transport']['readers'][0]['worktree_path'])
+        run_dir = Path(launched['paths']['run_dir'])
+        attempt = run_dir / 'tasks/reader-gap/attempt-001/attempt.json'
+        try:
+            deadline = time.monotonic() + 10
+            while not attempt.exists() and time.monotonic() < deadline:
+                time.sleep(.02)
+            self.assertEqual(json.loads(attempt.read_text())['state'], 'terminal')
+            row = self.client('lanes', ids=[launched['id']])['runs'][0]
+            self.assertTrue(row['pgid_alive'], row)
+            self.assertTrue(remote.exists(), 'the fallback owner still needs its input')
+        finally:
+            (run_dir / 'release').touch()
+        self.wait_writer(launched['id'])
+        self.assertFalse(remote.exists())
+
+    def test_terminal_reader_resume_recreates_frozen_checkout(self):
+        git, base, _ = self.writer_fixture()
+        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+            prompt='fixture only', task_id='reader-resume', operation_id='reader-first')
+        self.assertEqual(launched['status'], 'running', launched)
+        self.wait_writer(launched['id'])
+        target = Path(launched['code_transport']['readers'][0]['worktree_path'])
+        self.assertFalse(target.exists())
+        resumed = self.client('resume', resume=launched['id'], prompt='slow', operation_id='reader-next')
+        self.assertNotEqual(resumed.get('status'), 'rejected', resumed)
+        try:
+            target = Path(resumed['code_transport']['readers'][0]['worktree_path'])
+            self.assertEqual(git(target, 'rev-parse', 'HEAD'), base)
+            # Reach the production Python owner, which the provider fixture replaces.
+            import fabric_hosts as hosts
+            prior_file = Path(launched['paths']['run_dir']) / 'tasks/reader-resume/attempt-001/attempt.json'
+            prior = json.loads(prior_file.read_text())
+            prior['provenance']['resolved_model'] = 'fixture'
+            prior['provenance']['effort_applied'] = None
+            copied_run = self.root / 'resume-owner-check'
+            copied = copied_run / 'tasks/reader-resume/attempt-001/attempt.json'
+            copied.parent.mkdir(parents=True)
+            copied.write_text(json.dumps(prior))
+            (copied_run / 'RUN_RECEIPT.json').write_bytes((Path(launched['paths']['run_dir']) / 'RUN_RECEIPT.json').read_bytes())
+            with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                    'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents'), 'PROVENANT_REMOTE_LANE': '1'}):
+                owner = hosts._load_module('provenant_lane_prompt_reader', ROOT / 'skills/orchestrate/scripts/dispatch_run.py')
+                args = owner.parser().parse_args(['--run-dir', str(copied_run), '--resume', prior['run_id'],
+                    '--task-id', 'reader-resume', '--cwd', str(target), '--prompt-stdin'])
+                owner.prepare_resume(args)
+                self.assertEqual(args.provider_cwd, target)
+        finally:
+            self.client('cancel', id=launched['id'], operation_id='stop-reader-resume')
+        self.wait_writer(launched['id'])
+        self.assertFalse(target.exists())
+
+    def test_read_only_creation_refuses_escaping_worktree_root(self):
+        git, _, _ = self.writer_fixture()
+        outside = self.peer_home / 'outside'
+        outside.mkdir()
+        (self.peer_workspace / '.worktrees').symlink_to(outside, target_is_directory=True)
+        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+            prompt='slow', task_id='reader-boundary', operation_id='reader-boundary')
+        try:
+            self.assertTrue(launched.get('local'), launched)
+            self.assertTrue(launched['fallback']['reason'])
+            self.assertEqual(list(outside.iterdir()), [])
+        finally:
+            if launched.get('id'):
+                self.client('cancel', id=launched['id'], operation_id='stop-reader-boundary')
+
+    def test_reader_resume_recovers_frozen_input_when_launch_result_was_lost(self):
+        import sqlite3
+        git, base, _ = self.writer_fixture()
+        first = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+            prompt='fixture only', task_id='reader-lost-result', operation_id='reader-lost-result')
+        with closing(sqlite3.connect(self.peer_home / '.agents/.agent-fabric/hosts-state.sqlite3')) as database, database:
+            database.execute('UPDATE operations SET result=NULL WHERE id=?', ('reader-lost-result',))
+        self.wait_writer(first['id'])
+        resumed = self.client('resume', resume=first['id'], prompt='slow', operation_id='reader-recovered')
+        try:
+            rows = self.client('status', ids=[first['id']], detail='full')['runs']
+            target = Path(rows[0]['cwd'])
+            self.assertEqual(git(target, 'rev-parse', 'HEAD'), base)
+        finally:
+            self.client('cancel', id=first['id'], operation_id='stop-reader-recovered')
+        self.wait_writer(first['id'])
+        self.assertFalse(target.exists())
+
+    def test_remote_named_reader_session_uses_new_frozen_input_on_second_turn(self):
+        git, base, _ = self.writer_fixture()
+        first = self.client('dispatch', host='workshop', session='reader-session@workshop',
+            adapter='codex', model='fixture', prompt='fixture only', operation_id='session-reader-first')
+        self.wait_writer(first['id'])
+        second = self.client('dispatch', host='workshop', session='reader-session@workshop',
+            prompt='slow', operation_id='session-reader-next')
+        try:
+            self.assertNotEqual(second.get('status'), 'rejected', second)
+            row = self.client('status', ids=[first['id']], detail='full')['runs'][0]
+            target = Path(row['cwd'])
+            self.assertEqual(git(target, 'rev-parse', 'HEAD'), base)
+            self.assertEqual(target, Path(second['code_transport']['readers'][0]['worktree_path']))
+        finally:
+            self.client('cancel', id=first['id'], operation_id='stop-session-reader')
+        self.wait_writer(first['id'])
+        self.assertFalse(target.exists())
+
+    def test_reader_handoffs_use_independent_frozen_checkouts(self):
+        git, base, _ = self.writer_fixture()
+        first = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+            prompt='fixture only', task_id='handoff-reader', operation_id='handoff-input')
+        self.wait_writer(first['id'])
+        handoffs = []
+        try:
+            for operation in ('reader-handoff-a', 'reader-handoff-b'):
+                value = self.client('handoff', handoff=first['id'], prompt='slow', operation_id=operation)
+                handoffs.append(value)
+                self.assertNotEqual(value.get('status'), 'rejected', value)
+            targets = []
+            for value in handoffs:
+                rows = self.client('status', ids=[value['id']], detail='full')['runs']
+                target = Path(rows[0]['cwd'])
+                self.assertEqual(git(target, 'rev-parse', 'HEAD'), base)
+                self.assertNotEqual(target, self.peer_workspace)
+                targets.append(target)
+            self.assertNotEqual(targets[0], targets[1])
+            self.client('cancel', id=handoffs[0]['id'], operation_id='stop-reader-handoff-a')
+            self.wait_writer(handoffs[0]['id'])
+            self.assertFalse(targets[0].exists())
+            self.assertTrue(targets[1].exists())
+        finally:
+            for index, value in enumerate(handoffs):
+                self.client('cancel', id=value['id'], operation_id='cleanup-reader-handoff-' + str(index))
+        self.wait_writer(handoffs[-1]['id'])
+        self.assertFalse(targets[-1].exists())
+
+    def test_mixed_batch_cleans_unnamed_reader_and_preserves_writer(self):
+        _, _, local = self.writer_fixture()
+        launched = self.client('dispatch', host='workshop', operation_id='mixed-input', tasks=[
+            {'id': 'writer', 'adapter': 'codex', 'model': 'fixture', 'prompt': 'fixture only',
+             'mode': 'worktree_write', 'worktree': str(local)},
+            {'adapter': 'codex', 'model': 'fixture', 'prompt': 'fixture only', 'mode': 'read_only'}])
+        self.assertEqual(launched['status'], 'running', launched)
+        reader = Path(launched['code_transport']['readers'][0]['worktree_path'])
+        writer = Path(launched['code_transport']['writers'][0]['worktree_path'])
+        contexts = self.peer_home / '.agents/.agent-fabric/reader-contexts/mixed-input.json'
+        if contexts.exists():
+            self.assertTrue(all(context['read_only'] for context in json.loads(contexts.read_text())))
+        self.wait_writer(launched['id'])
+        self.assertFalse(reader.exists())
+        self.assertFalse(contexts.exists())
+        self.assertTrue(writer.exists())
+
+    def test_read_only_transport_failure_records_local_fallback(self):
+        result = self.client('dispatch', host='workshop', mode='read_only', prompt='review',
+            operation_id='no-committed-input')
+        self.assertTrue(result.get('local'), result)
+        self.assertIn(result['fallback']['reason'], {'project_not_configured', 'code_transport_failed'})
+        self.assertIn('fallback', result['digest'])
+        import fabric_hosts as hosts
+        with patch.dict(os.environ, self.env):
+            with self.assertRaises(hosts.HostError) as error:
+                hosts.lane_owner().client_call('dispatch', str(self.workspace), {
+                    'mode': 'read_only', 'prompt': 'review', 'operation_id': 'no-committed-input'})
+            self.assertEqual(error.exception.code, 'operation_conflict')
+
+    def test_reader_chunk_failure_before_launch_falls_back_and_binds_locally(self):
+        self.writer_fixture()
+        import fabric_hosts as hosts
+        with patch.dict(os.environ, self.env):
+            owner = hosts.lane_owner()
+            with patch.object(type(owner.code()), 'send', side_effect=hosts.HostError('timeout', 'chunk deadline')):
+                result = owner.client_call('dispatch', str(self.workspace), {
+                    'host': 'workshop', 'prompt': 'review', 'operation_id': 'reader-chunk-failure'})
+            self.assertTrue(result.get('local'), result)
+            self.assertEqual(result['fallback']['reason'], 'timeout')
+            with owner.database() as database:
+                self.assertIsNone(database.execute('SELECT id FROM pending WHERE id=?', ('reader-chunk-failure',)).fetchone())
+                self.assertEqual(database.execute('SELECT host FROM writer_dispatches WHERE id=?',
+                    ('reader-chunk-failure',)).fetchone()[0], 'laptop')
+        self.assertFalse((self.peer_home / '.agents/.agent-fabric/operations/reader-chunk-failure.json').exists())
+
+    def test_remote_prompt_file_in_scratch_is_sent_as_bounded_text(self):
+        import fabric_hosts as hosts
+        with tempfile.TemporaryDirectory() as directory:
+            brief = Path(directory) / 'brief.md'
+            brief.write_text('scratch review brief')
+            with patch.dict(os.environ, self.env):
+                value = hosts.lane_owner().rewrite_paths({'prompt_file': str(brief)}, cwd=str(self.workspace))
+                self.assertEqual(value, {'prompt': 'scratch review brief'})
+                brief.write_bytes(b'x' * (hosts.MAX_REQUEST_BYTES + 1))
+                with self.assertRaises(hosts.HostError) as error:
+                    hosts.lane_owner().rewrite_paths({'prompt_file': str(brief)}, cwd=str(self.workspace))
+                self.assertEqual(error.exception.code, 'request_too_large')
+
+    def test_invalid_config_lanes_keeps_local_rows_and_visible_note(self):
+        (self.local_home / '.agents/.agent-fabric/hosts.json').write_text('{bad')
+        result = self.lanes()
+        self.assertTrue(result['runs'])
+        self.assertIn('invalid_config', result['digest'])
+        self.assertEqual(result['hosts'][0]['error']['code'], 'invalid_config')
 
     def test_writer_transports_committed_base_and_fetches_verified_head_without_github(self):
         git, base, local = self.writer_fixture()
@@ -824,6 +1271,55 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertEqual(launched['status'], 'running', launched)
         self.wait_writer('writer-a@workshop')
         self.wait_writer('writer-b@workshop')
+
+    def test_settle_removes_only_operation_owned_initializing_worktree(self):
+        import fabric_hosts as hosts
+        git, base, _ = self.writer_fixture()
+        git(self.peer_workspace, 'fetch', str(self.workspace), 'HEAD')
+        identifier = 'dead-checkout'
+        target = self.peer_workspace / '.worktrees/feat-initializing'
+        git(self.peer_workspace, 'worktree', 'add', '--no-checkout', '-b', 'feat/initializing', str(target), base)
+        metadata = Path(git(target, 'rev-parse', '--absolute-git-dir'))
+        (metadata / 'locked').write_text('initializing')
+        # An interrupted checkout can leave tracked files absent and a partial index.
+        (target / 'code.txt').write_text('partial checkout')
+        context = dict(project_path='Repos/project', worktree_path=str(target), branch='feat/initializing',
+            base_revision=base, host='workshop', operation_id=identifier, created_worktree=True, created_branch=True)
+        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+            code = hosts.lane_owner().code()
+            code.write_json(code.state_file('writer-contexts', identifier), [context])
+            with code.f.database() as db:
+                db.execute('INSERT INTO operations VALUES (?,?,NULL)', (identifier,
+                    json.dumps({'project': 'Repos/project', 'verb': 'dispatch', 'digest': 'fixture'})))
+            # Preserve a lock owned by the user, even with an operation's intent.
+            (metadata / 'locked').write_text('user hold')
+            result = code.f.settle(identifier)
+            self.assertEqual(result['cleanup_pending'], [str(target)])
+            self.assertTrue(target.exists())
+            (metadata / 'locked').write_text('initializing')
+            import fcntl
+            with (metadata / code.w.WRITER_LOCK).open('a') as lease:
+                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertEqual(code.f.settle(identifier)['cleanup_pending'], [str(target)])
+            context['operation_id'] = 'another-operation'
+            code.write_json(code.state_file('writer-contexts', identifier), [context])
+            self.assertEqual(code.f.settle(identifier)['cleanup_pending'], [str(target)])
+            context['operation_id'] = identifier
+            context['base_revision'] = '0' * 40
+            code.write_json(code.state_file('writer-contexts', identifier), [context])
+            self.assertEqual(code.f.settle(identifier)['cleanup_pending'], [str(target)])
+            context['base_revision'] = base
+            code.write_json(code.state_file('writer-contexts', identifier), [context])
+            # Death before .git publication must also be repairable.
+            (target / '.git').unlink()
+            result = code.f.settle(identifier)
+            self.assertEqual(result['error'], 'launch_not_started')
+            self.assertNotIn('cleanup_pending', result)
+            self.assertFalse(target.exists())
+            self.assertFalse(metadata.exists())
+            self.assertEqual(git(self.peer_workspace, 'for-each-ref', '--format=%(refname)',
+                'refs/heads/feat/initializing'), '')
 
     def test_failed_prepare_settles_after_project_disappears_from_peer_config(self):
         import fabric_hosts as hosts
@@ -1078,7 +1574,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         deadline = time.monotonic() + 15
         while time.monotonic() < deadline:
             rows = self.lanes(selector)['runs']
-            if rows and all(row['state'] == 'terminal' for row in rows):
+            if rows and all(row['state'] == 'terminal' and row.get('pgid_alive') is not True for row in rows):
                 return rows
             time.sleep(.05)
         self.fail('fixture writer did not terminalise')
@@ -1794,11 +2290,16 @@ class LaneLoopbackContracts(unittest.TestCase):
 
     def test_pending_default_launch_cannot_fall_back_when_retried_offline(self):
         import fabric_hosts as hosts
+        self.writer_fixture()
         with patch.dict(os.environ, self.env):
             federation = hosts.lane_owner()
             request = {'prompt': 'fixture only', 'operation_id': 'pending-default'}
             def sent(action, params=None, **kwargs):
-                return hosts.envelope({'status': 'ok'}) if action == 'hello' else hosts.envelope(error=hosts.HostError('timeout', 'response lost'))
+                if action == 'git-have':
+                    return hosts.envelope({'have': []})
+                if action in {'hello', 'git-upload'}:
+                    return hosts.envelope({'status': 'ok'})
+                return hosts.envelope(error=hosts.HostError('timeout', 'response lost'))
             with patch.object(hosts.PeerClient, 'call', side_effect=sent):
                 first = federation.client_call('dispatch', str(self.workspace), request)
             self.assertEqual(first['state'], 'launch_unknown')
@@ -1880,11 +2381,17 @@ class LaneLoopbackContracts(unittest.TestCase):
 
     def test_prelaunch_owner_failure_is_a_durable_rejection(self):
         import fabric_hosts as hosts
+        self.writer_fixture()
+        with patch.dict(os.environ, self.env):
+            chair = hosts.lane_owner()
+            client = hosts.PeerClient('workshop', chair.config.peers['workshop'])
+            request = chair.code().outgoing('Repos/project', {'operation_id': 'prelaunch-failure',
+                'prompt': 'ordinary fixture input'}, str(self.workspace), 'prelaunch-failure', 'workshop', client)
+            chair.code().send(client, 'Repos/project', request['code_transport'])
         with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
                 'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
             federation = hosts.lane_owner()
-            params = {'project_path': 'Repos/project', 'input': {
-                'operation_id': 'prelaunch-failure', 'prompt': 'ordinary fixture input'}}
+            params = {'project_path': 'Repos/project', 'input': request}
             with patch.object(federation, 'worker', side_effect=hosts.HostError(
                     'lane_owner_failed', 'fixture owner failed before recording a launch')) as worker:
                 first = federation.peer_call('dispatch', params)
@@ -2233,6 +2740,18 @@ class LaneLoopbackContracts(unittest.TestCase):
     def fixture_product(self):
         """Reuse existing owner fixtures, never dispatch a real provider."""
         import shutil
+        # Remote readers now require committed input and an opted-in peer project.
+        for workspace in (self.workspace, self.peer_workspace):
+            if subprocess.run(['git', '-C', str(workspace), 'rev-parse', '--verify', 'HEAD'],
+                    capture_output=True).returncode:
+                subprocess.run(['git', '-C', str(workspace), 'commit', '--allow-empty', '-qm', 'fixture root'],
+                    check=True, capture_output=True, env={**os.environ, 'GIT_AUTHOR_NAME': 'Fixture',
+                        'GIT_AUTHOR_EMAIL': 'fixture@example.invalid', 'GIT_COMMITTER_NAME': 'Fixture',
+                        'GIT_COMMITTER_EMAIL': 'fixture@example.invalid'})
+        peer_config_path = self.peer_home / '.agents/.agent-fabric/hosts.json'
+        peer_config = json.loads(peer_config_path.read_text())
+        peer_config.setdefault('projects', {})['Repos/project'] = {}
+        peer_config_path.write_text(json.dumps(peer_config))
         product = self.root / 'product'
         owners = product / 'skills/orchestrate/scripts'
         helpers = product / 'scripts/lib'

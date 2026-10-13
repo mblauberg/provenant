@@ -4,13 +4,21 @@ import { resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
+import { randomUUID } from "node:crypto";
 
 export async function federatedLane(action: string, cwd: string, input: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, any> | undefined> {
   if (process.env.PROVENANT_HOST_LOCAL_ONLY === "1") return undefined;
   const config = resolve(process.env.AGENT_FABRIC_INSTANCE_ROOT || resolve(homedir(), ".agents"), ".agent-fabric/hosts.json");
   if (!existsSync(config) && input.host === undefined &&
       ![input.id, input.resume, input.handoff, input.session, ...(Array.isArray(input.ids) ? input.ids : [])].some((value) => typeof value === "string" && value.includes("@"))) return undefined;
+  // Allocate before transport so an interrupted CLI can retry the same frozen operation.
+  if (["dispatch", "resume", "handoff"].includes(action) && input.operation_id === undefined)
+    input.operation_id = randomUUID();
   const result = await hostOwner(["lane"], cwd, signal, { action, cwd, input });
+  if ((result.error as { code?: string } | undefined)?.code === "hosts_cancelled") {
+    return { status: "rejected", error: "hosts_cancelled", operation_id: input.operation_id,
+      fix: "Retry with the same --operation-id to resume or settle the interrupted transfer." };
+  }
   if (result.local) {
     if (result.input) {
       for (const key of Object.keys(input)) delete input[key];

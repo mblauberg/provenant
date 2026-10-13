@@ -273,13 +273,21 @@ def _run_git(
     ), captures
 
 
+def same_directory(left: Path, right: Path) -> bool:
+    """Compare directory identity, including case aliases on insensitive filesystems."""
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return False
+
+
 def owning_root(repo: Path) -> Path:
     requested = repo.expanduser().resolve()
     result = git(requested, "rev-parse", "--show-toplevel")
     if not result.stdout.endswith("\n"):
         raise PolicyError("Git top-level output was incomplete")
     root = Path(result.stdout.removesuffix("\n")).resolve()
-    if requested != root and not requested.is_relative_to(root):
+    if not any(same_directory(parent, root) for parent in (requested, *requested.parents)):
         raise PolicyError(
             f"{requested} is outside the Git working tree it resolves to ({root}); "
             "refusing copied checkout metadata"
@@ -310,7 +318,7 @@ def owning_root(repo: Path) -> Path:
                 raise PolicyError(
                     f"{root} has invalid linked-worktree back-pointer metadata"
                 ) from exc
-            if resolved_target != dot_git.resolve():
+            if not same_directory(resolved_target, dot_git):
                 raise PolicyError(
                     f"{root} is a copied checkout whose Git metadata points to "
                     f"{resolved_target}"

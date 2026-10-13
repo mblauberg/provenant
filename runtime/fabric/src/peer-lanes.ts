@@ -1,12 +1,13 @@
 /** Fixed peer boundary. Provider mechanics remain with the local owners. */
 import { closeSync, readFileSync, writeFileSync } from "node:fs";
-import { identify, databasePath } from "./identity.js";
+import { identify, databasePath, runRoot } from "./identity.js";
 import { dispatchConfiguredProvider, dispatchConfiguredBatch, cancelConfiguredRun, hostOwnersInThemselves, releaseActiveExecutions } from "./execution.js";
-import { statusRows, fabricOutput } from "./run-registry.js";
+import { statusRows, fabricOutput, runProcessAlive } from "./run-registry.js";
 import { readRuns } from "./run-reader.js";
 import { resumeConfiguredProvider, handoffDispatch } from "./resume.js";
 import { sessionDispatch } from "./sessions.js";
 import { Store } from "./store.js";
+import { resolve } from "node:path";
 
 const request = JSON.parse(readFileSync(process.argv[2]!, "utf8"));
 const identity = identify();
@@ -20,7 +21,7 @@ const recorded = () => {
   if (lockFd !== null && Number.isInteger(lockFd) && lockFd > 2) try { closeSync(lockFd); } catch { /* already closed */ }
   lockFd = null;
 };
-const launch = { onLaunch: (value: unknown) => {
+const launch = { ...(typeof request.reader_cwd === "string" ? { readOnlyCwd: request.reader_cwd } : {}), onLaunch: (value: unknown) => {
   if (request.launch_path) writeFileSync(request.launch_path, JSON.stringify(value), { mode: 0o600 });
   recorded();
 } };
@@ -62,6 +63,17 @@ try {
       break;
     }
     default: throw new Error("Unsupported peer lane verb");
+  }
+  // A terminal attempt can still have a live sequence owner between fallbacks.
+  // Expose that existing liveness field before the Python host considers cleanup.
+  const rows = (result as { runs?: Array<Record<string, any>> } | undefined)?.runs;
+  for (const row of rows ?? []) {
+    if (row.state === "terminal") {
+      const runDir = typeof row.run_dir === "string" ? row.run_dir
+        : typeof row.run_path === "string" ? resolve(runRoot(identity.project), row.run_path) : undefined;
+      row.pgid_alive = runDir === undefined || typeof row.task_id !== "string"
+        ? true : runProcessAlive(runDir, row.task_id, Number(row.attempt));
+    }
   }
   console.log(JSON.stringify(result));
 } finally {

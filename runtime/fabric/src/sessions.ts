@@ -7,9 +7,9 @@
 import { resolve } from "node:path";
 
 import { InputError, rejected, type DispatchInput } from "./execution-input.js";
-import { dispatchConfiguredProvider, rejectOwnSeatClaude, type LaunchObserver } from "./execution.js";
+import { dispatchConfiguredProvider, rejectOwnSeatClaude } from "./execution.js";
 import type { Identity } from "./identity.js";
-import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
+import { handoffDispatch, resumeConfiguredProvider, type PinnedContinuation } from "./resume.js";
 import { runProcessAlive, statusRows } from "./run-registry.js";
 import { canonicalSuccessStatus } from "./success-status.js";
 import type { NamedSession, SessionLaunch, SessionTurnKind, Store } from "./store.js";
@@ -155,7 +155,7 @@ export async function sessionDispatch(
   identity: Identity,
   store: Store,
   signal: AbortSignal,
-  observer: LaunchObserver = {},
+  observer: PinnedContinuation = {},
 ): Promise<Record<string, any>> {
   try {
     rejectOwnSeatClaude(input, identity, process.env, observer);
@@ -195,7 +195,14 @@ export async function sessionDispatch(
   if ("conflict" in claimed) return busy(name, claimed.conflict);
   let recorded = false,
     result: Record<string, any>;
+  if (kind === "resume" && observer.readOnlyCwd !== undefined &&
+      rest.mode === "read_only" && rest.cwd === observer.readOnlyCwd) {
+    // Placement belongs to the host owner; route and control overrides remain rejected.
+    delete rest.mode;
+    delete rest.cwd;
+  }
   const pin = {
+    ...(observer.readOnlyCwd === undefined ? {} : { readOnlyCwd: observer.readOnlyCwd }),
     attempt: prior?.attempt ?? undefined,
     // Record the run before its owner starts; if that fails, nothing launches.
     onLaunch: (launch: SessionLaunch) => {

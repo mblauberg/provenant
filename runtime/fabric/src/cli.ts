@@ -313,6 +313,15 @@ if (command === "dispatch") {
     await new Promise<void>((resolveWrite) => process.stdout.write(`${output}\n`, "utf8", () => resolveWrite()));
     process.exit(outcome.signalled && outcome.reason !== "still running" ? 0 : 1);
   }
+  const controller = new AbortController();
+  let interrupted: number | undefined;
+  // The transfer has its own process group. Await its cancellation before exiting.
+  const interrupt = (signal: NodeJS.Signals) => {
+    interrupted ??= signal === "SIGINT" ? 130 : 143;
+    controller.abort();
+  };
+  process.on("SIGINT", interrupt);
+  process.on("SIGTERM", interrupt);
   try {
     const options = subcommand?.startsWith("--") ? rest : rest.slice(1);
     const values = new Map<string, string>();
@@ -373,7 +382,7 @@ if (command === "dispatch") {
           ...(switches.has("--fresh") ? { fresh: true } : {}),
           ...(read("id") === undefined ? {} : { task_id: read("id") }),
           wait_seconds: switches.has("--wait") ? 55 : 0,
-        }, { ...who, registeredProjects: store.projects() }, store, new AbortController().signal);
+        }, { ...who, registeredProjects: store.projects() }, store, controller.signal);
         const session = await reconcileSession(store, who, name);
         if (session) sessionLine = String(sessionView(session).digest);
         if (result.session_error) sessionLine = `${sessionLine ?? ""}\n! ${String(result.session_error)}`.trim();
@@ -387,7 +396,7 @@ if (command === "dispatch") {
       const document = JSON.parse(readFileSync(resolve(who.cwd, tasksFile), "utf8")) as unknown;
       const batch = (Array.isArray(document) ? { tasks: document } : document) as BatchInput;
       if (!Array.isArray(batch.tasks)) throw new Error("--tasks file must contain a tasks array");
-      result = await dispatchConfiguredBatch({ ...route, ...batch, wait_seconds: switches.has("--wait") ? 55 : 0 }, executionIdentity(), new AbortController().signal);
+      result = await dispatchConfiguredBatch({ ...route, ...batch, wait_seconds: switches.has("--wait") ? 55 : 0 }, executionIdentity(), controller.signal);
     } else {
       const input: DispatchInput = {
         ...route,
@@ -400,10 +409,11 @@ if (command === "dispatch") {
         ...(read("handoff") === undefined ? {} : { handoff: read("handoff") }),
       };
       const { resumeConfiguredProvider, handoffDispatch } = await import("./resume.js");
-      result = input.resume ? await resumeConfiguredProvider(input, executionIdentity(), new AbortController().signal)
-        : input.handoff ? await handoffDispatch(input, executionIdentity(), new AbortController().signal)
-        : await dispatchConfiguredProvider(input, executionIdentity(), new AbortController().signal);
+      result = input.resume ? await resumeConfiguredProvider(input, executionIdentity(), controller.signal)
+        : input.handoff ? await handoffDispatch(input, executionIdentity(), controller.signal)
+        : await dispatchConfiguredProvider(input, executionIdentity(), controller.signal);
     }
+    if (typeof result.operation_id === "string") console.log(`operation_id: ${result.operation_id}`);
     console.log(String(result.id ?? "unassigned"));
     const taskRows = Array.isArray(result.tasks)
       ? result.tasks.filter((item): item is Record<string, unknown> =>
@@ -420,10 +430,10 @@ if (command === "dispatch") {
     console.log(`status: ${String(result.status ?? "unknown")}${rejectedDetails}${rejectedTaskDetails}`);
     if (result.placement_fallback || result.status === "launch_unknown") console.log(digest(result));
     if (sessionLine) console.log(sessionLine);
-    process.exit(result.status === "rejected" ? 1 : 0);
+    process.exit(interrupted ?? (result.status === "rejected" ? 1 : 0));
   } catch (error) {
     console.error(`fabric: ${error instanceof Error ? error.message : String(error)}`);
-    process.exit(2);
+    process.exit(interrupted ?? 2);
   }
 }
 if (command === "adapters" && argv.includes("--models")) {

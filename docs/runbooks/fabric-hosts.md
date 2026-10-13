@@ -93,12 +93,13 @@ provenant hosts doctor
 provenant hosts doctor --json workshop
 ```
 
-Each doctor row reports reachability, protocol version, revision, the
+Each doctor row reports reachability, protocol version, revision, Python version
+and whether it meets the Python 3.11 minimum, the
 home-relative primary project path and whether it exists, configured adapter
 executables, sign-in status, confinement and Fabric MCP registrations. Linked
 worktrees use their primary checkout's path; peers require the same path
-relative to their own home. Paths outside home or through escaping symlinks
-are refused.
+relative to their own home. Case aliases that identify the same filesystem
+directory are accepted. Paths outside home or through escaping symlinks are refused.
 
 Sign-in states are `usable`, `unusable` or `unknown`. Bounded CLI status probes
 never launch a model or return account identifiers. Claude keychain failures
@@ -106,10 +107,17 @@ become `unknown` or `unusable`. Adapters without a conclusive non-interactive
 status probe report `unknown`. Confinement uses the existing read-only planning
 and sandbox probes; the executing dispatch owner checks adapter sign-in,
 effective read-only confinement and requested browser socket paths before
-launch. Socket checks measure an estimated v2 attempt temporary path
-in bytes against the platform limit; a long project path can exceed it.
+launch. Temporary-path estimates measure filesystem path and component limits. They
+do not infer Unix socket placement from the attempt directory; the executing
+owner checks any actual requested browser socket paths.
 Registration reports the existing install check's Fabric-entry presence,
 independently of whether the adapter executable is on PATH.
+
+Malformed `hosts.json` leaves `hosts list`, `hosts doctor` and `fabric lanes`
+usable with local rows and a visible `invalid_config` note. Doctor exits nonzero
+for invalid configuration or a failed Python minimum check. A peer unable to
+start its interpreter reports that Python 3.11 or newer is required. Older
+protocol-v1 peers without the runtime diagnostic require an upgrade to verify it.
 
 Offline or timed-out peers get typed rows and leave the overall command
 successful. A deadline marks only that host unreachable for that call.
@@ -177,11 +185,17 @@ provenant fabric dispatch --handoff run-id@workshop --adapter claude --prompt-fi
 existing owner arguments. Without `--host`, the per-project default applies.
 An unreachable default host falls back locally only before a mutation is
 sent; the attempt records `placement_fallback` and a warning. Explicit host
-placement and sessions qualified with a host never fall back. A bare named
+placement and sessions qualified with a host fail closed on
+contact errors. Read-only placement whose committed-input preparation is
+unavailable falls back locally before launch, including explicit placement;
+the recorded reason identifies the transport failure. A bare named
 session keeps its local owner. Resume, handoff and cancel follow the owning
 host, including qualified task selectors.
 
-Dispatch and control requests receive a bounded operation ID. Supply
+Dispatch and control requests receive a bounded operation ID. Interrupting
+CLI dispatch with Ctrl-C or SIGTERM stops the transfer child before it can
+launch the peer lane and prints the operation ID. A lane whose launch was
+already recorded keeps its normal detached lifetime. Supply
 `--operation-id` to retry the same remote request; changing its content is
 refused with `operation_conflict`. A lost response after send returns
 `launch_unknown`. Subsequent lanes/status reads reconcile that ID against
@@ -199,8 +213,10 @@ The remote peer starts the existing detached dispatch owner, then exits.
 The lane survives the SSH connection. Paths in `cwd`, `worktree`, read roots
 and additional directories are rewritten relative to home and resolved
 against the receiving home. Paths outside home or escaping through symlinks
-are refused. Prompt files use the existing protected prompt reader and cross
-the boundary as text; credential files, hard links and final symlinks are
+are refused. Prompt files may be in a scratch directory outside home: the chair
+reads the explicitly supplied file with the protected prompt reader and sends
+its content (up to 64 KiB), so no matching peer path is needed. They cross the
+boundary as text; credential files, hard links and final symlinks are
 refused. The peer request limit also bounds transmitted prompts.
 
 `lanes`, `status`, `watch` and `lanes --wait` read each host's own attempt
@@ -224,6 +240,22 @@ Codex, agy and Claude seats use the same `fabric_dispatch`, `fabric_batch`,
 `fabric_runs`, `fabric_status`, `fabric_cancel` and `fabric_output` tools.
 Dispatch/batch inputs accept `host` and `operation_id`; dispatch also accepts
 `resume` and `handoff`. Qualified IDs route read/control tools to their owner.
+
+## Transport read-only input
+
+Remote read-only dispatch transports the chair's committed HEAD using the same
+bundle and chunk protocol as writers. The peer creates a detached worktree and
+runs the lane there; uncommitted chair files do not travel. Both hosts need the
+configured project key and a complete Git checkout. If preparation cannot
+transport the input, dispatch runs locally with a visible `placement_fallback`
+reason. The operation stays bound locally on retry.
+
+The detached worktree is removed after the lane's owner settles; polling keeps
+it while a fallback sequence is still alive and retries cleanup when needed.
+Resume or inherited handoff recreates the
+frozen detached input in a separate checkout per operation. Frozen reader input
+metadata survives cleanup and lost launch replies. Writer worktrees remain
+available for verification and fetch.
 
 ## Transport a writer
 
@@ -291,7 +323,7 @@ and Claude chairs.
 | `code_transport_failed` | The message names the Git command, its last error line and the retry action. A chair input preparation failure before send, or a result fetch failure, can be repaired and retried with the same operation ID. A peer prelaunch rejection is journalled permanently: repair the peer, then dispatch with a new operation ID. |
 | `timeout`, `unreachable` | A peer call or Git command did not finish. A chair input preparation failure before send releases the writer binding and frozen inputs: retry with the same ID, or dispatch locally. A peer prelaunch rejection requires repair and a new operation ID. After send with an unknown outcome, see `launch_unknown`. |
 | `launch_unknown` | The request may have landed. Run `lanes`; it reconciles and resends frozen input only when the peer never recorded the operation. |
-| `launch_not_started` | The peer stopped before launching. Dispatch again with a new operation ID. |
+| `launch_not_started` | The peer stopped before launching. `lanes` or retrying the same operation settles it and retries owned worktree cleanup, including `locked (initializing)`. If `cleanup_pending` remains, inspect the preserved worktree and lock on the peer; avoid deleting unrelated or changed work. After settlement, dispatch with a new operation ID. |
 | `code_input_incomplete`, `code_input_missing` | The committed input did not arrive whole. Dispatch again with a new operation ID. |
 | `operation_conflict` | The operation ID already binds another request, host or input. Use a new ID. |
 | `writer_not_terminal` | Wait for the writer to finish. |
@@ -328,6 +360,10 @@ reconciliation. A peer that stops before launching settles as
 `launch_not_started` and releases its worktree claim. A failed prepare or an
 unlaunched operation also removes any worktree and branch it created, provided
 they remain clean at the transported base and no later writer owns them.
+Settlement also repairs a half-created worktree marked `locked (initializing)`,
+including one whose `.git` backlink was never published, when the operation
+creation record, Git registration, branch and unchanged base prove ownership.
+An unrelated lock, changed branch or live writer lease remains `cleanup_pending`.
 An unreachable implicit placement may fall back only at initial placement; the
 writer operation is then durably bound locally. An existing binding keeps its
 host on every retry, including when the first explicit contact failed before send.
@@ -382,7 +418,7 @@ Git directory.
 
 ### Clean up
 
-Transport keeps its refs, worktrees and records until the operator removes
+Writer transport keeps its refs, worktrees and records until the operator removes
 them. After landing a result:
 
 ```sh
@@ -396,14 +432,14 @@ Run both on each host. On the peer, remove the writer worktree with
 result bundles live under `<instance-root>/.agent-fabric/code/`; delete an
 operation's directory there once it is fetched and no retry is pending.
 
-## Verify slices 1–3
+## Verify targeted changes
 
-Run the focused checks from the product checkout, one test process at a time:
+Run the focused checks from the product checkout, selecting the touched
+classes or methods, one test process at a time. Heavy suites run in GitHub Actions:
 
 ```sh
-(cd runtime/fabric && npx vitest run tests/hosts.test.ts tests/lane-wait.test.ts tests/named-sessions.test.ts tests/execution-lifecycle.test.ts tests/run-reader-events.test.ts tests/lanes-cli.test.ts tests/surface.test.ts tests/lean-surface.test.ts --maxWorkers=2)
-python3 -m unittest discover -s tests -p test_fabric_hosts.py -v
-.venv/bin/python -m pytest tests/test_dispatch_run.py tests/test_provenant_cli.py -q
+PYTHONPATH=scripts python3 -m unittest tests.test_fabric_hosts.<TouchedClassOrMethod>
+(cd runtime/fabric && npx vitest run tests/hosts.test.ts --maxWorkers=2)
 npm --prefix runtime/fabric run typecheck
 ```
 

@@ -1,8 +1,8 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createRequire } from "node:module";
-import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { execFileSync, spawn } from "node:child_process";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { expect, it } from "vitest";
@@ -143,6 +143,60 @@ it("includes the launcher's bounded stderr tail in host facade errors", async ()
   } finally {
     if (oldRoot === undefined) delete process.env.AGENT_FABRIC_PRODUCT_ROOT;
     else process.env.AGENT_FABRIC_PRODUCT_ROOT = oldRoot;
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 10_000);
+
+
+it.each(["SIGINT", "SIGTERM"] as const)("CLI %s stops a transfer before peer launch and prints its operation ID", async (signal) => {
+  const { setTimeout: delay } = await import("node:timers/promises");
+  const root = tempRoot("fabric-hosts-cli-interrupt-");
+  const product = join(root, "product"), instance = join(root, "instance");
+  const receipt = join(root, "transfer.json"), launched = join(root, "launched");
+  const python = execFileSync("python3", ["-c", "import sys;print(sys.executable)"], { encoding: "utf8" }).trim();
+  execFileSync("git", ["init", "-q", root]);
+  mkdirSync(join(product, "scripts"), { recursive: true });
+  mkdirSync(join(instance, ".agent-fabric"), { recursive: true });
+  writeFileSync(join(instance, ".agent-fabric/hosts.json"), "{}");
+  const peerLaunch = `import time,pathlib;time.sleep(1);pathlib.Path(${JSON.stringify(launched)}).touch()`;
+  writeFileSync(join(product, "scripts/fabric-hosts"), `#!${python}\nimport os,sys,json,subprocess,time\nrequest=json.load(sys.stdin)\nchild=subprocess.Popen([sys.executable,'-c',${JSON.stringify(peerLaunch)}])\nwith open(${JSON.stringify(receipt)}+'.tmp','w') as stream: json.dump({'pid':os.getpid(),'child_pid':child.pid,'operation_id':request['input'].get('operation_id')},stream)\nos.replace(${JSON.stringify(receipt)}+'.tmp',${JSON.stringify(receipt)})\ntime.sleep(30)\n`, { mode: 0o755 });
+  const prompt = join(root, "prompt.md");
+  writeFileSync(prompt, "transfer fixture");
+  const suppliedId = signal === "SIGTERM" ? "retry-transfer" : undefined;
+  const cli = spawn(process.execPath, ["--import", createRequire(import.meta.url).resolve("tsx"),
+    resolve(import.meta.dirname, "../src/cli.ts"), "dispatch", "--host", "peer", "--mode", "worktree_write",
+    "--adapter", "agy", "--model", "fixture", "--prompt-file", prompt,
+    ...(suppliedId ? ["--operation-id", suppliedId] : [])], {
+    cwd: root, stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HOME: root,
+      AGENT_FABRIC_PRODUCT_ROOT: product, AGENT_FABRIC_INSTANCE_ROOT: instance, PROVENANT_HOST_LOCAL_ONLY: "0",
+      AGENT_FABRIC_STATE_DIRECTORY: join(root, "state"), AGENT_FABRIC_SEAT: "codex" },
+  });
+  let out = "", err = "";
+  cli.stdout.on("data", (chunk) => { out += chunk.toString(); });
+  cli.stderr.on("data", (chunk) => { err += chunk.toString(); });
+  const exited = new Promise<{ code: number | null, signal: string | null }>((done) =>
+    cli.on("close", (code, exitSignal) => done({ code, signal: exitSignal })));
+  let transfer: { pid: number, child_pid: number, operation_id: string } | undefined;
+  try {
+    for (let count = 0; count < 100 && !existsSync(receipt); count++) await delay(20);
+    expect(existsSync(receipt), out + err).toBe(true);
+    transfer = JSON.parse(readFileSync(receipt, "utf8"));
+    cli.kill(signal);
+    const exit = await exited;
+    await delay(1100);
+    expect(existsSync(launched), "an interrupted transfer launched a peer lane").toBe(false);
+    expect(() => process.kill(transfer!.pid, 0)).toThrow();
+    expect(() => process.kill(transfer!.child_pid, 0)).toThrow();
+    expect(transfer!.operation_id).toEqual(suppliedId ?? expect.any(String));
+    expect(transfer!.operation_id.length).toBeGreaterThan(0);
+    expect(out + err).toContain(`operation_id: ${transfer!.operation_id}`);
+    expect(exit).toEqual({ code: signal === "SIGINT" ? 130 : 143, signal: null });
+  } finally {
+    cli.kill("SIGKILL");
+    if (transfer) {
+      try { process.kill(-transfer.pid, "SIGKILL"); } catch { /* already reaped */ }
+    }
+    await exited;
     rmSync(root, { recursive: true, force: true });
   }
 }, 10_000);

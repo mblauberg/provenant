@@ -200,7 +200,7 @@ if (prompt === "stubborn") {
   process.on("SIGTERM", () => {});
   while (true) await new Promise((r) => setTimeout(r, 50));
 }
-if (prompt === "slow" || prompt === "fallback-slow") {
+if (prompt === "slow" || prompt.endsWith("\n\nslow") || prompt === "fallback-slow") {
   while (true) {
     try {
       readFileSync(join(dir, "cancel"));

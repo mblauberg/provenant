@@ -2,9 +2,19 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 from pathlib import Path
+
+
+def _sync_directory(descriptor: int) -> None:
+    """Some network and FUSE filesystems cannot fsync directories."""
+    try:
+        os.fsync(descriptor)
+    except OSError as exc:
+        if exc.errno not in {errno.EINVAL, errno.ENOTSUP}:
+            raise
 
 
 class OwnedFileError(ValueError):
@@ -214,7 +224,7 @@ def atomic_write_contained(
         temp_fd = -1
         os.replace(temp_name, raw.parts[-1], src_dir_fd=parent_fd, dst_dir_fd=parent_fd)
         temp_name = None
-        os.fsync(parent_fd)
+        _sync_directory(parent_fd)
     except (OSError, OwnedFileError) as exc:
         if isinstance(exc, OwnedFileError):
             raise
@@ -272,7 +282,7 @@ def unlink_contained_regular(
         ):
             raise OwnedFileError(f"{label} changed while being removed: {raw.as_posix()}")
         os.unlink(raw.parts[-1], dir_fd=parent_fd)
-        os.fsync(parent_fd)
+        _sync_directory(parent_fd)
     except (OSError, OwnedFileError) as exc:
         if isinstance(exc, OwnedFileError):
             raise
