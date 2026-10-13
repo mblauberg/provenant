@@ -31,8 +31,10 @@ false report. Paste the first section into every lane and reviewer brief.
 - A worktree without installed dependencies runs nothing, yet lanes report
   passes. Install and prove it with one test file before dispatch.
 - Read lane state from `fabric_status{detail:"full"}`, not ad-hoc `ps`. Record
-  each lane's tip on first sight: an unchanged tip with nothing ahead is
-  `empty`, a failure even when the run says `ok`.
+  the tip of each writer lane (one expected to deliver commits) on first sight:
+  an unchanged tip with nothing ahead is `empty`, a failure even when the run
+  says `ok`. Read-only reviewers and researchers commit nothing; judge them by
+  their artifacts and evidence.
 - Before accepting a green, read the last exit code of every verify command in
   the lane's event log; any nonzero last exit voids it.
 - Targeted tests chosen from the changed test files miss dependents. Also run

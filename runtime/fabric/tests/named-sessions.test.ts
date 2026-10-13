@@ -221,6 +221,24 @@ it("reports continuation_unsupported and starts fresh only when asked", async ()
     const brief = readFileSync(join(handed.run_dir, "_owner", `${handed.task_id}-prompt-1.md`), "utf8");
     expect(brief).toContain(`result of ${marks.run_id}/${marks.task_id}#1`);
     expect(brief).not.toContain(`${marks.task_id}#2`);
+    // A handoff from a Claude seat keeps the inherited route (adapter, model) instead of re-routing.
+    const flags = (run: any) => {
+      const args = JSON.parse(readFileSync(join(run.run_dir, "_owner", `${run.task_id}-args-1.json`), "utf8")) as string[];
+      return ["--adapter", "--model"].map((flag) => args[args.indexOf(flag) + 1]);
+    };
+    expect(flags(handed)).toEqual(flags(marks));
+    // An explicit Claude route started elsewhere stays Claude, model included, when a Claude seat hands it off.
+    const codexSeat = await project.connect(project.linked, "codex-seat", "codex");
+    try {
+      const origin = await codexSeat.call("dispatch", { adapter: "claude", model: "opus", prompt: "origin", wait_seconds: 5 });
+      expect(origin).toMatchObject({ status: "ok" });
+      const carried = await chair.call("dispatch", { handoff: origin.run_id, task_id: origin.task_id, prompt: "carry", wait_seconds: 5 });
+      expect(carried, JSON.stringify(carried)).toMatchObject({ status: "ok" });
+      expect(flags(carried)).toEqual(flags(origin));
+      expect(flags(carried)[0]).toBe("claude");
+    } finally {
+      await codexSeat.client.close();
+    }
     expect(await chair.call("dispatch", { prompt: "x", fresh: true }))
       .toMatchObject({ status: "rejected", error: "dispatch_conflict" });
     expect(await chair.call("dispatch", { session: "x", resume: first.run_id, prompt: "x" }))

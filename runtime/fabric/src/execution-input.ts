@@ -251,7 +251,17 @@ function correctSelector(selector: string | undefined, catalogue: CatalogueSnaps
   return { value: selector, unknown: true };
 }
 
-export function normaliseRoute(input: RouteInput, identity: Identity, catalogue: CatalogueSnapshot): NormalisedRoute {
+/** True when the caller itself named an adapter or model, as opposed to a role alias, pool or task class. */
+export function namesExplicitRoute(input: RouteInput): boolean {
+  const named = (value: string | undefined) => typeof value === "string" && value.trim() !== "";
+  return named(input.adapter) || named(input.model) || (named(input.alias) && !ROLE_ALIASES.includes(input.alias!));
+}
+
+/**
+ * `ownSeatGuard` is set only for a new dispatch whose caller explicitly named the route; handoffs, resumes and
+ * pool or task-class picks reach the seat's own adapter without it and only warn.
+ */
+export function normaliseRoute(input: RouteInput, identity: Identity, catalogue: CatalogueSnapshot, ownSeatGuard = false): NormalisedRoute {
   input = { ...input, model: input.model || undefined, alias: input.alias || undefined };
   const warnings: string[] = [];
   // `adapter/model@effort` is the models-list spelling; accept it in model too.
@@ -324,7 +334,7 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
   if (adapter === nativeAdapter(identity)) {
     const own = `${adapter}/${input.model ?? input.alias ?? "workhorse"} is this ${adapter} seat's own model; `;
     // Claude subagents are first-class on the host; a Codex seat still runs with a warning.
-    if (adapter === "claude")
+    if (adapter === "claude" && ownSeatGuard)
       throw new InputError("native_seat_model", `${own}use the host's native subagents instead of Fabric (or pass another adapter).`);
     warnings.unshift(`NATIVE: ${own}spawn a native subagent instead of Fabric`);
   }

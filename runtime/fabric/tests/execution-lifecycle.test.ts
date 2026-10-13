@@ -15,7 +15,7 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
-import { normaliseRoute, readRoots, routeArguments, savedReadRoots, workingIdentity, type BatchTaskInput } from "../src/execution-input.js";
+import { namesExplicitRoute, normaliseRoute, readRoots, routeArguments, savedReadRoots, workingIdentity, type BatchTaskInput } from "../src/execution-input.js";
 import { resumeConfiguredProvider } from "../src/resume.js";
 import { databasePath } from "../src/identity.js";
 import { expandPools, nativeFirst } from "../src/pools.js";
@@ -1500,6 +1500,20 @@ describe("native-first routing", () => {
     const other = await dispatchConfiguredProvider({ adapter: "codex", prompt: "ordinary run", wait_seconds: 5 },
       claudeSeat(), new AbortController().signal, poolEnvironment());
     expect(other.error).not.toBe("native_seat_model");
+  });
+
+  it("applies the own-seat guard only to a new explicit route", () => {
+    const catalogue = { adapters: [{ name: "claude", models: ["claude-haiku-5-5"], model_details: [], aliases: {} }] } as any;
+    const claude = { ...identity, provider: "claude" }, codex = { ...identity, provider: "codex" };
+    const explicit = { adapter: "claude", model: "claude-haiku-5-5" };
+    expect(() => normaliseRoute(explicit, claude, catalogue, true)).toThrow(/own model/u);
+    // An inherited route (handoff) and a codex seat only warn.
+    expect(normaliseRoute(explicit, claude, catalogue).warnings?.[0]).toContain("NATIVE:");
+    expect(normaliseRoute({ adapter: "codex" }, codex, { adapters: [{ name: "codex", models: [], model_details: [], aliases: {} }] } as any, true)
+      .warnings?.[0]).toContain("NATIVE:");
+    expect(namesExplicitRoute(explicit)).toBe(true);
+    expect(namesExplicitRoute({ model: "haiku" })).toBe(true);
+    expect(namesExplicitRoute({ task_class: "review", alias: "workhorse" } as any)).toBe(false);
   });
 
   it("refuses a native seat's default when only its own models are available", async () => {

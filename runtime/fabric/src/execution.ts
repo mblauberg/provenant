@@ -1,5 +1,6 @@
 import {
   normaliseRoute,
+  namesExplicitRoute,
   preflight,
   routeArguments,
   applyDispatchDefaults,
@@ -297,6 +298,8 @@ async function initialiseRun(
  */
 export interface LaunchObserver {
   onLaunch?: (launch: { runId: string; taskId: string; attempt: number }) => void;
+  /** Set by a handoff: its route is inherited, so the own-seat guard for new explicit dispatches does not apply. */
+  continuation?: boolean;
 }
 
 export interface OwnerIdentification {
@@ -666,6 +669,7 @@ async function dispatchConfiguredProviderUnchecked(
 ): Promise<Record<string, unknown>> {
   const workspaceIdentity = identity;
   const root = productRoot(env);
+  const ownSeatGuard = !launch.continuation && namesExplicitRoute(withoutEmptySelectors(input));
   const preferred = nativeFirst(input, identity);
   input = preferred.task;
   let poolWarnings: string[] = preferred.warnings;
@@ -695,13 +699,13 @@ async function dispatchConfiguredProviderUnchecked(
     poolWarnings = [...preferred.warnings, ...expanded.warnings];
   }
   const snapshotStarted = performance.now(), catalogue = catalogueSnapshot(root, env);
-  const initialRoute = normaliseRoute(input, identity, catalogue);
+  const initialRoute = normaliseRoute(input, identity, catalogue, ownSeatGuard);
   input = { ...input, mode: initialRoute.access_mode };
   const providerIdentity = workingIdentity(input, identity);
   input = { ...input, ...(input.cwd === undefined ? {} : { cwd: providerIdentity.cwd }),
     ...(input.prompt_file === undefined ? {} : { prompt_file: ownerPromptPath(identity, input.prompt_file) }) };
   const policy = dispatchDefaults(identity.cwd);
-  const route = applyDispatchDefaults(normaliseRoute(input, identity, catalogue), policy.defaults);
+  const route = applyDispatchDefaults(normaliseRoute(input, identity, catalogue, ownSeatGuard), policy.defaults);
   route.warnings = [...new Set([...(initialRoute.warnings ?? []), ...(route.warnings ?? []), ...poolWarnings, ...policy.warnings])];
   validatePrompt(input.prompt, input.prompt_file);
   const roots = [...new Set([...readRoots(identity, input.cwd, input.prompt_file), ...(input.read_roots ?? [])])];
