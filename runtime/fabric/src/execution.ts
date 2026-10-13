@@ -687,7 +687,7 @@ async function dispatchConfiguredProviderUnchecked(
       const result = await dispatchConfiguredBatchUnchecked({
         ...Object.fromEntries(Object.entries(controls).filter(([key]) =>
           !["prompt", "prompt_file", "resume", "handoff", "adapter", "alias", "model", "effort", "confidential", ...POOL_FIELDS].includes(key))),
-        tasks: expanded.tasks,
+        tasks: expanded.tasks.map((task) => ({ ...task, [OWN_SEAT_GUARD]: ownSeatGuard || (!launch.continuation && input.models !== undefined) })),
         concurrency: Math.min(8, expanded.tasks.length),
         wait_seconds: wait_seconds ?? DEFAULT_WAIT_SECONDS,
       }, identity, signal, env, launch);
@@ -823,6 +823,9 @@ function withWarnings(result: Record<string, unknown>, warnings: string[]): Reco
     ...(rest.length ? [`warning: ${rest.join("; ")}`] : [])] };
 }
 
+/** Marks a batch task whose caller named its route (a task, a batch default or `models`), before pool expansion. */
+const OWN_SEAT_GUARD = "_own_seat_guard";
+
 function normaliseTask(
   task: BatchTaskInput,
   index: number,
@@ -830,12 +833,14 @@ function normaliseTask(
   catalogue: CatalogueSnapshot,
   defaults: DispatchDefaults = {},
 ): Record<string, unknown> {
-  const initialRoute = normaliseRoute(task, identity, catalogue);
+  const { [OWN_SEAT_GUARD]: ownSeatGuard, ...plain } = task as BatchTaskInput & { [OWN_SEAT_GUARD]?: boolean };
+  task = plain;
+  const initialRoute = normaliseRoute(task, identity, catalogue, ownSeatGuard === true);
   task = { ...task, mode: initialRoute.access_mode };
   validatePrompt(task.prompt, task.prompt_file);
   const providerIdentity = workingIdentity(task, identity);
   task = { ...task, ...(task.cwd === undefined ? {} : { cwd: providerIdentity.cwd }) };
-  const route = applyDispatchDefaults(normaliseRoute(task, identity, catalogue), defaults);
+  const route = applyDispatchDefaults(normaliseRoute(task, identity, catalogue, ownSeatGuard === true), defaults);
   route.warnings = [...new Set([...(initialRoute.warnings ?? []), ...(route.warnings ?? [])])];
   const roots = readRoots(identity, task.cwd, task.prompt_file);
   if (roots.length) route.read_roots = roots;
@@ -884,7 +889,9 @@ async function dispatchConfiguredBatchUnchecked(
   });
   const poolWarnings: string[] = [];
   merged = merged.map((task) => {
-    const preferred = nativeFirst(task, identity);
+    const marked = { ...task, [OWN_SEAT_GUARD]: (task as Record<string, unknown>)[OWN_SEAT_GUARD] ?? (!launch.continuation &&
+      (namesExplicitRoute(task) || task.models !== undefined)) };
+    const preferred = nativeFirst(marked, identity);
     poolWarnings.push(...preferred.warnings);
     return preferred.task;
   });

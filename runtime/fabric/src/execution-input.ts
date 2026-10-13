@@ -254,7 +254,7 @@ function correctSelector(selector: string | undefined, catalogue: CatalogueSnaps
 /** True when the caller itself named an adapter or model, as opposed to a role alias, pool or task class. */
 export function namesExplicitRoute(input: RouteInput): boolean {
   const named = (value: string | undefined) => typeof value === "string" && value.trim() !== "";
-  return named(input.adapter) || named(input.model) || (named(input.alias) && !ROLE_ALIASES.includes(input.alias!));
+  return named(input.adapter) || named(input.model) || (named(input.alias) && tierAlias(input.alias!) === undefined);
 }
 
 /**

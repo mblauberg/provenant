@@ -1516,6 +1516,34 @@ describe("native-first routing", () => {
     expect(namesExplicitRoute({ task_class: "review", alias: "workhorse" } as any)).toBe(false);
   });
 
+  it("guards an explicit own-seat Claude request on every batch entry path", async () => {
+    const run = (input: Record<string, unknown>) => dispatchConfiguredBatch({ wait_seconds: 5, ...input } as any,
+      claudeSeat(), new AbortController().signal, poolEnvironment());
+    const refused = (done: any) => {
+      expect(JSON.stringify(done)).toContain("native_seat_model");
+      expect(done.status).toBe("rejected");
+    };
+    refused(await run({ tasks: [{ id: "a", prompt: "p", adapter: "claude", model: "haiku" }] }));
+    refused(await run({ adapter: "claude", model: "haiku", tasks: [{ id: "a", prompt: "p" }] }));
+    refused(await run({ tasks: [{ id: "a", prompt: "p", models: ["claude/haiku"] }] }));
+    const single = await dispatchConfiguredProvider({ models: ["claude/haiku"], prompt: "p", wait_seconds: 5 },
+      claudeSeat(), new AbortController().signal, poolEnvironment());
+    refused(single);
+    // Automatic picks are not the caller's choice.
+    const automatic = await run({ tasks: [{ id: "a", prompt: "p" }] });
+    expect(JSON.stringify(automatic)).not.toContain("native_seat_model");
+  });
+
+  it("recognises a role alias by its normalised name, so task_class with Workhorse or workhorze is not own-seat", async () => {
+    for (const alias of ["Workhorse", "workhorze"]) {
+      const done = await dispatchConfiguredProvider({ task_class: "review", alias, prompt: "p", wait_seconds: 5 } as any,
+        claudeSeat(), new AbortController().signal, poolEnvironment());
+      expect(JSON.stringify(done), alias).not.toContain("native_seat_model");
+    }
+    expect(namesExplicitRoute({ alias: "Workhorse" })).toBe(false);
+    expect(namesExplicitRoute({ alias: "workhorze" })).toBe(false);
+  });
+
   it("refuses a native seat's default when only its own models are available", async () => {
     const bin = join(temporaryDirectory, "codex-only-bin");
     mkdirSync(bin, { recursive: true });
