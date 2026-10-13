@@ -308,8 +308,9 @@ export async function handoffDispatch(
     const requested = previous.provenance?.requested ?? {};
     const inherit = inheritsPreviousRoute(rest);
     const inheritedAdapter = requested.adapter ?? previous.adapter ?? identity.provider;
-    // A previous run on the seat's own adapter was the native default, never an explicit choice; it re-resolves as it did then.
-    const inheritsNative = inherit && inheritedAdapter === nativeAdapter(identity);
+    // Fabric rejects an explicit Claude model from a Claude seat, so a previous run on the seat's own adapter
+    // (the native default) re-resolves as it did then instead of being passed back as an explicit choice.
+    const inheritsNative = inherit && inheritedAdapter === "claude" && nativeAdapter(identity) === "claude";
     const writer = rest.mode === undefined && rest.worktree === undefined && rest.cwd === undefined &&
       previous.mode === "worktree_write" && typeof previous.worktree === "string";
     return await dispatchConfiguredProvider({
