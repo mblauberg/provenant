@@ -192,7 +192,10 @@ def load_config(path=None):
     if not isinstance(projects, dict):
         raise HostError(code, 'Projects must be keyed by home-relative project path')
     for project, placement in projects.items():
-        project_directory(project)
+        try:
+            project_directory(project)
+        except HostError as exc:
+            raise HostError(code, 'Project key is invalid: ' + str(exc)) from exc
         fields(placement, {'default_host', 'modes'}, set(), code)
         modes = placement.get('modes', {})
         fields(modes, {'read_only', 'worktree_write'}, set(), code)

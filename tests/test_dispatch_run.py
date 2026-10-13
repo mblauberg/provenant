@@ -678,6 +678,22 @@ def test_explicit_model_receipt_does_not_record_an_implied_alias(tmp_path):
     assert row["provenance"]["requested"]["alias"] == ""
 
 
+def test_config_fallback_detail_is_persisted_in_the_attempt_record(tmp_path, monkeypatch):
+    mod = load_dispatch_module()
+    args = SimpleNamespace(
+        tool="opencode", alias="workhorse", model="gpt-6-luna", alias_supplied=True,
+        effort=None, task_id="dispatch-001", access_mode="read_only", worktree=None,
+        _phase_timings={}, reviewer_id=None, risk_tier=None,
+        model_override_tier=None,
+    )
+    fallback = {"from_host": "hosts.json", "reason": "invalid_config", "detail": "Response deadline must be positive and finite"}
+    monkeypatch.setenv("PROVENANT_PLACEMENT_FALLBACK", json.dumps(fallback))
+    plan = {}
+    row = mod.contract_row(args, tmp_path, 1, tmp_path / "attempt", plan, "now")
+    assert row["placement_fallback"] == fallback
+    assert plan["warnings"] == ["local fallback from hosts.json: invalid_config: Response deadline must be positive and finite"]
+
+
 def test_explicit_model_and_alias_are_both_recorded_in_receipt(tmp_path):
     mod = load_dispatch_module()
     args = SimpleNamespace(

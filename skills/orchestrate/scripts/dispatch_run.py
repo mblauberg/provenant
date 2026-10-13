@@ -1532,7 +1532,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     if getattr(args,"confidential",False): provenance["requested"]["confidential"]=True
     placement = json.loads(os.environ.get('PROVENANT_PLACEMENT_FALLBACK', 'null'))
     if placement:
-        note = f'local fallback from {placement["from_host"]}: {placement["reason"]}'
+        note = f'local fallback from {placement["from_host"]}: {placement["reason"]}' + (f': {placement["detail"]}' if placement.get('detail') else '')
         if note not in plan.setdefault('warnings', []):
             plan['warnings'].append(note)
     return {"schema":"fabric.attempt.v1", **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
