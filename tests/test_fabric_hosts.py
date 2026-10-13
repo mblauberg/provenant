@@ -928,10 +928,17 @@ class LaneLoopbackContracts(unittest.TestCase):
         value = self.owner_process('print(json.dumps(hosts.project_identity()))')
         self.assertEqual(value, 'Repos/project')
 
+    def test_owner_process_runs_locally_when_hosts_config_is_broken(self):
+        (self.local_home / '.agents/.agent-fabric/hosts.json').write_text('{not json')
+        value = self.owner_process('print(json.dumps(hosts.lane_owner().client_call("dispatch", '
+            + repr(str(self.workspace)) + ', {"prompt": "placement only"})))')
+        self.assertTrue(value['local'])
+
     def test_owner_process_runs_worktree_write_locally_when_read_only_peer_is_offline(self):
         config_path = self.local_home / '.agents/.agent-fabric/hosts.json'
         config = json.loads(config_path.read_text())
-        config['projects']['Repos/project'] = {'default_host': 'laptop', 'modes': {'read_only': 'workshop'}}
+        peer = next(iter(config['peers']))
+        config['projects']['Repos/project'] = {'default_host': config['local_host'], 'modes': {'read_only': peer}}
         config_path.write_text(json.dumps(config))
         self.offline.touch()
         value = self.owner_process('print(json.dumps(hosts.lane_owner().client_call("dispatch", '

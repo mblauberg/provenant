@@ -25,7 +25,13 @@ PATH_FIELDS = {'cwd', 'worktree', 'add_dirs', 'read_roots'}
 class LaneFederation:
     def __init__(self, owner):
         self.h = owner
-        self.config = owner.load_config()
+        try:
+            self.config = owner.load_config()
+        except owner.HostError as exc:
+            if exc.code != 'invalid_config':
+                raise
+            # A broken placement file must never stop local work; run as a standalone host.
+            self.config = owner.HostsConfig()
         self.root = owner.config_path().parent
 
     @contextmanager
