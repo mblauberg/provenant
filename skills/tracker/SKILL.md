@@ -1,14 +1,14 @@
 ---
 name: tracker
-description: "Use for GitHub issue and project-board stewardship on any repo: duplicate checks before filing, epic placement, board/Horizon upkeep, PR issue-linking, closing stale issues, or steward-mode queue triage. Not for doing the work; use implement or orchestrate."
+description: "Use for GitHub issue and project-board stewardship on any repo: duplicate checks before filing, epic placement, board/priority upkeep, PR issue-linking, closing stale issues, or steward-mode queue triage. Not for doing the work; use implement or orchestrate."
 ---
 
 # Tracker
 
 A generic issue-and-board steward. Read the repository's `Repository process`
 declaration first (`MAINTAINING.md` or equivalent): a project with its own
-tracker commands and runbook — for example sealle-app's `pnpm issue` commands
-and `docs/runbooks/tracker.md` — owns the mechanics; this skill supplies the
+tracker commands and runbook — for example an `issue` package script and a
+`docs/runbooks/tracker.md` — owns the mechanics; this skill supplies the
 judgement calls those commands don't make (duplicate calls, placement, closing
 reasons) and falls back to raw `gh` only when no project command exists.
 
@@ -28,9 +28,10 @@ reasons) and falls back to raw `gh` only when no project command exists.
 4. **Link, don't restate.** Sub-issues are the only parent relation; a blocker
    is a dependency, never a parent. Every PR carries one `Closes #n` or
    `Refs #n` line per issue it touches; never a closing keyword in a commit.
-5. **Keep the board and Horizon true.** Status follows the work, not the
-   calendar. Horizon is the owner's call — start new epics at `Later` and
-   promote only under the repo's documented rule, logged.
+5. **Keep the board true.** Status follows the work, not the calendar. The
+   repository's priority or horizon field, when it declares one, is the
+   owner's call: start new items at its documented default and promote only
+   under its documented rule, logged.
 6. **Sweep for stale.** Close with merge evidence or a stated reason (not
    planned, duplicate-of, superseded); update, don't just re-read, an issue
    whose evidence has moved past its last comment. Quiet is not done.
@@ -43,8 +44,9 @@ and [references/hygiene.md](references/hygiene.md) for the rest.
 
 Create, edit, comment, link, close and set Status inside the repo's rules.
 Never delete an issue, never transfer it, never edit another author's comment,
-and never change Horizon except by the repo's own promotion rule. Worker lanes
-report follow-ups; only the coordinator or steward writes the tracker.
+and never change a priority or horizon field except by the repo's own rule.
+Worker lanes report follow-ups; only the coordinator or steward writes the
+tracker.
 
 ## Rate limits
 
