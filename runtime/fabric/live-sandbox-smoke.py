@@ -27,6 +27,7 @@ ROUTES = (
     ("claude", "claude", ("--alias", "workhorse")),
     # An explicit model runs even while a stale alias cooldown would skip it.
     ("agy", "agy", ("--model", "gemini-3.8-flash")),
+    ("cursor", "cursor-agent", ("--model", "auto")),
     ("kiro", "kiro-cli", ("--model", "auto")),
     ("opencode", "opencode", ("--model", "opencode/mimo-v2.6-flash-free")),
 )
