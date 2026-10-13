@@ -137,11 +137,13 @@ class LaneFederation:
 
     def cleanup_unstarted(self, identifier, result, held=None, transport=None):
         """Cleanup is best effort after the prelaunch outcome has been committed."""
+        result.pop('cleanup_pending', None)
+        result.pop('cleanup_error', None)
         try:
             remaining = (transport or self.code()).release(identifier, held)
             if remaining:
                 result['cleanup_pending'] = remaining
-        except (self.h.HostError, OSError, ValueError, subprocess.SubprocessError) as exc:
+        except Exception as exc:  # any cleanup failure is recorded; the outcome stands
             result['cleanup_error'] = str(exc)
         with self.database() as db:
             db.execute('UPDATE operations SET result=? WHERE id=?', (json.dumps(result), identifier))

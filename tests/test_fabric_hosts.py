@@ -866,6 +866,34 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertEqual(json.loads(record.read_text())[0]['worktree_path'], str(remote))
         self.assertEqual(self.peer('operation', operation_id=identifier)['result'], result)
 
+    def test_unstarted_cleanup_records_any_failure_and_clears_it_after_a_clean_retry(self):
+        import fabric_hosts as hosts
+        import worktree
+        identifier = 'cleanup-policy-error'
+
+        class Transport:
+            def __init__(self, outcome):
+                self.outcome = outcome
+
+            def release(self, identifier, held):
+                if isinstance(self.outcome, Exception):
+                    raise self.outcome
+                return self.outcome
+
+        with patch.dict(os.environ, self.env):
+            owner = hosts.lane_owner()
+            with owner.database() as db:
+                db.execute('INSERT INTO operations VALUES (?,?,NULL)', (identifier, json.dumps({})))
+            rejected = {'status': 'rejected', 'error': 'launch_not_started'}
+            failed = owner.cleanup_unstarted(identifier, dict(rejected),
+                transport=Transport(worktree.PolicyError('worktree is not owned')))
+            self.assertEqual(failed['cleanup_error'], 'worktree is not owned')
+            cleaned = owner.cleanup_unstarted(identifier, failed, transport=Transport([]))
+            self.assertEqual(cleaned, rejected)
+            with owner.database() as db:
+                stored = db.execute('SELECT result FROM operations WHERE id=?', (identifier,)).fetchone()[0]
+            self.assertEqual(json.loads(stored), rejected)
+
     def test_peer_transport_rejection_requires_a_new_operation_after_repair(self):
         import base64
         import hashlib
