@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, mkdirSync, openSync, readFileSync, readSync, realpathSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
-import { preflight, validatePrompt, rejected, timeoutSeconds, InputError, ownerPromptPath, savedReadRoots, type DispatchInput, type RouteInput } from "./execution-input.js";
+import { preflight, validatePrompt, rejected, timeoutSeconds, InputError, nativeAdapter, ownerPromptPath, savedReadRoots, type DispatchInput, type RouteInput } from "./execution-input.js";
 import { usesPool } from "./pools.js";
 import {
   dispatchConfiguredProvider,
@@ -307,17 +307,17 @@ export async function handoffDispatch(
     const brief = handoffBrief(previous);
     const requested = previous.provenance?.requested ?? {};
     const inherit = inheritsPreviousRoute(rest);
+    const inheritedAdapter = requested.adapter ?? previous.adapter ?? identity.provider;
+    // A previous run on the seat's own adapter was the native default, never an explicit choice; it re-resolves as it did then.
+    const inheritsNative = inherit && inheritedAdapter === nativeAdapter(identity);
     const writer = rest.mode === undefined && rest.worktree === undefined && rest.cwd === undefined &&
       previous.mode === "worktree_write" && typeof previous.worktree === "string";
     return await dispatchConfiguredProvider({
       ...rest,
-      ...(inherit
-        ? {
-            adapter: requested.adapter ?? previous.adapter ?? identity.provider,
-            model: previous.provenance?.resolved_model || requested.model || undefined,
-            ...(rest.effort === undefined && sentEffort(previous) ? { effort: sentEffort(previous) } : {}),
-          }
+      ...(inherit && !inheritsNative
+        ? { adapter: inheritedAdapter, model: previous.provenance?.resolved_model || requested.model || undefined }
         : {}),
+      ...(inherit && rest.effort === undefined && sentEffort(previous) ? { effort: sentEffort(previous) } : {}),
       ...(writer ? { mode: "worktree_write" as const, worktree: previous.worktree } : {}),
       ...inheritedConfidential(rest, requested),
       prompt: brief + prompt,
