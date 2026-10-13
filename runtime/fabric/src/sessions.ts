@@ -7,7 +7,7 @@
 import { resolve } from "node:path";
 
 import { InputError, rejected, type DispatchInput } from "./execution-input.js";
-import { dispatchConfiguredProvider, type LaunchObserver } from "./execution.js";
+import { dispatchConfiguredProvider, rejectOwnSeatClaude, type LaunchObserver } from "./execution.js";
 import type { Identity } from "./identity.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
 import { runProcessAlive, statusRows } from "./run-registry.js";
@@ -157,6 +157,11 @@ export async function sessionDispatch(
   signal: AbortSignal,
   observer: LaunchObserver = {},
 ): Promise<Record<string, any>> {
+  try {
+    rejectOwnSeatClaude(input, identity, process.env, observer);
+  } catch (error) {
+    return rejected(error);
+  }
   const { federatedLane } = await import("./hosts.js");
   const remote = await federatedLane("dispatch", identity.cwd, input as Record<string, unknown>, signal);
   if (remote) return remote;
