@@ -3842,6 +3842,42 @@ def _run_fake_codex(tmp_path: Path, name: str, body: str, extra_env: dict[str, s
     return run_dir / "dispatch/tasks/task-1/attempt-001", result
 
 
+def _invalid_hosts_env(tmp_path: Path, config: dict) -> dict[str, str]:
+    state = tmp_path / ".agents/.agent-fabric"
+    state.mkdir(parents=True)
+    (state / "hosts.json").write_text(json.dumps(config))
+    return {"HOME": str(tmp_path), "AGENT_FABRIC_INSTANCE_ROOT": str(tmp_path / ".agents"),
+            "AGENT_FABRIC_STATE_DIRECTORY": str(tmp_path / "state"), "PROVENANT_HOST_LOCAL_ONLY": "0"}
+
+
+@pytest.mark.parametrize("config", [
+    {"schema_version": 1, "local_host": "here", "peers": {"there": {"ssh_destination": "there", "response_deadline": 0}}},
+    {"schema_version": 1, "local_host": "here", "projects": {"/absolute/project": {}}},
+])
+def test_cli_dispatch_runs_locally_and_reports_an_invalid_hosts_config(tmp_path: Path, config) -> None:
+    env = _invalid_hosts_env(tmp_path, config)
+    attempt, result = _run_fake_codex(tmp_path, "badcfg", "printf 'OK\\n'\n", env)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "local fallback" in result.stderr and "invalid_config" in result.stderr
+    row = json.loads((attempt.parents[3] / "tasks/task-1/attempt-001/attempt.json").read_text())
+    assert row["placement_fallback"]["reason"] == "invalid_config"
+    assert row["placement_fallback"]["detail"]
+
+
+def test_cli_dispatch_to_an_explicit_peer_still_rejects_with_invalid_hosts_config(tmp_path: Path) -> None:
+    env = _invalid_hosts_env(tmp_path, {"schema_version": 1, "local_host": "here", "peers": {
+        "there": {"ssh_destination": "there", "response_deadline": 0}}})
+    run_dir = make_run(tmp_path, "explicit")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("hi\n")
+    result = subprocess.run(
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "task-1", "--adapter", "codex", "--host", "there",
+         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "workhorse", "--role", "worker"],
+        cwd=tmp_path, env={**os.environ, **env}, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["error"] == "unknown_host"
+
+
 def test_terminal_ok_attempt_prunes_private_tmp_but_keeps_records(tmp_path: Path) -> None:
     outside = tmp_path / "outside.txt"
     outside.write_text("keep\n")
