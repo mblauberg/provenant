@@ -227,61 +227,136 @@ Dispatch/batch inputs accept `host` and `operation_id`; dispatch also accepts
 
 ## Transport a writer
 
-Configure the project key on the receiving host too, even when it has no
-placement default: `"projects": {"Repos/project": {}}`. Git transfer refuses
-unconfigured repositories. Both hosts need full, registered primary checkouts
-at that home-relative path; shallow repositories and grafts are refused.
+1. On both hosts, configure the project key, even when it has no placement
+   default: `"projects": {"Repos/project": {}}`. Git transfer refuses
+   unconfigured repositories. Both hosts need full, registered primary
+   checkouts at that home-relative path; shallow repositories and grafts are
+   refused.
+2. Create a chair worktree with the normal helper, using its branch-derived
+   name, and commit the base the writer should start from:
 
-Create a chair worktree with the normal helper, using its branch-derived name,
-then dispatch it:
+   ```sh
+   provenant worktree create --new-branch feat/example
+   ```
 
-```sh
-provenant worktree create --new-branch feat/example
-provenant fabric dispatch --host workshop --mode worktree_write \
-  --worktree .worktrees/feat-example --prompt-file brief.md \
-  --adapter codex --id example-task --operation-id example-writer
-provenant fabric lanes --wait --all example-task@workshop
-provenant fabric fetch example-writer@workshop
-```
+3. Dispatch the writer:
 
-Fetch also accepts a qualified run or task ID; a batch requires one writer task at a time.
+   ```sh
+   provenant fabric dispatch --host workshop --mode worktree_write \
+     --worktree .worktrees/feat-example --prompt-file brief.md \
+     --adapter codex --id example-task
+   ```
+
+   The reply names the operation ID. Pass `--operation-id` only to retry the
+   same request.
+4. Wait for it to finish:
+
+   ```sh
+   provenant fabric lanes --wait --all example-task@workshop
+   ```
+
+5. Fetch the verified result. Fetch accepts the qualified operation, run or
+   task ID; a batch requires one writer task at a time.
+
+   ```sh
+   provenant fabric fetch example-task@workshop
+   ```
+
+6. Land it. Fetch imports the head into
+   `refs/provenant/hosts/<host>/<result>/result` and never moves a branch. Its
+   reply carries `merge_command`, also printed in the digest, which
+   fast-forwards the chair worktree:
+
+   ```sh
+   git -C ~/Repos/project/.worktrees/feat-example merge --ff-only \
+     refs/provenant/hosts/workshop/<result>/result
+   ```
+
 The MCP equivalents are `fabric_dispatch` with `host`, `mode`, `worktree` and
 `operation_id` (a `fabric_batch` carries these per task), followed by
 `fabric_fetch` with `id`. These operations use the same owner for Codex, agy
 and Claude chairs.
+
+### Errors
+
+| Code | Fix |
+| --- | --- |
+| `project_not_configured` | Add the project key to the receiving host's `hosts.json`. |
+| `worktree_required`, `worktree_invalid` (chair) | Pass a registered `.worktrees/<branch-derived-name>` linked worktree. |
+| `worktree_invalid` (peer) | The named peer worktree is unrelated, dirty or off its transported base. Fetch or remove it on the peer, or use another branch. |
+| `worktree_busy` | The named operation still owns the peer worktree. Wait for it, cancel it, or reconcile its operation ID with `lanes`. |
+| `writer_context_superseded` | A later operation owns the worktree. Continue the newest run. |
+| `code_transport_unsupported` | Unshallow the repository or remove its grafts. |
+| `code_transport_too_large` | The bundle exceeds 64 MiB. Fetch the project's main branch on the peer first, so only newer history travels. |
+| `code_transport_failed` | The message names the Git command and its last error line. Fix that repository state, then retry with the same operation ID. |
+| `timeout`, `unreachable` | A peer call or Git command did not finish. Before send, nothing reached the peer and the writer binding was released: retry, or dispatch locally. After send, see `launch_unknown`. |
+| `launch_unknown` | The request may have landed. Run `lanes`; it reconciles and resends frozen input only when the peer never recorded the operation. |
+| `launch_not_started` | The peer stopped before launching. Dispatch again with a new operation ID. |
+| `code_input_incomplete`, `code_input_missing` | The committed input did not arrive whole. Dispatch again with a new operation ID. |
+| `operation_conflict` | The operation ID already binds another request, host or input. Use a new ID. |
+| `writer_not_terminal` | Wait for the writer to finish. |
+| `writer_verification_failed` | Commit beyond the base, leave the peer worktree clean on its branch, and let the lane finish. |
+| `writer_binding_missing`, `code_result_ambiguous` | Select one writer by its qualified operation, run or task ID. |
+| `writer_head_mismatch`, `bad_response` | The peer's result contradicts its verification. Nothing was imported; investigate the peer. |
+
+### What travels
 
 Only the chair worktree's committed HEAD travels. The reply states that
 uncommitted changes were not transported. After contact, the chair offers the
 peer up to 64 first-parent ancestors of that base (`git-have`); the peer names
 the nearest one a local ref already reaches, and the bundle carries only the
 history after it. A peer with no shared history receives the full history.
-Verified results return as base-to-head bundles. Bundles travel in 32 KiB
-chunks, with a 64 MiB bundle limit, through the restricted peer entrypoint;
-GitHub is not involved, and neither host needs GitHub credentials. A peer that
-already fetched the project's main branch therefore receives a few commits even
-when the full history exceeds the limit. References live under `refs/provenant/hosts/`. The
-peer creates the worktree with its own helper, and its dispatch owner holds the
-host-local writer lease and checks sign-in, confinement and capability policy.
-Writer operation IDs are limited to 120 characters. Replays preserve the frozen
-base and destination; changing host or request is refused, including after a
-successful launch. An interrupted upload remains `launch_unknown` and resumes
-from the frozen input before dispatch reconciliation.
+Verified results return as base-to-head bundles. Uploads travel in 32 KiB
+chunks and downloads in 512 KiB chunks, with a 64 MiB bundle limit, through the
+restricted peer entrypoint; GitHub is not involved, and neither host needs
+GitHub credentials. A peer that already fetched the project's main branch
+therefore receives a few commits even when the full history exceeds the limit.
+The peer publishes each chunk whole, so an interrupted upload resumes cleanly.
+Each host deletes its copy of the input bundle once the peer has consumed it.
+References live under `refs/provenant/hosts/`.
+
+The peer creates the worktree with its own helper, without dependency
+provisioning, and its dispatch owner holds the host-local writer lease and
+checks sign-in, confinement and capability policy. Transport Git runs ignore
+repository hooks, `core.fsmonitor`, filter drivers, replace refs, lazy fetches,
+submodule recursion and automatic maintenance; the writer lane itself uses the
+repository normally. Writer operation IDs are limited to 120 characters.
+Replays preserve the frozen base and destination; changing host or request is
+refused, including after a successful launch. An interrupted upload remains
+`launch_unknown` and resumes from the frozen input before dispatch
+reconciliation. A peer that stops before launching settles as
+`launch_not_started` and releases its worktree claim.
 An unreachable implicit placement may fall back only at initial placement; the
 writer operation is then durably bound locally. An existing binding keeps its
 host on every retry, including when the first explicit contact failed before send.
+A failure while preparing the input, before anything is sent, releases the binding.
+
+Each transfer is a sequence of peer calls bounded by `response_deadline`. For
+large bundles, let SSH reuse one connection in the chair's `~/.ssh/config`:
+
+```text
+Host workshop
+  ControlMaster auto
+  ControlPath ~/.ssh/control-%C
+  ControlPersist 60
+```
+
+### Verification and fetch
 
 Fetch requires a terminal writer. The executing host holds the writer lease,
 checks registered worktree and branch identity, a new head descended from the
 base, and cleanliness using the normal claim verifier. Its receipt binds project,
-operation, base, head, host and worktree. Each operation and head has an immutable export. Earlier verified results stay
-fetchable after handoff; an unverified result from a superseded writer is
-refused. The
-chair selects its recorded input and continuation lineage before checking the
-receipt. It verifies the downloaded pack and ancestry in a temporary object
-repository, then imports only history reachable from the approved head into an
-owned ref. Hidden packed objects and rejected heads stay outside the chair's
-object store. Its existing branch and dirty files stay untouched. The
-reply names the imported ref for review or cherry-pick.
+operation, base, head, host and worktree. Each operation and head has an
+immutable export. Earlier verified results stay fetchable after handoff; an
+unverified result from a superseded writer is refused. The chair selects its
+recorded input and continuation lineage before checking the receipt. It
+verifies the downloaded pack and ancestry in a temporary object repository,
+then imports only history reachable from the approved head into an owned ref.
+Hidden packed objects and rejected heads stay outside the chair's object
+store. Its existing branch and dirty files stay untouched until the operator
+runs the fast-forward.
+
+### Continuations and ownership
 
 Resume and handoff keep the transported worktree. A new writer worktree requires
 a new dispatch; explicit writer overrides in handoff are refused. Remote writer
@@ -290,11 +365,29 @@ worktree from an earlier dispatch requires Provenant's recorded context, the
 same branch, an exact base match, cleanliness and an available writer lease.
 An unrelated or changed peer worktree is refused rather than reset or removed.
 Continuations require current ownership; the shared launch owner checks that
-ownership under the writer lease even for local resumes on the executing host.
-A resumed attempt reserves ownership through publication and completion.
-Read-only handoffs leave writer ownership intact,
-and rejected preflights restore their prior reservation. Ownership and transport
-records live in separate host-state directories outside the writer's Git directory.
+ownership under the writer lease for any run a transported writer launched,
+including local resumes on the executing host. An ordinary local writer that
+finds a stale transported claim clears it. A resumed attempt reserves ownership
+through publication and completion. Read-only handoffs leave writer ownership
+intact, and rejected preflights restore their prior reservation. Ownership and
+transport records live in separate host-state directories outside the writer's
+Git directory.
+
+### Clean up
+
+Transport keeps its refs, worktrees and records until the operator removes
+them. After landing a result:
+
+```sh
+git -C ~/Repos/project for-each-ref --format='%(refname)' refs/provenant/hosts/
+git -C ~/Repos/project update-ref -d refs/provenant/hosts/<host>/<id>/<base|result>
+```
+
+Run both on each host. On the peer, remove the writer worktree with
+`provenant worktree remove feat-example` and its branch with
+`git branch -D feat/example` once nothing will resume it. Frozen inputs and
+result bundles live under `<instance-root>/.agent-fabric/code/`; delete an
+operation's directory there once it is fetched and no retry is pending.
 
 ## Verify slices 1–3
 
