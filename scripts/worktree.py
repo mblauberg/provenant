@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+from contextvars import ContextVar
 import fcntl
 import hashlib
 import importlib.util
@@ -79,10 +81,10 @@ def trusted_tool_path() -> str:
     return os.pathsep.join(TRUSTED_TOOL_DIRECTORIES)
 
 
-# Set by the peer code transport, which handles received history: Git then
+# Scoped by the peer code transport, which handles received history: Git then
 # runs no repository-configured program, follows no replace ref and never
 # fetches lazily or recurses into submodules.
-HARDENED = False
+HARDENED = ContextVar('worktree_hardened_git', default=False)
 HARDENED_SETTINGS = (
     ("core.hooksPath", os.devnull),
     ("core.fsmonitor", "false"),
@@ -93,25 +95,36 @@ HARDENED_SETTINGS = (
 )
 
 
-def git_environment(repo: Path | None = None) -> dict[str, str]:
+@contextmanager
+def hardened_git():
+    token = HARDENED.set(True)
+    try:
+        yield
+    finally:
+        HARDENED.reset(token)
+
+
+def git_environment(repo: Path | None = None, *, hardened: bool = False) -> dict[str, str]:
     environment = {
         "PATH": trusted_tool_path(),
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_TERMINAL_PROMPT": "0",
     }
-    if not HARDENED:
+    if not (hardened or HARDENED.get()):
         return environment
     environment.update(GIT_NO_REPLACE_OBJECTS="1", GIT_NO_LAZY_FETCH="1")
     settings = list(HARDENED_SETTINGS)
     if repo is not None:
-        # Filter drivers have arbitrary names; blank every configured command.
+        # Disable required drivers as well as their executable commands.
         listed = subprocess.run(
             ["git", "-C", str(repo), "config", "--null", "--name-only", "--get-regexp",
-             r"^filter\..*\.(clean|smudge|process)$"],
+             r"^filter\..*\.(clean|smudge|process|required)$"],
             env=environment, stdin=subprocess.DEVNULL, capture_output=True, timeout=30, check=False,
         )
-        settings += [(name, "") for name in listed.stdout.decode(errors="replace").split("\0") if name]
+        names = [name for name in listed.stdout.decode(errors="replace").split("\0") if name]
+        settings += [(name, "") for name in names if not name.endswith('.required')]
+        settings += [(driver + '.required', 'false') for driver in sorted({name.rsplit('.', 1)[0] for name in names})]
     environment["GIT_CONFIG_COUNT"] = str(len(settings))
     for index, (key, value) in enumerate(settings):
         environment[f"GIT_CONFIG_KEY_{index}"] = key
@@ -685,7 +698,17 @@ def create(args: argparse.Namespace) -> dict[str, object]:
         command.extend([str(target), args.existing_branch])
     else:
         command.extend(["-b", args.new_branch, str(target), args.start_point])
-    git(root, *command)
+    branch_ref = 'refs/heads/' + args.new_branch if args.new_branch and not args.existing_branch and args.detach is None else None
+    absent = branch_ref and git(root, 'show-ref', '--verify', '--quiet', branch_ref, check=False).returncode == 1
+    base = git(root, 'rev-parse', '--verify', args.start_point + '^{commit}').stdout.strip() if absent else None
+    try:
+        git(root, *command)
+    except PolicyError:
+        if absent and not any(record.get('branch') == branch_ref for record in worktree_records(root)):
+            # Failed checkout can leave its newly created ref. Never delete an
+            # existing branch, a checked-out ref or one moved off our start point.
+            git(root, 'update-ref', '-d', branch_ref, base, check=False)
+        raise
     node_modules, node_modules_reason = provision_created_node_modules(
         root, target, disabled=args.no_node_modules,
     )

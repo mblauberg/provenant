@@ -288,8 +288,8 @@ and Claude chairs.
 | `writer_context_superseded` | A later operation owns the worktree. Continue the newest run. |
 | `code_transport_unsupported` | Unshallow the repository or remove its grafts. |
 | `code_transport_too_large` | The bundle exceeds 64 MiB. Fetch the project's main branch on the peer first, so only newer history travels. |
-| `code_transport_failed` | The message names the Git command and its last error line. Fix that repository state, then retry with the same operation ID. |
-| `timeout`, `unreachable` | A peer call or Git command did not finish. Before send, nothing reached the peer and the writer binding was released: retry, or dispatch locally. After send, see `launch_unknown`. |
+| `code_transport_failed` | The message names the Git command, its last error line and the retry action. A chair input preparation failure before send, or a result fetch failure, can be repaired and retried with the same operation ID. A peer prelaunch rejection is journalled permanently: repair the peer, then dispatch with a new operation ID. |
+| `timeout`, `unreachable` | A peer call or Git command did not finish. A chair input preparation failure before send releases the writer binding and frozen inputs: retry with the same ID, or dispatch locally. A peer prelaunch rejection requires repair and a new operation ID. After send with an unknown outcome, see `launch_unknown`. |
 | `launch_unknown` | The request may have landed. Run `lanes`; it reconciles and resends frozen input only when the peer never recorded the operation. |
 | `launch_not_started` | The peer stopped before launching. Dispatch again with a new operation ID. |
 | `code_input_incomplete`, `code_input_missing` | The committed input did not arrive whole. Dispatch again with a new operation ID. |
@@ -325,11 +325,18 @@ Replays preserve the frozen base and destination; changing host or request is
 refused, including after a successful launch. An interrupted upload remains
 `launch_unknown` and resumes from the frozen input before dispatch
 reconciliation. A peer that stops before launching settles as
-`launch_not_started` and releases its worktree claim.
+`launch_not_started` and releases its worktree claim. A failed prepare or an
+unlaunched operation also removes any worktree and branch it created, provided
+they remain clean at the transported base and no later writer owns them.
 An unreachable implicit placement may fall back only at initial placement; the
 writer operation is then durably bound locally. An existing binding keeps its
 host on every retry, including when the first explicit contact failed before send.
-A failure while preparing the input, before anything is sent, releases the binding.
+A failure while preparing the chair input, before anything is sent, retires its
+frozen input records and owned refs before releasing the binding. Repair and
+retry with the same ID, including on another peer. Once the peer records a
+prelaunch rejection, that ID always returns the recorded rejection; repair the
+cause and dispatch with a new operation ID. Result fetch retries use the same
+writer selector and its frozen verification.
 
 Each transfer is a sequence of peer calls bounded by `response_deadline`. For
 large bundles, let SSH reuse one connection in the chair's `~/.ssh/config`:

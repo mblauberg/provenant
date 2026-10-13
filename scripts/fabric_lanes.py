@@ -151,7 +151,10 @@ class LaneFederation:
             if not row:
                 return None
             if row[0]:
-                return json.loads(row[0])
+                result = json.loads(row[0])
+                if result.get('status') == 'rejected':
+                    self.code().release(identifier, held)
+                return result
             if (self.root / 'operations' / f'{identifier}.json').exists():
                 return None
             self.code().release(identifier, held)
@@ -252,9 +255,11 @@ class LaneFederation:
                 # The fixed worker records intent before starting an owner. Once
                 # that worker exits without a record, no lane could have started.
                 result = {'status': 'rejected', 'error': getattr(exc, 'code', 'lane_owner_unavailable'),
-                    'fix': str(exc)}
+                    'fix': str(exc) + '; the peer recorded this prelaunch rejection. Repair the cause, then dispatch with a new operation ID'}
             if not launch_path.exists():
-                transport.rollback_claims()
+                transport.release(identifier)
+                if result.get('status') == 'rejected' and 'new operation ID' not in result.get('fix', ''):
+                    result['fix'] = result.get('fix', '') + '; repair the cause, then dispatch with a new operation ID'
             result['operation_id'] = identifier
             with self.database() as db:
                 db.execute('UPDATE operations SET result=? WHERE id=?', (json.dumps(result), identifier))
@@ -731,12 +736,14 @@ class LaneFederation:
                 except self.h.HostError as exc:
                     if not bound_writer:
                         # Nothing reached the peer: free the ID for any placement.
+                        self.code().retire_outgoing(project, clean, identifier, host)
                         with self.database() as db:
                             db.execute('DELETE FROM writer_dispatches WHERE id=?', (identifier,))
                     if exc.code in TRANSIENT:
                         return {'status': 'rejected', 'host': host, 'error': exc.code,
-                            'fix': f'{exc}; nothing was sent to {host}. Retry, or dispatch with host {self.config.local_host} to run locally'}
-                    raise
+                            'fix': f'{exc}; nothing was sent to {host}. Repair the cause and retry with the same operation ID, or dispatch with host {self.config.local_host} to run locally'}
+                    raise self.h.HostError(exc.code,
+                        f'{exc}; nothing was sent to {host}. Repair the cause and retry with the same operation ID') from exc
                 self.code().record_request(project, host, identifier, action, clean)
             if action in WRITES:
                 current = (project, host, action, json.dumps(clean, sort_keys=True))

@@ -660,6 +660,12 @@ class LaneLoopbackContracts(unittest.TestCase):
         (local / 'code.txt').write_text('uncommitted chair edit\n')
         return git, base, local
 
+    def set_peer_response_deadline(self, seconds):
+        path = self.local_home / '.agents/.agent-fabric/hosts.json'
+        config = json.loads(path.read_text())
+        config['peers']['workshop']['response_deadline'] = seconds
+        path.write_text(json.dumps(config))
+
     def test_writer_transports_committed_base_and_fetches_verified_head_without_github(self):
         git, base, local = self.writer_fixture()
         launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
@@ -744,6 +750,168 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertEqual(launched['status'], 'running', launched)
         self.wait_writer(launched['id'])
 
+    def test_unsent_batch_retires_frozen_inputs_before_changing_peer(self):
+        self.set_peer_response_deadline(30)
+        git, base, local = self.writer_fixture()
+        other = self.workspace / '.worktrees/feat-other'
+        git(self.workspace, 'worktree', 'add', '-b', 'feat/mismatched', str(other), base)
+        request = dict(host='workshop', adapter='codex', model='fixture', mode='worktree_write',
+            operation_id='unsent-batch', tasks=[
+                {'id': 'writer-a', 'prompt': 'fixture only', 'worktree': str(local)},
+                {'id': 'writer-b', 'prompt': 'fixture only', 'worktree': str(other)}])
+        grafts = self.workspace / '.git/info/grafts'
+        grafts.write_text(base + '\n')
+        unsupported = self.client('dispatch', **request)
+        self.assertEqual(unsupported['error'], 'code_transport_unsupported', unsupported)
+        self.assertIn('same operation ID', unsupported['fix'])
+        grafts.unlink()
+        refused = self.client('dispatch', **request)
+        self.assertEqual(refused['error'], 'worktree_invalid', refused)
+        self.assertEqual(list(self.local_home.rglob('unsent-batch-*/outgoing.json')), [])
+        self.assertEqual(git(self.workspace, 'for-each-ref', '--format=%(refname)',
+            'refs/provenant/hosts/workshop/unsent-batch-'), '')
+        git(other, 'branch', '-m', 'feat/other')
+        # Repoint the loopback peer under a new host identity.
+        for home in (self.local_home, self.peer_home):
+            path = home / '.agents/.agent-fabric/hosts.json'
+            config = json.loads(path.read_text())
+            if home == self.local_home:
+                config['peers']['other'] = {'ssh_destination': 'other', 'response_deadline': 30}
+            else:
+                config['local_host'] = 'other'
+            path.write_text(json.dumps(config))
+        launched = self.client('dispatch', **{**request, 'host': 'other'})
+        self.assertEqual(launched['status'], 'running', launched)
+        self.wait_writer('writer-a@other')
+        self.wait_writer('writer-b@other')
+
+    def test_failed_peer_prepare_removes_worktrees_created_before_later_failure(self):
+        self.set_peer_response_deadline(30)
+        git, base, local = self.writer_fixture()
+        other = self.workspace / '.worktrees/feat-other'
+        git(self.workspace, 'worktree', 'add', '-b', 'feat/other', str(other), base)
+        # The second writer cannot create its branch on the peer.
+        git(self.peer_workspace, 'fetch', str(self.workspace), 'HEAD')
+        git(self.peer_workspace, 'branch', 'feat/other', 'FETCH_HEAD')
+        request = dict(host='workshop', adapter='codex', model='fixture', mode='worktree_write',
+            tasks=[{'id': 'writer-a', 'prompt': 'fixture only', 'worktree': str(local)},
+                   {'id': 'writer-b', 'prompt': 'fixture only', 'worktree': str(other)}])
+        refused = self.client('dispatch', **request, operation_id='failed-prepare')
+        self.assertEqual(refused['error'], 'worktree_invalid', refused)
+        self.assertFalse((self.peer_workspace / '.worktrees/feat-writer').exists())
+        self.assertEqual(git(self.peer_workspace, 'for-each-ref', '--format=%(refname)',
+            'refs/heads/feat/writer'), '')
+        self.assertEqual(git(self.peer_workspace, 'rev-parse', 'feat/other'), base)
+        git(self.peer_workspace, 'update-ref', '-d', 'refs/heads/feat/other', base)
+        launched = self.client('dispatch', **request, operation_id='after-failed-prepare')
+        self.assertEqual(launched['status'], 'running', launched)
+        self.wait_writer('writer-a@workshop')
+        self.wait_writer('writer-b@workshop')
+
+    def test_peer_transport_rejection_requires_a_new_operation_after_repair(self):
+        import base64
+        import hashlib
+        _, base, local = self.writer_fixture()
+        data = b'not a git bundle\n'
+        meta = dict(base_revision=base, branch='feat/writer', worktree='feat-writer',
+            size=len(data), sha256=hashlib.sha256(data).hexdigest())
+        self.assertTrue(self.peer('git-upload', operation_id='bad-prepare-0', metadata=meta,
+            offset=0, data=base64.b64encode(data).decode())['ok'])
+        request = dict(operation_id='bad-prepare', adapter='codex', model='fixture', prompt='fixture only',
+            mode='worktree_write', task_id='writer', code_transport=[dict(index=0, transfer_id='bad-prepare-0', **meta)])
+        rejected = self.peer('dispatch', **request)['result']
+        self.assertEqual(rejected['error'], 'code_transport_failed', rejected)
+        self.assertIn('new operation ID', rejected['fix'])
+        self.assertEqual(self.peer('dispatch', **request)['result'], rejected)
+        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+            prompt='fixture only', mode='worktree_write', worktree=str(local),
+            task_id='writer', operation_id='repaired-prepare')
+        self.assertEqual(launched['status'], 'running', launched)
+        self.wait_writer(launched['id'])
+
+    def test_transport_restores_normal_git_configuration_after_success_and_failure(self):
+        import fabric_hosts as hosts
+        git, _, _ = self.writer_fixture()
+        git(self.workspace, 'config', 'core.fsmonitor', 'true')
+        with patch.dict(os.environ, self.env):
+            code = hosts.lane_owner().code()
+            code.repo('Repos/project')
+            self.assertEqual(code.w.git(self.workspace, 'config', 'core.fsmonitor').stdout.strip(), 'true')
+            with self.assertRaises(hosts.HostError):
+                code.repo('Repos/missing')
+            self.assertEqual(code.w.git(self.workspace, 'config', 'core.fsmonitor').stdout.strip(), 'true')
+
+    def test_dead_creator_is_removed_with_or_without_a_published_claim(self):
+        import fabric_hosts as hosts
+        git, base, local = self.writer_fixture()
+        for state in ('claimed', 'unclaimed', 'moved'):
+            identifier = 'dead-created-' + state
+            with self.subTest(state=state):
+                with patch.dict(os.environ, self.env):
+                    code = hosts.lane_owner().code()
+                    client = hosts.PeerClient('workshop', code.f.config.peers['workshop'])
+                    request = code.outgoing('Repos/project', dict(adapter='codex', model='fixture',
+                        prompt='fixture only', mode='worktree_write', worktree=str(local), task_id='writer'),
+                        str(self.workspace), identifier, 'workshop', client)
+                    code.send(client, 'Repos/project', request['code_transport'])
+                with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                        'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+                    code = hosts.lane_owner().code()
+                    with code.f.database() as db:
+                        db.execute('INSERT INTO operations VALUES (?,?,NULL)', (identifier,
+                            json.dumps({'project': 'Repos/project', 'verb': 'dispatch', 'digest': 'fixture'})))
+                    with code.f.operation_lock(identifier):
+                        context = code.prepare('Repos/project', request, identifier)[0]
+                        if state == 'unclaimed':
+                            code.context_owner(Path(context['worktree_path'])).unlink()
+                moved = self.peer_workspace / '.worktrees/moved-writer'
+                if state == 'moved':
+                    git(self.peer_workspace, 'worktree', 'move', context['worktree_path'], str(moved))
+                result = self.peer('operation', operation_id=identifier)['result']
+                self.assertEqual(result['error'], 'launch_not_started', result)
+                self.assertFalse((self.peer_workspace / '.worktrees/feat-writer').exists())
+                if state == 'moved':
+                    self.assertEqual(git(moved, 'rev-parse', 'HEAD'), base)
+                    self.assertEqual(git(self.peer_workspace, 'rev-parse', 'feat/writer'), base)
+                else:
+                    self.assertEqual(git(self.peer_workspace, 'for-each-ref', '--format=%(refname)',
+                        'refs/heads/feat/writer'), '')
+                self.assertEqual(self.peer('operation', operation_id=identifier)['result'], result)
+
+    def test_failed_peer_creation_preserves_a_competing_creators_worktree(self):
+        import fabric_hosts as hosts
+        git, base, local = self.writer_fixture()
+        identifier = 'lost-creation-race'
+        with patch.dict(os.environ, self.env):
+            federation = hosts.lane_owner()
+            code = federation.code()
+            client = hosts.PeerClient('workshop', federation.config.peers['workshop'])
+            request = code.outgoing('Repos/project', federation.rewrite_paths(dict(adapter='codex',
+                model='fixture', prompt='fixture only', mode='worktree_write', worktree=str(local),
+                task_id='writer'), cwd=str(self.workspace)), str(self.workspace), identifier, 'workshop', client)
+            code.send(client, 'Repos/project', request['code_transport'])
+        popen = subprocess.Popen
+        competed = False
+        def competing_git(command, **kwargs):
+            nonlocal competed
+            if not competed and command[3:5] == ['worktree', 'add']:
+                competed = True
+                winner = popen(command, **kwargs)
+                _, stderr = winner.communicate()
+                self.assertEqual(winner.returncode, 0, stderr)
+            return popen(command, **kwargs)
+        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}), \
+                patch.object(subprocess, 'Popen', side_effect=competing_git):
+            result = hosts.lane_owner().peer_call('dispatch', {'project_path': 'Repos/project',
+                'input': {**request, 'operation_id': identifier}})
+        self.assertTrue(competed)
+        self.assertEqual(result['error'], 'worktree_invalid', result)
+        remote = self.peer_workspace / '.worktrees/feat-writer'
+        self.assertTrue(remote.exists())
+        self.assertEqual(git(remote, 'rev-parse', 'HEAD'), base)
+        self.assertEqual(git(self.peer_workspace, 'rev-parse', 'feat/writer'), base)
+        self.assertFalse((self.peer_home / '.agents/.agent-fabric/writer-contexts' / (identifier + '.json')).exists())
     def test_writer_fetch_refuses_active_lease_dirty_context_and_changed_branch(self):
         git, _, local = self.writer_fixture()
         result = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
@@ -1080,6 +1248,29 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertEqual(upload(32 * 1024, b'x' * 10)['error']['code'], 'operation_conflict')
         self.assertEqual(b''.join(part.read_bytes() for part in sorted(parts.glob('[0-9]*'))), data)
 
+    def test_chunk_and_bundle_publish_only_after_file_sync_succeeds(self):
+        import base64
+        import hashlib
+        import fabric_hosts as hosts
+        _, base, _ = self.writer_fixture()
+        data = b'complete bytes for publication\n'
+        meta = dict(base_revision=base, branch='feat/writer', worktree='feat-writer',
+            size=len(data), sha256=hashlib.sha256(data).hexdigest())
+        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+            code = hosts.lane_owner().code()
+            request = dict(operation_id='sync-0', metadata=meta, offset=0,
+                data=base64.b64encode(data).decode())
+            with patch.object(os, 'fsync', side_effect=OSError('sync failed')), self.assertRaises(OSError):
+                code.peer('git-upload', 'Repos/project', request)
+            path = code.directory('Repos/project', 'sync-0', receiving=True)
+            self.assertFalse((path / 'chunks/00000').exists())
+            self.assertEqual(code.peer('git-upload', 'Repos/project', request)['status'], 'ok')
+            with patch.object(os, 'fsync', side_effect=OSError('sync failed')), self.assertRaises(OSError):
+                code.assemble(path, meta)
+            self.assertFalse((path / 'input.bundle').exists())
+            self.assertEqual(code.assemble(path, meta).read_bytes(), data)
+
     def test_peer_transport_runs_no_repository_hooks_fsmonitor_or_filters(self):
         git, _, local = self.writer_fixture()
         ran = self.root / 'repository-programs-ran'
@@ -1096,6 +1287,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         git(self.peer_workspace, 'config', 'core.fsmonitor', program('fsmonitor'))
         git(self.peer_workspace, 'config', 'filter.fixture.smudge', program('smudge', 'cat\n'))
         git(self.peer_workspace, 'config', 'filter.fixture.clean', program('clean', 'cat\n'))
+        git(self.peer_workspace, 'config', 'filter.fixture.required', 'true')
         (local / '.gitattributes').write_text('*.txt filter=fixture\n')
         git(local, 'add', '.gitattributes')
         git(local, 'commit', '-qm', 'filtered text')
@@ -1162,6 +1354,7 @@ class LaneLoopbackContracts(unittest.TestCase):
                 self.client('cancel', id=second['id'], operation_id='cleanup-after-dead-writer')
 
     def test_rejected_writer_worktree_can_be_reused_only_at_exact_clean_base(self):
+        self.set_peer_response_deadline(30)
         git, base, local = self.writer_fixture()
         request = dict(host='workshop', adapter='codex', model='fixture', prompt='reject-before-attempt',
             mode='worktree_write', worktree=str(local), task_id='writer')
