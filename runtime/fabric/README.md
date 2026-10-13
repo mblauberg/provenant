@@ -450,7 +450,8 @@ recent runs (at most 20 task rows); an ID reads that run or task. Each row has
 `started_at`, `ended_at`, `last_progress_at`, `pgid`, `pgid_alive`,
 `result_path`, `receipt_path`, `writer`, `worktree` and `attempt`. Paths are
 relative to the project's `.agent-run` root. `ended_at` is `null` until the
-attempt is terminal. Missing facts are `null`; `pgid_alive: null` means
+attempt is terminal; a closure the owner never wrote takes the run's recorded
+finish time. Missing facts are `null`; `pgid_alive: null` means
 the process identity cannot be verified. Both `tasks/<id>/attempt-NNN/` and
 `dispatch/tasks/<id>/attempt-NNN/` receipts are read internally. Fabric's status
 and output readers use the same underlying receipt scanner; consumers should

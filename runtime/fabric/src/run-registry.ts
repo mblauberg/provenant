@@ -884,6 +884,9 @@ function v1Rows(runDir: string): Record<string, any>[] {
   // Only the attempt the dead launcher announced is closed; any attempt an owner wrote stands.
   const abandoned = launcherAbandoned(metadata, owners);
   const closureStatus = receipt?.status === "cancelled" || metadata?.status === "cancelled" ? "cancelled" : "interrupted";
+  // A closure the owner never wrote takes the run's recorded finish; unknown stays null.
+  const time = (value: unknown) => (typeof value === "string" ? value : null);
+  const closedAt = closed ? time(metadata?.finished_at) : null;
   const summary =
     typeof metadata?.batch_id === "string" && /^[A-Za-z0-9._-]+$/u.test(metadata.batch_id)
       ? readJson(join(runDir, "dispatch/batches", metadata.batch_id, "summary.json"))
@@ -900,6 +903,7 @@ function v1Rows(runDir: string): Record<string, any>[] {
             ...row,
             state: "terminal",
             status: closureStatus,
+            ended_at: row.ended_at ?? closedAt,
             digest: `${closureStatus} ${row.run_id}${closureStatus === "interrupted" ? " · fix: dispatch a new run" : ""}`,
           }
         : row;
@@ -919,6 +923,7 @@ function v1Rows(runDir: string): Record<string, any>[] {
         attempt_count: attempts.length,
         state: ended ? "terminal" : "queued",
         status,
+        ended_at: ended ? closedAt : null,
         ...(ended ? { fix, message: metadata?.message, ...(status === "rejected" && typeof metadata?.error === "string" ? { error: metadata.error } : {}) } : {}),
         started_at: metadata!.started_at,
         digest: ended ? `${status} ${row.run_id} · fix: ${fix}` : `running ${row.run_id} attempt ${metadata!.next_attempt} · fabric_status{ids:["${row.run_id}"],wait_seconds:55}`,
@@ -959,6 +964,7 @@ function v1Rows(runDir: string): Record<string, any>[] {
         state: terminal ? "terminal" : "queued",
         status: terminal ? canonicalSuccessStatus(terminalTask?.status ?? "interrupted") : null,
         started_at: metadata.started_at,
+        ended_at: terminal ? time(terminalTask?.finished_at) ?? time(summary?.finished_at) ?? closedAt : null,
         paths: {},
         digest: `${terminal ? canonicalSuccessStatus(terminalTask?.status ?? "interrupted") : "queued"} ${id}`,
       });
