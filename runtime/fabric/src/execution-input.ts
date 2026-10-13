@@ -81,7 +81,7 @@ export interface RouteInput {
   read_roots?: string[];
   host?: string;
   operation_id?: string;
-  placement_fallback?: { from_host: string; reason: string };
+  placement_fallback?: { from_host: string; reason: string; detail?: string };
   adapter?: string;
   alias?: string;
   task_class?: string;
