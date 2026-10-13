@@ -911,6 +911,34 @@ class LaneLoopbackContracts(unittest.TestCase):
                 self.assertTrue(placed['local'])
                 self.assertNotIn('fallback', placed)
 
+    def owner_process(self, script, cwd=None):
+        """Run like the dispatch owner: fabric_hosts loaded by path, scripts/ not on sys.path."""
+        program = ('import importlib.util,json,sys\n'
+            'sys.path[:] = [p for p in sys.path if p not in {"", ' + repr(str(ROOT / 'scripts')) + '}]\n'
+            'spec = importlib.util.spec_from_file_location("provenant_fabric_hosts", '
+            + repr(str(ROOT / 'scripts/fabric_hosts.py')) + ')\n'
+            'hosts = importlib.util.module_from_spec(spec); sys.modules[spec.name] = hosts\n'
+            'spec.loader.exec_module(hosts)\n' + script)
+        process = subprocess.run([sys.executable, '-c', program], cwd=cwd or self.workspace, env=self.env,
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(process.returncode, 0, process.stderr)
+        return json.loads(process.stdout)
+
+    def test_owner_process_resolves_project_identity_without_scripts_on_path(self):
+        value = self.owner_process('print(json.dumps(hosts.project_identity()))')
+        self.assertEqual(value, 'Repos/project')
+
+    def test_owner_process_runs_worktree_write_locally_when_read_only_peer_is_offline(self):
+        config_path = self.local_home / '.agents/.agent-fabric/hosts.json'
+        config = json.loads(config_path.read_text())
+        config['projects']['Repos/project'] = {'default_host': 'laptop', 'modes': {'read_only': 'workshop'}}
+        config_path.write_text(json.dumps(config))
+        self.offline.touch()
+        value = self.owner_process('print(json.dumps(hosts.lane_owner().client_call("dispatch", '
+            + repr(str(self.workspace)) + ', {"mode": "worktree_write", "prompt": "placement only"})))')
+        self.assertTrue(value['local'])
+        self.assertNotIn('fallback', value)
+
     def test_qualified_offline_selector_without_snapshot_is_unreachable(self):
         self.offline.touch()
         for action in ['lanes', 'status']:

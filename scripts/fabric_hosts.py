@@ -403,7 +403,8 @@ def validate_doctor_result(result, host, project_path=None):
         raise HostError('bad_response', 'Doctor socket path result is invalid')
 
 def project_identity(cwd=None):
-    from worktree import primary_root, PolicyError
+    worktree = _load_module('provenant_worktree', PRODUCT_ROOT / 'scripts/worktree.py')
+    primary_root, PolicyError = worktree.primary_root, worktree.PolicyError
     path = Path(cwd or Path.cwd()).resolve()
     try:
         path = primary_root(path)
