@@ -79,13 +79,44 @@ def trusted_tool_path() -> str:
     return os.pathsep.join(TRUSTED_TOOL_DIRECTORIES)
 
 
-def git_environment() -> dict[str, str]:
-    return {
+# Set by the peer code transport, which handles received history: Git then
+# runs no repository-configured program, follows no replace ref and never
+# fetches lazily or recurses into submodules.
+HARDENED = False
+HARDENED_SETTINGS = (
+    ("core.hooksPath", os.devnull),
+    ("core.fsmonitor", "false"),
+    ("submodule.recurse", "false"),
+    ("fetch.recurseSubmodules", "false"),
+    ("gc.auto", "0"),
+    ("maintenance.auto", "false"),
+)
+
+
+def git_environment(repo: Path | None = None) -> dict[str, str]:
+    environment = {
         "PATH": trusted_tool_path(),
         "GIT_CONFIG_NOSYSTEM": "1",
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_TERMINAL_PROMPT": "0",
     }
+    if not HARDENED:
+        return environment
+    environment.update(GIT_NO_REPLACE_OBJECTS="1", GIT_NO_LAZY_FETCH="1")
+    settings = list(HARDENED_SETTINGS)
+    if repo is not None:
+        # Filter drivers have arbitrary names; blank every configured command.
+        listed = subprocess.run(
+            ["git", "-C", str(repo), "config", "--null", "--name-only", "--get-regexp",
+             r"^filter\..*\.(clean|smudge|process)$"],
+            env=environment, stdin=subprocess.DEVNULL, capture_output=True, timeout=30, check=False,
+        )
+        settings += [(name, "") for name in listed.stdout.decode(errors="replace").split("\0") if name]
+    environment["GIT_CONFIG_COUNT"] = str(len(settings))
+    for index, (key, value) in enumerate(settings):
+        environment[f"GIT_CONFIG_KEY_{index}"] = key
+        environment[f"GIT_CONFIG_VALUE_{index}"] = value
+    return environment
 
 
 def _drain_process(
@@ -205,7 +236,7 @@ def _run_git(
     try:
         process = subprocess.Popen(
             command,
-            env=git_environment(),
+            env=git_environment(repo),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
