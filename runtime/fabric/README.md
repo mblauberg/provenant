@@ -485,6 +485,14 @@ holding only them is refused (`route_native_only`), a council hands them back as
 a spawn line, and an explicit request for them is rejected as
 `native_seat_model` on a Claude seat and runs with a leading `NATIVE:` warning on a Codex seat (`skills/orchestrate/references/routing-and-tiers.md#native-first`).
 
+For a Claude seat, the own-seat check applies after batch defaults and selector
+precedence settle, before local or peer placement (including qualified sessions).
+An explicit own-seat Claude route in any task refuses the entire batch:
+`native_seat_model` names the offending task id, every task returns as terminal
+and rejected, and no task is placed. Other task validation failures reject only
+those tasks; valid siblings still run. Selector-free continuations and handoffs
+that inherit their route remain exempt.
+
 ## Hosts
 
 `provenant hosts list` lists instance-owned host configuration;

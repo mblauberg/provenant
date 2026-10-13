@@ -856,6 +856,21 @@ function normaliseTask(
   };
 }
 
+function batchDefaults(input: BatchInput): Record<string, any> {
+  return withoutEmptySelectors(Object.fromEntries(Object.entries(input).filter(([key]) =>
+    ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", ...POOL_FIELDS].includes(key))));
+}
+
+function mergeBatchTask(defaults: Record<string, any>, input: BatchTaskInput, index: number): BatchTaskInput {
+  const task = withoutEmptySelectors(input);
+  // A task's selector replaces a default pool; its pool replaces a default selector.
+  const own = usesPool(task) ? Object.fromEntries(Object.entries(defaults).filter(([key]) => !["alias", "model"].includes(key)))
+    : task.alias !== undefined || task.model !== undefined
+      ? Object.fromEntries(Object.entries(defaults).filter(([key]) => !(POOL_FIELDS as readonly string[]).includes(key)))
+      : defaults;
+  return { ...own, ...task, id: task.id ?? `task-${index + 1}` };
+}
+
 async function dispatchConfiguredBatchUnchecked(
   input: BatchInput,
   identity: Identity,
@@ -876,20 +891,14 @@ async function dispatchConfiguredBatchUnchecked(
   const catalogue = catalogueSnapshot(root, env);
   const policy = dispatchDefaults(identity.cwd);
   const errors: Record<string, unknown>[] = [];
-  const defaults = withoutEmptySelectors(Object.fromEntries(Object.entries(input).filter(([key]) =>
-    ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", ...POOL_FIELDS].includes(key))));
+  const defaults = batchDefaults(input);
   let merged: BatchTaskInput[] = input.tasks.map((task) => withoutEmptySelectors(task)).flatMap((task, index) => {
     const taskError = (task as BatchTaskInput & { _fabric_error?: Record<string, unknown> })._fabric_error;
     if (taskError) {
       errors.push({ task_id: task.id ?? `task-${index + 1}`, ...taskError });
       return [];
     }
-    // A task's own selector replaces a default pool, and a task's own pool replaces a default selector.
-    const own = usesPool(task) ? Object.fromEntries(Object.entries(defaults).filter(([key]) => !["alias", "model"].includes(key)))
-      : task.alias !== undefined || task.model !== undefined
-        ? Object.fromEntries(Object.entries(defaults).filter(([key]) => !(POOL_FIELDS as readonly string[]).includes(key)))
-        : defaults;
-    return [{ ...own, ...task, id: task.id ?? `task-${index + 1}` }];
+    return [mergeBatchTask(defaults, task, index)];
   });
   const poolWarnings: string[] = [];
   merged = merged.map((task) => {
@@ -1006,17 +1015,30 @@ async function dispatchConfiguredBatchUnchecked(
  */
 export function rejectOwnSeatClaude(input: Record<string, any>, identity: Identity, env: NodeJS.ProcessEnv, launch: LaunchObserver = {}): void {
   if (launch.continuation || nativeAdapter(identity) !== "claude") return;
-  const defaults = { adapter: input.adapter, model: input.model, alias: input.alias };
-  const tasks: Record<string, any>[] = Array.isArray(input.tasks) ? input.tasks.map((task: Record<string, any>) => ({ ...defaults, ...withoutEmptySelectors(task) })) : [input];
-  const candidates = tasks.flatMap((task) => [task, ...[...(task.models ?? []), ...(input.models ?? [])].map((model: string) => ({ model }))])
-    .map((task) => withoutEmptySelectors(task) as RouteInput).filter(namesExplicitRoute);
+  const batch = Array.isArray(input.tasks);
+  const defaults = batch ? batchDefaults(input as BatchInput) : {};
+  const tasks: Record<string, any>[] = batch
+    ? input.tasks.flatMap((task: BatchTaskInput & { _fabric_error?: unknown }, index: number) =>
+      task._fabric_error ? [] : [mergeBatchTask(defaults, task, index)])
+    : [input];
+  const candidates = tasks.flatMap((task) => {
+    const effective = nativeFirst(task, identity).task;
+    // Malformed councils belong to per-task validation, not a batch-wide guard refusal.
+    if (effective.models !== undefined && (!Array.isArray(effective.models) ||
+      effective.models.some((model: unknown) => typeof model !== "string"))) return [];
+    const routes = effective.models !== undefined ? effective.models.map((model: string) => ({ model })) : [effective];
+    return routes.filter(namesExplicitRoute).map((route: RouteInput) => ({ route, taskId: batch ? task.id : undefined }));
+  });
   if (!candidates.length) return;
   const catalogue = catalogueSnapshot(productRoot(env), env);
-  for (const candidate of candidates) {
+  for (const { route, taskId } of candidates) {
     try {
-      normaliseRoute({ ...candidate }, identity, catalogue, true);
+      normaliseRoute({ ...route }, identity, catalogue, true);
     } catch (error) {
-      if (error instanceof InputError && error.code === "native_seat_model") throw error;
+      if (error instanceof InputError && error.code === "native_seat_model") {
+        if (batch) throw new InputError(error.code, `Task ${taskId}: ${error.fix} Entire batch refused before placement.`);
+        throw error;
+      }
     }
   }
 }

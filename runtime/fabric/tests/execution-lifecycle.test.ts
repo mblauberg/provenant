@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider, rejectOwnSeatClaude } from "../src/execution.js";
 import { handoffDispatch } from "../src/resume.js";
+import { sessionDispatch } from "../src/sessions.js";
 import { namesExplicitRoute, normaliseRoute, readRoots, routeArguments, savedReadRoots, workingIdentity, type BatchTaskInput } from "../src/execution-input.js";
 import { resumeConfiguredProvider } from "../src/resume.js";
 import { databasePath } from "../src/identity.js";
@@ -1549,6 +1550,84 @@ describe("native-first routing", () => {
     // Automatic picks are not the caller's choice.
     const automatic = await run({ tasks: [{ id: "a", prompt: "p" }] });
     expect(JSON.stringify(automatic)).not.toContain("native_seat_model");
+  });
+
+  it("guards only selectors left after batch merging", async () => {
+    const log = join(temporaryDirectory, "merged-routes.json");
+    const batch = await dispatchConfiguredBatch({ model: "claude/haiku",
+      tasks: [{ id: "routed", route: "strong", prompt: "p" }] }, claudeSeat(), new AbortController().signal,
+      { ...poolEnvironment(), FIXTURE_PREFLIGHT_LOG: log });
+    expect(batch).toMatchObject({ status: "rejected", error: "fixture_logged" });
+    expect(JSON.parse(readFileSync(log, "utf8"))).toMatchObject([{ id: "routed", adapter: "codex" }]);
+  });
+
+  it("guards only selectors left after single models precedence", async () => {
+    const log = join(temporaryDirectory, "council-routes.json");
+    const single = await dispatchConfiguredProvider({ model: "claude/haiku",
+      models: ["codex/gpt-6.1-sol"], prompt: "p" }, claudeSeat(), new AbortController().signal,
+      { ...poolEnvironment(), FIXTURE_PREFLIGHT_LOG: log });
+    expect(single).toMatchObject({ status: "rejected", error: "fixture_logged" });
+    expect(JSON.parse(readFileSync(log, "utf8"))).toMatchObject([{ adapter: "codex", model: "gpt-6.1-sol" }]);
+  });
+
+  it("leaves malformed models to per-task validation while valid siblings reach preflight", async () => {
+    const log = join(temporaryDirectory, "valid-sibling.json");
+    const result = await dispatchConfiguredBatch({ tasks: [
+      { id: "malformed", models: "codex/gpt-6.1-sol" as any, prompt: "p" },
+      { id: "valid", adapter: "codex", prompt: "p" },
+    ] }, claudeSeat(), new AbortController().signal, { ...poolEnvironment(), FIXTURE_PREFLIGHT_LOG: log });
+    expect(result).toMatchObject({ status: "rejected", error: "fixture_logged",
+      tasks: [{ task_id: "malformed", status: "rejected", error: "models_invalid" }] });
+    expect(JSON.parse(readFileSync(log, "utf8"))).toMatchObject([{ id: "valid", adapter: "codex" }]);
+  });
+
+  it("atomically refuses a mixed batch, naming its offending task, with zero placements", async () => {
+    const placed = join(temporaryDirectory, "batch-placed");
+    const hostOwner = join(product, "scripts/fabric-hosts");
+    writeFileSync(hostOwner, `#!/bin/sh\ntouch ${shellQuote(placed)}\nprintf '%s\\n' '{"status":"ok","host":"peer"}'\n`);
+    chmodSync(hostOwner, 0o755);
+    vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", product);
+    vi.stubEnv("PROVENANT_HOST_LOCAL_ONLY", "");
+    try {
+      const result = await dispatchConfiguredBatch({ host: "peer", tasks: [
+        { id: "safe", adapter: "codex", prompt: "p" },
+        { id: "forbidden", adapter: "claude", model: "haiku", prompt: "p" },
+        { adapter: "codex", prompt: "p" },
+      ] }, claudeSeat(), new AbortController().signal, { ...poolEnvironment(), PROVENANT_HOST_LOCAL_ONLY: "" });
+      expect(result).toMatchObject({ status: "rejected", error: "native_seat_model" });
+      const rows = result.tasks as Record<string, unknown>[];
+      expect(rows.map((row) => row.task_id)).toEqual(["safe", "forbidden", "task-3"]);
+      for (const row of rows) expect(row).toMatchObject({ status: "rejected", state: "terminal", error: "native_seat_model" });
+      expect(existsSync(placed)).toBe(false);
+      expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
+      expect(result.fix).toContain("Task forbidden");
+      expect(result.fix).toContain("Entire batch refused before placement");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("refuses a qualified session's explicit own-seat route before placement", async () => {
+    const placed = join(temporaryDirectory, "session-placed");
+    const hostOwner = join(product, "scripts/fabric-hosts");
+    writeFileSync(hostOwner, `#!/bin/sh\ntouch ${shellQuote(placed)}\nprintf '%s\\n' '{"status":"ok","host":"peer"}'\n`);
+    chmodSync(hostOwner, 0o755);
+    const store = new Store(databasePath(ownerEnvironment));
+    vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", product);
+    vi.stubEnv("PROVENANT_HOST_LOCAL_ONLY", "");
+    try {
+      const result = await sessionDispatch({ session: "new@peer", adapter: "claude", prompt: "p" },
+        claudeSeat(), store, new AbortController().signal);
+      expect(result).toMatchObject({ status: "rejected", error: "native_seat_model" });
+      expect(existsSync(placed)).toBe(false);
+      expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
+      expect(await sessionDispatch({ session: "existing@peer", prompt: "p" },
+        claudeSeat(), store, new AbortController().signal)).toMatchObject({ status: "ok", host: "peer" });
+      expect(existsSync(placed)).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+      store.close();
+    }
   });
 
   it("refuses an explicit own-seat Claude route before any peer placement, and lets an inherited continuation through", async () => {

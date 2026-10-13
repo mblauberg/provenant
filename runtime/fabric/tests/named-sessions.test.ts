@@ -140,7 +140,7 @@ it("starts, inspects, resumes across agents, serialises and forgets a named sess
     expect(await chair.call("dispatch", { session: "Board", prompt: "x", council: 2 }))
       .toMatchObject({ status: "rejected", error: "session_invalid" });
     // Resume keeps the route; a change is the existing typed rejection.
-    expect(await chair.call("dispatch", { session: "Review", prompt: "x", adapter: "claude" }))
+    expect(await chair.call("dispatch", { session: "Review", prompt: "x", adapter: "opencode" }))
       .toMatchObject({ status: "rejected", error: "resume_route_change" });
 
     // Only a clean turn moves the pointer, and the next turn continues from it.
