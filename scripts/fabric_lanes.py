@@ -135,6 +135,18 @@ class LaneFederation:
         module = self.h._load_module('provenant_fabric_git', self.h.PRODUCT_ROOT / 'scripts/fabric_git.py')
         return module.CodeTransport(self)
 
+    def cleanup_unstarted(self, identifier, result, held=None, transport=None):
+        """Cleanup is best effort after the prelaunch outcome has been committed."""
+        try:
+            remaining = (transport or self.code()).release(identifier, held)
+            if remaining:
+                result['cleanup_pending'] = remaining
+        except (self.h.HostError, OSError, ValueError, subprocess.SubprocessError) as exc:
+            result['cleanup_error'] = str(exc)
+        with self.database() as db:
+            db.execute('UPDATE operations SET result=? WHERE id=?', (json.dumps(result), identifier))
+        return result
+
     def settle(self, identifier, locked=False, held=None):
         """Resolve an operation whose preparer died before recording a launch.
 
@@ -153,16 +165,15 @@ class LaneFederation:
             if row[0]:
                 result = json.loads(row[0])
                 if result.get('status') == 'rejected':
-                    self.code().release(identifier, held)
+                    return self.cleanup_unstarted(identifier, result, held)
                 return result
             if (self.root / 'operations' / f'{identifier}.json').exists():
                 return None
-            self.code().release(identifier, held)
             result = {'status': 'rejected', 'error': 'launch_not_started', 'operation_id': identifier,
                 'fix': 'The peer stopped before launching; retry with a new operation ID'}
             with self.database() as db:
                 db.execute('UPDATE operations SET result=? WHERE id=?', (json.dumps(result), identifier))
-            return result
+            return self.cleanup_unstarted(identifier, result, held)
 
     def peer_call(self, verb, params):
         project = params['project_path']
@@ -257,12 +268,13 @@ class LaneFederation:
                 result = {'status': 'rejected', 'error': getattr(exc, 'code', 'lane_owner_unavailable'),
                     'fix': str(exc) + '; the peer recorded this prelaunch rejection. Repair the cause, then dispatch with a new operation ID'}
             if not launch_path.exists():
-                transport.release(identifier)
                 if result.get('status') == 'rejected' and 'new operation ID' not in result.get('fix', ''):
                     result['fix'] = result.get('fix', '') + '; repair the cause, then dispatch with a new operation ID'
             result['operation_id'] = identifier
             with self.database() as db:
                 db.execute('UPDATE operations SET result=? WHERE id=?', (json.dumps(result), identifier))
+            if not launch_path.exists():
+                return self.cleanup_unstarted(identifier, result, transport=transport)
             return result
 
     def rewrite_paths(self, request, receiving=False, cwd=None):
@@ -742,8 +754,10 @@ class LaneFederation:
                     if exc.code in TRANSIENT:
                         return {'status': 'rejected', 'host': host, 'error': exc.code,
                             'fix': f'{exc}; nothing was sent to {host}. Repair the cause and retry with the same operation ID, or dispatch with host {self.config.local_host} to run locally'}
+                    retry = ('A new operation ID is required' if exc.code == 'operation_conflict'
+                        else 'Repair the cause and retry with the same operation ID')
                     raise self.h.HostError(exc.code,
-                        f'{exc}; nothing was sent to {host}. Repair the cause and retry with the same operation ID') from exc
+                        f'{exc}; nothing was sent to {host}. {retry}') from exc
                 self.code().record_request(project, host, identifier, action, clean)
             if action in WRITES:
                 current = (project, host, action, json.dumps(clean, sort_keys=True))

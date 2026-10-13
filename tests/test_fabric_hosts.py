@@ -750,6 +750,23 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertEqual(launched['status'], 'running', launched)
         self.wait_writer(launched['id'])
 
+    def test_frozen_writer_branch_conflict_requires_a_new_operation_id(self):
+        import fabric_hosts as hosts
+        git, _, local = self.writer_fixture()
+        identifier = 'frozen-branch-conflict'
+        request = dict(host='workshop', adapter='codex', model='fixture', prompt='fixture only',
+            mode='worktree_write', worktree=str(local), task_id='writer', operation_id=identifier)
+        with patch.dict(os.environ, self.env):
+            code = hosts.lane_owner().code()
+            client = hosts.PeerClient('workshop', code.f.config.peers['workshop'])
+            code.outgoing('Repos/project', request, str(self.workspace), identifier, 'workshop', client)
+        git(local, 'branch', '-m', 'feat/renamed')
+        renamed = local.with_name('feat-renamed')
+        git(self.workspace, 'worktree', 'move', str(local), str(renamed))
+        rejected = self.client('dispatch', **{**request, 'worktree': str(renamed)})
+        self.assertEqual(rejected['error'], 'operation_conflict', rejected)
+        self.assertIn('new operation ID', rejected['fix'])
+
     def test_unsent_batch_retires_frozen_inputs_before_changing_peer(self):
         self.set_peer_response_deadline(30)
         git, base, local = self.writer_fixture()
@@ -807,6 +824,47 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertEqual(launched['status'], 'running', launched)
         self.wait_writer('writer-a@workshop')
         self.wait_writer('writer-b@workshop')
+
+    def test_failed_prepare_settles_after_project_disappears_from_peer_config(self):
+        import fabric_hosts as hosts
+        git, base, local = self.writer_fixture()
+        other = self.workspace / '.worktrees/feat-other'
+        git(self.workspace, 'worktree', 'add', '-b', 'feat/other', str(other), base)
+        git(self.peer_workspace, 'fetch', str(self.workspace), 'HEAD')
+        git(self.peer_workspace, 'branch', 'feat/other', 'FETCH_HEAD')
+        identifier = 'missing-project-prepare'
+        with patch.dict(os.environ, self.env):
+            code = hosts.lane_owner().code()
+            client = hosts.PeerClient('workshop', code.f.config.peers['workshop'])
+            request = code.outgoing('Repos/project', dict(adapter='codex', model='fixture',
+                mode='worktree_write', tasks=[
+                    {'id': 'writer-a', 'prompt': 'fixture only', 'worktree': str(local)},
+                    {'id': 'writer-b', 'prompt': 'fixture only', 'worktree': str(other)}]),
+                str(self.workspace), identifier, 'workshop', client)
+            code.send(client, 'Repos/project', request['code_transport'])
+        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+            code = hosts.lane_owner().code()
+            with code.f.database() as db:
+                db.execute('INSERT INTO operations VALUES (?,?,NULL)', (identifier,
+                    json.dumps({'project': 'Repos/project', 'verb': 'dispatch', 'digest': 'fixture'})))
+            with code.f.operation_lock(identifier), self.assertRaises(hosts.HostError) as raised:
+                code.prepare('Repos/project', request, identifier)
+            self.assertEqual(raised.exception.code, 'worktree_invalid')
+        config_path = self.peer_home / '.agents/.agent-fabric/hosts.json'
+        config = json.loads(config_path.read_text())
+        config.pop('projects')
+        config_path.write_text(json.dumps(config))
+        response = self.peer('operation', operation_id=identifier)
+        self.assertTrue(response['ok'], response)
+        result = response['result']
+        self.assertEqual(result['error'], 'launch_not_started', result)
+        remote = self.peer_workspace / '.worktrees/feat-writer'
+        self.assertEqual(result['cleanup_pending'], [str(remote)])
+        self.assertEqual(git(remote, 'rev-parse', 'HEAD'), base)
+        record = self.peer_home / '.agents/.agent-fabric/writer-contexts' / (identifier + '.json')
+        self.assertEqual(json.loads(record.read_text())[0]['worktree_path'], str(remote))
+        self.assertEqual(self.peer('operation', operation_id=identifier)['result'], result)
 
     def test_peer_transport_rejection_requires_a_new_operation_after_repair(self):
         import base64
@@ -877,6 +935,51 @@ class LaneLoopbackContracts(unittest.TestCase):
                     self.assertEqual(git(self.peer_workspace, 'for-each-ref', '--format=%(refname)',
                         'refs/heads/feat/writer'), '')
                 self.assertEqual(self.peer('operation', operation_id=identifier)['result'], result)
+
+    def test_creation_record_requires_a_durable_parent_directory(self):
+        import fabric_hosts as hosts
+        fsync = os.fsync
+        with patch.dict(os.environ, self.env):
+            code = hosts.lane_owner().code()
+            parent = code.f.root.stat()
+            def fail_parent_sync(fd):
+                inode = os.fstat(fd)
+                if (inode.st_dev, inode.st_ino) == (parent.st_dev, parent.st_ino):
+                    raise OSError('state directory sync failed')
+                return fsync(fd)
+            with patch.object(os, 'fsync', side_effect=fail_parent_sync), self.assertRaises(OSError):
+                code.write_json(code.state_file('writer-contexts', 'unsynced-parent'),
+                    [{'created_worktree': True, 'created_branch': True}])
+            self.assertFalse((code.f.root / 'writer-contexts/unsynced-parent.json').exists())
+
+    def test_creation_record_sync_failure_prevents_worktree_creation(self):
+        import fabric_hosts as hosts
+        _, _, local = self.writer_fixture()
+        identifier = 'unsynced-creation'
+        with patch.dict(os.environ, self.env):
+            code = hosts.lane_owner().code()
+            client = hosts.PeerClient('workshop', code.f.config.peers['workshop'])
+            request = code.outgoing('Repos/project', dict(adapter='codex', model='fixture',
+                prompt='fixture only', mode='worktree_write', worktree=str(local), task_id='writer'),
+                str(self.workspace), identifier, 'workshop', client)
+            code.send(client, 'Repos/project', request['code_transport'])
+        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+            code = hosts.lane_owner().code()
+            binding = request['code_transport'][0]
+            code.assemble(code.directory('Repos/project', binding['transfer_id'], receiving=True), binding)
+            fsync = os.fsync
+            def fail_creation_sync(fd):
+                record = code.f.root / 'writer-contexts'
+                inode = os.fstat(fd)
+                if record.exists() and any((path.stat().st_dev, path.stat().st_ino) == (inode.st_dev, inode.st_ino)
+                        for path in (record, *record.iterdir())):
+                    raise OSError('creation record sync failed')
+                return fsync(fd)
+            with patch.object(os, 'fsync', side_effect=fail_creation_sync), self.assertRaises(OSError):
+                code.prepare('Repos/project', request, identifier)
+            self.assertFalse((self.peer_workspace / '.worktrees/feat-writer').exists())
+            self.assertEqual(list((code.f.root / 'writer-contexts').iterdir()), [])
 
     def test_failed_peer_creation_preserves_a_competing_creators_worktree(self):
         import fabric_hosts as hosts
@@ -1248,28 +1351,55 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertEqual(upload(32 * 1024, b'x' * 10)['error']['code'], 'operation_conflict')
         self.assertEqual(b''.join(part.read_bytes() for part in sorted(parts.glob('[0-9]*'))), data)
 
-    def test_chunk_and_bundle_publish_only_after_file_sync_succeeds(self):
+    def test_chunk_and_bundle_publication_failures_leave_no_temporary_files(self):
         import base64
         import hashlib
+        import stat
         import fabric_hosts as hosts
         _, base, _ = self.writer_fixture()
         data = b'complete bytes for publication\n'
         meta = dict(base_revision=base, branch='feat/writer', worktree='feat-writer',
             size=len(data), sha256=hashlib.sha256(data).hexdigest())
-        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
-                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
-            code = hosts.lane_owner().code()
-            request = dict(operation_id='sync-0', metadata=meta, offset=0,
-                data=base64.b64encode(data).decode())
-            with patch.object(os, 'fsync', side_effect=OSError('sync failed')), self.assertRaises(OSError):
-                code.peer('git-upload', 'Repos/project', request)
-            path = code.directory('Repos/project', 'sync-0', receiving=True)
-            self.assertFalse((path / 'chunks/00000').exists())
-            self.assertEqual(code.peer('git-upload', 'Repos/project', request)['status'], 'ok')
-            with patch.object(os, 'fsync', side_effect=OSError('sync failed')), self.assertRaises(OSError):
-                code.assemble(path, meta)
-            self.assertFalse((path / 'input.bundle').exists())
-            self.assertEqual(code.assemble(path, meta).read_bytes(), data)
+        fsync, replace = os.fsync, os.replace
+        for failure in ('file_sync', 'directory_sync', 'replace'):
+            def fail_sync(fd):
+                directory = stat.S_ISDIR(os.fstat(fd).st_mode)
+                if (failure == 'file_sync' and not directory or failure == 'directory_sync' and directory
+                        and sync_parent.exists() and os.fstat(fd).st_ino == sync_parent.stat().st_ino):
+                    raise OSError('sync failed')
+                return fsync(fd)
+            def fail_replace(*args, **kwargs):
+                if failure == 'replace':
+                    raise OSError('replace failed')
+                return replace(*args, **kwargs)
+            with self.subTest(failure=failure), patch.dict(os.environ, {**self.env,
+                    'HOME': str(self.peer_home), 'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+                code = hosts.lane_owner().code()
+                identifier = 'sync-' + failure
+                request = dict(operation_id=identifier, metadata=meta, offset=0,
+                    data=base64.b64encode(data).decode())
+                path = code.directory('Repos/project', identifier, receiving=True)
+                code.write_json(path / 'incoming.json', meta)
+                sync_parent = path / 'chunks'
+                with patch.object(os, 'fsync', side_effect=fail_sync), \
+                        patch.object(os, 'replace', side_effect=fail_replace), self.assertRaises(OSError):
+                    code.peer('git-upload', 'Repos/project', request)
+                self.assertEqual((path / 'chunks/00000').exists(), failure == 'directory_sync')
+                self.assertEqual(list((path / 'chunks').glob('.partial-*')), [])
+                if failure == 'directory_sync':
+                    with patch.object(os, 'fsync', side_effect=fail_sync), self.assertRaises(OSError):
+                        code.peer('git-upload', 'Repos/project', request)
+                self.assertEqual(code.peer('git-upload', 'Repos/project', request)['status'], 'ok')
+                sync_parent = path
+                with patch.object(os, 'fsync', side_effect=fail_sync), \
+                        patch.object(os, 'replace', side_effect=fail_replace), self.assertRaises(OSError):
+                    code.assemble(path, meta)
+                self.assertEqual((path / 'input.bundle').exists(), failure == 'directory_sync')
+                self.assertEqual(list(path.glob('.bundle-*')), [])
+                if failure == 'directory_sync':
+                    with patch.object(os, 'fsync', side_effect=fail_sync), self.assertRaises(OSError):
+                        code.assemble(path, meta)
+                self.assertEqual(code.assemble(path, meta).read_bytes(), data)
 
     def test_peer_transport_runs_no_repository_hooks_fsmonitor_or_filters(self):
         git, _, local = self.writer_fixture()

@@ -133,7 +133,7 @@ class CodeTransport:
         self.repo(project, receiving)
         identifier = self.f.operation_id({'operation_id': identifier})
         path = self.f.root / 'code' / hashlib.sha256(project.encode()).hexdigest() / identifier
-        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.durable_directory(path)
         return path
 
     def metadata(self, value):
@@ -151,10 +151,31 @@ class CodeTransport:
         return value
 
     def write_json(self, path, value):
-        with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, delete=False) as file:
-            json.dump(value, file)
-            temporary = Path(file.name)
+        custody = self.h._load_module('provenant_fabric_custody', self.h.PRODUCT_ROOT / 'skills/_shared/custody.py')
+        try:
+            custody.atomic_write_contained(path.parent, path.name, json.dumps(value).encode('utf-8'))
+        except custody.OwnedFileError as exc:
+            raise OSError(str(exc)) from exc
+
+    @staticmethod
+    def sync_directory(path):
+        directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+
+    def publish_file(self, temporary, path):
         temporary.replace(path)
+        self.sync_directory(path.parent)
+
+    def durable_directory(self, path):
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # A synced file must not depend on an unsynced ancestor directory entry.
+        for parent in path.parents:
+            self.sync_directory(parent)
+            if parent == self.f.root:
+                break
 
     def bundle(self, repo, ref, path, exclude=None):
         """Thin when the receiver already holds `exclude`; never more than 64 MiB."""
@@ -434,17 +455,22 @@ class CodeTransport:
             # Each chunk is published whole, so an interrupted write leaves
             # nothing a retry must reconcile.
             parts = path / 'chunks'
-            parts.mkdir(exist_ok=True, mode=0o700)
+            self.durable_directory(parts)
             part = parts / f'{offset // CHUNK_BYTES:05d}'
             if part.exists():
                 if part.read_bytes() != chunk:
                     self.fail('operation_conflict', 'Repeated chunk changed its bytes')
+                self.sync_directory(parts)
             else:
                 with tempfile.NamedTemporaryFile(dir=parts, prefix='.partial-', delete=False) as handle:
-                    handle.write(chunk)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                Path(handle.name).replace(part)
+                    temporary = Path(handle.name)
+                    try:
+                        handle.write(chunk)
+                        handle.flush()
+                        os.fsync(handle.fileno())
+                        self.publish_file(temporary, part)
+                    finally:
+                        temporary.unlink(missing_ok=True)
             return {'status': 'ok', 'offset': offset}
 
     def assemble(self, path, meta):
@@ -456,11 +482,17 @@ class CodeTransport:
             if not all(part.is_file() for part in parts):
                 self.fail('code_input_incomplete', 'Writer bundle chunks are missing; resend the committed input')
             with tempfile.NamedTemporaryFile(dir=path, prefix='.bundle-', delete=False) as handle:
-                for part in parts:
-                    handle.write(part.read_bytes())
-                handle.flush()
-                os.fsync(handle.fileno())
-            Path(handle.name).replace(file)
+                temporary = Path(handle.name)
+                try:
+                    for part in parts:
+                        handle.write(part.read_bytes())
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    self.publish_file(temporary, file)
+                finally:
+                    temporary.unlink(missing_ok=True)
+        else:
+            self.sync_directory(path)
         if file.stat().st_size != meta['size'] or hashlib.sha256(file.read_bytes()).hexdigest() != meta['sha256']:
             self.fail('code_input_incomplete', 'Writer bundle is incomplete or its checksum differs')
         return file
@@ -551,12 +583,12 @@ class CodeTransport:
 
     def state_file(self, directory, identifier):
         path = self.f.root / directory
-        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.durable_directory(path)
         return path / (identifier + '.json')
 
     def context_owner(self, target):
         marker = owner_marker(self.f.root, self.git(target, 'rev-parse', '--absolute-git-dir'))
-        marker.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.durable_directory(marker.parent)
         return marker
 
     @hardened
@@ -626,7 +658,7 @@ class CodeTransport:
                     self.restore(marker, identifier)
             except (self.w.PolicyError, OSError, ValueError, KeyError, subprocess.SubprocessError):
                 continue  # A live or vanished worktree; its next claim settles it.
-        self.remove_created_worktrees(identifier, held)
+        return self.remove_created_worktrees(identifier, held)
 
     @hardened
     def remove_created_worktrees(self, identifier, held=None):
@@ -639,15 +671,15 @@ class CodeTransport:
             if not context.get('created_worktree'):
                 continue
             target = Path(context['worktree_path'])
-            repo = self.repo(context['project_path'], receiving=True)
             branch = 'refs/heads/' + context['branch']
-            # Settlement inside claim_context already holds this writer lease
-            # and may also hold the creation lock. Defer removal outside both.
-            if held is not None and target.exists() and self.context_owner(target) == held:
-                remaining.append(context)
-                continue
-            with self.creation_lock(target):
-                try:
+            try:
+                repo = self.repo(context['project_path'], receiving=True)
+                # Settlement inside claim_context already holds this writer lease
+                # and may also hold the creation lock. Defer removal outside both.
+                if held is not None and target.exists() and self.context_owner(target) == held:
+                    remaining.append(context)
+                    continue
+                with self.creation_lock(target):
                     if target.exists():
                         if target.is_symlink() or self.w.primary_root(target) != repo:
                             remaining.append(context)
@@ -665,12 +697,13 @@ class CodeTransport:
                             remaining.append(context)
                             continue
                         self.git(repo, 'update-ref', '-d', branch, context['base_revision'])
-                except (self.h.HostError, self.w.PolicyError, OSError, ValueError, subprocess.SubprocessError):
-                    remaining.append(context)
+            except (self.h.HostError, self.w.PolicyError, OSError, ValueError, subprocess.SubprocessError):
+                remaining.append(context)
         if remaining:
             self.write_json(record, remaining)
         else:
             record.unlink(missing_ok=True)
+        return [context['worktree_path'] for context in remaining]
 
     @hardened
     def rollback_claims(self):
