@@ -106,7 +106,8 @@ owner already answered; the newest owner decision wins.
 
 1. **Packet.** One file: question, options, constraints, prior owner
    decisions, evidence links.
-2. **Members.** At least three, across at least two model families.
+2. **Members.** At least three, across at least two model families. A project
+   may declare a smaller council; it still spans two families.
 3. **Independent first round.** Members see only the packet. Each returns a
    choice, rationale and what would change its mind.
 4. **Chair reconciles.** State the choice with its rationale, the strongest

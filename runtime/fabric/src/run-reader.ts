@@ -23,6 +23,7 @@ export interface RunRead {
   route: string | null;
   model: string | null;
   started_at: string | null;
+  ended_at: string | null;
   last_progress_at: string | null;
   pgid: number | null;
   pgid_alive: boolean | null;
@@ -130,6 +131,7 @@ export async function readRuns(
           ? `${adapter}/${model}${typeof effort === "string" ? `@${effort}` : ""}` : null,
         model: typeof model === "string" ? model : null,
         started_at: typeof row.started_at === "string" ? row.started_at : null,
+        ended_at: typeof row.ended_at === "string" ? row.ended_at : null,
         last_progress_at: typeof row.last_progress_at === "string" ? row.last_progress_at : null,
         pgid: typeof row.pgid === "number" ? row.pgid : provider?.provider_pgid ?? owner?.owner_pgid ?? null,
         pgid_alive: pid === undefined || started == null ? null

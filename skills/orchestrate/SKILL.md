@@ -11,7 +11,8 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
 2. Call `fabric_dispatch` with `prompt` or `prompt_file`, `adapter` or `model`, and optional `effort`. `model` also takes `adapter/id[@effort]`; `fabric_adapters` with `models: <adapter>` lists live ids.
 3. For writers, pass `mode: "worktree_write"` and the registered `worktree`,
    named per `setup-repo`'s branch naming doctrine; the task id defaults to that
-   same branch-derived string. Before dispatch, acquire and verify an advisory
+   same branch-derived string. Before dispatch, [confirm the connection's
+   project](references/fabric-identity.md), then acquire and verify an advisory
    `fabric_work_claim` for the issue or repository-relative path set with a
    stable unique `session_id`; renew it while work continues and release it when
    finished. Do not dispatch against a conflicting live claim; dispatch does not
@@ -46,6 +47,8 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
   `AGENT_FABRIC_LABEL` export also works. Renew an expiring lease and release it
   after an aborted landing. To wait for another chair's lease, use
   `fabric_landing_lease` `action: "wait"` (or shell `fabric landing-wait --timeout N`), not sleep loops.
+  A project whose landing tool takes and releases the lease itself says so in
+  its project skill; the chair then leaves the lease to that tool.
 - Keep full worker output in run files and return only the digest and path; brief native subagents to the [~150-word result digest](references/orchestration-contract.md#native-result-digest). For liveness, use `fabric_status`; see [worker-liveness.md](references/worker-liveness.md) for degraded runs. Size alone proves nothing.
 - On a terminal result, record `adapter/model@effort` from the receipt; derive family from it. Native subagents record `claude/<model>@<effort> (anthropic; resolved)` from the Agent tool's model parameter, never from self-report.
 

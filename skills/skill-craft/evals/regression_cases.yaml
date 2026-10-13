@@ -34,3 +34,14 @@ cases:
       boundary that answers no, because prose carries no machine-enforced
       invariant. If the invariant has no enforcing script, the correct output
       is an enforcing script or nothing.
+  - id: r125
+    relation: positive
+    prompt: "Audit this project skill that supplies repository mechanics for a global skill: can it be followed alone, and does it declare where it departs from the global defaults?"
+    tags: [direct, project-skill]
+    expected:
+      primary_skill: skill-craft
+      companion_skills: []
+    note: >-
+      A project skill extending a global skill states its own hard rules,
+      lists its departures under Project overrides, and keeps harness and
+      Fabric mechanics to coordination skills.
