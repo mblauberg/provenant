@@ -236,8 +236,8 @@ function resultTail(row: Record<string, any>, budget: number): string {
   if (typeof raw !== "string" || budget <= 0) return "";
   let fd: number | undefined;
   try {
-    const root = realpathSync(String(row.run_dir)),
-      path = realpathSync(resolve(root, raw));
+    const root = realpathSync.native(String(row.run_dir)),
+      path = realpathSync.native(resolve(root, raw));
     const inside = relative(root, path);
     if (isAbsolute(inside) || inside === ".." || inside.startsWith(`..${sep}`)) return "";
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);

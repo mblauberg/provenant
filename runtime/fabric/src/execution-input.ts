@@ -7,7 +7,7 @@ import type { CatalogueSnapshot } from "./catalogue.js";
 const DEFAULT_TIMEOUT_SECONDS = 3600;
 function canonical(path: string) {
   try {
-    return realpathSync(path);
+    return realpathSync.native(path);
   } catch {
     return resolve(path);
   }

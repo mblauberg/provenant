@@ -147,7 +147,7 @@ export function releaseActiveExecutions(): void {
 
 function canonical(path: string): string {
   try {
-    return realpathSync(path);
+    return realpathSync.native(path);
   } catch {
     return resolve(path);
   }

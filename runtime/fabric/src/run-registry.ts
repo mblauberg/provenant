@@ -176,7 +176,7 @@ export function removeOwnerRecord(runDir: string): void {
 function runDirectoryNames(workspace: string): string[] {
   const root = runRoot(workspace);
   let local = resolve(workspace, ".agent-run");
-  try { local = join(realpathSync(workspace), ".agent-run"); } catch { /* Missing workspace. */ }
+  try { local = join(realpathSync.native(workspace), ".agent-run"); } catch { /* Missing workspace. */ }
   const locations = [{ path: root, modern: true }, ...(local === root ? [] : [{ path: local, modern: false }])];
   const names: string[] = [];
   for (const location of locations) {
@@ -234,7 +234,7 @@ export function listRecordedRuns(workspace: string): RecordedRun[] {
 
 export function findRecordedRun(workspace: string, reference: string): RecordedRun | undefined {
   const runs = listRecordedRuns(workspace);
-  const real = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } }; // macOS /var
+  const real = (path: string) => { try { return realpathSync.native(path); } catch { return resolve(path); } }; // macOS /var
   return runs.find((run) => run.run_id === reference) ?? runs.find((run) => real(run.run_dir) === real(reference));
 }
 
@@ -615,7 +615,7 @@ async function legacyStatus(
     return { status: "rejected", error: "wait_invalid", fix: "Pass wait_seconds from 0 to 55." };
   }
   try {
-    workspace = realpathSync(workspace);
+    workspace = realpathSync.native(workspace);
   } catch {
     workspace = resolve(workspace);
   }
@@ -1111,8 +1111,8 @@ export async function fabricOutput(
     return { status: "rejected", error: "output_bounds", fix: "Use offset >= 0 and max_bytes 1–20000." };
   let fd: number | undefined;
   try {
-    const root = realpathSync(row.run_dir),
-      path = realpathSync(resolve(root, raw));
+    const root = realpathSync.native(row.run_dir),
+      path = realpathSync.native(resolve(root, raw));
     const rel = relative(root, path);
     if (isAbsolute(rel) || rel === ".." || rel.startsWith(`..${sep}`)) throw new Error("output escapes run directory");
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -1157,7 +1157,7 @@ export function resultTail(row: Record<string, any>, chars: number): { text: str
   if (typeof raw !== "string" || !row.run_dir || chars < 1) return undefined;
   let fd: number | undefined;
   try {
-    const root = realpathSync(row.run_dir), path = realpathSync(resolve(root, raw));
+    const root = realpathSync.native(row.run_dir), path = realpathSync.native(resolve(root, raw));
     const rel = relative(root, path);
     if (isAbsolute(rel) || rel === ".." || rel.startsWith(`..${sep}`)) return undefined;
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
