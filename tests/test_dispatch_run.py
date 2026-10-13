@@ -3117,8 +3117,9 @@ print(json.dumps({'type':'result','result':'DONE'}))
     assert result.returncode == 0, result.stdout + result.stderr
 
 
-@pytest.mark.parametrize('ownership', ['current', 'superseded', 'unresolved'])
+@pytest.mark.parametrize('ownership', ['current', 'superseded', 'unresolved', 'stale'])
 def test_local_writer_resume_requires_its_durable_context_owner(tmp_path, monkeypatch, ownership):
+    """A transported run needs its claim; an ordinary local writer clears a stale one."""
     code = '''import json,sys
 from pathlib import Path
 sys.stdin.read()
@@ -3144,19 +3145,24 @@ print(json.dumps({'type':'result','result':'DONE'}))
     state = instance / '.agent-fabric'
     owners = state / 'writer-owners'
     owners.mkdir(parents=True)
+    operations = state / 'operations'
+    operations.mkdir()
     marker = owners / (hashlib.sha256(git_dir.encode()).hexdigest() + '.json')
-    operation = 'current-writer' if ownership == 'current' else 'replacement-writer'
+    operation = 'current-writer' if ownership in {'current', 'stale'} else 'replacement-writer'
     marker.write_text(json.dumps({'operation_id': operation}))
-    if ownership != 'unresolved':
-        operations = state / 'operations'
-        operations.mkdir()
-        (operations / (operation + '.json')).write_text(json.dumps({
-            'runId': previous['run_id'] if ownership == 'current' else 'mcp-replacement',
-            'taskId': 'dispatch-001', 'attempt': 1}))
+    if ownership != 'stale':
+        # A peer operation launched this run for a transported writer.
+        (operations / 'current-writer.json').write_text(json.dumps({
+            'runId': previous['run_id'], 'taskId': 'dispatch-001', 'attempt': 1}))
+        (state / 'writer-contexts').mkdir()
+        (state / 'writer-contexts/current-writer.json').write_text('[]')
+    if ownership == 'superseded':
+        (operations / 'replacement-writer.json').write_text(json.dumps({
+            'runId': 'mcp-replacement', 'taskId': 'dispatch-001', 'attempt': 1}))
     resumed = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run),
                               '--resume', previous['run_id'], '--prompt-file', str(prompt)],
                              cwd=tmp_path, capture_output=True, text=True, timeout=30)
-    if ownership == 'current':
+    if ownership in {'current', 'stale'}:
         assert resumed.returncode == 0, resumed.stdout + resumed.stderr
         assert provider_effect.exists()
         assert (run / 'tasks/dispatch-001/attempt-002/attempt.json').is_file()
@@ -3165,7 +3171,10 @@ print(json.dumps({'type':'result','result':'DONE'}))
         assert json.loads(resumed.stdout)['error'] == 'writer_context_superseded'
         assert not provider_effect.exists()
         assert not (run / 'tasks/dispatch-001/attempt-002/attempt.json').exists()
-    assert json.loads(marker.read_text()) == {'operation_id': operation}
+    if ownership == 'stale':
+        assert not marker.exists()
+    else:
+        assert json.loads(marker.read_text()) == {'operation_id': operation}
     lease_owner = load_dispatch_module()
     lease = lease_owner.acquire_worktree_lease(worktree)
     lease_owner.release_worktree_lease(lease)

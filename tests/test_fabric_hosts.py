@@ -881,11 +881,13 @@ class LaneLoopbackContracts(unittest.TestCase):
             code = federation.code()
             with federation.database() as db:
                 db.execute('INSERT INTO operations VALUES (?,?,NULL)', ('reserved-resume', '{}'))
-            code.claim_context(context, expected_owner='reserved-writer', admission_operation='reserved-resume')
             replacement = {**context, 'operation_id': 'replacement-writer'}
-            with self.assertRaises(hosts.HostError) as refusal:
-                code.claim_context(replacement, expected_owner='reserved-writer')
-            self.assertEqual(refusal.exception.code, 'worktree_busy')
+            # A live preparer holds its operation lock, so its claim is not settled.
+            with federation.operation_lock('reserved-resume'):
+                code.claim_context(context, expected_owner='reserved-writer', admission_operation='reserved-resume')
+                with self.assertRaises(hosts.HostError) as refusal:
+                    code.claim_context(replacement, expected_owner='reserved-writer')
+                self.assertEqual(refusal.exception.code, 'worktree_busy')
             (state / 'operations/reserved-resume.json').write_text(json.dumps({
                 'runId': launched['id'].split('@')[0], 'taskId': 'writer', 'attempt': 2}))
             with federation.database() as db:
@@ -1033,9 +1035,12 @@ class LaneLoopbackContracts(unittest.TestCase):
             prompt='fixture only', mode='worktree_write', worktree=str(local),
             task_id='writer', operation_id='thin-writer')
         self.assertEqual(launched['status'], 'running', launched)
-        sent = next(self.local_home.rglob('thin-writer-0/input.bundle'))
-        self.assertLess(sent.stat().st_size, 50_000)
-        self.assertIn(b'\n-', sent.read_bytes().split(b'\n\n', 1)[0])
+        sent = json.loads(next(self.local_home.rglob('thin-writer-0/outgoing.json')).read_text())['metadata']
+        self.assertLess(sent['size'], 50_000)
+        # Each side drops its copy of the committed input once the peer consumed it.
+        self.assertEqual(list(self.local_home.rglob('thin-writer-0/input.bundle')), [])
+        self.assertEqual(list(self.peer_home.rglob('thin-writer-0/input.bundle')), [])
+        self.assertEqual(len(list(self.peer_home.rglob('thin-writer-0/consumed'))), 1)
         remote = self.peer_workspace / '.worktrees/feat-writer'
         self.assertEqual(git(remote, 'rev-parse', 'HEAD'), base)
         self.assertEqual(len((remote / 'large.bin').read_bytes()), 200_000)
@@ -1050,6 +1055,111 @@ class LaneLoopbackContracts(unittest.TestCase):
         returned = next(self.peer_home.rglob('result.bundle'))
         self.assertLess(returned.stat().st_size, 50_000)
         self.assertIn(('-' + base).encode(), returned.read_bytes().split(b'\n\n', 1)[0])
+        # The digest names the one explicit step that lands the verified head.
+        self.assertIn(fetched['merge_command'], fetched['digest'])
+        subprocess.run(shlex.split(fetched['merge_command']), check=True, capture_output=True)
+        self.assertEqual(git(local, 'rev-parse', 'HEAD'), head)
+
+    def test_peer_upload_retry_survives_an_interrupted_chunk_write(self):
+        import base64
+        import hashlib
+        _, base, _ = self.writer_fixture()
+        data = os.urandom(32 * 1024 + 10)
+        meta = {'base_revision': base, 'branch': 'feat/writer', 'worktree': 'feat-writer',
+            'size': len(data), 'sha256': hashlib.sha256(data).hexdigest()}
+        def upload(offset, chunk):
+            return self.peer('git-upload', operation_id='partial-0', metadata=meta, offset=offset,
+                data=base64.b64encode(chunk).decode())
+        self.assertEqual(upload(0, data[:100])['error']['code'], 'invalid_code_transport')
+        self.assertTrue(upload(0, data[:32 * 1024])['ok'])
+        parts = next(self.peer_home.rglob('partial-0/chunks'))
+        # An interrupted write leaves only an unpublished temporary file behind.
+        (parts / '.partial-interrupted').write_bytes(data[32 * 1024:32 * 1024 + 3])
+        for _ in range(2):
+            self.assertTrue(upload(32 * 1024, data[32 * 1024:])['ok'])
+        self.assertEqual(upload(32 * 1024, b'x' * 10)['error']['code'], 'operation_conflict')
+        self.assertEqual(b''.join(part.read_bytes() for part in sorted(parts.glob('[0-9]*'))), data)
+
+    def test_peer_transport_runs_no_repository_hooks_fsmonitor_or_filters(self):
+        git, _, local = self.writer_fixture()
+        ran = self.root / 'repository-programs-ran'
+        programs = self.root / 'repository-programs'
+        programs.mkdir()
+        def program(name, body=''):
+            path = programs / name
+            path.write_text(f'#!/bin/sh\necho {name} >> {shlex.quote(str(ran))}\n{body}')
+            path.chmod(0o755)
+            return str(path)
+        program('post-checkout')
+        program('reference-transaction')
+        git(self.peer_workspace, 'config', 'core.hooksPath', str(programs))
+        git(self.peer_workspace, 'config', 'core.fsmonitor', program('fsmonitor'))
+        git(self.peer_workspace, 'config', 'filter.fixture.smudge', program('smudge', 'cat\n'))
+        git(self.peer_workspace, 'config', 'filter.fixture.clean', program('clean', 'cat\n'))
+        (local / '.gitattributes').write_text('*.txt filter=fixture\n')
+        git(local, 'add', '.gitattributes')
+        git(local, 'commit', '-qm', 'filtered text')
+        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+            prompt='fixture only', mode='worktree_write', worktree=str(local),
+            task_id='writer', operation_id='hardened-writer')
+        self.assertEqual(launched['status'], 'running', launched)
+        try:
+            self.wait_writer('writer@workshop')
+            remote = self.peer_workspace / '.worktrees/feat-writer'
+            self.assertEqual((remote / 'code.txt').read_text(), 'committed base\n')
+            created = ran.read_text().split() if ran.exists() else []
+            self.assertNotIn('post-checkout', created)
+            self.assertNotIn('smudge', created)
+            (remote / 'result.txt').write_text('remote implementation\n')
+            git(remote, 'add', 'result.txt')
+            git(remote, 'commit', '-qm', 'remote implementation')
+            ran.unlink(missing_ok=True)
+            fetched = self.client('fetch', id='hardened-writer@workshop')
+            self.assertEqual(fetched['status'], 'ok', fetched)
+            self.assertFalse(ran.exists(), ran.read_text() if ran.exists() else '')
+        finally:
+            self.client('cancel', id='writer@workshop', operation_id='cleanup-hardened-writer')
+
+    def test_dead_peer_preparation_settles_and_releases_its_worktree_claim(self):
+        import sqlite3
+        _, _, local = self.writer_fixture()
+        request = dict(host='workshop', adapter='codex', model='fixture', prompt='fixture only',
+            mode='worktree_write', worktree=str(local), task_id='writer')
+        first = self.client('dispatch', **request, operation_id='settled-writer')
+        self.assertEqual(first['status'], 'running', first)
+        try:
+            self.wait_writer(first['id'])
+            state = self.peer_home / '.agents/.agent-fabric'
+            marker = next((state / 'writer-owners').glob('*.json'))
+            owner = json.loads(marker.read_text())
+            def died(identifier):
+                # The preparer recorded intent and claimed the worktree, then stopped.
+                db = sqlite3.connect(state / 'hosts-state.sqlite3')
+                with db:
+                    db.execute('INSERT INTO operations VALUES (?,?,NULL)', (identifier, json.dumps(
+                        {'project': 'Repos/project', 'verb': 'dispatch', 'digest': 'x'}, sort_keys=True)))
+                db.close()
+                marker.write_text(json.dumps({'operation_id': identifier,
+                    'worktree_path': owner['worktree_path'], 'previous': owner}))
+            died('dead-writer')
+            import fcntl
+            with (state / 'operations/dead-writer.lock').open('a') as lock:
+                # An orphaned worker that still shares the lock may yet launch.
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertEqual(self.peer('operation', operation_id='dead-writer')['result']['status'], 'launch_unknown')
+                self.assertEqual(json.loads(marker.read_text())['operation_id'], 'dead-writer')
+            settled = self.peer('operation', operation_id='dead-writer')['result']
+            self.assertEqual(settled['error'], 'launch_not_started', settled)
+            self.assertEqual(json.loads(marker.read_text()), owner)
+            died('dead-again')
+            second = self.client('dispatch', **request, operation_id='after-dead-writer')
+            self.assertEqual(second['status'], 'running', second)
+            self.wait_writer(second['id'])
+            self.assertEqual(self.peer('operation', operation_id='dead-again')['result']['error'], 'launch_not_started')
+        finally:
+            self.client('cancel', id=first['id'], operation_id='cleanup-settled-writer')
+            if 'second' in locals():
+                self.client('cancel', id=second['id'], operation_id='cleanup-after-dead-writer')
 
     def test_rejected_writer_worktree_can_be_reused_only_at_exact_clean_base(self):
         git, base, local = self.writer_fixture()

@@ -20,6 +20,8 @@ from pathlib import Path
 VERBS = {'dispatch', 'lanes', 'status', 'cancel', 'resume', 'handoff', 'output', 'operation'}
 WRITES = {'dispatch', 'cancel', 'resume', 'handoff'}
 PATH_FIELDS = {'cwd', 'worktree', 'add_dirs', 'read_roots'}
+# Peer errors after which a sent mutation may or may not have landed.
+TRANSIENT = {'timeout', 'unreachable', 'bad_response', 'hosts_cancelled', 'peer_command_failed'}
 
 
 class LaneFederation:
@@ -48,24 +50,30 @@ class LaneFederation:
         finally:
             db.close()
 
-    @contextmanager
     def pending_lock(self, identifier, wait=True):
         identifier = self.operation_id({'operation_id': identifier})
-        directory = self.root / 'pending-locks'
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        descriptor = os.open(directory / f'{identifier}.lock', os.O_CREAT | os.O_RDWR, 0o600)
+        return self.file_lock(self.root / 'pending-locks' / f'{identifier}.lock', wait)
+
+    def operation_lock(self, identifier, wait=True):
+        return self.file_lock(self.root / 'operations' / f'{identifier}.lock', wait)
+
+    @staticmethod
+    @contextmanager
+    def file_lock(path, wait=True):
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        descriptor = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
         with os.fdopen(descriptor, 'a') as handle:
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
             except BlockingIOError:
-                yield False
+                yield None
                 return
             try:
-                yield True
+                yield handle
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
-    def worker(self, verb, project, request, launch_path=None):
+    def worker(self, verb, project, request, launch_path=None, lock=None):
         directory = self.h.project_directory(project)
         if not directory.is_dir():
             raise self.h.HostError('project_missing', 'Peer project directory is missing')
@@ -81,10 +89,14 @@ class LaneFederation:
         with tempfile.NamedTemporaryFile(mode='w', dir=self.root, suffix='.json') as payload:
             json.dump({'verb': verb, 'input': request, 'launch_path': str(launch_path) if launch_path else None}, payload)
             payload.flush()
+            # The worker shares the operation lock until it records a launch, so
+            # it stays held if this process dies while the worker still runs.
             result = run_bounded([*command, payload.name], cwd=directory, timeout_seconds=60,
                 output_limit_bytes=self.h.MAX_RESPONSE_BYTES, merge_stderr=False,
+                pass_fds=(lock.fileno(),) if lock else (),
                 env={**os.environ, 'PROVENANT_HOST_LOCAL_ONLY': '1',
-                    'PROVENANT_REMOTE_LANE': '1' if verb in WRITES else '0'})
+                    'PROVENANT_REMOTE_LANE': '1' if verb in WRITES else '0',
+                    **({'PROVENANT_OPERATION_LOCK_FD': str(lock.fileno())} if lock else {})})
         if result.timed_out or result.stdout_truncated or result.returncode != 0:
             raise self.h.HostError('lane_owner_failed', 'Local lane owner did not return a complete response')
         try:
@@ -113,6 +125,32 @@ class LaneFederation:
     def code(self):
         module = self.h._load_module('provenant_fabric_git', self.h.PRODUCT_ROOT / 'scripts/fabric_git.py')
         return module.CodeTransport(self)
+
+    def settle(self, identifier, locked=False, held=None):
+        """Resolve an operation whose preparer died before recording a launch.
+
+        The preparer holds the operation lock until it records a result, and
+        its worker shares it until a launch is recorded, so a free lock, an
+        empty result and no launch file prove no lane started.
+        Returns the recorded result, or None while the outcome is unknown.
+        """
+        with nullcontext(True) if locked else self.operation_lock(identifier, wait=False) as acquired:
+            if not acquired:
+                return None
+            with self.database() as db:
+                row = db.execute('SELECT result FROM operations WHERE id=?', (identifier,)).fetchone()
+            if not row:
+                return None
+            if row[0]:
+                return json.loads(row[0])
+            if (self.root / 'operations' / f'{identifier}.json').exists():
+                return None
+            self.code().release(identifier, held)
+            result = {'status': 'rejected', 'error': 'launch_not_started', 'operation_id': identifier,
+                'fix': 'The peer stopped before launching; retry with a new operation ID'}
+            with self.database() as db:
+                db.execute('UPDATE operations SET result=? WHERE id=?', (json.dumps(result), identifier))
+            return result
 
     def peer_call(self, verb, params):
         project = params['project_path']
@@ -157,7 +195,8 @@ class LaneFederation:
                     and row.get('attempt', 0) >= identity['attempt']]
                 if recovered:
                     return {**value, 'runs': recovered, 'operation_id': identifier}
-            return {'status': 'launch_unknown', 'state': 'launch_unknown', 'operation_id': identifier}
+                return {'status': 'launch_unknown', 'state': 'launch_unknown', 'operation_id': identifier}
+            return self.settle(identifier) or {'status': 'launch_unknown', 'state': 'launch_unknown', 'operation_id': identifier}
         if verb not in WRITES:
             return self.worker(verb, project, request)
         identifier = self.operation_id(request)
@@ -171,16 +210,21 @@ class LaneFederation:
         encoded = json.dumps({'project': project, 'verb': verb,
             'digest': hashlib.sha256(json.dumps(clean, sort_keys=True).encode()).hexdigest()}, sort_keys=True)
         operations = self.root / 'operations'
-        operations.mkdir(parents=True, exist_ok=True, mode=0o700)
-        lock = operations / f'{identifier}.lock'
-        with lock.open('a') as handle:
-            fcntl.flock(handle, fcntl.LOCK_EX)
+        with self.operation_lock(identifier, wait=False) as held:
+            if not held:
+                # Another preparer, or its orphaned worker, still owns this ID.
+                return {'status': 'launch_unknown', 'state': 'launch_unknown', 'operation_id': identifier}
             with self.database() as db:
                 row = db.execute('SELECT request,result FROM operations WHERE id=?', (identifier,)).fetchone()
-                if row:
-                    if row[0] != encoded:
-                        raise self.h.HostError('operation_conflict', 'Operation ID was already used for another request')
-                    return json.loads(row[1]) if row[1] else self.peer_call('operation', {'project_path': project, 'input': {'operation_id': identifier}})
+            if row:
+                if row[0] != encoded:
+                    raise self.h.HostError('operation_conflict', 'Operation ID was already used for another request')
+                if row[1]:
+                    return json.loads(row[1])
+                if (operations / f'{identifier}.json').exists():
+                    return self.peer_call('operation', {'project_path': project, 'input': {'operation_id': identifier}})
+                return self.settle(identifier, locked=True)
+            with self.database() as db:
                 # Commit before invoking the launch owner. An interrupted operation is
                 # reconciled, never blindly relaunched by the receiving host.
                 db.execute('INSERT INTO operations VALUES (?,?,NULL)', (identifier, encoded))
@@ -189,7 +233,7 @@ class LaneFederation:
             try:
                 contexts = (transport.prepare(project, clean, identifier) if verb == 'dispatch'
                     else transport.continuation(project, verb, clean, identifier) if verb in {'resume', 'handoff'} else [])
-                result = self.worker(verb, project, clean, launch_path)
+                result = self.worker(verb, project, clean, launch_path, held)
                 if contexts:
                     result['code_transport'] = {'writers': contexts, 'uncommitted_changes_transported': False}
                     result['digest'] = result.get('digest', '') + '\n  committed input only; uncommitted chair changes were not transported'
@@ -433,7 +477,7 @@ class LaneFederation:
                                 db.execute('INSERT OR REPLACE INTO snapshots VALUES (?,?,?,?,?)', (project, host, verb, time.time(), json.dumps(payload)))
                 else:
                     error = response.get('error', {}).get('code')
-                    if not response.get('ok') and error not in {'timeout', 'unreachable', 'bad_response', 'hosts_cancelled', 'lane_owner_failed', 'peer_command_failed'}:
+                    if not response.get('ok') and error not in TRANSIENT | {'lane_owner_failed'}:
                         with self.database() as db:
                             db.execute('DELETE FROM pending WHERE id=?', (identifier,))
                         rows.append({**self.unknown(identifier, host), 'state': 'terminal', 'status': 'rejected', 'error': error})
@@ -668,8 +712,13 @@ class LaneFederation:
                 try:
                     clean = self.code().outgoing(project, clean, cwd, identifier, host, client)
                 except self.h.HostError as exc:
-                    if exc.code in {'timeout', 'unreachable', 'bad_response', 'hosts_cancelled', 'peer_command_failed'}:
-                        return {'status': 'rejected', 'host': host, 'error': exc.code, 'fix': str(exc)}
+                    if not bound_writer:
+                        # Nothing reached the peer: free the ID for any placement.
+                        with self.database() as db:
+                            db.execute('DELETE FROM writer_dispatches WHERE id=?', (identifier,))
+                    if exc.code in TRANSIENT:
+                        return {'status': 'rejected', 'host': host, 'error': exc.code,
+                            'fix': f'{exc}; nothing was sent to {host}. Retry, or dispatch with host {self.config.local_host} to run locally'}
                     raise
                 self.code().record_request(project, host, identifier, action, clean)
             if action in WRITES:
@@ -688,7 +737,7 @@ class LaneFederation:
                     try:
                         self.code().send(client, project, clean['code_transport'])
                     except self.h.HostError as exc:
-                        if exc.code in {'timeout', 'unreachable', 'bad_response', 'hosts_cancelled', 'peer_command_failed'}:
+                        if exc.code in TRANSIENT:
                             return {**self.unknown(identifier, host), 'digest': f'launch_unknown {identifier}@{host}; retry frozen code transport'}
                         raise
                 response = client.call(action, {'project_path': project, 'input': clean}, write=action in WRITES)
@@ -698,7 +747,7 @@ class LaneFederation:
                     with self.database() as db:
                         db.execute('DELETE FROM pending WHERE id=?', (identifier,))
                 return self.qualify(response['result'], host)
-            if action in WRITES and response.get('error', {}).get('code') in {'timeout', 'unreachable', 'bad_response', 'hosts_cancelled', 'lane_owner_failed', 'peer_command_failed'}:
+            if action in WRITES and response.get('error', {}).get('code') in TRANSIENT | {'lane_owner_failed'}:
                 return {**self.unknown(identifier, host), 'digest': f'launch_unknown {identifier}@{host}; reconcile by operation ID'}
             if action in WRITES:
                 with self.database() as db:

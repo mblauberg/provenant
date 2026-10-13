@@ -131,6 +131,7 @@ def run_bounded(
     env: Mapping[str, str] | None = None,
     output_limit_bytes: int = 1_048_576,
     merge_stderr: bool = True,
+    pass_fds: Sequence[int] = (),
 ) -> BoundedProcessResult:
     """Run one process group without pipe deadlocks.
 
@@ -157,6 +158,7 @@ def run_bounded(
             stderr=subprocess.STDOUT if merge_stderr else stderr_file,
             env=dict(env) if env is not None else None,
             start_new_session=True,
+            pass_fds=tuple(pass_fds),
         )
         timed_out = False
         try:

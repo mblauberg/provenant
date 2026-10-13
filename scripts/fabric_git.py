@@ -5,13 +5,15 @@ import argparse
 import base64
 import hashlib
 import json
-import os
 import re
+import shlex
+import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
-CHUNK_BYTES = 32 * 1024
+CHUNK_BYTES = 32 * 1024  # Uploads fit the 64 KiB peer request cap once encoded.
+DOWNLOAD_CHUNK_BYTES = 512 * 1024  # Downloads fit the 1 MiB peer response cap once encoded.
 MAX_BUNDLE_BYTES = 64 * 1024 * 1024
 MAX_HAVE_CANDIDATES = 64
 MAX_BUNDLE_HEADER_BYTES = 64 * 1024
@@ -23,11 +25,25 @@ def owner_marker(root, git_dir):
     return Path(root) / 'writer-owners' / (hashlib.sha256(str(git_dir).encode()).hexdigest() + '.json')
 
 
+def transported_run(root, run_id):
+    """True when a peer operation launched `run_id` for a transported writer."""
+    for launch in (Path(root) / 'operations').glob('*.json'):
+        try:
+            recorded = json.loads(launch.read_text()).get('runId') == run_id
+        except (OSError, ValueError, AttributeError):
+            continue
+        if recorded and (Path(root) / 'writer-contexts' / launch.name).is_file():
+            return True
+    return False
+
+
 def validate_launch(hosts, root, target, run_id, task_id):
-    """Refuse a launch that a transported writer context no longer binds.
+    """Refuse a transported writer launch that its worktree claim no longer binds.
 
     Needs only the instance root, never the host configuration, so a missing or
-    broken peer setup cannot block an ordinary local writer.
+    broken peer setup cannot block an ordinary local writer. The caller holds
+    the worktree writer lease, so a claim found by an ordinary local writer is
+    stale and is cleared rather than refusing the launch.
     """
     if not (Path(root) / 'writer-owners').is_dir():
         return
@@ -37,8 +53,9 @@ def validate_launch(hosts, root, target, run_id, task_id):
     if probe.returncode:
         raise hosts.HostError('worktree_invalid', 'Writer worktree Git directory is unreadable')
     marker = owner_marker(root, probe.stdout.strip())
-    if not marker.exists():
-        return  # Ordinary local writers have no transported context.
+    if not transported_run(root, run_id):
+        marker.unlink(missing_ok=True)
+        return
     try:
         owner = json.loads(marker.read_text())
         identifier = owner['operation_id']
@@ -58,20 +75,29 @@ class CodeTransport:
         self.h = federation.h
         self.claims = []
         self.w = self.h._load_module('provenant_host_worktree', self.h.PRODUCT_ROOT / 'scripts/worktree.py')
+        # Received history must not run repository-configured programs while
+        # it is imported, checked out, inspected or verified.
+        self.w.HARDENED = True
 
     def fail(self, code, message):
         raise self.h.HostError(code, message)
 
-    def git(self, repo, *args):
-        # Never inherit object/config routing, invoke hooks, fetch lazy objects,
-        # or honour replace refs while deciding transport identities.
-        env = {**self.w.git_environment(), 'GIT_NO_REPLACE_OBJECTS': '1', 'GIT_NO_LAZY_FETCH': '1'}
+    def git(self, repo, *args, check=True):
+        """Run bounded Git; with check=False a failed command returns None."""
+        # The hardened worktree environment: no inherited object or config
+        # routing, hooks, fsmonitor, filters, replace refs or lazy fetches.
+        env = self.w.git_environment(repo)
         runner = self.h._load_module('provenant_bounded_process', self.h.PRODUCT_ROOT / 'skills/_shared/bounded_process.py').run_bounded
-        result = runner(['git', '-C', str(repo), '-c', 'core.hooksPath=/dev/null',
-            '-c', 'protocol.file.allow=always', *args], env=env, cwd=repo,
+        result = runner(['git', '-C', str(repo), '-c', 'protocol.file.allow=always', *args], env=env, cwd=repo,
             timeout_seconds=60, output_limit_bytes=self.h.MAX_RESPONSE_BYTES, merge_stderr=False)
-        if result.returncode or result.timed_out or result.stdout_truncated or result.stderr_truncated:
-            self.fail('code_transport_failed', 'Git object transfer or identity check failed')
+        if result.timed_out:
+            self.fail('timeout', f'git {args[0]} timed out after 60 seconds')
+        if result.returncode or result.stdout_truncated or result.stderr_truncated:
+            if not check:
+                return None
+            lines = (result.stderr or '').strip().splitlines()
+            detail = ''.join(char if char.isprintable() else '?' for char in lines[-1][:200]) if lines else 'no error output'
+            self.fail('code_transport_failed', f'git {args[0]} failed: {detail}')
         return result.stdout.strip()
 
     def repo(self, project, receiving=False):
@@ -157,8 +183,8 @@ class CodeTransport:
         self.git(repo, 'bundle', 'verify', str(bundle))
         with tempfile.TemporaryDirectory(prefix='git-quarantine-', dir=self.f.root) as scratch:
             quarantine = Path(scratch)
-            format = self.git(repo, 'rev-parse', '--show-object-format')
-            self.git(quarantine, 'init', '--bare', '--object-format=' + format)
+            object_format = self.git(repo, 'rev-parse', '--show-object-format')
+            self.git(quarantine, 'init', '--bare', '--object-format=' + object_format)
             # Prerequisites and previously accepted history remain readable,
             # while every new object is written only in this temporary repository.
             (quarantine / 'objects/info/alternates').write_text(str(self.w.common_git_dir(repo) / 'objects') + '\n')
@@ -206,11 +232,8 @@ class CodeTransport:
         clean = dict(request)
         tasks = clean.get('tasks') or [clean]
         bindings = []
-        for index, task in enumerate(tasks):
-            effective = {**{k: v for k, v in clean.items() if k != 'tasks'}, **task}
-            writer = str(effective.get('mode', 'read_only')).lower() in WRITER_MODES
-            if not writer:
-                continue
+        for index in self.writer_tasks(clean):
+            effective = {**{k: v for k, v in clean.items() if k != 'tasks'}, **tasks[index]}
             if request.get('session'):
                 self.fail('remote_writer_session_unsupported', 'Writer dispatch requires a task, without a named session')
             if not effective.get('worktree'):
@@ -242,10 +265,9 @@ class CodeTransport:
                 ref = f'refs/provenant/hosts/{host}/{transfer_id}/base'
                 # Recover a preparation interrupted before metadata publication
                 # from its already-pinned ref, without guessing a new base.
-                existing = subprocess.run(['git', '-C', str(repo), 'rev-parse', '--verify', ref],
-                    env={**self.w.git_environment(), 'GIT_NO_REPLACE_OBJECTS': '1'}, capture_output=True, text=True)
-                if existing.returncode == 0:
-                    base = self.oid(existing.stdout.strip())
+                existing = self.git(repo, 'rev-parse', '--verify', '--quiet', ref, check=False)
+                if existing:
+                    base = self.oid(existing)
                 else:
                     self.git(repo, 'update-ref', ref, base, '0' * len(base))
                 exclude = None if (path / 'input.bundle').exists() else self.common_base(client, project, repo, base)
@@ -261,6 +283,8 @@ class CodeTransport:
         for binding in bindings:
             meta = {k: v for k, v in binding.items() if k not in {'index', 'transfer_id'}}
             path = self.directory(project, binding['transfer_id']) / 'input.bundle'
+            if not path.is_file():
+                continue  # Deleted after the peer answered; a replay gets its recorded result.
             with path.open('rb') as handle:
                 offset = 0
                 while chunk := handle.read(CHUNK_BYTES):
@@ -315,10 +339,10 @@ class CodeTransport:
 
     def record_result(self, identifier, result):
         with self.f.database() as db:
-            row = db.execute('SELECT bindings FROM writer_history WHERE id=?', (identifier,)).fetchone()
+            row = db.execute('SELECT bindings,project FROM writer_history WHERE id=?', (identifier,)).fetchone()
             if not row:
                 return
-            bindings = json.loads(row[0])
+            bindings, project = json.loads(row[0]), row[1]
             # Single dispatches and handoffs allocate task IDs in the launch
             # owner. Capture that identity without changing their frozen input.
             task = result.get('task_id')
@@ -328,6 +352,10 @@ class CodeTransport:
                 bindings[0]['task_id'] = task
             db.execute('UPDATE writer_history SET bindings=?,result=? WHERE id=?',
                 (json.dumps(bindings), json.dumps(result), identifier))
+        # The peer has answered for these inputs; their bundles are spent.
+        for binding in bindings:
+            (self.f.root / 'code' / hashlib.sha256(project.encode()).hexdigest() /
+                binding['transfer_id'] / 'input.bundle').unlink(missing_ok=True)
 
     def peer(self, verb, project, request):
         if verb == 'git-result':
@@ -352,7 +380,8 @@ class CodeTransport:
         with self.f.pending_lock('code-' + identifier):
             path = self.directory(project, identifier, receiving=True)
             offset = request['offset']
-            if type(offset) is not int or not 0 <= offset <= MAX_BUNDLE_BYTES or offset % CHUNK_BYTES:
+            step = DOWNLOAD_CHUNK_BYTES if verb == 'git-download' else CHUNK_BYTES
+            if type(offset) is not int or not 0 <= offset <= MAX_BUNDLE_BYTES or offset % step:
                 self.fail('invalid_code_transport', 'Invalid bundle chunk offset')
             if verb == 'git-download':
                 file = path / 'result.bundle'
@@ -360,38 +389,57 @@ class CodeTransport:
                     self.fail('code_result_missing', 'Verify the writer result before downloading')
                 with file.open('rb') as handle:
                     handle.seek(offset)
-                    chunk = handle.read(CHUNK_BYTES)
+                    chunk = handle.read(DOWNLOAD_CHUNK_BYTES)
                 return {'data': base64.b64encode(chunk).decode(), 'offset': offset}
             meta = self.metadata(request['metadata'])
             saved = path / 'incoming.json'
             if saved.exists() and json.loads(saved.read_text()) != meta:
                 self.fail('operation_conflict', 'Transfer ID already binds another committed input')
+            if (path / 'consumed').exists():
+                return {'status': 'ok', 'offset': offset}  # Already imported; a repeated upload is a no-op.
             if not saved.exists():
                 self.write_json(saved, meta)
             try:
                 chunk = base64.b64decode(request['data'], validate=True)
             except (ValueError, TypeError):
                 self.fail('invalid_code_transport', 'Invalid bundle chunk encoding')
-            if not 0 < len(chunk) <= CHUNK_BYTES or offset + len(chunk) > meta['size']:
-                self.fail('invalid_code_transport', 'Invalid bundle chunk length')
-            file = path / 'input.bundle'
-            with file.open('r+b' if file.exists() else 'w+b') as handle:
-                handle.seek(0, 2)
-                size = handle.tell()
-                if offset < size:
-                    handle.seek(offset)
-                    if handle.read(len(chunk)) != chunk:
-                        self.fail('operation_conflict', 'Repeated chunk changed its bytes')
-                elif offset == size:
+            if (not 0 < len(chunk) <= CHUNK_BYTES or offset + len(chunk) > meta['size'] or
+                    len(chunk) != CHUNK_BYTES and offset + len(chunk) != meta['size']):
+                self.fail('invalid_code_transport', 'Only the final bundle chunk may be short')
+            # Each chunk is published whole, so an interrupted write leaves
+            # nothing a retry must reconcile.
+            parts = path / 'chunks'
+            parts.mkdir(exist_ok=True, mode=0o700)
+            part = parts / f'{offset // CHUNK_BYTES:05d}'
+            if part.exists():
+                if part.read_bytes() != chunk:
+                    self.fail('operation_conflict', 'Repeated chunk changed its bytes')
+            else:
+                with tempfile.NamedTemporaryFile(dir=parts, prefix='.partial-', delete=False) as handle:
                     handle.write(chunk)
-                else:
-                    self.fail('invalid_code_transport', 'Bundle chunks must arrive in order')
+                Path(handle.name).replace(part)
             return {'status': 'ok', 'offset': offset}
+
+    def assemble(self, path, meta):
+        """Join the published chunks into the bound bundle once every one is present."""
+        file = path / 'input.bundle'
+        if not file.is_file():
+            count = -(-meta['size'] // CHUNK_BYTES)
+            parts = [path / 'chunks' / f'{index:05d}' for index in range(count)]
+            if not all(part.is_file() for part in parts):
+                self.fail('code_input_incomplete', 'Writer bundle chunks are missing; resend the committed input')
+            with tempfile.NamedTemporaryFile(dir=path, prefix='.bundle-', delete=False) as handle:
+                for part in parts:
+                    handle.write(part.read_bytes())
+            Path(handle.name).replace(file)
+        if file.stat().st_size != meta['size'] or hashlib.sha256(file.read_bytes()).hexdigest() != meta['sha256']:
+            self.fail('code_input_incomplete', 'Writer bundle is incomplete or its checksum differs')
+        return file
 
     def prepare(self, project, request, identifier):
         bindings = request.pop('code_transport', [])
         tasks = request.get('tasks') or [request]
-        writers = [i for i, task in enumerate(tasks) if str(task.get('mode', request.get('mode', 'read_only'))).lower() in WRITER_MODES]
+        writers = self.writer_tasks(request)
         if not isinstance(bindings, list) or [b.get('index') for b in bindings if isinstance(b, dict)] != writers:
             self.fail('invalid_code_transport', 'Each writer requires exactly one transported committed input')
         if writers and request.get('session'):
@@ -407,9 +455,7 @@ class CodeTransport:
             path = self.directory(project, binding['transfer_id'], receiving=True)
             if not (path / 'incoming.json').exists() or json.loads((path / 'incoming.json').read_text()) != meta:
                 self.fail('code_input_missing', 'Writer input has not been transferred')
-            file = path / 'input.bundle'
-            if file.stat().st_size != meta['size'] or hashlib.sha256(file.read_bytes()).hexdigest() != meta['sha256']:
-                self.fail('code_input_incomplete', 'Writer bundle is incomplete or its checksum differs')
+            file = self.assemble(path, meta)
             # Consume only the single advertised base ref; the sender cannot
             # install branch refs or choose any receiver ref namespace.
             advertised = self.git(repo, 'bundle', 'list-heads', str(file)).splitlines()
@@ -418,22 +464,26 @@ class CodeTransport:
             source = advertised[0].split()[1]
             ref = f'refs/provenant/hosts/{self.f.config.local_host}/{binding["transfer_id"]}/base'
             self.import_history(repo, file, source, meta['base_revision'], ref)
+            (path / 'consumed').touch()
+            file.unlink()
+            shutil.rmtree(path / 'chunks', ignore_errors=True)
             target = repo / '.worktrees' / meta['worktree']
             try:
                 if target.exists():
-                    known = any(context['project_path'] == project and context['worktree_path'] == str(target)
-                        and context['branch'] == meta['branch']
-                        for record in (self.f.root / 'writer-contexts').glob('*.json')
-                        for context in json.loads(record.read_text()))
-                    if not known or target.is_symlink() or self.w.primary_root(target) != repo:
-                        self.fail('worktree_invalid', 'Existing worktree has no transported writer context')
+                    owners = sorted(record.stem for record in (self.f.root / 'writer-contexts').glob('*.json')
+                        if any(context['project_path'] == project and context['worktree_path'] == str(target)
+                            and context['branch'] == meta['branch'] for context in json.loads(record.read_text())))
+                    if not owners or target.is_symlink() or self.w.primary_root(target) != repo:
+                        self.fail('worktree_invalid', f'Peer worktree {meta["worktree"]} exists but no transported writer operation binds it; '
+                            'remove it on the peer or use another branch')
                     with self.w.hold_writer_lease(target):
                         if (self.git(target, 'symbolic-ref', '--short', 'HEAD') != meta['branch'] or
                                 self.git(target, 'rev-parse', 'HEAD') != meta['base_revision'] or self.w.worktree_residue(target)):
-                            self.fail('worktree_invalid', 'Existing writer must be clean at the transported base on its bound branch')
+                            self.fail('worktree_invalid', f'Peer worktree {meta["worktree"]} (operation {", ".join(owners)}) must be clean '
+                                'at the transported base on its bound branch; fetch or remove it first')
                 else:
                     self.w.create(argparse.Namespace(repo=repo, name=meta['worktree'], existing_branch=None,
-                        new_branch=meta['branch'], detach=None, start_point=meta['base_revision'], no_node_modules=False))
+                        new_branch=meta['branch'], detach=None, start_point=meta['base_revision'], no_node_modules=True))
             except self.w.PolicyError as exc:
                 self.fail('worktree_invalid', str(exc))
             target = str(target)
@@ -458,35 +508,67 @@ class CodeTransport:
 
     def claim_context(self, context, expected_owner=None, admission_operation=None):
         target = Path(context['worktree_path'])
+        mine = {None, admission_operation, context['operation_id']}
         try:
             with self.w.hold_writer_lease(target):
                 marker = self.context_owner(target)
-                if expected_owner is not None and (not marker.exists() or
-                        json.loads(marker.read_text()).get('operation_id') != expected_owner):
-                    self.fail('writer_context_superseded', 'Continuation requires the current writer context')
-                if marker.exists():
+                # A preparer that died before recording a launch started no
+                # writer; release its reservation before judging ownership.
+                while marker.exists():
                     saved = json.loads(marker.read_text())
-                    for prior in {saved['operation_id'], saved.get('admission_operation')} - {None, admission_operation, context['operation_id']}:
-                        with self.f.database() as db:
-                            operation = db.execute('SELECT result FROM operations WHERE id=?', (prior,)).fetchone()
-                        if not operation or not operation[0]:
-                            self.fail('worktree_busy', 'Prior writer preparation has not resolved')
-                        launch = self.f.root / 'operations' / f'{prior}.json'
-                        if launch.exists():
-                            identity = json.loads(launch.read_text())
-                            rows = self.f.worker('status', context['project_path'],
-                                {'ids': [identity['runId']], 'detail': 'full'}).get('runs', [])
-                            rows = [row for row in rows if identity['taskId'] == '*' or row.get('task_id') == identity['taskId']]
-                            if not rows or any(row.get('state') != 'terminal' or
-                                    row.get('attempt', 0) < identity['attempt'] for row in rows):
-                                self.fail('worktree_busy', 'Prior writer has not terminalised')
-                previous = json.loads(marker.read_text()) if marker.exists() else None
-                current = {'operation_id': context['operation_id'],
-                    **({'admission_operation': admission_operation} if admission_operation else {})}
+                    claims = {saved.get('operation_id'), saved.get('admission_operation')} - mine
+                    if not any(self.f.settle(prior, held=marker) for prior in claims if not self.resolved(prior)):
+                        break
+                saved = json.loads(marker.read_text()) if marker.exists() else None
+                if expected_owner is not None and (saved or {}).get('operation_id') != expected_owner:
+                    self.fail('writer_context_superseded', 'Continuation requires the current writer context')
+                for prior in {saved['operation_id'], saved.get('admission_operation')} - mine if saved else ():
+                    if not self.resolved(prior):
+                        self.fail('worktree_busy', f'Writer operation {prior} has not resolved; reconcile it by operation ID')
+                    launch = self.f.root / 'operations' / f'{prior}.json'
+                    if launch.exists():
+                        identity = json.loads(launch.read_text())
+                        rows = self.f.worker('status', context['project_path'],
+                            {'ids': [identity['runId']], 'detail': 'full'}).get('runs', [])
+                        rows = [row for row in rows if identity['taskId'] == '*' or row.get('task_id') == identity['taskId']]
+                        if not rows or any(row.get('state') != 'terminal' or
+                                row.get('attempt', 0) < identity['attempt'] for row in rows):
+                            self.fail('worktree_busy', f'Writer operation {prior} (run {identity["runId"]}) has not finished')
+                current = {'operation_id': context['operation_id'], 'worktree_path': str(target),
+                    **({'admission_operation': admission_operation} if admission_operation else {}),
+                    # One level of history lets an unstarted claim be released.
+                    **({'previous': {k: v for k, v in saved.items() if k != 'previous'}} if saved else {})}
                 self.write_json(marker, current)
-                self.claims.append((target, previous, current))
+                self.claims.append((target, saved, current))
         except self.w.PolicyError as exc:
             self.fail('worktree_busy', str(exc))
+
+    def resolved(self, identifier):
+        with self.f.database() as db:
+            row = db.execute('SELECT result FROM operations WHERE id=?', (identifier,)).fetchone()
+        return bool(row and row[0])
+
+    def restore(self, marker, identifier):
+        """Undo a claim `identifier` still holds; the caller holds the writer lease."""
+        saved = json.loads(marker.read_text()) if marker.exists() else {}
+        if identifier not in {saved.get('operation_id'), saved.get('admission_operation')}:
+            return
+        if saved.get('previous'):
+            self.write_json(marker, saved['previous'])
+        else:
+            marker.unlink()
+
+    def release(self, identifier, held=None):
+        """Release every worktree claim an operation that never launched still holds."""
+        for marker in sorted((self.f.root / 'writer-owners').glob('*.json')):
+            if marker == held:
+                self.restore(marker, identifier)
+                continue
+            try:
+                with self.w.hold_writer_lease(Path(json.loads(marker.read_text())['worktree_path'])):
+                    self.restore(marker, identifier)
+            except (self.w.PolicyError, OSError, ValueError, KeyError, subprocess.SubprocessError):
+                continue  # A live or vanished worktree; its next claim settles it.
 
     def rollback_claims(self):
         # A rejected preflight never started a writer. Restore only our own reservation.
@@ -644,7 +726,7 @@ class CodeTransport:
         self.metadata({**original, 'size': size, 'sha256': checksum})
         repo = self.repo(project)
         with tempfile.NamedTemporaryFile(dir=path, suffix='.bundle') as file:
-            for offset in range(0, size, CHUNK_BYTES):
+            for offset in range(0, size, DOWNLOAD_CHUNK_BYTES):
                 chunk = client.call('git-download', {'project_path': project, 'input': {'operation_id': result_id, 'offset': offset}})
                 if not chunk.get('ok'):
                     return self.f.rejection(chunk)
@@ -653,7 +735,7 @@ class CodeTransport:
                     raw = base64.b64decode(data['data'], validate=True)
                 except (KeyError, ValueError, TypeError):
                     self.fail('bad_response', 'Invalid fetched bundle chunk')
-                if data.get('offset') != offset or len(raw) != min(CHUNK_BYTES, size - offset):
+                if data.get('offset') != offset or len(raw) != min(DOWNLOAD_CHUNK_BYTES, size - offset):
                     self.fail('bad_response', 'Fetched bundle chunk differs from bound size')
                 file.write(raw)
             file.flush()
@@ -667,5 +749,8 @@ class CodeTransport:
             self.import_history(repo, Path(file.name), source, head, ref, original['base_revision'])
             if self.git(repo, 'rev-parse', ref) != head:
                 self.fail('writer_head_mismatch', 'Fetched ref differs from verified head')
-        return {'status': 'ok', 'ref': ref, 'verification': receipt,
-            'digest': f'fetched {head} from {host}; verified clean writer {original["worktree"]}'}
+        # The verified head stays on its transport ref; landing it in the
+        # chair's own worktree is an explicit fast-forward.
+        merge = shlex.join(['git', '-C', str(repo / '.worktrees' / original['worktree']), 'merge', '--ff-only', ref])
+        return {'status': 'ok', 'ref': ref, 'verification': receipt, 'merge_command': merge,
+            'digest': f'fetched {head} from {host}; verified clean writer {original["worktree"]}\n  next: {merge}'}
