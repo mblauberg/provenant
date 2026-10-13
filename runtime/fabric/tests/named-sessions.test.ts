@@ -236,6 +236,10 @@ it("reports continuation_unsupported and starts fresh only when asked", async ()
       expect(carried, JSON.stringify(carried)).toMatchObject({ status: "ok" });
       expect(flags(carried)).toEqual(flags(origin));
       expect(flags(carried)[0]).toBe("claude");
+      // Naming a route in the handoff replaces the inherited one, so it is guarded like a new dispatch.
+      const codexOrigin = await codexSeat.call("dispatch", { adapter: "codex", prompt: "origin", wait_seconds: 5 });
+      expect(await chair.call("dispatch", { handoff: codexOrigin.run_id, task_id: codexOrigin.task_id, adapter: "claude", model: "haiku",
+        prompt: "carry", wait_seconds: 5 })).toMatchObject({ status: "rejected", error: "native_seat_model" });
     } finally {
       await codexSeat.client.close();
     }

@@ -322,7 +322,7 @@ export async function handoffDispatch(
       ...inheritedConfidential(rest, requested),
       prompt: brief + prompt,
       prompt_file: undefined,
-    }, identity, signal, env, { ...pin, continuation: true });
+    }, identity, signal, env, { ...pin, continuation: inherit });
   } catch (error) {
     if (signal.aborted) throw error;
     return rejected(error);
