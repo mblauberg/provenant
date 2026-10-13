@@ -55,7 +55,11 @@ CONFINED_STATE = {
         # without it. Only OAuth lanes get it: bare and endpoint lanes sign in with a key.
         "oauth_read": ("Library/Keychains/login.keychain-db",),
     },
-    "cursor": {"read_write": (".cursor", ".cache/cursor", ".npm")},
+    "cursor": {
+        "read_write": (".cursor", ".cache/cursor", ".npm"),
+        # cursor-agent keeps its sign-in in the login keychain; a read-only lane is signed out without it.
+        "read": ("Library/Keychains/login.keychain-db",),
+    },
     "kiro": {
         # kiro-cli keeps its sign-in and refreshed tokens in data.sqlite3, guarded by .refresh.lock,
         # which it opens for writing before reading the token. The rest of its support directory holds
@@ -486,6 +490,7 @@ def os_confinement_profile(plan, search_path=None):
     reads = [*state.get("read", ()), *(() if _uses_api_key(plan) else state.get("oauth_read", ()))]
     project_files, project_directories = _project_config_reads(plan, root)
     toolchain_files, uv_project_files, toolchain_directories = _toolchain_reads(plan, root, search_path)
+    launcher_links, install_directories = _adapter_binary_reads(plan, search_path)
     return (
         "(version 1)\n(allow default)\n(deny file-write*)\n"
         + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), Path("/dev")])
@@ -508,6 +513,8 @@ def os_confinement_profile(plan, search_path=None):
         + _sbpl_rule("allow", "file-read-data", toolchain_files, literal=True, canonical=True)
         + _sbpl_rule("allow", "file-read-data", uv_project_files, literal=True, keep_leaf=True)
         + _sbpl_rule("allow", "file-read-data", toolchain_directories, canonical=True)
+        + _sbpl_rule("allow", "file-read-data", launcher_links, literal=True, keep_leaf=True)
+        + _sbpl_rule("allow", "file-read-data", install_directories, canonical=True)
         # After every allow, since a state grant such as ~/.claude would otherwise reopen them.
         + _sbpl_rule("deny", "file-read-data", [home / path for path in
                                                 (*EXTRA_DENIED_READS, *state.get("read_denied", ()))])
@@ -781,6 +788,40 @@ def _toolchain_reads(plan, root, search_path=None):
 
 def _plain_file(path):
     return path.is_file() and not path.is_symlink()
+
+
+def _adapter_binary_reads(plan, search_path=None):
+    """(launcher links, install directories) the provider's own executable is read through.
+
+    The launcher is the PATH entry and every link hop to the real file, granted by name. A real
+    file inside an install folder (cursor-agent's ~/.local/share/cursor-agent/versions/<version>)
+    also grants that folder, since the launcher script runs siblings from it. A binary in a plain
+    `bin` directory is granted alone, never the directory. A path that is, holds or sits in home
+    or a credential store grants nothing.
+    """
+    argv = plan.get("argv")
+    found = shutil.which(argv[0], path=search_path) if argv else None
+    if not found:
+        return [], []
+    home = Path.home().resolve()
+    links, current = [], Path(found)
+    for _ in range(16):
+        links.append(current)
+        if not current.is_symlink():
+            break
+        target = Path(os.readlink(current))
+        current = target if target.is_absolute() else current.parent / target
+    else:
+        return [], []
+    resolved = current.resolve()
+    links = [path for path in links if not credential_path(path.parent.resolve() / path.name)]
+    if not resolved.is_file() or credential_path(resolved):
+        return links, []
+    links = list(dict.fromkeys([*links, resolved]))
+    install = resolved.parent
+    if install.name == "bin" or home.is_relative_to(install) or credential_path(install):
+        return links, []
+    return links, [install]
 
 
 def confinement_command(plan, command, search_path=None):

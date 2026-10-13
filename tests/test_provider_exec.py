@@ -734,6 +734,63 @@ def test_claude_read_only_profile_reads_login_keychain_only_for_oauth_lanes(
     assert f'(subpath "{home / "Library/Keychains"}")' not in allow
 
 
+def test_read_only_profile_reads_the_adapter_binary_through_its_launcher_link_and_install_folder(monkeypatch, tmp_path):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    workspace = home / "repo"
+    install = home / ".local/share/cursor-agent/versions/1.0-abc"
+    other = home / ".local/share/cursor-agent/versions/0.9-old"
+    for directory in (workspace, install, other, home / ".local/bin", home / ".ssh"):
+        directory.mkdir(parents=True)
+    (install / "cursor-agent").write_text("#!/bin/sh\nexec cat \"$(dirname \"$(readlink \"$0\")\")/index.js\"\n", encoding="utf-8")
+    (install / "cursor-agent").chmod(0o755)
+    (install / "index.js").write_text("ok\n", encoding="utf-8")
+    (other / "index.js").write_text("old\n", encoding="utf-8")
+    (home / ".ssh/id").write_text("secret\n", encoding="utf-8")
+    (home / ".local/bin/cursor-agent").symlink_to(install / "cursor-agent")
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    plan = {"adapter": "cursor", "mode": "read_only", "workspace_root": str(workspace), "cwd": str(workspace),
+            "argv": ["cursor-agent"], "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    search_path = os.pathsep.join([str(home / ".local/bin"), "/usr/bin", "/bin"])
+    profile = mod.os_confinement_profile(plan, search_path)
+    reads = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-read-data "))
+    assert f'(literal "{home}/.local/bin/cursor-agent")' in reads
+    assert f'(subpath "{install}")' in reads
+    # cursor-agent signs in through the login keychain.
+    assert f'(subpath "{home}/Library/Keychains/login.keychain-db")' in reads
+    # The link's folder, its sibling versions and the rest of home stay closed.
+    assert f'(subpath "{home / ".local/bin"}")' not in reads
+    assert f'(subpath "{other}")' not in reads
+    assert f'(subpath "{home / ".local/share/cursor-agent"}")' not in reads
+    sandbox_exec = mod._sandbox_exec_path()
+    if sys.platform != "darwin" or not sandbox_exec:
+        return
+    launched = subprocess.run([sandbox_exec, "-p", profile, str(home / ".local/bin/cursor-agent")],
+                              capture_output=True, text=True)
+    if launched.returncode and "sandbox_apply" in launched.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert launched.returncode == 0, launched.stderr
+    assert launched.stdout == "ok\n"
+    for denied in (other / "index.js", home / ".ssh/id"):
+        refused = subprocess.run([sandbox_exec, "-p", profile, "/bin/cat", str(denied)],
+                                 capture_output=True, text=True)
+        assert refused.returncode != 0, denied
+
+
+def test_adapter_binary_in_a_plain_bin_directory_grants_the_file_alone(monkeypatch, tmp_path):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    (home / ".local/bin").mkdir(parents=True)
+    tool = home / ".local/bin/tool"
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    tool.chmod(0o755)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    links, directories = mod._adapter_binary_reads({"argv": ["tool"]}, str(home / ".local/bin"))
+    assert links == [tool]
+    assert directories == []
+
+
 KIRO_SUPPORT = "Library/Application Support/kiro-cli"
 # Files in Kiro's support directory that the user's shell sources or that Kiro executes.
 KIRO_EXECUTABLES = ("shell/zshrc.pre.zsh", "shell/bashrc.post.bash", "node", "bun", "tui.js",
