@@ -134,8 +134,8 @@ identity, version or diagnostic fields produce `bad_response`.
 Protocol version 1 accepts one UTF-8 JSON document on stdin, at most 65,536
 bytes, followed by EOF. The request has `protocol_version`, `verb` and optional
 `params`. The fixed verbs are `hello`, `doctor`, `dispatch`, `lanes`, `status`,
-`cancel`, `resume`, `handoff`, `output`, `operation`, `git-upload`, `git-result`
-and `git-download`. Git verbs require an explicitly configured project and
+`cancel`, `resume`, `handoff`, `output`, `operation`, `git-have`,
+`git-upload`, `git-result` and `git-download`. Git verbs require an explicitly configured project and
 accept the same `project_path`/`input` envelope; callers cannot choose a ref
 namespace or shell command. Doctor accepts optional
 `project_path`; lane verbs require it and accept an `input` object. There is
@@ -245,14 +245,21 @@ provenant fabric fetch example-writer@workshop
 ```
 
 Fetch also accepts a qualified run or task ID; a batch requires one writer task at a time.
-The MCP equivalents are `fabric_dispatch`/`fabric_batch` with `host`, `mode`,
-`worktree` and `operation_id`, followed by `fabric_fetch` with `id`. These
-operations use the same owner for Codex, agy and Claude chairs.
+The MCP equivalents are `fabric_dispatch` with `host`, `mode`, `worktree` and
+`operation_id` (a `fabric_batch` carries these per task), followed by
+`fabric_fetch` with `id`. These operations use the same owner for Codex, agy
+and Claude chairs.
 
-Only the chair worktree's committed HEAD and its Git history travel. The reply
-states that uncommitted changes were not transported. Bundles travel in 32 KiB
+Only the chair worktree's committed HEAD travels. The reply states that
+uncommitted changes were not transported. After contact, the chair offers the
+peer up to 64 first-parent ancestors of that base (`git-have`); the peer names
+the nearest one a local ref already reaches, and the bundle carries only the
+history after it. A peer with no shared history receives the full history.
+Verified results return as base-to-head bundles. Bundles travel in 32 KiB
 chunks, with a 64 MiB bundle limit, through the restricted peer entrypoint;
-GitHub is not involved. References live under `refs/provenant/hosts/`. The
+GitHub is not involved, and neither host needs GitHub credentials. A peer that
+already fetched the project's main branch therefore receives a few commits even
+when the full history exceeds the limit. References live under `refs/provenant/hosts/`. The
 peer creates the worktree with its own helper, and its dispatch owner holds the
 host-local writer lease and checks sign-in, confinement and capability policy.
 Writer operation IDs are limited to 120 characters. Replays preserve the frozen
