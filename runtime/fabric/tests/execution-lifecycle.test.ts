@@ -14,7 +14,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
+import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider, rejectOwnSeatClaude } from "../src/execution.js";
+import { handoffDispatch } from "../src/resume.js";
 import { namesExplicitRoute, normaliseRoute, readRoots, routeArguments, savedReadRoots, workingIdentity, type BatchTaskInput } from "../src/execution-input.js";
 import { resumeConfiguredProvider } from "../src/resume.js";
 import { databasePath } from "../src/identity.js";
@@ -1548,6 +1549,21 @@ describe("native-first routing", () => {
     // Automatic picks are not the caller's choice.
     const automatic = await run({ tasks: [{ id: "a", prompt: "p" }] });
     expect(JSON.stringify(automatic)).not.toContain("native_seat_model");
+  });
+
+  it("refuses an explicit own-seat Claude route before any peer placement, and lets an inherited continuation through", async () => {
+    const seat = claudeSeat(), env = { ...poolEnvironment(), PROVENANT_HOST_LOCAL_ONLY: "" };
+    const signal = new AbortController().signal;
+    const refused = (done: any) => expect(done).toMatchObject({ status: "rejected", error: "native_seat_model" });
+    refused(await dispatchConfiguredProvider({ host: "peer", adapter: "claude", model: "haiku", prompt: "p" } as any, seat, signal, env));
+    refused(await dispatchConfiguredProvider({ host: "peer", models: ["claude/haiku"], prompt: "p" } as any, seat, signal, env));
+    refused(await dispatchConfiguredBatch({ host: "peer", tasks: [{ id: "a", prompt: "p", adapter: "claude", model: "haiku" }] } as any, seat, signal, env));
+    refused(await dispatchConfiguredBatch({ host: "peer", adapter: "claude", model: "haiku", tasks: [{ id: "a", prompt: "p" }] } as any, seat, signal, env));
+    refused(await handoffDispatch({ host: "peer", handoff: "x", adapter: "claude", model: "haiku", prompt: "p" } as any, seat, signal, env));
+    // An inherited route, an implicit request and a continuation pass the guard.
+    expect(() => rejectOwnSeatClaude({ host: "peer", prompt: "p" }, seat, env)).not.toThrow();
+    expect(() => rejectOwnSeatClaude({ adapter: "claude", model: "haiku" }, seat, env, { continuation: true })).not.toThrow();
+    expect(() => rejectOwnSeatClaude({ adapter: "claude", model: "haiku" }, { ...identity, provider: "codex" }, env)).not.toThrow();
   });
 
   it("recognises a role alias by its normalised name, so task_class with Workhorse or workhorze is not own-seat", async () => {

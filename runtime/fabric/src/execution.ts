@@ -1,6 +1,8 @@
 import {
   normaliseRoute,
   namesExplicitRoute,
+  nativeAdapter,
+  type RouteInput,
   preflight,
   routeArguments,
   applyDispatchDefaults,
@@ -998,6 +1000,27 @@ async function dispatchConfiguredBatchUnchecked(
 }
 
 
+/**
+ * The own-seat guard runs on the initiating side before any placement, so a request for the seat's own Claude model
+ * is refused the same way whether it would run here or on a peer. A continuation that inherits its route is exempt.
+ */
+export function rejectOwnSeatClaude(input: Record<string, any>, identity: Identity, env: NodeJS.ProcessEnv, launch: LaunchObserver = {}): void {
+  if (launch.continuation || nativeAdapter(identity) !== "claude") return;
+  const defaults = { adapter: input.adapter, model: input.model, alias: input.alias };
+  const tasks: Record<string, any>[] = Array.isArray(input.tasks) ? input.tasks.map((task: Record<string, any>) => ({ ...defaults, ...withoutEmptySelectors(task) })) : [input];
+  const candidates = tasks.flatMap((task) => [task, ...[...(task.models ?? []), ...(input.models ?? [])].map((model: string) => ({ model }))])
+    .map((task) => withoutEmptySelectors(task) as RouteInput).filter(namesExplicitRoute);
+  if (!candidates.length) return;
+  const catalogue = catalogueSnapshot(productRoot(env), env);
+  for (const candidate of candidates) {
+    try {
+      normaliseRoute({ ...candidate }, identity, catalogue, true);
+    } catch (error) {
+      if (error instanceof InputError && error.code === "native_seat_model") throw error;
+    }
+  }
+}
+
 export async function dispatchConfiguredProvider(
   input: DispatchInput,
   identity: Identity,
@@ -1006,6 +1029,7 @@ export async function dispatchConfiguredProvider(
   launch: LaunchObserver = {},
 ): Promise<Record<string, unknown>> {
   try {
+    rejectOwnSeatClaude(input, identity, env, launch);
     const remote = env.PROVENANT_HOST_LOCAL_ONLY === "1" ? undefined : await federatedLane("dispatch", identity.cwd, input as Record<string, unknown>, signal);
     if (remote) return remote;
     const localEnv = { ...env, PROVENANT_HOST_LOCAL_ONLY: "1", ...(input.placement_fallback ? { PROVENANT_PLACEMENT_FALLBACK: JSON.stringify(input.placement_fallback) } : {}) };
@@ -1032,6 +1056,7 @@ export async function dispatchConfiguredBatch(
   launch: LaunchObserver = {},
 ): Promise<Record<string, unknown>> {
   try {
+    rejectOwnSeatClaude(input as unknown as Record<string, any>, identity, env, launch);
     const remote = env.PROVENANT_HOST_LOCAL_ONLY === "1" ? undefined : await federatedLane("dispatch", identity.cwd, input as unknown as Record<string, unknown>, signal);
     if (remote) return remote;
     const localEnv = { ...env, PROVENANT_HOST_LOCAL_ONLY: "1", ...(input.placement_fallback ? { PROVENANT_PLACEMENT_FALLBACK: JSON.stringify(input.placement_fallback) } : {}) };
