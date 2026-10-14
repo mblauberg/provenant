@@ -1018,13 +1018,20 @@ class LaneLoopbackContracts(unittest.TestCase):
         first = self.client('dispatch', host='workshop', session='reader-session@workshop',
             adapter='codex', model='fixture', prompt='fixture only', operation_id='session-reader-first')
         self.wait_writer(first['id'])
+        self.assertEqual(first['code_transport']['readers'][0]['base_revision'], base)
+        (self.workspace / 'code.txt').write_text('new committed session input\n')
+        git(self.workspace, 'add', 'code.txt')
+        git(self.workspace, 'commit', '-qm', 'second session input')
+        next_base = git(self.workspace, 'rev-parse', 'HEAD')
+        self.assertNotEqual(next_base, base)
         second = self.client('dispatch', host='workshop', session='reader-session@workshop',
             prompt='slow', operation_id='session-reader-next')
         try:
             self.assertNotEqual(second.get('status'), 'rejected', second)
             row = self.client('status', ids=[first['id']], detail='full')['runs'][0]
             target = Path(row['cwd'])
-            self.assertEqual(git(target, 'rev-parse', 'HEAD'), base)
+            self.assertEqual(git(target, 'rev-parse', 'HEAD'), next_base)
+            self.assertEqual((target / 'code.txt').read_text(), 'new committed session input\n')
             self.assertEqual(target, Path(second['code_transport']['readers'][0]['worktree_path']))
         finally:
             self.client('cancel', id=first['id'], operation_id='stop-session-reader')
@@ -2789,6 +2796,8 @@ class LaneLoopbackContracts(unittest.TestCase):
     def test_reader_does_not_reconcile_an_inflight_control_send(self):
         import fabric_hosts as hosts
         import threading
+        # Named reader dispatches freeze committed input before reaching the wire.
+        self.fixture_product()
         cases = [('cancel', {'id': self.peer_run + '@workshop'}),
             ('resume', {'resume': self.peer_run + '@workshop'}),
             ('handoff', {'handoff': self.peer_run + '@workshop'}),
@@ -2807,6 +2816,8 @@ class LaneLoopbackContracts(unittest.TestCase):
                         calls.append(action)
                         if action == 'hello':
                             return hosts.envelope({'status': 'ok'})
+                        if action == 'git-have':
+                            return hosts.envelope({'have': []})
                         if action == verb:
                             started.set()
                             if not release.wait(5):

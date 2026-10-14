@@ -253,8 +253,7 @@ class CodeTransport:
         tasks = request.get('tasks') or [request]
         base = {k: v for k, v in request.items() if k != 'tasks'}
         return [index for index, task in enumerate(tasks)
-            if not ({**base, **task}.get('session'))
-            and str({**base, **task}.get('mode', 'read_only')).lower() in {'read_only', 'read', 'ro'}]
+            if str({**base, **task}.get('mode', 'read_only')).lower() in {'read_only', 'read', 'ro'}]
 
     def transport_tasks(self, request):
         return sorted(self.writer_tasks(request) + self.reader_tasks(request))
