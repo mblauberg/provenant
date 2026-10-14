@@ -769,7 +769,7 @@ class LaneFederation:
                         self.code().retire_outgoing(project, clean, identifier, host)
                         with self.database() as db:
                             db.execute('DELETE FROM writer_dispatches WHERE id=?', (identifier,))
-                    if (not bound_writer and not self.code().writer_tasks(clean)
+                    if (not request.get('host') and not bound_writer and not self.code().writer_tasks(clean)
                             and exc.code not in {'hosts_cancelled', 'operation_conflict'}):
                         with self.database() as db:
                             db.execute('INSERT OR REPLACE INTO writer_dispatches VALUES (?,?,?,?,1)',
@@ -802,7 +802,7 @@ class LaneFederation:
                     try:
                         self.code().send(client, project, clean['code_transport'])
                     except self.h.HostError as exc:
-                        if (not previous and not bound_writer and not request.get('session')
+                        if (not request.get('host') and not previous and not bound_writer and not request.get('session')
                                 and not self.code().writer_tasks(clean)
                                 and exc.code not in {'hosts_cancelled', 'operation_conflict'}):
                             # Only chunks were sent: this fresh request has never
@@ -824,7 +824,7 @@ class LaneFederation:
                 response = client.call(action, {'project_path': project, 'input': clean}, write=action in WRITES)
             if response.get('ok') and not response.get('reads_flagged'):
                 result = response['result']
-                if (action == 'dispatch' and writer and not previous and not bound_writer
+                if (action == 'dispatch' and not request.get('host') and writer and not previous and not bound_writer
                         and not request.get('session') and result.get('status') == 'rejected'
                         and result.get('code_transport_prelaunch_failure') is True
                         and result.get('error') not in {'hosts_cancelled', 'operation_conflict'}):

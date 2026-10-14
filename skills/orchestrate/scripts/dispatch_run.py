@@ -1481,8 +1481,6 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                         read_roots=read_roots)
                     if plan['applied'].get('confinement') in {None, 'none'}:
                         raise PreflightError('remote_confinement_degraded', 'Remote placement requires effective confinement')
-                    if 'browser' in task.get('capabilities', []) and not hosts.lane_socket_paths(workspace)['fits']:
-                        raise PreflightError('remote_temporary_path_too_long', 'Remote attempt temporary directory paths exceed the filesystem limit')
                 routes.append(route)
             except (PreflightError, WorktreeLeaseError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
                 prompt_fixes = {
@@ -1887,6 +1885,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     attempt_number = max(existing_attempt_number(task_dir), existing_attempt_number(run_dir / "tasks" / args.task_id))
     attempt_id = f"attempt-{attempt_number:03d}"
     attempt_dir = task_dir / attempt_id
+    if os.environ.get('PROVENANT_REMOTE_LANE') == '1' and 'browser' in args.capabilities:
+        socket = _fabric_hosts_owner().browser_socket_paths(attempt_dir / 'tmp')
+        if not socket['fits']:
+            return fail(run_dir, 'remote_temporary_path_too_long',
+                f"Chromium SingletonSocket under {attempt_dir / 'tmp'} needs "
+                f"{socket['max_path_bytes']} bytes; the socket path must be shorter than "
+                f"{socket['limit_bytes']} bytes. Use a shorter peer project/run path.")
     try:
         create_contained_directory(
             run_dir, attempt_dir.relative_to(run_dir), label="attempt directory"
@@ -2641,7 +2646,7 @@ def execute_attempt_sequence(args,custody=None):
 
 
 def cleanup_settled_reader(args) -> None:
-    row = getattr(args, "_last_row", {})
+    row = getattr(args, "_last_row", None) or {}
     if row.get("mode") == "read_only" and os.environ.get("PROVENANT_REMOTE_LANE") == "1":
         try:
             _fabric_hosts_owner().lane_owner().code().cleanup_readers([row])

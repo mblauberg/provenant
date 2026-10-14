@@ -107,9 +107,12 @@ become `unknown` or `unusable`. Adapters without a conclusive non-interactive
 status probe report `unknown`. Confinement uses the existing read-only planning
 and sandbox probes; the executing dispatch owner checks adapter sign-in,
 effective read-only confinement and requested browser socket paths before
-launch. Temporary-path estimates measure filesystem path and component limits. They
-do not infer Unix socket placement from the attempt directory; the executing
-owner checks any actual requested browser socket paths.
+launch. Doctor's temporary-path `fits` estimate measures filesystem path and
+component limits only. Remote browser lanes separately check the actual attempt's
+`tmp` path used by `MAC_CHROMIUM_TMPDIR`, reserving Chromium's generated directory
+and `SingletonSocket` suffix. Before provider launch, paths must fit the native
+Unix socket compatibility limit (104 bytes on macOS, 108 on Linux, including the
+terminator). Shorten the peer project/run path if this check rejects placement.
 Registration reports the existing install check's Fabric-entry presence,
 independently of whether the adapter executable is on PATH.
 

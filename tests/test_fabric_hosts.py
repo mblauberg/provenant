@@ -599,14 +599,27 @@ class HostDiagnosticsContracts(unittest.TestCase):
     def test_temporary_directory_estimate_uses_filesystem_path_limits(self):
         import fabric_hosts as hosts
         with tempfile.TemporaryDirectory() as directory:
-            result = hosts.lane_socket_paths(Path(directory) / 'project')
+            result = hosts.lane_temporary_paths(Path(directory) / 'project')
             self.assertTrue(result['fits'], result)
             self.assertEqual(result['constraint'], 'filesystem_path')
             self.assertGreater(result['limit_bytes'], 103)
             with patch.object(os, 'pathconf', side_effect=lambda path, name: 128 if name == 'PC_PATH_MAX' else 255):
-                self.assertFalse(hosts.lane_socket_paths(Path(directory) / 'project')['fits'])
+                self.assertFalse(hosts.lane_temporary_paths(Path(directory) / 'project')['fits'])
             with patch.object(os, 'pathconf', side_effect=lambda path, name: 4096 if name == 'PC_PATH_MAX' else 16):
-                self.assertFalse(hosts.lane_socket_paths(Path(directory) / 'project')['fits'])
+                self.assertFalse(hosts.lane_temporary_paths(Path(directory) / 'project')['fits'])
+
+    def test_browser_socket_budget_reserves_suffix_and_counts_encoded_bytes(self):
+        import fabric_hosts as hosts
+        suffix = '/.org.chromium.Chromium.XXXXXX/SingletonSocket'
+        for platform, limit in [('darwin', 104), ('linux', 108)]:
+            with self.subTest(platform=platform), patch.object(hosts.sys, 'platform', platform):
+                temporary = Path('/tmp/' + 'x' * (limit - 1 - len(suffix) - len('/tmp/')))
+                self.assertTrue(hosts.browser_socket_paths(temporary)['fits'])
+                result = hosts.browser_socket_paths(Path(str(temporary) + 'x'))
+                self.assertFalse(result['fits'])
+                self.assertEqual(result['max_path_bytes'], limit)
+                # One non-ASCII character needs two UTF-8 bytes.
+                self.assertFalse(hosts.browser_socket_paths(Path(str(temporary)[:-1] + 'é'))['fits'])
 
     def test_doctor_interpreter_probe_failure_names_python_minimum(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -972,7 +985,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         outside = self.peer_home / 'outside'
         outside.mkdir()
         (self.peer_workspace / '.worktrees').symlink_to(outside, target_is_directory=True)
-        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+        launched = self.client('dispatch', adapter='codex', model='fixture',
             prompt='slow', task_id='reader-boundary', operation_id='reader-boundary')
         try:
             self.assertTrue(launched.get('local'), launched)
@@ -1065,7 +1078,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.assertTrue(writer.exists())
 
     def test_read_only_transport_failure_records_local_fallback(self):
-        result = self.client('dispatch', host='workshop', mode='read_only', prompt='review',
+        result = self.client('dispatch', mode='read_only', prompt='review',
             operation_id='no-committed-input')
         self.assertTrue(result.get('local'), result)
         self.assertIn(result['fallback']['reason'], {'project_not_configured', 'code_transport_failed'})
@@ -1084,7 +1097,7 @@ class LaneLoopbackContracts(unittest.TestCase):
             owner = hosts.lane_owner()
             with patch.object(type(owner.code()), 'send', side_effect=hosts.HostError('timeout', 'chunk deadline')):
                 result = owner.client_call('dispatch', str(self.workspace), {
-                    'host': 'workshop', 'prompt': 'review', 'operation_id': 'reader-chunk-failure'})
+                    'prompt': 'review', 'operation_id': 'reader-chunk-failure'})
             self.assertTrue(result.get('local'), result)
             self.assertEqual(result['fallback']['reason'], 'timeout')
             with owner.database() as database:
@@ -1092,6 +1105,112 @@ class LaneLoopbackContracts(unittest.TestCase):
                 self.assertEqual(database.execute('SELECT host FROM writer_dispatches WHERE id=?',
                     ('reader-chunk-failure',)).fetchone()[0], 'laptop')
         self.assertFalse((self.peer_home / '.agents/.agent-fabric/operations/reader-chunk-failure.json').exists())
+
+    def test_explicit_reader_host_never_falls_back_on_transport_failure(self):
+        import fabric_hosts as hosts
+        with patch.dict(os.environ, self.env):
+            owner = hosts.lane_owner()
+            with self.assertRaises(hosts.HostError):
+                owner.client_call('dispatch', str(self.workspace), {
+                    'host': 'workshop', 'mode': 'read_only', 'prompt': 'review',
+                    'operation_id': 'explicit-reader-failure'})
+            with owner.database() as db:
+                self.assertIsNone(db.execute('SELECT id FROM writer_dispatches WHERE id=?',
+                    ('explicit-reader-failure',)).fetchone())
+
+    def test_explicit_reader_host_never_falls_back_after_chunk_timeout(self):
+        import fabric_hosts as hosts
+        self.writer_fixture()
+        original_call = hosts.PeerClient.call
+        def call(client, verb, *args, **kwargs):
+            if verb == 'git-upload':
+                raise hosts.HostError('timeout', 'chunk deadline')
+            return original_call(client, verb, *args, **kwargs)
+        with patch.dict(os.environ, self.env), patch.object(hosts.PeerClient, 'call', call):
+            owner = hosts.lane_owner()
+            result = owner.client_call('dispatch', str(self.workspace), {
+                'host': 'workshop', 'prompt': 'review', 'operation_id': 'explicit-chunk'})
+            self.assertNotIn('local', result)
+            self.assertEqual(result['status'], 'launch_unknown')
+            with owner.database() as db:
+                self.assertEqual(db.execute('SELECT host FROM writer_dispatches WHERE id=?',
+                    ('explicit-chunk',)).fetchone()[0], 'workshop')
+        self.assertFalse((self.peer_home / '.agents/.agent-fabric/operations/explicit-chunk.json').exists())
+
+    def test_explicit_reader_host_never_falls_back_after_peer_preparation_failure(self):
+        self.writer_fixture()
+        outside = self.peer_home / 'outside'
+        outside.mkdir()
+        (self.peer_workspace / '.worktrees').symlink_to(outside, target_is_directory=True)
+        result = self.client('dispatch', host='workshop', prompt='review',
+            operation_id='explicit-peer-prepare')
+        self.assertNotIn('local', result)
+        self.assertEqual(result['status'], 'rejected')
+        self.assertTrue(result['code_transport_prelaunch_failure'])
+        self.assertEqual(list(outside.iterdir()), [])
+
+    def test_reader_cwd_outside_checkout_returns_typed_failure_and_retires_preparation(self):
+        import fabric_hosts as hosts
+        self.writer_fixture()
+        outside = self.local_home / 'outside'
+        outside.mkdir()
+        (outside / '.git').write_text('gitdir: ' + str(outside / 'missing') + '\n')
+        with patch.dict(os.environ, self.env):
+            owner = hosts.lane_owner()
+            request = {'mode': 'read_only', 'cwd': str(outside), 'prompt': 'review'}
+            with self.assertRaises(hosts.HostError) as error:
+                owner.client_call('dispatch', str(self.workspace), {**request,
+                    'host': 'workshop', 'operation_id': 'outside-explicit'})
+            self.assertEqual(error.exception.code, 'worktree_invalid')
+            with owner.database() as db:
+                self.assertIsNone(db.execute('SELECT id FROM writer_dispatches WHERE id=?',
+                    ('outside-explicit',)).fetchone())
+            implicit = owner.client_call('dispatch', str(self.workspace), {
+                **request, 'operation_id': 'outside-implicit'})
+            self.assertTrue(implicit['local'])
+            self.assertEqual(implicit['fallback']['reason'], 'worktree_invalid')
+
+    def test_reader_cleanup_accepts_case_alias_registration_and_terminal_cwd(self):
+        import fabric_hosts as hosts
+        git, base, _ = self.writer_fixture()
+        git(self.peer_workspace, 'fetch', str(self.workspace), 'HEAD')
+        target = self.peer_workspace / '.worktrees/read-case'
+        git(self.peer_workspace, 'worktree', 'add', '--detach', str(target), base)
+        alias_root = self.peer_home / 'repos'
+        if not alias_root.exists():
+            alias_root.symlink_to(self.peer_home / 'Repos', target_is_directory=True)
+        alias = alias_root / 'project/.worktrees/read-case'
+        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+            code = hosts.lane_owner().code()
+            record = code.state_file('reader-contexts', 'case-reader')
+            code.write_json(record, [dict(project_path='Repos/project',
+                worktree_path=str(alias), base_revision=base)])
+            self.assertEqual(code.remove_readers('case-reader', terminal_cwd=str(target)), [])
+            self.assertFalse(target.exists())
+            self.assertFalse(record.exists())
+
+    def test_initializing_cleanup_accepts_case_alias_registration_and_back_pointer(self):
+        import fabric_hosts as hosts
+        git, base, _ = self.writer_fixture()
+        git(self.peer_workspace, 'fetch', str(self.workspace), 'HEAD')
+        target = self.peer_workspace / '.worktrees/feat-case-init'
+        git(self.peer_workspace, 'worktree', 'add', '--no-checkout', '-b', 'feat/case-init', str(target), base)
+        metadata = Path(git(target, 'rev-parse', '--absolute-git-dir'))
+        (metadata / 'locked').write_text('initializing')
+        (target / '.git').unlink()  # Interrupted before Git published the backlink.
+        alias_root = self.peer_home / 'repos'
+        if not alias_root.exists():
+            alias_root.symlink_to(self.peer_home / 'Repos', target_is_directory=True)
+        alias = alias_root / 'project/.worktrees/feat-case-init'
+        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+            code = hosts.lane_owner().code()
+            context = dict(project_path='Repos/project', worktree_path=str(alias), branch='feat/case-init',
+                base_revision=base, operation_id='case-init', created_worktree=True, created_branch=True)
+            self.assertTrue(code.remove_initializing_worktree(self.peer_workspace, alias, context, 'case-init'))
+            self.assertFalse(target.exists())
+            self.assertFalse(metadata.exists())
 
     def test_remote_prompt_file_in_scratch_is_sent_as_bounded_text(self):
         import fabric_hosts as hosts

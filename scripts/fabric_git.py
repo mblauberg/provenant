@@ -291,9 +291,12 @@ class CodeTransport:
                 original = Path(effective.get('cwd') or cwd).expanduser()
                 if not original.is_absolute():
                     original = Path(cwd) / original
-                local = original.resolve()
-                if not os.path.samefile(self.w.primary_root(local), repo):
-                    self.fail('worktree_invalid', 'Read-only input must belong to the configured project')
+                try:
+                    local = original.resolve()
+                    if not self.w.same_directory(self.w.primary_root(local), repo):
+                        self.fail('worktree_invalid', 'Read-only input must belong to the configured project')
+                except (self.w.PolicyError, OSError) as exc:
+                    self.fail('worktree_invalid', str(exc))
                 branch = 'read/' + identifier + '-' + str(index)
                 name = branch.replace('/', '-')
             else:
@@ -644,14 +647,15 @@ class CodeTransport:
         remaining = []
         for context in json.loads(record.read_text()):
             target = Path(context['worktree_path'])
-            if terminal_cwd is not None and str(target) != terminal_cwd:
+            if (terminal_cwd is not None and target != Path(terminal_cwd)
+                    and not self.w.same_directory(target, Path(terminal_cwd))):
                 remaining.append(context)
                 continue
             try:
                 repo = self.repo(context['project_path'], receiving=True)
                 with self.creation_lock(target):
                     registered = next((row for row in self.w.worktree_records(repo)
-                        if Path(str(row['worktree'])) == target), None)
+                        if self.w.same_directory(Path(str(row['worktree'])), target)), None)
                     if registered:
                         if (target.is_symlink() or not registered.get('detached') or
                                 self.git(target, 'rev-parse', 'HEAD') != context['base_revision']):
@@ -799,10 +803,11 @@ class CodeTransport:
         """
         branch = 'refs/heads/' + context['branch']
         expected = repo / '.worktrees' / context['branch'].replace('/', '-')
-        if (context.get('operation_id') != identifier or target != expected or target.is_symlink() or
+        if (context.get('operation_id') != identifier or not self.w.same_directory(target, expected) or target.is_symlink() or
                 not context.get('created_branch')):
             return False
-        records = [row for row in self.w.worktree_records(repo) if Path(str(row['worktree'])).resolve() == target]
+        records = [row for row in self.w.worktree_records(repo)
+            if self.w.same_directory(Path(str(row['worktree'])), target)]
         if (len(records) != 1 or records[0].get('locked') != 'initializing' or
                 records[0].get('branch') != branch or records[0].get('HEAD') != context['base_revision'] or
                 self.git(repo, 'rev-parse', '--verify', branch) != context['base_revision']):
@@ -814,7 +819,8 @@ class CodeTransport:
             if (metadata.is_symlink() or not metadata.is_dir() or back_pointer.is_symlink() or
                     not back_pointer.is_file()):
                 continue
-            if Path(back_pointer.read_text().strip()).resolve() == target / '.git':
+            gitlink = Path(back_pointer.read_text().strip())
+            if gitlink.name == '.git' and self.w.same_directory(gitlink.parent, target):
                 matches.append(metadata)
         if len(matches) != 1:
             return False

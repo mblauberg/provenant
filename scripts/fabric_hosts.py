@@ -416,10 +416,10 @@ def validate_doctor_result(result, host, project_path=None):
     for registration in result['fabric_registrations'].values():
         if not isinstance(registration, dict) or type(registration.get('registered')) is not bool:
             raise HostError('bad_response', 'Doctor registration result is invalid')
-    socket = result['lane_temporary_paths']
-    if (type(socket.get('fits')) is not bool or type(socket.get('max_path_bytes')) is not int
-            or type(socket.get('limit_bytes')) is not int):
-        raise HostError('bad_response', 'Doctor socket path result is invalid')
+    temporary = result['lane_temporary_paths']
+    if (type(temporary.get('fits')) is not bool or type(temporary.get('max_path_bytes')) is not int
+            or type(temporary.get('limit_bytes')) is not int):
+        raise HostError('bad_response', 'Doctor temporary path result is invalid')
 
 def project_identity(cwd=None):
     worktree = _load_module('provenant_worktree', PRODUCT_ROOT / 'scripts/worktree.py')
@@ -445,9 +445,20 @@ def project_directory(project_path):
         raise HostError('invalid_project_path', 'Project path resolves outside the user home')
     return path
 
-def lane_socket_paths(project):
-    # This estimates directory paths, not Unix sockets: no lane contract binds
-    # a socket at a fixed name under the attempt's temporary directory.
+def browser_socket_paths(temporary):
+    # MAC_CHROMIUM_TMPDIR owns Chromium's generated directory and SingletonSocket.
+    # Reserve the historical hidden Chromium prefix and six random characters;
+    # Chrome's branded prefix and the current unhidden prefix are shorter.
+    socket_path = Path(temporary) / '.org.chromium.Chromium.XXXXXX/SingletonSocket'
+    maximum = len(os.fsencode(str(socket_path)))
+    # Keep the native sockaddr_un compatibility limit, including its terminator.
+    limit = 104 if sys.platform == 'darwin' else 108
+    return {'fits': maximum < limit, 'max_path_bytes': maximum, 'limit_bytes': limit,
+            'constraint': 'unix_socket', 'socket_path': str(socket_path)}
+
+
+def lane_temporary_paths(project):
+    # Doctor estimates directory paths; browser placement uses the actual attempt.
     temporary = Path(project) / '.agent-run/runs/20260101-0000-dispatch-task-000000/dispatch/tasks/task/attempt-001/tmp'
     paths = [temporary, temporary / 'claude', temporary / 'cache/node/corepack']
     maximum = max(len(os.fsencode(str(path))) for path in paths)
@@ -582,7 +593,7 @@ def doctor(project_path=None, config=None):
     module = importlib.util.module_from_spec(checker)
     checker.loader.exec_module(module)
     result['fabric_registrations'] = module.provider_registration_status(Path.home())
-    result['lane_temporary_paths'] = lane_socket_paths(project)
+    result['lane_temporary_paths'] = lane_temporary_paths(project)
     return result
 
 def select_hosts(config, selectors):
