@@ -47,7 +47,9 @@ CONFINED_STATE = {
     },
     "opencode": {
         "read_write": (".local/share/opencode", ".local/state/opencode", ".cache/opencode"),
-        "read": (".config/opencode",),
+        # ~/.opencode is the install script's home and OpenCode v2's legacy global config directory;
+        # its config discovery stats it at startup and fails with a 500 when that is denied.
+        "read": (".config/opencode", ".opencode"),
     },
     "claude": {
         "read_write": (".claude", ".claude.json*", ".cache/claude", ".npm"),
@@ -159,6 +161,61 @@ def _opencode_discovery_grantable(path, *, directory=False):
     if directory:
         return target.is_dir()
     return target.is_file() and target.name in OPENCODE_INSTRUCTION_FILES
+
+
+def _strip_jsonc(text):
+    # Drops comments and trailing commas outside strings, so the result parses as JSON.
+    out, i, quoted, comma = [], 0, False, None
+    while i < len(text):
+        char = text[i]
+        if quoted:
+            out.append(char)
+            if char == "\\" and i + 1 < len(text):
+                out.append(text[i + 1])
+                i += 1
+            elif char == '"':
+                quoted = False
+        elif text.startswith("//", i):
+            i = text.find("\n", i)
+            if i < 0:
+                break
+            continue
+        elif text.startswith("/*", i):
+            end = text.find("*/", i + 2)
+            i = len(text) if end < 0 else end + 2
+            continue
+        elif char.isspace():
+            out.append(char)
+        else:
+            if char in "}]" and comma is not None:
+                out[comma] = ""
+            comma = len(out) if char == "," else None
+            quoted = char == '"'
+            out.append(char)
+        i += 1
+    return "".join(out)
+
+
+def _opencode_configured_instructions(home, config_home):
+    # Absolute `instructions` entries in the global OpenCode config, such as the harness constitution in
+    # the product checkout. OpenCode fails to start when one is denied, whatever the lane's cwd.
+    paths = []
+    for config in (config_home / "opencode/opencode.json", config_home / "opencode/opencode.jsonc",
+                   home / ".opencode/opencode.json", home / ".opencode/opencode.jsonc"):
+        try:
+            entries = json.loads(_strip_jsonc(config.read_text(encoding="utf-8"))).get("instructions", [])
+        except (OSError, ValueError, AttributeError):
+            continue
+        for entry in entries if isinstance(entries, list) else []:
+            if not isinstance(entry, str) or "://" in entry or any(c in entry for c in "*?[{"):
+                continue
+            path = Path(entry).expanduser()
+            if not path.is_absolute():
+                continue
+            for candidate in dict.fromkeys([path, path.resolve()]):
+                if candidate.is_file() and not credential_path(candidate):
+                    paths.append(candidate)
+    return list(dict.fromkeys(paths))
 
 
 def credential_path(path):
@@ -513,15 +570,19 @@ def os_confinement_profile(plan, search_path=None):
     project_files, project_directories = _project_config_reads(plan, root)
     discovery_dirs, discovery_files = [], []
     if plan.get("adapter") == "opencode":
-        # OpenCode v2 resolves every ancestor of its cwd, ~/.claude and ~/.agents at startup and reads the
+        # OpenCode v2 resolves every ancestor of its cwd, home, ~/.claude and ~/.agents at startup and reads the
         # instruction files it finds there. Home stays denied; re-allow those directories as listings
         # (never their contents) and the instruction files by name.
         cwd_path = Path(plan["cwd"]).resolve()
-        discovery_dirs = [*cwd_path.parents, home / ".claude", home / ".agents"]
+        # Home is listed even when the cwd sits outside it, as in a /tmp worktree.
+        discovery_dirs = [*dict.fromkeys([*cwd_path.parents, home]), home / ".claude", home / ".agents"]
         discovery_files = [d / name for d in cwd_path.parents for name in OPENCODE_INSTRUCTION_FILES]
         discovery_files += [home / ".agents/AGENTS.md", home / ".claude/CLAUDE.md"]
         discovery_dirs = [d for d in discovery_dirs if _opencode_discovery_grantable(d, directory=True)]
         discovery_files = [f for f in discovery_files if _opencode_discovery_grantable(f)]
+        configured = _opencode_configured_instructions(home, xdg_config_home)
+        discovery_files += configured
+        discovery_dirs += [parent for path in configured for parent in path.parents]
     toolchain_files, uv_project_files, toolchain_directories = _toolchain_reads(plan, root, search_path)
     launcher_links, install_directories = _adapter_binary_reads(plan, search_path)
     return (
@@ -534,7 +595,7 @@ def os_confinement_profile(plan, search_path=None):
         + _sbpl_rule("allow", "file-read-data", [*discovery_dirs, *discovery_files], literal=True)
         + _sbpl_rule("allow", "file-read-data", [*([run_dir] if run_dir else [])])
         + _sbpl_rule("allow", "file-read-data", state_writes, canonical=True)
-        + _sbpl_rule("allow", "file-read-data", [home / path for path in reads])
+        + _sbpl_rule("allow", "file-read-data", _state_read_paths(home, reads))
         + _sbpl_rule("allow", "file-read-data", [home / path for path in state.get("read_literal", ())],
                      literal=True, keep_leaf=True)
         + _sbpl_rule("allow", "file-read-data", git_config_files, literal=True)
@@ -571,6 +632,13 @@ def _state_paths(home, entries):
             path = path.parent.resolve() / path.name
         paths.append(path)
     return paths
+
+
+def _state_read_paths(home, entries):
+    """Readable provider state. The grant follows a link, so a link into a credential store, such as
+    ~/.opencode pointing at ~/.ssh, is skipped rather than reopening that store."""
+    paths = [home / entry for entry in entries]
+    return [path for path in paths if not (path.is_symlink() and credential_path(path.resolve()))]
 
 
 def _state_write_guards(home, state):
