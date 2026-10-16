@@ -500,6 +500,7 @@ def test_real_dispatch_children_defer_manifest_race_and_preserve_route_identity(
     bin_dir.mkdir()
     write_executable(bin_dir / 'codex', """
         #!/usr/bin/env bash
+        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
           exit 0
@@ -671,6 +672,7 @@ def test_real_dispatch_timeout_retains_typed_non_success_attempt(tmp_path, monke
     bin_dir.mkdir()
     write_executable(bin_dir / 'codex', """
         #!/usr/bin/env bash
+        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
           exit 0
@@ -758,6 +760,7 @@ def test_real_dispatch_cancellation_reaps_provider_process(tmp_path, monkeypatch
     provider_pid = tmp_path / 'provider.pid'
     write_executable(bin_dir / 'codex', f"""
         #!/usr/bin/env bash
+        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"low"}},{{"effort":"medium"}},{{"effort":"high"}}]}}]}}'
           exit 0
@@ -813,6 +816,7 @@ def test_external_batch_marker_cancels_active_child_and_skips_queued_provider(tm
     launches = tmp_path / 'launches'
     write_executable(bin_dir / 'codex', f"""
         #!/usr/bin/env bash
+        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"low"}}]}}]}}'
           exit 0
@@ -935,6 +939,7 @@ def test_retry_creates_new_attempt_without_replacing_attempt_one(tmp_path, monke
     bin_dir.mkdir()
     write_executable(bin_dir / 'codex', """
         #!/usr/bin/env bash
+        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"},{"effort":"medium"},{"effort":"high"}]}]}'
           exit 0
@@ -1011,6 +1016,7 @@ def test_real_dispatch_child_propagates_worker_question_envelope(tmp_path, monke
     bin_dir.mkdir()
     write_executable(bin_dir / 'codex', """
         #!/usr/bin/env bash
+        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"low"}]}]}'
           exit 0
