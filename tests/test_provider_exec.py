@@ -6598,3 +6598,14 @@ def test_opencode_v1_cli_is_a_typed_refusal_on_the_provider_exec_cli(tmp_path, m
         mod.build_plan("opencode", {"resolved_model": "opencode/x"}, "hello", cwd=tmp_path, workspace_root=tmp_path)
     assert caught.value.code == "unsupported_cli_version"
     assert isinstance(caught.value, ValueError)
+
+
+def test_codex_toml_overrides_spell_non_bmp_names_as_toml():
+    import tomllib
+    codex = importlib.import_module("skills.orchestrate.scripts.adapters.codex")
+    table = codex._toml_table({"\U0001F600": {"enabled": False}, "dot.name": {"enabled": False}})
+    assert "\\ud83d" not in table
+    assert tomllib.loads("mcp_servers = " + table)["mcp_servers"] == {
+        "\U0001F600": {"enabled": False}, "dot.name": {"enabled": False},
+    }
+

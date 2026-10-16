@@ -30,6 +30,11 @@ DISCOVERY_SECONDS = 8
 INERT_TRANSPORT_FIELDS = frozenset({"type", "url", "bearer_token_env_var", "http_headers", "env_http_headers"})
 
 
+def _toml(value):
+    # A JSON scalar is a TOML one, except that ensure_ascii would spell a non-BMP character as a
+    # surrogate pair, which TOML rejects.
+    return json.dumps(value, ensure_ascii=False)
+
 def _executes(transport):
     """A server whose transport starts a local process, directly (stdio) or through a command field."""
     if transport.get("type") not in {"stdio", "streamable_http"}:
@@ -147,8 +152,8 @@ def _toml_table(entries):
     """An inline TOML table. A parent-table override is used because Codex splits a dotted `-c` key
     on every dot, quoted or not, so `mcp_servers."a.b".enabled=false` cannot name a dotted server."""
     return "{" + ", ".join(
-        json.dumps(name) + " = {" + ", ".join(
-            key + " = " + json.dumps(value)  # JSON booleans and strings are TOML ones
+        _toml(name) + " = {" + ", ".join(
+            key + " = " + _toml(value)  # JSON booleans and strings are TOML ones
             for key, value in fields.items()) + "}"
         for name, fields in entries.items()) + "}"
 
@@ -209,13 +214,13 @@ def permissions_profile(p, extends, network, filesystem=None):
     """
     name = p["applied"].get("write_boundary", {}).get("profile") or "provenant-" + uuid.uuid4().hex
     command = [
-        "-c", "default_permissions=" + json.dumps(name),
-        "-c", "permissions." + name + ".extends=" + json.dumps(extends),
+        "-c", "default_permissions=" + _toml(name),
+        "-c", "permissions." + name + ".extends=" + _toml(extends),
         "-c", "permissions." + name + ".network.enabled=" + str(bool(network)).lower(),
     ]
     if filesystem is not None:
         command += ["-c", "permissions." + name + ".filesystem={" + ", ".join(
-            json.dumps(path) + " = " + json.dumps(access) for path, access in filesystem.items()) + "}"]
+            _toml(path) + " = " + _toml(access) for path, access in filesystem.items()) + "}"]
     return command
 
 
@@ -273,7 +278,7 @@ def _argv(p):
         command += [
             "-c",
             "sandbox_mode="
-            + json.dumps("danger-full-access" if sandbox == "full" else sandbox),
+            + _toml("danger-full-access" if sandbox == "full" else sandbox),
         ]
     else:
         command += ["-s", "danger-full-access" if sandbox == "full" else sandbox]
@@ -299,13 +304,13 @@ def _argv(p):
                     "model_providers.provenant_endpoint."
                     + key
                     + "="
-                    + json.dumps(value),
+                    + _toml(value),
                 ]
         command += ["-c", 'model_provider="provenant_endpoint"']
     if p["model"]:
         command += ["-m", p["model"]]
     if p["effort"]:
-        command += ["-c", EFFORT_FLAG + "=" + json.dumps(p["effort"])]
+        command += ["-c", EFFORT_FLAG + "=" + _toml(p["effort"])]
     if p.get("context_ceiling"):
         command += ["-c", "model_auto_compact_token_limit=" + str(int(p["context_ceiling"]))]
     return command + ["-"]
