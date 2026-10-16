@@ -2772,6 +2772,34 @@ def test_preflight_refuses_a_credential_store_prompt_in_any_root(tmp_path, monke
         assert result['error'] == 'credential_or_auth_store_denied', prompt
 
 
+def test_prepare_resume_keeps_an_opencode_variant_as_model_hash_variant(tmp_path: Path):
+    module = load_dispatch_module()
+    run_dir = make_run(tmp_path, "resume-variant")
+    attempt_dir = run_dir / "tasks/task-1/attempt-001"
+    attempt_dir.mkdir(parents=True)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    previous = {
+        "run_id": "resume-me", "task_id": "task-1", "attempt": 1, "state": "terminal",
+        "status": "ok", "mode": "read_only", "cwd": str(workspace), "worktree": None,
+        "workspace": {"root": str(workspace)}, "session_id": "saved-session", "read_roots": [],
+        "provenance": {"requested": {"adapter": "opencode"}, "resolved_model": "opencode/deepseek-v4.1-flash-free",
+                       "effort_applied": "high"},
+        "applied": {"sandbox": "read-only", "network": None, "add_dirs": [], "capabilities": []},
+        "paths": {"events": None}, "requested_route": {},
+    }
+    (attempt_dir / "attempt.json").write_text(json.dumps(previous), encoding="utf-8")
+    args = SimpleNamespace(
+        run_dir=run_dir, resume="resume-me", task_id=None, tool=None, model=None, effort=None,
+        access_mode=None, worktree=None, provider_cwd=None, sandbox=None, network=None,
+        add_dirs=[], resume_session=None, fallback=None, context_ceiling=None,
+        intent="ordinary", orchestrator_family="", role="worker", risk_tier="",
+        model_override_tier="", reviewer_id="", preface=True,
+    )
+    module.prepare_resume(args)
+    assert args.model == "opencode/deepseek-v4.1-flash-free#high" and args.effort == "high"
+
+
 def test_prepare_resume_refuses_a_read_root_that_now_resolves_elsewhere(tmp_path: Path):
     module = load_dispatch_module()
     run_dir = make_run(tmp_path, "resume-moved")

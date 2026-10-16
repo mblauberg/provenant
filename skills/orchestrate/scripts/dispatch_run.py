@@ -1648,6 +1648,8 @@ def prepare_resume(args):
     args.tool=requested["adapter"];args.model=previous["provenance"]["resolved_model"];args.alias=None;args.task_class=None
     # An effort the provider only reported was never sent, so resume does not send it.
     args.effort=None if previous["provenance"].get("effort_observed_source") else previous["provenance"]["effort_applied"];args.task_id=previous["task_id"]
+    # OpenCode applies effort only as a `#variant`; keep that intent so the router sends it again.
+    if args.tool=="opencode" and args.effort and "#" not in args.model: args.model=args.model+"#"+args.effort
     args.access_mode=previous["mode"];args.worktree=Path(previous["worktree"]) if previous.get("worktree") else None
     args.provider_cwd=Path(previous["cwd"]) if previous["mode"]=="read_only" else None
     args.workspace_root=Path(previous.get("workspace_root") or (previous.get("workspace") or {}).get("root") or Path.cwd()).expanduser().resolve()
