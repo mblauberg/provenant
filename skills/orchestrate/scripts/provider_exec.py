@@ -691,7 +691,23 @@ def _runtime_component(prefix, name, *, directory):
     return canonical
 
 
-OPENCODE_FATAL_LOG = r"^\s*ERROR\b|(?:monthly|weekly|5.hour) (?:usage )?limit"
+# v2 logs are `timestamp=... level=ERROR ...`; v1 printed `ERROR ...` at line start.
+OPENCODE_FATAL_LOG = r"^\s*ERROR\b|\blevel=ERROR\b|(?:monthly|weekly|5.hour) (?:usage )?limit"
+OPENCODE_QUIET_LOG = r"\s*(?:WARN|INFO|DEBUG)\b|.*\blevel=(?:WARN|INFO|DEBUG)\b"
+
+
+@functools.lru_cache(maxsize=8)
+def _opencode_version_error(executable, path):
+    """Typed refusal for an OpenCode older than v2; unknown versions pass (tool_missing reports absence)."""
+    found = shutil.which(executable, path=path)
+    if not found:
+        return None
+    try:
+        text = subprocess.run([found, "--version"], capture_output=True, text=True, timeout=10,
+                              stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return profile("opencode").version_error(text)
 
 
 def _pyenv_version_dir(root, selected):
@@ -895,6 +911,10 @@ def build_plan(
     original_prompt_file = metadata.pop("original_prompt_file", prompt_file)
     run_dir = metadata.pop("run_dir", None)
     config = profile(adapter)
+    if adapter == "opencode":
+        version_error = _opencode_version_error(config.CLI, os.environ.get("PATH"))
+        if version_error:
+            raise ValueError(version_error)
     selected_cwd = Path(worktree or cwd or workspace_root or Path.cwd()).expanduser().resolve()
     if not selected_cwd.is_dir():
         raise ValueError("cwd must be a readable directory")
@@ -1244,12 +1264,13 @@ def _model_unavailable_fix(plan):
         registered = route.registered_model_ids(adapter)
     except Exception:
         registered = []
+    listing = "; list every id with `opencode models`" if plan.get("adapter") == "opencode" else ""
     if registered:
         choices = ", ".join(registered[:6])
         if len(registered) > 6:
             choices += ", …"
-        return "choose a registered model: " + choices
-    return "choose another model"
+        return "choose a registered model: " + choices + listing
+    return "choose another model" + listing
 
 
 def _objects(value):
@@ -2260,26 +2281,21 @@ def _observed_model(plan, parsed, env):
     elif adapter == "opencode" and session:
         try:
             exported = subprocess.run(
-                [profile(adapter).CLI, "export", session],
+                [profile(adapter).CLI, "session", "export", "--standalone", session],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=20,
                 env=env,
                 cwd=plan["cwd"],
                 stdin=subprocess.DEVNULL,
             )
-            value = json.loads(exported.stdout)
-            observed = [
-                (item.get("providerID"), item["modelID"])
-                for item in _objects(value)
-                if isinstance(item.get("modelID"), str)
-            ]
-            if observed:
-                provider, model = observed[-1]
+            observed = (json.loads(exported.stdout).get("info") or {}).get("model") or {}
+            model, provider = observed.get("id"), observed.get("providerID")
+            if isinstance(model, str) and model:
                 return (
-                    provider + "/" + model if provider and "/" not in model else model
+                    provider + "/" + model if isinstance(provider, str) and provider and "/" not in model else model
                 ), profile(adapter).MODEL_SOURCE
-        except (OSError, ValueError, subprocess.SubprocessError):
+        except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
             pass
     if parsed["observed_model"]:
         return parsed["observed_model"], profile(adapter).MODEL_SOURCE
@@ -2890,7 +2906,7 @@ def execute(
             relevant = [line for line in text.splitlines()
                         if re.search(OPENCODE_FATAL_LOG, line, re.I)
                         or (re.search(r"\bresets?\b", line, re.I)
-                            and not re.match(r"\s*(?:WARN|INFO|DEBUG)\b", line, re.I))]
+                            and not re.match(OPENCODE_QUIET_LOG, line, re.I))]
             parsed = parse_output(adapter, "", "\n".join(relevant), 1)
             if parsed["status"] == "usage_limited":
                 live_failure = parsed

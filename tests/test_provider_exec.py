@@ -3395,7 +3395,7 @@ def test_opencode_launch_exposes_error_logs_for_silent_quota_hangs(tmp_path):
     plan = fixture_plan(tmp_path, "pass", "opencode")
     command = opencode.argv(plan)
     assert "--print-logs" in command
-    assert command[command.index("--log-level") + 1] == "ERROR"
+    assert command[command.index("--log-level") + 1] == "error"
 
 
 @pytest.mark.parametrize("stream", ["stdout", "stderr"])
@@ -3856,9 +3856,9 @@ def test_opencode_observed_model_comes_from_export(tmp_path):
     cli.write_text(
         "#!/usr/bin/env python3\n"
         "import json, os, pathlib, sys\n"
-        "if sys.argv[1] == 'export':\n"
+        "if sys.argv[1:3] == ['session', 'export'] and '--standalone' in sys.argv:\n"
         f"    pathlib.Path({str(pwd_file)!r}).write_text(os.environ['PWD'])\n"
-        "    print(json.dumps({'messages':[{'info':{'providerID':'opencode-go','modelID':'deepseek-v4.1-flash'}}]}))\n"
+        "    print(json.dumps({'info':{'model':{'providerID':'opencode-go','id':'deepseek-v4.1-flash','variant':'default'}}}))\n"
     )
     cli.chmod(0o755)
     plan = fixture_plan(
@@ -3873,7 +3873,7 @@ def test_opencode_observed_model_comes_from_export(tmp_path):
         env={**os.environ, "PATH": str(tmp_path) + ":" + os.environ["PATH"], "PWD": str(tmp_path)},
     )
     assert record["provenance"]["observed_model"] == "opencode-go/deepseek-v4.1-flash"
-    assert record["provenance"]["observed_source"] == "opencode:export.modelID"
+    assert record["provenance"]["observed_source"] == "opencode:session-export.info.model"
     assert pwd_file.read_text() == str(child)
 
 
@@ -4557,7 +4557,7 @@ def test_plan_only_honors_read_only_cwd_inside_workspace(tmp_path):
     assert json.loads(result.stdout)["cwd"] == str(child)
 
 
-def test_opencode_argv_always_pins_plan_cwd(tmp_path):
+def test_opencode_v2_argv_is_standalone_and_has_no_v1_flags(tmp_path):
     adapter = importlib.import_module("skills.orchestrate.scripts.adapters.opencode")
     plan = {
         "worktree": "",
@@ -4568,7 +4568,75 @@ def test_opencode_argv_always_pins_plan_cwd(tmp_path):
         "prompt": "hello",
     }
     argv = adapter.argv(plan)
-    assert argv[argv.index("--dir") + 1] == str(tmp_path)
+    assert argv[:3] == ["opencode", "run", "--standalone"]
+    assert "--dir" not in argv and "--variant" not in argv
+    assert argv[argv.index("--model") + 1] == "opencode/mimo-v2.6-flash-free"
+
+
+def test_opencode_v2_argv_carries_effort_as_model_variant_and_resume(tmp_path):
+    adapter = importlib.import_module("skills.orchestrate.scripts.adapters.opencode")
+    base = {"worktree": "", "cwd": str(tmp_path), "resume_session": "ses_1", "prompt": "hi"}
+    argv = adapter.argv({**base, "model": "opencode/glm-5.3-flash-free", "effort": "high"})
+    assert argv[argv.index("--model") + 1] == "opencode/glm-5.3-flash-free#high"
+    assert argv[argv.index("-s") + 1] == "ses_1"
+    # An id that already names its variant is not suffixed twice.
+    argv = adapter.argv({**base, "model": "opencode/x#low", "effort": "high"})
+    assert argv[argv.index("--model") + 1] == "opencode/x#low"
+
+
+@pytest.mark.parametrize("text,ok", [("opencode v2.0.30", True), ("2.1.0", True), ("1.14.2", False),
+                                     ("opencode v1.0.0", False), ("", True), ("garbage", True)])
+def test_opencode_version_gate_names_a_fix_for_v1(text, ok):
+    adapter = importlib.import_module("skills.orchestrate.scripts.adapters.opencode")
+    error = adapter.version_error(text)
+    assert (error is None) is ok
+    assert ok or "fix: upgrade OpenCode to v2" in error
+
+
+def test_opencode_v1_cli_is_refused_at_planning(tmp_path, monkeypatch):
+    cli = tmp_path / "bin" / "opencode"
+    cli.parent.mkdir()
+    cli.write_text("#!/bin/sh\necho 1.14.2\n")
+    cli.chmod(0o755)
+    monkeypatch.setenv("PATH", str(cli.parent) + ":" + os.environ["PATH"])
+    mod = supervisor()
+    mod._opencode_version_error.cache_clear()
+    with pytest.raises(ValueError, match="unsupported; fix: upgrade OpenCode to v2"):
+        mod.build_plan("opencode", {"resolved_model": "opencode/x"}, "hello", cwd=tmp_path, workspace_root=tmp_path)
+    mod._opencode_version_error.cache_clear()
+
+
+@pytest.mark.parametrize("message,status,signature", [
+    ("Model unavailable: opencode/nope", "model_unavailable", "model_unavailable"),
+    ("Invalid model reference: bogus", "model_unavailable", "model_unavailable"),
+    ("Variant unavailable for opencode/x: bogusvar", "rejected", "invalid_input"),
+])
+def test_opencode_v2_error_events_are_typed(message, status, signature):
+    event = json.dumps({"type": "error", "sessionID": "ses_1", "error": {"type": "provider.no-route", "message": message}})
+    parsed = supervisor().parse_output("opencode", event + "\n", "", 1)
+    assert (parsed["status"], parsed["signature"]) == (status, signature)
+
+
+def test_opencode_v2_events_yield_text_session_and_terminal():
+    lines = [
+        {"type": "step_start", "sessionID": "ses_9", "part": {"type": "step-start"}},
+        {"type": "tool_use", "sessionID": "ses_9", "part": {"tool": "read", "state": {"status": "completed"}}},
+        {"type": "text", "sessionID": "ses_9", "part": {"type": "text", "text": "PONG"}},
+        {"type": "step_finish", "sessionID": "ses_9", "part": {"type": "step-finish", "reason": "stop"}},
+    ]
+    parsed = supervisor().parse_output("opencode", "\n".join(map(json.dumps, lines)) + "\n", "", 0)
+    assert (parsed["status"], parsed["text"], parsed["session_id"], parsed["terminal"]) == ("ok", "PONG", "ses_9", True)
+
+
+def test_opencode_v2_single_text_event_without_step_events_is_ok():
+    event = {"type": "text", "sessionID": "ses_9", "part": {"type": "text", "text": "PONG"}}
+    assert supervisor().parse_output("opencode", json.dumps(event) + "\n", "", 0)["status"] == "ok"
+
+
+@pytest.mark.parametrize("stdout", ["", json.dumps({"type": "step_start", "sessionID": "s", "part": {}}) + "\n"])
+def test_opencode_exit_zero_without_assistant_text_is_empty_output(stdout):
+    parsed = supervisor().parse_output("opencode", stdout, "", 0)
+    assert (parsed["status"], parsed["signature"]) == ("failed", "empty_output")
 
 
 def test_unsupported_controls_are_not_claimed_as_applied(tmp_path):
@@ -6147,3 +6215,11 @@ def test_explicit_model_runs_despite_a_cooldown_with_a_warning(tmp_path):
     row = json.loads(next((run / "tasks").glob("*/attempt-*/attempt.json")).read_text())
     assert row["status"] == "ok"
     assert any("explicit model is cooling" in warning for warning in row.get("warnings", []))
+
+
+def test_opencode_v2_structured_error_log_lines_are_fatal_and_info_is_not():
+    fatal = supervisor().OPENCODE_FATAL_LOG
+    quiet = supervisor().OPENCODE_QUIET_LOG
+    assert re.search(fatal, "timestamp=2026-10-16T07:38:10.410Z level=ERROR run=ab message=boom", re.I | re.M)
+    assert not re.search(fatal, 'timestamp=2026-10-16T07:38:10.410Z level=INFO run=ab message="cli starting"', re.I | re.M)
+    assert re.match(quiet, "timestamp=x level=WARN message=y")
