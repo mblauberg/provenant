@@ -1,17 +1,47 @@
 {
   "schema_version": 1,
-  "catalog_date": "2026-10-12",
+  "catalog_date": "2026-10-16",
   "context": {
     "ceiling_tokens": 300000
   },
   "routes": {
-    "strong": [
+    "principal": [
+      {
+        "model": "claude/claude-opus-5-5",
+        "weight": "high"
+      },
+      {
+        "model": "codex/gpt-6-astra",
+        "weight": "normal"
+      },
+      {
+        "model": "opencode/opencode-go/gemini-4-argon-contributor",
+        "weight": "sparing"
+      }
+    ],
+    "senior": [
       {
         "model": "claude/claude-sonnet-5-5",
         "weight": "high"
       },
       {
         "model": "codex/gpt-6.1-sol",
+        "weight": "high",
+        "effort": [
+          "high",
+          "xhigh"
+        ]
+      },
+      {
+        "model": "agy/gemini-3.8-flash",
+        "weight": "normal",
+        "effort": [
+          "high",
+          "high"
+        ]
+      },
+      {
+        "model": "cursor/grok-4.7",
         "weight": "normal",
         "effort": [
           "high",
@@ -19,17 +49,17 @@
         ]
       },
       {
-        "model": "claude/claude-opus-5-5",
-        "weight": "normal"
-      },
-      {
-        "model": "codex/gpt-6-astra",
+        "model": "agy/claude-opus-4-6-thinking",
         "weight": "sparing"
       }
     ],
-    "bulk": [
+    "junior": [
       {
-        "model": "codex/gpt-6-luna",
+        "model": "opencode/opencode/deepseek-v4.1-flash-free",
+        "weight": "high"
+      },
+      {
+        "model": "opencode/opencode/glm-5.3-flash-free",
         "weight": "high"
       },
       {
@@ -41,44 +71,20 @@
         ]
       },
       {
+        "model": "codex/gpt-6-luna",
+        "weight": "high"
+      },
+      {
         "model": "agy/gemini-3.8-flash",
-        "weight": "normal"
-      },
-      {
-        "model": "opencode/opencode/space-bunny-free",
-        "weight": "normal"
-      },
-      {
-        "model": "opencode/opencode/mimo-v2.6-flash-free",
-        "weight": "normal"
-      },
-      {
-        "model": "opencode/opencode/muse-spark-1.3-contributor-free",
-        "weight": "normal"
-      },
-      {
-        "model": "agy/claude-opus-4-6-thinking",
-        "weight": "sparing"
+        "weight": "normal",
+        "effort": [
+          "low",
+          "medium"
+        ]
       },
       {
         "model": "agy/claude-sonnet-4-6",
         "weight": "sparing"
-      },
-      {
-        "model": "claude/claude-sonnet-5-5",
-        "weight": "sparing",
-        "effort": [
-          "medium",
-          "high"
-        ]
-      },
-      {
-        "model": "codex/gpt-6.1-sol",
-        "weight": "sparing",
-        "effort": [
-          "medium",
-          "high"
-        ]
       },
       {
         "model": "opencode/opencode-go/deepseek-v4.1-flash",
@@ -86,6 +92,18 @@
       },
       {
         "model": "opencode/opencode-go/glm-5.3-flash",
+        "weight": "sparing"
+      },
+      {
+        "model": "opencode/opencode/space-bunny-free",
+        "weight": "sparing"
+      },
+      {
+        "model": "opencode/opencode/mimo-v2.6-flash-free",
+        "weight": "sparing"
+      },
+      {
+        "model": "opencode/opencode/muse-spark-1.3-contributor-free",
         "weight": "sparing"
       }
     ],
@@ -135,18 +153,24 @@
     ]
   },
   "route_synonyms": {
-    "flagship": "strong",
-    "workhorse": "bulk",
-    "scout": "bulk",
-    "critical-review": "strong",
-    "orchestration": "strong",
-    "review": "strong",
-    "second-opinion": "strong",
-    "implementation": "bulk",
-    "legwork": "bulk",
-    "mechanical": "bulk",
-    "research": "bulk",
-    "screenshots": "bulk",
+    "flagship": "principal",
+    "top": "principal",
+    "critical-review": "principal",
+    "decision": "principal",
+    "orchestration": "principal",
+    "workhorse": "senior",
+    "strong": "senior",
+    "mid": "senior",
+    "review": "senior",
+    "second-opinion": "senior",
+    "implementation": "senior",
+    "bulk": "junior",
+    "scout": "junior",
+    "legwork": "junior",
+    "lens": "junior",
+    "mechanical": "junior",
+    "research": "junior",
+    "screenshots": "junior",
     "ui-taste": "design"
   },
   "model_traits": {},
@@ -742,56 +766,71 @@
       "endpoint_provider": "opencode",
       "fixed_model_family": null,
       "effort_transport": "flag",
-      "default_model": "opencode-go/deepseek-v4.1-flash",
+      "default_model": "opencode/deepseek-v4.1-flash-free",
       "models": [
         {
-          "id": "opencode-go/deepseek-v4.1-flash",
+          "id": "opencode/deepseek-v4.1-flash-free",
           "names": [
             "deepseek",
-            "deepseek-v4.1-flash"
+            "deepseek-free",
+            "deepseek-v4.1-flash-free"
           ],
-          "plan_cap_usd": 60,
+          "plan_cap_usd": 0,
           "trains_on_prompts": false,
           "default": true
         },
         {
-          "id": "opencode-go/glm-5.3-flash",
+          "id": "opencode/glm-5.3-flash-free",
           "names": [
             "glm",
+            "glm-free",
+            "glm-5.3-flash-free"
+          ],
+          "plan_cap_usd": 0,
+          "trains_on_prompts": false
+        },
+        {
+          "id": "opencode-go/deepseek-v4.1-flash",
+          "names": [
+            "deepseek-paid",
+            "deepseek-v4.1-flash"
+          ],
+          "plan_cap_usd": 60,
+          "trains_on_prompts": false
+        },
+        {
+          "id": "opencode-go/glm-5.3-flash",
+          "names": [
+            "glm-paid",
             "glm-5.3-flash"
           ],
           "plan_cap_usd": 30,
           "trains_on_prompts": false
         },
         {
-          "id": "opencode-go/kimi-k2.7-code",
+          "id": "opencode-go/gemini-4-argon-contributor",
           "names": [
-            "kimi"
-          ],
-          "plan_cap_usd": 15,
-          "trains_on_prompts": false
-        },
-        {
-          "id": "opencode-go/minimax-m3",
-          "names": [
-            "minimax"
-          ],
-          "plan_cap_usd": 15,
-          "trains_on_prompts": false
-        },
-        {
-          "id": "opencode-go/mimo-v2.6-flash",
-          "names": [
-            "mimo"
+            "argon",
+            "gemini-argon",
+            "gemini-4-argon"
           ],
           "plan_cap_usd": 30,
-          "trains_on_prompts": false
+          "trains_on_prompts": true,
+          "warning": "Contributor tier: prompts are used for training and not zero-retention. Do not send sensitive, private or client data."
         },
         {
           "id": "opencode/space-bunny-free",
           "names": [
             "space-bunny"
-          ]
+          ],
+          "trains_on_prompts": false
+        },
+        {
+          "id": "opencode/longcat-2.5-preview-free",
+          "names": [
+            "longcat"
+          ],
+          "trains_on_prompts": false
         },
         {
           "id": "opencode/mimo-v2.6-flash-free",
@@ -807,16 +846,14 @@
         }
       ],
       "aliases": {
-        "flagship": [
-          "opencode-go/glm-5.3-flash",
-          "opencode-go/kimi-k2.7-code",
-          "opencode-go/minimax-m3"
-        ],
         "workhorse": [
+          "opencode/deepseek-v4.1-flash-free",
+          "opencode/glm-5.3-flash-free",
           "opencode-go/deepseek-v4.1-flash"
         ],
         "scout": [
-          "opencode-go/mimo-v2.6-flash"
+          "opencode/deepseek-v4.1-flash-free",
+          "opencode/glm-5.3-flash-free"
         ]
       },
       "free_pattern": "-free$"

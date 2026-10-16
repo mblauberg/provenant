@@ -41,6 +41,11 @@ from attempt_evidence import canonical_success_status
 TERMINAL = {"ok", "failed", "cancelled"}
 STATUSES = {"draft", "verified", "superseded", "retired"}
 RETENTION = {"capsule", "evidence", "ephemeral"}
+# A review tier may use the tier name or the adapter alias it maps to.
+REVIEW_TIERS = {
+    "scout": "scout", "workhorse": "workhorse", "flagship": "flagship",
+    "junior": "scout", "senior": "workhorse", "principal": "flagship",
+}
 SCAFFOLD = {
     "MANIFEST.md",
     "RUN_RECEIPT.json",
@@ -205,7 +210,7 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
             seen.add(review["id"])
         if not isinstance(review["scope"], str) or review["scope"] not in {"targeted", "primary"}:
             errors.append(f"receipt review_plan.reviews[{index}].scope is invalid")
-        if not isinstance(review["tier"], str) or review["tier"] not in {"scout", "workhorse", "flagship"}:
+        if not isinstance(review["tier"], str) or review["tier"] not in REVIEW_TIERS:
             errors.append(f"receipt review_plan.reviews[{index}].tier is invalid")
         if not isinstance(review["status"], str) or review["status"] not in REVIEW_PLAN_STATUSES:
             errors.append(f"receipt review_plan.reviews[{index}].status is invalid")
@@ -331,7 +336,7 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                             errors.append(f"receipt review_plan.reviews[{index}].route_receipt identity does not match")
                         if isinstance(route_value, dict):
                             route_alias = route_value.get("route_alias", route_value.get("alias"))
-                            if review["tier"] == "flagship" and route_alias != "flagship":
+                            if REVIEW_TIERS.get(review["tier"]) == "flagship" and route_alias != "flagship":
                                 errors.append(f"receipt review_plan.reviews[{index}].route_receipt does not prove flagship strength")
                             transcript_available = bool(
                                 evidence_bytes is not None and evidence_bytes
@@ -470,7 +475,7 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
             review["scope"] == "primary"
             and review["family"] == other_primary
             and not review["substitution_for"]
-            and review["tier"] != "flagship"
+            and REVIEW_TIERS.get(review["tier"]) != "flagship"
         ):
             errors.append("other-primary review must use flagship strength")
     targeted = [r for r in checked if r["scope"] == "targeted" and r["status"] == "complete"]
@@ -500,7 +505,7 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
         elif (
             review["scope"] == "primary"
             and review["family"] not in {chair, other_primary}
-            and (review["tier"] == "flagship" or review["status"] != "complete")
+            and (REVIEW_TIERS.get(review["tier"]) == "flagship" or review["status"] != "complete")
         ):
             role = "distinct-family"
         else:

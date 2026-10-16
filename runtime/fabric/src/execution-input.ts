@@ -29,6 +29,8 @@ function inside(root: string, candidate: string) {
 export const DISPATCH_ADAPTERS = ["agy", "claude", "codex", "copilot", "cursor", "kiro", "opencode"] as const;
 const SUPPORTED_ADAPTERS = new Set<string>(DISPATCH_ADAPTERS);
 const ROLE_ALIASES = ["flagship", "workhorse", "scout"];
+/** The route-pool tier names, accepted wherever an adapter's own alias is asked for. */
+const TIER_NAMES: Record<string, string> = { junior: "scout", senior: "workhorse", principal: "flagship" };
 
 /**
  * Seats whose provider runs its own models as native subagents: Claude Code
@@ -97,12 +99,12 @@ export interface RouteInput {
   allow_secrets?: boolean;
   fallback?: boolean | "any" | Array<string | Record<string, unknown>>;
   context_ceiling?: number;
-  /** A global weighted pool (strong, bulk, design, writing) or a task-class/alias synonym. */
+  /** A global weighted pool (junior, senior, principal, design, writing) or a task-class/alias synonym. */
   route?: string;
   rotate?: boolean;
   council?: number;
   models?: string[];
-  /** Never route this task, or a fallback, to a free or prompt-training model; works with any selector. */
+  /** Never route this task, or a fallback, to a prompt-training model (free models count unless their entry says they do not train); works with any selector. */
   confidential?: boolean;
   /** Why the pool picked this model; set by the pool expansion, shown on the Route line. */
   pick_reason?: string;
@@ -165,6 +167,8 @@ const routeKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/gu, "
 
 /** The tier alias a caller meant, tolerating case and a one-letter typo (`Workhorse`, `workhorze`). */
 export function tierAlias(alias: string): string | undefined {
+  const tier = Object.keys(TIER_NAMES).find((candidate) => editDistance(candidate, routeKey(alias)) <= 1);
+  if (tier !== undefined) return TIER_NAMES[tier];
   return ROLE_ALIASES.find((candidate) => editDistance(routeKey(candidate), routeKey(alias)) <= 1);
 }
 
@@ -279,9 +283,11 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
     throw new InputError("capabilities_invalid", "Pass capabilities as a list of distinct postgres or browser values.");
   }
   let selector =
-    input.model ?? (input.alias && !ROLE_ALIASES.includes(input.alias) ? input.alias : undefined);
+    input.model ?? (input.alias && !ROLE_ALIASES.includes(input.alias) && !(input.alias.toLowerCase() in TIER_NAMES)
+      ? input.alias : undefined);
   const roleAlias = input.model === undefined && input.alias !== undefined ? tierAlias(input.alias) : undefined;
-  if (roleAlias !== undefined && roleAlias !== input.alias) warnings.push(`corrected alias ${input.alias} to ${roleAlias}`);
+  if (roleAlias !== undefined && roleAlias !== input.alias && TIER_NAMES[input.alias!.toLowerCase()] !== roleAlias)
+    warnings.push(`corrected alias ${input.alias} to ${roleAlias}`);
   if (roleAlias !== undefined) input.alias = roleAlias;
   const isRoleAlias = roleAlias !== undefined;
   if (selector !== undefined && !isRoleAlias) {

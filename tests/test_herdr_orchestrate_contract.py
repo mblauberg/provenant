@@ -14,7 +14,8 @@ def _cases() -> list[dict[str, object]]:
 
 def test_herdr_routing_boundaries_rebalance_the_exact_nine_cases() -> None:
     cases = _cases()
-    assert Counter(case["relation"] for case in cases) == {
+    herdr = [case for case in cases if "tiered-council" not in case.get("tags", [])]
+    assert Counter(case["relation"] for case in herdr) == {
         "positive": 3,
         "negative": 3,
         "boundary": 3,
