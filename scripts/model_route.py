@@ -644,7 +644,7 @@ def _kiro_probe_enforced(evidence: Any) -> bool:
 
 
 def probe_capabilities(adapter: str, executable: str, deadline: float | None = None,
-                       listing_only: bool = False) -> tuple[dict[str, Any], int]:
+                       listing_only: bool = False, refresh: bool = False) -> tuple[dict[str, Any], int]:
     """Probe an adapter CLI. `listing_only` (discovery) lists models without Kiro's
     model-backed safety chat, and keeps safety evidence cached for the same executable
     and version; a full probe re-runs the chat once that evidence has aged out."""
@@ -675,7 +675,7 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
     executable_path = str(Path(executable).resolve())
     safety_missing = adapter == "kiro" and not listing_only and isinstance(previous, dict) \
         and "read_only_probe" not in previous and previous.get("status") != "probe_unavailable"
-    if (isinstance(previous, dict) and previous.get("version") == version
+    if (isinstance(previous, dict) and previous.get("version") == version and not refresh
             and previous.get("executable") == executable_path and not safety_missing):
         try:
             # A full Kiro probe is only as fresh as its safety evidence, which a listing refresh keeps.
@@ -684,6 +684,7 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
                                                and "checked_at" in evidence) else previous["observed_at"]
             observed = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
             ttl = 3600 if (previous.get("status") == "probe_unavailable" or
+                           (adapter == "opencode" and not previous.get("models")) or
                            (adapter == "kiro" and not _kiro_probe_enforced(previous.get("read_only_probe")))) else 86400
             if (datetime.now(timezone.utc) - observed).total_seconds() < ttl:
                 return {**previous, "cache_hit": True}, 0 if previous.get("status") != "probe_unavailable" else 1
@@ -869,14 +870,22 @@ def _fallback_candidates(
     return results
 
 
-def _opencode_live_models() -> list[str]:
-    """Ids from the cached `opencode models` probe; empty when the CLI or listing is unavailable."""
+def _opencode_live_models(refresh: bool = False) -> tuple[list[str], bool]:
+    """Ids from the cached `opencode models` probe and whether the cache answered.
+
+    An unavailable probe or an empty listing means unknown, so the list is empty (and the cache
+    keeps such a record for an hour only).
+    """
     try:
-        record, _ = probe_capabilities("opencode", "opencode", time.monotonic() + 25, listing_only=True)
+        record, _ = probe_capabilities("opencode", "opencode", time.monotonic() + 25, listing_only=True,
+                                       refresh=refresh)
     except Exception:  # noqa: BLE001 - discovery must never break routing
-        return []
-    models = record.get("models") if isinstance(record, dict) else None
-    return [item for item in models if isinstance(item, str)] if isinstance(models, list) else []
+        return [], False
+    if not isinstance(record, dict) or record.get("status") == "probe_unavailable":
+        return [], False
+    models = record.get("models")
+    found = [item for item in models if isinstance(item, str)] if isinstance(models, list) else []
+    return found, bool(record.get("cache_hit"))
 
 
 def _resolve_opencode_name(requested: str, live: list[str]) -> tuple[str | None, list[str], dict[str, Any] | None]:
@@ -945,13 +954,22 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             args.effort = variant
             args.explicit_variant = True
             explicit = True
+        elif variant and args.effort != variant:
+            notes.append(f"#{variant} in the model id ignored: explicit effort {args.effort} wins")
     registered, match_notes = _registered_match(adapter_name, requested, catalog)
     notes.extend(match_notes)
     live_models: list[str] = []
     live_resolved = False
     if adapter_name == "opencode" and registered is None and requested.casefold() != "auto":
-        live_models = _opencode_live_models()
+        live_models, from_cache = _opencode_live_models()
+        if not live_models and "/" not in requested:
+            notes.append("the live opencode model listing is unavailable, so the name was not checked; "
+                         "run `opencode models` and pass a full provider/model id if the model is rejected")
         resolved_name, name_notes, refusal = _resolve_opencode_name(requested, live_models)
+        if refusal and refusal["status"] == "model_not_found" and from_cache:
+            # A cached listing can predate the model; look once without the cache.
+            live_models, _ = _opencode_live_models(refresh=True)
+            resolved_name, name_notes, refusal = _resolve_opencode_name(requested, live_models)
         if refusal:
             return emit({"schema_version": 1, "adapter": adapter_name, **refusal}, 2)
         if resolved_name:

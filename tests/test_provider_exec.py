@@ -111,11 +111,12 @@ def test_read_only_git_config_allowlist_is_limited_to_the_two_global_files(monke
     assert f'(literal "{home / ".gitconfig"}")' in profile
     assert f'(literal "{xdg / "git/config"}")' in profile
     assert f'(literal "{home / ".ssh/config"}")' not in profile
-    # OpenCode v2 needs to stat the home ancestry, so credential stores are denied rather than all of home.
-    assert f'(subpath "{home / ".ssh"}")' in profile
-    assert f'(subpath "{home / ".config/opencode"}")' in profile
+    # OpenCode v2 stats the home ancestry: home stays denied, discovery is re-allowed by literal.
+    assert f'(subpath "{home}")' in profile
     assert f'(literal "{(tmp_path).resolve()}")' in profile
     assert f'(literal "{home / ".claude"}")' in profile
+    assert f'(literal "{home / ".agents/AGENTS.md"}")' in profile
+    assert f'(literal "{tmp_path.resolve() / "AGENTS.md"}")' in profile
     other = supervisor.os_confinement_profile({**plan, "adapter": "gemini"})
     assert f'(subpath "{home}")' in other
 
@@ -4605,6 +4606,20 @@ def test_opencode_version_gate_names_a_fix_for_v1(text, ok):
     assert ok or "fix: upgrade OpenCode to v2" in error
 
 
+def test_opencode_version_probe_failure_is_not_cached(tmp_path, monkeypatch):
+    cli = tmp_path / "bin" / "opencode"
+    cli.parent.mkdir()
+    cli.write_text("#!/bin/sh\necho nothing\n")
+    cli.chmod(0o755)
+    mod = supervisor()
+    mod._OPENCODE_VERSION_CACHE.clear()
+    assert mod._opencode_version_error("opencode", str(cli.parent)) is None
+    assert mod._OPENCODE_VERSION_CACHE == {}
+    cli.write_text("#!/bin/sh\necho 1.2.3\n")
+    assert "unsupported" in mod._opencode_version_error("opencode", str(cli.parent))
+    mod._OPENCODE_VERSION_CACHE.clear()
+
+
 def test_opencode_v1_cli_is_refused_at_planning(tmp_path, monkeypatch):
     cli = tmp_path / "bin" / "opencode"
     cli.parent.mkdir()
@@ -4612,10 +4627,10 @@ def test_opencode_v1_cli_is_refused_at_planning(tmp_path, monkeypatch):
     cli.chmod(0o755)
     monkeypatch.setenv("PATH", str(cli.parent) + ":" + os.environ["PATH"])
     mod = supervisor()
-    mod._opencode_version_error.cache_clear()
+    mod._OPENCODE_VERSION_CACHE.clear()
     with pytest.raises(ValueError, match="unsupported; fix: upgrade OpenCode to v2"):
         mod.build_plan("opencode", {"resolved_model": "opencode/x"}, "hello", cwd=tmp_path, workspace_root=tmp_path)
-    mod._opencode_version_error.cache_clear()
+    mod._OPENCODE_VERSION_CACHE.clear()
 
 
 @pytest.mark.parametrize("message,status,signature", [

@@ -24,7 +24,7 @@ SIGNATURES = (
 
 def version_error(text):
     """A typed message when `opencode --version` output names a release before v2, else None."""
-    match = re.search(r"(\d+)\.\d+(?:\.\d+)?", text or "")
+    match = re.search(r"(?<![\w.])v?(\d+)\.\d+(?:\.\d+)?(?![\w.])", text or "")
     if match and int(match[1]) < MIN_MAJOR:
         return f"OpenCode {match[0]} is unsupported; fix: {UPGRADE_FIX}"
     return None

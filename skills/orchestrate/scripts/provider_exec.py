@@ -143,6 +143,10 @@ CREDENTIAL_STORES = (
 )
 
 
+# Instruction files OpenCode v2 reads from each ancestor of its cwd.
+OPENCODE_INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "HARNESS.md")
+
+
 def credential_path(path):
     candidate = Path(path).expanduser().resolve()
     home = Path.home().resolve()
@@ -493,16 +497,15 @@ def os_confinement_profile(plan, search_path=None):
     git_config_files = [home / ".gitconfig", xdg_config_home / "git/config"]
     reads = [*state.get("read", ()), *(() if _uses_api_key(plan) else state.get("oauth_read", ()))]
     project_files, project_directories = _project_config_reads(plan, root)
-    home_denied, discovery_dirs = [home], []
+    discovery_dirs, discovery_files = [], []
     if plan.get("adapter") == "opencode":
-        # OpenCode v2 resolves every ancestor of its cwd, ~/.claude and ~/.agents at startup, and
-        # follows @imports in the instruction files it finds. A blanket home deny fails that with
-        # EPERM, so deny the credential stores instead; the config's external_directory deny
-        # keeps the model's own tools inside the project. Directories are granted by name only
-        # (a listing), never their contents.
-        home_denied = [home / name for name in CREDENTIAL_STORES]
+        # OpenCode v2 resolves every ancestor of its cwd, ~/.claude and ~/.agents at startup and reads the
+        # instruction files it finds there. Home stays denied; re-allow those directories as listings
+        # (never their contents) and the instruction files by name.
         cwd_path = Path(plan["cwd"]).resolve()
-        discovery_dirs = [*cwd_path.parents, home / ".claude"]
+        discovery_dirs = [*cwd_path.parents, home / ".claude", home / ".agents"]
+        discovery_files = [d / name for d in cwd_path.parents for name in OPENCODE_INSTRUCTION_FILES]
+        discovery_files += [home / ".agents/AGENTS.md", home / ".claude/CLAUDE.md"]
     toolchain_files, uv_project_files, toolchain_directories = _toolchain_reads(plan, root, search_path)
     launcher_links, install_directories = _adapter_binary_reads(plan, search_path)
     return (
@@ -510,9 +513,9 @@ def os_confinement_profile(plan, search_path=None):
         + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), Path("/dev")])
         + _sbpl_rule("allow", "file-write*", state_writes, canonical=True)
         + _state_write_guards(home, state)
-        + _sbpl_rule("deny", "file-read-data", [*home_denied, Path("/private/tmp")])
+        + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
         + _sbpl_rule("deny", "file-read-data", [root, *add_dirs])
-        + _sbpl_rule("allow", "file-read-data", discovery_dirs, literal=True)
+        + _sbpl_rule("allow", "file-read-data", [*discovery_dirs, *discovery_files], literal=True)
         + _sbpl_rule("allow", "file-read-data", [*([run_dir] if run_dir else [])])
         + _sbpl_rule("allow", "file-read-data", state_writes, canonical=True)
         + _sbpl_rule("allow", "file-read-data", [home / path for path in reads])
@@ -711,18 +714,33 @@ OPENCODE_FATAL_LOG = r"^\s*ERROR\b|\blevel=ERROR\b|(?:monthly|weekly|5.hour) (?:
 OPENCODE_QUIET_LOG = r"\s*(?:WARN|INFO|DEBUG)\b|.*\blevel=(?:WARN|INFO|DEBUG)\b"
 
 
-@functools.lru_cache(maxsize=8)
+_OPENCODE_VERSION_CACHE = {}
+
+
 def _opencode_version_error(executable, path):
-    """Typed refusal for an OpenCode older than v2; unknown versions pass (tool_missing reports absence)."""
+    """Typed refusal for an OpenCode older than v2; unknown versions pass (tool_missing reports absence).
+
+    Only a parsed answer is cached, keyed on the binary's mtime, so a timeout is retried and
+    `opencode upgrade` is noticed by a long-lived process.
+    """
     found = shutil.which(executable, path=path)
     if not found:
         return None
+    try:
+        key = (found, os.stat(found).st_mtime_ns)
+    except OSError:
+        return None
+    if key in _OPENCODE_VERSION_CACHE:
+        return _OPENCODE_VERSION_CACHE[key]
     try:
         text = subprocess.run([found, "--version"], capture_output=True, text=True, timeout=10,
                               stdin=subprocess.DEVNULL).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    return profile("opencode").version_error(text)
+    error = profile("opencode").version_error(text)
+    if re.search(r"\d+\.\d+", text or ""):
+        _OPENCODE_VERSION_CACHE[key] = error
+    return error
 
 
 def _pyenv_version_dir(root, selected):

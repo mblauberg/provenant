@@ -92,14 +92,19 @@ is checked once per process.
   `provider.no-route` (unknown model or variant), `provider.quota` (free-tier throttle, 429,
   `FreeUsageLimitError`; classified `rate_limited`), `unknown` ("Invalid model reference").
   Stderr carries INFO logs even at `--log-level error`; only `level=ERROR` lines are fatal.
-- **Read-only sandbox.** v2 resolves every ancestor of the cwd, `~/.claude` and `~/.agents` and
-  follows `@imports` in instruction files at startup, so a blanket home read deny makes the
-  server fail with `UnexpectedStatus: 500` (EPERM). For OpenCode the macOS profile denies the
-  credential stores (`CREDENTIAL_STORES`, which include `~/.claude` and `~/.codex`), the rest of the
-  workspace root and `/private/tmp`, and allows listing (not reading) of the cwd ancestors.
-  The config's `external_directory: deny` keeps the model's own tools inside the project. The
-  run also sets `OPENCODE_DISABLE_CLAUDE_CODE`, `..._CLAUDE_CODE_SKILLS`, `..._AUTOUPDATE`
-  and `..._FILEWATCHER` so foreign instruction files, auto-update and watchers stay out.
+- **Read-only sandbox.** The macOS profile keeps the blanket read deny on HOME for OpenCode and
+  re-allows only what v2 needs to start: listings (not contents) of every ancestor of the cwd, of
+  `~/.claude` and `~/.agents`, plus the instruction files `AGENTS.md`, `CLAUDE.md` and `HARNESS.md`
+  in each ancestor and `~/.agents/AGENTS.md` and `~/.claude/CLAUDE.md`. v2 realPath()s those at
+  startup and follows `@imports`; without them the server fails with `UnexpectedStatus: 500` or
+  `Instruction initialization blocked` (EPERM on `lstat ~/.agents/AGENTS.md`). The provider state
+  grant stays: `~/.local/share/opencode` (including `auth.json`, which holds the login) and
+  `~/.cache/opencode` are readable, because OpenCode needs them, so credentials are not
+  denied to the model at the OS layer there; the config's `external_directory: deny` keeps the
+  model's tools to the project. `~/.zshrc`, `~/.ssh` and the rest of HOME stay unreadable (checked
+  with `sandbox-exec`). The fabric MCP server named in the user's OpenCode config cannot start under
+  it, which is intended. The run also sets `OPENCODE_DISABLE_CLAUDE_CODE`, `..._CLAUDE_CODE_SKILLS`,
+  `..._AUTOUPDATE` and `..._FILEWATCHER` so foreign instruction files, auto-update and watchers stay out.
 - **Herdr plugin.** A user plugin `~/.config/opencode/plugins/herdr-agent-state.js` fails to load
   in v2 ("must export default definition with id and effect/setup"). It is logged as a warning
   and is non-fatal; it lives outside the repo and needs updating by its owner.
