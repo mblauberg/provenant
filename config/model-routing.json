@@ -49,8 +49,12 @@
         "weight": "high"
       },
       {
-        "model": "opencode/opencode/space-bunny-free",
+        "model": "opencode/opencode/glm-5.3-flash-free",
         "weight": "normal"
+      },
+      {
+        "model": "opencode/opencode/space-bunny-free",
+        "weight": "sparing"
       },
       {
         "model": "opencode/opencode/mimo-v2.6-flash-free",
@@ -760,6 +764,16 @@
           "default": true
         },
         {
+          "id": "opencode/glm-5.3-flash-free",
+          "names": [
+            "glm",
+            "glm-free",
+            "glm-5.3-flash-free"
+          ],
+          "plan_cap_usd": 0,
+          "trains_on_prompts": false
+        },
+        {
           "id": "opencode-go/deepseek-v4.1-flash",
           "names": [
             "deepseek-paid",
@@ -771,7 +785,7 @@
         {
           "id": "opencode-go/glm-5.3-flash",
           "names": [
-            "glm",
+            "glm-paid",
             "glm-5.3-flash"
           ],
           "plan_cap_usd": 30,
@@ -799,14 +813,17 @@
       ],
       "aliases": {
         "flagship": [
+          "opencode/glm-5.3-flash-free",
           "opencode-go/glm-5.3-flash"
         ],
         "workhorse": [
           "opencode/deepseek-v4.1-flash-free",
+          "opencode/glm-5.3-flash-free",
           "opencode-go/deepseek-v4.1-flash"
         ],
         "scout": [
-          "opencode/deepseek-v4.1-flash-free"
+          "opencode/deepseek-v4.1-flash-free",
+          "opencode/glm-5.3-flash-free"
         ]
       },
       "free_pattern": "-free$"

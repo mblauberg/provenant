@@ -550,7 +550,8 @@ def test_compatibility_drift_rejection_names_a_fix(tmp_path):
     (["--adapter", "codex", "--alias", "luna"], "gpt-6-luna", ""),
     (["--adapter", "agy", "--alias", "flash", "--effort", "xhigh"], "gemini-3.8-flash-high", "high"),
     (["--adapter", "cursor", "--alias", "grok"], "grok-4.7", ""),
-    (["--adapter", "opencode", "--alias", "glm"], "opencode-go/glm-5.3-flash", ""),
+    (["--adapter", "opencode", "--alias", "glm"], "opencode/glm-5.3-flash-free", ""),
+    (["--adapter", "opencode", "--alias", "glm-paid"], "opencode-go/glm-5.3-flash", ""),
     (["--model", "gpt-5.6-luna"], "gpt-6-luna", ""),
 ])
 def test_ordinary_registry_routes_names_and_nearest_effort(arguments, model, effort):
@@ -631,6 +632,7 @@ def test_cooling_alias_skips_candidate_but_explicit_model_warns(tmp_path):
     (tmp_path / "cooldowns.json").write_text(json.dumps({"schema": "fabric.cooldowns.v1", "cooldowns": {
         "opencode/opencode-go/glm-5.3-flash": {"cooling_until": until},
         "opencode/opencode/deepseek-v4.1-flash-free": {"cooling_until": until},
+        "opencode/opencode/glm-5.3-flash-free": {"cooling_until": until},
     }}))
     env = {**os.environ, "HARNESS_PYTHON": sys.executable,
            "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT), "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
@@ -643,11 +645,11 @@ def test_cooling_alias_skips_candidate_but_explicit_model_warns(tmp_path):
     assert result.returncode == 0
     assert alias["resolved_model"] == "opencode-go/deepseek-v4.1-flash"
     assert any("cooling" in note for note in alias["notes"])
-    result, shorthand = routed("--adapter", "opencode", "--alias", "glm")
+    result, shorthand = routed("--adapter", "opencode", "--alias", "glm-paid")
     assert result.returncode == 0
     assert shorthand["resolved_model"] == "opencode-go/glm-5.3-flash"
     assert any("cooling" in warning for warning in shorthand["warnings"])
-    result, explicit = routed("--adapter", "opencode", "--model", "glm")
+    result, explicit = routed("--adapter", "opencode", "--model", "glm-paid")
     assert result.returncode == 0
     assert explicit["resolved_model"] == "opencode-go/glm-5.3-flash"
     assert any("cooling" in warning for warning in explicit["warnings"])
@@ -2554,7 +2556,7 @@ def test_opencode_without_model_uses_adapter_default(capsys, monkeypatch):
     route = json.loads(capsys.readouterr().out)
     assert result == 0
     assert route["status"] == "ok"
-    assert route["resolved_model"] == "opencode-go/glm-5.3-flash"
+    assert route["resolved_model"] == "opencode/glm-5.3-flash-free"
     assert route["model_selection"] == "alias"
     assert route["model_family"] == "zhipu"
 

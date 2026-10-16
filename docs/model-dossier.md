@@ -185,13 +185,18 @@ not read an absent `Watch out for` as an endorsement.
 - **Good at:** `opencode/deepseek-v4.1-flash-free` is the go-to and the adapter
   default: free, zero-retention, no training, and a distinct DeepSeek family, so
   use it heavily for bulk work, small implementations and as an extra cheap
-  review lens. It is a limited-time offer; the alias falls back to the paid Go
-  `opencode-go/deepseek-v4.1-flash`. `opencode-go/glm-5.3-flash` is the paid
-  second choice; it draws on the small Go monthly quota, so use it sparingly.
+  review lens. `opencode/glm-5.3-flash-free` (zero-retention, Zhipu family) is
+  the second free pick and the OpenCode flagship alias. Both are limited-time
+  offers; the aliases fall back to paid Go `opencode-go/glm-5.3-flash` and
+  `opencode-go/deepseek-v4.1-flash`, which draw on the small Go monthly quota,
+  so use those sparingly.
 - **Watch out for:** free models rotate often, and their data terms differ per
   model (Zen docs). Zero-retention, no training: `deepseek-v4.1-flash-free`,
-  `space-bunny-free`, `longcat-2.5-preview-free`. Use or log data:
-  `mimo-v2.6-flash-free`, `muse-spark-*-free`, `big-pickle`, `nemotron-*-free`.
+  `glm-5.3-flash-free`, `space-bunny-free`, `longcat-2.5-preview-free`.
+  `cat-jam-free` does not train but keeps data for 30 days. Use or log data:
+  `mimo-v2.6-flash-free`, `muse-spark-*-free`, `big-pickle`, `ll-alpha-free`,
+  `nemotron-*-free`. Space Bunny is an unidentified stealth model with no
+  published benchmarks, so it stays `sparing` until local runs justify more.
   Keep sensitive, private or client data off the second group
   (`confidential: true` skips any model whose `trains_on_prompts` is true; an
   unflagged free model counts as training).
