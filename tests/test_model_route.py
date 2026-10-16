@@ -3282,22 +3282,20 @@ def test_legacy_alias_route_does_not_claim_task_class_binding(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "arguments",
+    "arguments,expected",
     (
-        ("--alias", "scout", "--task-class", "mechanical"),
-        ("--task-class", "mechanical", "--effort", "medium"),
-        ("--task-class", "unknown"),
+        (("--alias", "scout", "--task-class", "mechanical"), "route_input_conflict"),
+        (("--task-class", "mechanical", "--effort", "medium"), "task_class_effort_conflict"),
+        (("--task-class", "unknown"), "unknown_task_class"),
     ),
 )
-def test_task_class_rejects_ambiguous_or_unknown_routing_inputs(arguments):
+def test_task_class_rejects_ambiguous_or_unknown_routing_inputs(arguments, expected):
     result, route = resolve("--adapter", "codex", *arguments, "--role", "worker")
     assert result.returncode == 2
     assert route["schema_version"] == 1
     assert route["adapter"] == "codex"
     assert route["role"] == "worker"
-    assert route["status"] in {
-        "route_input_conflict", "task_class_effort_conflict", "unknown_task_class",
-    }
+    assert route["status"] == expected
 
 
 def test_task_class_rejects_explicit_model_override():
@@ -4750,6 +4748,28 @@ def test_resolve_applies_effort_and_cooldown_gates_to_a_live_family_pick(tmp_pat
 def _resolve_env(state):
     return {**os.environ, "HARNESS_PYTHON": sys.executable, "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
             "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT), "AGENT_FABRIC_STATE_ROOT": str(state)}
+
+
+def test_newer_catalogue_warning_is_daily_and_always_kept_in_notes(tmp_path, monkeypatch, capsys):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    note = router._NEWER_NOTE.format("gpt-6.2-sol")
+
+    def emit():
+        router.emit({"status": "ok", "warnings": [note], "notes": []}, 0)
+        return json.loads(capsys.readouterr().out)
+
+    assert emit()["warnings"] == [note]
+    second = emit()
+    assert second["warnings"] == [] and second["notes"] == [note]
+    # A previous day's marker does not suppress today's warning.
+    state = tmp_path / "newer-model-warnings.json"
+    state.write_text(state.read_text().replace(datetime.now(timezone.utc).date().isoformat(), "2000-01-01"))
+    assert emit()["warnings"] == [note]
+    # State failures must not fail routing or lose the receipt note.
+    state.unlink()
+    state.mkdir()
+    assert emit()["notes"] == [note]
 
 
 def test_a_registered_id_in_the_live_listing_is_not_newer_than_the_catalogue(tmp_path):

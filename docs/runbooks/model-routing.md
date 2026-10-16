@@ -20,6 +20,12 @@ for that class selects the next configured route with no recent failure,
 instead of repeating the failed model. A successful later outcome clears that
 route's failed state for selection.
 
+`task_class_effort_conflict` is a preflight rejection: an explicit `effort`
+conflicts with the selected task class's configured effort. Omit `effort` to
+use the class setting, or omit `task_class` and pass an explicit model and
+effort. Batches retain this reason as a rejected task rather than a failed
+provider attempt.
+
 Fabric records the 20 latest outcomes per adapter, model and task class in
 `~/.local/state/agent-harness/fabric/route-health.json`. Outcomes distinguish
 `ok`, `failed`, `empty_output`, `cancelled`, `rate_limited` and `usage_limited`.
@@ -47,6 +53,9 @@ switches off the seeded `codex/gpt-6.1-sol`. `refresh-routing` merges a pool
 per entry and per field, so an instance edit and a product edit to the same
 pool both survive. Adapters with `latest_aliases` also resolve version-free names such as `gpt-sol` to the
 newest model (see `skills/orchestrate/references/routing-and-tiers.md`).
+The newer-than-catalogue warning appears at most once per model per UTC day;
+later routes retain the notice in receipt notes. Its best-effort marker lives
+in `newer-model-warnings.json` under the Fabric state root.
 
 `provenant help routes` is `provenant routes --health`: every pool with live
 availability, then the configured task classes and current route health. `AGENT_FABRIC_STATE_ROOT` relocates both health and cooldown

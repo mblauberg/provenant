@@ -109,6 +109,16 @@ if (!commands.has(command)) {
   console.error(`unknown command "${command}"\n\n${USAGE}`);
   process.exit(2);
 }
+if (argv.slice(1).some((arg) => arg === "--help" || arg === "-h")) {
+  let include = false;
+  const lines = USAGE.split("\n").filter((line) => {
+    if (/^  \S/u.test(line)) include = line.startsWith(`  ${command} `) || line.trim() === command;
+    else if (!line.startsWith("  ")) include = false;
+    return include;
+  });
+  console.log(`fabric ${command}\n\n${lines.join("\n")}`);
+  process.exit(0);
+}
 
 /** Read `--flag value` out of argv, so the remaining words form the body. */
 const flag = (name: string): string | undefined => {

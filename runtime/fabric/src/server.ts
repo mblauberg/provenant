@@ -4,7 +4,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 
 import { federatedLane, fabricHosts, releaseHostChecks } from "./hosts.js";
-import { databasePath, identify, resolveCommitSha } from "./identity.js";
+import { CommitShaError, databasePath, identify, resolveCommitSha } from "./identity.js";
 import { federatedStatusRows as statusRows, fabricOutput, resultTail } from "./run-registry.js";
 import { reply, digest, serverBuild, mailboxView, adapterView, runView, fullView, lanesDigest, cancelDigest } from "./surface.js";
 import { catalogueSnapshot, liveModels, resetCooldowns } from "./catalogue.js";
@@ -181,6 +181,7 @@ const batch = {
 };
 // The first listed target a tool actually has wins, so run_id is `id` on status and `ids` on runs.
 const INPUT_SYNONYMS: Record<string, string[]> = {
+  ttl_seconds: ["seconds"],
   prompt_path: ["prompt_file"], file: ["prompt_file"],
   dir: ["cwd"], path: ["cwd"], task: ["task_id", "id"],
   run_id: ["id", "ids"], task_id: ["id"], id: ["task_id", "ids"],
@@ -310,7 +311,7 @@ function register(
       return {
         ...reply({
           status: "rejected",
-          error: "request_failed",
+          error: error instanceof CommitShaError ? error.code : "request_failed",
           fix: String(error instanceof Error ? error.message : error).replace(/\s+/gu, " "),
         }, includeStructuredContent),
         isError: true,
@@ -542,9 +543,12 @@ register(
       return tail ? [`result tail ${row.task_id ?? row.run_id}${tail.total > tail.text.length ? " (end)" : ""}:\n${tail.text}`] : [];
     });
     const running = rows.some((row) => row.state === "running" || row.state === "queued");
+    const pollHint = wait_seconds === undefined && rows.length > 0 && rows.every((row) => row.state === "running")
+      ? 'hint: pass wait_seconds: 55 to block (or use `provenant lanes --wait --all --timeout 900`)'
+      : 'hint: shell `provenant lanes --wait --all --timeout 900` blocks until they finish';
     const ownership = [
       ...tails,
-      ...(running ? ['hint: shell `provenant lanes --wait --all --timeout 900` blocks until they finish'] : []),
+      ...(running ? [pollHint] : []),
       ...workClaims.map((claim) => `claim ${claim.issue ?? claim.paths.join(",")} ${claim.holder} g${claim.generation}`),
       ...(landingLease ? [`landing ${landingLease.holder} g${landingLease.generation} ${landingLease.expectedSha}`] : []),
     ];
@@ -556,11 +560,13 @@ register(
 register("fabric_work_claim", "Acquire, renew, verify or release an advisory issue or path claim.", {
   action: z.enum(["acquire", "renew", "verify", "release"]), session_id: z.string().min(1),
   issue: str, paths: z.array(z.string()).optional(), id: str,
-  generation: z.number().int().positive().optional(), seconds: z.number().int().min(1).max(3600).optional(),
+  generation: z.number().int().positive().optional(), seconds: z.number().int().min(1).optional(),
 }, ({ action, session_id, issue, paths, id, generation, seconds }) => {
-  if (action === "acquire") return readyStore().acquireWork(who, session_id, { issue, paths }, seconds ?? 900);
+  const ttl = Math.min(seconds ?? 900, 3600);
+  const warnings = seconds > 3600 ? [`seconds ${seconds} clamped to 3600`] : [];
+  if (action === "acquire") return withWarnings(readyStore().acquireWork(who, session_id, { issue, paths }, ttl), warnings);
   if (!id || generation === undefined) throw new Error("id and generation are required");
-  if (action === "renew") return readyStore().renewWork(who, session_id, id, generation, seconds ?? 900);
+  if (action === "renew") return withWarnings(readyStore().renewWork(who, session_id, id, generation, ttl), warnings);
   if (action === "verify") return readyStore().verifyWork(who, session_id, id, generation);
   readyStore().releaseWork(who, session_id, id, generation);
   return { released: id, generation };

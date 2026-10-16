@@ -1241,8 +1241,39 @@ def resolve_endpoint_profile(
 def emit(record: dict[str, Any], code: int) -> int:
     if record.get("status") == "ok" and ROUTE_WARNINGS:
         record["warnings"] = list(dict.fromkeys([*(record.get("warnings") or []), *ROUTE_WARNINGS]))
+    warnings = record.get("warnings", [])
+    newer = [note for note in warnings if " is newer than the catalogue;" in note]
+    if newer:
+        record["notes"] = list(dict.fromkeys([*record.get("notes", []), *newer]))
+        record["warnings"] = [note for note in warnings if note not in newer or _daily_newer_warning(note)]
     print(json.dumps(record, sort_keys=True))
     return code
+
+
+def _daily_newer_warning(note: str) -> bool:
+    """Demote repeat catalogue notices to receipt notes; state is best effort."""
+    try:
+        path = _state_root() / "newer-model-warnings.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("a+") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            stream.seek(0)
+            try:
+                seen = json.load(stream)
+            except ValueError:
+                seen = {}
+            today = datetime.now(timezone.utc).date().isoformat()
+            seen = {key: day for key, day in seen.items() if day == today} if isinstance(seen, dict) else {}
+            model = note.split(" is newer than the catalogue;", 1)[0]
+            if model in seen:
+                return False
+            seen[model] = today
+            stream.seek(0)
+            stream.truncate()
+            json.dump(seen, stream)
+            return True
+    except (OSError, ValueError, TypeError):
+        return False
 
 
 def load_json(raw: str) -> Any:

@@ -285,7 +285,8 @@ def test_preflight_honours_policy_secret_scan_exclusions(tmp_path, monkeypatch):
 
 def test_secret_scan_budget_skips_vendored_build_and_large_binary_before_counting(tmp_path, monkeypatch):
     scan = load_secret_scan_module()
-    for dirname in ("node_modules", ".venv", "dist", "build", "coverage", ".agent-run"):
+    for dirname in ("node_modules", ".venv", "dist", "build", "coverage", ".agent-run",
+                    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".next", ".turbo"):
         target = tmp_path / dirname
         target.mkdir()
         (target / "ignored.txt").write_text("ordinary")
@@ -307,6 +308,19 @@ def test_secret_scan_budget_fix_names_offending_directory(tmp_path, monkeypatch)
     assert result.budget_exceeded
     assert str(directory) in result.fix()
     assert "narrower" in result.fix()
+
+
+def test_secret_scan_budget_names_largest_files_including_the_file_over_the_limit(tmp_path, monkeypatch):
+    scan = load_secret_scan_module()
+    for index, size in enumerate((20, 10, 80, 5)):
+        (tmp_path / f"scratch-{index}.txt").write_text("x" * size)
+    monkeypatch.setattr(scan, "MAX_TOTAL_BYTES", 100)
+    result = scan.scan_inputs(b"hello", "<prompt>", [str(tmp_path)])
+    assert result.budget_exceeded
+    fix = result.fix()
+    assert "largest files" in fix
+    assert "scratch-2.txt" in fix and "scratch-0.txt" in fix
+    assert "add_dirs" in fix and "allow_secrets" in fix
 
 
 def test_secret_scan_skips_git_metadata_file(tmp_path):
@@ -2728,6 +2742,7 @@ def test_preflight_accepts_a_prompt_file_only_inside_a_read_root(tmp_path, monke
     monkeypatch.chdir(workspace)
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
     module = load_dispatch_module()
+    monkeypatch.setattr(module, "prompt_temp_roots", lambda: ())
     prompt = other / 'brief.md'
     prompt.write_text('read the other project')
     task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt)}
@@ -2737,6 +2752,33 @@ def test_preflight_accepts_a_prompt_file_only_inside_a_read_root(tmp_path, monke
     assert 'registered Fabric project' in rejected['fix']
     assert 'dispatch from it' in rejected['fix']
     assert module.preflight_tasks([{**task, 'read_roots': [str(other)]}], workspace)['status'] == 'validated'
+
+
+def test_preflight_accepts_temp_prompts_and_retains_secret_and_link_checks(tmp_path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    scratch = tmp_path / 'scratch'
+    workspace.mkdir()
+    scratch.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv('TMPDIR', str(scratch))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    module = load_dispatch_module()
+    prompt = scratch / 'brief.md'
+    prompt.write_text('hello')
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt)}
+    assert module.preflight_tasks([task], workspace)['status'] == 'validated'
+    prompt.write_text('AKIA' + 'A' * 16)
+    assert module.preflight_tasks([task], workspace)['error'] == 'secret_detected'
+    auth = scratch / '.codex' / 'auth.json'
+    auth.parent.mkdir()
+    auth.write_text('{}')
+    assert module.preflight_tasks([{**task, 'prompt_file': str(auth)}], workspace)['error'] == 'credential_or_auth_store_denied'
+    link = scratch / 'linked.md'
+    link.symlink_to(auth)
+    assert module.preflight_tasks([{**task, 'prompt_file': str(link)}], workspace)['error'] == 'credential_or_auth_store_denied'
+    linked = scratch / 'hardlinked.md'
+    linked.hardlink_to(prompt)
+    assert module.preflight_tasks([{**task, 'prompt_file': str(linked)}], workspace)['error'] == 'prompt_hard_link_denied'
 
 
 def test_preflight_scans_a_read_root_prompt_for_secrets(tmp_path, monkeypatch):
@@ -2846,9 +2888,11 @@ print(json.dumps({"type":"result","result":os.getcwd()}))
     command[command.index(str(prompt))] = str(brief)
     command += ['--cwd', str(other / 'src'), '--no-preface']
 
-    refused = subprocess.run(command, cwd=workspace, capture_output=True, text=True)
+    refused_run = make_run(workspace, 'outside-refused')
+    refused_command = [str(refused_run) if arg == str(run) else arg for arg in command]
+    refused = subprocess.run(refused_command, cwd=workspace, capture_output=True, text=True)
     assert refused.returncode != 0
-    assert 'read root' in refused.stdout + refused.stderr
+    assert json.loads(refused.stdout)['status'] == 'failed'
 
     # A non-canonical root is resolved before use and saved canonical, so resume accepts it.
     result = subprocess.run([*command, '--read-root', str(other / 'src' / '..')], cwd=workspace,
@@ -3926,6 +3970,7 @@ def test_provider_exec_failures_are_not_router_refusals():
 
 
 def _run_fake_codex(tmp_path: Path, name: str, body: str, extra_env: dict[str, str] | None = None):
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, name)
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Reply exactly OK\n", encoding="utf-8")
