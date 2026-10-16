@@ -51,6 +51,12 @@ unless the project declares a lock with more slots. Tell every lane its budget
 in the brief. An empty frontier is an idle checkpoint, not a reason to invent
 work.
 
+## Fresh agents
+
+One agent, one PR. Prefer a fresh agent briefed from files over a resume,
+except for a tiny follow-up within about five minutes. Owner corrections go to
+a fresh follow-up after the push; message a running agent only to stop harm.
+
 ## Lane ids
 
 Start every lane id and native subagent description with a role prefix so
@@ -65,8 +71,10 @@ code — independently of this lane id.
 ## Waiting
 
 After dispatch, keep one `provenant lanes --wait` running in the background.
-When it exits, read the printed lanes, act, and re-arm it; the next wait reports
-any lane that finished in between. `provenant lanes` is
+Without `--all` it exits at the first finisher, so the chair acts on each lane
+as it lands and re-arms; the next wait reports any lane that finished in
+between. Add `--all --timeout N` only to hold the report until a whole fan-out
+is terminal. Do not start one wait per lane. `provenant lanes` is
 the source of truth after compaction or restart. Use `provenant events --follow`
 only for foreground streaming; it replays retained events without a cursor and
 does not exit on its own.
@@ -173,3 +181,6 @@ change window, owner applies) builds what it can now and hands the rest to the
 owning session rather than idling: write a handoff file in the session
 directory listing the pull requests, heads, lanes and close-out order, send
 each owner its slice, mark the state file retired, then stop.
+
+Show each new prototype at once (an Artifact, or screenshots for mobile) and
+keep a short overview ready. Once a prototype is close, iterate in the product.
