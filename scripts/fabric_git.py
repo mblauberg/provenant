@@ -5,6 +5,7 @@ import argparse
 import base64
 import errno
 import fcntl
+import glob
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 CHUNK_BYTES = 32 * 1024  # Uploads fit the 64 KiB peer request cap once encoded.
@@ -591,6 +593,7 @@ class CodeTransport:
                         self.fail('worktree_invalid', 'Detached review worktree already exists')
                     context = {**binding, 'worktree_path': str(target), 'project_path': project,
                         'host': self.f.config.local_host, 'operation_id': identifier, 'created_worktree': True,
+                        'creation_nonce': uuid.uuid4().hex,
                         'task_id': tasks[binding['index']].get('id') or tasks[binding['index']].get('task_id')
                             or request.get('task_id') or ('task-' + str(binding['index'] + 1) if request.get('tasks') else None)}
                     contexts.append(context)
@@ -599,6 +602,7 @@ class CodeTransport:
                     try:
                         self.w.create(argparse.Namespace(repo=repo, name=meta['worktree'], existing_branch=None,
                             new_branch=None, detach=meta['base_revision'], start_point=None, no_node_modules=True))
+                        self.prove_creation(target, context)
                     except self.w.PolicyError as exc:
                         # A refused creation proves nothing about the checkout at
                         # this path (a competitor may hold it): revoke our intent.
@@ -607,7 +611,7 @@ class CodeTransport:
                         self.fail('worktree_invalid', str(exc))
                 task = tasks[binding['index']]
                 cwd = self.reader_cwd(context)
-                if not cwd.is_dir() or cwd.is_symlink():
+                if not self.contained_directory(Path(context['worktree_path']), context.get('subdir')):
                     self.fail('worktree_invalid', 'Requested reader directory is not part of the committed input')
                 task.update(mode='read_only', cwd=str(cwd))
                 task.pop('worktree', None)
@@ -637,6 +641,7 @@ class CodeTransport:
                         # Publish ownership intent before create: even death between
                         # checkout and claim publication must be recoverable.
                         context['created_worktree'] = True
+                        context['creation_nonce'] = uuid.uuid4().hex
                         context['created_branch'] = self.git(repo, 'rev-parse', '--verify', '--quiet',
                             'refs/heads/' + meta['branch'], check=False) is None
                         contexts.append(context)
@@ -644,6 +649,7 @@ class CodeTransport:
                         try:
                             self.w.create(argparse.Namespace(repo=repo, name=meta['worktree'], existing_branch=None,
                                 new_branch=meta['branch'], detach=None, start_point=meta['base_revision'], no_node_modules=True))
+                            self.prove_creation(target, context)
                         except self.w.PolicyError:
                             context['created_worktree'] = context['created_branch'] = False
                             self.write_json(self.state_file('writer-contexts', identifier), [c for c in contexts if not c.get('read_only')])
@@ -659,6 +665,38 @@ class CodeTransport:
                 self.claim_context(contexts[-1])
                 self.write_json(self.state_file('writer-contexts', identifier), [c for c in contexts if not c.get('read_only')])
         return contexts
+
+    PROOF = 'provenant-creation'
+
+    def prove_creation(self, target, context):
+        """Record, in the new worktree's private git dir, that this operation created it.
+
+        The creation intent is written before creation; only this nonce, written
+        after creation succeeds, proves the checkout is not a competitor's.
+        """
+        metadata = Path(self.git(target, 'rev-parse', '--absolute-git-dir'))
+        (metadata / self.PROOF).write_text(context['creation_nonce'])
+
+    def proven_creation(self, target, context):
+        try:
+            metadata = Path(self.git(target, 'rev-parse', '--absolute-git-dir'))
+            proof = metadata / self.PROOF
+            return bool(context.get('creation_nonce')) and not proof.is_symlink() and \
+                proof.read_text() == context['creation_nonce']
+        except (self.h.HostError, OSError, ValueError):
+            return False
+
+    @staticmethod
+    def contained_directory(root, subdir):
+        """True when subdir names a real directory under root with no symlink component."""
+        current = Path(root)
+        for part in Path(subdir).parts if subdir else ():
+            if part in {'', '.', '..'}:
+                return False
+            current = current / part
+            if current.is_symlink():
+                return False
+        return current.is_dir() and not current.is_symlink()
 
     @staticmethod
     def reader_cwd(context):
@@ -694,7 +732,8 @@ class CodeTransport:
                     # proved it created, and left unchanged, is ours to remove.
                     unlaunched = terminal_cwd is None
                     if registered:
-                        if unlaunched and not context.get('created_worktree'):
+                        if unlaunched and not (context.get('created_worktree') and
+                                (registered.get('locked') or self.proven_creation(target, context))):
                             remaining.append(context)
                             continue
                         if registered.get('locked'):
@@ -752,7 +791,8 @@ class CodeTransport:
             if identity.get('runId') != run_id or identity.get('taskId') not in {task_id, '*'}:
                 continue
             for context in json.loads(record.read_text()):
-                if str(self.reader_cwd(context)) != str(target) or not context.get('read_only'):
+                if str(self.reader_cwd(context)) != str(target) or not context.get('read_only') or \
+                        not self.contained_directory(Path(context['worktree_path']), context.get('subdir')):
                     continue
                 if context.get('task_id') not in {None, task_id}:
                     continue
@@ -846,7 +886,9 @@ class CodeTransport:
             except (self.w.PolicyError, OSError, ValueError, KeyError, subprocess.SubprocessError):
                 continue  # A live or vanished worktree; its next claim settles it.
         directory = self.f.root / 'code'
-        for transfer in directory.glob('*/' + identifier + '-*') if directory.is_dir() else []:
+        for transfer in directory.glob('*/' + glob.escape(identifier) + '-*') if directory.is_dir() else []:
+            if not re.fullmatch(r'\d+', transfer.name[len(identifier) + 1:]):
+                continue
             # An unlaunched operation never consumes its uploaded input.
             (transfer / 'input.bundle').unlink(missing_ok=True)
             shutil.rmtree(transfer / 'chunks', ignore_errors=True)
@@ -901,7 +943,7 @@ class CodeTransport:
                 return False
             # Whatever an interrupted checkout left must be a byte-exact part of
             # the base tree; edits, untracked files or doubt keep it pending.
-            if not self.initial_contents_only(repo, target, context['base_revision']):
+            if not self.initial_contents_only(repo, target, context['base_revision'], metadata):
                 return False
             gitlink = target / '.git'
             if target.is_dir() and not gitlink.exists():
@@ -919,8 +961,22 @@ class CodeTransport:
             os.close(descriptor)
         return True
 
-    def initial_contents_only(self, repo, target, base):
+    def index_matches_base(self, repo, target, base, metadata):
+        """True when the worktree's index is absent or identical to the base tree."""
+        index = metadata / 'index'
+        if index.is_symlink():
+            return False
+        if not index.exists():
+            return True
+        env = {**self.w.git_environment(repo, hardened=True), 'GIT_DIR': str(metadata), 'GIT_INDEX_FILE': str(index)}
+        result = subprocess.run(['git', 'diff-index', '--cached', '--quiet', base, '--'], env=env,
+            cwd=repo, capture_output=True, timeout=60)
+        return result.returncode == 0
+
+    def initial_contents_only(self, repo, target, base, metadata=None):
         """True when target holds nothing but unmodified files of the base tree."""
+        if metadata is not None and not self.index_matches_base(repo, target, base, metadata):
+            return False
         if not target.exists():
             return True
         if target.is_symlink() or not target.is_dir():
@@ -959,7 +1015,7 @@ class CodeTransport:
                         while block := handle.read(1 << 20):
                             hasher.update(block)
                     digest = hasher.hexdigest()
-                    modes = {'100644', '100755'}
+                    modes = {'100755'} if path.stat().st_mode & 0o111 else {'100644'}
                 else:
                     return False
                 if digest != known[1] or known[0] not in modes:
@@ -992,6 +1048,9 @@ class CodeTransport:
                             remaining.append(context)
                             continue
                         marker = self.context_owner(target)
+                        if not self.proven_creation(target, context):
+                            remaining.append(context)
+                            continue
                         with self.w.hold_writer_lease(target):
                             if (marker.exists() or self.git(target, 'symbolic-ref', 'HEAD') != branch or
                                     self.git(target, 'rev-parse', 'HEAD') != context['base_revision'] or

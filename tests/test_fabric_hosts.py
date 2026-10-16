@@ -1552,6 +1552,79 @@ class LaneLoopbackContracts(unittest.TestCase):
             self.assertFalse(code.state_file('reader-contexts', 'reader-collision').exists())
             self.assertEqual(list((self.peer_home / '.agents/.agent-fabric/code').glob('*/reader-collision-0/input.bundle')), [])
 
+    def test_initializing_cleanup_keeps_staged_changes_and_mode_edits(self):
+        git, base, _ = self.writer_fixture()
+        git(self.peer_workspace, 'fetch', str(self.workspace), 'HEAD')
+        target, metadata = self.interrupted_checkout(git, base, 'feat/staged')
+        context = dict(project_path='Repos/project', worktree_path=str(target), branch='feat/staged',
+            base_revision=base, host='workshop', operation_id='staged-init', created_worktree=True, created_branch=True)
+        (target / 'code.txt').write_text('unique staged recovery content\n')
+        git(target, 'add', 'code.txt')
+        (target / 'code.txt').write_text('committed base\n')  # Bytes match the base; the index does not.
+        code, result = self.settle_with('writer-contexts', context, 'staged-init')
+        self.assertEqual(result['cleanup_pending'], [str(target)])
+        self.assertEqual(git(target, 'diff', '--cached', '--name-only'), 'code.txt')
+        (metadata / 'index').unlink()
+        (target / 'code.txt').chmod(0o755)
+        self.assertEqual(code.f.settle('staged-init')['cleanup_pending'], [str(target)])
+        self.assertTrue(target.exists())
+        (target / 'code.txt').chmod(0o644)
+        self.assertNotIn('cleanup_pending', code.f.settle('staged-init'))
+        self.assertFalse(target.exists())
+
+    def test_creation_intent_without_proof_never_removes_a_competitors_checkout(self):
+        git, base, _ = self.writer_fixture()
+        git(self.peer_workspace, 'fetch', str(self.workspace), 'HEAD')
+        target = self.peer_workspace / '.worktrees/read-intent-only-0'
+        git(self.peer_workspace, 'worktree', 'add', '--detach', str(target), base)
+        context = dict(project_path='Repos/project', worktree_path=str(target), worktree=target.name,
+            read_only=True, base_revision=base, host='workshop', operation_id='intent-only',
+            created_worktree=True, creation_nonce='abc123')
+        code, result = self.settle_with('reader-contexts', context, 'intent-only')
+        self.assertEqual(result['cleanup_pending'], [str(target)])
+        self.assertTrue(target.exists())
+        code.prove_creation(target, context)
+        self.assertNotIn('cleanup_pending', code.f.settle('intent-only'))
+        self.assertFalse(target.exists())
+
+    def test_reader_subdirectory_through_a_committed_symlink_is_refused(self):
+        import fabric_hosts as hosts
+        git, base, local = self.writer_fixture()
+        (local / 'real/pkg').mkdir(parents=True)
+        (local / 'real/pkg/input.txt').write_text('package input\n')
+        (local / 'bridge').symlink_to('real')
+        git(local, 'add', '.')
+        git(local, 'commit', '-qm', 'bridge')
+        self.writer_fixture_state = (git, git(local, 'rev-parse', 'HEAD'), local)
+        request = self.reader_input(git, 'reader-bridge', cwd=local / 'real/pkg')
+        binding = request['code_transport'][0]
+        self.assertEqual(binding['subdir'], 'real/pkg')
+        binding['subdir'] = 'bridge/pkg'
+        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+            code = hosts.lane_owner().code()
+            incoming = code.directory('Repos/project', 'reader-bridge-0', receiving=True) / 'incoming.json'
+            meta = json.loads(incoming.read_text())
+            meta['subdir'] = 'bridge/pkg'
+            incoming.write_text(json.dumps(meta))
+            with code.f.operation_lock('reader-bridge'), self.assertRaises(hosts.HostError) as raised:
+                code.prepare('Repos/project', request, 'reader-bridge')
+            self.assertEqual(raised.exception.code, 'worktree_invalid')
+
+    def test_release_matches_the_exact_operation_and_task_index(self):
+        import fabric_hosts as hosts
+        git, base, local = self.writer_fixture()
+        self.writer_fixture_state = (git, base, local)
+        self.reader_input(git, 'prefix-sibling')
+        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+            code = hosts.lane_owner().code()
+            transfer = code.directory('Repos/project', 'prefix-sibling-0', receiving=True)
+            before = sorted(item.name for item in transfer.iterdir())
+            self.assertTrue(before)
+            code.release('prefix')
+            self.assertEqual(sorted(item.name for item in transfer.iterdir()), before)
+
     def test_reader_keeps_the_requested_subdirectory_through_dispatch_and_resume(self):
         git, base, local = self.writer_fixture()
         (local / 'pkg').mkdir()
