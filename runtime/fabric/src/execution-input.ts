@@ -7,7 +7,7 @@ import type { CatalogueSnapshot } from "./catalogue.js";
 const DEFAULT_TIMEOUT_SECONDS = 3600;
 function canonical(path: string) {
   try {
-    return realpathSync(path);
+    return realpathSync.native(path);
   } catch {
     return resolve(path);
   }
@@ -29,6 +29,8 @@ function inside(root: string, candidate: string) {
 export const DISPATCH_ADAPTERS = ["agy", "claude", "codex", "copilot", "cursor", "kiro", "opencode"] as const;
 const SUPPORTED_ADAPTERS = new Set<string>(DISPATCH_ADAPTERS);
 const ROLE_ALIASES = ["flagship", "workhorse", "scout"];
+/** The route-pool tier names, accepted wherever an adapter's own alias is asked for. */
+const TIER_NAMES: Record<string, string> = { junior: "scout", senior: "workhorse", principal: "flagship" };
 
 /**
  * Seats whose provider runs its own models as native subagents: Claude Code
@@ -81,7 +83,7 @@ export interface RouteInput {
   read_roots?: string[];
   host?: string;
   operation_id?: string;
-  placement_fallback?: { from_host: string; reason: string };
+  placement_fallback?: { from_host: string; reason: string; detail?: string };
   adapter?: string;
   alias?: string;
   task_class?: string;
@@ -97,12 +99,12 @@ export interface RouteInput {
   allow_secrets?: boolean;
   fallback?: boolean | "any" | Array<string | Record<string, unknown>>;
   context_ceiling?: number;
-  /** A global weighted pool (strong, bulk, design, writing) or a task-class/alias synonym. */
+  /** A global weighted pool (junior, senior, principal, design, writing) or a task-class/alias synonym. */
   route?: string;
   rotate?: boolean;
   council?: number;
   models?: string[];
-  /** Never route this task, or a fallback, to a free or prompt-training model; works with any selector. */
+  /** Never route this task, or a fallback, to a prompt-training model (free models count unless their entry says they do not train); works with any selector. */
   confidential?: boolean;
   /** Why the pool picked this model; set by the pool expansion, shown on the Route line. */
   pick_reason?: string;
@@ -165,6 +167,8 @@ const routeKey = (value: string) => value.toLowerCase().replace(/[^a-z0-9]/gu, "
 
 /** The tier alias a caller meant, tolerating case and a one-letter typo (`Workhorse`, `workhorze`). */
 export function tierAlias(alias: string): string | undefined {
+  const tier = Object.keys(TIER_NAMES).find((candidate) => editDistance(candidate, routeKey(alias)) <= 1);
+  if (tier !== undefined) return TIER_NAMES[tier];
   return ROLE_ALIASES.find((candidate) => editDistance(routeKey(candidate), routeKey(alias)) <= 1);
 }
 
@@ -251,7 +255,17 @@ function correctSelector(selector: string | undefined, catalogue: CatalogueSnaps
   return { value: selector, unknown: true };
 }
 
-export function normaliseRoute(input: RouteInput, identity: Identity, catalogue: CatalogueSnapshot): NormalisedRoute {
+/** True when the caller itself named an adapter or model, as opposed to a role alias, pool or task class. */
+export function namesExplicitRoute(input: RouteInput): boolean {
+  const named = (value: string | undefined) => typeof value === "string" && value.trim() !== "";
+  return named(input.adapter) || named(input.model) || (named(input.alias) && tierAlias(input.alias!) === undefined);
+}
+
+/**
+ * `ownSeatGuard` is set only for a new dispatch whose caller explicitly named the route; handoffs, resumes and
+ * pool or task-class picks reach the seat's own adapter without it and only warn.
+ */
+export function normaliseRoute(input: RouteInput, identity: Identity, catalogue: CatalogueSnapshot, ownSeatGuard = false): NormalisedRoute {
   input = { ...input, model: input.model || undefined, alias: input.alias || undefined };
   const warnings: string[] = [];
   // `adapter/model@effort` is the models-list spelling; accept it in model too.
@@ -269,9 +283,11 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
     throw new InputError("capabilities_invalid", "Pass capabilities as a list of distinct postgres or browser values.");
   }
   let selector =
-    input.model ?? (input.alias && !ROLE_ALIASES.includes(input.alias) ? input.alias : undefined);
+    input.model ?? (input.alias && !ROLE_ALIASES.includes(input.alias) && !(input.alias.toLowerCase() in TIER_NAMES)
+      ? input.alias : undefined);
   const roleAlias = input.model === undefined && input.alias !== undefined ? tierAlias(input.alias) : undefined;
-  if (roleAlias !== undefined && roleAlias !== input.alias) warnings.push(`corrected alias ${input.alias} to ${roleAlias}`);
+  if (roleAlias !== undefined && roleAlias !== input.alias && TIER_NAMES[input.alias!.toLowerCase()] !== roleAlias)
+    warnings.push(`corrected alias ${input.alias} to ${roleAlias}`);
   if (roleAlias !== undefined) input.alias = roleAlias;
   const isRoleAlias = roleAlias !== undefined;
   if (selector !== undefined && !isRoleAlias) {
@@ -322,8 +338,11 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
   }
   if (corrected.unknown) warnings.push(`${selector} is not in the ${adapter} catalogue; passing it as given`);
   if (adapter === nativeAdapter(identity)) {
-    warnings.unshift(`NATIVE: ${adapter}/${input.model ?? input.alias ?? "workhorse"} is this ${adapter} seat's own model; ` +
-      "spawn a native subagent instead of Fabric");
+    const own = `${adapter}/${input.model ?? input.alias ?? "workhorse"} is this ${adapter} seat's own model; `;
+    // Claude subagents are first-class on the host; a Codex seat still runs with a warning.
+    if (adapter === "claude" && ownSeatGuard)
+      throw new InputError("native_seat_model", `${own}use the host's native subagents instead of Fabric (or pass another adapter).`);
+    warnings.unshift(`NATIVE: ${own}spawn a native subagent instead of Fabric`);
   }
   const requestedMode = input.mode ?? "read_only";
   const mode = canonicalMode(requestedMode) as AccessMode;

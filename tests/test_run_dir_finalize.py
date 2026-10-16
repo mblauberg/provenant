@@ -141,6 +141,8 @@ def panel(panel_id, preset, membership, reviews, output):
 
 def test_real_run_rejects_unavailable_other_primary_with_distinct_family_reviews(tmp_path):
     plan = substantial_plan()
+    # Same-family targeted legs add no lens beyond the others, so they cannot cover the skip.
+    plan["reviews"][0]["lens"] = plan["reviews"][1]["lens"] = "routing"
     plan["reviews"][-1] = review(
         "primary-down", "primary", "other-primary", "anthropic", status="unavailable"
     )
@@ -150,7 +152,7 @@ def test_real_run_rejects_unavailable_other_primary_with_distinct_family_reviews
     ])
     bind_complete_reviews(tmp_path, plan)
 
-    assert any("passing other-primary" in error for error in run_dir_finalize._validate_review_plan(plan, tmp_path))
+    assert any("same-family targeted review" in error for error in run_dir_finalize._validate_review_plan(plan, tmp_path))
 
 
 def test_real_run_allows_recorded_targeted_omission(tmp_path):
@@ -383,12 +385,14 @@ def test_other_primary_review_requires_flagship_strength():
 
 def test_other_primary_unavailability_remains_load_bearing():
     plan = substantial_plan()
+    # Same-family targeted legs add no lens beyond the others, so the distinct-family substitutes do not buy past the skip.
+    plan["reviews"][0]["lens"] = plan["reviews"][1]["lens"] = "routing"
     plan["reviews"][-1] = review("primary-down", "primary", "other-primary", "anthropic", status="unavailable")
     plan["reviews"].extend([
         review("sub-google", "primary", "whole-change-a", "google", substitution_for="other-primary", wave=2),
         review("sub-xai", "primary", "whole-change-b", "xai", substitution_for="other-primary", wave=2),
     ])
-    assert any("passing other-primary" in error for error in run_dir_finalize._validate_review_plan(plan))
+    assert any("same-family targeted review" in error for error in run_dir_finalize._validate_review_plan(plan))
 
 
 def test_crucial_review_topology_records_unavailable_second_family():
@@ -989,3 +993,16 @@ def test_finalisation_fails_if_canonical_receipt_inode_is_replaced(tmp_path, mon
     monkeypatch.setattr(run_dir_finalize, "_receipt_path_is_bound", replace_visible_receipt)
     assert run_dir_finalize.main([str(run), "--status", "failed", "--reason", "custody race"]) == 1
     assert json.loads(receipt.read_text())["status"] == "active"
+
+
+@pytest.mark.parametrize("tier", ["principal", "flagship"])
+def test_review_tier_accepts_tier_names(tier):
+    plan = substantial_plan()
+    plan["reviews"][3]["tier"] = tier
+    assert not any("tier is invalid" in e or "flagship strength" in e for e in run_dir_finalize._validate_review_plan(plan))
+
+
+def test_review_tier_senior_is_not_flagship_strength():
+    plan = substantial_plan()
+    plan["reviews"][3]["tier"] = "senior"
+    assert any("flagship strength" in e for e in run_dir_finalize._validate_review_plan(plan))

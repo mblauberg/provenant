@@ -10,6 +10,7 @@ import sys
 from typing import NoReturn
 
 from lib.product_root_resolver import POINTER_RELATIVE_PATH, load_pointer_file
+from lib.stale_checkout import warn_if_stale_checkout
 
 
 REPAIR = (
@@ -90,7 +91,8 @@ def help_text() -> None:
 Thin front door; each command delegates to its existing owner:
   root           print the resolved product checkout
   route ...      scripts/model-route ... (low-level resolver; capability-bound
-                 aliases need a fresh snapshot, normally supplied by dispatch)
+                 aliases need a fresh snapshot, normally supplied by dispatch);
+                 `route reset [adapter[/model]]` clears cooldowns
   routes [--json] [--health]
                  each global route pool with live availability; --health adds
                  task-class routes and recent health (same as `help routes`)
@@ -354,6 +356,12 @@ def main(arguments: list[str]) -> int:
     except (OSError, ValueError) as exc:
         print(f"provenant: {exc}", file=sys.stderr)
         return 3
+    if command == "check":
+        try:
+            warn_if_stale_checkout(resolve_product_root())
+        except Exception as exc:  # advisory only; PROVENANT_DEBUG shows why it failed
+            if os.environ.get("PROVENANT_DEBUG"):
+                print(f"provenant: stale-checkout check failed: {exc!r}", file=sys.stderr)
     execute(target, command_arguments, product_root, clear_git_redirects=command == "check")
 
 

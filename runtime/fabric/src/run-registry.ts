@@ -176,7 +176,7 @@ export function removeOwnerRecord(runDir: string): void {
 function runDirectoryNames(workspace: string): string[] {
   const root = runRoot(workspace);
   let local = resolve(workspace, ".agent-run");
-  try { local = join(realpathSync(workspace), ".agent-run"); } catch { /* Missing workspace. */ }
+  try { local = join(realpathSync.native(workspace), ".agent-run"); } catch { /* Missing workspace. */ }
   const locations = [{ path: root, modern: true }, ...(local === root ? [] : [{ path: local, modern: false }])];
   const names: string[] = [];
   for (const location of locations) {
@@ -234,7 +234,7 @@ export function listRecordedRuns(workspace: string): RecordedRun[] {
 
 export function findRecordedRun(workspace: string, reference: string): RecordedRun | undefined {
   const runs = listRecordedRuns(workspace);
-  const real = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } }; // macOS /var
+  const real = (path: string) => { try { return realpathSync.native(path); } catch { return resolve(path); } }; // macOS /var
   return runs.find((run) => run.run_id === reference) ?? runs.find((run) => real(run.run_dir) === real(reference));
 }
 
@@ -451,6 +451,7 @@ export function pruneDispatchRuns(workspace: string, env: NodeJS.ProcessEnv): st
       const successful = isSuccessStatus(receipt?.status) || receipt?.status === "cancelled";
       const failed = [
         "failed",
+        "quarantined",
         "partial",
         "usage_limited",
         "rate_limited",
@@ -614,7 +615,7 @@ async function legacyStatus(
     return { status: "rejected", error: "wait_invalid", fix: "Pass wait_seconds from 0 to 55." };
   }
   try {
-    workspace = realpathSync(workspace);
+    workspace = realpathSync.native(workspace);
   } catch {
     workspace = resolve(workspace);
   }
@@ -745,7 +746,7 @@ async function legacyStatus(
         const terminal =
           attempts.length > 0 &&
           attempts.every((attempt) =>
-            ["ok", "failed", "blocked", "timed_out", "cancelled"].includes(String(canonicalSuccessStatus(attempt.status))),
+            ["ok", "quarantined", "failed", "blocked", "timed_out", "cancelled"].includes(String(canonicalSuccessStatus(attempt.status))),
           ) &&
           (batchId === undefined ||
             (Array.isArray(status?.task_ids) &&
@@ -883,6 +884,9 @@ function v1Rows(runDir: string): Record<string, any>[] {
   // Only the attempt the dead launcher announced is closed; any attempt an owner wrote stands.
   const abandoned = launcherAbandoned(metadata, owners);
   const closureStatus = receipt?.status === "cancelled" || metadata?.status === "cancelled" ? "cancelled" : "interrupted";
+  // A closure the owner never wrote takes the run's recorded finish; unknown stays null.
+  const time = (value: unknown) => (typeof value === "string" ? value : null);
+  const closedAt = closed ? time(metadata?.finished_at) : null;
   const summary =
     typeof metadata?.batch_id === "string" && /^[A-Za-z0-9._-]+$/u.test(metadata.batch_id)
       ? readJson(join(runDir, "dispatch/batches", metadata.batch_id, "summary.json"))
@@ -899,6 +903,7 @@ function v1Rows(runDir: string): Record<string, any>[] {
             ...row,
             state: "terminal",
             status: closureStatus,
+            ended_at: row.ended_at ?? closedAt,
             digest: `${closureStatus} ${row.run_id}${closureStatus === "interrupted" ? " · fix: dispatch a new run" : ""}`,
           }
         : row;
@@ -918,6 +923,7 @@ function v1Rows(runDir: string): Record<string, any>[] {
         attempt_count: attempts.length,
         state: ended ? "terminal" : "queued",
         status,
+        ended_at: ended ? closedAt : null,
         ...(ended ? { fix, message: metadata?.message, ...(status === "rejected" && typeof metadata?.error === "string" ? { error: metadata.error } : {}) } : {}),
         started_at: metadata!.started_at,
         digest: ended ? `${status} ${row.run_id} · fix: ${fix}` : `running ${row.run_id} attempt ${metadata!.next_attempt} · fabric_status{ids:["${row.run_id}"],wait_seconds:55}`,
@@ -958,6 +964,7 @@ function v1Rows(runDir: string): Record<string, any>[] {
         state: terminal ? "terminal" : "queued",
         status: terminal ? canonicalSuccessStatus(terminalTask?.status ?? "interrupted") : null,
         started_at: metadata.started_at,
+        ended_at: terminal ? time(terminalTask?.finished_at) ?? time(summary?.finished_at) ?? closedAt : null,
         paths: {},
         digest: `${terminal ? canonicalSuccessStatus(terminalTask?.status ?? "interrupted") : "queued"} ${id}`,
       });
@@ -1104,8 +1111,8 @@ export async function fabricOutput(
     return { status: "rejected", error: "output_bounds", fix: "Use offset >= 0 and max_bytes 1–20000." };
   let fd: number | undefined;
   try {
-    const root = realpathSync(row.run_dir),
-      path = realpathSync(resolve(root, raw));
+    const root = realpathSync.native(row.run_dir),
+      path = realpathSync.native(resolve(root, raw));
     const rel = relative(root, path);
     if (isAbsolute(rel) || rel === ".." || rel.startsWith(`..${sep}`)) throw new Error("output escapes run directory");
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -1150,7 +1157,7 @@ export function resultTail(row: Record<string, any>, chars: number): { text: str
   if (typeof raw !== "string" || !row.run_dir || chars < 1) return undefined;
   let fd: number | undefined;
   try {
-    const root = realpathSync(row.run_dir), path = realpathSync(resolve(root, raw));
+    const root = realpathSync.native(row.run_dir), path = realpathSync.native(resolve(root, raw));
     const rel = relative(root, path);
     if (isAbsolute(rel) || rel === ".." || rel.startsWith(`..${sep}`)) return undefined;
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);

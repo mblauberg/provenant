@@ -23,12 +23,20 @@ def test_free_opencode_models_are_derived_from_the_free_pattern():
     assert adapter["free_pattern"]
     for model in adapter["models"]:
         free = router.is_free_model(adapter, model["id"])
-        assert router.training_flag(adapter, model) is free or model["trains_on_prompts"] is False
+        training = router.training_flag(adapter, model)
+        # Free ids default to training unless flagged zero-retention; paid ids train only when flagged.
+        assert training is ((model.get("trains_on_prompts") is not False) if free
+                            else model.get("trains_on_prompts") is True)
         assert (model["plan_cap_usd"] == 0) is free
-        assert bool(model.get("warning")) is free
+        assert bool(model.get("warning")) is training
     fixture = {"free_pattern": "-free$", "models": [{"id": "opencode/rotating-free"}]}
     router._apply_free_pattern(fixture)
     assert fixture["models"][0]["trains_on_prompts"] is True and fixture["models"][0]["plan_cap_usd"] == 0
+    assert fixture["models"][0]["warning"]
+    explicit = {"free_pattern": "-free$", "models": [{"id": "opencode/zero-free", "trains_on_prompts": False}]}
+    router._apply_free_pattern(explicit)
+    assert explicit["models"][0]["trains_on_prompts"] is False and "warning" not in explicit["models"][0]
+    assert explicit["models"][0]["plan_cap_usd"] == 0
 
 
 def test_required_task_classes_bind_registered_exact_models_and_supported_efforts():
@@ -545,7 +553,8 @@ def test_compatibility_drift_rejection_names_a_fix(tmp_path):
     (["--adapter", "codex", "--alias", "luna"], "gpt-6-luna", ""),
     (["--adapter", "agy", "--alias", "flash", "--effort", "xhigh"], "gemini-3.8-flash-high", "high"),
     (["--adapter", "cursor", "--alias", "grok"], "grok-4.7", ""),
-    (["--adapter", "opencode", "--alias", "glm"], "opencode-go/glm-5.3-flash", ""),
+    (["--adapter", "opencode", "--alias", "glm"], "opencode/glm-5.3-flash-free", ""),
+    (["--adapter", "opencode", "--alias", "glm-paid"], "opencode-go/glm-5.3-flash", ""),
     (["--model", "gpt-5.6-luna"], "gpt-6-luna", ""),
 ])
 def test_ordinary_registry_routes_names_and_nearest_effort(arguments, model, effort):
@@ -554,6 +563,21 @@ def test_ordinary_registry_routes_names_and_nearest_effort(arguments, model, eff
     assert route["status"] == "ok"
     assert route["resolved_model"] == model
     assert route["effort_applied"] == effort
+
+
+@pytest.mark.parametrize("model,asked,resolved,used", [
+    ("sonnet", "low", "claude-sonnet-5-5", "medium"),
+    ("haiku", "max", "claude-haiku-5-5", "xhigh"),
+])
+def test_tier_alias_clamps_effort_to_the_registry_efforts(model, asked, resolved, used):
+    result, route = resolve("--adapter", "claude", "--alias", "workhorse", "--model", model,
+                            "--effort", asked, "--role", "worker")
+    assert result.returncode == 0, route
+    assert route["status"] == "ok"
+    assert route["resolved_model"] == resolved
+    assert route["effort"] == used
+    assert route["effort_substitution"] == f"{asked} unsupported by {resolved}; ran at {used}"
+    assert asked not in route["supported_efforts"]
 
 
 def test_ordinary_unknown_model_passes_through_and_conflict_prefers_model():
@@ -587,16 +611,19 @@ def test_opencode_training_warning_and_paid_fallback_excludes_free():
     for model in free_models:
         result, free_route = resolve("--adapter", "opencode", "--model", model, "--role", "worker")
         assert result.returncode == 0, free_route
-        assert free_route["trains_on_prompts"] is True
-        assert free_route["warnings"]
+        zero_retention = next(item for item in CATALOG["adapters"]["opencode"]["models"]
+                              if item["id"] == model).get("trains_on_prompts") is False
+        assert free_route["trains_on_prompts"] is (not zero_retention)
+        assert bool(free_route["warnings"]) is (not zero_retention)
     result, route = resolve("--adapter", "opencode", "--model",
                             "opencode/muse-spark-1.3-contributor-free", "--role", "worker")
     assert result.returncode == 0, route
     assert route["warnings"]
-    result, route = resolve("--adapter", "opencode", "--alias", "flagship", "--role", "worker")
+    result, route = resolve("--adapter", "opencode", "--alias", "workhorse", "--role", "worker")
     assert result.returncode == 0, route
-    assert all(not candidate["trains_on_prompts"] and candidate["plan_cap_usd"] > 0
-               for candidate in route["fallback_candidates"])
+    assert [candidate["model"] for candidate in route["fallback_candidates"]] == [
+        "opencode/glm-5.3-flash-free", "opencode-go/deepseek-v4.1-flash"]
+    assert all(candidate["trains_on_prompts"] is False for candidate in route["fallback_candidates"])
     result, unregistered = resolve("--adapter", "opencode", "--model",
                                    "opencode/muse-spark-2-contributor-free", "--role", "worker")
     assert result.returncode == 0, unregistered
@@ -604,10 +631,20 @@ def test_opencode_training_warning_and_paid_fallback_excludes_free():
     assert unregistered["warnings"]
 
 
+def test_opencode_has_no_flagship_tier_and_says_so():
+    assert "flagship" not in CATALOG["adapters"]["opencode"]["aliases"]
+    result, route = resolve("--adapter", "opencode", "--alias", "flagship", "--role", "worker")
+    assert result.returncode == 0, route
+    assert route["resolved_model"] == CATALOG["adapters"]["opencode"]["default_model"]
+    assert any("no flagship tier" in warning for warning in route["warnings"])
+
+
 def test_cooling_alias_skips_candidate_but_explicit_model_warns(tmp_path):
     until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
     (tmp_path / "cooldowns.json").write_text(json.dumps({"schema": "fabric.cooldowns.v1", "cooldowns": {
         "opencode/opencode-go/glm-5.3-flash": {"cooling_until": until},
+        "opencode/opencode/deepseek-v4.1-flash-free": {"cooling_until": until},
+        "opencode/opencode/glm-5.3-flash-free": {"cooling_until": until},
     }}))
     env = {**os.environ, "HARNESS_PYTHON": sys.executable,
            "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT), "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
@@ -616,15 +653,15 @@ def test_cooling_alias_skips_candidate_but_explicit_model_warns(tmp_path):
         process = subprocess.run([str(SCRIPT), "resolve", *arguments, "--role", "worker"],
                                  capture_output=True, text=True, env=env)
         return process, json.loads(process.stdout)
-    result, alias = routed("--adapter", "opencode", "--alias", "flagship")
+    result, alias = routed("--adapter", "opencode", "--alias", "workhorse")
     assert result.returncode == 0
-    assert alias["resolved_model"] == "opencode-go/kimi-k2.7-code"
+    assert alias["resolved_model"] == "opencode-go/deepseek-v4.1-flash"
     assert any("cooling" in note for note in alias["notes"])
-    result, shorthand = routed("--adapter", "opencode", "--alias", "glm")
+    result, shorthand = routed("--adapter", "opencode", "--alias", "glm-paid")
     assert result.returncode == 0
     assert shorthand["resolved_model"] == "opencode-go/glm-5.3-flash"
     assert any("cooling" in warning for warning in shorthand["warnings"])
-    result, explicit = routed("--adapter", "opencode", "--model", "glm")
+    result, explicit = routed("--adapter", "opencode", "--model", "glm-paid")
     assert result.returncode == 0
     assert explicit["resolved_model"] == "opencode-go/glm-5.3-flash"
     assert any("cooling" in warning for warning in explicit["warnings"])
@@ -2531,9 +2568,8 @@ def test_opencode_without_model_uses_adapter_default(capsys, monkeypatch):
     route = json.loads(capsys.readouterr().out)
     assert result == 0
     assert route["status"] == "ok"
-    assert route["resolved_model"] == "opencode-go/glm-5.3-flash"
-    assert route["model_selection"] == "alias"
-    assert route["model_family"] == "zhipu"
+    assert route["resolved_model"] == "opencode/deepseek-v4.1-flash-free"
+    assert route["model_family"] == "deepseek"
 
 
 def test_cursor_without_model_uses_account_auto_default(capsys, monkeypatch):
@@ -3246,22 +3282,20 @@ def test_legacy_alias_route_does_not_claim_task_class_binding(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "arguments",
+    "arguments,expected",
     (
-        ("--alias", "scout", "--task-class", "mechanical"),
-        ("--task-class", "mechanical", "--effort", "medium"),
-        ("--task-class", "unknown"),
+        (("--alias", "scout", "--task-class", "mechanical"), "route_input_conflict"),
+        (("--task-class", "mechanical", "--effort", "medium"), "task_class_effort_conflict"),
+        (("--task-class", "unknown"), "unknown_task_class"),
     ),
 )
-def test_task_class_rejects_ambiguous_or_unknown_routing_inputs(arguments):
+def test_task_class_rejects_ambiguous_or_unknown_routing_inputs(arguments, expected):
     result, route = resolve("--adapter", "codex", *arguments, "--role", "worker")
     assert result.returncode == 2
     assert route["schema_version"] == 1
     assert route["adapter"] == "codex"
     assert route["role"] == "worker"
-    assert route["status"] in {
-        "route_input_conflict", "task_class_effort_conflict", "unknown_task_class",
-    }
+    assert route["status"] == expected
 
 
 def test_task_class_rejects_explicit_model_override():
@@ -4716,6 +4750,28 @@ def _resolve_env(state):
             "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT), "AGENT_FABRIC_STATE_ROOT": str(state)}
 
 
+def test_newer_catalogue_warning_is_daily_and_always_kept_in_notes(tmp_path, monkeypatch, capsys):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    note = router._NEWER_NOTE.format("gpt-6.2-sol")
+
+    def emit():
+        router.emit({"status": "ok", "warnings": [note], "notes": []}, 0)
+        return json.loads(capsys.readouterr().out)
+
+    assert emit()["warnings"] == [note]
+    second = emit()
+    assert second["warnings"] == [] and second["notes"] == [note]
+    # A previous day's marker does not suppress today's warning.
+    state = tmp_path / "newer-model-warnings.json"
+    state.write_text(state.read_text().replace(datetime.now(timezone.utc).date().isoformat(), "2000-01-01"))
+    assert emit()["warnings"] == [note]
+    # State failures must not fail routing or lose the receipt note.
+    state.unlink()
+    state.mkdir()
+    assert emit()["notes"] == [note]
+
+
 def test_a_registered_id_in_the_live_listing_is_not_newer_than_the_catalogue(tmp_path):
     _live_cache(tmp_path, "codex", ["gpt-6.1-sol"])
     run = subprocess.run([str(SCRIPT), "resolve", "--adapter", "codex", "--model", "gpt-6.1-sol",
@@ -4761,3 +4817,127 @@ def test_agy_effort_suffixed_live_ids_match_their_family_and_keep_the_dispatch_i
                           "--role", "worker"], capture_output=True, text=True, env=_resolve_env(tmp_path))
     route = json.loads(run.stdout)
     assert run.returncode == 0 and route["resolved_model"] == "gemini-3.9-flash-high", route
+
+
+@pytest.mark.parametrize(("tier", "alias"), [("junior", "scout"), ("Senior", "workhorse"), ("principal", "flagship")])
+def test_route_tier_names_work_as_adapter_aliases(tmp_path, tier, alias):
+    capability = write_codex_capability_snapshot(tmp_path)
+    common = ("--adapter", "codex", "--role", "worker", "--capabilities-file", str(capability))
+    _, named = resolve("--alias", tier, *common)
+    _, original = resolve("--alias", alias, *common)
+    assert named["resolved_model"] == original["resolved_model"]
+    assert not any("model won" in note for note in named.get("notes", [])), "a tier name is not a model name"
+
+
+LIVE_OPENCODE = ["opencode/big-pickle", "opencode-go/qwen3.8-flash", "opencode-go/kimi-k3",
+                 "opencode-go/kimi-k2.7-code", "opencode-go/mimo-v2.6-flash", "opencode/mimo-v2.6-flash-free"]
+
+
+@pytest.mark.parametrize("name,model", [("qwen3.8-flash", "opencode-go/qwen3.8-flash"),
+                                        ("QWEN3.8-FLASH", "opencode-go/qwen3.8-flash"),
+                                        ("big-pickle", "opencode/big-pickle"),
+                                        ("qwen", "opencode-go/qwen3.8-flash")])
+def test_opencode_bare_name_resolves_against_live_listing(name, model):
+    resolved, notes, refusal = load_router()._resolve_opencode_name(name, LIVE_OPENCODE)
+    assert (resolved, refusal) == (model, None) and notes
+
+
+@pytest.mark.parametrize("name,status", [("kimi", "model_ambiguous"), ("mimo", "model_ambiguous"),
+                                         ("zzzzzz", "model_not_found")])
+def test_opencode_bare_name_refusals_are_typed_with_a_fix(name, status):
+    resolved, _, refusal = load_router()._resolve_opencode_name(name, LIVE_OPENCODE)
+    assert resolved is None and refusal["status"] == status and "fix:" in refusal["message"]
+    if status == "model_ambiguous":
+        assert "opencode-go/kimi-k3" in refusal["message"] or "mimo-v2.6-flash" in refusal["message"]
+
+
+def test_opencode_bare_name_passes_through_without_a_listing_or_with_a_provider_path():
+    router = load_router()
+    assert router._resolve_opencode_name("kimi", []) == (None, [], None)
+    assert router._resolve_opencode_name("opencode/anything", LIVE_OPENCODE) == (None, [], None)
+
+
+def test_opencode_resolve_end_to_end_with_a_fake_cli(tmp_path):
+    cli = tmp_path / "bin" / "opencode"
+    cli.parent.mkdir()
+    cli.write_text("#!/bin/sh\n"
+                   "if [ \"$1\" = --version ]; then echo 'opencode v2.0.30'; exit 0; fi\n"
+                   "if [ \"$1\" = models ]; then printf '%s\\n' " + " ".join(LIVE_OPENCODE) + "; fi\n")
+    cli.chmod(0o755)
+    env = {**os.environ, "PATH": f"{cli.parent}:/usr/bin:/bin", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+           "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
+
+    def run(model):
+        out = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve", "--adapter",
+                              "opencode", "--role", "worker", "--model", model], text=True, capture_output=True,
+                             env=env)
+        return out.returncode, json.loads(out.stdout)
+
+    code, route = run("qwen3.8-flash")
+    assert code == 0 and route["resolved_model"] == "opencode-go/qwen3.8-flash"
+    code, route = run("kimi")
+    assert code == 2 and route["status"] == "model_ambiguous"
+    code, route = run("zzzzzz")
+    assert code == 2 and route["status"] == "model_not_found"
+    code, route = run("opencode-go/kimi-k3")
+    assert code == 0 and any("live opencode listing" in note for note in route["notes"])
+    code, route = run("opencode/deepseek-v4.1-flash-free#high")
+    assert code == 0 and route["resolved_model"] == "opencode/deepseek-v4.1-flash-free"
+    assert route["effort_applied"] == "high"
+    code, route = run("deepseek")
+    assert code == 0 and route["resolved_model"] == "opencode/deepseek-v4.1-flash-free"
+
+
+def test_opencode_variant_matching_explicit_effort_still_sends_the_variant(tmp_path):
+    env = {**os.environ, "PATH": "/usr/bin:/bin", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+           "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
+    out = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve", "--adapter",
+                          "opencode", "--role", "worker", "--model", "opencode/deepseek-v4.1-flash-free#high",
+                          "--effort", "high"], text=True, capture_output=True, env=env)
+    route = json.loads(out.stdout)
+    assert out.returncode == 0, route
+    assert route["effort_applied"] == "high"
+    assert route["requested_model"] == "opencode/deepseek-v4.1-flash-free"
+    assert route["requested_input"] == "opencode/deepseek-v4.1-flash-free#high"
+
+
+def test_opencode_requested_input_keeps_the_callers_bare_token(tmp_path):
+    cli = tmp_path / "bin" / "opencode"
+    cli.parent.mkdir()
+    cli.write_text("#!/bin/sh\n"
+                   "if [ \"$1\" = --version ]; then echo 'opencode v2.0.30'; exit 0; fi\n"
+                   "if [ \"$1\" = models ]; then printf '%s\\n' " + " ".join(LIVE_OPENCODE) + "; fi\n")
+    cli.chmod(0o755)
+    env = {**os.environ, "PATH": f"{cli.parent}:/usr/bin:/bin", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+           "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
+    out = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve", "--adapter",
+                          "opencode", "--role", "worker", "--model", "QWEN3.8-FLASH"],
+                         text=True, capture_output=True, env=env)
+    route = json.loads(out.stdout)
+    assert route["resolved_model"] == "opencode-go/qwen3.8-flash"
+    assert route["requested_input"] == "QWEN3.8-FLASH"
+
+
+def test_failed_opencode_refresh_keeps_the_last_good_listing(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    cli = tmp_path / "opencode"
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.0.30; exit; fi\n"
+                   "if [ \"$1\" = --help ]; then exit; fi\nprintf 'a/one\\na/two\\n'\n")
+    cli.chmod(0o755)
+    record, code = router.probe_capabilities("opencode", str(cli), listing_only=True)
+    assert code == 0 and record["models"] == ["a/one", "a/two"]
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.0.30; exit; fi\nexit 1\n")
+    failed, code = router.probe_capabilities("opencode", str(cli), listing_only=True, refresh=True)
+    assert code == 0 and failed["models"] == ["a/one", "a/two"] and failed["refresh_failed"]
+    cached, code = router.probe_capabilities("opencode", str(cli), listing_only=True)
+    assert code == 0 and cached["cache_hit"] and cached["models"] == ["a/one", "a/two"]
+
+
+def test_opencode_refresh_is_skipped_when_the_shared_budget_is_nearly_spent(monkeypatch):
+    router = load_router()
+    calls = []
+    monkeypatch.setattr(router, "probe_capabilities", lambda *a, **k: calls.append(k) or ({"models": ["x/y"]}, 0))
+    assert router._opencode_live_models(refresh=True, deadline=router.time.monotonic() + 1) == ([], False)
+    assert not calls
+    assert router._opencode_live_models(refresh=True, deadline=router.time.monotonic() + 10)[0] == ["x/y"]

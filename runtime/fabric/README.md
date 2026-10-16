@@ -45,6 +45,8 @@ with a warning rather than rejected: `run_id` or `task_id` for `id`, `id` for a
 dispatch `task_id`, numeric strings such as `wait_seconds:"30"`, and a numeric
 `until:"55"` (read as `wait_seconds`). Relative `cwd` and `worktree` paths resolve from
 the caller directory.
+Every shell subcommand accepts `--help` or `-h` and exits successfully before
+opening the store or validating command arguments.
 No provider output is embedded in status responses.
 
 Without an MCP connection, `provenant fabric dispatch --adapter A --model M
@@ -118,14 +120,19 @@ and finding names. The scan reads whole files, skipping Git-ignored, vendored an
 and directories listed under `secret_scan_exclude` in `.agents/fabric-policy.json`
 (which must resolve inside the project). Past 10,000
 files or 64 MiB, dispatch rejects with `error: secret_scan_budget_exceeded`
-naming the largest subtree; narrow the inputs, exclude it, or explicitly set
+naming the largest scanned subtree and up to three largest files encountered,
+including the file that exceeds the budget. The scan also skips `__pycache__`,
+`.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.next` and `.turbo` caches.
+Narrow `add_dirs`, exclude the subtree, or explicitly set
 `allow_secrets: true` and explain why in the prompt. The same policy's
 `dispatch_defaults` may set `add_dirs`, `timeout_seconds` and `network` (Codex
 only) for dispatches that leave them unset. Writers use `mode: worktree_write` and an
 owned, registered linked worktree. The primary checkout is refused; create a linked
 worktree. `cwd` selects an existing read-only directory inside any registered
 Fabric project, and `prompt_file` may sit in the caller's directory or any
-registered project. A project is registered once any Fabric command, such as
+registered project, or a caller temporary directory (`TMPDIR`, `/tmp`,
+`/private/tmp` or `/private/var/folders`). Credential stores and secret paths
+remain refused. A project is registered once any Fabric command, such as
 `fabric whoami`, has run inside it; an unregistered path is rejected with that
 route or the alternative of dispatching from the other project. For a
 directory outside the caller's, Fabric passes the owner a read root, so the run
@@ -137,7 +144,10 @@ applies controls; Fabric does not claim a stronger guarantee than its receipt.
 On macOS, non-Codex read-only launches use `sandbox-exec` when available. The
 profile limits writes to the attempt directory and provider state. It denies
 reads of home, shared temp and the workspace outside `cwd` and `add_dirs`, with
-provider sign-in paths re-allowed. Training routes also deny reads of protected
+provider sign-in paths re-allowed. Each read-only profile also reads the provider's
+own executable: the PATH entry, every link hop to the real file and, when that file
+sits in an install folder rather than a plain `bin` directory (cursor-agent's
+`~/.local/share/cursor-agent/versions/<version>`), that folder. Training routes also deny reads of protected
 paths. OpenCode's profile also reads, by their unresolved names,
 `opencode.json`, `opencode.jsonc`, `AGENTS.md`, `CLAUDE.md` and `.opencode/`
 in each directory from `cwd` up to the repository root, since OpenCode loads
@@ -228,11 +238,22 @@ branch had changed that path too before the attempt), Fabric by default
 quarantines the change: it archives the lane's files to `<attempt>/protected.patch`
 (and its index or HEAD to `protected.index.patch` or `protected.head.patch` when
 they differ), commits the start or integration-branch version back to the lane,
-returns the index and files to their starting content and finishes `ok` with a
-warning naming the patches. `.agents/fabric-policy.json` `instruction_changes`
-may instead be `allow` (keep an ordinary edit, with a warning) or `deny` (fail
-with `protected_instructions_changed`). A conflict, special file, replaced root,
-lane process left running or failed quarantine fails under any policy. If OS confinement is unavailable, agy write
+returns the index and files to their starting content. A successful provider
+then finishes `quarantined` only when the restore was verified: its result
+stays visible, `landable: false` is an advisory marker for the chair (not
+enforced landing), and status/digest/lanes name the reason and patches for chair
+review.
+`.agents/fabric-policy.json` `instruction_changes` may instead be `allow` (keep
+an ordinary edit, with a warning) or `deny` (retain the edit for review without
+restoration). Denied edits, failed restoration and unverifiable checks leave
+edits on the lane, so the lane ends `failed` (fix: restore `.agents/` to the
+start commit before landing) with its output and patches retained and listed;
+incomplete or interrupted providers keep their failure outcomes.
+`protected.patch` may be empty for an index-only edit or carry
+an unavailable-diff comment for unsafe states, with `quarantine.patch_error`
+explaining capture failure. Spared processes alone do not prove instruction
+edits. Writers stage proposed instruction edits outside `.agents/` for separate
+review. If OS confinement is unavailable, agy write
 dispatch is refused; other wrapped writer receipts warn that writes are
 unconfined. Setting `PROVENANT_NO_OS_CONFINEMENT=1` has the same effect on new
 wrapped attempts.
@@ -364,13 +385,17 @@ named session is never silently relaunched. `fresh: true` then starts a new
 session primed with the last clean result, as `handoff` does.
 
 Status accepts `ids`, `wait_seconds` (0–55), `until: any|all`, `detail`,
-`tail_chars` and `fields`. Terminal brief rows end with the last 1,200 characters
-of their result (`tail_chars` 0–4,000, 0 disables; the total across rows is
-bounded), so a short answer needs no `result.md` read. `detail: full` keeps a
+`tail_chars` and `fields`. A terminal brief row ends with the last 1,200
+characters of its result the first time the session sees that lane, so a short
+answer needs no `result.md` read and batch polls do not resend finished lanes.
+Requesting one lane, or passing `tail_chars` (0–4,000; 0 disables; the total
+across rows is bounded), shows the tail again. `detail: full` keeps a
 one-line summary per attempt instead of a second copy of the row; `fields`
 returns only the named keys (`fields:["attempts"]` gives the raw history).
 While lanes run, the text ends with a hint to block with `provenant lanes --wait
 --all --timeout 900` instead of polling.
+When every requested lane is running and `wait_seconds` is omitted, the hint
+also suggests `wait_seconds: 55`; the default wait remains unchanged.
 New attempts wait when available host memory is below 10% of physical RAM for
 `worktree_write` or 5% for `read_only`; set either percentage from 0 to 100 in
 `<workspace_root>/.agents/fabric-policy.json` as `{"memory_floor_percent":{"worktree_write":10,"read_only":5}}` (either key may be omitted, and 0 disables that mode's floor).
@@ -434,9 +459,11 @@ has `status: ok|unknown` and `runs`; read failure is `unknown` with an `error`,
 never an apparently empty successful list. The default list covers active and
 recent runs (at most 20 task rows); an ID reads that run or task. Each row has
 `id`, `run_id`, `task_id`, `run_path`, `state`, `status`, `route`, `model`,
-`started_at`, `last_progress_at`, `pgid`, `pgid_alive`, `result_path`,
-`receipt_path`, `writer`, `worktree` and `attempt`. Paths are relative to the
-project's `.agent-run` root. Missing facts are `null`; `pgid_alive: null` means
+`started_at`, `ended_at`, `last_progress_at`, `pgid`, `pgid_alive`,
+`result_path`, `receipt_path`, `writer`, `worktree` and `attempt`. Paths are
+relative to the project's `.agent-run` root. `ended_at` is `null` until the
+attempt is terminal; a closure the owner never wrote takes the run's recorded
+finish time. Missing facts are `null`; `pgid_alive: null` means
 the process identity cannot be verified. Both `tasks/<id>/attempt-NNN/` and
 `dispatch/tasks/<id>/attempt-NNN/` receipts are read internally. Fabric's status
 and output readers use the same underlying receipt scanner; consumers should
@@ -467,8 +494,16 @@ whole groups and says how many; `match` narrows either. Dispatch any id as `mode
 outside the catalogue runs with a note. A Claude or Codex seat keeps its own
 models on native subagents: pool picks and the default route skip them, a pool
 holding only them is refused (`route_native_only`), a council hands them back as
-a spawn line, and an explicit request for them runs
-with a leading `NATIVE:` warning (`skills/orchestrate/references/routing-and-tiers.md#native-first`).
+a spawn line, and an explicit request for them is rejected as
+`native_seat_model` on a Claude seat and runs with a leading `NATIVE:` warning on a Codex seat (`skills/orchestrate/references/routing-and-tiers.md#native-first`).
+
+For a Claude seat, the own-seat check applies after batch defaults and selector
+precedence settle, before local or peer placement (including qualified sessions).
+An explicit own-seat Claude route in any task refuses the entire batch:
+`native_seat_model` names the offending task id, every task returns as terminal
+and rejected, and no task is placed. Other task validation failures reject only
+those tasks; valid siblings still run. Selector-free continuations and handoffs
+that inherit their route remain exempt.
 
 ## Hosts
 
@@ -501,7 +536,8 @@ acknowledging the delivery. `wait_seconds`, `task_id`, `peek` and
 `chair` resolves through `PROVENANT_CHAIR`; `/root`, `root` and `parent` use
 `PROVENANT_PARENT`, then the chair. Only known project seats are selected. An
 unbound caller can use a registered seat named `chair`; otherwise the request
-is rejected with `fix: pass to:<seat>`. Fabric never guesses the first seat.
+is rejected with `fix: pass to:<seat>` and the currently valid labels, seats
+and teams. Fabric never guesses the first seat.
 Owner completion posts `run_terminal` to the dispatching seat. Observing a
 terminal row through dispatch, cancel or status acknowledges its notices,
 including a notice that arrives after the response.
@@ -536,10 +572,20 @@ and `generation` identify renew, verify and release operations; expired claims
 lapse. `#869` and `869` share an issue key, and path claims compare without case.
 Active claims appear in `fabric work-claims` and `fabric_status` when
 full detail is requested or ownership is present.
+`ttl_seconds` is accepted as an alias of `seconds`; values above 3,600 seconds
+are clamped to 3,600 with a warning.
 
 `fabric_landing_lease` separately acquires one repository-wide landing lease
 with the expected remote integration SHA. It has a holder, expiry, generation,
-verify and release operations. An expired lease can be taken over; the prior
+verify and release operations. To wait for another chair to land, use
+`fabric_landing_lease` with `action: "wait"` and `wait_seconds` (clamped to 55) or the
+shell `fabric landing-wait --timeout 900` (exit 124 on timeout) instead of
+sleep loops; both return when the holder, generation or release state changes.
+`expected_sha` may be a unique prefix of at least seven hex digits or uppercase
+and is resolved with Git in the project. Invalid values return
+`expected_sha_invalid`; unknown or ambiguous prefixes return
+`expected_sha_unresolved` with a command to obtain the full SHA.
+An expired lease can be taken over; the prior
 holder and new generation are recorded in activity. Before pushing, run
 `fabric landing-push <session-id> <generation> <branch> --label <seat>` from the
 landing checkout, using the same label as the MCP lease holder. Alternatively,

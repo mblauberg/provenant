@@ -87,7 +87,7 @@ def test_claude_window_comes_from_the_answering_model_never_init_or_the_largest(
 def replayed(tmp_path, events):
     stream = tmp_path / "stream.jsonl"
     stream.write_text("".join(json.dumps(event) + "\n" for event in events))
-    plan = supervisor().build_plan("claude", {"resolved_model": "haiku", "model_family": "anthropic",
+    plan = supervisor().build_plan("claude", {"resolved_model": "claude-haiku-4-5", "model_family": "anthropic",
                                               "endpoint_provider": "anthropic"}, "hello", cwd=tmp_path)
     plan["argv"] = [sys.executable, "-c", f"import sys; sys.stdout.write(open({str(stream)!r}).read())"]
     plan["grace_seconds"] = 0.1
@@ -207,10 +207,11 @@ UNKNOWN = "context_ceiling not applied: {} compaction point for {} unknown"
     ("claude", "opus", None, ["--autocompact", "300000"], "enforced", 300000),
     ("claude", "claude-opus-5-5", 250000, ["--autocompact", "250000"], "enforced", 250000),
     ("claude", "claude-haiku-4-5", None, None, "provider_default", 200000),
-    # Keep Haiku's smaller window bound if a Claude session answers with another model.
-    ("claude", "haiku", None, None, "provider_default", 200000),
-    ("claude", "haiku", 250000, None, "provider_default", 200000),
-    ("claude", "haiku", 150000, ["--autocompact", "150000"], "enforced", 150000),
+    ("claude", "haiku", None, ["--autocompact", "300000"], "enforced", 300000),
+    # Keep Haiku 4.5's smaller window bound if a Claude session answers with another model.
+    ("claude", "claude-haiku-4-5-20251001", None, None, "provider_default", 200000),
+    ("claude", "claude-haiku-4-5", 250000, None, "provider_default", 200000),
+    ("claude", "claude-haiku-4-5", 150000, ["--autocompact", "150000"], "enforced", 150000),
     ("claude", "unknown-model", None, None, "provider_default", None),
     ("claude", "unknown-model", 250000, None, "provider_default", None),
     ("cursor", "auto", 250000, None, "unsupported", 250000),

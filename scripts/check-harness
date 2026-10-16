@@ -208,6 +208,14 @@ if [[ "$DOCTOR" == true ]]; then
     app_host="/Applications/ChatGPT.app/Contents/Resources/codex-code-mode-host"
     [[ -x "$app_host" ]] && echo "codex-code-mode-host-candidate=$app_host"
   fi
+  instance_agents="${AGENT_FABRIC_INSTANCE_ROOT:-$HOME/.agents}/AGENTS.md"
+  if [[ ! -f "$instance_agents" ]]; then
+    echo "instance-agents=WARN missing $instance_agents"
+  elif cmp -s "$instance_agents" "$PRODUCT_ROOT/AGENTS.md"; then
+    echo "instance-agents=ok"
+  else
+    echo "instance-agents=WARN differs from $PRODUCT_ROOT/AGENTS.md; global CLAUDE.md and AGENTS.md are links to it, so review and copy or edit it"
+  fi
   if command -v herdr >/dev/null 2>&1; then
     herdr status server || true
     herdr integration status || true

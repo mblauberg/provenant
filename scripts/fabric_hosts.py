@@ -192,7 +192,10 @@ def load_config(path=None):
     if not isinstance(projects, dict):
         raise HostError(code, 'Projects must be keyed by home-relative project path')
     for project, placement in projects.items():
-        project_directory(project)
+        try:
+            project_directory(project)
+        except HostError as exc:
+            raise HostError(code, 'Project key is invalid: ' + str(exc)) from exc
         fields(placement, {'default_host', 'modes'}, set(), code)
         modes = placement.get('modes', {})
         fields(modes, {'read_only', 'worktree_write'}, set(), code)
@@ -403,7 +406,8 @@ def validate_doctor_result(result, host, project_path=None):
         raise HostError('bad_response', 'Doctor socket path result is invalid')
 
 def project_identity(cwd=None):
-    from worktree import primary_root, PolicyError
+    worktree = _load_module('provenant_worktree', PRODUCT_ROOT / 'scripts/worktree.py')
+    primary_root, PolicyError = worktree.primary_root, worktree.PolicyError
     path = Path(cwd or Path.cwd()).resolve()
     try:
         path = primary_root(path)
@@ -590,7 +594,8 @@ def parse_request(raw):
     verb = request['verb']
     if not isinstance(verb, str):
         raise HostError('invalid_request', 'Verb must be a string')
-    lane_verbs = {'dispatch', 'lanes', 'status', 'cancel', 'resume', 'handoff', 'output', 'operation'}
+    lane_verbs = {'dispatch', 'lanes', 'status', 'cancel', 'resume', 'handoff', 'output', 'operation',
+                  'git-have', 'git-upload', 'git-result', 'git-download'}
     if verb not in {'hello', 'doctor', *lane_verbs}:
         raise HostError('unknown_verb', 'Unsupported peer verb')
     if verb != 'hello' and request['protocol_version'] != PROTOCOL_VERSION:
@@ -629,7 +634,7 @@ def main(argv=None):
         try:
             request = strict_json(sys.stdin.buffer.read())
             fields(request, {'action', 'cwd', 'input'}, {'action', 'cwd', 'input'}, 'invalid_request')
-            if request['action'] not in {'dispatch', 'lanes', 'status', 'cancel', 'resume', 'handoff', 'output'}:
+            if request['action'] not in {'dispatch', 'lanes', 'status', 'cancel', 'resume', 'handoff', 'output', 'fetch'}:
                 raise HostError('unknown_verb', 'Unsupported lane operation')
             result = lane_owner().client_call(request['action'], request['cwd'], request['input'])
         except HostError as exc:

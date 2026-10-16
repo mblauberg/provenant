@@ -32,6 +32,21 @@ clean when the command in fact never ran, or ran on the wrong input.
   work proceeds as though it passed. Run a long job in the background on its
   own; run the gate whose result you intend to act on in the foreground, where
   it lands in front of you before you rely on it.
+- **`${PIPESTATUS[0]}` is empty in zsh.** zsh uses the one-indexed
+  `$pipestatus[1]`, so `gate 2>&1 | tail -6; echo "EXIT=${PIPESTATUS[0]}"`
+  prints an empty code while the trailing `tail` or `echo` supplies a zero
+  status. Redirect to a log, check `$?` straight after, then read the summary line.
+- **`gh pr view --json statusCheckRollup` reports `.conclusion` as `""`, not
+  null, for a running check.** A guard on conclusion alone then reads green.
+  Test `.status != "COMPLETED"` first, then `.conclusion`. Two further traps:
+  after a force-push the API can still return the previous run's checks, and
+  checks register incrementally, so "nothing pending" may mean one skipped
+  check. Poll `commits/<head-sha>/check-runs` for the exact head and require a
+  known-mandatory check to be present before believing a green.
+- **`git cherry`: `-` proves, `+` does not.** A `-` means a patch-identical
+  commit exists upstream, which is sound grounds to drop work. A `+` only
+  means none was found; work redone with a different shape still reads `+`.
+  Settle a `+` by reading what upstream code now does.
 - **Long waits can outlive the command window.** If a foreground shell call
   approaches its roughly ten-minute cap, the process may continue without its
   result reaching the caller. Prefer the harness's own background run, which

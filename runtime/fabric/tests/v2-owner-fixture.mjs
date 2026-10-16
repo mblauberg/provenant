@@ -1,5 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync, readdirSync, existsSync } from "node:fs";
+import { writeFileAtomic } from "./atomic-write.mjs";
 import { join, isAbsolute } from "node:path";
 const args = process.argv.slice(2),
   value = (key) => args.includes(key) ? args[args.indexOf(key) + 1] : undefined;
@@ -45,7 +46,7 @@ if (args.includes("--preflight-json")) {
 }
 if (owner === "run_dir_init.sh") {
   if (args.includes("--owner-logs")) mkdirSync(join(args[0], "_owner"));
-  writeFileSync(join(args[0], "RUN_RECEIPT.json"), JSON.stringify({ status: "active" }));
+  writeFileAtomic(join(args[0], "RUN_RECEIPT.json"), JSON.stringify({ status: "active" }));
   process.exit();
 }
 const dir = value("--run-dir");
@@ -71,7 +72,7 @@ if (owner === "batch_run.py") {
         prompt,
         "--timeout",
         String(task.timeout ?? 3600),
-        ...["adapter", "alias", "model", "effort", "cwd", "context_ceiling"].flatMap((key) => task[key] === undefined ? [] : ["--" + key, String(task[key])]),
+        ...["adapter", "alias", "model", "effort", "cwd", "context_ceiling", "worktree", "access_mode"].flatMap((key) => task[key] === undefined ? [] : ["--" + key, String(task[key])]),
         ...(task.capabilities?.length ? ["--capabilities", JSON.stringify(task.capabilities)] : []),
       ],
       { env: { ...process.env, PROVENANT_FIXTURE_OWNER: "dispatch_run.py" }, encoding: "utf8" },
@@ -81,8 +82,8 @@ if (owner === "batch_run.py") {
   }
   const summary = join(dir, "dispatch/batches/batch-001");
   mkdirSync(summary, { recursive: true });
-  writeFileSync(join(summary, "summary.json"), JSON.stringify({ status: "completed", tasks: rows }));
-  writeFileSync(join(dir, "RUN_RECEIPT.json"), JSON.stringify({ status: "ok", attempts: rows }));
+  writeFileAtomic(join(summary, "summary.json"), JSON.stringify({ status: "completed", tasks: rows }));
+  writeFileAtomic(join(dir, "RUN_RECEIPT.json"), JSON.stringify({ status: "ok", attempts: rows }));
   console.log(JSON.stringify({ schema: "fabric.status.v1", runs: rows }));
   process.exit();
 }
@@ -96,8 +97,8 @@ if (args.includes("--alias") && args.includes("--model")) {
   console.error("--alias and --model are mutually exclusive"); process.exit(2);
 }
 const prompt = readFileSync(value("--prompt-file"), "utf8");
-writeFileSync(join(dir, "_owner", `${task}-args-${attempt}.json`), JSON.stringify(args));
-writeFileSync(join(dir, "_owner", `${task}-env-${attempt}.json`), JSON.stringify({ chair: process.env.PROVENANT_CHAIR }));
+writeFileAtomic(join(dir, "_owner", `${task}-args-${attempt}.json`), JSON.stringify(args));
+writeFileAtomic(join(dir, "_owner", `${task}-env-${attempt}.json`), JSON.stringify({ chair: process.env.PROVENANT_CHAIR }));
 writeFileSync(join(dir, "_owner", `${task}-prompt-${attempt}.md`), prompt);
 if (prompt === "reject-before-attempt") {
   console.log(JSON.stringify({schema_version:1,status:"rejected",message:"dispatch a new run",fix:"dispatch a new run"})); process.exit(2);
@@ -116,7 +117,7 @@ if (value("--require-session") !== undefined && prior.session_id !== value("--re
 if (prompt === "fallback-slow" || prompt === "fallback-gap") {
   // A retryable first attempt, then the owner's fallback attempt in the same invocation.
   mkdirSync(attemptDir(attempt), { recursive: true });
-  writeFileSync(join(attemptDir(attempt), "attempt.json"), JSON.stringify({
+  writeFileAtomic(join(attemptDir(attempt), "attempt.json"), JSON.stringify({
     schema: "fabric.attempt.v1", run_id: process.env.PROVENANT_RUN_ID, task_id: task, attempt, state: "terminal",
     status: "failed", retryable: true, session_id: null, provenance: { transport: "codex" },
     started_at: new Date().toISOString(), ended_at: new Date().toISOString(), paths: {},
@@ -140,8 +141,8 @@ const row = {
   // A resume keeps the provider session; "lose-session" models a turn that recorded none.
   session_id: prompt === "lose-session" ? null : prompt === "fail-new-session" ? `other-${attempt}`
     : prior.session_id ?? `fixture-${process.env.PROVENANT_RUN_ID}-${task}`,
-  mode: args.includes("--access-mode") ? value("--access-mode") : "read_only",
-  worktree: args.includes("--worktree") ? value("--worktree") : null,
+  mode: value("--access-mode") ?? prior.mode ?? "read_only",
+  worktree: value("--worktree") ?? prior.worktree ?? null,
   started_at: new Date().toISOString(),
   ended_at: null,
   evidence: { owner_cwd: process.cwd(), prompt_file: value("--prompt-file"), timeout: Number(value("--timeout")) },
@@ -163,7 +164,7 @@ const row = {
 };
 const readRoots = args.filter((_, index) => args[index - 1] === "--read-root");
 if (readRoots.length) row.read_roots = readRoots;
-const write = () => writeFileSync(join(path, "attempt.json"), JSON.stringify(row));
+const write = () => writeFileAtomic(join(path, "attempt.json"), JSON.stringify(row));
 write();
 writeFileSync(join(path, "stderr.log"), "fixture stderr");
 writeFileSync(join(path, "events.jsonl"), "{}\n");
@@ -178,7 +179,7 @@ if (prompt === "orphan-provider") {
     setInterval(() => { if (existsSync(${JSON.stringify(join(dir, "release"))})) end(); }, 20);
   `], { detached: true, stdio: "ignore" });
   provider.unref();
-  writeFileSync(join(dir, "dispatch-provider.json"), JSON.stringify({
+  writeFileAtomic(join(dir, "dispatch-provider.json"), JSON.stringify({
     run_token: process.env.PROVENANT_RUN_TOKEN, provider_pid: provider.pid, provider_pgid: provider.pid, provider_started_at: null,
   }));
   process.exit(0);
@@ -224,5 +225,5 @@ row.digest = `${row.status} ${run_id} codex/fixture@high · result ${row.paths.r
 // "mark" prompts end their result with its attempt, so a handoff shows which result it carried.
 writeFileSync(join(path, "result.md"), "x".repeat(25000) + (prompt.startsWith("mark") ? `\nresult of ${run_id}/${task}#${attempt}\n` : ""));
 write();
-writeFileSync(join(dir, "RUN_RECEIPT.json"), JSON.stringify({ status: row.status, attempts: [row] }));
+writeFileAtomic(join(dir, "RUN_RECEIPT.json"), JSON.stringify({ status: row.status, attempts: [row] }));
 console.log(JSON.stringify(row));

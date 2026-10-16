@@ -3,11 +3,11 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 
-import { fabricHosts, releaseHostChecks } from "./hosts.js";
-import { databasePath, identify } from "./identity.js";
+import { federatedLane, fabricHosts, releaseHostChecks } from "./hosts.js";
+import { CommitShaError, databasePath, identify, resolveCommitSha } from "./identity.js";
 import { federatedStatusRows as statusRows, fabricOutput, resultTail } from "./run-registry.js";
 import { reply, digest, serverBuild, mailboxView, adapterView, runView, fullView, lanesDigest, cancelDigest } from "./surface.js";
-import { catalogueSnapshot, liveModels } from "./catalogue.js";
+import { catalogueSnapshot, liveModels, resetCooldowns } from "./catalogue.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
 import { reconcileSession, sessionDispatch, sessionName, sessionView } from "./sessions.js";
 import {
@@ -85,6 +85,8 @@ server.server.onclose = async () => {
  * run left that way is reaped by the next dispatch in the same workspace.
  */
 let shuttingDown = false;
+// Lanes whose result tail this session has already shown; bounded, oldest evicted first.
+const tailedLanes = new Set<string>();
 for (const signal of ["SIGTERM", "SIGINT", "SIGHUP"] as const) {
   process.on(signal, () => {
     if (shuttingDown) return;
@@ -149,7 +151,7 @@ const route = {
   operation_id: str,
   adapter: str,
   alias: str,
-  model: str,
+  model: str.meta({ description: "A model name or catalogue alias (for example sonnet, sol, luna, deepseek-free, glm-free); the most predictable selector. adapter/model also works." }),
   effort: str,
   mode: z.enum(ACCESS_MODES).optional(),
   worktree: str,
@@ -164,11 +166,11 @@ const route = {
   fallback: z
     .union([z.boolean(), z.literal("any"), z.array(z.union([z.string(), z.record(z.string(), z.unknown())]))])
     .optional(),
-  route: z.string().optional().meta({ description: "Global pool: strong, bulk, design or writing; task classes and flagship/workhorse/scout map onto these. adapter narrows the pool; an explicit model wins over route." }),
+  route: z.string().optional().meta({ description: "Tier pool: junior (laid-out work, cheap lenses), senior (judgement, review, delegation) or principal (critical decisions); or design or writing. Old names map on: bulk/scout to junior, workhorse/strong/review to senior, flagship to principal. adapter narrows the pool; an explicit model wins over route. Prefer naming a model (deepseek-free, glm-free, sonnet, sol) when you know what you want." }),
   rotate: z.boolean().optional().meta({ description: "Cycle the route's pool per project instead of taking its top model; ignored with council." }),
   council: z.number().int().min(1).max(8).optional().meta({ description: "Run 1-8 members from the route as one batch, families spread first; members repeat when fewer are available." }),
   models: z.array(z.string()).min(1).max(8).optional().meta({ description: "Ad-hoc council of adapter/model[@effort] entries; bypasses route and adapter." }),
-  confidential: z.boolean().optional().meta({ description: "Never use a free or prompt-training model, fallbacks included; works with any selector." }),
+  confidential: z.boolean().optional().meta({ description: "Never use a prompt-training model, fallbacks included (free models count unless their entry says they do not train); works with any selector." }),
 };
 const task = { prompt: str, prompt_file: str, timeout_seconds: optionalNumber, ...route };
 const taskFields = { id: str, ...task };
@@ -179,6 +181,7 @@ const batch = {
 };
 // The first listed target a tool actually has wins, so run_id is `id` on status and `ids` on runs.
 const INPUT_SYNONYMS: Record<string, string[]> = {
+  ttl_seconds: ["seconds"],
   prompt_path: ["prompt_file"], file: ["prompt_file"],
   dir: ["cwd"], path: ["cwd"], task: ["task_id", "id"],
   run_id: ["id", "ids"], task_id: ["id"], id: ["task_id", "ids"],
@@ -308,7 +311,7 @@ function register(
       return {
         ...reply({
           status: "rejected",
-          error: "request_failed",
+          error: error instanceof CommitShaError ? error.code : "request_failed",
           fix: String(error instanceof Error ? error.message : error).replace(/\s+/gu, " "),
         }, includeStructuredContent),
         isError: true,
@@ -489,7 +492,7 @@ register(
 );
 register(
   "fabric_status",
-  "Read or wait for runs. wait_seconds above 55 is clamped to 55; invalid numeric values return a typed rejection.",
+  "Read or wait for runs. Batch status shows each finished lane's tail once per session; request one lane or pass tail_chars to see it again. wait_seconds above 55 is clamped to 55; invalid numeric values return a typed rejection.",
   {
     ids: ids(),
     id: str,
@@ -517,19 +520,35 @@ register(
     } catch {
       // Fall through with no ownership rows.
     }
-    // A short answer should not cost a second call: terminal rows carry the end of their result.
+    // A short answer should not cost a second call: a terminal row carries the end of its result
+    // the first time this session sees it, so batch polls do not resend finished lanes.
     const rows: Record<string, any>[] = Array.isArray(result.runs) ? result.runs : [];
     const localHost = (result as Record<string, any>).hosts?.find((host: Record<string, any>) => host.local)?.host;
     const terminal = rows.filter((row) => row.state === "terminal" && (!row.host || row.host === localHost));
-    const each = Math.min(tail_chars ?? 1200, Math.floor(Math.max(3600, tail_chars ?? 0) / Math.max(1, terminal.length)));
-    const tails = detail === "full" ? [] : terminal.flatMap((row) => {
+    const oneLaneRequested = rows.length === 1 && (
+      (id !== undefined && id !== rows[0]?.batch_id) ||
+      (ids?.length === 1 && ids[0] !== rows[0]?.batch_id)
+    );
+    const laneKey = (row: Record<string, any>) => `${who.project}:${row.run_id}:${row.task_id}:${row.attempt}`;
+    const tailed = tail_chars === 0 || (detail === "full" && tail_chars === undefined) ? [] : terminal.filter((row) =>
+      oneLaneRequested || tail_chars !== undefined || !tailedLanes.has(laneKey(row)));
+    for (const row of tailed) {
+      tailedLanes.delete(laneKey(row));
+      tailedLanes.add(laneKey(row));
+    }
+    while (tailedLanes.size > 4096) tailedLanes.delete(tailedLanes.values().next().value as string);
+    const each = Math.min(tail_chars ?? 1200, Math.floor(Math.max(3600, tail_chars ?? 0) / Math.max(1, tailed.length)));
+    const tails = tailed.flatMap((row) => {
       const tail = resultTail(row, each);
       return tail ? [`result tail ${row.task_id ?? row.run_id}${tail.total > tail.text.length ? " (end)" : ""}:\n${tail.text}`] : [];
     });
     const running = rows.some((row) => row.state === "running" || row.state === "queued");
+    const pollHint = wait_seconds === undefined && rows.length > 0 && rows.every((row) => row.state === "running")
+      ? 'hint: pass wait_seconds: 55 to block (or use `provenant lanes --wait --all --timeout 900`)'
+      : 'hint: shell `provenant lanes --wait --all --timeout 900` blocks until they finish';
     const ownership = [
       ...tails,
-      ...(running ? ['hint: shell `provenant lanes --wait --all --timeout 900` blocks until they finish'] : []),
+      ...(running ? [pollHint] : []),
       ...workClaims.map((claim) => `claim ${claim.issue ?? claim.paths.join(",")} ${claim.holder} g${claim.generation}`),
       ...(landingLease ? [`landing ${landingLease.holder} g${landingLease.generation} ${landingLease.expectedSha}`] : []),
     ];
@@ -541,29 +560,40 @@ register(
 register("fabric_work_claim", "Acquire, renew, verify or release an advisory issue or path claim.", {
   action: z.enum(["acquire", "renew", "verify", "release"]), session_id: z.string().min(1),
   issue: str, paths: z.array(z.string()).optional(), id: str,
-  generation: z.number().int().positive().optional(), seconds: z.number().int().min(1).max(3600).optional(),
+  generation: z.number().int().positive().optional(), seconds: z.number().int().min(1).optional(),
 }, ({ action, session_id, issue, paths, id, generation, seconds }) => {
-  if (action === "acquire") return readyStore().acquireWork(who, session_id, { issue, paths }, seconds ?? 900);
+  const ttl = Math.min(seconds ?? 900, 3600);
+  const warnings = seconds > 3600 ? [`seconds ${seconds} clamped to 3600`] : [];
+  if (action === "acquire") return withWarnings(readyStore().acquireWork(who, session_id, { issue, paths }, ttl), warnings);
   if (!id || generation === undefined) throw new Error("id and generation are required");
-  if (action === "renew") return readyStore().renewWork(who, session_id, id, generation, seconds ?? 900);
+  if (action === "renew") return withWarnings(readyStore().renewWork(who, session_id, id, generation, ttl), warnings);
   if (action === "verify") return readyStore().verifyWork(who, session_id, id, generation);
   readyStore().releaseWork(who, session_id, id, generation);
   return { released: id, generation };
 });
-register("fabric_landing_lease", "Acquire, renew, verify or release the repository landing lease.", {
-  action: z.enum(["acquire", "renew", "verify", "release"]), session_id: z.string().min(1),
+register("fabric_landing_lease",
+  "Acquire, renew, verify or release the repository landing lease. action=wait blocks up to wait_seconds (max 55) " +
+  "until the lease changes hands or frees; use it instead of sleep loops. expected_sha may be short or uppercase.", {
+  action: z.enum(["acquire", "renew", "verify", "release", "wait"]), session_id: z.string().min(1),
   expected_sha: str, generation: z.number().int().positive().optional(),
-  seconds: z.number().int().min(1).max(3600).optional(),
-}, ({ action, session_id, expected_sha, generation, seconds }) => {
-  if (action === "acquire") {
-    if (!expected_sha) throw new Error("expected_sha is required");
-    return readyStore().acquireLanding(who, session_id, expected_sha, seconds ?? 300);
+  seconds: z.number().int().min(1).max(3600).optional(), wait_seconds: z.number().optional(),
+}, async ({ action, session_id, expected_sha, generation, seconds, wait_seconds }, { signal }) => {
+  if (action === "wait") {
+    const bounded = boundedWait(wait_seconds ?? MAX_WAIT_SECONDS);
+    if (bounded.error) return bounded.error;
+    const waited = await readyStore().waitLanding(who.project, bounded.value!, signal);
+    return withWarnings({ changed: waited.changed, landing_lease: waited.lease }, bounded.warnings);
   }
-  if (generation === undefined) throw new Error("generation is required");
+  if (action === "acquire") {
+    if (!expected_sha) throw new Error("expected_sha is required: the integration branch's current remote SHA");
+    return readyStore().acquireLanding(who, session_id, resolveCommitSha(who.cwd, expected_sha), seconds ?? 300);
+  }
+  if (generation === undefined)
+    throw new Error("generation is required: pass the generation returned by action=acquire (fabric_status shows the live one)");
   if (action === "renew") return readyStore().renewLanding(who, session_id, generation, seconds ?? 300);
   if (action === "verify") {
     if (!expected_sha) throw new Error("expected_sha is required");
-    return readyStore().verifyLanding(who, session_id, generation, expected_sha);
+    return readyStore().verifyLanding(who, session_id, generation, resolveCommitSha(who.cwd, expected_sha));
   }
   readyStore().releaseLanding(who, session_id, generation);
   return { released: generation };
@@ -599,6 +629,11 @@ register("fabric_cancel", "Stop a run and its provider group, or one task of a b
   const view = runView(result);
   return detail === "full" ? view : { ...view, digest: cancelDigest(view) };
 });
+register("fabric_fetch", "Fetch one terminal remote writer: verify on the owning host, import its commits and compare the bound head.",
+  { id: z.string() }, async (input, { signal }) =>
+    await federatedLane("fetch", who.cwd, input, signal) ??
+      { status: "rejected", error: "remote_host_required", fix: "Qualify a remote writer ID with its host." },
+);
 register(
   "fabric_output",
   "Read output; continue at next_offset. max_bytes above 20000 is clamped with a warning; invalid numeric values return a typed rejection.",
@@ -666,13 +701,19 @@ register("fabric_hosts", "List hosts or diagnose peers over SSH.", {
   action: z.enum(["list", "doctor"]).default("list"),
   hosts: z.array(z.string()).optional(),
 }, ({ action, hosts }, { signal }) => fabricHosts(action, hosts ?? [], who.cwd, signal));
-register("fabric_adapters", "List routes and guarantees; full includes profiles; models lists one adapter's live models.", {
+register("fabric_adapters", "List routes and guarantees; full includes profiles; models lists one adapter's live models; action reset clears cooldowns.", {
   detail,
   models: z.string().max(40).optional().describe("Adapter whose live models to list (cached probe)."),
   match: z.string().max(80).optional().describe("Substring filter for models."),
-}, ({ detail, models, match }) =>
-  models === undefined ? adapterView(catalogueSnapshot(), detail) : liveModels(models, { match }),
-);
+  action: z.enum(["reset"]).optional().describe("reset clears cooldowns (selector: adapter or adapter/model; omit for all); use after the user says usage is back or switches accounts."),
+  selector: z.string().min(1).max(80).optional(),
+}, ({ detail, models, match, action, selector }) => {
+  if (action === "reset") {
+    const removed = resetCooldowns(selector);
+    return { digest: removed.length ? `cleared: ${removed.join(" ")}` : "no cooldowns matched" };
+  }
+  return models === undefined ? adapterView(catalogueSnapshot(), detail) : liveModels(models, { match });
+});
 if (process.env.FABRIC_LEGACY_TOOLS === "1") {
   register("fabric_batch", "Run a task batch.", batch, (input, { signal }) =>
     dispatchConfiguredBatch(input, executionIdentity(), signal),

@@ -73,3 +73,18 @@ taxonomy.
 ## 8. Wrong-home repair
 
 When a passage is doing the wrong job, move it before rewriting it; wrong-home material usually gets worse when polished in place. Common moves: design rationale buried in a README goes to an ADR or design doc; requirements detail in a business case goes to the SRS; implementation narrative in a PR description goes to code comments or the design doc; status and roadmap material in a README goes to the roadmap or changelog; argument for a decision goes to the ADR, and the ADR is then linked, not restated.
+
+## Style passes and fidelity
+
+A model-assisted style pass is a rewrite, not an edit. Never adopt it on the
+rewriter's own change ledger: send source and rewrite to an independent
+read-only audit on fixed axes (dropped facts, citations or status markers,
+promoted hedges, weakened warnings or gates, invented content) and adopt only
+on an explicit verdict of adopt, adopt with fixes or reject. Concision,
+"no negative prose" and "no hedging" lenses delete exclusions, markers of
+unverified claims and the qualifiers that make a gate a gate. Brief the pass to
+preserve every claim, number, citation, named owner, gate and the
+observed/believed/recommended distinction. Treat word-count ceilings as
+targets, not requirements. Never style-pass constraints, gates, credential
+custody, decision records or literal process docs and runbooks; edit those by
+hand. Check first whether tests match exact phrases in the document.

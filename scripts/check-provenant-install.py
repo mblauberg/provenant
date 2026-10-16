@@ -13,6 +13,7 @@ import tomllib
 
 from lib.jsonc import parse_jsonc
 from lib.product_root_resolver import POINTER_RELATIVE_PATH, load_pointer_file
+from lib.stale_checkout import warn_if_stale_checkout
 from instance_installation import InstallError, routing_drift
 
 
@@ -92,6 +93,7 @@ def main() -> int:
     if (pointer.exists() or pointer.is_symlink()) and pointed_product is None:
         print(f"FAIL: product-root pointer is invalid or stale at {pointer}", file=sys.stderr)
         return 1
+    warn_if_stale_checkout(pointed_product or ROOT)
     if pointed_product is None or pointed_product.resolve() != ROOT.resolve():
         print("provenant installed stub=not-owned-by-this-checkout")
         return 0

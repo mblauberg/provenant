@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import tomllib
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -109,12 +110,42 @@ def test_read_only_git_config_allowlist_is_limited_to_the_two_global_files(monke
 
     assert f'(literal "{home / ".gitconfig"}")' in profile
     assert f'(literal "{xdg / "git/config"}")' in profile
-    assert f'(subpath "{home}")' in profile
     assert f'(literal "{home / ".ssh/config"}")' not in profile
+    # OpenCode v2 stats the home ancestry: home stays denied, discovery is re-allowed by literal.
+    assert f'(subpath "{home}")' in profile
+    assert f'(literal "{(tmp_path).resolve()}")' in profile
+    assert f'(literal "{home / ".claude"}")' in profile
+    assert f'(literal "{home / ".agents/AGENTS.md"}")' in profile
+    assert f'(literal "{tmp_path.resolve() / "AGENTS.md"}")' in profile
+    other = supervisor.os_confinement_profile({**plan, "adapter": "gemini"})
+    assert f'(subpath "{home}")' in other
 
     monkeypatch.delenv("XDG_CONFIG_HOME")
     default_profile = supervisor.os_confinement_profile(plan)
     assert f'(literal "{home / ".config/git/config"}")' in default_profile
+
+
+def test_opencode_read_only_discovery_skips_symlinks_to_credentials(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    home = (tmp_path / "home").resolve()
+    (home / ".ssh").mkdir(parents=True)
+    key = home / ".ssh/id_ed25519"
+    key.write_text("secret")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (tmp_path / "AGENTS.md").symlink_to(key)
+    real = tmp_path / "real" / "CLAUDE.md"
+    real.parent.mkdir()
+    real.write_text("ok")
+    (tmp_path / "CLAUDE.md").symlink_to(real)
+    monkeypatch.setattr(supervisor.Path, "home", lambda: home)
+    plan = {
+        "adapter": "opencode", "mode": "read_only", "workspace_root": str(workspace),
+        "cwd": str(workspace), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    }
+    profile = supervisor.os_confinement_profile(plan)
+    assert "id_ed25519" not in profile
+    assert f'(literal "{real.resolve()}")' in profile
 
 
 @pytest.mark.parametrize("adapter", ["agy", "claude", "cursor", "opencode", "kiro"])
@@ -733,6 +764,63 @@ def test_claude_read_only_profile_reads_login_keychain_only_for_oauth_lanes(
     assert f'(subpath "{home / "Library/Keychains"}")' not in allow
 
 
+def test_read_only_profile_reads_the_adapter_binary_through_its_launcher_link_and_install_folder(monkeypatch, tmp_path):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    workspace = home / "repo"
+    install = home / ".local/share/cursor-agent/versions/1.0-abc"
+    other = home / ".local/share/cursor-agent/versions/0.9-old"
+    for directory in (workspace, install, other, home / ".local/bin", home / ".ssh"):
+        directory.mkdir(parents=True)
+    (install / "cursor-agent").write_text("#!/bin/sh\nexec cat \"$(dirname \"$(readlink \"$0\")\")/index.js\"\n", encoding="utf-8")
+    (install / "cursor-agent").chmod(0o755)
+    (install / "index.js").write_text("ok\n", encoding="utf-8")
+    (other / "index.js").write_text("old\n", encoding="utf-8")
+    (home / ".ssh/id").write_text("secret\n", encoding="utf-8")
+    (home / ".local/bin/cursor-agent").symlink_to(install / "cursor-agent")
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    plan = {"adapter": "cursor", "mode": "read_only", "workspace_root": str(workspace), "cwd": str(workspace),
+            "argv": ["cursor-agent"], "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    search_path = os.pathsep.join([str(home / ".local/bin"), "/usr/bin", "/bin"])
+    profile = mod.os_confinement_profile(plan, search_path)
+    reads = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-read-data "))
+    assert f'(literal "{home}/.local/bin/cursor-agent")' in reads
+    assert f'(subpath "{install}")' in reads
+    # cursor-agent signs in through the login keychain.
+    assert f'(subpath "{home}/Library/Keychains/login.keychain-db")' in reads
+    # The link's folder, its sibling versions and the rest of home stay closed.
+    assert f'(subpath "{home / ".local/bin"}")' not in reads
+    assert f'(subpath "{other}")' not in reads
+    assert f'(subpath "{home / ".local/share/cursor-agent"}")' not in reads
+    sandbox_exec = mod._sandbox_exec_path()
+    if sys.platform != "darwin" or not sandbox_exec:
+        return
+    launched = subprocess.run([sandbox_exec, "-p", profile, str(home / ".local/bin/cursor-agent")],
+                              capture_output=True, text=True)
+    if launched.returncode and "sandbox_apply" in launched.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert launched.returncode == 0, launched.stderr
+    assert launched.stdout == "ok\n"
+    for denied in (other / "index.js", home / ".ssh/id"):
+        refused = subprocess.run([sandbox_exec, "-p", profile, "/bin/cat", str(denied)],
+                                 capture_output=True, text=True)
+        assert refused.returncode != 0, denied
+
+
+def test_adapter_binary_in_a_plain_bin_directory_grants_the_file_alone(monkeypatch, tmp_path):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    (home / ".local/bin").mkdir(parents=True)
+    tool = home / ".local/bin/tool"
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    tool.chmod(0o755)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    links, directories = mod._adapter_binary_reads({"argv": ["tool"]}, str(home / ".local/bin"))
+    assert links == [tool]
+    assert directories == []
+
+
 KIRO_SUPPORT = "Library/Application Support/kiro-cli"
 # Files in Kiro's support directory that the user's shell sources or that Kiro executes.
 KIRO_EXECUTABLES = ("shell/zshrc.pre.zsh", "shell/bashrc.post.bash", "node", "bun", "tui.js",
@@ -1191,6 +1279,21 @@ def test_sandbox_exec_profile_confines_reads_to_temp_subdirectory(tmp_path):
 
 def supervisor():
     return importlib.import_module("skills.orchestrate.scripts.provider_exec")
+
+
+def test_daily_catalogue_notes_are_not_promoted_back_to_dispatch_warnings(tmp_path, monkeypatch, capsys):
+    router = importlib.import_module('scripts.model_route')
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    monkeypatch.setenv('PROVENANT_NO_OS_CONFINEMENT', '1')
+    note = router._NEWER_NOTE.format('fixture-new-model')
+    for first in (True, False):
+        router.emit({'status': 'ok', 'resolved_model': 'fixture', 'notes': ['ordinary route note'],
+                     'warnings': [note]}, 0)
+        route = json.loads(capsys.readouterr().out)
+        plan = supervisor().build_plan('codex', route, 'hello', cwd=tmp_path, workspace_root=tmp_path)
+        assert (note in plan['warnings']) is first
+        assert 'ordinary route note' in plan['warnings']
+        assert note in plan['route']['notes']
 
 
 @pytest.mark.parametrize(
@@ -2031,6 +2134,12 @@ def test_opencode_read_only_declares_fully_denied_bash_tool(tmp_path):
     permission = json.loads((tmp_path / "result.md").read_text())["permission"]
     assert permission["bash"]["*"] == "deny"
     assert permission["bash"]["provenant-no-shell"] == "allow"
+
+
+def test_opencode_run_disables_foreign_instruction_discovery(tmp_path):
+    code = "import json, os; print(json.dumps({'type':'result','result':os.environ.get('OPENCODE_DISABLE_CLAUDE_CODE','') + os.environ.get('OPENCODE_DISABLE_AUTOUPDATE','')}))"
+    supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert (tmp_path / "result.md").read_text() == "11"
 
 
 def test_opencode_free_tier_refusal_is_model_unavailable(tmp_path):
@@ -3296,6 +3405,76 @@ time.sleep(60)
         pytest.fail("provider child survived startup_timeout")
 
 
+@pytest.mark.parametrize("stream", ["stderr", "error_event"])
+@pytest.mark.parametrize("reset", ["Resets in 2 days.", ""])
+def test_opencode_quota_hang_fails_fast_and_cools_only_its_model(tmp_path, stream, reset):
+    message = "Monthly usage limit reached. " + reset
+    payload = (json.dumps({"type": "error", "error": {"message": message}})
+               if stream == "error_event" else "ERROR " + "context=" + "x" * 220 + " error=" + message)
+    code = f"""import sys,time
+sys.{ 'stdout' if stream == 'error_event' else 'stderr' }.write({payload[:25]!r})
+sys.{ 'stdout' if stream == 'error_event' else 'stderr' }.flush()
+time.sleep(0.1)
+sys.{ 'stdout' if stream == 'error_event' else 'stderr' }.write({(payload[25:] + chr(10))!r})
+sys.{ 'stdout' if stream == 'error_event' else 'stderr' }.flush()
+time.sleep(30)
+"""
+    plan = fixture_plan(tmp_path, code, "opencode", startup_seconds=0.6, idle_seconds=0.6, timeout_seconds=3)
+    plan["model"] = "opencode-go/glm-5"
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "usage_limited"
+    assert record["evidence"]["signature"] == "quota_exhausted"
+    assert record["evidence"]["termination_source"] == "usage_limited"
+    assert record["retryable"] is True
+    assert record["retry_after"] == (None if reset else 24 * 3600)
+    from skills.orchestrate.scripts import fabric_records
+    record["run_id"] = "fixture"
+    path = tmp_path / "cooldowns.json"
+    at = datetime.now(UTC)
+    fabric_records.write_cooldown(record, path=path, at=at)
+    cooldown = fabric_records.read_cooldowns(path, at)
+    assert set(cooldown) == {"opencode/opencode-go/glm-5"}
+    until = fabric_records.parse_time(cooldown["opencode/opencode-go/glm-5"]["cooling_until"])
+    if reset:
+        assert timedelta(days=1) < until - at < timedelta(days=3)
+    else:
+        assert until - at == timedelta(hours=24)
+
+
+def test_opencode_launch_exposes_error_logs_for_silent_quota_hangs(tmp_path):
+    from adapters import opencode
+    plan = fixture_plan(tmp_path, "pass", "opencode")
+    command = opencode.argv(plan)
+    assert "--print-logs" in command
+    assert command[command.index("--log-level") + 1] == "error"
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_kiro_browser_login_hang_fails_fast_with_auth_fix(tmp_path, stream):
+    code = f"""import sys,time
+sys.{stream}.write('Opening brow')
+sys.{stream}.flush()
+time.sleep(0.1)
+sys.{stream}.write('ser...\\n')
+sys.{stream}.flush()
+time.sleep(30)
+"""
+    plan = fixture_plan(tmp_path, code, "kiro", startup_seconds=0.6, idle_seconds=0.6, timeout_seconds=3)
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "auth_required"
+    assert record["evidence"]["signature"] == "auth_expired"
+    assert record["evidence"]["termination_source"] == "auth_required"
+    assert record["fix"] == "run `kiro-cli whoami` outside the sandbox"
+
+
+@pytest.mark.parametrize("adapter,text", [("opencode", "Monthly usage limit reached. Resets in 2 days."),
+                                          ("kiro", "Opening browser...")])
+def test_failure_phrases_in_assistant_prose_are_not_live_errors(tmp_path, adapter, text):
+    event = json.dumps({"type": "text", "text": text})
+    plan = fixture_plan(tmp_path, f"print({event!r})", adapter)
+    assert supervisor().execute(plan, tmp_path / "result.md")["status"] == "ok"
+
+
 def test_provider_output_before_startup_window_keeps_running(tmp_path):
     code = """import json,time
 print(json.dumps({'type':'thread.started','thread_id':'t1'}), flush=True)
@@ -3728,9 +3907,9 @@ def test_opencode_observed_model_comes_from_export(tmp_path):
     cli.write_text(
         "#!/usr/bin/env python3\n"
         "import json, os, pathlib, sys\n"
-        "if sys.argv[1] == 'export':\n"
+        "if sys.argv[1:3] == ['session', 'export'] and '--standalone' in sys.argv:\n"
         f"    pathlib.Path({str(pwd_file)!r}).write_text(os.environ['PWD'])\n"
-        "    print(json.dumps({'messages':[{'info':{'providerID':'opencode-go','modelID':'deepseek-v4.1-flash'}}]}))\n"
+        "    print(json.dumps({'info':{'model':{'providerID':'opencode-go','id':'deepseek-v4.1-flash','variant':'default'}}}))\n"
     )
     cli.chmod(0o755)
     plan = fixture_plan(
@@ -3745,7 +3924,7 @@ def test_opencode_observed_model_comes_from_export(tmp_path):
         env={**os.environ, "PATH": str(tmp_path) + ":" + os.environ["PATH"], "PWD": str(tmp_path)},
     )
     assert record["provenance"]["observed_model"] == "opencode-go/deepseek-v4.1-flash"
-    assert record["provenance"]["observed_source"] == "opencode:export.modelID"
+    assert record["provenance"]["observed_source"] == "opencode:session-export.info.model"
     assert pwd_file.read_text() == str(child)
 
 
@@ -3922,6 +4101,7 @@ def test_codex_permissions_profile_name_is_unique_to_each_plan(tmp_path):
     assert all(re.fullmatch(r"provenant-[0-9a-f]{32}", name) for name in names), names
 
 
+@pytest.mark.live_provider
 @pytest.mark.skipif(sys.platform != "darwin" or shutil.which("codex") is None,
                     reason="needs the codex CLI's macOS sandbox")
 @pytest.mark.parametrize("resume", [None, "thread-1"], ids=["fresh", "resume"])
@@ -4080,8 +4260,14 @@ def test_codex_writer_authoring_instructions_fails_under_deny_policy(tmp_path, e
     _, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, edit, policy={"instruction_changes": "deny"})
     assert record["status"] == "failed"
-    assert record["error"] == "protected_instructions_changed"
-    assert record["evidence"]["signature"] == "protected_instructions_changed"
+    assert record["landable"] is False
+    assert record["quarantine"]["restored"] is False
+    assert "instruction edits remain on the lane branch" in record["fix"]
+    assert (tmp_path / "attempt/protected.patch").is_file()
+    assert str(tmp_path / "attempt/protected.patch") in record["quarantine"]["patches"]
+    assert Path(record["output_path"]).read_text() == "done"
+    assert record["error"] == record["evidence"]["signature"] == (
+        "protected_instructions_unverifiable" if "pipe" in edit else "protected_instructions_changed")
     assert any(".agents/skills/fixture/" in warning.casefold() for warning in record["warnings"])
 
 
@@ -4101,7 +4287,14 @@ def test_codex_writer_instruction_changes_are_quarantined_by_default(tmp_path, e
     start = git(lane, "rev-parse", "HEAD").strip()
     record = lane_attempt(tmp_path, lane, edit)
     patch = tmp_path / "attempt" / "protected.patch"
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
+    assert record["exit"] == 0
+    assert record["landable"] is False
+    assert record["retryable"] is False
+    assert record["quarantine"]["restored"] is True
+    assert str(patch) in record["quarantine"]["patches"]
+    assert Path(record["output_path"]).read_text() == "done"
+    assert record["certification_eligible"] is False
     assert "error" not in record
     assert any("quarantined" in warning and str(patch) in warning for warning in record["warnings"]), record["warnings"]
     # The lane's result no longer carries the change: HEAD, index and files match its start.
@@ -4122,7 +4315,7 @@ def test_quarantine_keeps_the_integration_branch_version_a_lane_merged(tmp_path)
     repo, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, "git('merge', '-q', '--no-edit', 'main')\n"
                           f"open({SKILL!r}, 'w').write('v2 lane\\n'); git('commit', '-q', '-am', 'edit')\n")
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
     assert (lane / SKILL).read_text() == "v2\n"
     git(repo, "apply", str(tmp_path / "attempt" / "protected.patch"))
     assert (repo / SKILL).read_text() == "v2 lane\n"
@@ -4135,7 +4328,7 @@ def test_quarantine_never_follows_a_planted_patch_link(tmp_path):
     record = lane_attempt(tmp_path, lane, f"os.symlink({str(outside)!r}, {str(patch)!r})\n"
                           f"open({SKILL!r}, 'w').write('lane edit\\n')\n")
     assert not outside.exists()
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
     assert not patch.is_symlink() and "lane edit" in patch.read_text()
 
 
@@ -4148,7 +4341,7 @@ def test_quarantine_restores_each_starting_view(tmp_path):
     (lane / SKILL).write_text("disk start\n")  # staged and unstaged edits at the start
     record = lane_attempt(tmp_path, lane, f"open({notes!r}, 'w').write('lane notes\\n')\n"
                           f"open({SKILL!r}, 'w').write('lane edit\\n'); git('add', {SKILL!r})\n")
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
     assert (lane / notes).read_text() == "start notes\n"
     assert (lane / SKILL).read_text() == "disk start\n"
     assert git(lane, "show", ":" + SKILL) == "staged start\n"
@@ -4168,7 +4361,7 @@ def test_quarantine_restores_and_reports_an_untracked_start_file_the_lane_remove
     (lane / notes).parent.mkdir()
     (lane / notes).write_text("start notes\n")  # untracked at the start
     record = lane_attempt(tmp_path, lane, script)
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
     assert not (lane / ".agents/local").is_symlink()
     assert (lane / notes).read_text() == "start notes\n"
     assert any("quarantined" in warning and notes in warning for warning in record["warnings"]), record["warnings"]
@@ -4178,20 +4371,22 @@ def test_quarantine_archives_a_staged_change_the_disk_no_longer_shows(tmp_path):
     _, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('staged lane\\n'); git('add', {SKILL!r})\n"
                           f"open({SKILL!r}, 'w').write('v1\\n')\n")
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
     assert git(lane, "show", ":" + SKILL) == "v1\n"
     archived = [warning for warning in record["warnings"] if "quarantined" in warning]
     assert archived and "protected.index.patch" in archived[0], record["warnings"]
     assert "staged lane" in (tmp_path / "attempt" / "protected.index.patch").read_text()
+    assert (tmp_path / "attempt" / "protected.patch").read_bytes() == b""
+    assert len(record["quarantine"]["patches"]) == 2
 
 
-@pytest.mark.parametrize("policy, status", [(None, "ok"), ({"instruction_changes": "deny"}, "failed")])
+@pytest.mark.parametrize("policy, status", [(None, "quarantined"), ({"instruction_changes": "deny"}, "failed")])
 def test_a_merge_that_discards_integration_instruction_changes_is_caught(tmp_path, policy, status):
     _, lane = instruction_lane(tmp_path)
     git(lane, "reset", "-q", "--hard", "HEAD~1")  # the lane starts from main's old commit
     record = lane_attempt(tmp_path, lane, "git('merge', '-q', '-s', 'ours', '--no-edit', 'main')\n", policy=policy)
     assert record["status"] == status, record
-    if status == "ok":
+    if policy is None:
         assert (lane / SKILL).read_text() == "v2\n"
         assert git(lane, "show", "HEAD:" + SKILL) == "v2\n"
     else:
@@ -4213,7 +4408,7 @@ def test_a_merge_that_keeps_the_lanes_own_earlier_change_to_a_path_both_sides_ch
 def test_other_writer_adapters_have_instruction_changes_quarantined(tmp_path):
     _, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('lane edit\\n')\n", adapter="claude")
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
     assert (lane / SKILL).read_text() == "v1\n"
     assert any("quarantined" in warning for warning in record["warnings"])
 
@@ -4232,17 +4427,21 @@ def test_unknown_instruction_policy_warns_and_quarantines(tmp_path):
     _, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('lane edit\\n')\n",
                           policy={"instruction_changes": "alow"})
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
     assert (lane / SKILL).read_text() == "v1\n"
     assert any("instruction_changes" in warning for warning in record["warnings"])
 
 
 @pytest.mark.parametrize("policy", [None, {"instruction_changes": "allow"}], ids=["default", "allow"])
-def test_case_variant_and_special_instruction_changes_still_fail(tmp_path, policy):
+def test_special_instruction_changes_fail_a_successful_result(tmp_path, policy):
     _, lane = instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, "os.mkfifo('.agents/skills/fixture/pipe')\n", policy=policy)
     assert record["status"] == "failed"
-    assert record["error"] == "protected_instructions_changed"
+    assert "instruction edits remain on the lane branch" in record["fix"]
+    assert record["error"] == "protected_instructions_unverifiable"
+    assert record["landable"] is False
+    assert record["quarantine"]["patch_error"]
+    assert Path(record["output_path"]).read_text() == "done"
 
 
 def test_codex_writer_may_run_instruction_scripts(tmp_path):
@@ -4268,11 +4467,12 @@ def test_codex_writer_committing_an_instruction_root_entry_fails(tmp_path):
     assert any(warning.endswith(": .agents") for warning in record["warnings"])
 
 
-def test_codex_writer_unresolved_instruction_conflict_fails(tmp_path):
+def test_codex_writer_unresolved_instruction_conflict_fails_with_instruction_changes(tmp_path):
     _, lane = instruction_lane(tmp_path)
     (lane / SKILL).write_text("branch edit\n")
     git(lane, "commit", "-q", "-am", "reviewed skill edit")
     record = lane_attempt(tmp_path, lane, f"subprocess.run(['git', *{GIT_FIXTURE!r}, 'merge', '-q', 'main'])\n")
+    assert record["status"] == "failed"
     assert record["error"] == "protected_instructions_changed"
     assert any(SKILL + " (unresolved conflict)" in warning for warning in record["warnings"])
 
@@ -4283,7 +4483,7 @@ def test_codex_writer_unresolved_instruction_conflict_fails(tmp_path):
     "os.symlink('../elsewhere', '.agents')\n",
     "open('.agents/big', 'wb').truncate(1 << 40)\n",
 ], ids=["unreadable", "root-symlink", "oversized"])
-def test_codex_writer_hiding_instructions_fails(tmp_path, script):
+def test_codex_writer_unverifiable_instructions_fail_a_successful_result(tmp_path, script):
     _, lane = instruction_lane(tmp_path)
     hidden = lane / ".agents" / "hidden"
     try:
@@ -4291,7 +4491,9 @@ def test_codex_writer_hiding_instructions_fails(tmp_path, script):
     finally:
         if hidden.exists():
             hidden.chmod(0o755)
-    assert record["error"] == "protected_instructions_changed"
+    assert record["status"] == "failed"
+    assert record["error"] == "protected_instructions_unverifiable"
+    assert record["landable"] is False
     assert any("unverifiable" in warning for warning in record["warnings"])
 
 
@@ -4406,7 +4608,7 @@ def test_plan_only_honors_read_only_cwd_inside_workspace(tmp_path):
     assert json.loads(result.stdout)["cwd"] == str(child)
 
 
-def test_opencode_argv_always_pins_plan_cwd(tmp_path):
+def test_opencode_v2_argv_is_standalone_and_has_no_v1_flags(tmp_path):
     adapter = importlib.import_module("skills.orchestrate.scripts.adapters.opencode")
     plan = {
         "worktree": "",
@@ -4417,7 +4619,96 @@ def test_opencode_argv_always_pins_plan_cwd(tmp_path):
         "prompt": "hello",
     }
     argv = adapter.argv(plan)
-    assert argv[argv.index("--dir") + 1] == str(tmp_path)
+    assert argv[:3] == ["opencode", "run", "--standalone"]
+    assert "--dir" not in argv and "--variant" not in argv
+    assert argv[argv.index("--model") + 1] == "opencode/mimo-v2.6-flash-free"
+
+
+def test_opencode_v2_argv_carries_effort_as_model_variant_and_resume(tmp_path):
+    adapter = importlib.import_module("skills.orchestrate.scripts.adapters.opencode")
+    base = {"worktree": "", "cwd": str(tmp_path), "resume_session": "ses_1", "prompt": "hi"}
+    argv = adapter.argv({**base, "model": "opencode/glm-5.3-flash-free", "effort": "high"})
+    assert argv[argv.index("--model") + 1] == "opencode/glm-5.3-flash-free#high"
+    assert argv[argv.index("-s") + 1] == "ses_1"
+    # An id that already names its variant is not suffixed twice.
+    argv = adapter.argv({**base, "model": "opencode/x#low", "effort": "high"})
+    assert argv[argv.index("--model") + 1] == "opencode/x#low"
+
+
+@pytest.mark.parametrize("text,ok", [("opencode v2.0.30", True), ("2.1.0", True), ("1.14.2", False),
+                                     ("opencode v1.0.0", False), ("", True), ("garbage", True)])
+def test_opencode_version_gate_names_a_fix_for_v1(text, ok):
+    adapter = importlib.import_module("skills.orchestrate.scripts.adapters.opencode")
+    error = adapter.version_error(text)
+    assert (error is None) is ok
+    assert ok or "fix: upgrade OpenCode to v2" in error
+
+
+def test_opencode_version_probe_failure_is_not_cached(tmp_path, monkeypatch):
+    cli = tmp_path / "bin" / "opencode"
+    cli.parent.mkdir()
+    cli.write_text("#!/bin/sh\necho nothing\n")
+    cli.chmod(0o755)
+    mod = supervisor()
+    mod._OPENCODE_VERSION_CACHE.clear()
+    assert mod._opencode_version_error("opencode", str(cli.parent)) is None
+    assert mod._OPENCODE_VERSION_CACHE == {}
+    cli.write_text("#!/bin/sh\necho 1.2.3\n")
+    assert "unsupported" in mod._opencode_version_error("opencode", str(cli.parent))
+    mod._OPENCODE_VERSION_CACHE.clear()
+
+
+def test_opencode_v1_cli_is_refused_at_planning(tmp_path, monkeypatch):
+    cli = tmp_path / "bin" / "opencode"
+    cli.parent.mkdir()
+    cli.write_text("#!/bin/sh\necho 1.14.2\n")
+    cli.chmod(0o755)
+    monkeypatch.setenv("PATH", str(cli.parent) + ":" + os.environ["PATH"])
+    mod = supervisor()
+    mod._OPENCODE_VERSION_CACHE.clear()
+    with pytest.raises(ValueError, match="unsupported; fix: upgrade OpenCode to v2"):
+        mod.build_plan("opencode", {"resolved_model": "opencode/x"}, "hello", cwd=tmp_path, workspace_root=tmp_path)
+    mod._OPENCODE_VERSION_CACHE.clear()
+
+
+@pytest.mark.parametrize("message,status,signature", [
+    ("Model unavailable: opencode/nope", "model_unavailable", "model_unavailable"),
+    ("Invalid model reference: bogus", "model_unavailable", "model_unavailable"),
+    ("Variant unavailable for opencode/x: bogusvar", "rejected", "invalid_input"),
+])
+def test_opencode_v2_error_events_are_typed(message, status, signature):
+    event = json.dumps({"type": "error", "sessionID": "ses_1", "error": {"type": "provider.no-route", "message": message}})
+    parsed = supervisor().parse_output("opencode", event + "\n", "", 1)
+    assert (parsed["status"], parsed["signature"]) == (status, signature)
+
+
+def test_opencode_bad_variant_fix_names_the_variant_to_drop():
+    event = json.dumps({"type": "error", "error": {"type": "provider.no-route", "message": "Variant unavailable for opencode/x: high"}})
+    fix = supervisor()._variant_fix(event)
+    assert fix.startswith("opencode/x has no `high` variant; drop --effort or `#high`")
+    assert supervisor()._variant_fix("plain input error") == "plain input error"
+
+
+def test_opencode_v2_events_yield_text_session_and_terminal():
+    lines = [
+        {"type": "step_start", "sessionID": "ses_9", "part": {"type": "step-start"}},
+        {"type": "tool_use", "sessionID": "ses_9", "part": {"tool": "read", "state": {"status": "completed"}}},
+        {"type": "text", "sessionID": "ses_9", "part": {"type": "text", "text": "PONG"}},
+        {"type": "step_finish", "sessionID": "ses_9", "part": {"type": "step-finish", "reason": "stop"}},
+    ]
+    parsed = supervisor().parse_output("opencode", "\n".join(map(json.dumps, lines)) + "\n", "", 0)
+    assert (parsed["status"], parsed["text"], parsed["session_id"], parsed["terminal"]) == ("ok", "PONG", "ses_9", True)
+
+
+def test_opencode_v2_single_text_event_without_step_events_is_ok():
+    event = {"type": "text", "sessionID": "ses_9", "part": {"type": "text", "text": "PONG"}}
+    assert supervisor().parse_output("opencode", json.dumps(event) + "\n", "", 0)["status"] == "ok"
+
+
+@pytest.mark.parametrize("stdout", ["", json.dumps({"type": "step_start", "sessionID": "s", "part": {}}) + "\n"])
+def test_opencode_exit_zero_without_assistant_text_is_empty_output(stdout):
+    parsed = supervisor().parse_output("opencode", stdout, "", 0)
+    assert (parsed["status"], parsed["signature"]) == ("failed", "empty_output")
 
 
 def test_unsupported_controls_are_not_claimed_as_applied(tmp_path):
@@ -4658,7 +4949,8 @@ for i in range(10000): print(json.dumps({'type':'telemetry','data':'x'*100}))
 def test_plan_uses_router_applied_effort(tmp_path):
     plan = supervisor().build_plan('opencode', {'resolved_model':'fixture', 'effort':'high', 'effort_applied':'medium'}, 'hello', cwd=tmp_path, workspace_root=tmp_path)
     assert plan['effort'] == 'medium'
-    assert plan['argv'][plan['argv'].index('--variant') + 1] == 'medium'
+    assert plan['argv'][plan['argv'].index('--model') + 1] == 'fixture#medium'
+    assert '--variant' not in plan['argv']
 
 
 def test_fallback_uses_router_candidates_and_parses_explicit_routes():
@@ -4965,7 +5257,10 @@ def test_kiro_v2_engine_stream_is_parsed_and_auto_is_not_passed():
 
 def test_claude_reported_ids_match_their_aliases():
     module = supervisor()
-    assert module._same_model("claude", "haiku", "claude-haiku-4-5-20251001")
+    assert module._same_model("claude", "haiku", "claude-haiku-5-5")
+    assert not module._same_model("claude", "haiku", "claude-haiku-4-5-20251001")
+    assert module._same_model("claude", "claude-haiku-4-5", "claude-haiku-4-5-20251001")
+    assert not module._same_model("claude", "claude-haiku-4-5", "claude-haiku-5-5")
     assert module._same_model("claude", "sonnet", "claude-sonnet-5-5")
     assert module._same_model("claude", "claude-sonnet-5-5", "claude-sonnet-5")
     assert not module._same_model("claude", "haiku", "claude-sonnet-5-5")
@@ -5108,7 +5403,7 @@ def test_codex_writer_may_merge_in_a_first_instruction_directory(tmp_path):
 def test_codex_writer_authoring_a_first_instruction_directory_is_quarantined(tmp_path):
     _, lane = first_instruction_lane(tmp_path)
     record = lane_attempt(tmp_path, lane, "open('.agents/own.md', 'w').write('lane\\n')\n")
-    assert record["status"] == "ok", record
+    assert record["status"] == "quarantined", record
     assert any(".agents/own.md" in warning and "quarantined" in warning for warning in record["warnings"])
     assert not os.path.lexists(lane / ".agents")
     assert "+lane" in (tmp_path / "attempt" / "protected.patch").read_text()
@@ -5171,6 +5466,7 @@ def test_codex_read_only_writes_its_temp_and_add_dirs_but_not_the_cwd(tmp_path):
     assert "permissions.NAME.network.enabled=true" in codex_read_only_permissions(networked["argv"])
 
 
+@pytest.mark.live_provider
 @pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("codex"), reason="needs the Codex seatbelt")
 def test_codex_read_only_profile_writes_only_temp_and_lock_dirs(tmp_path):
     repo = tmp_path / "repo"
@@ -5235,6 +5531,7 @@ def test_opencode_read_only_profile_reads_project_config_above_its_cwd(tmp_path)
     assert cat(repo / "opencode.jsonc").returncode != 0
 
 
+@pytest.mark.live_provider
 @pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("opencode"), reason="needs OpenCode")
 def test_opencode_starts_below_a_repository_config(tmp_path):
     mod = supervisor()
@@ -5372,6 +5669,7 @@ def test_codex_read_only_never_grants_a_directory_named_like_a_pattern(tmp_path,
     assert any(warning.endswith(str(literal)) and "pattern character" in warning for warning in plan["warnings"])
 
 
+@pytest.mark.live_provider
 @pytest.mark.skipif(sys.platform != "darwin" or not shutil.which("codex"), reason="needs the Codex seatbelt")
 def test_codex_read_only_directory_named_like_a_pattern_leaves_cwd_unwritable(tmp_path):
     repo = tmp_path / "repo"
@@ -5465,6 +5763,117 @@ def test_toolchain_reads_resolve_path_commands_to_their_runtime_components(tmp_p
     for granted in [*files, *directories]:
         assert granted != home and not supervisor().credential_path(granted)
         assert not (home / ".local").is_relative_to(granted)
+
+
+@pytest.mark.parametrize("selection", ["environment", "local", "global"])
+def test_toolchain_reads_resolve_pyenv_shims_without_running_them(tmp_path, monkeypatch, selection):
+    home, tools, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    monkeypatch.delenv("PYENV_VERSION", raising=False)
+    monkeypatch.delenv("PYENV_DIR", raising=False)
+    root = home / ".pyenv"
+    monkeypatch.setenv("PYENV_ROOT", str(root))
+    (root / "shims").mkdir()
+    shim = root / "shims/python3"
+    marker = tmp_path / "shim-ran"
+    shim.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 1\n")
+    shim.chmod(0o755)
+    (tools["python3"].parent / "python3").symlink_to(tools["python3"])
+    repo = tmp_path / "repo"
+    cwd = repo / "sub"
+    cwd.mkdir(parents=True)
+    (root / "version").write_text("missing-version\n")
+    if selection == "environment":
+        monkeypatch.setenv("PYENV_VERSION", "3.13.0")
+    elif selection == "local":
+        (repo / ".python-version").write_text("3.13.0\n")
+    else:
+        (root / "version").write_text("3.13.0\n")
+    plan = {"adapter": "claude", "mode": "read_only", "cwd": str(cwd), "applied": {"add_dirs": []}}
+    files, _, directories = supervisor()._toolchain_reads(plan, repo, str(root / "shims"))
+    assert tools["python3"] in files
+    assert tools["python3"].parent.parent / "lib" in directories
+    assert tools["python3"].parent.parent not in directories
+    assert root not in directories
+    assert not marker.exists()
+
+
+@pytest.mark.parametrize("version", ["../../.ssh", "shim-link"])
+def test_unsafe_pyenv_shim_fails_clearly(tmp_path, monkeypatch, version):
+    home, tools, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    root = home / ".pyenv"
+    monkeypatch.setenv("PYENV_ROOT", str(root))
+    monkeypatch.setenv("PYENV_VERSION", "3.13.0" if version == "shim-link" else version)
+    (root / "shims").mkdir()
+    shim = root / "shims/python3"
+    if version == "shim-link":
+        credentials = home / ".ssh/id_ed25519"
+        credentials.chmod(0o755)
+        shim.symlink_to(credentials)
+        (tools["python3"].parent / "python3").symlink_to(tools["python3"])
+    else:
+        shim.write_text("#!/bin/sh\nexit 1\n")
+        shim.chmod(0o755)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    plan = {"adapter": "claude", "mode": "read_only", "cwd": str(repo), "applied": {"add_dirs": []}}
+    with pytest.raises(ValueError, match="pyenv shim.*fix:"):
+        supervisor()._toolchain_reads(plan, repo, str(root / "shims"))
+
+
+@pytest.mark.parametrize("version", ["missing-version", "3.13.0", None])
+def test_unresolvable_pyenv_selection_is_skipped_with_a_warning(tmp_path, monkeypatch, caplog, version):
+    home, tools, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    root = home / ".pyenv"
+    monkeypatch.setenv("PYENV_ROOT", str(root))
+    monkeypatch.delenv("PYENV_DIR", raising=False)
+    if version is None:
+        monkeypatch.delenv("PYENV_VERSION", raising=False)  # no file either: pyenv means "system"
+    else:
+        monkeypatch.setenv("PYENV_VERSION", version)
+    (root / "shims").mkdir()
+    shim = root / "shims/python3"
+    shim.write_text("#!/bin/sh\nexit 1\n")
+    shim.chmod(0o755)
+    if version == "3.13.0":
+        # An executable without a Python runtime layout must not earn a grant.
+        shutil.rmtree(tools["python3"].parent.parent / "lib")
+        (tools["python3"].parent / "python3").symlink_to(tools["python3"])
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    plan = {"adapter": "claude", "mode": "read_only", "cwd": str(repo), "applied": {"add_dirs": []}}
+    files, _, _ = supervisor()._toolchain_reads(plan, repo, str(root / "shims"))
+    assert shim.resolve() not in files
+    if version:
+        assert "skipping toolchain candidate" in caplog.text
+
+
+def test_pyenv_prefix_selection_uses_the_highest_installed_patch(tmp_path, monkeypatch):
+    home, tools, _ = fake_toolchain_home(tmp_path, monkeypatch)
+    root = home / ".pyenv"
+    monkeypatch.setenv("PYENV_ROOT", str(root))
+    monkeypatch.setenv("PYENV_VERSION", "3.13")
+    (root / "shims").mkdir()
+    shim = root / "shims/python3"
+    shim.write_text("#!/bin/sh\nexit 1\n")
+    shim.chmod(0o755)
+    (root / "versions/3.13.9").symlink_to(root / "versions/3.13.0")
+    # 3.13.10 outranks 3.13.9 numerically, 3.130.0 is not a 3.13 patch.
+    assert supervisor()._pyenv_version_dir(root, "3.13").name == "3.13.9"
+    (root / "versions/3.13.10").symlink_to(root / "versions/3.13.0")
+    (root / "versions/3.130.0").symlink_to(root / "versions/3.13.0")
+    assert supervisor()._pyenv_version_dir(root, "3.13").name == "3.13.10"
+    assert supervisor()._pyenv_version_dir(root, "3.13.0").name == "3.13.0"
+    assert supervisor()._pyenv_version_dir(root, "3.99") is None
+
+
+def test_unsafe_pyenv_shim_is_rejected_by_execute(tmp_path, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise ValueError("cannot resolve pyenv shim x; fix: select an installed Python version")
+    monkeypatch.setattr(supervisor(), "confinement_command", refuse)
+    plan = fixture_plan(tmp_path, "pass", "claude")
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "rejected"
+    assert "fix: select an installed Python version" in (record["evidence"]["excerpt"] + str(record))
 
 
 def test_toolchain_reads_follow_a_workspace_venv_to_its_base_interpreter(tmp_path, monkeypatch):
@@ -5790,3 +6199,118 @@ def test_toolchain_rules_emit_the_validated_path_without_resolving_again(tmp_pat
 def test_credential_path_covers_common_host_secrets(tmp_path, monkeypatch, secret):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     assert supervisor().credential_path(tmp_path / "home" / secret)
+
+
+def test_failed_writer_with_instruction_edits_is_not_usable(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('lane edit\\n')\n"
+                          "import sys; sys.exit(3)\n", policy={"instruction_changes": "deny"})
+    assert record["status"] == "failed"
+    assert record["exit"] == 3
+    assert record["landable"] is False
+
+
+def test_failed_instruction_restoration_fails_but_keeps_output_and_patch(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('staged edit\\n'); git('add', {SKILL!r})\n"
+                          f"open({SKILL!r}, 'w').write('lane edit\\n')\n"
+                          "directory = git('rev-parse', '--absolute-git-dir')\n"
+                          "open(directory + '/index.lock', 'w').close()\n")
+    assert record["status"] == "failed"
+    assert record["error"] == "protected_instructions_changed"
+    assert "restore .agents/ to the start commit" in record["fix"]
+    assert record["landable"] is False
+    assert record["quarantine"]["restored"] is False
+    assert record["quarantine"]["patch_error"]
+    assert 'lane edit' in (tmp_path / 'attempt/protected.patch').read_text()
+    assert str(tmp_path / 'attempt/protected.index.patch') in record['quarantine']['patches']
+    assert Path(record["output_path"]).read_text() == 'done'
+
+
+def _stderr_run(tmp_path, lines, delays=0.05):
+    code = "import sys,time\n" + "".join(
+        f"sys.stderr.write({line + chr(10)!r});sys.stderr.flush();time.sleep({delays})\n" for line in lines
+    ) + "time.sleep(30)\n"
+    plan = fixture_plan(tmp_path, code, "opencode", startup_seconds=0.6, idle_seconds=0.6, timeout_seconds=3)
+    plan["model"] = "opencode-go/glm-5"
+    return supervisor().execute(plan, tmp_path / "result.md")
+
+
+def test_opencode_non_error_stderr_quota_noise_is_not_fatal(tmp_path):
+    record = _stderr_run(tmp_path, ["WARN retrying: Individual quota reached"])
+    assert record["status"] != "usage_limited"
+
+
+def test_opencode_warn_quota_line_beside_unrelated_error_is_not_fatal(tmp_path):
+    record = _stderr_run(tmp_path, ["WARN retrying: Individual quota reached", "ERROR service=bus unrelated failure"])
+    assert record["status"] != "usage_limited"
+
+
+def test_opencode_warn_quota_line_with_reset_hint_beside_unrelated_error_is_not_fatal(tmp_path):
+    record = _stderr_run(tmp_path, ["WARN retrying: Individual quota reached, resets in 30s",
+                                    "ERROR service=bus unrelated failure"])
+    assert record["status"] != "usage_limited"
+
+
+def test_opencode_reset_hint_on_a_separate_earlier_line_is_kept(tmp_path):
+    record = _stderr_run(tmp_path, ["Resets in 2 days.", "ERROR error=Monthly usage limit reached."])
+    assert record["status"] == "usage_limited"
+    assert record["retry_after"] is None
+    assert record["reset_at"]
+
+
+def test_opencode_explicit_period_limit_phrase_is_fatal_without_error_prefix(tmp_path):
+    record = _stderr_run(tmp_path, ["retrying: weekly usage limit reached"])
+    assert record["status"] == "usage_limited"
+
+
+def test_explicit_model_runs_despite_a_cooldown_with_a_warning(tmp_path):
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    cli = bindir / "claude"
+    cli.write_text("#!/usr/bin/env python3\nimport json,sys\nsys.stdin.read()\n"
+                   "print(json.dumps({'type':'result','is_error':False,'result':'DONE'}))\n")
+    cli.chmod(0o755)
+    until = (datetime.now(UTC) + timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    (tmp_path / "cooldowns.json").write_text(json.dumps({"schema": "fabric.cooldowns.v1", "cooldowns": {
+        "claude/*": {"adapter": "claude", "model": "*", "account": None, "status": "usage_limited",
+                     "cooling_until": until, "source_run": "r", "recorded_at": until, "signature": "quota_exhausted"}}}))
+    env = {**os.environ, "PROVENANT_NO_OS_CONFINEMENT": "1", "PATH": str(bindir) + ":" + os.environ["PATH"],
+           "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+           "FABRIC_COOLDOWNS_PATH": str(tmp_path / "cooldowns.json")}
+    run = Path(subprocess.check_output([str(SCRIPTS / "run_dir_init.sh"), "--kind", "dispatch"],
+                                       cwd=tmp_path, text=True).strip())
+    (tmp_path / "prompt.md").write_text("Reply DONE")
+    result = subprocess.run([sys.executable, str(SCRIPTS / "dispatch_run.py"), "--run-dir", str(run), "--tool", "claude",
+                             "--model", "opus", "--prompt-file", str(tmp_path / "prompt.md")],
+                            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stdout + result.stderr
+    row = json.loads(next((run / "tasks").glob("*/attempt-*/attempt.json")).read_text())
+    assert row["status"] == "ok"
+    assert any("explicit model is cooling" in warning for warning in row.get("warnings", []))
+
+
+def test_opencode_v2_structured_error_log_lines_are_fatal_and_info_is_not():
+    fatal = supervisor().OPENCODE_FATAL_LOG
+    quiet = supervisor().OPENCODE_QUIET_LOG
+    assert re.search(fatal, "timestamp=2026-10-16T07:38:10.410Z level=ERROR run=ab message=boom", re.I | re.M)
+    assert not re.search(fatal, 'timestamp=2026-10-16T07:38:10.410Z level=INFO run=ab message="cli starting"', re.I | re.M)
+    assert re.match(quiet, "timestamp=x level=WARN message=y")
+
+
+def test_opencode_v2_free_quota_event_is_rate_limited():
+    event = {"type": "error", "sessionID": "ses_1", "error": {
+        "type": "provider.quota", "message": "Rate limit exceeded. Please try again later.", "status": 429,
+        "response": {"body": json.dumps({"type": "error", "error": {"type": "FreeUsageLimitError"}})}}}
+    parsed = supervisor().parse_output("opencode", json.dumps(event) + "\n", "", 1)
+    assert parsed["status"] == "rate_limited"
+
+
+def test_opencode_v1_cli_is_a_typed_refusal_on_the_provider_exec_cli(tmp_path, monkeypatch, capsys):
+    mod = supervisor()
+    monkeypatch.setattr(mod, "_opencode_version_error",
+                        lambda *_: "OpenCode 1.14.2 is unsupported; fix: upgrade OpenCode to v2")
+    with pytest.raises(mod.CapabilityError) as caught:
+        mod.build_plan("opencode", {"resolved_model": "opencode/x"}, "hello", cwd=tmp_path, workspace_root=tmp_path)
+    assert caught.value.code == "unsupported_cli_version"
+    assert isinstance(caught.value, ValueError)

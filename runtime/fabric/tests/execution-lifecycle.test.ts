@@ -7,14 +7,17 @@ import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { writeFileAtomic } from "./atomic-write.mjs";
 import { setTimeout as delay } from "node:timers/promises";
 
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider } from "../src/execution.js";
-import { normaliseRoute, readRoots, routeArguments, savedReadRoots, workingIdentity, type BatchTaskInput } from "../src/execution-input.js";
+import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider, rejectOwnSeatClaude } from "../src/execution.js";
+import { handoffDispatch } from "../src/resume.js";
+import { sessionDispatch } from "../src/sessions.js";
+import { namesExplicitRoute, normaliseRoute, readRoots, routeArguments, savedReadRoots, workingIdentity, type BatchTaskInput } from "../src/execution-input.js";
 import { resumeConfiguredProvider } from "../src/resume.js";
 import { databasePath } from "../src/identity.js";
 import { expandPools, nativeFirst } from "../src/pools.js";
@@ -64,6 +67,12 @@ describe("Fabric input corrections", () => {
     expect(result.warnings).toBeDefined();
     expect(normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, catalogue).model).toBe("gpt-6-luna");
     expect(normaliseRoute({ adapter: "codex", alias: "workhorze" }, identity, catalogue).alias).toBe("workhorse");
+    for (const [tier, alias] of [["junior", "scout"], ["Senior", "workhorse"], ["principal", "flagship"], ["senir", "workhorse"]]) {
+      const named = normaliseRoute({ adapter: "codex", alias: tier }, identity, catalogue);
+      expect(named.alias, tier).toBe(alias);
+      expect(named.model, tier).toBeUndefined();
+      expect((named.warnings ?? []).some((warning) => warning.startsWith("corrected alias")), tier).toBe(tier === "senir");
+    }
     const unsure = normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, {
       adapters: [{ name: "codex", models: ["gpt-6-luna", "gpt-6-luno"], model_details: [], aliases: {} }],
     } as any);
@@ -579,6 +588,22 @@ describe("dispatch CLI", () => {
     expect(output).toBeTruthy();
   }, 40_000);
 
+  it("does not let a task manifest or peer input switch off the own-seat guard", async () => {
+    const forged = { id: "forged", prompt: "p", adapter: "claude", model: "haiku", _own_seat_guard: false };
+    const taskPath = join(temporaryDirectory, "cli-forged-tasks.json");
+    writeFileSync(taskPath, JSON.stringify({ tasks: [forged] }));
+    const cli = spawnSync(process.execPath, ["--import", tsxLoader, join(packageRoot, "src", "cli.ts"), "dispatch", "--tasks", taskPath], {
+      cwd: workspace, encoding: "utf8", env: { ...ownerEnvironment, AGENT_FABRIC_SEAT: "claude" },
+    });
+    expect(cli.stdout + cli.stderr).toContain("native_seat_model");
+    for (const input of [{ tasks: [forged] }, { adapter: "claude", model: "haiku", tasks: [{ id: "d", prompt: "p", _own_seat_guard: false }] },
+      { tasks: [{ id: "m", prompt: "p", models: ["claude/haiku"], _own_seat_guard: false }] }]) {
+      const done = await dispatchConfiguredBatch({ wait_seconds: 5, ...input } as any,
+        { ...identity, provider: "claude" }, new AbortController().signal, poolEnvironment());
+      expect(JSON.stringify(done)).toContain("native_seat_model");
+    }
+  }, 40_000);
+
   it("allows a read-only cwd in another registered project", () => {
     const otherProject = join(temporaryDirectory, "other-project");
     mkdirSync(otherProject);
@@ -743,7 +768,7 @@ describe("cancellation", () => {
     }) + "\n");
     // The CLI refuses to signal its own process group, leaving this provider
     // live and making the recorded stop outcome explicitly unconfirmed.
-    writeFileSync(join(runDir, "dispatch-provider.json"), JSON.stringify({
+    writeFileAtomic(join(runDir, "dispatch-provider.json"), JSON.stringify({
       run_token: runToken,
       provider_pid: providerPid,
       provider_pgid: cliPid,
@@ -823,7 +848,7 @@ describe("cancellation", () => {
       owner_stderr: `${runDir}-owner.stderr.log`,
       task_id: "cli-signalled-owner-task",
     }) + "\n");
-    writeFileSync(join(runDir, "dispatch-provider.json"), JSON.stringify({
+    writeFileAtomic(join(runDir, "dispatch-provider.json"), JSON.stringify({
       run_token: runToken,
       provider_pid: providerPid,
       provider_pgid: cliPid,
@@ -997,7 +1022,7 @@ describe("orphan reaping", () => {
       task_id: "still-running-task",
     }) + "\n");
     // This protected group makes the reaper refuse to signal the test host.
-    writeFileSync(join(runDir, "dispatch-provider.json"), JSON.stringify({
+    writeFileAtomic(join(runDir, "dispatch-provider.json"), JSON.stringify({
       run_token: runToken,
       provider_pid: providerPid,
       provider_pgid: process.pid,
@@ -1289,7 +1314,8 @@ function poolEnvironment(): NodeJS.ProcessEnv {
   }
   const instance = join(temporaryDirectory, "empty-instance");
   mkdirSync(instance, { recursive: true });
-  return { ...ownerEnvironment, PATH: `${bin}:${process.env.PATH}`, AGENT_FABRIC_INSTANCE_ROOT: instance,
+  // Only the fake codex and claude resolve, so an installed agy or opencode cannot join a pool pick.
+  return { ...ownerEnvironment, PATH: `${bin}:${dirname(process.execPath)}:/usr/bin:/bin`, AGENT_FABRIC_INSTANCE_ROOT: instance,
     AGENT_FABRIC_STATE_ROOT: join(temporaryDirectory, "pool-state") };
 }
 
@@ -1306,12 +1332,12 @@ describe("route pools", () => {
     ], fixturePython, product, { ...identity, provider: "agent" }, env, new AbortController().signal);
     expect(expanded.errors.map((error) => [error.task_id, error.error])).toEqual([["nope", "route_invalid"]]);
     const byId = Object.fromEntries(expanded.tasks.map((task) => [task.id, task]));
-    expect(byId.one).toMatchObject({ adapter: "claude", model: "claude-sonnet-5-5", pick_reason: "strong top" });
+    expect(byId.one).toMatchObject({ adapter: "claude", model: "claude-sonnet-5-5", pick_reason: "senior top" });
     expect(byId.one).not.toHaveProperty("route");
-    expect([byId["pair-1"]?.pick_reason, byId["pair-2"]?.pick_reason]).toEqual(["strong council 1/2", "strong council 2/2"]);
+    expect([byId["pair-1"]?.pick_reason, byId["pair-2"]?.pick_reason]).toEqual(["senior council 1/2", "senior council 2/2"]);
     expect(new Set([byId["pair-1"]?.adapter, byId["pair-2"]?.adapter])).toEqual(new Set(["claude", "codex"]));
     expect(byId["adhoc-1"]).toMatchObject({ adapter: "codex", model: "gpt-6-luna", effort: "low", pick_reason: "ad-hoc council 1/2" });
-    expect(byId["adhoc-2"]).toMatchObject({ adapter: "claude", model: "haiku", pick_reason: "ad-hoc council 2/2" });
+    expect(byId["adhoc-2"]).toMatchObject({ adapter: "claude", model: "claude-haiku-5-5", pick_reason: "ad-hoc council 2/2" });
     expect(byId.plain).toEqual({ id: "plain", prompt: "p", adapter: "codex" });
     expect(byId.both).toEqual({ id: "both", prompt: "p", model: "gpt-6-luna" });
     expect(expanded.warnings).toContain("route ignored: model gpt-6-luna was named explicitly");
@@ -1401,7 +1427,7 @@ describe("route pools", () => {
     const runDir = String((done.paths as Record<string, unknown>).run_dir);
     const manifest = JSON.parse(readFileSync(join(runDir, "_owner", "task-manifest.json"), "utf8"));
     expect(manifest.tasks.map((task: Record<string, unknown>) => [task.id, task.adapter, task.model, task.pick_reason])).toEqual([
-      ["council-1", "codex", "gpt-6-luna", "ad-hoc council 1/2"], ["council-2", "claude", "haiku", "ad-hoc council 2/2"]]);
+      ["council-1", "codex", "gpt-6-luna", "ad-hoc council 1/2"], ["council-2", "claude", "claude-haiku-5-5", "ad-hoc council 2/2"]]);
   });
 
   it("lets an explicit model win over a pool, with a warning", async () => {
@@ -1444,7 +1470,7 @@ describe("native-first routing", () => {
     const expanded = await expandPools([{ id: "pair", prompt: "p", route: "strong", council: 2 }],
       fixturePython, product, claudeSeat(), poolEnvironment(), new AbortController().signal);
     expect(expanded.tasks.map((task) => task.adapter)).toEqual(["codex"]);
-    expect(expanded.tasks[0]).toMatchObject({ id: "pair-1", pick_reason: "strong council 1/1" });
+    expect(expanded.tasks[0]).toMatchObject({ id: "pair-1", pick_reason: "senior council 1/1" });
     expect(expanded.warnings.some((warning) =>
       /^spawn 1 native claude member \(claude-\S+\); Fabric runs 1 of 2$/u.test(warning))).toBe(true);
   });
@@ -1488,15 +1514,152 @@ describe("native-first routing", () => {
       seat, new AbortController().signal, poolEnvironment());
     const noted = JSON.stringify(routed.warnings ?? []);
     expect(noted).not.toContain("workhorse taken from the route pool");
-    expect(noted).toContain("claude/claude-opus-5-5 skipped: use a native subagent");
+    expect(noted).toContain("claude/claude-sonnet-5-5 skipped: use a native subagent");
   });
 
-  it("runs an explicit native model with a prominent warning of its own", async () => {
+  it("rejects an explicit native model and points at the host's native subagents", async () => {
     const done = await dispatchConfiguredProvider({ adapter: "claude", model: "haiku", prompt: "ordinary run", wait_seconds: 5 },
       claudeSeat(), new AbortController().signal, poolEnvironment());
-    expect(done.status, JSON.stringify(done)).toBe("ok");
-    expect((done.warnings as string[])[0]).toBe(
-      "NATIVE: claude/haiku is this claude seat's own model; spawn a native subagent instead of Fabric");
+    expect(done).toMatchObject({ status: "rejected", error: "native_seat_model" });
+    expect(done.fix).toContain("use the host's native subagents instead of Fabric");
+    const other = await dispatchConfiguredProvider({ adapter: "codex", prompt: "ordinary run", wait_seconds: 5 },
+      claudeSeat(), new AbortController().signal, poolEnvironment());
+    expect(other.error).not.toBe("native_seat_model");
+  });
+
+  it("applies the own-seat guard only to a new explicit route", () => {
+    const catalogue = { adapters: [{ name: "claude", models: ["claude-haiku-5-5"], model_details: [], aliases: {} }] } as any;
+    const claude = { ...identity, provider: "claude" }, codex = { ...identity, provider: "codex" };
+    const explicit = { adapter: "claude", model: "claude-haiku-5-5" };
+    expect(() => normaliseRoute(explicit, claude, catalogue, true)).toThrow(/own model/u);
+    // An inherited route (handoff) and a codex seat only warn.
+    expect(normaliseRoute(explicit, claude, catalogue).warnings?.[0]).toContain("NATIVE:");
+    expect(normaliseRoute({ adapter: "codex" }, codex, { adapters: [{ name: "codex", models: [], model_details: [], aliases: {} }] } as any, true)
+      .warnings?.[0]).toContain("NATIVE:");
+    expect(namesExplicitRoute(explicit)).toBe(true);
+    expect(namesExplicitRoute({ model: "haiku" })).toBe(true);
+    expect(namesExplicitRoute({ task_class: "review", alias: "workhorse" } as any)).toBe(false);
+  });
+
+  it("guards an explicit own-seat Claude request on every batch entry path", async () => {
+    const run = (input: Record<string, unknown>) => dispatchConfiguredBatch({ wait_seconds: 5, ...input } as any,
+      claudeSeat(), new AbortController().signal, poolEnvironment());
+    const refused = (done: any) => {
+      expect(JSON.stringify(done)).toContain("native_seat_model");
+      expect(done.status).toBe("rejected");
+    };
+    refused(await run({ tasks: [{ id: "a", prompt: "p", adapter: "claude", model: "haiku" }] }));
+    refused(await run({ adapter: "claude", model: "haiku", tasks: [{ id: "a", prompt: "p" }] }));
+    refused(await run({ tasks: [{ id: "a", prompt: "p", models: ["claude/haiku"] }] }));
+    const single = await dispatchConfiguredProvider({ models: ["claude/haiku"], prompt: "p", wait_seconds: 5 },
+      claudeSeat(), new AbortController().signal, poolEnvironment());
+    refused(single);
+    // Automatic picks are not the caller's choice.
+    const automatic = await run({ tasks: [{ id: "a", prompt: "p" }] });
+    expect(JSON.stringify(automatic)).not.toContain("native_seat_model");
+  });
+
+  it("guards only selectors left after batch merging", async () => {
+    const log = join(temporaryDirectory, "merged-routes.json");
+    const batch = await dispatchConfiguredBatch({ model: "claude/haiku",
+      tasks: [{ id: "routed", route: "strong", prompt: "p" }] }, claudeSeat(), new AbortController().signal,
+      { ...poolEnvironment(), FIXTURE_PREFLIGHT_LOG: log });
+    expect(batch).toMatchObject({ status: "rejected", error: "fixture_logged" });
+    expect(JSON.parse(readFileSync(log, "utf8"))).toMatchObject([{ id: "routed", adapter: "codex" }]);
+  });
+
+  it("guards only selectors left after single models precedence", async () => {
+    const log = join(temporaryDirectory, "council-routes.json");
+    const single = await dispatchConfiguredProvider({ model: "claude/haiku",
+      models: ["codex/gpt-6.1-sol"], prompt: "p" }, claudeSeat(), new AbortController().signal,
+      { ...poolEnvironment(), FIXTURE_PREFLIGHT_LOG: log });
+    expect(single).toMatchObject({ status: "rejected", error: "fixture_logged" });
+    expect(JSON.parse(readFileSync(log, "utf8"))).toMatchObject([{ adapter: "codex", model: "gpt-6.1-sol" }]);
+  });
+
+  it("leaves malformed models to per-task validation while valid siblings reach preflight", async () => {
+    const log = join(temporaryDirectory, "valid-sibling.json");
+    const result = await dispatchConfiguredBatch({ tasks: [
+      { id: "malformed", models: "codex/gpt-6.1-sol" as any, prompt: "p" },
+      { id: "valid", adapter: "codex", prompt: "p" },
+    ] }, claudeSeat(), new AbortController().signal, { ...poolEnvironment(), FIXTURE_PREFLIGHT_LOG: log });
+    expect(result).toMatchObject({ status: "rejected", error: "fixture_logged",
+      tasks: [{ task_id: "malformed", status: "rejected", error: "models_invalid" }] });
+    expect(JSON.parse(readFileSync(log, "utf8"))).toMatchObject([{ id: "valid", adapter: "codex" }]);
+  });
+
+  it("atomically refuses a mixed batch, naming its offending task, with zero placements", async () => {
+    const placed = join(temporaryDirectory, "batch-placed");
+    const hostOwner = join(product, "scripts/fabric-hosts");
+    writeFileSync(hostOwner, `#!/bin/sh\ntouch ${shellQuote(placed)}\nprintf '%s\\n' '{"status":"ok","host":"peer"}'\n`);
+    chmodSync(hostOwner, 0o755);
+    vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", product);
+    vi.stubEnv("PROVENANT_HOST_LOCAL_ONLY", "");
+    try {
+      const result = await dispatchConfiguredBatch({ host: "peer", tasks: [
+        { id: "safe", adapter: "codex", prompt: "p" },
+        { id: "forbidden", adapter: "claude", model: "haiku", prompt: "p" },
+        { adapter: "codex", prompt: "p" },
+      ] }, claudeSeat(), new AbortController().signal, { ...poolEnvironment(), PROVENANT_HOST_LOCAL_ONLY: "" });
+      expect(result).toMatchObject({ status: "rejected", error: "native_seat_model" });
+      const rows = result.tasks as Record<string, unknown>[];
+      expect(rows.map((row) => row.task_id)).toEqual(["safe", "forbidden", "task-3"]);
+      for (const row of rows) expect(row).toMatchObject({ status: "rejected", state: "terminal", error: "native_seat_model" });
+      expect(existsSync(placed)).toBe(false);
+      expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
+      expect(result.fix).toContain("Task forbidden");
+      expect(result.fix).toContain("Entire batch refused before placement");
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("refuses a qualified session's explicit own-seat route before placement", async () => {
+    const placed = join(temporaryDirectory, "session-placed");
+    const hostOwner = join(product, "scripts/fabric-hosts");
+    writeFileSync(hostOwner, `#!/bin/sh\ntouch ${shellQuote(placed)}\nprintf '%s\\n' '{"status":"ok","host":"peer"}'\n`);
+    chmodSync(hostOwner, 0o755);
+    const store = new Store(databasePath(ownerEnvironment));
+    vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", product);
+    vi.stubEnv("PROVENANT_HOST_LOCAL_ONLY", "");
+    try {
+      const result = await sessionDispatch({ session: "new@peer", adapter: "claude", prompt: "p" },
+        claudeSeat(), store, new AbortController().signal);
+      expect(result).toMatchObject({ status: "rejected", error: "native_seat_model" });
+      expect(existsSync(placed)).toBe(false);
+      expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
+      expect(await sessionDispatch({ session: "existing@peer", prompt: "p" },
+        claudeSeat(), store, new AbortController().signal)).toMatchObject({ status: "ok", host: "peer" });
+      expect(existsSync(placed)).toBe(true);
+    } finally {
+      vi.unstubAllEnvs();
+      store.close();
+    }
+  });
+
+  it("refuses an explicit own-seat Claude route before any peer placement, and lets an inherited continuation through", async () => {
+    const seat = claudeSeat(), env = { ...poolEnvironment(), PROVENANT_HOST_LOCAL_ONLY: "" };
+    const signal = new AbortController().signal;
+    const refused = (done: any) => expect(done).toMatchObject({ status: "rejected", error: "native_seat_model" });
+    refused(await dispatchConfiguredProvider({ host: "peer", adapter: "claude", model: "haiku", prompt: "p" } as any, seat, signal, env));
+    refused(await dispatchConfiguredProvider({ host: "peer", models: ["claude/haiku"], prompt: "p" } as any, seat, signal, env));
+    refused(await dispatchConfiguredBatch({ host: "peer", tasks: [{ id: "a", prompt: "p", adapter: "claude", model: "haiku" }] } as any, seat, signal, env));
+    refused(await dispatchConfiguredBatch({ host: "peer", adapter: "claude", model: "haiku", tasks: [{ id: "a", prompt: "p" }] } as any, seat, signal, env));
+    refused(await handoffDispatch({ host: "peer", handoff: "x", adapter: "claude", model: "haiku", prompt: "p" } as any, seat, signal, env));
+    // An inherited route, an implicit request and a continuation pass the guard.
+    expect(() => rejectOwnSeatClaude({ host: "peer", prompt: "p" }, seat, env)).not.toThrow();
+    expect(() => rejectOwnSeatClaude({ adapter: "claude", model: "haiku" }, seat, env, { continuation: true })).not.toThrow();
+    expect(() => rejectOwnSeatClaude({ adapter: "claude", model: "haiku" }, { ...identity, provider: "codex" }, env)).not.toThrow();
+  });
+
+  it("recognises a role alias by its normalised name, so task_class with Workhorse or workhorze is not own-seat", async () => {
+    for (const alias of ["Workhorse", "workhorze"]) {
+      const done = await dispatchConfiguredProvider({ task_class: "review", alias, prompt: "p", wait_seconds: 5 } as any,
+        claudeSeat(), new AbortController().signal, poolEnvironment());
+      expect(JSON.stringify(done), alias).not.toContain("native_seat_model");
+    }
+    expect(namesExplicitRoute({ alias: "Workhorse" })).toBe(false);
+    expect(namesExplicitRoute({ alias: "workhorze" })).toBe(false);
   });
 
   it("refuses a native seat's default when only its own models are available", async () => {

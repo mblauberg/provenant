@@ -13,6 +13,7 @@ import {
   pythonOwner,
   stagingPath,
   startOwner,
+  rejectOwnSeatClaude,
   type LaunchObserver,
 } from "./execution.js";
 import type { Identity } from "./identity.js";
@@ -87,8 +88,6 @@ export async function resumeConfiguredProvider(
       throw new InputError("resume_not_ready", "Resume one terminal task; wait for its active attempt to finish.");
     if(latest.attempts?.at(-1)?.state === "running") throw new InputError("resume_not_ready", "Dispatch a new run; the owner did not terminalise this attempt.");
     const previous = pinnedAttempt(latest, pin.attempt);
-    if (env.PROVENANT_REMOTE_LANE === "1" && previous.mode === "worktree_write")
-      throw new InputError("remote_writer_unavailable", "Remote writer transport belongs to slice 3.");
     const root = productRoot(env),
       runDir = String(previous.run_dir),
       taskId = String(previous.task_id);
@@ -236,8 +235,8 @@ function resultTail(row: Record<string, any>, budget: number): string {
   if (typeof raw !== "string" || budget <= 0) return "";
   let fd: number | undefined;
   try {
-    const root = realpathSync(String(row.run_dir)),
-      path = realpathSync(resolve(root, raw));
+    const root = realpathSync.native(String(row.run_dir)),
+      path = realpathSync.native(resolve(root, raw));
     const inside = relative(root, path);
     if (isAbsolute(inside) || inside === ".." || inside.startsWith(`..${sep}`)) return "";
     fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
@@ -283,6 +282,11 @@ export async function handoffDispatch(
   env: NodeJS.ProcessEnv = process.env,
   pin: PinnedContinuation = {},
 ): Promise<Record<string, unknown>> {
+  try {
+    rejectOwnSeatClaude(input, identity, env, { continuation: inheritsPreviousRoute(input) });
+  } catch (error) {
+    return rejected(error);
+  }
   const remote = env.PROVENANT_HOST_LOCAL_ONLY === "1" ? undefined : await federatedLane("handoff", identity.cwd, input as Record<string, unknown>, signal);
   if (remote) return remote;
   env = { ...env, PROVENANT_HOST_LOCAL_ONLY: "1" };
@@ -294,8 +298,6 @@ export async function handoffDispatch(
     if (target.row!.state !== "terminal")
       throw new InputError("handoff_not_ready", "Wait for the prior task to finish, then hand off.");
     const previous = pinnedAttempt(target.row!, pin.attempt);
-    if (env.PROVENANT_REMOTE_LANE === "1" && previous.mode === "worktree_write")
-      throw new InputError("remote_writer_unavailable", "Remote writer transport belongs to slice 3.");
     let prompt = input.prompt;
     if (prompt === undefined) {
       try {
@@ -322,7 +324,7 @@ export async function handoffDispatch(
       ...inheritedConfidential(rest, requested),
       prompt: brief + prompt,
       prompt_file: undefined,
-    }, identity, signal, env, pin);
+    }, identity, signal, env, { ...pin, continuation: inherit });
   } catch (error) {
     if (signal.aborted) throw error;
     return rejected(error);

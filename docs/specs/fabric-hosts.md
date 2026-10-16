@@ -140,8 +140,10 @@ The first deployment is a laptop (`laptop`) plus an always-on spare Mac
   writer lease. The writer lease stays host-local.
 - The executing host verifies the worktree context and cleanliness, and binds
   the result to the base revision, head revision, host and worktree identity.
-  The chair then fetches the branch and verifies that the fetched head matches
-  that bound result. Transport does not depend on GitHub being reachable.
+  The chair then fetches the branch's head into a Provenant-owned ref,
+  verifies that the fetched head matches that bound result, and names the
+  fast-forward that lands it on the chair branch. Transport does not depend on
+  GitHub being reachable.
 
 ### Lanes, status and control
 

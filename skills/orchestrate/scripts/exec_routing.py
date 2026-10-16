@@ -124,7 +124,7 @@ def model_families(model, catalogue=None):
 
 
 
-UNSAFE_TRAITS = frozenset({"free", "trains-on-prompts"})
+UNSAFE_TRAITS = frozenset({"trains-on-prompts"})
 
 
 def _configured_traits(adapter, model):
@@ -136,17 +136,33 @@ def _configured_traits(adapter, model):
         return set()
 
 
+def _registered_training(adapter, model, meta):
+    """The model's explicit `trains_on_prompts` flag, from the caller's metadata or the router catalogue."""
+    if type(meta.get("trains_on_prompts")) is bool:
+        return meta["trains_on_prompts"]
+    try:
+        route = _model_route_module()
+        catalog = route.load_catalog()
+        registered = route._registered_match(adapter, str(model), catalog)[0]
+        flag = (registered or {}).get("trains_on_prompts")
+        return flag if type(flag) is bool else None
+    except (OSError, ValueError, AttributeError, TypeError, KeyError, ImportError):
+        return None
+
+
 def disclosure_risk(adapter, model, meta=None):
     """Why a route may keep or train on prompts, or None when it is paid and non-training."""
     meta = meta if isinstance(meta, dict) else {}
     model = str(model or "")
     if meta.get("trains_on_prompts") is True:
         return "trains on prompts"
-    if (meta.get("plan_cap_usd") == 0 or model.endswith(("-free", ":free"))
-            or model.startswith("opencode/")):
+    free = meta.get("plan_cap_usd") == 0 or model.endswith(("-free", ":free")) or model.startswith("opencode/")
+    if UNSAFE_TRAITS & _configured_traits(adapter, model):  # a configured trait outranks any no-training flag
+        return "is a free tier that may train on prompts" if free else "may train on prompts (model_traits)"
+    if _registered_training(adapter, model, meta) is False:
+        return None  # an explicit per-model flag (zero-retention free tier) outranks the free-tier heuristics
+    if free:
         return "is a free tier that may train on prompts"
-    if UNSAFE_TRAITS & _configured_traits(adapter, model):
-        return "may train on prompts (model_traits)"
     return None
 
 
@@ -253,7 +269,8 @@ def candidates(plan, policy=None, catalogue=None, confidential=False):
         if confidential:
             if disclosure_risk(candidate_adapter, model, {**meta, **item}):
                 continue
-        elif not explicit and policy != "any" and (training is True or free):
+        elif not explicit and policy != "any" and (
+                training is True or (free and _registered_training(candidate_adapter, model, {**meta, **item}) is not False)):
             continue
         answer.append(
             {

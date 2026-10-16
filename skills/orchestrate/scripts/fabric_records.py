@@ -22,6 +22,7 @@ except ImportError:
 TERMINAL_STATUSES = {
     "ok",
     "partial",
+    "quarantined",
     "failed",
     "usage_limited",
     "rate_limited",
@@ -106,7 +107,13 @@ def render_digest(row):
     if result and row.get("run_dir"):
         result = str(Path(row["run_dir"]) / result)
     detail = " · result " + result if result else ""
-    if status not in {"ok", "partial"}:
+    if status == "quarantined":
+        quarantine = row.get("quarantine") or {}
+        detail += " · not landable; review quarantine: " + str(quarantine.get("reason") or "inspect receipt")
+        detail += "; patches: " + (", ".join(quarantine.get("patches") or []) or "unavailable")
+        if quarantine.get("patch_error"):
+            detail += "; " + str(quarantine["patch_error"])
+    elif status not in {"ok", "partial"}:
         excerpt = row.get("evidence", {}).get("excerpt") or ""
         excerpt_line = next(
             (" ".join(line.split())[:120] for line in excerpt.splitlines() if line.strip()),
@@ -270,7 +277,7 @@ def write_route_health(row, *, path=None, at=None):
     status = row.get("status", "failed")
     if row.get("evidence", {}).get("signature") == "empty_output":
         status = "empty_output"
-    if status not in {"ok", "failed", "empty_output", "cancelled", "rate_limited", "usage_limited"}:
+    if status not in {"ok", "quarantined", "failed", "empty_output", "cancelled", "rate_limited", "usage_limited"}:
         status = "failed"
     key = f"{adapter}|{model}|{task_class}"
     entry = {"status": status, "task_class": task_class, "at": timestamp(at), "run_id": row.get("run_id", "")}
@@ -311,8 +318,56 @@ def write_route_health(row, *, path=None, at=None):
             os.close(parent)
 
 
+def _store_cooldowns(path, values):
+    """Atomic write of the cooldown map; callers hold the lock."""
+    parent, leaf = store_parent(path)
+    temp = ".cooldowns-" + secrets.token_hex(12)
+    fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(
+                {"schema": "fabric.cooldowns.v1", "cooldowns": values},
+                stream,
+                indent=2,
+            )
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temp, leaf, src_dir_fd=parent, dst_dir_fd=parent)
+        os.fsync(parent)
+    finally:
+        try:
+            os.unlink(temp, dir_fd=parent)
+        except FileNotFoundError:
+            pass
+        os.close(parent)
+
+
+def clear_cooldowns(selector=None, path=None):
+    """Remove cooldowns: all, one adapter (`*` and every model key), or one adapter/model."""
+    try:
+        from .exec_routing import registered_model
+    except ImportError:
+        from exec_routing import registered_model
+    adapter, slash, model = (selector or "").partition("/")
+    if selector is not None and (not adapter.strip() or adapter.startswith("-")):
+        raise ValueError("selector must be adapter or adapter/model; omit it to clear every cooldown")
+    path = Path(path or cooldown_path())
+    if slash:
+        model = registered_model(adapter, model or "*")
+    with locked(path.with_name("cooldowns.lock")):
+        values = read_cooldowns(path)
+        removed = sorted(key for key in values if not selector
+                         or (key == adapter + "/" + model if slash else key.startswith(adapter + "/")))
+        for key in removed:
+            del values[key]
+        if removed:
+            _store_cooldowns(path, values)
+    return removed
+
+
 def write_cooldown(row, *, path=None, at=None):
-    if row["status"] not in {"usage_limited", "rate_limited"}:
+    if row["status"] not in {"ok", "usage_limited", "rate_limited"}:
         return
     if row.get("evidence", {}).get("signature") == "cooldown_active":
         return
@@ -324,11 +379,13 @@ def write_cooldown(row, *, path=None, at=None):
     at = at or datetime.now(UTC)
     prov = row["provenance"]
     adapter = prov["requested"]["adapter"]
-    model = registered_model(adapter, prov["resolved_model"] or "*", warnings=row.setdefault("warnings", []))
+    model = registered_model(adapter, (prov.get("observed_model") if row["status"] == "ok" else None)
+                             or prov["resolved_model"] or "*", warnings=row.setdefault("warnings", []))
     excerpt = row.get("evidence", {}).get("excerpt", "")
-    # Antigravity meters each hosted model pool separately; its quota message
-    # names one pool, so it never cools the whole adapter.
-    if adapter != "agy" and row["status"] == "usage_limited" and re.search(
+    # Antigravity and OpenCode (Go or otherwise) meter each model separately; a limit there says
+    # nothing about the account's other models, so only other adapters' account limits widen.
+    model_quota = adapter in {"agy", "opencode"}
+    if not model_quota and row["status"] == "usage_limited" and re.search(
         r"(?:usage|session|weekly|account|plan) limit|individual quota reached|insufficient_quota", excerpt, re.I
     ):
         model = "*"
@@ -344,37 +401,39 @@ def write_cooldown(row, *, path=None, at=None):
         until = at + timedelta(seconds=delay)
     with locked(path.with_name("cooldowns.lock")):
         values = read_cooldowns(path, at)
-        values[adapter + "/" + model] = {
-            "adapter": adapter,
-            "model": model,
-            "account": None,
-            "status": row["status"],
-            "cooling_until": timestamp(until),
-            "source_run": row["run_id"],
-            "recorded_at": timestamp(at),
-            "signature": row["evidence"]["signature"],
-        }
-        parent, leaf = store_parent(path)
-        temp = ".cooldowns-" + secrets.token_hex(12)
-        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=parent)
-        try:
-            with os.fdopen(fd, "w") as stream:
-                json.dump(
-                    {"schema": "fabric.cooldowns.v1", "cooldowns": values},
-                    stream,
-                    indent=2,
-                )
-                stream.write("\n")
-                stream.flush()
-                os.fsync(stream.fileno())
-            os.replace(temp, leaf, src_dir_fd=parent, dst_dir_fd=parent)
-            os.fsync(parent)
-        finally:
+        key = adapter + "/" + model
+        if row["status"] == "ok":
+            # A substitution proves the answering model recovered, not the requested one.
+            # An account-wide `*` entry clears only for an attempt that began after it was
+            # recorded (a stale in-flight success must not clear a newer limit) and never on
+            # model_quota adapters. Accepted risk: a lighter model succeeding while a heavier
+            # one is still limited costs one attempt, which re-arms the cooldown.
+            wide = values.get(adapter + "/*")
             try:
-                os.unlink(temp, dir_fd=parent)
-            except FileNotFoundError:
-                pass
-            os.close(parent)
+                clears_wide = (not model_quota and wide is not None
+                               and parse_time(row["started_at"]) > parse_time(wide["recorded_at"]))
+            except (KeyError, ValueError, TypeError, AttributeError):
+                clears_wide = False
+            gone = {key} if model != "*" else set()
+            if clears_wide:
+                gone.add(adapter + "/*")
+            gone &= values.keys()
+            if not gone:
+                return
+            for item in gone:
+                del values[item]
+        else:
+            values[key] = {
+                "adapter": adapter,
+                "model": model,
+                "account": None,
+                "status": row["status"],
+                "cooling_until": timestamp(until),
+                "source_run": row["run_id"],
+                "recorded_at": timestamp(at),
+                "signature": row["evidence"]["signature"],
+            }
+        _store_cooldowns(path, values)
 
 
 def append_index(row, run_dir, *, root=None):

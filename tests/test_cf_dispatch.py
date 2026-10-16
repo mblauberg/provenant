@@ -2625,6 +2625,7 @@ def test_claude_worktree_writer_route_runs_inside_the_owned_worktree():
     assert f"PWD={worktree}" in recorded
     assert "owned worktree" in recorded
     assert "run commands and commit only inside this owned worktree" in recorded
+    assert "Do not author changes under .agents/" in recorded
 
 
 def test_claude_read_only_route_remains_the_default():
@@ -3051,7 +3052,7 @@ def test_unimplemented_adapter_is_refused_before_any_provider_work():
 
 
 def test_opencode_arm_runs_with_explicit_model_and_reports_unsupported_variant():
-    """Unknown OpenCode models run with the router-applied effort and a note."""
+    """Uncatalogued OpenCode models run with the effort sent as a model variant and a note."""
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
         bin_dir = tmp / "bin"
@@ -3088,10 +3089,10 @@ def test_opencode_arm_runs_with_explicit_model_and_reports_unsupported_variant()
         assert "--format" in recorded
         assert "json" in recorded
         assert "--model" in recorded
-        assert "opencode/union-alpha" in recorded
+        assert "opencode/union-alpha#high" in recorded
         assert "--variant" not in recorded
-        assert record["provenance"]["effort_applied"] == ""
-        assert any("effort control" in note for note in record["warnings"])
+        assert "--standalone" in recorded
+        assert record["provenance"]["effort_applied"] == "high"
         assert "--auto" in recorded
         assert out.read_text(encoding="utf-8") == "OPENCODE OK"
         assert '"type":"text"' in (tmp / "out.txt.raw.jsonl").read_text()
@@ -3137,7 +3138,8 @@ def test_opencode_writer_route_uses_owned_worktree():
     assert record["access_mode"] == "worktree_write"
     assert record["read_only_guarantee"] == "none"
     assert f"PWD={worktree}" in recorded
-    assert f"--dir\n{worktree}" in recorded
+    assert "--dir" not in recorded
+    assert "--standalone" in recorded
     config = json.loads(recorded.split("CONFIG=", 1)[1].splitlines()[0])
     assert config["permission"]["external_directory"] == {"*": "deny"}
     assert config["permission"]["edit"] == {"*": "allow"}
@@ -3250,7 +3252,7 @@ def test_opencode_idle_watchdog_terminates_silent_provider():
         tmp = Path(td)
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
-        write_executable(bin_dir / "opencode", "#!/usr/bin/env bash\nsleep 10\n")
+        write_executable(bin_dir / "opencode", '#!/usr/bin/env bash\n[ "$1" = "--version" ] && { echo 2.0.30; exit 0; }\nsleep 10\n')
         env = fabric_free_env()
         env["PATH"] = f"{bin_dir}:{PRODUCT_ROOT / 'scripts'}:{env['PATH']}"
         env["CF_DISPATCH_IDLE_SECONDS"] = "1"
@@ -3300,6 +3302,7 @@ def test_opencode_dispatch_group_signal_terminates_provider_and_grandchild():
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
         write_executable(bin_dir / "opencode", f"""#!/usr/bin/env bash
+            [ "$1" = "--version" ] && {{ echo 2.0.30; exit 0; }}
             echo "$$" > "{tmp / 'provider.pid'}"
             trap 'touch "{tmp / 'provider.stopped'}"; exit 143' TERM
             (trap 'touch "{tmp / 'grandchild.stopped'}"; exit 143' TERM; touch "{tmp / 'ready'}"; while :; do sleep 0.1; done) &
@@ -3340,6 +3343,7 @@ def test_opencode_normal_exit_reaps_grandchild():
         bin_dir = tmp / "bin"
         bin_dir.mkdir()
         write_executable(bin_dir / "opencode", f"""#!/usr/bin/env bash
+            [ "$1" = "--version" ] && {{ echo 2.0.30; exit 0; }}
             echo "$$" > "{tmp / 'provider.pid'}"
             (trap 'touch "{tmp / 'grandchild.stopped'}"; exit 143' TERM; touch "{tmp / 'ready'}"; while :; do sleep 0.1; done) &
             while [ ! -f "{tmp / 'ready'}" ]; do sleep 0.05; done

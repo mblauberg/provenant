@@ -9,6 +9,7 @@ import ctypes
 import functools
 import hashlib
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -54,7 +55,11 @@ CONFINED_STATE = {
         # without it. Only OAuth lanes get it: bare and endpoint lanes sign in with a key.
         "oauth_read": ("Library/Keychains/login.keychain-db",),
     },
-    "cursor": {"read_write": (".cursor", ".cache/cursor", ".npm")},
+    "cursor": {
+        "read_write": (".cursor", ".cache/cursor", ".npm"),
+        # cursor-agent keeps its sign-in in the login keychain; a read-only lane is signed out without it.
+        "read": ("Library/Keychains/login.keychain-db",),
+    },
     "kiro": {
         # kiro-cli keeps its sign-in and refreshed tokens in data.sqlite3, guarded by .refresh.lock,
         # which it opens for writing before reading the token. The rest of its support directory holds
@@ -125,19 +130,41 @@ def now():
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+# Home-relative credential stores. No lane reads them, whatever else its profile grants.
+CREDENTIAL_STORES = (
+    '.ssh', '.aws', '.azure', '.gnupg', '.codex', '.claude',
+    '.gemini', '.cursor', '.kiro', '.docker', '.kube', '.netrc', '.npmrc',
+    '.git-credentials', '.pypirc', '.pgpass', '.vault-token', '.password-store', '.boto',
+    '.s3cfg', '.terraform.d', '.cargo/credentials', '.cargo/credentials.toml',
+    '.gem/credentials', '.config/git/credentials', '.config/hub', '.config/op',
+    '.config/gh', '.config/gcloud', '.config/claude', '.config/codex',
+    '.config/openai', '.config/opencode', '.local/share/opencode', 'Library/Keychains',
+    'Library/Application Support',
+)
+
+
+# Instruction files OpenCode v2 reads from each ancestor of its cwd.
+OPENCODE_INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "HARNESS.md")
+
+
+def _opencode_discovery_grantable(path, *, directory=False):
+    # A symlinked discovery entry must not carry a read grant to its target: files only when the target is an
+    # instruction file outside credential stores, directories only when the target is not a credential store.
+    path = Path(path)
+    if not path.is_symlink():
+        return True
+    target = path.resolve()
+    if credential_path(target) and not target.is_relative_to(Path.home().resolve() / ".claude"):
+        return False
+    if directory:
+        return target.is_dir()
+    return target.is_file() and target.name in OPENCODE_INSTRUCTION_FILES
+
+
 def credential_path(path):
     candidate = Path(path).expanduser().resolve()
     home = Path.home().resolve()
-    stores = [home / name for name in (
-        '.ssh', '.aws', '.azure', '.gnupg', '.codex', '.claude',
-        '.gemini', '.cursor', '.kiro', '.docker', '.kube', '.netrc', '.npmrc',
-        '.git-credentials', '.pypirc', '.pgpass', '.vault-token', '.password-store', '.boto',
-        '.s3cfg', '.terraform.d', '.cargo/credentials', '.cargo/credentials.toml',
-        '.gem/credentials', '.config/git/credentials', '.config/hub', '.config/op',
-        '.config/gh', '.config/gcloud', '.config/claude', '.config/codex',
-        '.config/openai', '.config/opencode', '.local/share/opencode', 'Library/Keychains',
-        'Library/Application Support',
-    )]
+    stores = [home / name for name in CREDENTIAL_STORES]
     if any(candidate.is_relative_to(store) or store.is_relative_to(candidate) for store in stores):
         return True
     parts = [part.lower() for part in candidate.parts]
@@ -484,7 +511,19 @@ def os_confinement_profile(plan, search_path=None):
     git_config_files = [home / ".gitconfig", xdg_config_home / "git/config"]
     reads = [*state.get("read", ()), *(() if _uses_api_key(plan) else state.get("oauth_read", ()))]
     project_files, project_directories = _project_config_reads(plan, root)
+    discovery_dirs, discovery_files = [], []
+    if plan.get("adapter") == "opencode":
+        # OpenCode v2 resolves every ancestor of its cwd, ~/.claude and ~/.agents at startup and reads the
+        # instruction files it finds there. Home stays denied; re-allow those directories as listings
+        # (never their contents) and the instruction files by name.
+        cwd_path = Path(plan["cwd"]).resolve()
+        discovery_dirs = [*cwd_path.parents, home / ".claude", home / ".agents"]
+        discovery_files = [d / name for d in cwd_path.parents for name in OPENCODE_INSTRUCTION_FILES]
+        discovery_files += [home / ".agents/AGENTS.md", home / ".claude/CLAUDE.md"]
+        discovery_dirs = [d for d in discovery_dirs if _opencode_discovery_grantable(d, directory=True)]
+        discovery_files = [f for f in discovery_files if _opencode_discovery_grantable(f)]
     toolchain_files, uv_project_files, toolchain_directories = _toolchain_reads(plan, root, search_path)
+    launcher_links, install_directories = _adapter_binary_reads(plan, search_path)
     return (
         "(version 1)\n(allow default)\n(deny file-write*)\n"
         + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), Path("/dev")])
@@ -492,6 +531,7 @@ def os_confinement_profile(plan, search_path=None):
         + _state_write_guards(home, state)
         + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
         + _sbpl_rule("deny", "file-read-data", [root, *add_dirs])
+        + _sbpl_rule("allow", "file-read-data", [*discovery_dirs, *discovery_files], literal=True)
         + _sbpl_rule("allow", "file-read-data", [*([run_dir] if run_dir else [])])
         + _sbpl_rule("allow", "file-read-data", state_writes, canonical=True)
         + _sbpl_rule("allow", "file-read-data", [home / path for path in reads])
@@ -507,6 +547,8 @@ def os_confinement_profile(plan, search_path=None):
         + _sbpl_rule("allow", "file-read-data", toolchain_files, literal=True, canonical=True)
         + _sbpl_rule("allow", "file-read-data", uv_project_files, literal=True, keep_leaf=True)
         + _sbpl_rule("allow", "file-read-data", toolchain_directories, canonical=True)
+        + _sbpl_rule("allow", "file-read-data", launcher_links, literal=True, keep_leaf=True)
+        + _sbpl_rule("allow", "file-read-data", install_directories, canonical=True)
         # After every allow, since a state grant such as ~/.claude would otherwise reopen them.
         + _sbpl_rule("deny", "file-read-data", [home / path for path in
                                                 (*EXTRA_DENIED_READS, *state.get("read_denied", ()))])
@@ -683,6 +725,95 @@ def _runtime_component(prefix, name, *, directory):
     return canonical
 
 
+# v2 logs are `timestamp=... level=ERROR ...`; v1 printed `ERROR ...` at line start.
+OPENCODE_FATAL_LOG = r"^\s*ERROR\b|\blevel=ERROR\b|(?:monthly|weekly|5.hour) (?:usage )?limit"
+OPENCODE_QUIET_LOG = r"\s*(?:WARN|INFO|DEBUG)\b|.*\blevel=(?:WARN|INFO|DEBUG)\b"
+
+
+_OPENCODE_VERSION_CACHE = {}
+
+
+def _opencode_version_error(executable, path):
+    """Typed refusal for an OpenCode older than v2; unknown versions pass (tool_missing reports absence).
+
+    Only a parsed answer is cached, keyed on the binary's mtime, so a timeout is retried and
+    `opencode upgrade` is noticed by a long-lived process.
+    """
+    found = shutil.which(executable, path=path)
+    if not found:
+        return None
+    try:
+        key = (found, os.stat(found).st_mtime_ns)
+    except OSError:
+        return None
+    if key in _OPENCODE_VERSION_CACHE:
+        return _OPENCODE_VERSION_CACHE[key]
+    try:
+        text = subprocess.run([found, "--version"], capture_output=True, text=True, timeout=10,
+                              stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    error = profile("opencode").version_error(text)
+    if re.search(r"\d+\.\d+", text or ""):
+        _OPENCODE_VERSION_CACHE[key] = error
+    return error
+
+
+def _pyenv_version_dir(root, selected):
+    """versions/<selected>, or the highest installed versions/<selected>.* for a prefix like 3.12."""
+    versions = root / "versions"
+    if (versions / selected).is_dir():
+        return versions / selected
+    prefix = selected + "."
+    matches = [path for path in versions.glob(selected + ".*") if path.is_dir() and path.name.startswith(prefix)]
+    key = lambda path: [(0, int(part), "") if part.isdigit() else (-1, 0, part) for part in re.split(r"[.-]", path.name)]
+    return max(matches, key=key, default=None)
+
+
+def _pyenv_shim(executable, cwd, search_path):
+    """Resolve ordinary pyenv selections from data, never by executing a shim or hook.
+
+    Returns (None, [], []) with a warning when the selection cannot be resolved, so the caller
+    skips that candidate; an unsafe shim, root or version name still raises ValueError.
+    """
+    root = Path(os.environ.get("PYENV_ROOT") or Path.home() / ".pyenv").expanduser().resolve()
+    if executable.parent.resolve() != root / "shims":
+        return executable, [], []
+    error = f"cannot resolve pyenv shim {executable}; fix: select an installed Python version or put its bin on PATH"
+    if not _executable_file(executable) or credential_path(root) or credential_path(executable):
+        raise ValueError(error)
+    version = os.environ.get("PYENV_VERSION", "")
+    files = [executable.resolve()]
+    if not version:
+        start = Path(os.environ.get("PYENV_DIR") or cwd).expanduser().resolve()
+        source = next((parent / ".python-version" for parent in (start, *start.parents)
+                       if _plain_file(parent / ".python-version")), root / "version")
+        if _plain_file(source):
+            if credential_path(source):
+                raise ValueError(error)
+            version = ":".join(line.partition("#")[0].strip().split()[0]
+                               for line in source.read_text(errors="replace").splitlines()
+                               if line.partition("#")[0].strip())
+            files.append(source.resolve())
+    for selected in (version or "system").split(":"):
+        if selected == "system":
+            without_shims = os.pathsep.join(part for part in search_path.split(os.pathsep)
+                                           if Path(part).resolve() != root / "shims")
+            found = shutil.which(executable.name, path=without_shims)
+            target = Path(found) if found else None
+        elif re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", selected):
+            directory = _pyenv_version_dir(root, selected)
+            target = directory / "bin" / executable.name if directory else None
+        else:
+            raise ValueError(error)
+        if target is not None and _toolchain_grant(target)[0]:
+            # The shim and pyenv's scripts still run inside the lane's sandbox.
+            libexec = _runtime_component(root, "libexec", directory=True)
+            return target, files, [libexec] if libexec else []
+    logging.getLogger(__name__).warning("skipping toolchain candidate: %s", error)
+    return None, [], []
+
+
 def _toolchain_reads(plan, root, search_path=None):
     """Files, unresolved project files and directories of the toolchain a read-only lane uses.
 
@@ -709,9 +840,12 @@ def _toolchain_reads(plan, root, search_path=None):
             candidates.extend(Path(base) / name for name in ("python3", "python"))
     files = []
     for candidate in candidates:
+        candidate, shim_files, shim_directories = _pyenv_shim(candidate, cwd, search_path)
+        if candidate is None:
+            continue
         granted_files, granted_directories = _toolchain_grant(candidate)
-        files.extend(granted_files)
-        directories.extend(granted_directories)
+        files.extend([*granted_files, *shim_files])
+        directories.extend([*granted_directories, *shim_directories])
     project_files = ([parent / name for parent in cwd.parents for name in UV_PROJECT_FILES]
                      if any(path.name.startswith("uv") for path in files) else [])
     return list(dict.fromkeys(files)), project_files, list(dict.fromkeys(directories))
@@ -719,6 +853,40 @@ def _toolchain_reads(plan, root, search_path=None):
 
 def _plain_file(path):
     return path.is_file() and not path.is_symlink()
+
+
+def _adapter_binary_reads(plan, search_path=None):
+    """(launcher links, install directories) the provider's own executable is read through.
+
+    The launcher is the PATH entry and every link hop to the real file, granted by name. A real
+    file inside an install folder (cursor-agent's ~/.local/share/cursor-agent/versions/<version>)
+    also grants that folder, since the launcher script runs siblings from it. A binary in a plain
+    `bin` directory is granted alone, never the directory. A path that is, holds or sits in home
+    or a credential store grants nothing.
+    """
+    argv = plan.get("argv")
+    found = shutil.which(argv[0], path=search_path) if argv else None
+    if not found:
+        return [], []
+    home = Path.home().resolve()
+    links, current = [], Path(found)
+    for _ in range(16):
+        links.append(current)
+        if not current.is_symlink():
+            break
+        target = Path(os.readlink(current))
+        current = target if target.is_absolute() else current.parent / target
+    else:
+        return [], []
+    resolved = current.resolve()
+    links = [path for path in links if not credential_path(path.parent.resolve() / path.name)]
+    if not resolved.is_file() or credential_path(resolved):
+        return links, []
+    links = list(dict.fromkeys([*links, resolved]))
+    install = resolved.parent
+    if install.name == "bin" or home.is_relative_to(install) or credential_path(install):
+        return links, []
+    return links, [install]
 
 
 def confinement_command(plan, command, search_path=None):
@@ -792,6 +960,10 @@ def build_plan(
     original_prompt_file = metadata.pop("original_prompt_file", prompt_file)
     run_dir = metadata.pop("run_dir", None)
     config = profile(adapter)
+    if adapter == "opencode":
+        version_error = _opencode_version_error(config.CLI, os.environ.get("PATH"))
+        if version_error:
+            raise CapabilityError("unsupported_cli_version", version_error)
     selected_cwd = Path(worktree or cwd or workspace_root or Path.cwd()).expanduser().resolve()
     if not selected_cwd.is_dir():
         raise ValueError("cwd must be a readable directory")
@@ -830,7 +1002,11 @@ def build_plan(
         raise ValueError("invalid sandbox")
     if network is not None and type(network) is not bool:
         raise ValueError("network must be a boolean")
-    warnings = list(route.get("notes") or []) + list(route.get("warnings") or [])
+    # Catalogue notices demoted to receipt notes must not become warnings again.
+    warnings = list(dict.fromkeys([
+        *(note for note in route.get("notes") or [] if " is newer than the catalogue;" not in note),
+        *list(route.get("warnings") or []),
+    ]))
     applied_network = network
     if adapter == "codex":
         applied_network = (
@@ -896,7 +1072,7 @@ def build_plan(
     if preface:
         prompt = (
             f"You are {route_label} via Fabric. Attribute work to exactly this route; never guess a model name. "
-            "This is a headless run that ends when you reply: run commands in the foreground and finish before answering; processes left running are then stopped.\n\n"
+            "This is a headless run that ends when you reply: run commands in the foreground and finish before answering; processes left running are then stopped. Keep tool output bounded: redirect large output to a file and read slices.\n\n"
             + prompt
         )
     guarantee = (
@@ -1028,7 +1204,10 @@ def build_plan(
     if not all(math.isfinite(value) and value > 0 for value in (timeout, idle, startup)):
         raise ValueError("timeouts must be finite positive numbers")
     boundary = f"Workspace root: {cwd}\nResolve relative paths against this root. " + (
-        "Write, run commands and commit only inside this owned worktree. Do not push or change other checkouts."
+        "Write, run commands and commit only inside this owned worktree. Do not push or change other checkouts. "
+        + ("" if metadata.get("instruction_policy") == "allow" else
+           "Do not author changes under .agents/; stage proposed instruction edits elsewhere for chair review. ")
+        + "Protected instruction changes or unverifiable checks quarantine a completed result: review it before landing."
         if mode == "worktree_write"
         else "Do not modify files or run commands that mutate state. Use file-reading tools only."
     )
@@ -1123,6 +1302,15 @@ SIGNATURES = (
 )
 
 
+def _variant_fix(failure_text):
+    """The fix for a rejected input; OpenCode's bad variant names the model and the variant to drop."""
+    found = re.search(r"Variant unavailable for ([^\s:\"]+): ([^\s\"}]+)", failure_text)
+    if found:
+        return (f"{found[1]} has no `{found[2]}` variant; drop --effort or `#{found[2]}`, "
+                "or pass a variant that model supports")
+    return failure_text.strip()[:400]
+
+
 def _model_unavailable_fix(plan):
     route = plan.get("route") or {}
     if route.get("identity_source") != "passed-through":
@@ -1138,12 +1326,13 @@ def _model_unavailable_fix(plan):
         registered = route.registered_model_ids(adapter)
     except Exception:
         registered = []
+    listing = "; list every id with `opencode models`" if plan.get("adapter") == "opencode" else ""
     if registered:
         choices = ", ".join(registered[:6])
         if len(registered) > 6:
             choices += ", …"
-        return "choose a registered model: " + choices
-    return "choose another model"
+        return "choose a registered model: " + choices + listing
+    return "choose another model" + listing
 
 
 def _objects(value):
@@ -1170,6 +1359,9 @@ def reset_time(text, events, at=None):
                     )
                 except (ValueError, OverflowError, OSError):
                     pass
+    days = re.search(r"Resets in\s+(\d+)\s*d(?:ays?)?\b", text, re.I)
+    if days:
+        return (at + timedelta(days=int(days[1]))).astimezone(UTC).isoformat().replace("+00:00", "Z")
     hours = re.search(r"Resets in\s+(\d+)h(?:\s*(\d+)m)?", text, re.I)
     if hours:
         return (
@@ -2151,26 +2343,21 @@ def _observed_model(plan, parsed, env):
     elif adapter == "opencode" and session:
         try:
             exported = subprocess.run(
-                [profile(adapter).CLI, "export", session],
+                [profile(adapter).CLI, "session", "export", "--standalone", session],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=20,
                 env=env,
                 cwd=plan["cwd"],
                 stdin=subprocess.DEVNULL,
             )
-            value = json.loads(exported.stdout)
-            observed = [
-                (item.get("providerID"), item["modelID"])
-                for item in _objects(value)
-                if isinstance(item.get("modelID"), str)
-            ]
-            if observed:
-                provider, model = observed[-1]
+            observed = (json.loads(exported.stdout).get("info") or {}).get("model") or {}
+            model, provider = observed.get("id"), observed.get("providerID")
+            if isinstance(model, str) and model:
                 return (
-                    provider + "/" + model if provider and "/" not in model else model
+                    provider + "/" + model if isinstance(provider, str) and provider and "/" not in model else model
                 ), profile(adapter).MODEL_SOURCE
-        except (OSError, ValueError, subprocess.SubprocessError):
+        except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
             pass
     if parsed["observed_model"]:
         return parsed["observed_model"], profile(adapter).MODEL_SOURCE
@@ -2410,7 +2597,7 @@ def _git_bytes(cwd, *args, input=None, env=None):
 
 
 def quarantinable(changes):
-    """Ordinary paths below .agents/ the owner can take back out; anything else still fails the attempt."""
+    """Ordinary paths below .agents/ the owner can archive and restore safely."""
     return all(change.startswith(INSTRUCTION_DIR + "/") and not change.endswith(" (unresolved conflict)")
                for change in changes)
 
@@ -2491,13 +2678,14 @@ QUARANTINE_PATCHES = (("disk", "protected.patch"), ("index", "protected.index.pa
                       ("head", "protected.head.patch"))
 
 
-def quarantine_instruction_changes(cwd, start, changes, attempt_dir):
+def quarantine_instruction_changes(cwd, start, changes, attempt_dir, *, restore_changes=True, published=None):
     """Move a lane's authored .agents changes out of its worktree into patches the chair applies.
 
     Each of the lane's files, index and HEAD is archived as a patch from the view's restore point
     (protected.patch for files; index and HEAD patches only when they hold something else). A commit,
     the index and the files then return to their restore points. Blobs are hashed and written
-    without filters, so no command the repository configures runs. Returns the patches written.
+    without filters, so no command the repository configures runs. With restore_changes=False,
+    archive only. Returns the patches written; protected.patch may be empty for an index-only edit.
     """
     root = Path(cwd).resolve()
     paths = sorted(changes)
@@ -2507,7 +2695,8 @@ def quarantine_instruction_changes(cwd, start, changes, attempt_dir):
     lane = {"head": _instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", head))[0],
             "index": _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)[0],
             "disk": {path: entry for path in paths if (entry := _store_blob(cwd, path))}}
-    published = []
+    if published is None:
+        published = []
     # Scratch files stay out of the attempt directory, which a lane may be able to write.
     with tempfile.TemporaryDirectory() as private:
         scratch_index = Path(private, "index")
@@ -2526,12 +2715,14 @@ def quarantine_instruction_changes(cwd, start, changes, attempt_dir):
             patch = _git_bytes(cwd, "diff", "--binary", "--full-index", "--no-renames", "--no-ext-diff",
                                "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/",
                                tree_of(restore[view]), tree_of(lane[view]))
-            if patch and patch not in written:
+            if name == "protected.patch" or (patch and patch not in written):
                 written.add(patch)
                 Path(private, name).write_bytes(patch)
                 # Replace, never follow, whatever the lane left at the destination.
                 install(str(Path(private, name)), str(Path(attempt_dir, name)))
                 published.append(Path(attempt_dir, name))
+        if not restore_changes:
+            return published
         tree = tree_of(restore["head"], base=head)
         if tree != os.fsdecode(_git_bytes(cwd, "rev-parse", head + "^{tree}")).strip():
             message = (f"fabric: quarantine protected {INSTRUCTION_DIR}/ changes\n\n"
@@ -2726,6 +2917,11 @@ def execute(
         }
         # The sentinel matches no real command and exists only so Zen declares bash.
         environment["OPENCODE_CONFIG_CONTENT"] = json.dumps({"permission": permission})
+        # v2 scans ~/.claude for Claude Code skills and CLAUDE.md, which the confinement profile
+        # denies (startup fails with EPERM) and which holds the owner's private instructions.
+        # Autoupdate and the filewatcher have no place in a supervised, sandboxed run.
+        environment.update(OPENCODE_DISABLE_CLAUDE_CODE="1", OPENCODE_DISABLE_CLAUDE_CODE_SKILLS="1",
+                           OPENCODE_DISABLE_AUTOUPDATE="1", OPENCODE_DISABLE_FILEWATCHER="1")
     warning_text = "\n".join(plan["warnings"])
     if warning_text:
         print(warning_text, file=sys.stderr, flush=True)
@@ -2751,11 +2947,38 @@ def execute(
     semantic = {}
     text_chunks, text_size = deque(), 0
     semantic_failures = {}
+    live_failure = None
+    diagnostic_pending = {"stdout": b"", "stderr": b""}
     retry_failure = None
     terminal_text = None
     text_truncated = False
     old_handlers = {}
     meter = context_usage.Meter(plan["adapter"])
+
+    def consume_diagnostic(data, stream):
+        nonlocal live_failure
+        adapter = plan["adapter"]
+        if adapter not in {"opencode", "kiro"} or (adapter == "opencode" and stream != "stderr"):
+            return
+        # Preserve split diagnostics without buffering an unbounded log or interpreting answers.
+        diagnostic_pending[stream] = (diagnostic_pending[stream] + data)[-65536:]
+        text = diagnostic_pending[stream].decode(errors="replace")
+        if adapter == "kiro":
+            if re.search(r"(?m)^\s*Opening browser(?:\.\.\.|…)\s*$", text):
+                live_failure = {"status": "auth_required", "signature": "auth_expired",
+                                "excerpt": "Opening browser...", "reset_at": None, "retry_after": None}
+        elif re.search(OPENCODE_FATAL_LOG, text, re.I | re.M):
+            # Only an ERROR log or an explicit period limit is fatal; other retried noise is not.
+            # Classify only the qualifying lines plus reset-hint lines; the rest of the window is not evidence.
+            relevant = [line for line in text.splitlines()
+                        if re.search(OPENCODE_FATAL_LOG, line, re.I)
+                        or (re.search(r"\bresets?\b", line, re.I)
+                            and not re.match(OPENCODE_QUIET_LOG, line, re.I))]
+            parsed = parse_output(adapter, "", "\n".join(relevant), 1)
+            if parsed["status"] == "usage_limited":
+                live_failure = parsed
+        # Keep the unfinished line and a few before it, so a reset hint on its own line is not lost.
+        diagnostic_pending[stream] = b"\n".join(diagnostic_pending[stream].split(b"\n")[-6:])
 
     def consume(data):
         nonlocal pending, terminal_at, text_size, retry_failure, terminal_text, text_truncated, dropping_line
@@ -2913,6 +3136,7 @@ def execute(
                         consume(data)
                     else:
                         diagnostics.write(data)
+                    consume_diagnostic(data, key.data)
                     last_progress = time.monotonic()
                     last_progress_at = now()
                     warned = False
@@ -2934,6 +3158,11 @@ def execute(
                     break
                 if cancel_signal:
                     forced = "interrupted"
+                    break
+                if plan["adapter"] == "opencode" and "usage_limited" in semantic_failures:
+                    live_failure = semantic_failures["usage_limited"]
+                if live_failure:
+                    forced = live_failure["status"]
                     break
                 if (
                     terminal_at is not None
@@ -2982,6 +3211,9 @@ def execute(
                     warned = True
     except FileNotFoundError as exc:
         forced = "tool_missing"
+        diagnostics.write(str(exc).encode())
+    except ValueError as exc:
+        forced = "rejected"
         diagnostics.write(str(exc).encode())
     except OSError as exc:
         forced = "failed"
@@ -3072,6 +3304,14 @@ def execute(
             priority = [status for status, _ in (SIGNATURES[0], *profile(plan["adapter"]).SIGNATURES, *SIGNATURES[1:])]
             selected = next((failures[status] for status in priority if status in failures), next(iter(failures.values())))
             parsed.update(selected)
+    if live_failure and forced == live_failure["status"]:
+        parsed.update({key: live_failure[key] for key in ("status", "signature", "excerpt", "reset_at", "retry_after")})
+    if plan["adapter"] == "opencode" and parsed["status"] == "usage_limited":
+        parsed["signature"] = "quota_exhausted"
+        if not parsed["reset_at"] and re.search(r"monthly usage limit", parsed.get("failure_text") or parsed["excerpt"], re.I):
+            # Billing anniversary is unknown: re-probe after a day. The next attempt is the probe;
+            # success clears the entry and failure re-arms it.
+            parsed["retry_after"] = 24 * 3600
     if forced:
         parsed["status"] = forced
         parsed["signature"] = {
@@ -3180,6 +3420,7 @@ def execute(
         "line": line,
     }
     status = parsed["status"]
+    quarantine = None
     instruction_changes = []
     if instruction_start is not None:
         try:
@@ -3193,42 +3434,67 @@ def execute(
     instruction_policy = ("deny" if status == "interrupted" or
                           (status == "cancelled" and termination_request)
                           else plan.get("instruction_policy", "quarantine"))
-    # Unverifiable states, special files and conflicts stay hard failures under any policy.
+    # Assurance failure blocks landing, independently of a usable provider result.
     if instruction_changes and instruction_policy == "allow" and quarantinable(instruction_changes):
         warnings.append("lane changed " + INSTRUCTION_DIR + "/ (allowed by policy): " + ", ".join(instruction_changes))
         instruction_changes = []
-    elif instruction_changes and instruction_policy == "quarantine" and quarantinable(instruction_changes):
+    if instruction_changes:
+        unverifiable = any("(unverifiable:" in change for change in instruction_changes)
+        signature = "protected_instructions_unverifiable" if unverifiable else "protected_instructions_changed"
+        quarantine = {"reason": signature + ": " + ", ".join(instruction_changes),
+                      "patches": [], "restored": False, "patch_error": None}
+        patch = Path(plan["run_dir"], "protected.patch")
+        patches = []
         try:
-            patches = quarantine_instruction_changes(plan["cwd"], instruction_start, instruction_changes,
-                                                     Path(plan["run_dir"]))
-            remaining = authored_instruction_changes(plan["cwd"], instruction_start)
-            if remaining:
-                raise ValueError("still changed after restore: " + ", ".join(remaining))
+            # Retain an explicit unavailable marker even if safe diff capture fails.
+            with tempfile.TemporaryDirectory() as marker_dir:
+                marker = Path(marker_dir, "protected.patch")
+                marker.write_text("# Instruction diff unavailable: " + quarantine["reason"] + "\n")
+                install(str(marker), str(patch))
+            quarantine["patches"] = [str(patch)]
+            if not quarantinable(instruction_changes) or not isinstance(instruction_start, dict):
+                raise ValueError("no safe instruction diff can be captured; inspect the retained worktree")
+            patches = quarantine_instruction_changes(
+                plan["cwd"], instruction_start, instruction_changes, Path(plan["run_dir"]),
+                restore_changes=instruction_policy == "quarantine", published=patches)
+            quarantine["patches"] = list(map(str, patches))
+            if instruction_policy == "quarantine":
+                remaining = authored_instruction_changes(plan["cwd"], instruction_start)
+                if remaining:
+                    raise ValueError("still changed after restore: " + ", ".join(remaining))
+                quarantine["restored"] = True
+                warnings.append("lane changed " + INSTRUCTION_DIR + "/ beyond its start and integration branch: "
+                                + ", ".join(instruction_changes) + f"; quarantined to {', '.join(map(str, patches))} "
+                                "and removed from the lane; review before landing")
+                instruction_changes = []
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            quarantine["patch_error"] = str(exc)
             warnings.append(f"quarantine of {INSTRUCTION_DIR}/ changes failed: {exc}")
-        else:
-            warnings.append("lane changed " + INSTRUCTION_DIR + "/ beyond its start and integration branch: "
-                            + ", ".join(instruction_changes) + f"; quarantined to {', '.join(map(str, patches))} and removed from "
-                            "the lane; review it, then git apply it deliberately")
-            instruction_changes = []
+        if patches:
+            quarantine["patches"] = list(map(str, patches))
+        if instruction_changes:  # Edits remain on the lane: fail, as without quarantine.
+            status = "failed"
+        elif status == "ok":
+            status = "quarantined"
+        parsed["signature"] = signature
     if created_instructions is not None:
         try:
             created_instructions.rmdir()  # Only the empty directory this attempt added.
         except OSError:
             pass
     if instruction_changes:
-        status = "failed"
-        parsed["signature"] = "protected_instructions_changed"
-        warnings.append("lane changed " + INSTRUCTION_DIR + "/ beyond its start and integration branch: "
+        warnings.append(("instruction assurance unavailable: " if unverifiable else
+                         "lane changed " + INSTRUCTION_DIR + "/ beyond its start and integration branch: ")
                         + ", ".join(instruction_changes))
-    if plan["adapter"] == "agy" and status not in {"ok", "input_required", "partial"}:
+    if (plan["adapter"] == "agy" and status not in {"ok", "input_required", "partial", "quarantined"}
+            and not (quarantine and parsed["status"] == "ok")):
         parsed["text"] = ""
         stderr = "agy dispatch failed: status=" + status + "\n" + stderr
         if parsed["excerpt"]:
             parsed["excerpt"] = "provider error: " + parsed["excerpt"]
     output = (
         parsed["text"]
-        if status in {"ok", "input_required", "partial"}
+        if status in {"ok", "input_required", "partial", "quarantined"} or quarantine and parsed["status"] == "ok"
         else (parsed["text"] + "\n" if parsed["text"] else "")
         + stderr
         + ("\n" + parsed["excerpt"] if parsed["excerpt"] else "")
@@ -3253,7 +3519,10 @@ def execute(
     )
     guarantee = plan["applied"]["guarantee"]
     fix = (
-        parsed["failure_text"].strip()[:400]
+        "run `kiro-cli whoami` outside the sandbox"
+        if status == "auth_required" and parsed["signature"] == "auth_expired"
+        else
+        _variant_fix(parsed["failure_text"])
         if status == "rejected" and parsed["signature"] == "invalid_input"
         else
         "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"
@@ -3276,9 +3545,15 @@ def execute(
             "rate_limited": "retry after the recorded cooldown",
         }.get(status)
     )
-    if instruction_changes:
-        fix = ("restore " + INSTRUCTION_DIR + "/ to the start commit or the integration branch; "
-               "a Codex lane may carry that branch's instruction changes but not author its own")
+    if quarantine and status == "failed" and instruction_changes:
+        fix = ("instruction edits remain on the lane branch; restore " + INSTRUCTION_DIR
+               + "/ to the start commit before landing; patches: "
+               + (", ".join(quarantine["patches"]) or "unavailable")
+               + ("; " + quarantine["patch_error"] if quarantine["patch_error"] else ""))
+    elif quarantine:
+        fix = ("not landable; review quarantine: " + quarantine["reason"] + "; patches: "
+               + (", ".join(quarantine["patches"]) or "unavailable")
+               + ("; " + quarantine["patch_error"] if quarantine["patch_error"] else ""))
     record = {
         **{
             key: route.get(key, "")
@@ -3305,10 +3580,11 @@ def execute(
         "effort": plan["effort"],
         "status": status,
         **({"error": "invalid_input"} if status == "rejected" and parsed["signature"] == "invalid_input" else {}),
-        **({"error": "protected_instructions_changed"} if instruction_changes else {}),
+        **({"error": parsed["signature"]} if instruction_changes else {}),
+        **({"landable": False, "quarantine": quarantine} if quarantine else {}),
         "reason": parsed["excerpt"],
         "exit": 0
-        if status in {"ok", "input_required"} and terminal_at is not None
+        if status in {"ok", "input_required", "quarantined"} and terminal_at is not None
         else exit_code,
         "output_path": output_value,
         "output_digest": digest_value,
@@ -3495,6 +3771,7 @@ def main():
             json.dumps(
                 {
                     "status": status,
+                    **({"error": exc.code} if isinstance(exc, CapabilityError) else {}),
                     "fix": str(exc),
                     "output_path": "",
                     "output_digest": "",

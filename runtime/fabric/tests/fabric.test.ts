@@ -1,4 +1,5 @@
 import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync,
 } from "node:fs";
@@ -13,7 +14,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
-import { identify, withoutGitRedirects } from "../src/identity.js";
+import { identify, resolveCommitSha, withoutGitRedirects } from "../src/identity.js";
 import { inspectDatabase, Store, type Message } from "../src/store.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -56,6 +57,30 @@ function announce(store: Store, ...ids: string[]): void {
 }
 
 describe("work ownership", () => {
+  it("resolves SHA object prefixes without accepting hex-named refs or ambiguous objects", () => {
+    const repo = join(temporaryDirectory, "sha-prefixes");
+    mkdirSync(repo);
+    const git = (...args: string[]) => execFileSync("git", args, { cwd: repo, encoding: "utf8" }).trim();
+    git("init", "-q");
+    git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "--allow-empty", "-qm", "base");
+    git("branch", "deadbee");
+    expect(() => resolveCommitSha(repo, "deadbee")).toThrow(/unknown or ambiguous/u);
+    const tree = git("rev-parse", "HEAD^{tree}");
+    const seen = new Map<string, string>();
+    let collision: string[] = [];
+    let prefix = "";
+    for (let index = 0; index < 200_000; index++) {
+      const body = `tree ${tree}\nauthor Fixture <fixture@example.test> 1 +0000\ncommitter Fixture <fixture@example.test> 1 +0000\n\n${index}\n`;
+      prefix = createHash("sha1").update(`commit ${Buffer.byteLength(body)}\0${body}`).digest("hex").slice(0, 7);
+      const prior = seen.get(prefix);
+      if (prior) { collision = [prior, body]; break; }
+      seen.set(prefix, body);
+    }
+    expect(collision).toHaveLength(2);
+    for (const body of collision) execFileSync("git", ["hash-object", "-t", "commit", "-w", "--stdin"], { cwd: repo, input: body });
+    expect(() => resolveCommitSha(repo, prefix)).toThrow(/unknown or ambiguous/u);
+  });
+
   it("rejects overlapping issue and path claims across stores and fences an expired holder", () => {
     const first = openStore(), second = openStore();
     const alice = agent("alice"), bob = agent("bob");
@@ -153,6 +178,61 @@ describe("work ownership", () => {
     } finally { db.close(); }
   });
 
+  it("keeps waiting through a push start and wakes on release", async () => {
+    const store = openStore(), who = agent("alice"), sha = "a".repeat(40);
+    announce(store, "alice");
+    const lease = store.acquireLanding(who, "session-a", sha, 60);
+    const db = new Database(databasePath);
+    try {
+      const pushing = store.waitLanding(who.project, 0.3, undefined, 20);
+      db.prepare("UPDATE landing_leases SET pushing_until = ? WHERE project = ?").run(Date.now() + 60_000, who.project);
+      expect(await pushing).toMatchObject({ changed: false });
+      db.prepare("UPDATE landing_leases SET pushing_until = NULL WHERE project = ?").run(who.project);
+      const released = store.waitLanding(who.project, 5, undefined, 20);
+      store.releaseLanding(who, "session-a", lease.generation);
+      expect(await released).toMatchObject({ changed: true, lease: null });
+    } finally { db.close(); }
+  });
+
+  it("waits for a landing lease change and resolves short or uppercase SHAs", async () => {
+    const head = spawnSync("git", ["rev-parse", "HEAD"], { cwd: repositoryRoot, encoding: "utf8" }).stdout.trim();
+    const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
+    const tsxLoader = createRequire(import.meta.url).resolve("tsx");
+    const client = new Client({ name: "landing-wait-test", version: "1" });
+    await client.connect(new StdioClientTransport({
+      command: process.execPath, args: ["--import", tsxLoader, serverPath], cwd: repositoryRoot,
+      env: { ...process.env, AGENT_FABRIC_STATE_DIRECTORY: temporaryDirectory,
+        AGENT_FABRIC_SEAT: "claude", AGENT_FABRIC_LABEL: "chair-wait", NODE_NO_WARNINGS: "1" },
+    }));
+    try {
+      const call = (arguments_: Record<string, unknown>) => client.callTool({ name: "fabric_landing_lease", arguments: arguments_ });
+      const idle = await call({ action: "wait", session_id: "s1", wait_seconds: 0 });
+      expect(idle.structuredContent).toMatchObject({ changed: false, landing_lease: null });
+      const acquired = await call({ action: "acquire", session_id: "s1", expected_sha: head.slice(0, 7).toUpperCase(), seconds: 60 });
+      expect(acquired.structuredContent).toMatchObject({ expectedSha: head, generation: 1 });
+      const bad = await call({ action: "acquire", session_id: "s2", expected_sha: "zzzz" });
+      expect(bad.isError).toBe(true);
+      expect(bad.structuredContent).toMatchObject({ error: "expected_sha_invalid" });
+      expect(JSON.stringify(bad.content)).toContain("not a commit SHA");
+      const short = await call({ action: "verify", session_id: "s1", generation: 1, expected_sha: head.slice(0, 6) });
+      expect(short.structuredContent).toMatchObject({ error: "expected_sha_invalid" });
+      const unknown = await call({ action: "verify", session_id: "s1", generation: 1, expected_sha: "0000000" });
+      expect(unknown.structuredContent).toMatchObject({ error: "expected_sha_unresolved" });
+      expect(JSON.stringify(unknown.content)).toContain("git rev-parse <branch>");
+      const missing = await call({ action: "renew", session_id: "s1" });
+      expect(JSON.stringify(missing.content)).toContain("pass the generation returned by action=acquire");
+      const waiting = call({ action: "wait", session_id: "s2", wait_seconds: 10 });
+      await new Promise((done) => setTimeout(done, 300));
+      await call({ action: "release", session_id: "s1", generation: 1 });
+      expect((await waiting).structuredContent).toMatchObject({ changed: true, landing_lease: null });
+      const cli = runCli(["landing-wait", "--timeout", "0"]);
+      expect(cli.status).toBe(124);
+      expect(cli.stdout).toContain('"changed": false');
+    } finally {
+      await client.close().catch(() => undefined);
+    }
+  });
+
   it("exposes claims and landing through MCP and refuses a push without a lease", async () => {
     const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
     const tsxLoader = createRequire(import.meta.url).resolve("tsx");
@@ -171,10 +251,22 @@ describe("work ownership", () => {
       expect(JSON.stringify(emptyStatus)).not.toContain('"work_claims"');
       expect(JSON.stringify(emptyStatus)).not.toContain('"landing_lease"');
       const claim = await client.callTool({ name: "fabric_work_claim", arguments: {
-        action: "acquire", session_id: "claude-session-one", issue: "869", seconds: 60,
+        action: "acquire", session_id: "claude-session-one", issue: "869", ttl_seconds: 7200,
       } });
       expect(claim.isError).not.toBe(true);
+      expect(JSON.stringify(claim)).toContain("clamped to 3600");
+      expect((claim.structuredContent as any).expiresAtMs - Date.now()).toBeGreaterThan(3_590_000);
       const claimRecord = claim.structuredContent as { id: string; generation: number };
+      const renewed = await client.callTool({ name: "fabric_work_claim", arguments: {
+        action: "renew", session_id: "claude-session-one", id: claimRecord.id,
+        generation: claimRecord.generation, seconds: 7200,
+      } });
+      expect(JSON.stringify(renewed)).toContain("clamped to 3600");
+      const invalid = await client.callTool({ name: "fabric_work_claim", arguments: {
+        action: "renew", session_id: "claude-session-one", id: claimRecord.id,
+        generation: claimRecord.generation, ttl_seconds: 0,
+      } });
+      expect(invalid.structuredContent).toMatchObject({ status: "rejected", error: "invalid_input" });
       const verified = await client.callTool({ name: "fabric_work_claim", arguments: {
         action: "verify", session_id: "claude-session-one", id: claimRecord.id, generation: claimRecord.generation,
       } });
@@ -196,7 +288,7 @@ describe("work ownership", () => {
     } finally {
       await client.close().catch(() => undefined);
     }
-  });
+  }, 15_000);
 
   it("pushes the leased head from the cwd repository despite Git redirects", () => {
     const work = join(temporaryDirectory, "landing-work"), bare = join(temporaryDirectory, "landing-remote.git");
@@ -260,6 +352,23 @@ function statSnapshot(path: string) {
   const stat = statSync(path);
   return { mode: stat.mode, size: stat.size, mtimeMs: stat.mtimeMs, ino: stat.ino };
 }
+
+it("shows help for every CLI command before validating arguments or opening the store", () => {
+  const commands = ["whoami", "send", "inbox", "ack", "note", "tasks", "task", "claim", "done",
+    "activity", "watch", "status", "doctor", "dispatch", "adapters", "lanes", "events",
+    "work-claims", "landing-wait", "landing-push", "session", "cancel", "output", "fetch"];
+  for (const command of commands) {
+    for (const help of ["--help", "-h"]) {
+      const result = spawnSync(resolve(repositoryRoot, "runtime/fabric/bin/fabric"), [command, help], {
+        encoding: "utf8", env: { ...process.env, FABRIC_NODE: process.execPath,
+          AGENT_FABRIC_STATE_DIRECTORY: join(temporaryDirectory, "unused") },
+      });
+      expect(result.status, `${command} ${help}: ${result.stderr}`).toBe(0);
+      expect(result.stdout).toContain(`fabric ${command}`);
+    }
+  }
+  expect(existsSync(join(temporaryDirectory, "unused"))).toBe(false);
+}, 90_000);
 
 describe("CLI boundaries", () => {
   it("summarises unread messages by task and sender within a bounded digest", () => {
@@ -1848,10 +1957,14 @@ it('acknowledges a terminal notice published after status observation', () => {
 
 it('rejects unbound chair and parent aliases instead of guessing a stale seat', () => {
  const store=openStore();announce(store,'old-seat','worker');
+ store.createTeam(agent('worker'),'reviewers',['old-seat']);
  const saved={chair:process.env.PROVENANT_CHAIR,parent:process.env.PROVENANT_PARENT};
  delete process.env.PROVENANT_CHAIR;delete process.env.PROVENANT_PARENT;
  try {
-  for(const to of ['chair','parent','root','/root']) expect(()=>store.send(agent('worker'),to,'question')).toThrow(/pass to:<seat>/u);
+  for(const to of ['chair','parent','root','/root','coordinator','/tmp/fabric.sock']) {
+   expect(()=>store.send(agent('worker'),to,'question')).toThrow(/pass to:<seat>/u);
+   expect(()=>store.send(agent('worker'),to,'question')).toThrow(/old-seat.*worker.*reviewers/u);
+  }
   expect(store.inbox(agent('old-seat'),{peek:true})).toEqual([]);
  } finally {
   if(saved.chair!==undefined) process.env.PROVENANT_CHAIR=saved.chair;

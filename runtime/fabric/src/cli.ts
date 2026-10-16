@@ -9,7 +9,7 @@
  *   fabric tasks [state]
  *   fabric watch [--interval 2]
  */
-import { digest } from "./surface.js";
+import { digest, quarantineAction } from "./surface.js";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
@@ -45,6 +45,7 @@ const USAGE = `fabric <command>
   task <objective...>         open a task
   claim <task-id>             atomically claim an open, unowned task
   work-claims                 active work claims and landing lease
+  landing-wait [--timeout N]  block until the landing lease changes or frees (default 900s; exit 124 on timeout)
   landing-push <session> <generation> <branch> [--label <seat>]  verify lease and remote SHA, then push HEAD
   done <task-id>              close a task
   activity [--after-seq N]    list activity, optionally after a cursor
@@ -65,19 +66,21 @@ const USAGE = `fabric <command>
   dispatch list [--json]      configured-provider runs recorded in this workspace
   dispatch kill <run> [--json]  stop one recorded run and the group it leads
   cancel <id@host> [--operation-id ID]  stop a lane on its owning host
+  fetch <operation-or-task@host>  import a verified remote writer commit
   output <id@host> [--part P] [--offset N] [--max-bytes N] [--tail]
                               bounded output from the owning host
   dispatch --prompt-file F [--adapter A] [--alias NAME | --model M] [--effort E]
            [--mode MODE] [--worktree W | --cwd D] [--id ID] [--wait]
            [--host H] [--operation-id ID] [--resume ID | --handoff ID]
-  dispatch --prompt-file F --route strong|bulk|design|writing
+  dispatch --prompt-file F --route junior|senior|principal|design|writing
                               top model of a global pool; --adapter narrows it
   dispatch --prompt-file F --route R --rotate    cycle the pool per project
   dispatch --prompt-file F --route R --council N  N members (1-8), families
                               spread first; rotate is ignored with a council
   dispatch --prompt-file F --models a/m[@e],b/m  ad-hoc council; bypasses --route
-  --confidential              with any selector: never a free or prompt-training
-                              model, fallbacks included
+  --confidential              with any selector: never a prompt-training model,
+                              fallbacks included; free models count unless
+                              their entry says they do not train
   An explicit --model wins over --route; see
   skills/orchestrate/references/routing-and-tiers.md#route-pools
   dispatch --tasks F [route flags]  run a JSON task manifest; flags set task defaults
@@ -95,7 +98,7 @@ const command = argv[0] ?? "whoami";
 const commands = new Set([
   "whoami", "send", "inbox", "ack", "note", "tasks", "task", "claim", "done",
   "activity", "watch", "status", "doctor", "dispatch", "adapters", "lanes", "events",
-  "work-claims", "landing-push", "session", "cancel", "output",
+  "work-claims", "landing-wait", "landing-push", "session", "cancel", "output", "fetch",
 ]);
 
 if (command === "--help" || command === "-h" || command === "help") {
@@ -105,6 +108,16 @@ if (command === "--help" || command === "-h" || command === "help") {
 if (!commands.has(command)) {
   console.error(`unknown command "${command}"\n\n${USAGE}`);
   process.exit(2);
+}
+if (argv.slice(1).some((arg) => arg === "--help" || arg === "-h")) {
+  let include = false;
+  const lines = USAGE.split("\n").filter((line) => {
+    if (/^  \S/u.test(line)) include = line.startsWith(`  ${command} `) || line.trim() === command;
+    else if (!line.startsWith("  ")) include = false;
+    return include;
+  });
+  console.log(`fabric ${command}\n\n${lines.join("\n")}`);
+  process.exit(0);
 }
 
 /** Read `--flag value` out of argv, so the remaining words form the body. */
@@ -135,6 +148,15 @@ const executionIdentity = () => {
     store.close();
   }
 };
+if (command === "fetch") {
+  const ids = argv.slice(1).filter((value) => value !== "--json");
+  if (ids.length !== 1) { console.error("Pass exactly one remote writer ID"); process.exit(2); }
+  const { federatedLane } = await import("./hosts.js");
+  const result = await federatedLane("fetch", who.cwd, { id: ids[0] }) ??
+    { status: "rejected", error: "remote_host_required", fix: "Qualify a remote writer ID with its host." };
+  console.log(JSON.stringify(result, null, 2));
+  process.exit(result.status === "ok" ? 0 : 1);
+}
 if (command === "cancel" || command === "output") {
   try {
     const operationId = flag("operation-id");
@@ -219,7 +241,7 @@ if (command === "lanes") {
       console.log(`no lanes for project ${laneWho.project}` +
         (laneWho.cwd === laneWho.project ? "" : ` (cwd ${laneWho.cwd} resolves to it; --project reads another)`));
     for (const row of rows)
-      console.log(`${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${age(row.started_at)}`);
+      console.log(`${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${age(row.started_at)}${row.status === "quarantined" ? ` · ${quarantineAction(row)}` : ""}`);
     if (result.omitted)
       console.log(`${result.omitted} lanes omitted; use provenant lanes ID to see a lane past the 20-row cap`);
   } else {
@@ -530,6 +552,15 @@ try {
     if (argv.length !== 1) throw new Error("usage: fabric work-claims");
     show({ work_claims: store.workClaims(who.project), landing_lease: store.landingLease(who.project) });
     break;
+
+  case "landing-wait": {
+    const timeout = flag("timeout") ?? "900";
+    if (argv.length !== 1 || !/^\d+$/u.test(timeout)) throw new Error("usage: fabric landing-wait [--timeout N]");
+    const waited = await store.waitLanding(who.project, Number(timeout));
+    show({ changed: waited.changed, landing_lease: waited.lease });
+    if (!waited.changed) process.exitCode = 124;
+    break;
+  }
 
   case "landing-push": {
     const session = argv[1], generation = Number(argv[2]), branch = argv[3];

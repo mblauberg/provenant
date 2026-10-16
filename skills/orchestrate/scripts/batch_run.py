@@ -52,6 +52,7 @@ from dispatch_run import (
     cancellation_marker_present,
     create_cancellation_marker,
     remove_cancellation_marker,
+    prompt_temp_roots,
 )
 from attempt_evidence import AttemptEvidenceError as SharedAttemptEvidenceError, canonical_success_status, validate_successful_attempt
 from secret_scan import scan_inputs
@@ -71,7 +72,7 @@ DEFAULT_TIMEOUT_SECONDS = 3600.0
 # before the batch falls back to killing that owner.
 CANCEL_DISPATCH_GRACE_SECONDS = 2.0
 DISPATCH_WATCHDOG_GRACE_SECONDS = 5.0
-TERMINAL_TASK_STATUSES = {"blocked", "ok", "failed", "rejected", "timed_out", "cancelled"}
+TERMINAL_TASK_STATUSES = {"blocked", "ok", "quarantined", "failed", "rejected", "timed_out", "cancelled"}
 PREFLIGHT_REJECTION_CODES = {
     "access_mode_invalid", "allow_secrets_invalid", "capabilities_adapter_invalid",
     "capabilities_confinement_unavailable", "capabilities_invalid", "capabilities_mode_invalid",
@@ -81,7 +82,7 @@ PREFLIGHT_REJECTION_CODES = {
     "network_invalid", "prompt_hard_link_denied", "prompt_invalid", "prompt_path_forbidden",
     "prompt_required", "prompt_unavailable", "protected_path_denied", "sandbox_forbidden",
     "sandbox_invalid", "secret_detected", "secret_scan_budget_exceeded",
-    "secret_scan_unavailable", "unknown_task_class", "worktree_conflict",
+    "secret_scan_unavailable", "task_class_effort_conflict", "unknown_task_class", "worktree_conflict",
     "worktree_invalid", "worktree_not_applicable", "worktree_required",
     "worktree_write_adapter_unsupported",
 }
@@ -253,8 +254,8 @@ def _load_manifest(
             if not prompt.is_absolute():
                 prompt = workspace / prompt
             prompt = _local_regular(prompt, f"task {task_id} prompt_file")
-            if not any(prompt.is_relative_to(Path(root).resolve()) for root in (workspace, *read_roots)):
-                raise BatchInputError(f"task {task_id} prompt_file must be inside the workspace or a read root")
+            if not any(prompt.is_relative_to(Path(root).resolve()) for root in (workspace, *read_roots, *prompt_temp_roots())):
+                raise BatchInputError(f"task {task_id} prompt_file must be inside the workspace, a caller temp directory or a read root")
 
         adapter = task.get("adapter", task.get("tool"))
         if not isinstance(adapter, str) or not adapter:
@@ -447,7 +448,7 @@ def _preflight_rejection(record: dict[str, Any], process_exit: int | None) -> di
             return {"error": error, "fix": record["fix"]}
     status = record.get("status")
     typed_status = (
-        isinstance(status, str) and status not in {"ok", "failed", "timed_out", "cancelled", "blocked", "rejected"}
+        isinstance(status, str) and status not in {"ok", "quarantined", "failed", "timed_out", "cancelled", "blocked", "rejected"}
         and re.fullmatch(r"[a-z][a-z0-9_]{1,63}", status) and record.get("error") == status
     )
     if (record.get("schema_version") == 1 and isinstance(status, str) and
@@ -585,6 +586,7 @@ def _validate_child_record(task: dict[str, Any], record: dict[str, Any], run_dir
         return {
             "task_id": task_id, "status": status, "outcome": outcome,
             "dispatch_exit": process_exit, "attempt_path": attempt_path,
+            **({"landable": False, "quarantine": attempt.get("quarantine")} if status == "quarantined" else {}),
             "attempt_digest": record.get("attempt_digest"), "result_path": result_path,
             "requested_route": requested, "route": {
                 field: route[field] for field in ("adapter", "alias", "model", "effort", "provider_family", "model_family", "resolved_model", "execution_intent")

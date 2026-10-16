@@ -15,7 +15,7 @@ function inside(root: string, candidate: string) {
 }
 function canonical(path: string) {
   try {
-    return realpathSync(path);
+    return realpathSync.native(path);
   } catch {
     return resolve(path);
   }
@@ -27,7 +27,7 @@ export interface OwnerCompletion {
   error?: string;
 }
 
-const DISPATCH_TERMINAL_STATUSES = new Set(["ok", "succeeded", "failed", "blocked", "timed_out", "cancelled"]);
+const DISPATCH_TERMINAL_STATUSES = new Set(["ok", "succeeded", "quarantined", "failed", "blocked", "timed_out", "cancelled"]);
 const BATCH_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const RESERVED_UNTYPED_STATUSES = new Set([...DISPATCH_TERMINAL_STATUSES, ...BATCH_TERMINAL_STATUSES, "running"]);
 
@@ -59,7 +59,7 @@ function retainedRegularFile(runDir: string, value: unknown): string | null {
   if (path === null) return null;
   try {
     const metadata = lstatSync(path);
-    return metadata.isFile() && !metadata.isSymbolicLink() && inside(canonical(runDir), realpathSync(path))
+    return metadata.isFile() && !metadata.isSymbolicLink() && inside(canonical(runDir), realpathSync.native(path))
       ? path
       : null;
   } catch {
@@ -243,6 +243,7 @@ export function compactDispatch(started: OwnerFiles, completion: OwnerCompletion
     ...(record.fix === undefined ? {} : { fix: record.fix }),
     ...(typeof record.error === "string" && record.error !== record.status ? { error: record.error } : {}),
     outcome: record.outcome,
+    ...(record.landable === false ? { landable: false, quarantine: record.quarantine } : {}),
     task_id: record.task_id,
     attempt_id: record.attempt_id,
     route: compactRoute(record.route),
@@ -261,7 +262,8 @@ function batchStatus(runs: unknown): string {
   const statuses = Array.isArray(runs) ? runs.map((run) => objectValue(run)?.status) : [];
   if (statuses.length === 0) return "failed";
   if (statuses.every(isSuccessStatus)) return "ok";
-  return statuses.some(isSuccessStatus) ? "partial" : "failed";
+  if (statuses.every((status) => isSuccessStatus(status) || status === "quarantined")) return "quarantined";
+  return statuses.some((status) => isSuccessStatus(status) || status === "quarantined") ? "partial" : "failed";
 }
 
 export function compactBatch(started: OwnerFiles, completion: OwnerCompletion): Record<string, unknown> {
@@ -313,6 +315,7 @@ export function compactBatch(started: OwnerFiles, completion: OwnerCompletion): 
           task_id: task.task_id,
           status: empty ? "failed" : canonicalSuccessStatus(task.status),
           outcome: empty ? "empty_output" : task.outcome,
+          ...(task.landable === false ? { landable: false, quarantine: task.quarantine } : {}),
           route: compactRoute(task.route),
           paths: {
             attempt: retainedAbsolute(started.runDir, task.attempt_path),
