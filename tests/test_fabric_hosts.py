@@ -1197,28 +1197,6 @@ class LaneLoopbackContracts(unittest.TestCase):
             self.assertFalse(target.exists())
             self.assertFalse(record.exists())
 
-    def test_initializing_cleanup_accepts_case_alias_registration_and_back_pointer(self):
-        import fabric_hosts as hosts
-        git, base, _ = self.writer_fixture()
-        git(self.peer_workspace, 'fetch', str(self.workspace), 'HEAD')
-        target = self.peer_workspace / '.worktrees/feat-case-init'
-        git(self.peer_workspace, 'worktree', 'add', '--no-checkout', '-b', 'feat/case-init', str(target), base)
-        metadata = Path(git(target, 'rev-parse', '--absolute-git-dir'))
-        (metadata / 'locked').write_text('initializing')
-        (target / '.git').unlink()  # Interrupted before Git published the backlink.
-        alias_root = self.peer_home / 'repos'
-        if not alias_root.exists():
-            alias_root.symlink_to(self.peer_home / 'Repos', target_is_directory=True)
-        alias = alias_root / 'project/.worktrees/feat-case-init'
-        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
-                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
-            code = hosts.lane_owner().code()
-            context = dict(project_path='Repos/project', worktree_path=str(alias), branch='feat/case-init',
-                base_revision=base, operation_id='case-init', created_worktree=True, created_branch=True)
-            self.assertTrue(code.remove_initializing_worktree(self.peer_workspace, alias, context, 'case-init'))
-            self.assertFalse(target.exists())
-            self.assertFalse(metadata.exists())
-
     def test_remote_prompt_file_in_scratch_is_sent_as_bounded_text(self):
         import fabric_hosts as hosts
         with tempfile.TemporaryDirectory() as directory:
@@ -1398,55 +1376,6 @@ class LaneLoopbackContracts(unittest.TestCase):
         self.wait_writer('writer-a@workshop')
         self.wait_writer('writer-b@workshop')
 
-    def test_settle_removes_only_operation_owned_initializing_worktree(self):
-        import fabric_hosts as hosts
-        git, base, _ = self.writer_fixture()
-        git(self.peer_workspace, 'fetch', str(self.workspace), 'HEAD')
-        identifier = 'dead-checkout'
-        target = self.peer_workspace / '.worktrees/feat-initializing'
-        git(self.peer_workspace, 'worktree', 'add', '--no-checkout', '-b', 'feat/initializing', str(target), base)
-        metadata = Path(git(target, 'rev-parse', '--absolute-git-dir'))
-        (metadata / 'locked').write_text('initializing')
-        # An interrupted checkout can leave tracked files absent and a partial index.
-        (target / 'code.txt').write_text('committed base\n')
-        context = dict(project_path='Repos/project', worktree_path=str(target), branch='feat/initializing',
-            base_revision=base, host='workshop', operation_id=identifier, created_worktree=True, created_branch=True)
-        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
-                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
-            code = hosts.lane_owner().code()
-            code.write_json(code.state_file('writer-contexts', identifier), [context])
-            with code.f.database() as db:
-                db.execute('INSERT INTO operations VALUES (?,?,NULL)', (identifier,
-                    json.dumps({'project': 'Repos/project', 'verb': 'dispatch', 'digest': 'fixture'})))
-            # Preserve a lock owned by the user, even with an operation's intent.
-            (metadata / 'locked').write_text('user hold')
-            result = code.f.settle(identifier)
-            self.assertEqual(result['cleanup_pending'], [str(target)])
-            self.assertTrue(target.exists())
-            (metadata / 'locked').write_text('initializing')
-            import fcntl
-            with (metadata / code.w.WRITER_LOCK).open('a') as lease:
-                fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                self.assertEqual(code.f.settle(identifier)['cleanup_pending'], [str(target)])
-            context['operation_id'] = 'another-operation'
-            code.write_json(code.state_file('writer-contexts', identifier), [context])
-            self.assertEqual(code.f.settle(identifier)['cleanup_pending'], [str(target)])
-            context['operation_id'] = identifier
-            context['base_revision'] = '0' * 40
-            code.write_json(code.state_file('writer-contexts', identifier), [context])
-            self.assertEqual(code.f.settle(identifier)['cleanup_pending'], [str(target)])
-            context['base_revision'] = base
-            code.write_json(code.state_file('writer-contexts', identifier), [context])
-            # Death before .git publication must also be repairable.
-            (target / '.git').unlink()
-            result = code.f.settle(identifier)
-            self.assertEqual(result['error'], 'launch_not_started')
-            self.assertNotIn('cleanup_pending', result)
-            self.assertFalse(target.exists())
-            self.assertFalse(metadata.exists())
-            self.assertEqual(git(self.peer_workspace, 'for-each-ref', '--format=%(refname)',
-                'refs/heads/feat/initializing'), '')
-
     def interrupted_checkout(self, git, base, branch=None):
         """A Git worktree stopped while its initializing lock was held."""
         name = (branch or 'read-interrupted').replace('/', '-')
@@ -1471,47 +1400,135 @@ class LaneLoopbackContracts(unittest.TestCase):
                 json.dumps({'project': 'Repos/project', 'verb': 'dispatch', 'digest': 'fixture'})))
         return code, code.f.settle(identifier)
 
-    def test_initializing_cleanup_keeps_edited_or_untracked_work(self):
+    def test_initializing_checkouts_are_preserved_even_with_intent_and_proof(self):
+        """A genuine initializing lock may be a live competitor's git worktree add."""
         git, base, _ = self.writer_fixture()
         git(self.peer_workspace, 'fetch', str(self.workspace), 'HEAD')
-        target, metadata = self.interrupted_checkout(git, base, 'feat/edited')
-        context = dict(project_path='Repos/project', worktree_path=str(target), branch='feat/edited',
-            base_revision=base, host='workshop', operation_id='edited-init', created_worktree=True, created_branch=True)
-        (target / 'code.txt').write_text('tracked edit made during recovery\n')
-        (target / 'notes.md').write_text('untracked recovery notes\n')
-        code, result = self.settle_with('writer-contexts', context, 'edited-init')
-        self.assertEqual(result['cleanup_pending'], [str(target)])
-        self.assertEqual((target / 'code.txt').read_text(), 'tracked edit made during recovery\n')
+        target, metadata = self.interrupted_checkout(git, base, 'feat/initializing')
+        context = dict(project_path='Repos/project', worktree_path=str(target), branch='feat/initializing',
+            base_revision=base, host='workshop', operation_id='init-writer', created_worktree=True,
+            created_branch=True, creation_nonce='nonce-writer')
         (target / 'code.txt').write_text('committed base\n')
-        self.assertEqual(code.f.settle('edited-init')['cleanup_pending'], [str(target)])
-        self.assertEqual((target / 'notes.md').read_text(), 'untracked recovery notes\n')
-        (target / 'notes.md').unlink()
-        self.assertNotIn('cleanup_pending', code.f.settle('edited-init'))
-        self.assertFalse(target.exists())
-        self.assertFalse(metadata.exists())
+        (target / 'code.txt').chmod(0o654)  # Git reads 100755 -> 100644; the gate no longer matters.
+        code, result = self.settle_with('writer-contexts', context, 'init-writer')
+        self.assertEqual(result['cleanup_pending'], [str(target)])
+        code.prove_creation(target, context)
+        self.assertEqual(code.f.settle('init-writer')['cleanup_pending'], [str(target)])
+        self.assertTrue(target.exists())
+        self.assertTrue(metadata.exists())
+        reader = dict(project_path='Repos/project', worktree_path=str(target), worktree=target.name,
+            read_only=True, base_revision=base, host='workshop', operation_id='init-reader',
+            created_worktree=True, creation_nonce='nonce-writer')
+        code.write_json(code.state_file('reader-contexts', 'init-reader'), [reader])
+        with code.f.database() as db:
+            db.execute('INSERT INTO operations VALUES (?,?,NULL)', ('init-reader',
+                json.dumps({'project': 'Repos/project', 'verb': 'dispatch', 'digest': 'fixture'})))
+        self.assertEqual(code.f.settle('init-reader')['cleanup_pending'], [str(target)])
+        self.assertTrue(target.exists())
 
-    def test_interrupted_reader_initialization_settles_only_when_proven_ours_and_unchanged(self):
+    def test_cleanup_never_forces_removal_and_keeps_content_staged_after_validation(self):
         git, base, _ = self.writer_fixture()
         git(self.peer_workspace, 'fetch', str(self.workspace), 'HEAD')
-        target, metadata = self.interrupted_checkout(git, base)
-        context = dict(project_path='Repos/project', worktree_path=str(target), worktree=target.name,
-            read_only=True, base_revision=base, host='workshop', operation_id='reader-init',
-            created_worktree=True)
-        (target / 'code.txt').write_text('committed base\n')  # A partial but faithful checkout.
-        (target / 'notes.md').write_text('someone else wrote this\n')
-        code, result = self.settle_with('reader-contexts', context, 'reader-init')
+        target = self.peer_workspace / '.worktrees/feat-raced'
+        git(self.peer_workspace, 'worktree', 'add', '-b', 'feat/raced', str(target), base)
+        context = dict(project_path='Repos/project', worktree_path=str(target), branch='feat/raced',
+            base_revision=base, host='workshop', operation_id='raced', created_worktree=True,
+            created_branch=True, creation_nonce='nonce-raced')
+        import fabric_hosts as hosts
+        patcher = patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+            'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        code = hosts.lane_owner().code()
+        code.prove_creation(target, context)
+        commands = []
+        real = type(code).git
+
+        def stage_after_validation(owner, directory, *args, **kwargs):
+            commands.append(args)
+            if args[:2] == ('worktree', 'remove'):
+                # Native Git, outside the advisory lease, stages unique recovery content.
+                (target / 'code.txt').write_text('unique staged recovery content\n')
+                git(target, 'add', 'code.txt')
+            return real(owner, directory, *args, **kwargs)
+
+        with patch.object(type(code), 'git', stage_after_validation):
+            code.write_json(code.state_file('writer-contexts', 'raced'), [context])
+            with code.f.database() as db:
+                db.execute('INSERT INTO operations VALUES (?,?,NULL)', ('raced',
+                    json.dumps({'project': 'Repos/project', 'verb': 'dispatch', 'digest': 'fixture'})))
+            result = code.f.settle('raced')
+        removals = [args for args in commands if args[:2] == ('worktree', 'remove')]
+        self.assertTrue(removals)
+        self.assertFalse(any(flag in args for args in commands for flag in ('--force', '-f')))
         self.assertEqual(result['cleanup_pending'], [str(target)])
-        (target / 'notes.md').unlink()
-        code.write_json(code.state_file('reader-contexts', 'reader-init'), [{**context, 'created_worktree': False}])
-        self.assertEqual(code.f.settle('reader-init')['cleanup_pending'], [str(target)])
-        code.write_json(code.state_file('reader-contexts', 'reader-init'), [{**context, 'operation_id': 'other'}])
-        self.assertEqual(code.f.settle('reader-init')['cleanup_pending'], [str(target)])
-        self.assertTrue(target.exists())
-        code.write_json(code.state_file('reader-contexts', 'reader-init'), [context])
-        self.assertNotIn('cleanup_pending', code.f.settle('reader-init'))
-        self.assertFalse(target.exists())
-        self.assertFalse(metadata.exists())
-        self.assertFalse(code.state_file('reader-contexts', 'reader-init').exists())
+        self.assertEqual((target / 'code.txt').read_text(), 'unique staged recovery content\n')
+        self.assertEqual(git(target, 'diff', '--cached', '--name-only'), 'code.txt')
+
+    def test_proof_creation_never_follows_or_overwrites_a_planted_file(self):
+        git, base, _ = self.writer_fixture()
+        git(self.peer_workspace, 'fetch', str(self.workspace), 'HEAD')
+        target = self.peer_workspace / '.worktrees/read-planted'
+        git(self.peer_workspace, 'worktree', 'add', '--detach', str(target), base)
+        metadata = Path(git(target, 'rev-parse', '--absolute-git-dir'))
+        victim = self.root / 'victim.txt'
+        victim.write_text('keep me\n')
+        (metadata / 'provenant-creation').symlink_to(victim)
+        import fabric_hosts as hosts
+        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+            code = hosts.lane_owner().code()
+            with self.assertRaises(OSError):
+                code.prove_creation(target, dict(creation_nonce='nonce'))
+        self.assertEqual(victim.read_text(), 'keep me\n')
+
+    def test_reader_continuation_publishes_proof_and_failed_prelaunch_is_cleaned(self):
+        import fabric_hosts as hosts
+        git, base, _ = self.writer_fixture()
+        git(self.peer_workspace, 'fetch', str(self.workspace), 'HEAD')
+        previous = self.peer_workspace / '.worktrees/read-previous-0'
+        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+            code = hosts.lane_owner().code()
+            prior = dict(project_path='Repos/project', worktree_path=str(previous), worktree=previous.name,
+                read_only=True, base_revision=base, host='workshop', operation_id='previous', index=0,
+                branch='read/previous-0', task_id=None)
+            code.write_json(code.state_file('reader-inputs', 'previous'), [prior])
+            code.write_json(code.state_file('operations', 'previous'), {'runId': 'run-1', 'taskId': '*', 'attempt': 1})
+            with code.f.database() as db:
+                db.execute('INSERT INTO operations VALUES (?,?,NULL)', ('continued',
+                    json.dumps({'project': 'Repos/project', 'verb': 'resume', 'digest': 'fixture'})))
+            contexts = code.reader_continuation('Repos/project', {'run_id': 'run-1', 'cwd': str(previous)}, 'continued')
+            target = Path(contexts[0]['worktree_path'])
+            self.assertTrue(code.proven_creation(target, contexts[0]))
+            # The continuation never launched: settlement now removes the proven checkout.
+            self.assertEqual(code.release('continued'), [])
+            self.assertFalse(target.exists())
+            self.assertFalse(code.state_file('reader-contexts', 'continued').exists())
+
+    def test_post_creation_failure_keeps_the_ownership_record(self):
+        import fabric_hosts as hosts
+        git, base, local = self.writer_fixture()
+        self.writer_fixture_state = (git, base, local)
+        request = self.reader_input(git, 'reader-post')
+        target = self.peer_workspace / '.worktrees/read-reader-post-0'
+        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+            code = hosts.lane_owner().code()
+            with code.f.database() as db:
+                db.execute('INSERT INTO operations VALUES (?,?,NULL)', ('reader-post',
+                    json.dumps({'project': 'Repos/project', 'verb': 'dispatch', 'digest': 'fixture'})))
+
+            def created_then_failed(args):
+                git(self.peer_workspace, 'worktree', 'add', '--detach', str(target), base)
+                raise code.w.PostCreationError('cannot determine new worktree branch identity')
+
+            with code.f.operation_lock('reader-post'), \
+                    patch.object(code.w, 'create', side_effect=created_then_failed), self.assertRaises(hosts.HostError):
+                code.prepare('Repos/project', request, 'reader-post')
+            self.assertTrue(code.state_file('reader-contexts', 'reader-post').exists())
+            self.assertEqual(code.release('reader-post'), [str(target)])  # Unproven, so preserved and reported.
+            self.assertTrue(target.exists())
 
     def reader_input(self, git, identifier, cwd=None):
         """Upload a frozen reader input to the peer, returning the request and the peer environment."""
@@ -1551,26 +1568,6 @@ class LaneLoopbackContracts(unittest.TestCase):
             self.assertEqual((target / 'unrelated.txt').read_text(), 'belongs to the competitor\n')
             self.assertFalse(code.state_file('reader-contexts', 'reader-collision').exists())
             self.assertEqual(list((self.peer_home / '.agents/.agent-fabric/code').glob('*/reader-collision-0/input.bundle')), [])
-
-    def test_initializing_cleanup_keeps_staged_changes_and_mode_edits(self):
-        git, base, _ = self.writer_fixture()
-        git(self.peer_workspace, 'fetch', str(self.workspace), 'HEAD')
-        target, metadata = self.interrupted_checkout(git, base, 'feat/staged')
-        context = dict(project_path='Repos/project', worktree_path=str(target), branch='feat/staged',
-            base_revision=base, host='workshop', operation_id='staged-init', created_worktree=True, created_branch=True)
-        (target / 'code.txt').write_text('unique staged recovery content\n')
-        git(target, 'add', 'code.txt')
-        (target / 'code.txt').write_text('committed base\n')  # Bytes match the base; the index does not.
-        code, result = self.settle_with('writer-contexts', context, 'staged-init')
-        self.assertEqual(result['cleanup_pending'], [str(target)])
-        self.assertEqual(git(target, 'diff', '--cached', '--name-only'), 'code.txt')
-        (metadata / 'index').unlink()
-        (target / 'code.txt').chmod(0o755)
-        self.assertEqual(code.f.settle('staged-init')['cleanup_pending'], [str(target)])
-        self.assertTrue(target.exists())
-        (target / 'code.txt').chmod(0o644)
-        self.assertNotIn('cleanup_pending', code.f.settle('staged-init'))
-        self.assertFalse(target.exists())
 
     def test_creation_intent_without_proof_never_removes_a_competitors_checkout(self):
         git, base, _ = self.writer_fixture()

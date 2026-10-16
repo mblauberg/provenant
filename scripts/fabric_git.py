@@ -603,6 +603,10 @@ class CodeTransport:
                         self.w.create(argparse.Namespace(repo=repo, name=meta['worktree'], existing_branch=None,
                             new_branch=None, detach=meta['base_revision'], start_point=None, no_node_modules=True))
                         self.prove_creation(target, context)
+                    except self.w.PostCreationError as exc:
+                        # The checkout exists and may be ours: keep the intent so
+                        # settlement can still prove or preserve it.
+                        self.fail('worktree_invalid', str(exc))
                     except self.w.PolicyError as exc:
                         # A refused creation proves nothing about the checkout at
                         # this path (a competitor may hold it): revoke our intent.
@@ -650,6 +654,8 @@ class CodeTransport:
                             self.w.create(argparse.Namespace(repo=repo, name=meta['worktree'], existing_branch=None,
                                 new_branch=meta['branch'], detach=None, start_point=meta['base_revision'], no_node_modules=True))
                             self.prove_creation(target, context)
+                        except self.w.PostCreationError:
+                            raise  # The checkout exists: keep the record for settlement.
                         except self.w.PolicyError:
                             context['created_worktree'] = context['created_branch'] = False
                             self.write_json(self.state_file('writer-contexts', identifier), [c for c in contexts if not c.get('read_only')])
@@ -675,7 +681,12 @@ class CodeTransport:
         after creation succeeds, proves the checkout is not a competitor's.
         """
         metadata = Path(self.git(target, 'rev-parse', '--absolute-git-dir'))
-        (metadata / self.PROOF).write_text(context['creation_nonce'])
+        # Exclusive, non-following create: a preplanted symlink or file is never overwritten.
+        descriptor = os.open(metadata / self.PROOF, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, 'w') as stream:
+            stream.write(context['creation_nonce'])
+            stream.flush()
+            os.fsync(stream.fileno())
 
     def proven_creation(self, target, context):
         try:
@@ -732,14 +743,11 @@ class CodeTransport:
                     # proved it created, and left unchanged, is ours to remove.
                     unlaunched = terminal_cwd is None
                     if registered:
-                        if unlaunched and not (context.get('created_worktree') and
-                                (registered.get('locked') or self.proven_creation(target, context))):
+                        # A locked checkout (Git's initializing lock included) may belong
+                        # to a live competitor; Git would refuse removal, so keep it.
+                        if registered.get('locked') or (unlaunched and not (
+                                context.get('created_worktree') and self.proven_creation(target, context))):
                             remaining.append(context)
-                            continue
-                        if registered.get('locked'):
-                            # Git's initializing lock: an interrupted checkout.
-                            if not self.remove_initializing_worktree(repo, target, context, identifier):
-                                remaining.append(context)
                             continue
                         if (target.is_symlink() or not registered.get('detached') or
                                 self.git(target, 'rev-parse', 'HEAD') != context['base_revision']):
@@ -752,8 +760,8 @@ class CodeTransport:
                                     continue
                                 self.git(repo, 'worktree', 'remove', str(target))
                             continue
-                        # A launched, terminal reader's detached tree is disposable input.
-                        self.git(repo, 'worktree', 'remove', '--force', str(target))
+                        # Git's own refusal of a modified tree leaves the record pending.
+                        self.git(repo, 'worktree', 'remove', str(target))
                     elif target.exists():
                         remaining.append(context)
             except (self.h.HostError, self.w.PolicyError, OSError, ValueError, subprocess.SubprocessError):
@@ -894,134 +902,6 @@ class CodeTransport:
             shutil.rmtree(transfer / 'chunks', ignore_errors=True)
         return (self.remove_readers(identifier) or []) + (self.remove_created_worktrees(identifier, held) or [])
 
-    def remove_initializing_worktree(self, repo, target, context, identifier):
-        """Recover checkout interrupted after Git published its initializing lock.
-
-        The durable creation intent and operation lock prove no lane launched.
-        Require Git's own registration to still bind this exact new worktree,
-        its unchanged branch, and its initializing lock before forcing removal.
-        """
-        reader = bool(context.get('read_only'))
-        branch = None if reader else 'refs/heads/' + context['branch']
-        expected = repo / '.worktrees' / (context['worktree'] if reader else context['branch'].replace('/', '-'))
-        if (context.get('operation_id') != identifier or not self.w.same_directory(target, expected) or target.is_symlink() or
-                not context.get('created_worktree' if reader else 'created_branch')):
-            return False
-        records = [row for row in self.w.worktree_records(repo)
-            if self.w.same_directory(Path(str(row['worktree'])), target)]
-        if (len(records) != 1 or records[0].get('locked') != 'initializing' or
-                records[0].get('HEAD') != context['base_revision']):
-            return False
-        if reader:
-            if records[0].get('branch') or not records[0].get('detached'):
-                return False
-        elif (records[0].get('branch') != branch or
-                self.git(repo, 'rev-parse', '--verify', branch) != context['base_revision']):
-            return False
-        administrative = self.w.common_git_dir(repo) / 'worktrees'
-        matches = []
-        for metadata in administrative.iterdir():
-            back_pointer = metadata / 'gitdir'
-            if (metadata.is_symlink() or not metadata.is_dir() or back_pointer.is_symlink() or
-                    not back_pointer.is_file()):
-                continue
-            gitlink = Path(back_pointer.read_text().strip())
-            if gitlink.name == '.git' and self.w.same_directory(gitlink.parent, target):
-                matches.append(metadata)
-        if len(matches) != 1:
-            return False
-        metadata = matches[0]
-        marker = owner_marker(self.f.root, metadata)
-        if marker.exists() or (metadata / 'HEAD').read_text().strip() != (context['base_revision'] if reader else 'ref: ' + branch):
-            return False
-        # The checkout may not have created its .git file yet, so bind the
-        # writer lease through the validated administrative directory instead.
-        descriptor = os.open(metadata / self.w.WRITER_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        try:
-            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            if (metadata / 'locked').read_text().strip() != 'initializing':
-                return False
-            # Whatever an interrupted checkout left must be a byte-exact part of
-            # the base tree; edits, untracked files or doubt keep it pending.
-            if not self.initial_contents_only(repo, target, context['base_revision'], metadata):
-                return False
-            gitlink = target / '.git'
-            if target.is_dir() and not gitlink.exists():
-                # Git requires the backlink for removal even when checkout died
-                # before publishing it. Reconstruct only the proven binding;
-                # exclusive creation preserves any concurrent or symlinked file.
-                backlink = os.open(gitlink, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-                with os.fdopen(backlink, 'w') as stream:
-                    stream.write('gitdir: ' + str(metadata) + '\n')
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                self.sync_directory(target)
-            self.git(repo, 'worktree', 'remove', '--force', '--force', str(target))
-        finally:
-            os.close(descriptor)
-        return True
-
-    def index_matches_base(self, repo, target, base, metadata):
-        """True when the worktree's index is absent or identical to the base tree."""
-        index = metadata / 'index'
-        if index.is_symlink():
-            return False
-        if not index.exists():
-            return True
-        env = {**self.w.git_environment(repo, hardened=True), 'GIT_DIR': str(metadata), 'GIT_INDEX_FILE': str(index)}
-        result = subprocess.run(['git', 'diff-index', '--cached', '--quiet', base, '--'], env=env,
-            cwd=repo, capture_output=True, timeout=60)
-        return result.returncode == 0
-
-    def initial_contents_only(self, repo, target, base, metadata=None):
-        """True when target holds nothing but unmodified files of the base tree."""
-        if metadata is not None and not self.index_matches_base(repo, target, base, metadata):
-            return False
-        if not target.exists():
-            return True
-        if target.is_symlink() or not target.is_dir():
-            return False
-        tree = {}
-        for entry in self.git(repo, 'ls-tree', '-r', '-z', '--full-tree', base).split('\0'):
-            if entry:
-                head, path = entry.split('\t', 1)
-                mode, kind, oid = head.split(' ')
-                tree[path] = (mode, oid)
-        algorithm = 'sha256' if tree and len(next(iter(tree.values()))[1]) == 64 else 'sha1'
-        for current, directories, names in os.walk(target, followlinks=False):
-            relative = Path(current).relative_to(target)
-            if '.git' in directories or ('.git' in names and relative != Path('.')):
-                return False
-            for name in directories[:]:
-                if (Path(current) / name).is_symlink():
-                    directories.remove(name)
-                    names.append(name)
-            for name in names:
-                path = Path(current) / name
-                if name == '.git' and relative == Path('.'):
-                    if path.is_symlink() or not path.is_file():
-                        return False
-                    continue
-                known = tree.get((relative / name).as_posix())
-                if known is None:
-                    return False
-                if path.is_symlink():
-                    data = os.readlink(path).encode(errors='surrogateescape')
-                    digest = hashlib.new(algorithm, b'blob %d\0' % len(data) + data).hexdigest()
-                    modes = {'120000'}
-                elif path.is_file():
-                    hasher = hashlib.new(algorithm, b'blob %d\0' % path.stat().st_size)
-                    with path.open('rb') as handle:
-                        while block := handle.read(1 << 20):
-                            hasher.update(block)
-                    digest = hasher.hexdigest()
-                    modes = {'100755'} if path.stat().st_mode & 0o111 else {'100644'}
-                else:
-                    return False
-                if digest != known[1] or known[0] not in modes:
-                    return False
-        return True
-
     @hardened
     def remove_created_worktrees(self, identifier, held=None):
         """Remove only clean, unchanged worktrees created by an unlaunched operation."""
@@ -1042,8 +922,7 @@ class CodeTransport:
                     remaining.append(context)
                     continue
                 with self.creation_lock(target):
-                    initializing_removed = self.remove_initializing_worktree(repo, target, context, identifier)
-                    if target.exists() and not initializing_removed:
+                    if target.exists():
                         if target.is_symlink() or not self.w.same_directory(self.w.primary_root(target), repo):
                             remaining.append(context)
                             continue
@@ -1139,7 +1018,7 @@ class CodeTransport:
         name = branch.replace('/', '-')
         context = {**previous, 'operation_id': identifier, 'branch': branch, 'worktree': name,
             'worktree_path': str(self.repo(project, receiving=True) / '.worktrees' / name),
-            'task_id': None, 'created_worktree': True}
+            'task_id': None, 'created_worktree': True, 'creation_nonce': uuid.uuid4().hex}
         target = Path(context['worktree_path'])
         repo = self.repo(project, receiving=True)
         with self.creation_lock(target):
@@ -1152,6 +1031,9 @@ class CodeTransport:
                 try:
                     self.w.create(argparse.Namespace(repo=repo, name=name, existing_branch=None,
                         new_branch=None, detach=context['base_revision'], start_point=None, no_node_modules=True))
+                    self.prove_creation(target, context)
+                except self.w.PostCreationError:
+                    raise  # The checkout exists: keep the intent for settlement.
                 except self.w.PolicyError:
                     self.revoke_readers(identifier, [])  # A refused creation is no proof of ownership.
                     raise

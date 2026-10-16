@@ -70,6 +70,10 @@ class PolicyError(RuntimeError):
     """A requested operation violates the shared-worktree contract."""
 
 
+class PostCreationError(PolicyError):
+    """`git worktree add` succeeded, but a later step failed: the checkout exists."""
+
+
 def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     result, _ = _run_git(repo, *args)
     if check and result.returncode != 0:
@@ -717,14 +721,17 @@ def create(args: argparse.Namespace) -> dict[str, object]:
             # existing branch, a checked-out ref or one moved off our start point.
             git(root, 'update-ref', '-d', branch_ref, base, check=False)
         raise
-    node_modules, node_modules_reason = provision_created_node_modules(
-        root, target, disabled=args.no_node_modules,
-    )
-    head_revision = git(target, "rev-parse", "HEAD").stdout.strip()
-    branch_result = git(target, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
-    if branch_result.returncode not in {0, 1}:
-        raise PolicyError(branch_result.stderr.strip() or "cannot determine new worktree branch identity")
-    branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
+    try:
+        node_modules, node_modules_reason = provision_created_node_modules(
+            root, target, disabled=args.no_node_modules,
+        )
+        head_revision = git(target, "rev-parse", "HEAD").stdout.strip()
+        branch_result = git(target, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+        if branch_result.returncode not in {0, 1}:
+            raise PolicyError(branch_result.stderr.strip() or "cannot determine new worktree branch identity")
+        branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
+    except PolicyError as exc:
+        raise PostCreationError(str(exc)) from exc
     return {
         "status": "created",
         "name": args.name,
