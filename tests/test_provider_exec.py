@@ -1697,6 +1697,92 @@ def test_codex_read_only_lane_disables_inherited_mcp_servers_and_writer_keeps_th
     assert "mcp_servers.fabric.enabled=false" not in codex_options(writer)
 
 
+def test_codex_read_only_lane_disables_hooks_and_every_discovered_stdio_server(monkeypatch, tmp_path):
+    """Project-layer and plugin stdio servers appear only in Codex's own inventory, not the user file."""
+    mod = supervisor()
+    codex = mod.profile("codex")
+    seen = []
+
+    def discover(cwd):
+        seen.append(cwd)
+        return {"projsrv": True, "plugin-srv": True, "weird.name": True, "projurl": False}
+
+    monkeypatch.setattr(codex, "_discover_mcp_servers", discover)
+    route = {"resolved_model": "fixture"}
+    reader = mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True)
+    options = codex_options(reader)
+    assert seen and set(seen) == {str(tmp_path)}
+    assert "features.hooks=false" in options
+    assert reader["applied"]["hooks_disabled"] is True
+    for name in ("projsrv", "plugin-srv"):
+        assert f"mcp_servers.{name}.enabled=false" in options
+    assert 'mcp_servers."weird.name".enabled=false' in options
+    assert "mcp_servers.projurl.enabled=false" not in options
+    assert 'mcp_servers.projurl.default_tools_approval_mode="approve"' in options
+    assert reader["applied"]["mcp_disabled"] == ["plugin-srv", "projsrv", "weird.name"]
+    assert "_mcp_inventory" not in reader, "the serialised plan must not carry the inventory"
+    assured = mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True, intent="assurance")
+    assert "features.hooks=false" not in codex_options(assured) and "--ignore-user-config" in assured["argv"]
+
+
+def test_codex_non_writer_lane_goes_clean_when_mcp_discovery_fails(monkeypatch, tmp_path):
+    mod = supervisor()
+    monkeypatch.setattr(mod.profile("codex"), "_discover_mcp_servers", lambda cwd: None)
+    route = {"resolved_model": "fixture"}
+    reader = mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True)
+    assert reader["applied"]["config"] == "clean"
+    assert "failed" in reader["applied"]["config_note"]
+    assert "--ignore-user-config" in reader["argv"] and "--ignore-rules" in reader["argv"]
+    assert "features.hooks=false" not in codex_options(reader)
+
+
+def test_codex_discovery_treats_codex_errors_as_failure(monkeypatch, tmp_path):
+    real = supervisor().profile("codex")
+    discover = real._real_discover_mcp_servers  # the autouse stand-in replaced the module attribute
+    for outcome in (subprocess.CompletedProcess([], 1, "", "boom"),
+                    subprocess.CompletedProcess([], 0, "not json", ""),
+                    OSError("no codex")):
+        def fake(*args, _o=outcome, **kwargs):
+            if isinstance(_o, Exception):
+                raise _o
+            return _o
+        monkeypatch.setattr(real.subprocess, "run", fake)
+        assert discover(str(tmp_path)) is None
+    listing = json.dumps([{"name": "a", "enabled": True, "transport": {"type": "stdio"}},
+                          {"name": "b", "enabled": True, "transport": {"type": "streamable_http"}},
+                          {"name": "c", "enabled": False, "transport": {"type": "stdio"}}])
+    monkeypatch.setattr(real.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, listing, ""))
+    assert discover(str(tmp_path)) == {"a": True, "b": False}
+
+
+def test_codex_writer_receipt_records_unconfined_hooks_and_stdio_servers(monkeypatch, tmp_path):
+    mod = supervisor()
+    monkeypatch.setattr(mod.profile("codex"), "_discover_mcp_servers",
+                        lambda cwd: {"projsrv": True, "projurl": False})
+    _, worktree = linked_worktree(tmp_path)
+    writer = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello", mode="worktree_write",
+                            worktree=worktree, workspace_root=worktree, network=True)
+    options = codex_options(writer)
+    assert "features.hooks=false" not in options and "mcp_servers.projsrv.enabled=false" not in options
+    assert writer["applied"]["hooks_unconfined"] is True
+    assert writer["applied"]["mcp_unconfined"] == ["projsrv"]
+    assert "hooks_disabled" not in writer["applied"] and "mcp_disabled" not in writer["applied"]
+
+
+@pytest.mark.live_provider
+@pytest.mark.skipif(not shutil.which("codex"), reason="needs a real codex")
+def test_live_codex_lists_trusted_project_stdio_server(monkeypatch, tmp_path):
+    """Real `codex mcp list --json` sees a server that only a trusted project config defines."""
+    codex = supervisor().profile("codex")
+    home, project = tmp_path / "home", tmp_path / "proj"
+    (project / ".codex").mkdir(parents=True)
+    home.mkdir()
+    (home / "config.toml").write_text(f'[projects."{project}"]\ntrust_level = "trusted"\n', encoding="utf-8")
+    (project / ".codex/config.toml").write_text('[mcp_servers.projsrv]\ncommand = "/bin/sh"\n', encoding="utf-8")
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    assert codex._real_discover_mcp_servers(str(project)) == {"projsrv": True}
+
+
 def test_codex_native_route_pins_openai_provider_over_user_config(tmp_path):
     mod = supervisor()
     options = codex_options(mod.build_plan("codex", {"resolved_model": "fixture"}, "hello", cwd=tmp_path))

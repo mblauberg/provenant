@@ -15,6 +15,7 @@ no test reads or writes the host's live route state.
 from __future__ import annotations
 
 import atexit
+import importlib
 import os
 import shutil
 import subprocess
@@ -110,6 +111,28 @@ def _isolated_codex_home_and_state(tmp_path_factory, monkeypatch, request):
         return
     monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("codex-home")))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("state-home")))
+
+
+@pytest.fixture(autouse=True)
+def _codex_mcp_discovery_from_user_config(monkeypatch, request):
+    """Tests never run the real `codex mcp list`; read the pinned CODEX_HOME config instead.
+    Tests of discovery itself (project layers, failure) patch `_discover_mcp_servers` again."""
+    if request.node.path.name == "test_install_harness.py":
+        return
+    import tomllib
+
+    def discover(cwd):
+        path = Path(os.environ["CODEX_HOME"]) / "config.toml"
+        try:
+            servers = tomllib.loads(path.read_text(encoding="utf-8")).get("mcp_servers", {})
+        except (OSError, tomllib.TOMLDecodeError):
+            return {}
+        return {name: "url" not in server for name, server in servers.items() if isinstance(server, dict)}
+
+    codex = importlib.import_module("skills.orchestrate.scripts.provider_exec").profile("codex")
+    if not hasattr(codex, "_real_discover_mcp_servers"):
+        codex._real_discover_mcp_servers = codex._discover_mcp_servers
+    monkeypatch.setattr(codex, "_discover_mcp_servers", discover)
 
 
 @pytest.fixture(autouse=True)

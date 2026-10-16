@@ -121,11 +121,25 @@ applied block of the receipt records `config: inherited` or `config: clean`.
   the workspace and writers stay inside their worktree.
 - An inheriting lane also sets `web_search="live"` and `notify=[]`, and sets
   `mcp_servers.<name>.default_tools_approval_mode="approve"` for each server it
-  keeps, since no one is present to approve a tool call. A worktree writer keeps
-  every server. Any other lane sets `mcp_servers.<name>.enabled=false` for each
-  stdio server, because a stdio server starts outside Codex's command sandbox
-  and could write the workspace; it keeps remote (`url`) servers, which start no
-  local process. The receipt lists the disabled servers as `applied.mcp_disabled`.
+  keeps, since no one is present to approve a tool call.
+- Read-only and every other non-writer lane runs no hook and no stdio MCP
+  server. Hooks (user, trusted project and plugin) and stdio servers run outside
+  Codex's command sandbox and the permission profile, so the lane sets
+  `features.hooks=false` (receipt: `applied.hooks_disabled`) and
+  `mcp_servers.<name>.enabled=false` for each stdio server (receipt:
+  `applied.mcp_disabled`). It keeps remote (`url`) servers, which start no local
+  process. The server inventory comes from `codex mcp list --json` run in the
+  lane's directory, which resolves every layer Codex loads (user config, trusted
+  project `.codex/config.toml` files, plugin servers). If that discovery fails the
+  lane runs clean (`--ignore-user-config --ignore-rules`) and the receipt carries
+  `applied.config_note`, rather than inheriting blind.
+- Accepted boundary for worktree writers: a writer keeps every hook and server, as
+  a native Codex session does, and these run with the operator's privileges
+  outside the worktree confinement; a stdio server or hook can write anywhere the
+  operator can. This is a deliberate parity choice, not a guard. The receipt
+  records it as `applied.hooks_unconfined` and `applied.mcp_unconfined` (the
+  stdio servers kept). Assurance and capability lanes, which run clean, are
+  unaffected.
 - Every native-route lane pins `model_provider="openai"` and clears
   `openai_base_url`, so a provider or base URL in the user file cannot redirect
   the route and misattribute the receipt. An endpoint route keeps its own pin.
