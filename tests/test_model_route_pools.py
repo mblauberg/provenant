@@ -308,6 +308,39 @@ def test_instance_overlay_reorders_and_reweights_a_pool(tmp_path):
     assert any(note.startswith("route_synonyms.deep: strong is now senior") for note in snapshot["drift"])
 
 
+def test_legacy_fold_keeps_workhorse_and_bulk_ahead_of_strong_and_scout(tmp_path):
+    env = overlay_environment(tmp_path, {"routes": {
+        "strong": [{"model": "codex/gpt-6.1-sol", "weight": "high"}],
+        "workhorse": [{"model": "codex/gpt-6.1-sol", "weight": "off"}],
+        "scout": [{"model": "codex/gpt-6-luna", "weight": "high"}],
+        "bulk": [{"model": "codex/gpt-6-luna", "weight": "sparing"}],
+    }})
+    routes = json.loads(model_route(env, "routes", "--json").stdout)["routes"]
+    sol = next(entry for entry in routes["senior"] if entry["model"] == "codex/gpt-6.1-sol")
+    luna = next(entry for entry in routes["junior"] if entry["model"] == "codex/gpt-6-luna")
+    assert sol["weight"] == "off"
+    assert luna["weight"] == "sparing"
+
+
+def test_overlay_may_name_adapter_aliases_by_tier():
+    overlay = pools.migrate_legacy_routes({
+        "task_class_routes": {"implementation": {"alias": "senior", "effort": "high"}},
+        "families": {"openai": {
+            "aliases": {"principal": ["gpt-6-astra"], "workhorse": ["gpt-6.1-sol"], "senior": ["gpt-6-luna"]},
+            "role_effort_defaults": {"orchestrator": {"principal": "high"}},
+            "risk_tier_overrides": {"crucial": {"alias": "principal"}},
+        }},
+        "adapters": {"opencode": {"aliases": {"junior": ["opencode/glm-5.3-flash-free"]}}},
+    }, [])
+    assert overlay["task_class_routes"]["implementation"]["alias"] == "workhorse"
+    family = overlay["families"]["openai"]
+    assert family["aliases"] == {"flagship": ["gpt-6-astra"], "workhorse": ["gpt-6.1-sol"]}, \
+        "an alias-named key wins over its tier name"
+    assert family["role_effort_defaults"]["orchestrator"] == {"flagship": "high"}
+    assert family["risk_tier_overrides"]["crucial"]["alias"] == "flagship"
+    assert overlay["adapters"]["opencode"]["aliases"] == {"scout": ["opencode/glm-5.3-flash-free"]}
+
+
 def test_pick_command_answers_every_request_and_types_rejections(tmp_path):
     env = overlay_environment(tmp_path, {})
     run = model_route(env, "pick", "--seed", "3", stdin=json.dumps({"requests": [

@@ -116,7 +116,7 @@ if _pools is None:
 EFFORT_ORDER = _catalog_validation.EFFORT_ORDER
 ALIAS_ORDER = _catalog_validation.ALIAS_ORDER
 # The route-pool tier names, accepted wherever an adapter's own alias is asked for.
-TIER_ALIASES = {"junior": "scout", "senior": "workhorse", "principal": "flagship"}
+TIER_ALIASES = _pools.TIER_ALIASES
 infer_family = _catalog_validation.infer_family
 matching_model_families = _catalog_validation.matching_model_families
 model_slug_for_family = _catalog_validation.model_slug_for_family
