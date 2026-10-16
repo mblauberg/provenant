@@ -848,6 +848,13 @@
           "trains_on_prompts": false
         },
         {
+          "id": "opencode/longcat-2.5-preview-free",
+          "names": [
+            "longcat"
+          ],
+          "trains_on_prompts": false
+        },
+        {
           "id": "opencode/mimo-v2.6-flash-free",
           "names": [
             "mimo-free"
