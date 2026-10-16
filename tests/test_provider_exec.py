@@ -1672,6 +1672,40 @@ def test_codex_capability_profile_keeps_git_narrow_and_grants_only_selected_feat
     assert 'ipc-sysv-shm' not in browser_profile
 
 
+def codex_options(plan):
+    argv = plan["argv"]
+    return {argv[index + 1] for index, arg in enumerate(argv) if arg == "-c"}
+
+
+def test_codex_ordinary_lane_inherits_user_config_and_assurance_stays_clean(monkeypatch, tmp_path):
+    mod = supervisor()
+    home = Path(os.environ["CODEX_HOME"])
+    (home / "config.toml").write_text(
+        '[mcp_servers.fabric]\ncommand = "x"\n[mcp_servers.computer-use]\ncommand = "y"\n', encoding="utf-8")
+    route = {"resolved_model": "fixture"}
+    ordinary = mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True)
+    assert ordinary["applied"]["config"] == "inherited"
+    assert "--ignore-user-config" not in ordinary["argv"] and "--ignore-rules" not in ordinary["argv"]
+    assert {'web_search="live"', "notify=[]", 'approval_policy="never"',
+            'mcp_servers.fabric.default_tools_approval_mode="approve"',
+            'mcp_servers.computer-use.default_tools_approval_mode="approve"'} <= codex_options(ordinary)
+    # The route and permission overrides come after any user config, so they still win.
+    assert any(option.startswith("default_permissions=") for option in codex_options(ordinary))
+    assured = mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True, intent="assurance")
+    assert assured["applied"]["config"] == "clean"
+    assert "--ignore-user-config" in assured["argv"] and "--ignore-rules" in assured["argv"]
+    assert 'web_search="live"' not in codex_options(assured)
+    assert not any("default_tools_approval_mode" in option for option in codex_options(assured))
+    monkeypatch.setenv("CF_DISPATCH_CODEX_CONFIG", "clean")
+    assert mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True)["applied"]["config"] == "clean"
+    monkeypatch.setenv("CF_DISPATCH_CODEX_CONFIG", "bogus")
+    with pytest.raises(ValueError, match="CF_DISPATCH_CODEX_CONFIG"):
+        mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True)
+    monkeypatch.setenv("CF_DISPATCH_CODEX_CONFIG", "clean")
+    capable = mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True)
+    assert capable["applied"]["config"] == "clean"
+
+
 def test_codex_writer_argv_preserves_default_and_capability_sandboxes(monkeypatch, tmp_path):
     mod = supervisor()
     _, lane = instruction_lane(tmp_path)
@@ -1693,11 +1727,15 @@ def test_codex_writer_argv_preserves_default_and_capability_sandboxes(monkeypatc
         # Each plan names its own permissions profile; compare the rest.
         return [arg.replace(plan["applied"]["write_boundary"]["profile"], "profile") for arg in plan["argv"]]
 
+    # An ordinary lane keeps the login shell, so provenant and pnpm sit on PATH as they do natively.
     for before, after in ((argv(default_linux), argv(default_darwin)),
                           (argv(resumed_linux), argv(resumed_darwin))):
-        index = after.index("allow_login_shell=false")
-        assert after[index - 1] == "-c"
-        assert after[:index - 1] + after[index + 1:] == before
+        assert after == before
+        assert "allow_login_shell=false" not in after
+    assured = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello", workspace_root=tmp_path,
+                             mode="worktree_write", worktree=lane, intent="assurance")
+    index = argv(assured).index("allow_login_shell=false")
+    assert argv(assured)[index - 1] == "-c"
 
     fresh = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello",
                            workspace_root=tmp_path, mode="worktree_write", worktree=lane,
@@ -3900,6 +3938,11 @@ def codex_profile(plan):
     return name, overrides
 
 
+def provenant_state():
+    """Provenant's own state directory, which a Codex lane may write for lock files."""
+    return str(Path(os.environ["XDG_STATE_HOME"]) / "provenant")
+
+
 def codex_filesystem(plan):
     """The filesystem table of the Codex permissions profile a writer plan passes."""
     name, overrides = codex_profile(plan)
@@ -4023,6 +4066,7 @@ def test_codex_writer_gets_the_wrapped_writer_git_boundary(tmp_path, resume):
     assert f"permissions.{name}.extends=\":workspace\"" in overrides
     assert f"permissions.{name}.network.enabled=false" in overrides
     assert "-s" not in argv and not any("sandbox_mode" in arg or "sandbox_workspace_write" in arg for arg in argv)
+    assert table.pop(Path(provenant_state())) == "write"  # Provenant's own lock directory, beside the planned boundary
     assert plan["applied"]["write_boundary"]["filesystem"] == {str(path): access for path, access in table.items()}
     for granted in (private, private / "index", private / "index.lock", private / "HEAD",
                     private / "ORIG_HEAD", private / "logs/HEAD",
@@ -5316,7 +5360,8 @@ def test_codex_read_only_writes_its_temp_and_add_dirs_but_not_the_cwd(tmp_path):
         'default_permissions="NAME"',
         'permissions.NAME.extends=":read-only"',
         "permissions.NAME.network.enabled=false",
-        'permissions.NAME.filesystem={":tmpdir" = "write", ' + json.dumps(str(locks)) + ' = "write"}',
+        'permissions.NAME.filesystem={":tmpdir" = "write", ' + json.dumps(str(locks)) + ' = "write", '
+        + json.dumps(provenant_state()) + ' = "write"}',
     ]
     assert "-s" not in plan["argv"]
     assert f"codex read_only add-dir stays read-only (it holds cwd or a pattern character): {repo}" in plan["warnings"]
@@ -5524,7 +5569,8 @@ def test_codex_read_only_never_grants_a_directory_named_like_a_pattern(tmp_path,
     literal.mkdir(parents=True)
     plan = supervisor().build_plan("codex", {"resolved_model": "fixture"}, "hello", cwd=repo,
                                    workspace_root=repo, add_dirs=[str(literal)], network=False)
-    assert codex_read_only_permissions(plan["argv"])[-1] == 'permissions.NAME.filesystem={":tmpdir" = "write"}'
+    assert codex_read_only_permissions(plan["argv"])[-1] == (
+        'permissions.NAME.filesystem={":tmpdir" = "write", ' + json.dumps(provenant_state()) + ' = "write"}')
     assert any(warning.endswith(str(literal)) and "pattern character" in warning for warning in plan["warnings"])
 
 

@@ -100,6 +100,31 @@ rather than hard-coded so the catalogue can follow the CLI.
   rule: a third-party endpoint exposes no effort control the harness can claim.
 - Ordinary Codex dispatch is unchanged and still inherits nothing.
 
+## Amendment 2026-10-16: ordinary lanes inherit the user config
+
+Context and Decision above describe the clean configuration, which is now the
+assurance behaviour only. A lane reached through `dispatch_run` with
+`--intent ordinary` (the Fabric default) previously lost the operator's MCP
+servers, plugins, hooks, execpolicy rules, memories and subagent settings, and
+so had less reach than a native Codex subagent. It now loads them, and the
+applied block of the receipt records `config: inherited` or `config: clean`.
+
+- `assurance` intent (the `cf_dispatch.sh` default), capability lanes (which run
+  under their own `CODEX_HOME`) and `CF_DISPATCH_CODEX_CONFIG=clean` keep
+  `--ignore-user-config --ignore-rules` and `allow_login_shell=false`.
+  `CF_DISPATCH_CODEX_CONFIG` accepts `clean` or `inherited`; any other value is
+  an error.
+- Every route and permission override Provenant passes with `-c` (permission
+  profile, model, effort, approval policy, service tier, endpoint provider)
+  still wins over the user file, so a user config that grants unrestricted
+  filesystem access does not widen a lane: read-only lanes stay unable to write
+  the workspace and writers stay inside their worktree.
+- An inheriting lane also sets `web_search="live"`, `notify=[]`, and
+  `mcp_servers.<name>.default_tools_approval_mode="approve"` for each server in
+  the user config, since no one is present to approve a tool call.
+- A lane may write Provenant's own state directory (`$XDG_STATE_HOME/provenant`,
+  holding the admission lock).
+
 ## Non-goals
 
 This decision does not add an endpoint profile for any particular provider, does

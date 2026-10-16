@@ -102,6 +102,13 @@ def _isolated_route_state(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_codex_home_and_state(tmp_path_factory, monkeypatch):
+    """Codex argv reads the operator's MCP servers and names Provenant's state dir; pin both."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("codex-home")))
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("state-home")))
+
+
+@pytest.fixture(autouse=True)
 def _unconfined_provider_stubs(monkeypatch, request):
     """Keep OS confinement off for tests that execute stub providers in temp dirs."""
     if (

@@ -1,6 +1,9 @@
 import json
+import os
 from pathlib import Path
+import re
 import sys
+import tomllib
 import uuid
 
 CLI = "codex"
@@ -18,6 +21,41 @@ SIGNATURES = (("usage_limited", r"usage limit|try again at \d"),)
 # Codex reads these in a permission path as a pattern (it strips a trailing /** outright), so a
 # directory spelt with them could grant more than itself.
 PERMISSION_PATTERN_CHARACTERS = frozenset("*?[]{}")
+
+
+def config_policy(p):
+    """`inherited` loads the operator's Codex config (MCP servers, plugins, hooks, rules, subagent
+    settings) so a lane matches a native subagent; `clean` ignores it. Assurance runs, capability
+    lanes (which run under their own CODEX_HOME) and CF_DISPATCH_CODEX_CONFIG=clean stay clean."""
+    chosen = os.environ.get("CF_DISPATCH_CODEX_CONFIG", "")
+    if chosen not in {"", "clean", "inherited"}:
+        raise ValueError("CF_DISPATCH_CODEX_CONFIG must be clean or inherited")
+    if p.get("intent") == "assurance" or p["applied"].get("capabilities") or chosen == "clean":
+        return "clean"
+    return "inherited"
+
+
+def configured_mcp_servers():
+    """Names of the MCP servers in the operator's Codex config, which a lane cannot prompt to approve."""
+    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser() / "config.toml"
+    try:
+        servers = tomllib.loads(path.read_text(encoding="utf-8")).get("mcp_servers", {})
+    except (OSError, tomllib.TOMLDecodeError):
+        return []
+    return sorted(name for name in servers if re.fullmatch(r"[A-Za-z0-9_-]+", name))
+
+
+def provenant_state_dir():
+    """Provenant's own per-user state (admission lock): a lane's nested dispatch needs to write it."""
+    state_home = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
+    if not state_home.is_absolute():
+        state_home = Path.home() / ".local/state"
+    path = state_home / "provenant"
+    try:
+        path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    except OSError:
+        return None
+    return None if path.is_symlink() or not path.is_dir() else str(path)
 
 
 def read_only_writable_dirs(p):
@@ -53,8 +91,16 @@ def argv(p):
     command += [
         "--json",
         "--skip-git-repo-check",
-        "--ignore-user-config",
-        "--ignore-rules",
+    ]
+    inherited = config_policy(p) == "inherited"
+    if not inherited:
+        command += ["--ignore-user-config", "--ignore-rules"]
+    else:
+        # A lane has no one to approve a call, and the operator's notify hook is a desktop alert.
+        command += ["-c", "notify=[]", "-c", 'web_search="live"']
+        for name in configured_mcp_servers():
+            command += ["-c", "mcp_servers." + name + '.default_tools_approval_mode="approve"']
+    command += [
         "-c",
         'service_tier="default"',
         "-c",
@@ -62,8 +108,9 @@ def argv(p):
     ]
     sandbox, network = p["applied"]["sandbox"], p["applied"]["network"]
     capabilities = p["applied"].get("capabilities", [])
-    if sys.platform == "darwin" and sandbox != "full":
+    if sys.platform == "darwin" and sandbox != "full" and not inherited:
         command += ["-c", "allow_login_shell=false"]
+    state_dir = provenant_state_dir()
     # exec resume inherits its session sandbox; config overrides apply to both forms.
     if capabilities:
         if p["resume_session"]:
@@ -73,12 +120,14 @@ def argv(p):
     elif sandbox == "read-only":
         # :read-only reads everywhere; the profile adds writes to the attempt's TMPDIR and to
         # add_dirs (a shared lock directory, say), so a reviewer can run a targeted test.
-        writable = {":tmpdir": "write", **dict.fromkeys(read_only_writable_dirs(p), "write")}
+        writable = {":tmpdir": "write", **dict.fromkeys(read_only_writable_dirs(p), "write"),
+                    **({state_dir: "write"} if state_dir else {})}
         command += permissions_profile(p, ":read-only", network, writable)
     elif sandbox == "workspace-write":
         # A permissions profile names single Git paths inside the common directory, which
         # sandbox_workspace_write.writable_roots cannot; the nearest entry wins.
-        filesystem = p["applied"].get("write_boundary", {}).get("filesystem") or {}
+        filesystem = {**(p["applied"].get("write_boundary", {}).get("filesystem") or {}),
+                      **({state_dir: "write"} if state_dir else {})}
         command += permissions_profile(p, ":workspace", network, filesystem)
     elif p["resume_session"]:
         command += [

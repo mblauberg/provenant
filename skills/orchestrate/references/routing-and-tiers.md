@@ -196,10 +196,10 @@ to `generic-open` (worker only, not assurance). See
 
 A profile listing `codex` among its adapters reaches an OpenAI-compatible
 endpoint instead, and must also declare `wire_api` (Codex 0.146 accepts only
-`responses`). Codex keeps `--ignore-user-config` on every route, so the provider
-is passed inline as `-c model_providers.provenant_endpoint.*` overrides plus
-`-c model_provider=provenant_endpoint` rather than read from the operator's own
-`config.toml`. The token stays named: `env_key` tells Codex which variable to
+`responses`). Codex receives the provider inline, as `-c model_providers.provenant_endpoint.*`
+overrides plus `-c model_provider=provenant_endpoint`, rather than from the operator's own
+`config.toml`; assurance runs also keep `--ignore-user-config`, while ordinary lanes inherit the
+operator's config (ADR 0023, amendment). The token stays named: `env_key` tells Codex which variable to
 read, so no credential reaches an argument vector. See
 [ADR 0023](../../../docs/adr/0023-codex-custom-providers-inline-config.md).
 
