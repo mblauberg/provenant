@@ -355,6 +355,11 @@ class PeerClient:
                 raise HostError('bad_response', 'Peer changed protocol version after hello')
             if decision['compatible'] and response['ok'] and verb == 'doctor':
                 validate_doctor_result(response['result'], self.host, (params or {}).get('project_path'))
+                # Older protocol-v1 peers predate the runtime diagnostic. Keep
+                # their validated diagnostics while making this missing check visible.
+                response['result'].setdefault('python', {'minimum': '3.11', 'supported': None, 'status': 'unknown',
+                    'error': HostError('python_check_unavailable',
+                        'Peer does not report its Python version; upgrade Provenant on the peer to check Python 3.11 or newer').wire()})
             result = {'host': self.host, 'reachability': 'reachable', **response, **decision}
             if decision['reads_flagged']:
                 result['error'] = HostError('protocol_mismatch', 'Read came from a different protocol version').wire()
@@ -364,7 +369,7 @@ class PeerClient:
             return {'host': self.host, 'reachability': 'unreachable' if exc.code in {'timeout', 'unreachable'} else 'reachable',
                     **envelope(error=exc)}
 
-def hello():
+def hello(config=None):
     try:
         revision = subprocess.run(['git', '-C', str(PRODUCT_ROOT), 'rev-parse', 'HEAD'],
                                   capture_output=True, text=True, timeout=2,
@@ -372,7 +377,7 @@ def hello():
         revision = revision.stdout.strip() if revision.returncode == 0 else None
     except (OSError, subprocess.SubprocessError):
         revision = None
-    return {'protocol_version': PROTOCOL_VERSION, 'revision': revision, 'host': load_config().local_host}
+    return {'protocol_version': PROTOCOL_VERSION, 'revision': revision, 'host': (config if config is not None else load_config()).local_host}
 
 def validate_doctor_result(result, host, project_path=None):
     required = {'protocol_version', 'revision', 'host', 'project', 'adapters', 'fabric_registrations', 'lane_temporary_paths'}
@@ -380,6 +385,17 @@ def validate_doctor_result(result, host, project_path=None):
             or type(result['protocol_version']) is not int or result['protocol_version'] != PROTOCOL_VERSION
             or not (result['revision'] is None or isinstance(result['revision'], str))):
         raise HostError('bad_response', 'Doctor host or required fields are invalid')
+    if 'python' in result:
+        runtime = result['python']
+        if (not isinstance(runtime, dict) or not isinstance(runtime.get('version'), str)
+                or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', runtime['version'])
+                or runtime.get('minimum') != '3.11' or type(runtime.get('supported')) is not bool
+                or runtime['supported'] != (tuple(map(int, runtime['version'].split('.')[:2])) >= (3, 11))):
+            raise HostError('bad_response', 'Doctor Python runtime result is invalid')
+        if not runtime['supported'] and (not isinstance(runtime.get('error'), dict)
+                or runtime['error'].get('code') != 'python_too_old'
+                or not isinstance(runtime['error'].get('message'), str)):
+            raise HostError('bad_response', 'Doctor Python failure is invalid')
     project = result['project']
     if (not isinstance(project, dict) or not isinstance(project.get('path'), str)
             or type(project.get('present')) is not bool
@@ -400,10 +416,10 @@ def validate_doctor_result(result, host, project_path=None):
     for registration in result['fabric_registrations'].values():
         if not isinstance(registration, dict) or type(registration.get('registered')) is not bool:
             raise HostError('bad_response', 'Doctor registration result is invalid')
-    socket = result['lane_temporary_paths']
-    if (type(socket.get('fits')) is not bool or type(socket.get('max_path_bytes')) is not int
-            or type(socket.get('limit_bytes')) is not int):
-        raise HostError('bad_response', 'Doctor socket path result is invalid')
+    temporary = result['lane_temporary_paths']
+    if (type(temporary.get('fits')) is not bool or type(temporary.get('max_path_bytes')) is not int
+            or type(temporary.get('limit_bytes')) is not int):
+        raise HostError('bad_response', 'Doctor temporary path result is invalid')
 
 def project_identity(cwd=None):
     worktree = _load_module('provenant_worktree', PRODUCT_ROOT / 'scripts/worktree.py')
@@ -429,14 +445,37 @@ def project_directory(project_path):
         raise HostError('invalid_project_path', 'Project path resolves outside the user home')
     return path
 
-def lane_socket_paths(project):
-    # Use the actual v2 attempt layout; these are estimates until a lane is placed.
+def browser_socket_paths(temporary):
+    # MAC_CHROMIUM_TMPDIR owns Chromium's generated directory and SingletonSocket.
+    # Reserve the historical hidden Chromium prefix and six random characters;
+    # Chrome's branded prefix and the current unhidden prefix are shorter.
+    socket_path = Path(temporary) / '.org.chromium.Chromium.XXXXXX/SingletonSocket'
+    maximum = len(os.fsencode(str(socket_path)))
+    # Keep the native sockaddr_un compatibility limit, including its terminator.
+    limit = 104 if sys.platform == 'darwin' else 108
+    return {'fits': maximum < limit, 'max_path_bytes': maximum, 'limit_bytes': limit,
+            'constraint': 'unix_socket', 'socket_path': str(socket_path)}
+
+
+def lane_temporary_paths(project):
+    # Doctor estimates directory paths; browser placement uses the actual attempt.
     temporary = Path(project) / '.agent-run/runs/20260101-0000-dispatch-task-000000/dispatch/tasks/task/attempt-001/tmp'
-    paths = [temporary / 'SingletonSocket', temporary / 'claude/SingletonSocket']
+    paths = [temporary, temporary / 'claude', temporary / 'cache/node/corepack']
     maximum = max(len(os.fsencode(str(path))) for path in paths)
-    limit = 103 if sys.platform == 'darwin' else 107
-    return {'fits': maximum <= limit, 'max_path_bytes': maximum, 'limit_bytes': limit,
+    existing = Path(project)
+    while not existing.exists() and existing != existing.parent:
+        existing = existing.parent
+    limit = os.pathconf(existing, 'PC_PATH_MAX')
+    component_limit = os.pathconf(existing, 'PC_NAME_MAX')
+    # A negative pathconf result means the filesystem has no fixed limit.
+    if limit < 0:
+        limit = sys.maxsize
+    components_fit = component_limit < 0 or all(
+        len(os.fsencode(part)) <= component_limit for path in paths for part in path.parts)
+    return {'fits': maximum < limit and components_fit, 'max_path_bytes': maximum, 'limit_bytes': limit,
+            'component_limit_bytes': component_limit, 'constraint': 'filesystem_path',
             'estimated': True, 'layout': 'dispatch/tasks/task/attempt-001/tmp'}
+
 
 def signin_status(adapter, executable):
     """Probe only local CLI status. Never read/return credentials or launch a model."""
@@ -518,11 +557,16 @@ def adapter_doctor(name, project):
         confinement = {'status': 'unknown', 'reason': 'planning_unavailable', 'mode': 'read_only'}
     return {'executable': executable, 'signin': signin_status(name, executable), 'confinement': confinement}
 
-def doctor(project_path=None):
+def doctor(project_path=None, config=None):
     catalogue_snapshot = _load_module(
         'provenant_model_route', PRODUCT_ROOT / 'scripts/model_route.py'
     ).catalogue_snapshot
-    result = hello()
+    result = hello(config)
+    version = sys.version_info[:3]
+    supported = version[:2] >= (3, 11)
+    result['python'] = {'version': '.'.join(map(str, version)), 'minimum': '3.11', 'supported': supported}
+    if not supported:
+        result['python']['error'] = HostError('python_too_old', 'Python 3.11 or newer is required').wire()
     if project_path is None:
         project_path = project_identity()
     project = project_directory(project_path)
@@ -549,7 +593,7 @@ def doctor(project_path=None):
     module = importlib.util.module_from_spec(checker)
     checker.loader.exec_module(module)
     result['fabric_registrations'] = module.provider_registration_status(Path.home())
-    result['lane_temporary_paths'] = lane_socket_paths(project)
+    result['lane_temporary_paths'] = lane_temporary_paths(project)
     return result
 
 def select_hosts(config, selectors):
@@ -570,7 +614,7 @@ def hosts_doctor(config, selected):
     def probe(host):
         if host == config.local_host:
             try:
-                response = envelope(doctor(project_path))
+                response = envelope(doctor(project_path, config=config))
             except HostError as exc:
                 response = envelope(error=exc)
             except Exception:
@@ -649,9 +693,17 @@ def main(argv=None):
     parser.add_argument('--json', action='store_true')
     parser.add_argument('hosts', nargs='*')
     args = parser.parse_intermixed_args(argv)
+    config_error = None
     try:
-        config = load_config()
-        selected = select_hosts(config, args.hosts)
+        path = config_path()
+        try:
+            config = load_config(path)
+        except HostError as exc:
+            if exc.code != 'invalid_config':
+                raise
+            config_error = exc
+            config = HostsConfig()
+        selected = [config.local_host] if config_error else select_hosts(config, args.hosts)
         result = hosts_doctor(config, selected) if args.action == 'doctor' else hosts_list(config)
         if CANCELLED.is_set():
             raise HostError('hosts_cancelled', 'Host check cancelled')
@@ -660,6 +712,8 @@ def main(argv=None):
     except HostError as exc:
         print(json.dumps(envelope(error=exc)))
         return 1
+    if config_error:
+        result['error'] = config_error.wire()
     if args.json:
         print(json.dumps(result))
     else:
@@ -668,7 +722,11 @@ def main(argv=None):
                 print(row['host'] + (' local' if row['local'] else ' ' + row['ssh_destination']))
             else:
                 print(row['host'] + ' ' + row['reachability'] + ' ' + json.dumps(row.get('error') or row.get('result'), sort_keys=True))
-    return 0
+        if config_error:
+            print(config_error.code + ': ' + str(config_error))
+    python_failed = any(row.get('result', {}).get('python', {}).get('supported') is False
+                        for row in result['hosts'])
+    return 1 if args.action == 'doctor' and (config_error or python_failed) else 0
 
 
 if __name__ == '__main__':

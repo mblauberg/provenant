@@ -45,6 +45,8 @@ function pinnedAttempt(row: Record<string, any>, attempt: number | undefined): R
 export interface PinnedContinuation extends LaunchObserver {
   attempt?: number;
   session?: string;
+  /** Frozen detached input supplied by the host transport owner. */
+  readOnlyCwd?: string;
 }
 
 /** One task row: a run id with task_id for a batch, or a task's own id. */
@@ -121,7 +123,8 @@ export async function resumeConfiguredProvider(
     const timeout = input.timeout_seconds === undefined
       ? Number(saved.timeout_seconds ?? (previous.mode === "worktree_write" ? 10800 : 3600))
       : timeoutSeconds(input.timeout_seconds);
-    const executionIdentity = { ...identity, cwd: typeof previous.cwd === "string" ? previous.cwd : identity.cwd };
+    const executionIdentity = { ...identity, cwd: previous.mode === "read_only" && pin.readOnlyCwd !== undefined
+      ? pin.readOnlyCwd : typeof previous.cwd === "string" ? previous.cwd : identity.cwd };
     const python = await pythonOwner(root, identity, env);
     const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
     const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
@@ -321,6 +324,8 @@ export async function handoffDispatch(
           }
         : {}),
       ...(writer ? { mode: "worktree_write" as const, worktree: previous.worktree } : {}),
+      ...(previous.mode === "read_only" && pin.readOnlyCwd !== undefined && rest.cwd === undefined
+        ? { cwd: pin.readOnlyCwd } : {}),
       ...inheritedConfidential(rest, requested),
       prompt: brief + prompt,
       prompt_file: undefined,

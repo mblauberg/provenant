@@ -82,7 +82,7 @@ class LaneFederation:
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
 
-    def worker(self, verb, project, request, launch_path=None, lock=None):
+    def worker(self, verb, project, request, launch_path=None, lock=None, reader_cwd=None):
         directory = self.h.project_directory(project)
         if not directory.is_dir():
             raise self.h.HostError('project_missing', 'Peer project directory is missing')
@@ -96,7 +96,7 @@ class LaneFederation:
         run_bounded = self.h._load_module('provenant_bounded_process', self.h.PRODUCT_ROOT / 'skills/_shared/bounded_process.py').run_bounded
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         with tempfile.NamedTemporaryFile(mode='w', dir=self.root, suffix='.json') as payload:
-            json.dump({'verb': verb, 'input': request, 'launch_path': str(launch_path) if launch_path else None}, payload)
+            json.dump({'verb': verb, 'input': request, 'launch_path': str(launch_path) if launch_path else None, 'reader_cwd': reader_cwd}, payload)
             payload.flush()
             # The worker shares the operation lock until it records a launch, so
             # it stays held if this process dies while the worker still runs.
@@ -223,7 +223,9 @@ class LaneFederation:
                 return {'status': 'launch_unknown', 'state': 'launch_unknown', 'operation_id': identifier}
             return self.settle(identifier) or {'status': 'launch_unknown', 'state': 'launch_unknown', 'operation_id': identifier}
         if verb not in WRITES:
-            return self.worker(verb, project, request)
+            value = self.worker(verb, project, request)
+            self.code().cleanup_readers(value.get('runs', []))
+            return value
         identifier = self.operation_id(request)
         clean = {key: value for key, value in request.items() if key not in {'operation_id', 'host'}}
         if verb in {'dispatch', 'resume', 'handoff'}:
@@ -255,20 +257,28 @@ class LaneFederation:
                 db.execute('INSERT INTO operations VALUES (?,?,NULL)', (identifier, encoded))
             launch_path = operations / f'{identifier}.json'
             transport = self.code()
+            preparing_reader = False
             try:
+                preparing_reader = verb == 'dispatch' and bool(clean.get('code_transport')) and not transport.writer_tasks(clean)
                 contexts = (transport.prepare(project, clean, identifier) if verb == 'dispatch'
                     else transport.continuation(project, verb, clean, identifier) if verb in {'resume', 'handoff'} else [])
-                result = self.worker(verb, project, clean, launch_path, held)
+                preparing_reader = False
+                reader = next((c for c in contexts if c.get('read_only')), None)
+                result = (self.worker(verb, project, clean, launch_path, held, reader_cwd=str(transport.reader_cwd(reader)))
+                    if reader and (verb in {'resume', 'handoff'} or clean.get('session')) else self.worker(verb, project, clean, launch_path, held))
                 if contexts:
-                    result['code_transport'] = {'writers': contexts, 'uncommitted_changes_transported': False}
+                    result['code_transport'] = {'writers': [c for c in contexts if not c.get('read_only')],
+                        'readers': [c for c in contexts if c.get('read_only')], 'uncommitted_changes_transported': False}
                     result['digest'] = result.get('digest', '') + '\n  committed input only; uncommitted chair changes were not transported'
-            except (self.h.HostError, OSError, subprocess.SubprocessError) as exc:
+            except Exception as exc:  # Anything before launch must still release the preparation.
                 if launch_path.exists():
                     raise self.h.HostError('lane_owner_failed', 'Owner response was lost after launch was recorded') from exc
                 # The fixed worker records intent before starting an owner. Once
                 # that worker exits without a record, no lane could have started.
                 result = {'status': 'rejected', 'error': getattr(exc, 'code', 'lane_owner_unavailable'),
                     'fix': str(exc) + '; the peer recorded this prelaunch rejection. Repair the cause, then dispatch with a new operation ID'}
+                if preparing_reader:
+                    result['code_transport_prelaunch_failure'] = True
             if not launch_path.exists():
                 if result.get('status') == 'rejected' and 'new operation ID' not in result.get('fix', ''):
                     result['fix'] = result.get('fix', '') + '; repair the cause, then dispatch with a new operation ID'
@@ -291,12 +301,11 @@ class LaneFederation:
             path = Path(value.pop('prompt_file')).expanduser()
             if not path.is_absolute():
                 path = Path(cwd or Path.cwd()) / path
-            if not path.resolve().is_relative_to(Path.home().resolve()):
-                raise self.h.HostError('invalid_remote_path', 'Remote prompt files must be inside home')
             path = path.parent.resolve() / path.name
             owner = self.h._load_module('provenant_lane_prompt_reader', self.h.PRODUCT_ROOT / 'skills/orchestrate/scripts/dispatch_run.py')
             try:
-                raw = owner.read_prompt_input(path, Path(cwd or Path.cwd()).resolve(), Path(cwd or Path.cwd()).resolve())
+                raw = owner.read_prompt_input(path, Path(cwd or Path.cwd()).resolve(), Path(cwd or Path.cwd()).resolve(),
+                    read_roots=(path.parent,), max_bytes=self.h.MAX_REQUEST_BYTES)
             except owner.PreflightError as exc:
                 raise self.h.HostError(exc.code, str(exc)) from exc
             if len(raw) > self.h.MAX_REQUEST_BYTES:
@@ -583,6 +592,13 @@ class LaneFederation:
 
     def client_call(self, action, cwd, request):
         result = self.placed_call(action, cwd, request)
+        if self.config_error and action in {'lanes', 'status'} and result.get('local'):
+            project = self.h.project_identity(cwd)
+            result = self.worker(action, project, result.get('input', request))
+            result['hosts'] = [{'host': self.config.local_host, 'reachability': 'reachable',
+                'error': {'code': 'invalid_config', 'message': self.config_error}}]
+            result['digest'] = '\n'.join(row.get('digest') or str(row.get('task_id', 'local lane'))
+                for row in result.get('runs', [])) + '\ninvalid_config: ' + self.config_error
         if (self.config_error and action == 'dispatch' and result.get('local') and 'fallback' not in result
                 and os.environ.get('PROVENANT_HOST_LOCAL_ONLY') != '1'):
             result = {**result, 'fallback': {'from_host': 'hosts.json', 'reason': 'invalid_config', 'detail': self.config_error},
@@ -704,7 +720,7 @@ class LaneFederation:
                 bound_writer = writer is not None
                 if writer and tuple(writer[:3]) != (project, host, digest):
                     raise self.h.HostError('operation_conflict', 'Writer operation already binds another host or request')
-                if self.code().writer_tasks(clean) and not writer:
+                if self.code().transport_tasks(clean) and not writer:
                     with self.database() as db:
                         db.execute('INSERT INTO writer_dispatches VALUES (?,?,?,?,0)', (identifier, project, host, digest))
                     writer = (project, host, digest, 0)
@@ -753,6 +769,15 @@ class LaneFederation:
                         self.code().retire_outgoing(project, clean, identifier, host)
                         with self.database() as db:
                             db.execute('DELETE FROM writer_dispatches WHERE id=?', (identifier,))
+                    if (not request.get('host') and not bound_writer and not self.code().writer_tasks(clean)
+                            and exc.code not in {'hosts_cancelled', 'operation_conflict'}):
+                        with self.database() as db:
+                            db.execute('INSERT OR REPLACE INTO writer_dispatches VALUES (?,?,?,?,1)',
+                                (identifier, project, self.config.local_host, digest))
+                        return {'local': True, 'input': {k: v for k, v in request.items()
+                            if k not in {'host', 'operation_id'}},
+                            'fallback': {'from_host': host, 'reason': exc.code},
+                            'digest': f'local fallback from {host}: {exc.code}'}
                     if exc.code in TRANSIENT:
                         return {'status': 'rejected', 'host': host, 'error': exc.code,
                             'fix': f'{exc}; nothing was sent to {host}. Repair the cause and retry with the same operation ID, or dispatch with host {self.config.local_host} to run locally'}
@@ -777,11 +802,45 @@ class LaneFederation:
                     try:
                         self.code().send(client, project, clean['code_transport'])
                     except self.h.HostError as exc:
+                        if (not request.get('host') and not previous and not bound_writer and not request.get('session')
+                                and not self.code().writer_tasks(clean)
+                                and exc.code not in {'hosts_cancelled', 'operation_conflict'}):
+                            # Only chunks were sent: this fresh request has never
+                            # invoked the peer launch owner. Bind its local fallback.
+                            with self.database() as db:
+                                db.execute('DELETE FROM pending WHERE id=?', (identifier,))
+                                db.execute('UPDATE writer_dispatches SET host=?,sent=1 WHERE id=?',
+                                    (self.config.local_host, identifier))
+                                db.execute('UPDATE writer_history SET host=? WHERE id=?',
+                                    (self.config.local_host, identifier))
+                            self.code().retire_outgoing(project, clean, identifier, host)
+                            return {'local': True, 'input': {k: v for k, v in request.items()
+                                if k not in {'host', 'operation_id'}},
+                                'fallback': {'from_host': host, 'reason': exc.code},
+                                'digest': f'local fallback from {host}: {exc.code}'}
                         if exc.code in TRANSIENT:
                             return {**self.unknown(identifier, host), 'digest': f'launch_unknown {identifier}@{host}; retry frozen code transport'}
                         raise
                 response = client.call(action, {'project_path': project, 'input': clean}, write=action in WRITES)
             if response.get('ok') and not response.get('reads_flagged'):
+                result = response['result']
+                if (action == 'dispatch' and not request.get('host') and writer and not previous and not bound_writer
+                        and not request.get('session') and result.get('status') == 'rejected'
+                        and result.get('code_transport_prelaunch_failure') is True
+                        and result.get('error') not in {'hosts_cancelled', 'operation_conflict'}):
+                    # The peer durably proved its input preparation never launched.
+                    with self.database() as db:
+                        db.execute('DELETE FROM pending WHERE id=?', (identifier,))
+                        db.execute('UPDATE writer_dispatches SET host=?,sent=1 WHERE id=?',
+                            (self.config.local_host, identifier))
+                        db.execute('UPDATE writer_history SET host=? WHERE id=?',
+                            (self.config.local_host, identifier))
+                    self.code().retire_outgoing(project, clean, identifier, host)
+                    reason = result['error']
+                    return {'local': True, 'input': {k: v for k, v in request.items()
+                        if k not in {'host', 'operation_id'}},
+                        'fallback': {'from_host': host, 'reason': reason},
+                        'digest': f'local fallback from {host}: {reason}'}
                 if action in WRITES and response['result'].get('status') != 'launch_unknown':
                     self.code().record_result(identifier, response['result'])
                     with self.database() as db:

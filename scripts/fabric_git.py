@@ -3,6 +3,9 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
+import fcntl
+import glob
 import hashlib
 import json
 import os
@@ -12,6 +15,7 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 
 CHUNK_BYTES = 32 * 1024  # Uploads fit the 64 KiB peer request cap once encoded.
@@ -114,7 +118,8 @@ class CodeTransport:
             self.fail('project_not_configured', 'Git transport requires an explicitly configured project')
         repo = self.h.project_directory(project)
         try:
-            if self.w.primary_root(repo) != repo or self.w.owning_root(repo) != repo:
+            if (not self.w.same_directory(self.w.primary_root(repo), repo) or
+                    not self.w.same_directory(self.w.owning_root(repo), repo)):
                 self.fail('invalid_project_path', 'Git transport requires the primary checkout')
         except self.w.PolicyError as exc:
             self.fail('invalid_project_path', str(exc))
@@ -137,9 +142,17 @@ class CodeTransport:
         return path
 
     def metadata(self, value):
-        self.h.fields(value, {'base_revision', 'branch', 'worktree', 'size', 'sha256'},
+        self.h.fields(value, {'base_revision', 'branch', 'worktree', 'size', 'sha256', 'read_only', 'subdir'},
             {'base_revision', 'branch', 'worktree', 'size', 'sha256'}, 'invalid_code_transport')
         self.oid(value['base_revision'])
+        if 'read_only' in value and value['read_only'] is not True:
+            self.fail('invalid_code_transport', 'Read-only transport marker must be true')
+        if 'subdir' in value:
+            subdir = value['subdir']
+            parts = subdir.split('/') if isinstance(subdir, str) else []
+            if (not value.get('read_only') or not parts or len(subdir) > 1024 or
+                    any(part in {'', '.', '..', '.git'} or '\0' in part for part in parts)):
+                self.fail('invalid_code_transport', 'Reader subdirectory must be a relative path inside the checkout')
         branch, name = value['branch'], value['worktree']
         if (not isinstance(branch, str) or not branch or branch.startswith('-') or
                 not isinstance(name, str) or name != branch.replace('/', '-') or not self.w.SAFE_NAME.fullmatch(name)):
@@ -161,7 +174,11 @@ class CodeTransport:
     def sync_directory(path):
         directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            os.fsync(directory)
+            try:
+                os.fsync(directory)
+            except OSError as exc:
+                if exc.errno not in {errno.EINVAL, errno.ENOTSUP}:
+                    raise
         finally:
             os.close(directory)
 
@@ -239,6 +256,16 @@ class CodeTransport:
         return [index for index, task in enumerate(tasks)
             if str({**base, **task}.get('mode', 'read_only')).lower() in WRITER_MODES]
 
+    @staticmethod
+    def reader_tasks(request):
+        tasks = request.get('tasks') or [request]
+        base = {k: v for k, v in request.items() if k != 'tasks'}
+        return [index for index, task in enumerate(tasks)
+            if str({**base, **task}.get('mode', 'read_only')).lower() in {'read_only', 'read', 'ro'}]
+
+    def transport_tasks(self, request):
+        return sorted(self.writer_tasks(request) + self.reader_tasks(request))
+
     def common_base(self, client, project, repo, base):
         """Ask the peer which first-parent ancestor of `base` it already holds."""
         depth = int(self.git(repo, 'rev-list', '--first-parent', '--count', base))
@@ -247,9 +274,7 @@ class CodeTransport:
         while step < depth and len(offsets) < MAX_HAVE_CANDIDATES:
             offsets.append(step)
             step *= 2
-        if not offsets:
-            return None
-        candidates = self.git(repo, 'rev-parse', *(f'{base}~{offset}' for offset in offsets)).split()
+        candidates = self.git(repo, 'rev-parse', *(f'{base}~{offset}' for offset in offsets)).split() if offsets else []
         response = client.call('git-have', {'project_path': project, 'input': {'candidates': candidates}}, write=True)
         if not response.get('ok'):
             self.fail(response['error']['code'], response['error']['message'])
@@ -264,22 +289,44 @@ class CodeTransport:
         clean = dict(request)
         tasks = clean.get('tasks') or [clean]
         bindings = []
-        for index in self.writer_tasks(clean):
+        for index in self.transport_tasks(clean):
             effective = {**{k: v for k, v in clean.items() if k != 'tasks'}, **tasks[index]}
-            if request.get('session'):
+            read_only = index in self.reader_tasks(clean)
+            if not read_only and request.get('session'):
                 self.fail('remote_writer_session_unsupported', 'Writer dispatch requires a task, without a named session')
-            if not effective.get('worktree'):
-                self.fail('worktree_required', 'Pass the chair linked worktree to transport its committed HEAD')
-            original = Path(effective['worktree']).expanduser()
-            if not original.is_absolute():
-                original = Path(cwd) / original
-            local = original.resolve()
             repo = self.repo(project)
-            if original.is_symlink() or local.parent != repo / '.worktrees' or self.w.primary_root(local) != repo:
-                self.fail('worktree_invalid', 'Writer requires a registered canonical linked worktree')
-            branch = self.git(local, 'symbolic-ref', '--short', 'HEAD')
-            if local.name != branch.replace('/', '-'):
-                self.fail('worktree_invalid', 'Worktree name must derive from its branch')
+            if read_only:
+                original = Path(effective.get('cwd') or cwd).expanduser()
+                if not original.is_absolute():
+                    original = Path(cwd) / original
+                try:
+                    local = original.resolve()
+                    if not self.w.same_directory(self.w.primary_root(local), repo):
+                        self.fail('worktree_invalid', 'Read-only input must belong to the configured project')
+                except (self.w.PolicyError, OSError) as exc:
+                    self.fail('worktree_invalid', str(exc))
+                branch = 'read/' + identifier + '-' + str(index)
+                name = branch.replace('/', '-')
+                # Freeze the requested directory relative to the source checkout;
+                # the peer restores it inside the detached input.
+                try:
+                    relative = local.relative_to(Path(self.git(local, 'rev-parse', '--show-toplevel')).resolve()).as_posix()
+                except ValueError:
+                    self.fail('worktree_invalid', 'Read-only input must lie inside its checkout')
+                subdir = None if relative == '.' else relative
+            else:
+                if not effective.get('worktree'):
+                    self.fail('worktree_required', 'Pass the chair linked worktree to transport its committed HEAD')
+                original = Path(effective['worktree']).expanduser()
+                if not original.is_absolute():
+                    original = Path(cwd) / original
+                local = original.resolve()
+                if original.is_symlink() or not self.w.same_directory(local.parent, repo / '.worktrees') or not self.w.same_directory(self.w.primary_root(local), repo):
+                    self.fail('worktree_invalid', 'Writer requires a registered canonical linked worktree')
+                branch = self.git(local, 'symbolic-ref', '--short', 'HEAD')
+                name = local.name
+                if name != branch.replace('/', '-'):
+                    self.fail('worktree_invalid', 'Worktree name must derive from its branch')
             if len(identifier) > 120:
                 self.fail('invalid_operation_id', 'Writer operation IDs are limited to 120 characters')
             transfer_id = identifier + '-' + str(index)
@@ -290,7 +337,7 @@ class CodeTransport:
                 if frozen['host'] != host:
                     self.fail('operation_conflict', 'Writer operation is already owned by another host')
                 meta = frozen['metadata']
-                if meta['branch'] != branch or meta['worktree'] != local.name:
+                if meta['branch'] != branch or meta['worktree'] != name:
                     self.fail('operation_conflict', 'Writer operation already binds another worktree')
             else:
                 base = self.oid(self.git(local, 'rev-parse', 'HEAD'))
@@ -303,7 +350,9 @@ class CodeTransport:
                 else:
                     self.git(repo, 'update-ref', ref, base, '0' * len(base))
                 exclude = None if (path / 'input.bundle').exists() else self.common_base(client, project, repo, base)
-                meta = self.metadata({'base_revision': base, 'branch': branch, 'worktree': local.name,
+                meta = self.metadata({'base_revision': base, 'branch': branch, 'worktree': name,
+                    **({'read_only': True} if read_only else {}),
+                    **({'subdir': subdir} if read_only and subdir else {}),
                     **self.bundle(repo, ref, path / 'input.bundle', exclude)})
                 self.write_json(saved, {'host': host, 'operation_id': identifier, 'metadata': meta})
             bindings.append({'index': index, 'transfer_id': transfer_id, **meta})
@@ -315,7 +364,7 @@ class CodeTransport:
         """Retire only input resources owned by a dispatch that was never sent."""
         # Cleanup must also work when preparation rejected shallow/grafted history.
         repo = self.h.project_directory(project)
-        for index in self.writer_tasks(request):
+        for index in self.transport_tasks(request):
             transfer_id = identifier + '-' + str(index)
             ref = f'refs/provenant/hosts/{host}/{transfer_id}/base'
             base = self.git(repo, 'rev-parse', '--verify', '--quiet', ref, check=False)
@@ -502,17 +551,19 @@ class CodeTransport:
         bindings = request.pop('code_transport', [])
         tasks = request.get('tasks') or [request]
         writers = self.writer_tasks(request)
-        if not isinstance(bindings, list) or [b.get('index') for b in bindings if isinstance(b, dict)] != writers:
+        if not isinstance(bindings, list) or [b.get('index') for b in bindings if isinstance(b, dict)] != self.transport_tasks(request):
             self.fail('invalid_code_transport', 'Each writer requires exactly one transported committed input')
         if writers and request.get('session'):
             self.fail('remote_writer_session_unsupported', 'Continue a transported writer by its qualified run ID')
         contexts = []
         for binding in bindings:
-            self.h.fields(binding, {'index', 'transfer_id', 'base_revision', 'branch', 'worktree', 'size', 'sha256'},
+            self.h.fields(binding, {'index', 'transfer_id', 'base_revision', 'branch', 'worktree', 'size', 'sha256', 'read_only', 'subdir'},
                 {'index', 'transfer_id', 'base_revision', 'branch', 'worktree', 'size', 'sha256'}, 'invalid_code_transport')
             if binding['transfer_id'] != identifier + '-' + str(binding['index']):
                 self.fail('invalid_code_transport', 'Writer transfer must bind the dispatch operation')
             meta = self.metadata({k: v for k, v in binding.items() if k not in {'index', 'transfer_id'}})
+            if bool(meta.get('read_only')) != (binding['index'] in self.reader_tasks(request)):
+                self.fail('invalid_code_transport', 'Transport mode must match the bound task')
             repo = self.repo(project, receiving=True)
             path = self.directory(project, binding['transfer_id'], receiving=True)
             if not (path / 'incoming.json').exists() or json.loads((path / 'incoming.json').read_text()) != meta:
@@ -530,6 +581,45 @@ class CodeTransport:
             file.unlink()
             shutil.rmtree(path / 'chunks', ignore_errors=True)
             target = repo / '.worktrees' / meta['worktree']
+            if meta.get('read_only'):
+                if binding['index'] not in self.reader_tasks(request):
+                    self.fail('invalid_code_transport', 'Read-only input must bind a read-only task')
+                try:
+                    self.w.ensure_shared_root(repo)
+                except self.w.PolicyError as exc:
+                    self.fail('worktree_invalid', str(exc))
+                with self.creation_lock(target):
+                    if target.exists() or any(Path(str(item.get('worktree'))) == target for item in self.w.worktree_records(repo)):
+                        self.fail('worktree_invalid', 'Detached review worktree already exists')
+                    context = {**binding, 'worktree_path': str(target), 'project_path': project,
+                        'host': self.f.config.local_host, 'operation_id': identifier, 'created_worktree': True,
+                        'creation_nonce': uuid.uuid4().hex,
+                        'task_id': tasks[binding['index']].get('id') or tasks[binding['index']].get('task_id')
+                            or request.get('task_id') or ('task-' + str(binding['index'] + 1) if request.get('tasks') else None)}
+                    contexts.append(context)
+                    self.write_json(self.state_file('reader-inputs', identifier), [c for c in contexts if c.get('read_only')])
+                    self.write_json(self.state_file('reader-contexts', identifier), [c for c in contexts if c.get('read_only')])
+                    try:
+                        self.w.create(argparse.Namespace(repo=repo, name=meta['worktree'], existing_branch=None,
+                            new_branch=None, detach=meta['base_revision'], start_point=None, no_node_modules=True))
+                        self.prove_creation(target, context)
+                    except self.w.PostCreationError as exc:
+                        # The checkout exists and may be ours: keep the intent so
+                        # settlement can still prove or preserve it.
+                        self.fail('worktree_invalid', str(exc))
+                    except self.w.PolicyError as exc:
+                        # A refused creation proves nothing about the checkout at
+                        # this path (a competitor may hold it): revoke our intent.
+                        contexts.remove(context)
+                        self.revoke_readers(identifier, [c for c in contexts if c.get('read_only')])
+                        self.fail('worktree_invalid', str(exc))
+                task = tasks[binding['index']]
+                cwd = self.reader_cwd(context)
+                if not self.contained_directory(Path(context['worktree_path']), context.get('subdir')):
+                    self.fail('worktree_invalid', 'Requested reader directory is not part of the committed input')
+                task.update(mode='read_only', cwd=str(cwd))
+                task.pop('worktree', None)
+                continue
             # Reconcile a dead creator before deciding whether its target exists.
             for record in sorted((self.f.root / 'writer-contexts').glob('*.json')):
                 if record.stem != identifier and any(context['worktree_path'] == str(target)
@@ -543,7 +633,7 @@ class CodeTransport:
                         owners = sorted(record.stem for record in (self.f.root / 'writer-contexts').glob('*.json')
                             if any(context['project_path'] == project and context['worktree_path'] == str(target)
                                 and context['branch'] == meta['branch'] for context in json.loads(record.read_text())))
-                        if not owners or target.is_symlink() or self.w.primary_root(target) != repo:
+                        if not owners or target.is_symlink() or not self.w.same_directory(self.w.primary_root(target), repo):
                             self.fail('worktree_invalid', f'Peer worktree {meta["worktree"]} exists but no transported writer operation binds it; '
                                 'remove it on the peer or use another branch')
                         with self.w.hold_writer_lease(target):
@@ -555,16 +645,20 @@ class CodeTransport:
                         # Publish ownership intent before create: even death between
                         # checkout and claim publication must be recoverable.
                         context['created_worktree'] = True
+                        context['creation_nonce'] = uuid.uuid4().hex
                         context['created_branch'] = self.git(repo, 'rev-parse', '--verify', '--quiet',
                             'refs/heads/' + meta['branch'], check=False) is None
                         contexts.append(context)
-                        self.write_json(self.state_file('writer-contexts', identifier), contexts)
+                        self.write_json(self.state_file('writer-contexts', identifier), [c for c in contexts if not c.get('read_only')])
                         try:
                             self.w.create(argparse.Namespace(repo=repo, name=meta['worktree'], existing_branch=None,
                                 new_branch=meta['branch'], detach=None, start_point=meta['base_revision'], no_node_modules=True))
+                            self.prove_creation(target, context)
+                        except self.w.PostCreationError:
+                            raise  # The checkout exists: keep the record for settlement.
                         except self.w.PolicyError:
                             context['created_worktree'] = context['created_branch'] = False
-                            self.write_json(self.state_file('writer-contexts', identifier), contexts)
+                            self.write_json(self.state_file('writer-contexts', identifier), [c for c in contexts if not c.get('read_only')])
                             raise
                 except self.w.PolicyError as exc:
                     self.fail('worktree_invalid', str(exc))
@@ -575,8 +669,149 @@ class CodeTransport:
                 if not context.get('created_worktree'):
                     contexts.append(context)
                 self.claim_context(contexts[-1])
-                self.write_json(self.state_file('writer-contexts', identifier), contexts)
+                self.write_json(self.state_file('writer-contexts', identifier), [c for c in contexts if not c.get('read_only')])
         return contexts
+
+    PROOF = 'provenant-creation'
+
+    def prove_creation(self, target, context):
+        """Record, in the new worktree's private git dir, that this operation created it.
+
+        The creation intent is written before creation; only this nonce, written
+        after creation succeeds, proves the checkout is not a competitor's.
+        """
+        metadata = Path(self.git(target, 'rev-parse', '--absolute-git-dir'))
+        # Exclusive, non-following create: a preplanted symlink or file is never overwritten.
+        descriptor = os.open(metadata / self.PROOF, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(descriptor, 'w') as stream:
+            stream.write(context['creation_nonce'])
+            stream.flush()
+            os.fsync(stream.fileno())
+
+    def proven_creation(self, target, context):
+        try:
+            metadata = Path(self.git(target, 'rev-parse', '--absolute-git-dir'))
+            proof = metadata / self.PROOF
+            return bool(context.get('creation_nonce')) and not proof.is_symlink() and \
+                proof.read_text() == context['creation_nonce']
+        except (self.h.HostError, OSError, ValueError):
+            return False
+
+    @staticmethod
+    def contained_directory(root, subdir):
+        """True when subdir names a real directory under root with no symlink component."""
+        current = Path(root)
+        for part in Path(subdir).parts if subdir else ():
+            if part in {'', '.', '..'}:
+                return False
+            current = current / part
+            if current.is_symlink():
+                return False
+        return current.is_dir() and not current.is_symlink()
+
+    @staticmethod
+    def reader_cwd(context):
+        root = Path(context['worktree_path'])
+        return root / context['subdir'] if context.get('subdir') else root
+
+    def revoke_readers(self, identifier, readers):
+        for directory in ('reader-inputs', 'reader-contexts'):
+            path = self.state_file(directory, identifier)
+            if readers:
+                self.write_json(path, readers)
+            else:
+                path.unlink(missing_ok=True)
+
+    @hardened
+    def remove_readers(self, identifier, terminal_cwd=None):
+        record = self.f.root / 'reader-contexts' / (identifier + '.json')
+        if not record.is_file():
+            return []
+        remaining = []
+        for context in json.loads(record.read_text()):
+            target = Path(context['worktree_path'])
+            if (terminal_cwd is not None and target != Path(terminal_cwd)
+                    and not self.w.same_directory(target, Path(terminal_cwd))):
+                remaining.append(context)
+                continue
+            try:
+                repo = self.repo(context['project_path'], receiving=True)
+                with self.creation_lock(target):
+                    registered = next((row for row in self.w.worktree_records(repo)
+                        if self.w.same_directory(Path(str(row['worktree'])), target)), None)
+                    # Without a launch record, only a checkout this operation
+                    # proved it created, and left unchanged, is ours to remove.
+                    unlaunched = terminal_cwd is None
+                    if registered:
+                        # A locked checkout (Git's initializing lock included) may belong
+                        # to a live competitor; Git would refuse removal, so keep it.
+                        if registered.get('locked') or (unlaunched and not (
+                                context.get('created_worktree') and self.proven_creation(target, context))):
+                            remaining.append(context)
+                            continue
+                        if (target.is_symlink() or not registered.get('detached') or
+                                self.git(target, 'rev-parse', 'HEAD') != context['base_revision']):
+                            remaining.append(context)
+                            continue
+                        if unlaunched:
+                            with self.w.hold_writer_lease(target):
+                                if self.w.worktree_residue(target):
+                                    remaining.append(context)
+                                    continue
+                                self.git(repo, 'worktree', 'remove', str(target))
+                            continue
+                        # Git's own refusal of a modified tree leaves the record pending.
+                        self.git(repo, 'worktree', 'remove', str(target))
+                    elif target.exists():
+                        remaining.append(context)
+            except (self.h.HostError, self.w.PolicyError, OSError, ValueError, subprocess.SubprocessError):
+                remaining.append(context)
+        if remaining:
+            self.write_json(record, remaining)
+        else:
+            record.unlink(missing_ok=True)
+        return [context['worktree_path'] for context in remaining]
+
+    def cleanup_readers(self, rows):
+        for row in rows:
+            if row.get('state') != 'terminal' or row.get('pgid_alive') is True:
+                continue
+            for record in (self.f.root / 'reader-contexts').glob('*.json'):
+                launch = self.f.root / 'operations' / record.name
+                if not launch.is_file():
+                    continue
+                identity = json.loads(launch.read_text())
+                if (identity.get('runId') != row.get('run_id') or
+                        row.get('attempt', 0) < identity.get('attempt', 0)):
+                    continue
+                for context in json.loads(record.read_text()):
+                    if (context.get('task_id') or identity.get('taskId')) == row.get('task_id'):
+                        self.remove_readers(record.stem, terminal_cwd=context['worktree_path'])
+
+    @hardened
+    def validate_reader_resume(self, cwd, run_id, task_id):
+        target = Path(cwd).resolve()
+        for record in (self.f.root / 'reader-contexts').glob('*.json'):
+            launch = self.f.root / 'operations' / record.name
+            if not launch.is_file():
+                continue
+            identity = json.loads(launch.read_text())
+            if identity.get('runId') != run_id or identity.get('taskId') not in {task_id, '*'}:
+                continue
+            for context in json.loads(record.read_text()):
+                if str(self.reader_cwd(context)) != str(target) or not context.get('read_only') or \
+                        not self.contained_directory(Path(context['worktree_path']), context.get('subdir')):
+                    continue
+                if context.get('task_id') not in {None, task_id}:
+                    continue
+                repo = self.repo(context['project_path'], receiving=True)
+                root = Path(context['worktree_path'])
+                if (root == repo / '.worktrees' / context['worktree'] and
+                        self.w.same_directory(self.w.primary_root(root), repo) and
+                        self.git(root, 'symbolic-ref', '-q', 'HEAD', check=False) is None and
+                        self.git(root, 'rev-parse', 'HEAD') == context['base_revision']):
+                    return
+        self.fail('reader_binding_missing', 'Resume cwd is not bound to this transported reader launch')
 
     def creation_lock(self, target):
         return self.f.pending_lock('worktree-' + hashlib.sha256(str(target).encode()).hexdigest())
@@ -658,7 +893,14 @@ class CodeTransport:
                     self.restore(marker, identifier)
             except (self.w.PolicyError, OSError, ValueError, KeyError, subprocess.SubprocessError):
                 continue  # A live or vanished worktree; its next claim settles it.
-        return self.remove_created_worktrees(identifier, held)
+        directory = self.f.root / 'code'
+        for transfer in directory.glob('*/' + glob.escape(identifier) + '-*') if directory.is_dir() else []:
+            if not re.fullmatch(r'\d+', transfer.name[len(identifier) + 1:]):
+                continue
+            # An unlaunched operation never consumes its uploaded input.
+            (transfer / 'input.bundle').unlink(missing_ok=True)
+            shutil.rmtree(transfer / 'chunks', ignore_errors=True)
+        return (self.remove_readers(identifier) or []) + (self.remove_created_worktrees(identifier, held) or [])
 
     @hardened
     def remove_created_worktrees(self, identifier, held=None):
@@ -681,10 +923,13 @@ class CodeTransport:
                     continue
                 with self.creation_lock(target):
                     if target.exists():
-                        if target.is_symlink() or self.w.primary_root(target) != repo:
+                        if target.is_symlink() or not self.w.same_directory(self.w.primary_root(target), repo):
                             remaining.append(context)
                             continue
                         marker = self.context_owner(target)
+                        if not self.proven_creation(target, context):
+                            remaining.append(context)
+                            continue
                         with self.w.hold_writer_lease(target):
                             if (marker.exists() or self.git(target, 'symbolic-ref', 'HEAD') != branch or
                                     self.git(target, 'rev-parse', 'HEAD') != context['base_revision'] or
@@ -733,7 +978,7 @@ class CodeTransport:
         if verb == 'handoff' and (request.get('mode') is not None or request.get('cwd') is not None):
             return []  # The local handoff owner will not inherit writer mode.
         if row.get('mode') != 'worktree_write':
-            return []
+            return self.reader_continuation(project, row, identifier) if row.get('state') == 'terminal' else []
         matches = []
         for file in (self.f.root / 'writer-contexts').glob('*.json'):
             identity_path = self.f.root / 'operations' / file.name
@@ -753,6 +998,48 @@ class CodeTransport:
             'operation_id': identifier}
         self.claim_context(context, expected_owner=previous_owner)
         self.write_json(self.state_file('writer-contexts', identifier), [context])
+        return [context]
+
+    @hardened
+    def reader_continuation(self, project, row, identifier):
+        # Input identity outlives disposable cleanup state and a lost launch result.
+        matches = []
+        for record in sorted((self.f.root / 'reader-inputs').glob('*.json')):
+            launch = self.f.root / 'operations' / record.name
+            if not launch.is_file() or json.loads(launch.read_text()).get('runId') != row.get('run_id'):
+                continue
+            for context in json.loads(record.read_text()):
+                if context['project_path'] == project and str(self.reader_cwd(context)) == row.get('cwd'):
+                    matches.append(context)
+        if not matches:
+            return []  # Ordinary remote lanes have no transported reader input.
+        previous = matches[-1]
+        branch = 'read/' + identifier + '-' + str(previous['index'])
+        name = branch.replace('/', '-')
+        context = {**previous, 'operation_id': identifier, 'branch': branch, 'worktree': name,
+            'worktree_path': str(self.repo(project, receiving=True) / '.worktrees' / name),
+            'task_id': None, 'created_worktree': True, 'creation_nonce': uuid.uuid4().hex}
+        target = Path(context['worktree_path'])
+        repo = self.repo(project, receiving=True)
+        with self.creation_lock(target):
+            try:
+                self.w.ensure_shared_root(repo)
+                if target.exists() or target.is_symlink():
+                    self.fail('worktree_invalid', 'Reader continuation checkout already exists')
+                self.write_json(self.state_file('reader-inputs', identifier), [context])
+                self.write_json(self.state_file('reader-contexts', identifier), [context])
+                try:
+                    self.w.create(argparse.Namespace(repo=repo, name=name, existing_branch=None,
+                        new_branch=None, detach=context['base_revision'], start_point=None, no_node_modules=True))
+                    self.prove_creation(target, context)
+                except self.w.PostCreationError:
+                    raise  # The checkout exists: keep the intent for settlement.
+                except self.w.PolicyError:
+                    self.revoke_readers(identifier, [])  # A refused creation is no proof of ownership.
+                    raise
+            except self.w.PolicyError as exc:
+                self.fail('worktree_invalid', str(exc))
+
         return [context]
 
     @hardened

@@ -1010,7 +1010,7 @@ def fast_fabric_plan(args, prompt_path: Path, result_path: Path, workspace: Path
         return None
 
 
-def _read_prompt_once(workspace: Path, prompt_source: Path) -> bytes:
+def _read_prompt_once(workspace: Path, prompt_source: Path, max_bytes: int | None = None) -> bytes:
     """Read the validated prompt inode once for both retention and provider use."""
     try:
         relative = prompt_source.relative_to(workspace)
@@ -1021,10 +1021,14 @@ def _read_prompt_once(workspace: Path, prompt_source: Path) -> bytes:
     )
     try:
         chunks: list[bytes] = []
+        size = 0
         while True:
             chunk = os.read(fd, 1024 * 1024)
             if not chunk:
                 return b"".join(chunks)
+            size += len(chunk)
+            if max_bytes is not None and size > max_bytes:
+                raise PreflightError("request_too_large", "Remote prompt exceeds request limit")
             chunks.append(chunk)
     finally:
         os.close(fd)
@@ -1215,7 +1219,7 @@ def prompt_temp_roots() -> tuple[Path, ...]:
     return tuple(dict.fromkeys(candidate for root in roots if root.is_absolute() for candidate in (root, root.resolve())))
 
 
-def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path, read_roots=()) -> bytes:
+def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path, read_roots=(), max_bytes=None) -> bytes:
     prompt_source = None
     if prompt_file is not None:
         prompt_source = prompt_file.expanduser()
@@ -1246,7 +1250,7 @@ def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path, read_ro
                 or provider_exec.credential_path(prompt_source)):
             raise PreflightError("credential_or_auth_store_denied", "prompt path is a credential or authentication store")
         try:
-            prompt_bytes = _read_prompt_once(prompt_root, prompt_source)
+            prompt_bytes = _read_prompt_once(prompt_root, prompt_source, max_bytes=max_bytes)
         except OwnedLinkError as exc:
             raise PreflightError("prompt_hard_link_denied", str(exc))
         except OwnedFileError as exc:
@@ -1489,8 +1493,6 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                         read_roots=read_roots)
                     if plan['applied'].get('confinement') in {None, 'none'}:
                         raise PreflightError('remote_confinement_degraded', 'Remote placement requires effective confinement')
-                    if 'browser' in task.get('capabilities', []) and not hosts.lane_socket_paths(workspace)['fits']:
-                        raise PreflightError('remote_socket_path_too_long', 'Remote attempt temporary paths exceed the socket limit')
                 routes.append(route)
             except (PreflightError, WorktreeLeaseError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
                 prompt_fixes = {
@@ -1658,7 +1660,13 @@ def prepare_resume(args):
     # OpenCode applies effort only as a `#variant`; keep that intent so the router sends it again.
     if args.tool=="opencode" and args.effort and "#" not in args.model: args.model=args.model+"#"+args.effort
     args.access_mode=previous["mode"];args.worktree=Path(previous["worktree"]) if previous.get("worktree") else None
+    supplied_cwd = args.provider_cwd
     args.provider_cwd=Path(previous["cwd"]) if previous["mode"]=="read_only" else None
+    if (previous["mode"] == "read_only" and supplied_cwd is not None and
+            os.environ.get("PROVENANT_REMOTE_LANE") == "1" and supplied_cwd != args.provider_cwd):
+        _fabric_hosts_owner().lane_owner().code().validate_reader_resume(
+            supplied_cwd, previous["run_id"], previous["task_id"])
+        args.provider_cwd = supplied_cwd
     args.workspace_root=Path(previous.get("workspace_root") or (previous.get("workspace") or {}).get("root") or Path.cwd()).expanduser().resolve()
     args.sandbox=previous["applied"]["sandbox"];args.network=None if previous["applied"]["network"] is None else str(previous["applied"]["network"]).lower()
     args.add_dirs=previous["applied"]["add_dirs"];args.resume_session=previous["session_id"]
@@ -1891,6 +1899,13 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     attempt_number = max(existing_attempt_number(task_dir), existing_attempt_number(run_dir / "tasks" / args.task_id))
     attempt_id = f"attempt-{attempt_number:03d}"
     attempt_dir = task_dir / attempt_id
+    if os.environ.get('PROVENANT_REMOTE_LANE') == '1' and 'browser' in args.capabilities:
+        socket = _fabric_hosts_owner().browser_socket_paths(attempt_dir / 'tmp')
+        if not socket['fits']:
+            return fail(run_dir, 'remote_temporary_path_too_long',
+                f"Chromium SingletonSocket under {attempt_dir / 'tmp'} needs "
+                f"{socket['max_path_bytes']} bytes; the socket path must be shorter than "
+                f"{socket['limit_bytes']} bytes. Use a shorter peer project/run path.")
     try:
         create_contained_directory(
             run_dir, attempt_dir.relative_to(run_dir), label="attempt directory"
@@ -2644,6 +2659,16 @@ def execute_attempt_sequence(args,custody=None):
     return result
 
 
+def cleanup_settled_reader(args) -> None:
+    row = getattr(args, "_last_row", None) or {}
+    if row.get("mode") == "read_only" and os.environ.get("PROVENANT_REMOTE_LANE") == "1":
+        try:
+            _fabric_hosts_owner().lane_owner().code().cleanup_readers([row])
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+            # A subsequent host read retries operation-owned cleanup.
+            pass
+
+
 def dispatch(args: argparse.Namespace) -> int:
     """Run one attempt while serialising standalone run-ledger mutation."""
     if os.environ.get('PROVENANT_HOST_LOCAL_ONLY') != '1':
@@ -2711,9 +2736,13 @@ def dispatch(args: argparse.Namespace) -> int:
     if args.task_id is None and not (args.resume and owned and not args.batch_child):
         args.task_id = "dispatch-001"  # A resume names its task, or takes the run's only one.
     if not owned:
-        return _dispatch(args)
+        result = _dispatch(args)
+        cleanup_settled_reader(args)
+        return result
     if args.batch_child:
-        return execute_attempt_sequence(args)
+        result = execute_attempt_sequence(args)
+        cleanup_settled_reader(args)
+        return result
     try:
         custody = acquire_run_custody(run_dir)
     except (OSError, OwnedFileError):
@@ -2726,6 +2755,7 @@ def dispatch(args: argparse.Namespace) -> int:
             return fail(run_dir,"rejected","adapter and alias or model are required")
         result = execute_attempt_sequence(args,custody)
         close_mcp_run(run_dir)
+        cleanup_settled_reader(args)
         return result
     finally:
         fcntl.flock(custody.fileno(), fcntl.LOCK_UN)

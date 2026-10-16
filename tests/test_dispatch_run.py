@@ -1894,6 +1894,35 @@ def test_missing_run_receipt_reports_missing_custody(tmp_path: Path, monkeypatch
     assert json.loads(capsys.readouterr().out)["status"] == "run_custody_missing"
 
 
+@pytest.mark.parametrize('browser', [True, False])
+def test_remote_long_attempt_path_rejects_only_browser_before_launch(tmp_path, monkeypatch, capsys, browser):
+    workspace = tmp_path / ('long-peer-project-' + 'x' * 60)
+    workspace.mkdir()
+    run_dir = make_run(workspace, 'long-browser')
+    prompt = workspace / 'prompt.md'
+    prompt.write_text('review\n')
+    launched = workspace / 'launched'
+    adapter = workspace / 'adapter'
+    write_success_adapter(adapter)
+    adapter.write_text(adapter.read_text().replace('#!/usr/bin/env bash\n',
+        '#!/usr/bin/env bash\ntouch ' + str(launched) + '\n', 1))
+    module = load_dispatch_module()
+    monkeypatch.setattr(module, 'CF_DISPATCH', adapter)
+    monkeypatch.setenv('PROVENANT_REMOTE_LANE', '1')
+    monkeypatch.chdir(workspace)
+    args = module.parser().parse_args([
+        '--run-dir', str(run_dir), '--task-id', 'browser', '--adapter', 'claude',
+        '--prompt-file', str(prompt), '--alias', 'workhorse', '--role', 'worker',
+        '--capabilities', '["browser"]' if browser else '[]',
+    ])
+    assert module.dispatch(args) == (2 if browser else 0)
+    if browser:
+        assert json.loads(capsys.readouterr().out)['error'] == 'remote_temporary_path_too_long'
+        assert not launched.exists()
+    else:
+        assert launched.exists()
+
+
 def test_nonfinite_or_nonpositive_timeout_is_rejected() -> None:
     module = load_dispatch_module()
     for value in ("0", "-1", "nan", "inf", "-inf"):

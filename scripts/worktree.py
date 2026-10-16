@@ -70,6 +70,10 @@ class PolicyError(RuntimeError):
     """A requested operation violates the shared-worktree contract."""
 
 
+class PostCreationError(PolicyError):
+    """`git worktree add` succeeded, but a later step failed: the checkout exists."""
+
+
 def git(repo: Path, *args: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     result, _ = _run_git(repo, *args)
     if check and result.returncode != 0:
@@ -273,13 +277,21 @@ def _run_git(
     ), captures
 
 
+def same_directory(left: Path, right: Path) -> bool:
+    """Compare directory identity, including case aliases on insensitive filesystems."""
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return False
+
+
 def owning_root(repo: Path) -> Path:
     requested = repo.expanduser().resolve()
     result = git(requested, "rev-parse", "--show-toplevel")
     if not result.stdout.endswith("\n"):
         raise PolicyError("Git top-level output was incomplete")
     root = Path(result.stdout.removesuffix("\n")).resolve()
-    if requested != root and not requested.is_relative_to(root):
+    if not any(same_directory(parent, root) for parent in (requested, *requested.parents)):
         raise PolicyError(
             f"{requested} is outside the Git working tree it resolves to ({root}); "
             "refusing copied checkout metadata"
@@ -310,7 +322,7 @@ def owning_root(repo: Path) -> Path:
                 raise PolicyError(
                     f"{root} has invalid linked-worktree back-pointer metadata"
                 ) from exc
-            if resolved_target != dot_git.resolve():
+            if not same_directory(resolved_target, dot_git):
                 raise PolicyError(
                     f"{root} is a copied checkout whose Git metadata points to "
                     f"{resolved_target}"
@@ -709,20 +721,24 @@ def create(args: argparse.Namespace) -> dict[str, object]:
             # existing branch, a checked-out ref or one moved off our start point.
             git(root, 'update-ref', '-d', branch_ref, base, check=False)
         raise
-    node_modules, node_modules_reason = provision_created_node_modules(
-        root, target, disabled=args.no_node_modules,
-    )
-    head_revision = git(target, "rev-parse", "HEAD").stdout.strip()
-    branch_result = git(target, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
-    if branch_result.returncode not in {0, 1}:
-        raise PolicyError(branch_result.stderr.strip() or "cannot determine new worktree branch identity")
-    branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
+    try:
+        node_modules, node_modules_reason = provision_created_node_modules(
+            root, target, disabled=args.no_node_modules,
+        )
+        head_revision = git(target, "rev-parse", "HEAD").stdout.strip()
+        branch_result = git(target, "symbolic-ref", "--quiet", "--short", "HEAD", check=False)
+        if branch_result.returncode not in {0, 1}:
+            raise PolicyError(branch_result.stderr.strip() or "cannot determine new worktree branch identity")
+        branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
+        shared_git_dir = common_git_dir(root)
+    except PolicyError as exc:
+        raise PostCreationError(str(exc)) from exc
     return {
         "status": "created",
         "name": args.name,
         "primary_root": str(root),
         "worktree_root": str(target),
-        "common_git_dir": str(common_git_dir(root)),
+        "common_git_dir": str(shared_git_dir),
         "head_revision": head_revision,
         "branch": branch,
         "detached": branch is None,
