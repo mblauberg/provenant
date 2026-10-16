@@ -1,6 +1,6 @@
 """Pick models from the global weighted route pools (#848).
 
-A route (`strong`, `bulk`, `design`, `writing`) is a weighted pool of
+A route (the tiers `junior`, `senior`, `principal`, or the crafts `design`, `writing`) is a weighted pool of
 `adapter/model` entries across adapters. This module filters a pool on
 availability and picks from it in one of four modes: single (highest weight),
 rotate (smooth weighted round-robin per project), council (N picks, families
@@ -22,7 +22,7 @@ from typing import Any, Callable
 WEIGHTS = {"high": 8, "normal": 4, "sparing": 1, "off": 0}
 DEFAULT_WEIGHT = "normal"
 BINARIES = {"cursor": "cursor-agent", "kiro": "kiro-cli"}
-PRIVATE_UNSAFE_TRAITS = frozenset({"free", "trains-on-prompts"})
+PRIVATE_UNSAFE_TRAITS = frozenset({"trains-on-prompts"})
 MAX_COUNCIL = 8
 
 
@@ -79,6 +79,108 @@ def merge_route(base: list[Any], overlay: list[Any], path: str, drift: list[str]
     return merged + [entry for entry in base if isinstance(entry, dict) and entry.get("model") not in listed]
 
 
+# Pools renamed when the routes became the junior, senior and principal tiers; an older overlay
+# still names them.
+# Folded in this order, so a `workhorse` or `bulk` entry outranks a `strong` or
+# `scout` entry for the same model, as it did before the rename.
+LEGACY_ROUTES = {"workhorse": "senior", "strong": "senior", "bulk": "junior", "scout": "junior",
+                 "flagship": "principal"}
+TIER_ROUTES = ("junior", "senior", "principal")
+# The tier names as an adapter's own alias names, which the catalogue keeps.
+TIER_ALIASES = {"junior": "scout", "senior": "workhorse", "principal": "flagship"}
+
+
+def _alias_keys(mapping: Any) -> Any:
+    """Rename tier-named keys of an alias map, keeping an alias-named key on a clash."""
+    if not isinstance(mapping, dict):
+        return mapping
+    renamed = {key: value for key, value in mapping.items() if key not in TIER_ALIASES}
+    for key, value in mapping.items():
+        if key in TIER_ALIASES:
+            renamed.setdefault(TIER_ALIASES[key], value)
+    return renamed
+
+
+def canonical_aliases(overlay: dict[str, Any]) -> None:
+    """Let an overlay name adapter aliases by tier (`senior` for `workhorse`)."""
+    tasks = overlay.get("task_class_routes")
+    if isinstance(tasks, dict):
+        overlay["task_class_routes"] = {
+            name: ({**route, "alias": TIER_ALIASES[route["alias"]]}
+                   if isinstance(route, dict) and route.get("alias") in TIER_ALIASES else route)
+            for name, route in tasks.items()
+        }
+    for section, nested in (("families", ("aliases",)), ("adapters", ("aliases",))):
+        block = overlay.get(section)
+        if not isinstance(block, dict):
+            continue
+        updated = {}
+        for name, entry in block.items():
+            if isinstance(entry, dict):
+                entry = dict(entry)
+                for key in nested:
+                    if key in entry:
+                        entry[key] = _alias_keys(entry[key])
+                if section == "families":
+                    for key in ("role_overrides", "role_effort_defaults"):
+                        roles = entry.get(key)
+                        if isinstance(roles, dict):
+                            entry[key] = {role: _alias_keys(value) for role, value in roles.items()}
+                    tiers = entry.get("risk_tier_overrides")
+                    if isinstance(tiers, dict):
+                        entry["risk_tier_overrides"] = {
+                            tier: ({**value, "alias": TIER_ALIASES[value["alias"]]}
+                                   if isinstance(value, dict) and value.get("alias") in TIER_ALIASES else value)
+                            for tier, value in tiers.items()
+                        }
+            updated[name] = entry
+        overlay[section] = updated
+
+
+def migrate_legacy_routes(overlay: Any, drift: list[str]) -> Any:
+    """Fold an overlay's renamed pools into their tiers and repoint its synonyms.
+
+    A legacy pool's entries follow the tier's own overlay entries, so a reweight
+    of `strong` still applies to `senior`. A synonym named after a pool or an old
+    tier is dropped, since the product maps those names, and one aimed at a
+    renamed pool is repointed; both are noted in `drift`. Tier names used as
+    adapter aliases become the alias names.
+    """
+    if not isinstance(overlay, dict):
+        return overlay
+    overlay = dict(overlay)
+    canonical_aliases(overlay)
+    routes = overlay.get("routes")
+    if isinstance(routes, dict):
+        routes = dict(routes)
+        for old, new in LEGACY_ROUTES.items():
+            if old not in routes:
+                continue
+            legacy = routes.pop(old)
+            current = routes.get(new)
+            if isinstance(legacy, list) and (current is None or isinstance(current, list)):
+                listed = {entry.get("model") for entry in current or [] if isinstance(entry, dict)}
+                routes[new] = [*(current or []), *(entry for entry in legacy
+                                                   if not isinstance(entry, dict) or entry.get("model") not in listed)]
+                drift.append(f"routes.{old}: renamed to {new}; fix: rename it in the overlay")
+            else:
+                drift.append(f"routes.{old}: malformed legacy pool dropped; fix: list it under routes.{new}")
+        overlay["routes"] = routes
+    synonyms = overlay.get("route_synonyms")
+    if isinstance(synonyms, dict):
+        kept: dict[str, Any] = {}
+        for name, target in synonyms.items():
+            if name in {*TIER_ROUTES, *LEGACY_ROUTES, "design", "writing"}:
+                drift.append(f"route_synonyms.{name}: dropped, the product maps tier names; fix: remove it")
+                continue
+            if target in LEGACY_ROUTES:
+                drift.append(f"route_synonyms.{name}: {target} is now {LEGACY_ROUTES[target]}; fix: repoint it")
+                target = LEGACY_ROUTES[target]
+            kept[name] = target
+        overlay["route_synonyms"] = kept
+    return overlay
+
+
 def route_name(catalog: dict[str, Any], name: str) -> str:
     routes = catalog.get("routes", {})
     key = name.strip().casefold()
@@ -130,17 +232,22 @@ def model_traits(router: Any, catalog: dict[str, Any], adapter: str, model: str)
     adapter_entry = catalog.get("adapters", {}).get(adapter, {})
     registered = router._registered_match(adapter, model, catalog)[0] if "models" in adapter_entry else None
     # A live id the catalogue lacks inherits its family's traits, so it is never less private than its family.
-    for name in (model, *((registered or {}).get("inherits", []))):
+    names = (model, *(((registered or {}).get("id"),) if (registered or {}).get("id") else ()),
+             *((registered or {}).get("inherits", [])))
+    for name in names:
         for key in (f"{adapter}/{name}", name):
             value = table.get(key) if isinstance(table, dict) else None
             if isinstance(value, list):
                 traits.update(item for item in value if isinstance(item, str))
-    if router.training_flag(adapter_entry, registered) is True:
+    flag = router.training_flag(adapter_entry, registered, model)
+    if flag is True:
         traits.add("trains-on-prompts")
-    if isinstance(registered, dict) and registered.get("plan_cap_usd") == 0:
+    if ((isinstance(registered, dict) and registered.get("plan_cap_usd") == 0) or router.is_free_model(adapter_entry, model)
+            or (registered is None and router.looks_free(adapter_entry, model))):
         traits.add("free")
-    if router.is_free_model(adapter_entry, model):
-        traits.update(("free", "trains-on-prompts"))
+    # Free implies training unless the model's own entry says otherwise (zero-retention free tiers).
+    if "free" in traits and (registered or {}).get("trains_on_prompts") is not False:
+        traits.add("trains-on-prompts")
     return sorted(traits)
 
 
@@ -256,13 +363,20 @@ def _effort(entry: dict[str, Any], requested: str | None, effort_order: dict[str
 
 
 def _council(entries: list[dict[str, Any]], count: int, rng: random.Random) -> list[dict[str, Any]]:
-    """Pick `count` entries: unused families first, weights as odds, repeats only once exhausted."""
+    """Pick `count` entries: unused families first, weights as odds, repeats only once exhausted.
+
+    A prompt-training model never claims a seat for a new family: it joins a council
+    only by its odds, so a rare contributor model is not drawn into every council.
+    """
     picks: list[dict[str, Any]] = []
     while len(picks) < count:
         remaining = list(entries)
         families: set[str] = set()
         while remaining and len(picks) < count:
-            fresh = [entry for entry in remaining if entry["family"] not in families] or remaining
+            fresh = remaining if not families else [
+                entry for entry in remaining
+                if entry["family"] not in families
+                and not PRIVATE_UNSAFE_TRAITS.intersection(entry["traits"])] or remaining
             chosen = rng.choices(fresh, weights=[entry["weight"] for entry in fresh])[0]
             picks.append(chosen)
             families.add(chosen["family"])

@@ -63,7 +63,7 @@ def models(result):
 
 def test_seed_routes_name_registered_models_with_the_tiny_weight_vocabulary():
     CATALOG = SEED
-    assert set(CATALOG["routes"]) == {"strong", "bulk", "design", "writing"}
+    assert set(CATALOG["routes"]) == {"principal", "senior", "junior", "design", "writing"}
     for name, entries in CATALOG["routes"].items():
         for entry in entries:
             assert entry["weight"] in {"high", "normal", "sparing"}
@@ -81,11 +81,18 @@ def test_top_is_the_highest_weight_available_and_deterministic(tmp_path):
     assert models(first) == ["claude/claude-opus-5-5"]
     assert first["picks"][0]["reason"] == "strong top"
     assert models(pick({"route": "strong"}, tmp_path, seed=99)) == models(first)
-    assert models(pick({"route": "bulk"}, tmp_path)) == ["codex/gpt-6-luna"]
-    # Haiku 5.5 ties Luna at high weight; listing order keeps Luna the single-mode top pick.
-    bulk = {entry["model"]: entry for entry in SEED["routes"]["bulk"]}
-    assert bulk["claude/claude-haiku-5-5"]["weight"] == bulk["codex/gpt-6-luna"]["weight"] == "high"
-    assert [e["model"] for e in SEED["routes"]["bulk"]][:2] == ["codex/gpt-6-luna", "claude/claude-haiku-5-5"]
+    # The seed pools are the three tiers: deciders, mid-level judges and tier-1 lenses.
+    assert models(pick({"route": "principal"}, tmp_path, catalog=SEED)) == ["claude/claude-opus-5-5"]
+    assert models(pick({"route": "senior"}, tmp_path, catalog=SEED)) == ["claude/claude-sonnet-5-5"]
+    assert models(pick({"route": "junior"}, tmp_path, catalog=SEED)) == ["opencode/opencode/deepseek-v4.1-flash-free"]
+    bulk = {entry["model"]: entry["weight"] for entry in SEED["routes"]["junior"]}
+    assert {bulk[model] for model in ("opencode/opencode/glm-5.3-flash-free", "claude/claude-haiku-5-5",
+                                       "codex/gpt-6-luna")} == {"high"}
+    # Rotating free tiers stay in bulk at the lowest weight; no mid or top model sits in bulk.
+    assert all(weight == "sparing" for model, weight in bulk.items()
+               if model.startswith("opencode/opencode/")
+               and not model.endswith(("deepseek-v4.1-flash-free", "glm-5.3-flash-free")))
+    assert not set(bulk) & {"claude/claude-sonnet-5-5", "codex/gpt-6.1-sol", "claude/claude-opus-5-5"}
 
 
 def test_every_mode_filters_cooling_uninstalled_and_disabled_models(tmp_path):
@@ -131,6 +138,15 @@ def test_council_weights_are_sampling_odds_and_sparing_is_rare(tmp_path):
     drawn = Counter(models(pick({"route": "strong", "council": 1}, tmp_path, seed=seed))[0] for seed in range(400))
     assert drawn["claude/claude-opus-5-5"] > drawn["codex/gpt-6.1-sol"] > drawn["codex/gpt-6-astra"] > 0
     assert drawn["codex/gpt-6-astra"] < 400 / 8
+
+
+def test_a_prompt_training_model_never_takes_a_council_seat_for_its_family(tmp_path):
+    argon = "opencode/opencode-go/gemini-4-argon-contributor"
+    assert {"model": argon, "weight": "sparing"} in SEED["routes"]["principal"]
+    drawn = Counter(model for seed in range(200)
+                    for model in models(pick({"route": "principal", "council": 2}, tmp_path, catalog=SEED, seed=seed)))
+    # As the lone Google family Argon would sit on every two-member council; by odds it sits on about one in thirteen.
+    assert 0 < drawn[argon] < 200 / 6
 
 
 def test_council_larger_than_the_pool_repeats_with_a_warning(tmp_path):
@@ -217,10 +233,16 @@ def test_availability_skips_entries_the_adapter_cannot_run(tmp_path):
 
 
 def test_task_classes_and_aliases_map_onto_routes(tmp_path):
-    assert pick({"route": "review"}, tmp_path)["route"] == "strong"
-    assert pick({"route": "Flagship"}, tmp_path)["route"] == "strong"
-    assert pick({"route": "ui-taste"}, tmp_path)["route"] == "design"
-    assert pick({"route": "scout"}, tmp_path)["route"] == "bulk"
+    assert pick({"route": "review"}, tmp_path, catalog=SEED)["route"] == "senior"
+    assert pick({"route": "strong"}, tmp_path, catalog=SEED)["route"] == "senior"
+    assert pick({"route": "Flagship"}, tmp_path, catalog=SEED)["route"] == "principal"
+    assert pick({"route": "critical-review"}, tmp_path, catalog=SEED)["route"] == "principal"
+    assert pick({"route": "ui-taste"}, tmp_path, catalog=SEED)["route"] == "design"
+    for lens in ("scout", "mechanical", "lens", "research"):
+        assert pick({"route": lens}, tmp_path, catalog=SEED)["route"] == "junior"
+    assert pick({"route": "implementation"}, tmp_path, catalog=SEED)["route"] == "senior", "matches its task class"
+    for old, new in (("workhorse", "senior"), ("flagship", "principal"), ("bulk", "junior")):
+        assert pick({"route": old}, tmp_path, catalog=SEED)["route"] == new
     with pytest.raises(pools.PoolError) as error:
         pick({"route": "fastest"}, tmp_path)
     assert error.value.code == "route_invalid"
@@ -257,16 +279,26 @@ def test_instance_overlay_reorders_and_reweights_a_pool(tmp_path):
                    {"model": "claude/claude-opus-5-5", "weight": "off"}],
         "local": [{"model": "codex/gpt-6-luna"}],
         "broken": [{"model": "no-adapter", "weight": "loud"}],
-    }, "route_synonyms": {"deep": "strong"}})
+    }, "route_synonyms": {"deep": "strong", "flagship": "strong", "workhorse": "bulk"}})
     run = model_route(env, "routes", "--json")
     assert run.returncode == 0, run.stderr
     document = json.loads(run.stdout)
-    strong = document["routes"]["strong"]
-    listed = ["codex/gpt-6-astra", "claude/claude-opus-5-5"]
-    assert [entry["model"] for entry in strong] == [
-        *listed, *(entry["model"] for entry in SEED["routes"]["strong"] if entry["model"] not in listed)]
-    assert strong[1]["weight"] == "off" and strong[1]["availability"] == "off"
-    sol = next(entry for entry in strong if entry["model"] == "codex/gpt-6.1-sol")
+    assert "strong" not in document["routes"], "a legacy pool folds into its tier"
+    folded = document["routes"]["senior"]
+    assert [entry["model"] for entry in folded][:2] == ["codex/gpt-6-astra", "claude/claude-opus-5-5"]
+    assert folded[1]["weight"] == "off" and folded[1]["availability"] == "off"
+    assert [entry["model"] for entry in folded][2:] == [entry["model"] for entry in SEED["routes"]["senior"]], \
+        "the tier keeps its seed fallbacks"
+    assert document["routes"]["principal"][0]["model"] == SEED["routes"]["principal"][0]["model"], \
+        "a legacy synonym cannot shadow a pool"
+    second = tmp_path / "second"
+    second.mkdir()
+    workhorse = model_route(overlay_environment(second, {"routes": {
+        "workhorse": [{"model": "codex/gpt-6-astra", "weight": "high"}]}}), "routes", "--json")
+    merged = json.loads(workhorse.stdout)["routes"]["senior"]
+    assert [entry["model"] for entry in merged] == [
+        "codex/gpt-6-astra", *(entry["model"] for entry in SEED["routes"]["senior"])]
+    sol = next(entry for entry in merged if entry["model"] == "codex/gpt-6.1-sol")
     assert sol["effort"] == "high-xhigh", "unlisted entries keep their fields"
     assert document["routes"]["local"][0]["weight"] == "normal"
     assert "broken" not in document["routes"]
@@ -278,6 +310,41 @@ def test_instance_overlay_reorders_and_reweights_a_pool(tmp_path):
         assert results[0]["picks"][0]["model"] == "gpt-6-astra"
     snapshot = json.loads(model_route(env, "snapshot", "--json").stdout)
     assert any(note.startswith("routes.broken") for note in snapshot["drift"])
+    assert any(note.startswith("routes.strong: renamed to senior") for note in snapshot["drift"])
+    assert any(note.startswith("route_synonyms.deep: strong is now senior") for note in snapshot["drift"])
+
+
+def test_legacy_fold_keeps_workhorse_and_bulk_ahead_of_strong_and_scout(tmp_path):
+    env = overlay_environment(tmp_path, {"routes": {
+        "strong": [{"model": "codex/gpt-6.1-sol", "weight": "high"}],
+        "workhorse": [{"model": "codex/gpt-6.1-sol", "weight": "off"}],
+        "scout": [{"model": "codex/gpt-6-luna", "weight": "high"}],
+        "bulk": [{"model": "codex/gpt-6-luna", "weight": "sparing"}],
+    }})
+    routes = json.loads(model_route(env, "routes", "--json").stdout)["routes"]
+    sol = next(entry for entry in routes["senior"] if entry["model"] == "codex/gpt-6.1-sol")
+    luna = next(entry for entry in routes["junior"] if entry["model"] == "codex/gpt-6-luna")
+    assert sol["weight"] == "off"
+    assert luna["weight"] == "sparing"
+
+
+def test_overlay_may_name_adapter_aliases_by_tier():
+    overlay = pools.migrate_legacy_routes({
+        "task_class_routes": {"implementation": {"alias": "senior", "effort": "high"}},
+        "families": {"openai": {
+            "aliases": {"principal": ["gpt-6-astra"], "workhorse": ["gpt-6.1-sol"], "senior": ["gpt-6-luna"]},
+            "role_effort_defaults": {"orchestrator": {"principal": "high"}},
+            "risk_tier_overrides": {"crucial": {"alias": "principal"}},
+        }},
+        "adapters": {"opencode": {"aliases": {"junior": ["opencode/glm-5.3-flash-free"]}}},
+    }, [])
+    assert overlay["task_class_routes"]["implementation"]["alias"] == "workhorse"
+    family = overlay["families"]["openai"]
+    assert family["aliases"] == {"flagship": ["gpt-6-astra"], "workhorse": ["gpt-6.1-sol"]}, \
+        "an alias-named key wins over its tier name"
+    assert family["role_effort_defaults"]["orchestrator"] == {"flagship": "high"}
+    assert family["risk_tier_overrides"]["crucial"]["alias"] == "flagship"
+    assert overlay["adapters"]["opencode"]["aliases"] == {"scout": ["opencode/glm-5.3-flash-free"]}
 
 
 def test_pick_command_answers_every_request_and_types_rejections(tmp_path):
@@ -300,7 +367,7 @@ def test_routes_prints_each_pool_with_live_availability(tmp_path):
     (state / "cooldowns.json").write_text(json.dumps({"cooldowns": {"codex/gpt-6-luna": {"cooling_until": until}}}))
     run = model_route(env, "routes")
     assert run.returncode == 0, run.stderr
-    for name in ("strong", "bulk", "design", "writing"):
+    for name in ("principal", "senior", "junior", "design", "writing"):
         assert f"\n{name}\n" in f"\n{run.stdout}"
     assert "not installed" in run.stdout
     bin_dir = tmp_path / "bin"
@@ -316,7 +383,7 @@ def test_routes_prints_each_pool_with_live_availability(tmp_path):
                                text=True, capture_output=True, check=False,
                                env={**env, "PATH": os.environ["PATH"]})
     assert provenant.returncode == 0, provenant.stderr
-    assert set(json.loads(provenant.stdout)["routes"]) >= {"strong", "bulk", "design", "writing"}
+    assert set(json.loads(provenant.stdout)["routes"]) >= {"principal", "senior", "junior", "design", "writing"}
 
 
 def test_route_line_names_why_the_pool_picked_the_model():
@@ -604,3 +671,85 @@ def test_pool_pick_of_a_suffixed_live_id_keeps_the_effort_its_suffix_names(tmp_p
     low = pick({"models": ["agy/gemini-3.9-flash-low"]}, tmp_path)["picks"][0]
     assert (low["model"], low.get("effort")) == ("gemini-3.9-flash", "low")
     assert pick({"models": ["agy/gemini-3.9-flash-low@high"]}, tmp_path)["picks"][0]["effort"] == "high"
+
+
+def _free_catalog(flag):
+    entry = {"id": "opencode/zero-retention-free"}
+    if flag is not None:
+        entry["trains_on_prompts"] = flag
+    adapter = {**CATALOG["adapters"]["opencode"], "models": [entry]}
+    router._apply_free_pattern(adapter)
+    return {**CATALOG, "adapters": {**CATALOG["adapters"], "opencode": adapter}, "routes": {
+        **CATALOG["routes"], "zr": [{"model": "opencode/opencode/zero-retention-free", "weight": "high"},
+                                    {"model": "codex/gpt-6-luna", "weight": "sparing"}]}}
+
+
+def test_free_model_with_explicit_no_training_is_not_private_unsafe(tmp_path):
+    catalog = _free_catalog(False)
+    adapter = catalog["adapters"]["opencode"]
+    assert not adapter["models"][0].get("warning")
+    traits = pools.model_traits(router, catalog, "opencode", "opencode/zero-retention-free")
+    assert "free" in traits and "trains-on-prompts" not in traits
+    for seed in range(5):
+        result = pick({"route": "zr", "confidential": True}, tmp_path, catalog=catalog, seed=seed)
+        assert models(result) == ["opencode/opencode/zero-retention-free"]
+        assert not any("may train" in w or "skipped" in w for w in result["warnings"])
+    assert not any("may train" in w for w in pick({"route": "zr"}, tmp_path, catalog=catalog)["warnings"])
+
+
+def test_free_model_without_flag_still_defaults_to_training(tmp_path):
+    catalog = _free_catalog(None)
+    assert catalog["adapters"]["opencode"]["models"][0]["warning"]
+    traits = pools.model_traits(router, catalog, "opencode", "opencode/zero-retention-free")
+    assert {"free", "trains-on-prompts"} <= set(traits)
+    for seed in range(5):
+        private = pick({"route": "zr", "confidential": True}, tmp_path, catalog=catalog, seed=seed)
+        assert models(private) == ["codex/gpt-6-luna"]
+
+
+def test_exec_routing_treats_explicit_no_training_free_model_as_safe():
+    exec_routing = exec_routing_module()
+    assert exec_routing.disclosure_risk("opencode", "opencode/deepseek-v4.1-flash-free",
+                                        {"plan_cap_usd": 0, "trains_on_prompts": False}) is None
+    assert exec_routing.disclosure_risk("opencode", "opencode/mimo-v2.6-flash-free", {})
+
+
+def test_a_configured_training_trait_outranks_a_no_training_flag(monkeypatch):
+    import copy
+    catalog = copy.deepcopy(_free_catalog(False))
+    catalog["model_traits"] = {"opencode/opencode/zero-retention-free": ["trains-on-prompts"]}
+    exec_routing = exec_routing_module()
+    monkeypatch.setattr(router, "load_catalog", lambda *args, **kwargs: catalog)
+    monkeypatch.setattr(exec_routing, "_model_route_module", lambda: router)
+    # Direct dispatch and fallback checks pass the resolver's flag; the trait still wins, as in the pools.
+    assert exec_routing.disclosure_risk("opencode", "opencode/zero-retention-free",
+                                        {"plan_cap_usd": 0, "trains_on_prompts": False})
+    assert exec_routing.disclosure_risk("opencode", "opencode/zero-retention-free", {})
+
+
+def test_an_adapter_wide_no_training_default_never_clears_an_unknown_free_model(tmp_path):
+    catalog = _free_catalog(None)
+    adapter = {**catalog["adapters"]["opencode"], "trains_on_prompts": False}
+    catalog = {**catalog, "adapters": {**catalog["adapters"], "opencode": adapter}}
+    assert router.training_flag(adapter, None, "opencode/rotating-free") is None
+    assert "trains-on-prompts" in pools.model_traits(router, catalog, "opencode", "opencode/rotating-free")
+    assert router.training_flag(adapter, None, "opencode-go/paid-model") is False
+
+
+def test_a_trait_on_the_canonical_id_follows_an_effort_suffixed_pick(monkeypatch):
+    import copy
+    catalog = copy.deepcopy(CATALOG)
+    catalog["model_traits"] = {"cursor/grok-4.7": ["trains-on-prompts"]}
+    assert "trains-on-prompts" in pools.model_traits(router, catalog, "cursor", "grok-4.7-high")
+    exec_routing = exec_routing_module()
+    monkeypatch.setattr(router, "load_catalog", lambda *args, **kwargs: catalog)
+    monkeypatch.setattr(exec_routing, "_model_route_module", lambda: router)
+    assert exec_routing.disclosure_risk("cursor", "grok-4.7-high", {"trains_on_prompts": False})
+
+
+def test_every_free_sign_keeps_an_adapter_wide_false_from_clearing_an_unknown_model():
+    adapter = {**SEED["adapters"]["opencode"], "trains_on_prompts": False}
+    for model in ("opencode/big-pickle", "openrouter/example:free", "opencode/rotating-free"):
+        assert router.training_flag(adapter, None, model) is None, model
+        assert "trains-on-prompts" in pools.model_traits(
+            router, {**SEED, "adapters": {**SEED["adapters"], "opencode": adapter}}, "opencode", model), model
