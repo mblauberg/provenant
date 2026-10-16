@@ -82,6 +82,16 @@ it("reads both receipt layouts through one versioned root-relative run interface
   }
 });
 
+it("omits the effort suffix when an adapter applies no effort", async () => {
+  const workspace = fixture();
+  const { row, run } = attempt(workspace, "tasks", "noeffort", "terminal", "ok");
+  Object.assign(row.provenance, { requested: { ...row.provenance.requested, adapter: "opencode", effort: null },
+    resolved_model: "opencode/nemotron-3.5-lightning-free", effort_requested: null, effort_applied: "" });
+  writeFileSync(join(workspace, ".agent-run", "runs", run, "tasks", "noeffort", "attempt-001", "attempt.json"), JSON.stringify(row));
+  const [lane] = (await readRuns(workspace)).runs;
+  expect(lane!.route).toBe("opencode/opencode/nemotron-3.5-lightning-free");
+});
+
 function closure(workspace: string, taskId: string, state: string, status: string | null, files: Record<string, unknown>) {
   const { row, run } = attempt(workspace, "tasks", taskId, state, status);
   const runDir = join(workspace, ".agent-run", "runs", run);
