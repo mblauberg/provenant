@@ -174,8 +174,10 @@ stealth models into alias tables; pick the slug at dispatch time.
 OpenCode is an ordinary implemented broker for its catalogue (`opencode/<model>`).
 `opencode/deepseek-v4.1-flash-free` (zero-retention, no training) is the preferred go-to and
 adapter default, `high` in `bulk`; `opencode/glm-5.3-flash-free` (also zero-retention) is the
-second and the flagship alias. Paid `opencode-go/glm-5.3-flash` and
-`opencode-go/deepseek-v4.1-flash` are the backups. The two paid models share one small monthly quota, so both are `sparing` in the pools. Any registered or unregistered
+second. OpenCode has `workhorse` and `scout` aliases only: its models sit between the
+Sonnet/Sol and Haiku/Luna tiers, so a `flagship` request takes the adapter default and warns.
+Paid `opencode-go/deepseek-v4.1-flash` is the `workhorse` backup; paid `opencode-go/glm-5.3-flash`
+is reachable by name. The two paid models share one small monthly quota, so both are `sparing` in the pools. Any registered or unregistered
 model whose id matches the adapter's `free_pattern` (`-free$`) is free and, unless its
 entry sets `trains_on_prompts: false`, may train on prompts: it is then warned on and
 skipped by `confidential: true`. Free models

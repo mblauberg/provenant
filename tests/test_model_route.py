@@ -616,15 +616,24 @@ def test_opencode_training_warning_and_paid_fallback_excludes_free():
                             "opencode/muse-spark-1.3-contributor-free", "--role", "worker")
     assert result.returncode == 0, route
     assert route["warnings"]
-    result, route = resolve("--adapter", "opencode", "--alias", "flagship", "--role", "worker")
+    result, route = resolve("--adapter", "opencode", "--alias", "workhorse", "--role", "worker")
     assert result.returncode == 0, route
-    assert all(not candidate["trains_on_prompts"] and candidate["plan_cap_usd"] > 0
-               for candidate in route["fallback_candidates"])
+    assert [candidate["model"] for candidate in route["fallback_candidates"]] == [
+        "opencode/glm-5.3-flash-free", "opencode-go/deepseek-v4.1-flash"]
+    assert all(candidate["trains_on_prompts"] is False for candidate in route["fallback_candidates"])
     result, unregistered = resolve("--adapter", "opencode", "--model",
                                    "opencode/muse-spark-2-contributor-free", "--role", "worker")
     assert result.returncode == 0, unregistered
     assert unregistered["trains_on_prompts"] is None
     assert unregistered["warnings"]
+
+
+def test_opencode_has_no_flagship_tier_and_says_so():
+    assert "flagship" not in CATALOG["adapters"]["opencode"]["aliases"]
+    result, route = resolve("--adapter", "opencode", "--alias", "flagship", "--role", "worker")
+    assert result.returncode == 0, route
+    assert route["resolved_model"] == CATALOG["adapters"]["opencode"]["default_model"]
+    assert any("no flagship tier" in warning for warning in route["warnings"])
 
 
 def test_cooling_alias_skips_candidate_but_explicit_model_warns(tmp_path):
@@ -2556,9 +2565,8 @@ def test_opencode_without_model_uses_adapter_default(capsys, monkeypatch):
     route = json.loads(capsys.readouterr().out)
     assert result == 0
     assert route["status"] == "ok"
-    assert route["resolved_model"] == "opencode/glm-5.3-flash-free"
-    assert route["model_selection"] == "alias"
-    assert route["model_family"] == "zhipu"
+    assert route["resolved_model"] == "opencode/deepseek-v4.1-flash-free"
+    assert route["model_family"] == "deepseek"
 
 
 def test_cursor_without_model_uses_account_auto_default(capsys, monkeypatch):

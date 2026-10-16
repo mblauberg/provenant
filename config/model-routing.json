@@ -812,10 +812,6 @@
         }
       ],
       "aliases": {
-        "flagship": [
-          "opencode/glm-5.3-flash-free",
-          "opencode-go/glm-5.3-flash"
-        ],
         "workhorse": [
           "opencode/deepseek-v4.1-flash-free",
           "opencode/glm-5.3-flash-free",

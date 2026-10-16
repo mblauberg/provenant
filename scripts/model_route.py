@@ -842,7 +842,8 @@ def _fallback_candidates(
         entry, _ = _registered_match(candidate_adapter, candidate, catalog)
         opt_in = fallback == "any" or f"{candidate_adapter}/{candidate}" in (requested_routes or []) or candidate in (requested_routes or [])
         flag = training_flag(catalog["adapters"].get(candidate_adapter, {}), entry)
-        if (entry and (opt_in or (entry.get("plan_cap_usd", 1) > 0 and flag is not True))
+        # Implicit fallbacks are paid or explicitly non-training (zero-retention free tiers).
+        if (entry and (opt_in or flag is False or (entry.get("plan_cap_usd", 1) > 0 and flag is not True))
                 and not _cooling(candidate_adapter, canonical, cooldowns, catalog)):
             results.append({"adapter": candidate_adapter, "model": canonical,
                             "plan_cap_usd": entry.get("plan_cap_usd"),
@@ -877,6 +878,8 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             fixed = adapter.get("fixed_model_family")
             candidates = catalog.get("families", {}).get(fixed, {}).get("aliases", {}).get(args.alias or "workhorse", [])
         requested = candidates[0] if candidates else adapter.get("default_model", "")
+        if not candidates and requested and args.alias in ALIAS_ORDER:
+            warnings.append(f"{adapter_name} has no {args.alias} tier; using adapter default {requested}")
     if not requested:
         return emit({"schema_version": 1, "status": "model_required_for_broker", "adapter": adapter_name,
                      "message": "No model default; fix: pass --model"}, 2)

@@ -186,10 +186,12 @@ not read an absent `Watch out for` as an endorsement.
   default: free, zero-retention, no training, and a distinct DeepSeek family, so
   use it heavily for bulk work, small implementations and as an extra cheap
   review lens. `opencode/glm-5.3-flash-free` (zero-retention, Zhipu family) is
-  the second free pick and the OpenCode flagship alias. Both are limited-time
-  offers; the aliases fall back to paid Go `opencode-go/glm-5.3-flash` and
-  `opencode-go/deepseek-v4.1-flash`, which draw on the small Go monthly quota,
-  so use those sparingly.
+  the second free pick. Both sit between the Sonnet/Sol and Haiku/Luna tiers,
+  so OpenCode has `workhorse` and `scout` aliases but no `flagship`; a flagship
+  request falls to the adapter default with a warning. Both are limited-time
+  offers; `workhorse` falls back to paid Go `opencode-go/deepseek-v4.1-flash`,
+  and paid `opencode-go/glm-5.3-flash` stays reachable by name (`glm-paid`).
+  Both paid models draw on the small Go monthly quota, so use them sparingly.
 - **Watch out for:** free models rotate often, and their data terms differ per
   model (Zen docs). Zero-retention, no training: `deepseek-v4.1-flash-free`,
   `glm-5.3-flash-free`, `space-bunny-free`, `longcat-2.5-preview-free`.
