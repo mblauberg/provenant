@@ -79,6 +79,52 @@ def merge_route(base: list[Any], overlay: list[Any], path: str, drift: list[str]
     return merged + [entry for entry in base if isinstance(entry, dict) and entry.get("model") not in listed]
 
 
+# Pools renamed when the routes became tiers; an older overlay still names them.
+LEGACY_ROUTES = {"strong": "workhorse", "scout": "bulk"}
+
+
+def migrate_legacy_routes(overlay: Any, drift: list[str]) -> Any:
+    """Fold an overlay's renamed pools into their tiers and repoint its synonyms.
+
+    A legacy pool's entries follow the tier's own overlay entries, so a reweight
+    of `strong` still applies to `workhorse`. A synonym whose name is now a pool
+    can never resolve (a pool name wins), and one aimed at a renamed pool is
+    repointed; both are noted in `drift`.
+    """
+    if not isinstance(overlay, dict):
+        return overlay
+    overlay = dict(overlay)
+    routes = overlay.get("routes")
+    if isinstance(routes, dict):
+        routes = dict(routes)
+        for old, new in LEGACY_ROUTES.items():
+            if old not in routes:
+                continue
+            legacy = routes.pop(old)
+            current = routes.get(new)
+            if isinstance(legacy, list) and (current is None or isinstance(current, list)):
+                listed = {entry.get("model") for entry in current or [] if isinstance(entry, dict)}
+                routes[new] = [*(current or []), *(entry for entry in legacy
+                                                   if not isinstance(entry, dict) or entry.get("model") not in listed)]
+                drift.append(f"routes.{old}: renamed to {new}; fix: rename it in the overlay")
+            else:
+                drift.append(f"routes.{old}: malformed legacy pool dropped; fix: list it under routes.{new}")
+        overlay["routes"] = routes
+    synonyms = overlay.get("route_synonyms")
+    if isinstance(synonyms, dict):
+        kept: dict[str, Any] = {}
+        for name, target in synonyms.items():
+            if name in LEGACY_ROUTES.values() or name in {"flagship", "design", "writing"}:
+                drift.append(f"route_synonyms.{name}: dropped, a pool of that name exists; fix: remove it")
+                continue
+            if target in LEGACY_ROUTES:
+                drift.append(f"route_synonyms.{name}: {target} is now {LEGACY_ROUTES[target]}; fix: repoint it")
+                target = LEGACY_ROUTES[target]
+            kept[name] = target
+        overlay["route_synonyms"] = kept
+    return overlay
+
+
 def route_name(catalog: dict[str, Any], name: str) -> str:
     routes = catalog.get("routes", {})
     key = name.strip().casefold()
@@ -130,7 +176,9 @@ def model_traits(router: Any, catalog: dict[str, Any], adapter: str, model: str)
     adapter_entry = catalog.get("adapters", {}).get(adapter, {})
     registered = router._registered_match(adapter, model, catalog)[0] if "models" in adapter_entry else None
     # A live id the catalogue lacks inherits its family's traits, so it is never less private than its family.
-    for name in (model, *((registered or {}).get("inherits", []))):
+    names = (model, *(((registered or {}).get("id"),) if (registered or {}).get("id") else ()),
+             *((registered or {}).get("inherits", [])))
+    for name in names:
         for key in (f"{adapter}/{name}", name):
             value = table.get(key) if isinstance(table, dict) else None
             if isinstance(value, list):
@@ -138,7 +186,8 @@ def model_traits(router: Any, catalog: dict[str, Any], adapter: str, model: str)
     flag = router.training_flag(adapter_entry, registered, model)
     if flag is True:
         traits.add("trains-on-prompts")
-    if (isinstance(registered, dict) and registered.get("plan_cap_usd") == 0) or router.is_free_model(adapter_entry, model):
+    if ((isinstance(registered, dict) and registered.get("plan_cap_usd") == 0) or router.is_free_model(adapter_entry, model)
+            or (registered is None and router.looks_free(adapter_entry, model))):
         traits.add("free")
     # Free implies training unless the model's own entry says otherwise (zero-retention free tiers).
     if "free" in traits and (registered or {}).get("trains_on_prompts") is not False:

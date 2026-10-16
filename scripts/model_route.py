@@ -236,6 +236,13 @@ def is_free_model(adapter: dict[str, Any], model: str) -> bool:
     return isinstance(pattern, str) and re.search(pattern, model) is not None
 
 
+def looks_free(adapter: dict[str, Any], model: str) -> bool:
+    """Free by any sign the dispatch gate also uses: the adapter's pattern, a `-free` or `:free` id,
+    or an OpenCode Zen path. An unregistered id that looks free has unknown data terms."""
+    return (is_free_model(adapter, model) or model.endswith(("-free", ":free"))
+            or model.startswith("opencode/"))
+
+
 def _apply_free_pattern(adapter: dict[str, Any]) -> None:
     """Free models are listed by id alone; the pattern supplies the cap and a default
     training flag; the warning follows the resolved flag, so an explicit `false` (zero-retention) wins."""
@@ -286,7 +293,7 @@ def catalogue_snapshot(path: Path | None = None) -> dict[str, Any]:
                 if stale_routing:
                     drift.append("instance catalogue is older than product routing; ignored until refreshed")
                 else:
-                    base = _merge_catalog(base, overlay, "", drift)
+                    base = _merge_catalog(base, _pools.migrate_legacy_routes(overlay, drift), "", drift)
             else:
                 drift.append("instance catalogue: malformed overlay dropped; fix: use a JSON object")
         except (OSError, ValueError):
@@ -503,7 +510,7 @@ def training_flag(adapter: dict[str, Any], registered: dict[str, Any] | None, mo
     if type(own) is bool:
         return own
     value = adapter.get("trains_on_prompts")
-    if value is False and model and is_free_model(adapter, model):
+    if value is False and model and looks_free(adapter, model):
         return None
     return value if type(value) is bool else None
 

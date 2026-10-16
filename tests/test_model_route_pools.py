@@ -272,14 +272,18 @@ def test_instance_overlay_reorders_and_reweights_a_pool(tmp_path):
                    {"model": "claude/claude-opus-5-5", "weight": "off"}],
         "local": [{"model": "codex/gpt-6-luna"}],
         "broken": [{"model": "no-adapter", "weight": "loud"}],
-    }, "route_synonyms": {"deep": "strong"}})
+    }, "route_synonyms": {"deep": "strong", "flagship": "strong", "workhorse": "bulk"}})
     run = model_route(env, "routes", "--json")
     assert run.returncode == 0, run.stderr
     document = json.loads(run.stdout)
-    strong = document["routes"]["strong"]
-    listed = ["codex/gpt-6-astra", "claude/claude-opus-5-5"]
-    assert [entry["model"] for entry in strong] == listed, "an overlay may add a pool the seed lacks"
-    assert strong[1]["weight"] == "off" and strong[1]["availability"] == "off"
+    assert "strong" not in document["routes"], "a legacy pool folds into its tier"
+    folded = document["routes"]["workhorse"]
+    assert [entry["model"] for entry in folded][:2] == ["codex/gpt-6-astra", "claude/claude-opus-5-5"]
+    assert folded[1]["weight"] == "off" and folded[1]["availability"] == "off"
+    assert [entry["model"] for entry in folded][2:] == [entry["model"] for entry in SEED["routes"]["workhorse"]], \
+        "the tier keeps its seed fallbacks"
+    assert document["routes"]["flagship"][0]["model"] == SEED["routes"]["flagship"][0]["model"], \
+        "a legacy synonym cannot shadow a pool"
     second = tmp_path / "second"
     second.mkdir()
     workhorse = model_route(overlay_environment(second, {"routes": {
@@ -299,6 +303,8 @@ def test_instance_overlay_reorders_and_reweights_a_pool(tmp_path):
         assert results[0]["picks"][0]["model"] == "gpt-6-astra"
     snapshot = json.loads(model_route(env, "snapshot", "--json").stdout)
     assert any(note.startswith("routes.broken") for note in snapshot["drift"])
+    assert any(note.startswith("routes.strong: renamed to workhorse") for note in snapshot["drift"])
+    assert any(note.startswith("route_synonyms.deep: strong is now workhorse") for note in snapshot["drift"])
 
 
 def test_pick_command_answers_every_request_and_types_rejections(tmp_path):
@@ -688,3 +694,22 @@ def test_an_adapter_wide_no_training_default_never_clears_an_unknown_free_model(
     assert router.training_flag(adapter, None, "opencode/rotating-free") is None
     assert "trains-on-prompts" in pools.model_traits(router, catalog, "opencode", "opencode/rotating-free")
     assert router.training_flag(adapter, None, "opencode-go/paid-model") is False
+
+
+def test_a_trait_on_the_canonical_id_follows_an_effort_suffixed_pick(monkeypatch):
+    import copy
+    catalog = copy.deepcopy(CATALOG)
+    catalog["model_traits"] = {"cursor/grok-4.7": ["trains-on-prompts"]}
+    assert "trains-on-prompts" in pools.model_traits(router, catalog, "cursor", "grok-4.7-high")
+    exec_routing = exec_routing_module()
+    monkeypatch.setattr(router, "load_catalog", lambda *args, **kwargs: catalog)
+    monkeypatch.setattr(exec_routing, "_model_route_module", lambda: router)
+    assert exec_routing.disclosure_risk("cursor", "grok-4.7-high", {"trains_on_prompts": False})
+
+
+def test_every_free_sign_keeps_an_adapter_wide_false_from_clearing_an_unknown_model():
+    adapter = {**SEED["adapters"]["opencode"], "trains_on_prompts": False}
+    for model in ("opencode/big-pickle", "openrouter/example:free", "opencode/rotating-free"):
+        assert router.training_flag(adapter, None, model) is None, model
+        assert "trains-on-prompts" in pools.model_traits(
+            router, {**SEED, "adapters": {**SEED["adapters"], "opencode": adapter}}, "opencode", model), model
