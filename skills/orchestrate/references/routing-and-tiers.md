@@ -33,7 +33,7 @@ Task class selects `flagship`, `workhorse` or `scout` when no explicit model is 
 
 Mixed selectors settle by precedence rather than rejection, and a warning names every ignored field: `models` beats `route`, `alias`, `model`, `council` and `rotate`; an explicit `model` beats `route`, `council` and `rotate`; `route` beats `alias`; `council` beats `rotate`; an `alias` without a `route` ignores `council` and `rotate`. `adapter` with `route` narrows the pool to that adapter's entries.
 
-`confidential: true` is a disclosure filter, not a selector: it works with a route, alias, model, adapter alone or task class, and removes every free or prompt-training model (`model_traits`, a zero plan cap, a `free_pattern` id) from the resolved candidates, fallbacks included, even under `fallback: "any"`. An alias or task class whose first member is unsafe steps to its first safe member; dispatch refuses, with a fix, only when nothing safe remains. A resume or handoff of a confidential run stays confidential unless the caller passes `confidential: false`. Without it, such models stay in the pool; the warning appears only when one is actually selected. Task classes and the tier aliases map onto routes through `route_synonyms` (`review` → `strong`, `scout` → `bulk`). The route line names the pick, for example `Route: opencode/deepseek-v4.1-flash (deepseek; observed; design council 2/3)`. `provenant routes` prints every pool with live availability; `--health` adds task-class routes and recent health (the same view as `provenant help routes`).
+`confidential: true` is a disclosure filter, not a selector: it works with a route, alias, model, adapter alone or task class, and removes every prompt-training model (`model_traits`, or a free model, that is a zero plan cap or `free_pattern` id, unless its own `trains_on_prompts` is `false`) from the resolved candidates, fallbacks included, even under `fallback: "any"`. An alias or task class whose first member is unsafe steps to its first safe member; dispatch refuses, with a fix, only when nothing safe remains. A resume or handoff of a confidential run stays confidential unless the caller passes `confidential: false`. Without it, such models stay in the pool; the warning appears only when one is actually selected. Task classes and the tier aliases map onto routes through `route_synonyms` (`review` → `strong`, `scout` → `bulk`). The route line names the pick, for example `Route: opencode/deepseek-v4.1-flash (deepseek; observed; design council 2/3)`. `provenant routes` prints every pool with live availability; `--health` adds task-class routes and recent health (the same view as `provenant help routes`).
 
 To add a model, list it in the user overlay (`~/.agents/config/model-routing.json`); unlisted product entries keep their place after the listed ones:
 
@@ -172,10 +172,12 @@ infers one (`family_source: slug-inferred`); stealth/unknown broker ids stay
 stealth models into alias tables; pick the slug at dispatch time.
 
 OpenCode is an ordinary implemented broker for its catalogue (`opencode/<model>`).
-`opencode-go/deepseek-v4.1-flash` is the preferred go-to and `opencode-go/glm-5.3-flash`
-the second; both share one small monthly quota, so both are `sparing` in the pools. Any registered or unregistered
-model whose id matches the adapter's `free_pattern` (`-free$`) is free and may
-train on prompts: it is warned on and skipped by `confidential: true`. Free models
+`opencode/deepseek-v4.1-flash-free` (zero-retention, no training) is the preferred go-to and
+adapter default, `high` in `bulk`; paid `opencode-go/glm-5.3-flash` is the second and
+`opencode-go/deepseek-v4.1-flash` the paid backup. The two paid models share one small monthly quota, so both are `sparing` in the pools. Any registered or unregistered
+model whose id matches the adapter's `free_pattern` (`-free$`) is free and, unless its
+entry sets `trains_on_prompts: false`, may train on prompts: it is then warned on and
+skipped by `confidential: true`. Free models
 rotate, so adding or removing one is a single line in the adapter's `models` list
 (or none, for a passed-through id); pools may weight it separately. Read-only
 runs keep bash declared for Zen but deny every real command. Fabric honours

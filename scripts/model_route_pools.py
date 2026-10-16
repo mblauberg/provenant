@@ -22,7 +22,7 @@ from typing import Any, Callable
 WEIGHTS = {"high": 8, "normal": 4, "sparing": 1, "off": 0}
 DEFAULT_WEIGHT = "normal"
 BINARIES = {"cursor": "cursor-agent", "kiro": "kiro-cli"}
-PRIVATE_UNSAFE_TRAITS = frozenset({"free", "trains-on-prompts"})
+PRIVATE_UNSAFE_TRAITS = frozenset({"trains-on-prompts"})
 MAX_COUNCIL = 8
 
 
@@ -135,12 +135,14 @@ def model_traits(router: Any, catalog: dict[str, Any], adapter: str, model: str)
             value = table.get(key) if isinstance(table, dict) else None
             if isinstance(value, list):
                 traits.update(item for item in value if isinstance(item, str))
-    if router.training_flag(adapter_entry, registered) is True:
+    flag = router.training_flag(adapter_entry, registered)
+    if flag is True:
         traits.add("trains-on-prompts")
-    if isinstance(registered, dict) and registered.get("plan_cap_usd") == 0:
+    if (isinstance(registered, dict) and registered.get("plan_cap_usd") == 0) or router.is_free_model(adapter_entry, model):
         traits.add("free")
-    if router.is_free_model(adapter_entry, model):
-        traits.update(("free", "trains-on-prompts"))
+    # Free implies training unless the model's own flag says otherwise (zero-retention free tiers).
+    if "free" in traits and flag is not False:
+        traits.add("trains-on-prompts")
     return sorted(traits)
 
 

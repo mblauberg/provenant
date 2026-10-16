@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_date": "2026-10-12",
+  "catalog_date": "2026-10-16",
   "context": {
     "ceiling_tokens": 300000
   },
@@ -43,6 +43,10 @@
       {
         "model": "agy/gemini-3.8-flash",
         "weight": "normal"
+      },
+      {
+        "model": "opencode/opencode/deepseek-v4.1-flash-free",
+        "weight": "high"
       },
       {
         "model": "opencode/opencode/space-bunny-free",
@@ -742,17 +746,27 @@
       "endpoint_provider": "opencode",
       "fixed_model_family": null,
       "effort_transport": "flag",
-      "default_model": "opencode-go/deepseek-v4.1-flash",
+      "default_model": "opencode/deepseek-v4.1-flash-free",
       "models": [
+        {
+          "id": "opencode/deepseek-v4.1-flash-free",
+          "names": [
+            "deepseek",
+            "deepseek-free",
+            "deepseek-v4.1-flash-free"
+          ],
+          "plan_cap_usd": 0,
+          "trains_on_prompts": false,
+          "default": true
+        },
         {
           "id": "opencode-go/deepseek-v4.1-flash",
           "names": [
-            "deepseek",
+            "deepseek-paid",
             "deepseek-v4.1-flash"
           ],
           "plan_cap_usd": 60,
-          "trains_on_prompts": false,
-          "default": true
+          "trains_on_prompts": false
         },
         {
           "id": "opencode-go/glm-5.3-flash",
@@ -764,34 +778,11 @@
           "trains_on_prompts": false
         },
         {
-          "id": "opencode-go/kimi-k2.7-code",
-          "names": [
-            "kimi"
-          ],
-          "plan_cap_usd": 15,
-          "trains_on_prompts": false
-        },
-        {
-          "id": "opencode-go/minimax-m3",
-          "names": [
-            "minimax"
-          ],
-          "plan_cap_usd": 15,
-          "trains_on_prompts": false
-        },
-        {
-          "id": "opencode-go/mimo-v2.6-flash",
-          "names": [
-            "mimo"
-          ],
-          "plan_cap_usd": 30,
-          "trains_on_prompts": false
-        },
-        {
           "id": "opencode/space-bunny-free",
           "names": [
             "space-bunny"
-          ]
+          ],
+          "trains_on_prompts": false
         },
         {
           "id": "opencode/mimo-v2.6-flash-free",
@@ -808,15 +799,14 @@
       ],
       "aliases": {
         "flagship": [
-          "opencode-go/glm-5.3-flash",
-          "opencode-go/kimi-k2.7-code",
-          "opencode-go/minimax-m3"
+          "opencode-go/glm-5.3-flash"
         ],
         "workhorse": [
+          "opencode/deepseek-v4.1-flash-free",
           "opencode-go/deepseek-v4.1-flash"
         ],
         "scout": [
-          "opencode-go/mimo-v2.6-flash"
+          "opencode/deepseek-v4.1-flash-free"
         ]
       },
       "free_pattern": "-free$"

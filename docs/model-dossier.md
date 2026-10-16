@@ -182,13 +182,19 @@ not read an absent `Watch out for` as an endorsement.
 
 ### OpenCode models
 
-- **Good at:** `opencode-go/deepseek-v4.1-flash` is the preferred go-to and
-  `opencode-go/glm-5.3-flash` the second. Both draw on one small monthly quota,
-  so use both sparingly. They suit reviews, small implementations and design
-  opinions.
-- **Watch out for:** free models (any `opencode/*-free`) rotate often and may
-  train on prompts; keep sensitive, private or client data off them
-  (`confidential: true` skips them).
+- **Good at:** `opencode/deepseek-v4.1-flash-free` is the go-to and the adapter
+  default: free, zero-retention, no training, and a distinct DeepSeek family, so
+  use it heavily for bulk work, small implementations and as an extra cheap
+  review lens. It is a limited-time offer; the alias falls back to the paid Go
+  `opencode-go/deepseek-v4.1-flash`. `opencode-go/glm-5.3-flash` is the paid
+  second choice; it draws on the small Go monthly quota, so use it sparingly.
+- **Watch out for:** free models rotate often, and their data terms differ per
+  model (Zen docs). Zero-retention, no training: `deepseek-v4.1-flash-free`,
+  `space-bunny-free`, `longcat-2.5-preview-free`. Use or log data:
+  `mimo-v2.6-flash-free`, `muse-spark-*-free`, `big-pickle`, `nemotron-*-free`.
+  Keep sensitive, private or client data off the second group
+  (`confidential: true` skips any model whose `trains_on_prompts` is true; an
+  unflagged free model counts as training).
 - **Reach:** `opencode` adapter; other models stay discoverable with
   `opencode models`.
 
@@ -378,7 +384,7 @@ assessment; until then, route these on the hard axis alone.
 | Moonshot Kimi | `moonshot-kimi` endpoint, reached through the `claude` adapter | needs owner review |
 | Zhipu GLM | `zai-glm` endpoint, reached through the `claude` adapter | needs owner review |
 | OpenRouter (any slug) | `openrouter-anthropic` / `openrouter-openai` endpoints; caller picks live slug; not alias-pinned | needs owner review; free/stealth windows rotate |
-| OpenCode free / Zen | `opencode` adapter with explicit `opencode/<model>` (discover via `opencode models`) | needs owner review; not distinct-family assurance |
+| OpenCode free / Zen | `opencode` adapter with explicit `opencode/<model>` (discover via `opencode models`) | needs owner review; not distinct-family assurance; data terms vary per model |
 
 ## Recording the preference
 

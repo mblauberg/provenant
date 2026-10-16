@@ -598,3 +598,44 @@ def test_pool_pick_of_a_suffixed_live_id_keeps_the_effort_its_suffix_names(tmp_p
     low = pick({"models": ["agy/gemini-3.9-flash-low"]}, tmp_path)["picks"][0]
     assert (low["model"], low.get("effort")) == ("gemini-3.9-flash", "low")
     assert pick({"models": ["agy/gemini-3.9-flash-low@high"]}, tmp_path)["picks"][0]["effort"] == "high"
+
+
+def _free_catalog(flag):
+    entry = {"id": "opencode/zero-retention-free"}
+    if flag is not None:
+        entry["trains_on_prompts"] = flag
+    adapter = {**CATALOG["adapters"]["opencode"], "models": [entry]}
+    router._apply_free_pattern(adapter)
+    return {**CATALOG, "adapters": {**CATALOG["adapters"], "opencode": adapter}, "routes": {
+        **CATALOG["routes"], "zr": [{"model": "opencode/opencode/zero-retention-free", "weight": "high"},
+                                    {"model": "codex/gpt-6-luna", "weight": "sparing"}]}}
+
+
+def test_free_model_with_explicit_no_training_is_not_private_unsafe(tmp_path):
+    catalog = _free_catalog(False)
+    adapter = catalog["adapters"]["opencode"]
+    assert not adapter["models"][0].get("warning")
+    traits = pools.model_traits(router, catalog, "opencode", "opencode/zero-retention-free")
+    assert "free" in traits and "trains-on-prompts" not in traits
+    for seed in range(5):
+        result = pick({"route": "zr", "confidential": True}, tmp_path, catalog=catalog, seed=seed)
+        assert models(result) == ["opencode/opencode/zero-retention-free"]
+        assert not any("may train" in w or "skipped" in w for w in result["warnings"])
+    assert not any("may train" in w for w in pick({"route": "zr"}, tmp_path, catalog=catalog)["warnings"])
+
+
+def test_free_model_without_flag_still_defaults_to_training(tmp_path):
+    catalog = _free_catalog(None)
+    assert catalog["adapters"]["opencode"]["models"][0]["warning"]
+    traits = pools.model_traits(router, catalog, "opencode", "opencode/zero-retention-free")
+    assert {"free", "trains-on-prompts"} <= set(traits)
+    for seed in range(5):
+        private = pick({"route": "zr", "confidential": True}, tmp_path, catalog=catalog, seed=seed)
+        assert models(private) == ["codex/gpt-6-luna"]
+
+
+def test_exec_routing_treats_explicit_no_training_free_model_as_safe():
+    exec_routing = exec_routing_module()
+    assert exec_routing.disclosure_risk("opencode", "opencode/deepseek-v4.1-flash-free",
+                                        {"plan_cap_usd": 0, "trains_on_prompts": False}) is None
+    assert exec_routing.disclosure_risk("opencode", "opencode/mimo-v2.6-flash-free", {})

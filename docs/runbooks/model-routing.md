@@ -34,7 +34,7 @@ also clears `adapter/*` when it started after that entry was recorded.
 Global route pools (`routes`: `strong`, `bulk`, `design`, `writing`) sit
 beside the task classes. Each entry names `adapter/model`, a `weight` (`high`,
 `normal`, `sparing`, `off` or a number) and an optional two-value `effort`
-band; `model_traits` adds traits beyond the OpenCode `free_pattern`, and
+band; `model_traits` adds traits beyond the OpenCode `free_pattern` (which supplies a default `trains_on_prompts: true` that an explicit per-model value overrides, so a zero-retention free model is not skipped under `confidential`), and
 `route_synonyms` maps task classes and tier aliases onto a pool. In the overlay a
 `routes.<name>` list merges by `model`: listed entries come first in overlay
 order and take the overlay's fields, and unlisted product entries follow. So

@@ -230,18 +230,21 @@ FREE_TIER_WARNING = "Free tier: prompts may be used for training. Do not send se
 
 
 def is_free_model(adapter: dict[str, Any], model: str) -> bool:
-    """A model id matching the adapter's `free_pattern`: free, and may train on prompts."""
+    """A model id matching the adapter's `free_pattern`: free. Training risk is the model's own
+    `trains_on_prompts` flag, which the pattern defaults to true (`_apply_free_pattern`)."""
     pattern = adapter.get("free_pattern") if isinstance(adapter, dict) else None
     return isinstance(pattern, str) and re.search(pattern, model) is not None
 
 
 def _apply_free_pattern(adapter: dict[str, Any]) -> None:
-    """Free models are listed by id alone; the pattern supplies the cap, training flag and warning."""
+    """Free models are listed by id alone; the pattern supplies the cap and a default
+    training flag; the warning follows the resolved flag, so an explicit `false` (zero-retention) wins."""
     for entry in adapter.get("models", []) if isinstance(adapter, dict) else []:
         if isinstance(entry, dict) and is_free_model(adapter, entry.get("id", "")):
             entry.setdefault("plan_cap_usd", 0)
             entry.setdefault("trains_on_prompts", True)
-            entry.setdefault("warning", FREE_TIER_WARNING)
+            if entry["trains_on_prompts"] is True:
+                entry.setdefault("warning", FREE_TIER_WARNING)
 
 
 def catalogue_snapshot(path: Path | None = None) -> dict[str, Any]:
@@ -951,7 +954,7 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     warning = (registered or {}).get("warning")
     if warning:
         warnings.append(warning)
-    if is_free_model(adapter, model) and not warning:
+    if is_free_model(adapter, model) and not warning and training_model is not False:
         warnings.append(FREE_TIER_WARNING)
     cap = (registered or {}).get("plan_cap_usd")
     if explicit and cap == 15:

@@ -25,10 +25,15 @@ def test_free_opencode_models_are_derived_from_the_free_pattern():
         free = router.is_free_model(adapter, model["id"])
         assert router.training_flag(adapter, model) is free or model["trains_on_prompts"] is False
         assert (model["plan_cap_usd"] == 0) is free
-        assert bool(model.get("warning")) is free
+        assert bool(model.get("warning")) is (free and model.get("trains_on_prompts") is not False)
     fixture = {"free_pattern": "-free$", "models": [{"id": "opencode/rotating-free"}]}
     router._apply_free_pattern(fixture)
     assert fixture["models"][0]["trains_on_prompts"] is True and fixture["models"][0]["plan_cap_usd"] == 0
+    assert fixture["models"][0]["warning"]
+    explicit = {"free_pattern": "-free$", "models": [{"id": "opencode/zero-free", "trains_on_prompts": False}]}
+    router._apply_free_pattern(explicit)
+    assert explicit["models"][0]["trains_on_prompts"] is False and "warning" not in explicit["models"][0]
+    assert explicit["models"][0]["plan_cap_usd"] == 0
 
 
 def test_required_task_classes_bind_registered_exact_models_and_supported_efforts():
@@ -602,8 +607,10 @@ def test_opencode_training_warning_and_paid_fallback_excludes_free():
     for model in free_models:
         result, free_route = resolve("--adapter", "opencode", "--model", model, "--role", "worker")
         assert result.returncode == 0, free_route
-        assert free_route["trains_on_prompts"] is True
-        assert free_route["warnings"]
+        zero_retention = next(item for item in CATALOG["adapters"]["opencode"]["models"]
+                              if item["id"] == model).get("trains_on_prompts") is False
+        assert free_route["trains_on_prompts"] is (not zero_retention)
+        assert bool(free_route["warnings"]) is (not zero_retention)
     result, route = resolve("--adapter", "opencode", "--model",
                             "opencode/muse-spark-1.3-contributor-free", "--role", "worker")
     assert result.returncode == 0, route
@@ -623,6 +630,7 @@ def test_cooling_alias_skips_candidate_but_explicit_model_warns(tmp_path):
     until = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
     (tmp_path / "cooldowns.json").write_text(json.dumps({"schema": "fabric.cooldowns.v1", "cooldowns": {
         "opencode/opencode-go/glm-5.3-flash": {"cooling_until": until},
+        "opencode/opencode/deepseek-v4.1-flash-free": {"cooling_until": until},
     }}))
     env = {**os.environ, "HARNESS_PYTHON": sys.executable,
            "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT), "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT),
@@ -631,9 +639,9 @@ def test_cooling_alias_skips_candidate_but_explicit_model_warns(tmp_path):
         process = subprocess.run([str(SCRIPT), "resolve", *arguments, "--role", "worker"],
                                  capture_output=True, text=True, env=env)
         return process, json.loads(process.stdout)
-    result, alias = routed("--adapter", "opencode", "--alias", "flagship")
+    result, alias = routed("--adapter", "opencode", "--alias", "workhorse")
     assert result.returncode == 0
-    assert alias["resolved_model"] == "opencode-go/kimi-k2.7-code"
+    assert alias["resolved_model"] == "opencode-go/deepseek-v4.1-flash"
     assert any("cooling" in note for note in alias["notes"])
     result, shorthand = routed("--adapter", "opencode", "--alias", "glm")
     assert result.returncode == 0
