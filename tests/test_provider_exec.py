@@ -110,8 +110,14 @@ def test_read_only_git_config_allowlist_is_limited_to_the_two_global_files(monke
 
     assert f'(literal "{home / ".gitconfig"}")' in profile
     assert f'(literal "{xdg / "git/config"}")' in profile
-    assert f'(subpath "{home}")' in profile
     assert f'(literal "{home / ".ssh/config"}")' not in profile
+    # OpenCode v2 needs to stat the home ancestry, so credential stores are denied rather than all of home.
+    assert f'(subpath "{home / ".ssh"}")' in profile
+    assert f'(subpath "{home / ".config/opencode"}")' in profile
+    assert f'(literal "{(tmp_path).resolve()}")' in profile
+    assert f'(literal "{home / ".claude"}")' in profile
+    other = supervisor.os_confinement_profile({**plan, "adapter": "gemini"})
+    assert f'(subpath "{home}")' in other
 
     monkeypatch.delenv("XDG_CONFIG_HOME")
     default_profile = supervisor.os_confinement_profile(plan)
@@ -2089,6 +2095,12 @@ def test_opencode_read_only_declares_fully_denied_bash_tool(tmp_path):
     permission = json.loads((tmp_path / "result.md").read_text())["permission"]
     assert permission["bash"]["*"] == "deny"
     assert permission["bash"]["provenant-no-shell"] == "allow"
+
+
+def test_opencode_run_disables_foreign_instruction_discovery(tmp_path):
+    code = "import json, os; print(json.dumps({'type':'result','result':os.environ.get('OPENCODE_DISABLE_CLAUDE_CODE','') + os.environ.get('OPENCODE_DISABLE_AUTOUPDATE','')}))"
+    supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert (tmp_path / "result.md").read_text() == "11"
 
 
 def test_opencode_free_tier_refusal_is_model_unavailable(tmp_path):
@@ -4877,7 +4889,8 @@ for i in range(10000): print(json.dumps({'type':'telemetry','data':'x'*100}))
 def test_plan_uses_router_applied_effort(tmp_path):
     plan = supervisor().build_plan('opencode', {'resolved_model':'fixture', 'effort':'high', 'effort_applied':'medium'}, 'hello', cwd=tmp_path, workspace_root=tmp_path)
     assert plan['effort'] == 'medium'
-    assert plan['argv'][plan['argv'].index('--variant') + 1] == 'medium'
+    assert plan['argv'][plan['argv'].index('--model') + 1] == 'fixture#medium'
+    assert '--variant' not in plan['argv']
 
 
 def test_fallback_uses_router_candidates_and_parses_explicit_routes():

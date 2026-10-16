@@ -130,19 +130,23 @@ def now():
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+# Home-relative credential stores. No lane reads them, whatever else its profile grants.
+CREDENTIAL_STORES = (
+    '.ssh', '.aws', '.azure', '.gnupg', '.codex', '.claude',
+    '.gemini', '.cursor', '.kiro', '.docker', '.kube', '.netrc', '.npmrc',
+    '.git-credentials', '.pypirc', '.pgpass', '.vault-token', '.password-store', '.boto',
+    '.s3cfg', '.terraform.d', '.cargo/credentials', '.cargo/credentials.toml',
+    '.gem/credentials', '.config/git/credentials', '.config/hub', '.config/op',
+    '.config/gh', '.config/gcloud', '.config/claude', '.config/codex',
+    '.config/openai', '.config/opencode', '.local/share/opencode', 'Library/Keychains',
+    'Library/Application Support',
+)
+
+
 def credential_path(path):
     candidate = Path(path).expanduser().resolve()
     home = Path.home().resolve()
-    stores = [home / name for name in (
-        '.ssh', '.aws', '.azure', '.gnupg', '.codex', '.claude',
-        '.gemini', '.cursor', '.kiro', '.docker', '.kube', '.netrc', '.npmrc',
-        '.git-credentials', '.pypirc', '.pgpass', '.vault-token', '.password-store', '.boto',
-        '.s3cfg', '.terraform.d', '.cargo/credentials', '.cargo/credentials.toml',
-        '.gem/credentials', '.config/git/credentials', '.config/hub', '.config/op',
-        '.config/gh', '.config/gcloud', '.config/claude', '.config/codex',
-        '.config/openai', '.config/opencode', '.local/share/opencode', 'Library/Keychains',
-        'Library/Application Support',
-    )]
+    stores = [home / name for name in CREDENTIAL_STORES]
     if any(candidate.is_relative_to(store) or store.is_relative_to(candidate) for store in stores):
         return True
     parts = [part.lower() for part in candidate.parts]
@@ -489,6 +493,16 @@ def os_confinement_profile(plan, search_path=None):
     git_config_files = [home / ".gitconfig", xdg_config_home / "git/config"]
     reads = [*state.get("read", ()), *(() if _uses_api_key(plan) else state.get("oauth_read", ()))]
     project_files, project_directories = _project_config_reads(plan, root)
+    home_denied, discovery_dirs = [home], []
+    if plan.get("adapter") == "opencode":
+        # OpenCode v2 resolves every ancestor of its cwd, ~/.claude and ~/.agents at startup, and
+        # follows @imports in the instruction files it finds. A blanket home deny fails that with
+        # EPERM, so deny the credential stores instead; the config's external_directory deny
+        # keeps the model's own tools inside the project. Directories are granted by name only
+        # (a listing), never their contents.
+        home_denied = [home / name for name in CREDENTIAL_STORES]
+        cwd_path = Path(plan["cwd"]).resolve()
+        discovery_dirs = [*cwd_path.parents, home / ".claude"]
     toolchain_files, uv_project_files, toolchain_directories = _toolchain_reads(plan, root, search_path)
     launcher_links, install_directories = _adapter_binary_reads(plan, search_path)
     return (
@@ -496,8 +510,9 @@ def os_confinement_profile(plan, search_path=None):
         + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), Path("/dev")])
         + _sbpl_rule("allow", "file-write*", state_writes, canonical=True)
         + _state_write_guards(home, state)
-        + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
+        + _sbpl_rule("deny", "file-read-data", [*home_denied, Path("/private/tmp")])
         + _sbpl_rule("deny", "file-read-data", [root, *add_dirs])
+        + _sbpl_rule("allow", "file-read-data", discovery_dirs, literal=True)
         + _sbpl_rule("allow", "file-read-data", [*([run_dir] if run_dir else [])])
         + _sbpl_rule("allow", "file-read-data", state_writes, canonical=True)
         + _sbpl_rule("allow", "file-read-data", [home / path for path in reads])
@@ -2855,6 +2870,11 @@ def execute(
         }
         # The sentinel matches no real command and exists only so Zen declares bash.
         environment["OPENCODE_CONFIG_CONTENT"] = json.dumps({"permission": permission})
+        # v2 scans ~/.claude for Claude Code skills and CLAUDE.md, which the confinement profile
+        # denies (startup fails with EPERM) and which holds the owner's private instructions.
+        # Autoupdate and the filewatcher have no place in a supervised, sandboxed run.
+        environment.update(OPENCODE_DISABLE_CLAUDE_CODE="1", OPENCODE_DISABLE_CLAUDE_CODE_SKILLS="1",
+                           OPENCODE_DISABLE_AUTOUPDATE="1", OPENCODE_DISABLE_FILEWATCHER="1")
     warning_text = "\n".join(plan["warnings"])
     if warning_text:
         print(warning_text, file=sys.stderr, flush=True)
