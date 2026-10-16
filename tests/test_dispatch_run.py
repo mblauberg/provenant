@@ -427,6 +427,7 @@ def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_pat
     write_executable(
         bin_dir / "codex",
         """#!/usr/bin/env bash
+        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
@@ -496,6 +497,7 @@ def test_invalid_memory_floor_retains_failed_attempt_with_fix(tmp_path, monkeypa
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     write_executable(bin_dir / "codex", '''#!/usr/bin/env bash
+if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
 if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
   printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
   exit 0
@@ -532,6 +534,7 @@ def test_memory_wait_expiry_is_typed_and_visible(tmp_path, monkeypatch, legacy):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     write_executable(bin_dir / "codex", '''#!/usr/bin/env bash
+if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
 if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
   printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
   exit 0
@@ -575,6 +578,7 @@ def test_queued_receipt_is_published_where_admission_scans(tmp_path, monkeypatch
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     write_executable(bin_dir / "codex", '''#!/usr/bin/env bash
+if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
 if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
   printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
   exit 0
@@ -1109,6 +1113,7 @@ def test_ordinary_dispatch_without_lead_family_is_not_certification(tmp_path: Pa
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     write_executable(bin_dir / "codex", """#!/usr/bin/env bash
+        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
@@ -1223,6 +1228,7 @@ def test_route_failure_is_typed_and_provider_is_not_invoked(tmp_path: Path) -> N
         bin_dir / "codex",
         f"""
         #!/usr/bin/env bash
+        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
           exit 0
@@ -1268,6 +1274,7 @@ def test_nonzero_provider_exit_is_recorded_without_substitution(tmp_path: Path) 
     write_executable(
         bin_dir / "codex",
         """#!/usr/bin/env bash
+        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '{"models":[{"slug":"gpt-6.1-sol","supported_reasoning_levels":[{"effort":"high"}]},{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
@@ -1456,6 +1463,7 @@ def test_timeout_records_reaped_exit(tmp_path: Path) -> None:
     write_executable(
         bin_dir / "codex",
         """#!/usr/bin/env bash
+        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
@@ -1492,6 +1500,7 @@ def test_sigterm_interrupts_and_reaps_provider_group(tmp_path: Path) -> None:
     write_executable(
         bin_dir / "codex",
         """#!/usr/bin/env bash
+        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
@@ -1632,6 +1641,7 @@ def test_external_task_cancel_reaps_only_owned_provider_group(tmp_path: Path) ->
     write_executable(
         bin_dir / "codex",
         f"""#!/usr/bin/env bash
+        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
           exit 0
@@ -1735,6 +1745,7 @@ def test_attempt_rows_are_accepted_by_existing_finalizer(tmp_path: Path) -> None
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     write_executable(bin_dir / "codex", """#!/usr/bin/env bash
+        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0
@@ -3572,7 +3583,7 @@ def test_fabric_fast_plan_matches_shell_for_explicit_model(tmp_path, monkeypatch
     isolate_fabric_plan_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
     if adapter == 'codex':
-        write_executable(tmp_path / 'provider-bin/codex', '#!/bin/sh\nexit 0\n')
+        write_executable(tmp_path / 'provider-bin/codex', '#!/bin/sh\n[ "$1" = mcp ] && printf "[]"\nexit 0\n')
     mod = load_dispatch_module()
     args = mod.parser().parse_args(command[2:])
     args.tool = adapter
@@ -3608,7 +3619,7 @@ def test_fabric_fast_plan_matches_or_delegates_shell_edge_routes(
     isolate_fabric_plan_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
     if adapter == 'codex':
-        write_executable(tmp_path / 'provider-bin/codex', '#!/bin/sh\nexit 0\n')
+        write_executable(tmp_path / 'provider-bin/codex', '#!/bin/sh\n[ "$1" = mcp ] && printf "[]"\nexit 0\n')
     prompt.write_bytes(content.encode())
     mod = load_dispatch_module()
     args = mod.parser().parse_args(command[2:])
@@ -3979,6 +3990,7 @@ def _run_fake_codex(tmp_path: Path, name: str, body: str, extra_env: dict[str, s
     write_executable(
         bin_dir / "codex",
         """#!/usr/bin/env bash
+        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '{"models":[{"slug":"gpt-6-luna","supported_reasoning_levels":[{"effort":"high"}]}]}'
           exit 0

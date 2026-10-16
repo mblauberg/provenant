@@ -2696,7 +2696,8 @@ def test_codex_read_only_route_without_network_writes_only_its_temp():
     assert record["provider_network"] is False
     assert "-s\nread-only" not in recorded
     profile = recorded_codex_profile(recorded)
-    assert f'permissions.{profile}.filesystem={{":tmpdir" = "write"}}' in recorded
+    state = Path(os.environ["XDG_STATE_HOME"]) / "provenant"
+    assert f'permissions.{profile}.filesystem={{":tmpdir" = "write", {json.dumps(str(state))} = "write"}}' in recorded
     assert f"permissions.{profile}.network.enabled=false" in recorded
     assert "workspace-write" not in recorded
 
@@ -2882,6 +2883,10 @@ if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
   printf '%s\n' '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
   exit 0
 fi
+if [ "$1" = "mcp" ] && [ "$2" = "list" ]; then
+  echo '[]'
+  exit 0
+fi
 printf '%s\n' "$@" > {args_file}
 cat >/dev/null
 echo OK
@@ -2944,16 +2949,23 @@ def codex_endpoint_instance(tmp, name="deepseek-openai", profile=None):
     return instance
 
 
-def test_ordinary_codex_dispatch_still_ignores_user_config():
-    """No endpoint named, so the user's own codex config stays out of the run."""
-    result, recorded = run_codex_dispatch(extra_args=["--model", "gpt-6-luna"])
+def test_ordinary_codex_dispatch_inherits_user_config_and_assurance_ignores_it():
+    """The user's own codex config reaches an ordinary lane, as it does a native subagent."""
+    result, recorded = run_codex_dispatch(extra_args=["--model", "gpt-6-luna", "--intent", "ordinary"])
 
     assert result.returncode == 0, result.stderr
     record = json.loads(result.stdout)
     assert record["status"] == "ok"
     assert record["model_family"] == "openai"
-    assert "--ignore-user-config" in recorded
-    assert not [arg for arg in recorded if arg.startswith("model_provider")]
+    assert "--ignore-user-config" not in recorded and "--ignore-rules" not in recorded
+    assert 'web_search="live"' in recorded
+    assert [arg for arg in recorded if arg.startswith("model_provider")] == ['model_provider="openai"']
+
+    # Assurance is the dispatcher's default intent; it runs on a clean, recorded configuration.
+    result, recorded = run_codex_dispatch(extra_args=["--model", "gpt-6-luna"])
+    assert result.returncode == 0, result.stderr
+    assert "--ignore-user-config" in recorded and "--ignore-rules" in recorded
+    assert 'web_search="live"' not in recorded
 
 
 def test_codex_endpoint_profile_supplies_the_provider_inline():
@@ -2973,9 +2985,7 @@ def test_codex_endpoint_profile_supplies_the_provider_inline():
     assert record["status"] == "ok"
     assert record["model_family"] == "deepseek"
     assert record["resolved_model"] == "deepseek-3.2"
-    # The flag that discards the user's config stays on, and the provider the
-    # run needs arrives inline instead of from `~/.codex/config.toml`.
-    assert "--ignore-user-config" in recorded
+    # The provider the run needs arrives inline, so the route never depends on `~/.codex/config.toml`.
     assert 'model_providers.provenant_endpoint.name="deepseek-openai"' in recorded
     assert (
         'model_providers.provenant_endpoint.base_url="https://api.deepseek.com/v1"'
