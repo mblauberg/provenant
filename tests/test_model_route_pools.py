@@ -228,8 +228,14 @@ def test_task_classes_and_aliases_map_onto_routes(tmp_path):
 
 def test_adapter_narrows_the_pool(tmp_path):
     assert models(pick({"route": "strong", "adapter": "codex"}, tmp_path)) == ["codex/gpt-6.1-sol"]
-    with pytest.raises(pools.PoolError):
-        pick({"route": "strong", "adapter": "kiro"}, tmp_path)
+    with pytest.raises(pools.PoolError) as error:
+        pick({"route": "strong", "adapter": "opencode"}, tmp_path)
+    assert error.value.code == "route_adapter_empty"
+    containing = [name for name, entries in CATALOG["routes"].items()
+                  if any(entry["model"].startswith("opencode/") for entry in entries)]
+    assert containing
+    assert all(name in str(error.value) for name in containing)
+    assert "model" in str(error.value)
 
 
 def overlay_environment(tmp_path, overlay):

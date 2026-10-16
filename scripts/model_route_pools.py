@@ -359,8 +359,12 @@ def pick(router: Any, catalog: dict[str, Any], request: dict[str, Any], *,
         if request.get("adapter"):
             entries = [entry for entry in entries if entry["adapter"] == request["adapter"]]
             if not entries:
-                raise PoolError("route_adapter_empty", f"{label} has no {request['adapter']} entry; fix: omit "
-                                "adapter or pick another route (provenant routes lists them).")
+                adapter = request["adapter"]
+                containing = [name for name in catalog.get("routes", {})
+                              if any(entry["adapter"] == adapter for entry in pool(router, catalog, name, effort_order))]
+                raise PoolError("route_adapter_empty", f"{label} has no {adapter} entry; pools containing {adapter}: "
+                                f"{', '.join(containing) or 'none'}; fix: pick one of those routes, omit adapter, "
+                                f"or pass model: {adapter}/<model-id> instead of route.")
             native = None  # naming the native adapter is explicit; dispatch warns instead
     usable = []
     for entry in entries:
