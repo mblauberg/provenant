@@ -933,7 +933,11 @@ def build_plan(
         raise ValueError("invalid sandbox")
     if network is not None and type(network) is not bool:
         raise ValueError("network must be a boolean")
-    warnings = list(route.get("notes") or []) + list(route.get("warnings") or [])
+    # Catalogue notices demoted to receipt notes must not become warnings again.
+    warnings = list(dict.fromkeys([
+        *(note for note in route.get("notes") or [] if " is newer than the catalogue;" not in note),
+        *list(route.get("warnings") or []),
+    ]))
     applied_network = network
     if adapter == "codex":
         applied_network = (
