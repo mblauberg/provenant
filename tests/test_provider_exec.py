@@ -1692,6 +1692,14 @@ def codex_options(plan):
     return {argv[index + 1] for index, arg in enumerate(argv) if arg == "-c"}
 
 
+def mcp_table(plan):
+    """The single `mcp_servers={...}` override, parsed as TOML the way Codex reads it."""
+    import tomllib
+    tables = [option for option in codex_options(plan) if option.startswith("mcp_servers=")]
+    assert len(tables) <= 1, "one parent-table override, so a later one cannot replace an earlier"
+    return tomllib.loads(tables[0])["mcp_servers"] if tables else {}
+
+
 def test_codex_read_only_lane_disables_inherited_mcp_servers_and_writer_keeps_them(tmp_path):
     mod = supervisor()
     (Path(os.environ["CODEX_HOME"]) / "config.toml").write_text(
@@ -1700,16 +1708,14 @@ def test_codex_read_only_lane_disables_inherited_mcp_servers_and_writer_keeps_th
     route = {"resolved_model": "fixture"}
     reader = mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True)
     options = codex_options(reader)
-    assert "mcp_servers.fabric.enabled=false" in options
-    assert "mcp_servers.docs.enabled=false" not in options, "a remote server starts no local process"
-    assert 'mcp_servers.docs.default_tools_approval_mode="approve"' in options
-    assert not any(option.startswith("mcp_servers.fabric.default_tools") for option in options)
+    assert mcp_table(reader) == {"fabric": {"enabled": False},
+                                 "docs": {"default_tools_approval_mode": "approve"}}
     assert reader["applied"]["mcp_disabled"] == ["fabric"]
     _, worktree = linked_worktree(tmp_path)
     writer = mod.build_plan("codex", route, "hello", mode="worktree_write", worktree=worktree,
                             workspace_root=worktree, network=True)
-    assert 'mcp_servers.fabric.default_tools_approval_mode="approve"' in codex_options(writer)
-    assert "mcp_servers.fabric.enabled=false" not in codex_options(writer)
+    assert mcp_table(writer) == {"fabric": {"default_tools_approval_mode": "approve"},
+                                 "docs": {"default_tools_approval_mode": "approve"}}
 
 
 def test_codex_read_only_lane_disables_hooks_and_every_discovered_stdio_server(monkeypatch, tmp_path):
@@ -1720,7 +1726,9 @@ def test_codex_read_only_lane_disables_hooks_and_every_discovered_stdio_server(m
 
     def discover(cwd):
         seen.append(cwd)
-        return {"projsrv": True, "plugin-srv": True, "weird.name": True, "projurl": False}
+        return {"projsrv": {"exec": True, "plugin": False}, "weird.name": {"exec": True, "plugin": False},
+                "projurl": {"exec": False, "plugin": False},
+                "helperurl": {"exec": True, "plugin": False}}
 
     monkeypatch.setattr(codex, "_discover_mcp_servers", discover)
     route = {"resolved_model": "fixture"}
@@ -1729,12 +1737,11 @@ def test_codex_read_only_lane_disables_hooks_and_every_discovered_stdio_server(m
     assert seen and set(seen) == {str(tmp_path)}
     assert "features.hooks=false" in options
     assert reader["applied"]["hooks_disabled"] is True
-    for name in ("projsrv", "plugin-srv"):
-        assert f"mcp_servers.{name}.enabled=false" in options
-    assert 'mcp_servers."weird.name".enabled=false' in options
-    assert "mcp_servers.projurl.enabled=false" not in options
-    assert 'mcp_servers.projurl.default_tools_approval_mode="approve"' in options
-    assert reader["applied"]["mcp_disabled"] == ["plugin-srv", "projsrv", "weird.name"]
+    assert mcp_table(reader) == {"projsrv": {"enabled": False}, "weird.name": {"enabled": False},
+                                 "helperurl": {"enabled": False},
+                                 "projurl": {"default_tools_approval_mode": "approve"}}
+    assert reader["applied"]["mcp_disabled"] == ["helperurl", "projsrv", "weird.name"]
+    assert not any(option.startswith("mcp_servers.") for option in options), "no dotted per-server keys"
     assert "_mcp_inventory" not in reader, "the serialised plan must not carry the inventory"
     assured = mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True, intent="assurance")
     assert "features.hooks=false" not in codex_options(assured) and "--ignore-user-config" in assured["argv"]
@@ -1756,6 +1763,7 @@ def test_codex_discovery_treats_codex_errors_as_failure(monkeypatch, tmp_path):
     discover = real._real_discover_mcp_servers  # the autouse stand-in replaced the module attribute
     for outcome in (subprocess.CompletedProcess([], 1, "", "boom"),
                     subprocess.CompletedProcess([], 0, "not json", ""),
+                    subprocess.TimeoutExpired("codex", 8),
                     OSError("no codex")):
         def fake(*args, _o=outcome, **kwargs):
             if isinstance(_o, Exception):
@@ -1763,22 +1771,98 @@ def test_codex_discovery_treats_codex_errors_as_failure(monkeypatch, tmp_path):
             return _o
         monkeypatch.setattr(real.subprocess, "run", fake)
         assert discover(str(tmp_path)) is None
-    listing = json.dumps([{"name": "a", "enabled": True, "transport": {"type": "stdio"}},
-                          {"name": "b", "enabled": True, "transport": {"type": "streamable_http"}},
-                          {"name": "c", "enabled": False, "transport": {"type": "stdio"}}])
-    monkeypatch.setattr(real.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess([], 0, listing, ""))
-    assert discover(str(tmp_path)) == {"a": True, "b": False}
+    http = {"type": "streamable_http", "url": "https://x.invalid", "bearer_token_env_var": None,
+            "http_headers": None, "env_http_headers": None, "http_headers_helper": None}
+    entries = [{"name": "a", "enabled": True, "transport": {"type": "stdio"}},
+               {"name": "b", "enabled": True, "transport": http},
+               {"name": "c", "enabled": False, "transport": {"type": "stdio"}},
+               {"name": "helper", "enabled": True, "transport": {**http, "http_headers_helper": "<redacted>"}},
+               {"name": "plug", "enabled": True, "transport": {"type": "stdio"}},
+               {"name": "future", "enabled": True, "transport": {**http, "auth_command": "x"}}]
+    calls = []
+
+    def listing(argv, **kwargs):
+        calls.append((argv, kwargs["timeout"]))
+        shown = [e for e in entries if e["name"] != "plug" or "features.plugins=false" not in argv]
+        return subprocess.CompletedProcess([], 0, json.dumps(shown), "")
+
+    monkeypatch.setattr(real.subprocess, "run", listing)
+    assert discover(str(tmp_path)) == {
+        "a": {"exec": True, "plugin": False}, "b": {"exec": False, "plugin": False},
+        "helper": {"exec": True, "plugin": False}, "plug": {"exec": True, "plugin": True},
+        "future": {"exec": True, "plugin": False}}
+    assert len(calls) == 2 and all(timeout <= real.DISCOVERY_SECONDS < 30 for _, timeout in calls)
+
+
+def test_codex_plugin_servers_use_the_plugin_switch_not_a_server_override(monkeypatch, tmp_path):
+    """A plugin server has no config-table transport: `mcp_servers.<name>.enabled=false` makes Codex
+    exit with `invalid transport`. Only `features.plugins=false` stops it."""
+    mod = supervisor()
+    inventory = {"plug": {"exec": True, "plugin": True}, "plugurl": {"exec": False, "plugin": True},
+                 "user": {"exec": True, "plugin": False}}
+    monkeypatch.setattr(mod.profile("codex"), "_discover_mcp_servers", lambda cwd: inventory)
+    route = {"resolved_model": "fixture"}
+    reader = mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True)
+    assert "features.plugins=false" in codex_options(reader)
+    assert mcp_table(reader) == {"user": {"enabled": False}}
+    assert reader["applied"]["plugins_disabled"] is True
+    assert reader["applied"]["mcp_disabled"] == ["plug", "user"]
+    _, worktree = linked_worktree(tmp_path)
+    writer = mod.build_plan("codex", route, "hello", mode="worktree_write", worktree=worktree,
+                            workspace_root=worktree, network=True)
+    assert "features.plugins=false" not in codex_options(writer)
+    assert mcp_table(writer) == {"user": {"default_tools_approval_mode": "approve"}}
+    assert writer["applied"]["mcp_unconfined"] == ["plug", "user"]
+    assert writer["applied"]["mcp_unapproved"] == ["plug", "plugurl"]
+    only_urls = {"plugurl": {"exec": False, "plugin": True}}
+    monkeypatch.setattr(mod.profile("codex"), "_discover_mcp_servers", lambda cwd: only_urls)
+    remote = mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True)
+    assert "features.plugins=false" not in codex_options(remote) and mcp_table(remote) == {}
+
+
+def test_codex_unspellable_server_name_makes_a_reader_go_clean_and_a_writer_skip_it(monkeypatch, tmp_path):
+    mod = supervisor()
+    monkeypatch.setattr(mod.profile("codex"), "_discover_mcp_servers",
+                        lambda cwd: {"bad\x7fname": {"exec": True, "plugin": False}})
+    route = {"resolved_model": "fixture"}
+    reader = mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True)
+    assert reader["applied"]["config"] == "clean" and "cannot be overridden" in reader["applied"]["config_note"]
+    _, worktree = linked_worktree(tmp_path)
+    writer = mod.build_plan("codex", route, "hello", mode="worktree_write", worktree=worktree,
+                            workspace_root=worktree, network=True)
+    assert writer["applied"]["config"] == "inherited" and mcp_table(writer) == {}
+    assert writer["applied"]["mcp_unapproved"] == ["bad\x7fname"]
+
+
+def test_codex_rebuilt_argv_reuses_the_first_config_decision(monkeypatch, tmp_path):
+    """A context-ceiling change or effort retry rebuilds argv; discovery must not be re-run or the
+    receipt (config, config_note, mcp_disabled) could contradict the argv."""
+    mod = supervisor()
+    codex = mod.profile("codex")
+    answers, calls = iter([None, {"late": {"exec": False, "plugin": False}}]), []
+    monkeypatch.setattr(codex, "_discover_mcp_servers", lambda cwd: calls.append(cwd) or next(answers))
+    plan = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello", cwd=tmp_path, network=True)
+    assert plan["applied"]["config"] == "clean" and "config_note" in plan["applied"]
+    first = list(plan["argv"])
+    plan["context_ceiling"] = 50000
+    rebuilt = codex.argv(plan)
+    assert rebuilt[:len(first) - 1].count("--ignore-user-config") == 1
+    assert not any(option.startswith("mcp_servers=") for option in rebuilt)
+    assert plan["applied"]["config"] == "clean" and "config_note" in plan["applied"]
+    assert calls == [str(tmp_path)], "discovery ran only once"
 
 
 def test_codex_writer_receipt_records_unconfined_hooks_and_stdio_servers(monkeypatch, tmp_path):
     mod = supervisor()
     monkeypatch.setattr(mod.profile("codex"), "_discover_mcp_servers",
-                        lambda cwd: {"projsrv": True, "projurl": False})
+                        lambda cwd: {"projsrv": {"exec": True, "plugin": False},
+                                     "projurl": {"exec": False, "plugin": False}})
     _, worktree = linked_worktree(tmp_path)
     writer = mod.build_plan("codex", {"resolved_model": "fixture"}, "hello", mode="worktree_write",
                             worktree=worktree, workspace_root=worktree, network=True)
     options = codex_options(writer)
-    assert "features.hooks=false" not in options and "mcp_servers.projsrv.enabled=false" not in options
+    assert "features.hooks=false" not in options
+    assert mcp_table(writer)["projsrv"] == {"default_tools_approval_mode": "approve"}
     assert writer["applied"]["hooks_unconfined"] is True
     assert writer["applied"]["mcp_unconfined"] == ["projsrv"]
     assert "hooks_disabled" not in writer["applied"] and "mcp_disabled" not in writer["applied"]
@@ -1793,9 +1877,14 @@ def test_live_codex_lists_trusted_project_stdio_server(monkeypatch, tmp_path):
     (project / ".codex").mkdir(parents=True)
     home.mkdir()
     (home / "config.toml").write_text(f'[projects."{project}"]\ntrust_level = "trusted"\n', encoding="utf-8")
-    (project / ".codex/config.toml").write_text('[mcp_servers.projsrv]\ncommand = "/bin/sh"\n', encoding="utf-8")
+    (project / ".codex/config.toml").write_text(
+        '[mcp_servers.projsrv]\ncommand = "/bin/sh"\n[mcp_servers."dot.name"]\ncommand = "/bin/sh"\n'
+        '[mcp_servers.helper]\nurl = "https://x.invalid/mcp"\nhttp_headers_helper = "/bin/true"\n'
+        '[mcp_servers.plain]\nurl = "https://x.invalid/mcp"\n', encoding="utf-8")
     monkeypatch.setenv("CODEX_HOME", str(home))
-    assert codex._real_discover_mcp_servers(str(project)) == {"projsrv": True}
+    inert, runs = {"exec": False, "plugin": False}, {"exec": True, "plugin": False}
+    assert codex._real_discover_mcp_servers(str(project)) == {
+        "projsrv": runs, "dot.name": runs, "helper": runs, "plain": inert}
 
 
 def test_codex_native_route_pins_openai_provider_over_user_config(tmp_path):
@@ -1851,8 +1940,8 @@ def test_codex_ordinary_lane_inherits_user_config_and_assurance_stays_clean(monk
     assert ordinary["applied"]["config"] == "inherited"
     assert "--ignore-user-config" not in ordinary["argv"] and "--ignore-rules" not in ordinary["argv"]
     assert {'web_search="live"', "notify=[]", 'approval_policy="never"',
-            "mcp_servers.fabric.enabled=false",
-            "mcp_servers.computer-use.enabled=false"} <= codex_options(ordinary)
+            } <= codex_options(ordinary)
+    assert mcp_table(ordinary) == {"fabric": {"enabled": False}, "computer-use": {"enabled": False}}
     # The route and permission overrides come after any user config, so they still win.
     assert any(option.startswith("default_permissions=") for option in codex_options(ordinary))
     assured = mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True, intent="assurance")

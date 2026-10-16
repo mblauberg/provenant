@@ -120,17 +120,28 @@ applied block of the receipt records `config: inherited` or `config: clean`.
   filesystem access does not widen a lane: read-only lanes stay unable to write
   the workspace and writers stay inside their worktree.
 - An inheriting lane also sets `web_search="live"` and `notify=[]`, and sets
-  `mcp_servers.<name>.default_tools_approval_mode="approve"` for each server it
-  keeps, since no one is present to approve a tool call.
+  `default_tools_approval_mode="approve"` for each server it keeps, since no one
+  is present to approve a tool call. Per-server settings go in one
+  `mcp_servers={...}` parent-table override: Codex splits a dotted `-c` key on
+  every dot even when quoted, so `mcp_servers."a.b".enabled=false` fails.
 - Read-only and every other non-writer lane runs no hook and no stdio MCP
   server. Hooks (user, trusted project and plugin) and stdio servers run outside
   Codex's command sandbox and the permission profile, so the lane sets
   `features.hooks=false` (receipt: `applied.hooks_disabled`) and
-  `mcp_servers.<name>.enabled=false` for each stdio server (receipt:
-  `applied.mcp_disabled`). It keeps remote (`url`) servers, which start no local
-  process. The server inventory comes from `codex mcp list --json` run in the
+  `enabled=false` for each server that executes a local process (receipt:
+  `applied.mcp_disabled`): stdio servers, and remote servers with a command
+  field such as `http_headers_helper`. It keeps plain remote (`url`) servers. A
+  plugin-supplied server has no config-table transport, so a per-server override
+  makes Codex exit `invalid transport`; when one executes, the lane sets
+  `features.plugins=false` instead (receipt: `applied.plugins_disabled`). A
+  server name that cannot be spelt in an override sends the lane clean. The
+  server inventory comes from `codex mcp list --json` run in the
   lane's directory, which resolves every layer Codex loads (user config, trusted
-  project `.codex/config.toml` files, plugin servers). If that discovery fails the
+  project `.codex/config.toml` files, plugin servers); a second listing under
+  `features.plugins=false` identifies the plugin servers. Discovery has an 8
+  second budget. The decision is taken once per plan and reused when the argv is
+  rebuilt (context ceiling, effort retry, resume), so receipts match the argv. If
+  discovery fails or times out the
   lane runs clean (`--ignore-user-config --ignore-rules`) and the receipt carries
   `applied.config_note`, rather than inheriting blind.
 - Accepted boundary for worktree writers: a writer keeps every hook and server, as
@@ -138,7 +149,8 @@ applied block of the receipt records `config: inherited` or `config: clean`.
   outside the worktree confinement; a stdio server or hook can write anywhere the
   operator can. This is a deliberate parity choice, not a guard. The receipt
   records it as `applied.hooks_unconfined` and `applied.mcp_unconfined` (the
-  stdio servers kept). Assurance and capability lanes, which run clean, are
+  servers that execute; `applied.mcp_unapproved` lists plugin servers, which
+  take no override). Assurance and capability lanes, which run clean, are
   unaffected.
 - Every native-route lane pins `model_provider="openai"` and clears
   `openai_base_url`, so a provider or base URL in the user file cannot redirect

@@ -127,7 +127,8 @@ def _codex_mcp_discovery_from_user_config(monkeypatch, request):
             servers = tomllib.loads(path.read_text(encoding="utf-8")).get("mcp_servers", {})
         except (OSError, tomllib.TOMLDecodeError):
             return {}
-        return {name: "url" not in server for name, server in servers.items() if isinstance(server, dict)}
+        return {name: {"exec": "url" not in server or "http_headers_helper" in server, "plugin": False}
+                for name, server in servers.items() if isinstance(server, dict)}
 
     codex = importlib.import_module("skills.orchestrate.scripts.provider_exec").profile("codex")
     if not hasattr(codex, "_real_discover_mcp_servers"):

@@ -1,9 +1,9 @@
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
+import time
 import uuid
 
 CLI = "codex"
@@ -23,51 +23,147 @@ SIGNATURES = (("usage_limited", r"usage limit|try again at \d"),)
 PERMISSION_PATTERN_CHARACTERS = frozenset("*?[]{}")
 
 
+# Discovery must finish well inside the planner's own deadline (30s), or a hang starves the plan.
+DISCOVERY_SECONDS = 8
+# Transport fields that carry data, not a command. Any other populated field (an
+# `http_headers_helper`, or one a later Codex adds) is treated as something that executes.
+INERT_TRANSPORT_FIELDS = frozenset({"type", "url", "bearer_token_env_var", "http_headers", "env_http_headers"})
+
+
+def _executes(transport):
+    """A server whose transport starts a local process, directly (stdio) or through a command field."""
+    if transport.get("type") not in {"stdio", "streamable_http"}:
+        return True
+    if transport["type"] == "stdio":
+        return True
+    return any(value for key, value in transport.items() if key not in INERT_TRANSPORT_FIELDS)
+
+
 def _discover_mcp_servers(cwd):
     """Effective MCP servers as Codex itself resolves them for `cwd`: user config, trusted project
-    `.codex/config.toml` layers and plugin servers. Returns {name: is_stdio}, or None on any error."""
-    try:
-        done = subprocess.run([CLI, "mcp", "list", "--json"], cwd=cwd, capture_output=True, text=True,
-                              timeout=30, stdin=subprocess.DEVNULL)
+    `.codex/config.toml` layers and plugin servers. Returns {name: {"exec": bool, "plugin": bool}},
+    or None on any error or when the shared DISCOVERY_SECONDS budget runs out. A plugin server is one
+    that vanishes under `features.plugins=false`; it has no config-table transport to override."""
+    deadline = time.monotonic() + DISCOVERY_SECONDS
+
+    def listing(*extra):
+        done = subprocess.run([CLI, "mcp", "list", "--json", *extra], cwd=cwd, capture_output=True,
+                              text=True, timeout=max(0.1, deadline - time.monotonic()),
+                              stdin=subprocess.DEVNULL)
         if done.returncode != 0:
-            return None
-        return {entry["name"]: entry.get("transport", {}).get("type") == "stdio"
+            raise ValueError("codex mcp list failed")
+        return {entry["name"]: _executes(entry.get("transport") or {})
                 for entry in json.loads(done.stdout) if entry.get("enabled", True)}
+
+    try:
+        everything = listing()
+        without_plugins = listing("-c", "features.plugins=false")
+        return {name: {"exec": executes, "plugin": name not in without_plugins}
+                for name, executes in everything.items()}
     except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError):
         return None
 
 
 def mcp_inventory(p):
-    """{name: is_stdio} for the lane's working directory; None when discovery failed. Held on the
-    plan only while the argv is built (`argv` removes it, since the plan is serialised)."""
+    """{name: {"exec", "plugin"}} for the lane's working directory; None when discovery failed. Held
+    on the plan only while the argv is built (`argv` removes it, since the plan is serialised)."""
     if "_mcp_inventory" not in p:
         p["_mcp_inventory"] = _discover_mcp_servers(p.get("worktree") or p.get("cwd") or os.getcwd())
     return p["_mcp_inventory"]
 
 
-def config_policy(p):
-    """`inherited` loads the operator's Codex config (MCP servers, plugins, hooks, rules, subagent
-    settings) so a lane matches a native subagent; `clean` ignores it. Assurance runs, capability
-    lanes (which run under their own CODEX_HOME), CF_DISPATCH_CODEX_CONFIG=clean and a lane that is
-    not a worktree writer and cannot enumerate its MCP servers stay clean (fail closed)."""
+def _decide(p):
+    """Choose the lane's config policy once: `inherited` loads the operator's Codex config (MCP
+    servers, plugins, hooks, rules, subagent settings) so a lane matches a native subagent; `clean`
+    ignores it. Assurance runs, capability lanes (their own CODEX_HOME) and CF_DISPATCH_CODEX_CONFIG=clean
+    stay clean, as does a non-writer lane that cannot enumerate its MCP servers (fail closed).
+
+    Returns {"config", "args", "applied"}: the argv segment and receipt fields that go together."""
     chosen = os.environ.get("CF_DISPATCH_CODEX_CONFIG", "")
     if chosen not in {"", "clean", "inherited"}:
         raise ValueError("CF_DISPATCH_CODEX_CONFIG must be clean or inherited")
+    clean = {"config": "clean", "args": ["--ignore-user-config", "--ignore-rules"],
+             "applied": {"config": "clean"}}
     if p.get("intent") == "assurance" or p["applied"].get("capabilities") or chosen == "clean":
-        return "clean"
-    if p.get("mode") != "worktree_write" and mcp_inventory(p) is None:
-        p["applied"]["config_note"] = "MCP server discovery failed; a non-writer lane cannot inherit blind"
-        return "clean"
-    return "inherited"
+        return clean
+    writer = p.get("mode") == "worktree_write"
+    inventory = mcp_inventory(p)
+    applied = {"config": "inherited"}
+    if inventory is None:
+        if not writer:
+            clean["applied"]["config_note"] = "MCP server discovery failed; a non-writer lane cannot inherit blind"
+            return clean
+        applied["config_note"] = "MCP server discovery failed; no server approvals set"
+        inventory = {}
+    # A lane has no one to approve a call, and the operator's notify hook is a desktop alert.
+    args = ["-c", "notify=[]", "-c", 'web_search="live"']
+    entries, plugin_servers, disabled, unconfined = {}, [], [], []
+    for name in sorted(inventory):
+        info = inventory[name]
+        if not _toml_key_safe(name):
+            # Cannot be spelt in a -c override: a non-writer lane would run it unconfined.
+            if writer:
+                applied.setdefault("mcp_unapproved", []).append(name)
+                continue
+            clean["applied"]["config_note"] = "MCP server name cannot be overridden: " + json.dumps(name)
+            return clean
+        if info["plugin"]:
+            plugin_servers.append(name)  # no config-table transport: only features.plugins reaches it
+        elif info["exec"] and not writer:
+            entries[name] = {"enabled": False}
+            disabled.append(name)
+        else:
+            entries[name] = {"default_tools_approval_mode": "approve"}
+        if writer and info["exec"]:
+            unconfined.append(name)
+    if entries:
+        args += ["-c", "mcp_servers=" + _toml_table(entries)]
+    if writer:
+        # Accepted boundary (ADR 0023): as in a native Codex session, hooks and stdio MCP servers
+        # run with the operator's privileges, outside the command sandbox.
+        applied["hooks_unconfined"] = True
+        if unconfined:
+            applied["mcp_unconfined"] = unconfined
+        if plugin_servers:
+            applied.setdefault("mcp_unapproved", []).extend(plugin_servers)
+    else:
+        # Hooks (user, project, plugin) run outside the permission profile; none may start.
+        args += ["-c", "features.hooks=false"]
+        applied["hooks_disabled"] = True
+        if any(inventory[name]["exec"] for name in plugin_servers):
+            args += ["-c", "features.plugins=false"]
+            applied["plugins_disabled"] = True
+            disabled += [name for name in plugin_servers if inventory[name]["exec"]]
+    if disabled:
+        applied["mcp_disabled"] = sorted(disabled)
+    return {"config": "inherited", "args": args, "applied": applied}
 
 
-def mcp_key(name):
-    return "mcp_servers." + (name if re.fullmatch(r"[A-Za-z0-9_-]+", name) else json.dumps(name))
+def _toml_key_safe(name):
+    return name.isprintable()
 
 
-def configured_mcp_servers(p):
-    """Names of the MCP servers Codex would load for the lane, which cannot prompt to approve them."""
-    return sorted(mcp_inventory(p) or {})
+def _toml_table(entries):
+    """An inline TOML table. A parent-table override is used because Codex splits a dotted `-c` key
+    on every dot, quoted or not, so `mcp_servers."a.b".enabled=false` cannot name a dotted server."""
+    return "{" + ", ".join(
+        json.dumps(name) + " = {" + ", ".join(
+            key + " = " + json.dumps(value)  # JSON booleans and strings are TOML ones
+            for key, value in fields.items()) + "}"
+        for name, fields in entries.items()) + "}"
+
+
+def config_decision(p):
+    """The lane's config decision, taken on first use and reused by every rebuild of the argv (a
+    context-ceiling change, an effort retry, a resume relaunch), so receipts cannot contradict argv."""
+    if "codex_config" not in p:
+        p["codex_config"] = _decide(p)
+    p["applied"].update(p["codex_config"]["applied"])
+    return p["codex_config"]
+
+
+def config_policy(p):
+    return config_decision(p)["config"]
 
 
 def provenant_state_dir(p):
@@ -95,14 +191,6 @@ def provenant_state_dir(p):
         if path == root or path.is_relative_to(root) or root.is_relative_to(path):
             return None, "state directory overlaps " + str(root)
     return str(path), None
-
-
-def disabled_mcp_servers(p):
-    """Inherited MCP servers a lane must not start: stdio servers run outside Codex's command
-    sandbox, so only a worktree writer keeps them. A remote (url) server starts no local process."""
-    if p.get("mode") == "worktree_write":
-        return []
-    return sorted(name for name, stdio in (mcp_inventory(p) or {}).items() if stdio)
 
 
 def read_only_writable_dirs(p):
@@ -146,33 +234,9 @@ def _argv(p):
         "--json",
         "--skip-git-repo-check",
     ]
-    inherited = config_policy(p) == "inherited"
-    if not inherited:
-        command += ["--ignore-user-config", "--ignore-rules"]
-    else:
-        # A lane has no one to approve a call, and the operator's notify hook is a desktop alert.
-        command += ["-c", "notify=[]", "-c", 'web_search="live"']
-        disabled = disabled_mcp_servers(p)
-        kept = []
-        for name in configured_mcp_servers(p):
-            if name in disabled:
-                command += ["-c", mcp_key(name) + ".enabled=false"]
-            else:
-                command += ["-c", mcp_key(name) + '.default_tools_approval_mode="approve"']
-                kept.append(name)
-        if disabled:
-            p["applied"]["mcp_disabled"] = disabled
-        if p.get("mode") == "worktree_write":
-            # Accepted boundary (ADR 0023): as in a native Codex session, hooks and stdio MCP servers
-            # run with the operator's privileges, outside the command sandbox.
-            p["applied"]["hooks_unconfined"] = True
-            stdio = [name for name in kept if (mcp_inventory(p) or {}).get(name)]
-            if stdio:
-                p["applied"]["mcp_unconfined"] = stdio
-        else:
-            # Hooks (user, project, plugin) run outside the permission profile; none may start.
-            command += ["-c", "features.hooks=false"]
-            p["applied"]["hooks_disabled"] = True
+    decision = config_decision(p)
+    inherited = decision["config"] == "inherited"
+    command += decision["args"]
     command += [
         "-c",
         'service_tier="default"',
