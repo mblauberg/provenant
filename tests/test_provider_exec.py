@@ -160,6 +160,33 @@ def test_opencode_read_only_grants_configured_instruction_files(monkeypatch, tmp
     assert "id_ed25519" not in profile
 
 
+def test_read_only_state_link_into_a_credential_store_is_not_granted(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    home = (tmp_path / "home").resolve()
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".opencode").symlink_to(home / ".ssh")
+    monkeypatch.setattr(supervisor.Path, "home", lambda: home)
+    workspace = (tmp_path / "workspace").resolve()
+    workspace.mkdir()
+    plan = {
+        "adapter": "opencode", "mode": "read_only", "workspace_root": str(workspace),
+        "cwd": str(workspace), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    }
+    profile = supervisor.os_confinement_profile(plan)
+
+    assert f'(subpath "{home / ".opencode"}")' not in profile
+    assert f'(subpath "{home / ".ssh"}")' not in profile
+    assert f'(subpath "{home / ".config/opencode"}")' in profile
+
+
+def test_strip_jsonc_keeps_comment_and_comma_text_inside_strings():
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    text = '{"a": "x,}y // not a comment /* nor this */", "b": [1, 2, /* c */ ], // tail\n}'
+    assert supervisor.json.loads(supervisor._strip_jsonc(text)) == {
+        "a": "x,}y // not a comment /* nor this */", "b": [1, 2],
+    }
+
+
 def test_opencode_read_only_discovery_skips_symlinks_to_credentials(monkeypatch, tmp_path):
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
     home = (tmp_path / "home").resolve()

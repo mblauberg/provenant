@@ -164,7 +164,8 @@ def _opencode_discovery_grantable(path, *, directory=False):
 
 
 def _strip_jsonc(text):
-    out, i, quoted = [], 0, False
+    # Drops comments and trailing commas outside strings, so the result parses as JSON.
+    out, i, quoted, comma = [], 0, False, None
     while i < len(text):
         char = text[i]
         if quoted:
@@ -174,9 +175,6 @@ def _strip_jsonc(text):
                 i += 1
             elif char == '"':
                 quoted = False
-        elif char == '"':
-            quoted = True
-            out.append(char)
         elif text.startswith("//", i):
             i = text.find("\n", i)
             if i < 0:
@@ -186,10 +184,16 @@ def _strip_jsonc(text):
             end = text.find("*/", i + 2)
             i = len(text) if end < 0 else end + 2
             continue
+        elif char.isspace():
+            out.append(char)
         else:
+            if char in "}]" and comma is not None:
+                out[comma] = ""
+            comma = len(out) if char == "," else None
+            quoted = char == '"'
             out.append(char)
         i += 1
-    return re.sub(r",(\s*[}\]])", r"\1", "".join(out))
+    return "".join(out)
 
 
 def _opencode_configured_instructions(home, config_home):
@@ -591,7 +595,7 @@ def os_confinement_profile(plan, search_path=None):
         + _sbpl_rule("allow", "file-read-data", [*discovery_dirs, *discovery_files], literal=True)
         + _sbpl_rule("allow", "file-read-data", [*([run_dir] if run_dir else [])])
         + _sbpl_rule("allow", "file-read-data", state_writes, canonical=True)
-        + _sbpl_rule("allow", "file-read-data", [home / path for path in reads])
+        + _sbpl_rule("allow", "file-read-data", _state_read_paths(home, reads))
         + _sbpl_rule("allow", "file-read-data", [home / path for path in state.get("read_literal", ())],
                      literal=True, keep_leaf=True)
         + _sbpl_rule("allow", "file-read-data", git_config_files, literal=True)
@@ -628,6 +632,13 @@ def _state_paths(home, entries):
             path = path.parent.resolve() / path.name
         paths.append(path)
     return paths
+
+
+def _state_read_paths(home, entries):
+    """Readable provider state. The grant follows a link, so a link into a credential store, such as
+    ~/.opencode pointing at ~/.ssh, is skipped rather than reopening that store."""
+    paths = [home / entry for entry in entries]
+    return [path for path in paths if not (path.is_symlink() and credential_path(path.resolve()))]
 
 
 def _state_write_guards(home, state):
