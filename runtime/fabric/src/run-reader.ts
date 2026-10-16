@@ -118,7 +118,7 @@ export async function readRuns(
       const requested = row.provenance?.requested;
       const adapter = requested?.adapter ?? row.route?.adapter ?? row.adapter;
       const model = row.provenance?.resolved_model ?? row.route?.resolved_model ?? row.model;
-      const effort = row.provenance?.effort_applied ?? requested?.effort;
+      const effort = row.provenance?.effort_applied || requested?.effort;
       return {
         id: String(row.task_id ?? row.id ?? row.run_id),
         run_id: String(row.run_id),
@@ -128,7 +128,7 @@ export async function readRuns(
         status: typeof row.status === "string" ? row.status : null,
         ...(row.landable === false ? { landable: false as const, quarantine: row.quarantine } : {}),
         route: typeof adapter === "string" && typeof model === "string"
-          ? `${adapter}/${model}${typeof effort === "string" ? `@${effort}` : ""}` : null,
+          ? `${adapter}/${model}${typeof effort === "string" && effort ? `@${effort}` : ""}` : null,
         model: typeof model === "string" ? model : null,
         started_at: typeof row.started_at === "string" ? row.started_at : null,
         ended_at: typeof row.ended_at === "string" ? row.ended_at : null,
