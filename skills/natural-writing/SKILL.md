@@ -72,6 +72,9 @@ invariants live in `engineering-writing`.
 - Repair repeated templates without manufacturing quirks.
 - Keep one honest qualifier for weak evidence; do not hedge strong evidence.
 - If the draft already reads naturally, edit lightly and say so.
+- Never adopt a style rewrite on its own ledger: an independent audit checks
+  for dropped facts, citations, status markers and weakened gates. Never
+  style-pass gates, ADR decisions or process runbooks.
 
 ## Output
 
