@@ -47,7 +47,9 @@ CONFINED_STATE = {
     },
     "opencode": {
         "read_write": (".local/share/opencode", ".local/state/opencode", ".cache/opencode"),
-        "read": (".config/opencode",),
+        # ~/.opencode is the install script's home and OpenCode v2's legacy global config directory;
+        # its config discovery stats it at startup and fails with a 500 when that is denied.
+        "read": (".config/opencode", ".opencode"),
     },
     "claude": {
         "read_write": (".claude", ".claude.json*", ".cache/claude", ".npm"),
