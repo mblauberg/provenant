@@ -496,8 +496,15 @@ def _registered_match(adapter: str, requested: str, catalog: dict[str, Any]) -> 
     return chosen, notes
 
 
-def training_flag(adapter: dict[str, Any], registered: dict[str, Any] | None) -> bool | None:
-    value = (registered or {}).get("trains_on_prompts", adapter.get("trains_on_prompts"))
+def training_flag(adapter: dict[str, Any], registered: dict[str, Any] | None, model: str = "") -> bool | None:
+    """The model's own flag, else the adapter's; an adapter-wide `false` never clears a free model,
+    whose terms only its own entry can vouch for."""
+    own = (registered or {}).get("trains_on_prompts")
+    if type(own) is bool:
+        return own
+    value = adapter.get("trains_on_prompts")
+    if value is False and model and is_free_model(adapter, model):
+        return None
     return value if type(value) is bool else None
 
 
@@ -1950,7 +1957,7 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             args.adapter, args.alias, model, catalog, cooldowns,
             args.fallback, args.fallback_route, bool(args.model) or bool(args.alias and args.alias not in ALIAS_ORDER),
         ),
-        "trains_on_prompts": training_flag(adapter, registered_model),
+        "trains_on_prompts": training_flag(adapter, registered_model, model),
     }
     if args.task_class in {"review", "critical-review", "second-opinion"}:
         failed_models = _recent_failed_task_class_models(args.adapter, args.task_class)

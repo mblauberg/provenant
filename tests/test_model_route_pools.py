@@ -665,3 +665,25 @@ def test_exec_routing_treats_explicit_no_training_free_model_as_safe():
     assert exec_routing.disclosure_risk("opencode", "opencode/deepseek-v4.1-flash-free",
                                         {"plan_cap_usd": 0, "trains_on_prompts": False}) is None
     assert exec_routing.disclosure_risk("opencode", "opencode/mimo-v2.6-flash-free", {})
+
+
+def test_a_configured_training_trait_outranks_a_no_training_flag(monkeypatch):
+    import copy
+    catalog = copy.deepcopy(_free_catalog(False))
+    catalog["model_traits"] = {"opencode/opencode/zero-retention-free": ["trains-on-prompts"]}
+    exec_routing = exec_routing_module()
+    monkeypatch.setattr(router, "load_catalog", lambda *args, **kwargs: catalog)
+    monkeypatch.setattr(exec_routing, "_model_route_module", lambda: router)
+    # Direct dispatch and fallback checks pass the resolver's flag; the trait still wins, as in the pools.
+    assert exec_routing.disclosure_risk("opencode", "opencode/zero-retention-free",
+                                        {"plan_cap_usd": 0, "trains_on_prompts": False})
+    assert exec_routing.disclosure_risk("opencode", "opencode/zero-retention-free", {})
+
+
+def test_an_adapter_wide_no_training_default_never_clears_an_unknown_free_model(tmp_path):
+    catalog = _free_catalog(None)
+    adapter = {**catalog["adapters"]["opencode"], "trains_on_prompts": False}
+    catalog = {**catalog, "adapters": {**catalog["adapters"], "opencode": adapter}}
+    assert router.training_flag(adapter, None, "opencode/rotating-free") is None
+    assert "trains-on-prompts" in pools.model_traits(router, catalog, "opencode", "opencode/rotating-free")
+    assert router.training_flag(adapter, None, "opencode-go/paid-model") is False

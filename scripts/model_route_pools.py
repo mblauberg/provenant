@@ -135,13 +135,13 @@ def model_traits(router: Any, catalog: dict[str, Any], adapter: str, model: str)
             value = table.get(key) if isinstance(table, dict) else None
             if isinstance(value, list):
                 traits.update(item for item in value if isinstance(item, str))
-    flag = router.training_flag(adapter_entry, registered)
+    flag = router.training_flag(adapter_entry, registered, model)
     if flag is True:
         traits.add("trains-on-prompts")
     if (isinstance(registered, dict) and registered.get("plan_cap_usd") == 0) or router.is_free_model(adapter_entry, model):
         traits.add("free")
-    # Free implies training unless the model's own flag says otherwise (zero-retention free tiers).
-    if "free" in traits and flag is not False:
+    # Free implies training unless the model's own entry says otherwise (zero-retention free tiers).
+    if "free" in traits and (registered or {}).get("trains_on_prompts") is not False:
         traits.add("trains-on-prompts")
     return sorted(traits)
 

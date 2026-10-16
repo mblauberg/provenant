@@ -2790,7 +2790,8 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--no-preface", dest="preface", action="store_false")
     root.add_argument("--fallback", default=None, help="false, true, any, or JSON route list")
     root.add_argument("--confidential", action="store_true",
-                      help="never route this task, or any fallback, to a free or prompt-training model")
+                      help="never route this task, or any fallback, to a prompt-training model; "
+                           "a free model counts unless its entry sets trains_on_prompts false")
     root.add_argument("--pick-reason", help="why a route pool picked this model; appended to the Route line")
     return root
 

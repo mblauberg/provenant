@@ -102,7 +102,7 @@ export interface RouteInput {
   rotate?: boolean;
   council?: number;
   models?: string[];
-  /** Never route this task, or a fallback, to a free or prompt-training model; works with any selector. */
+  /** Never route this task, or a fallback, to a prompt-training model (free models count unless their entry says they do not train); works with any selector. */
   confidential?: boolean;
   /** Why the pool picked this model; set by the pool expansion, shown on the Route line. */
   pick_reason?: string;

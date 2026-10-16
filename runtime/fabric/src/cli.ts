@@ -78,8 +78,9 @@ const USAGE = `fabric <command>
   dispatch --prompt-file F --route R --council N  N members (1-8), families
                               spread first; rotate is ignored with a council
   dispatch --prompt-file F --models a/m[@e],b/m  ad-hoc council; bypasses --route
-  --confidential              with any selector: never a free or prompt-training
-                              model, fallbacks included
+  --confidential              with any selector: never a prompt-training model,
+                              fallbacks included; free models count unless
+                              their entry says they do not train
   An explicit --model wins over --route; see
   skills/orchestrate/references/routing-and-tiers.md#route-pools
   dispatch --tasks F [route flags]  run a JSON task manifest; flags set task defaults

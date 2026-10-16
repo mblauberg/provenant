@@ -170,7 +170,7 @@ const route = {
   rotate: z.boolean().optional().meta({ description: "Cycle the route's pool per project instead of taking its top model; ignored with council." }),
   council: z.number().int().min(1).max(8).optional().meta({ description: "Run 1-8 members from the route as one batch, families spread first; members repeat when fewer are available." }),
   models: z.array(z.string()).min(1).max(8).optional().meta({ description: "Ad-hoc council of adapter/model[@effort] entries; bypasses route and adapter." }),
-  confidential: z.boolean().optional().meta({ description: "Never use a free or prompt-training model, fallbacks included; works with any selector." }),
+  confidential: z.boolean().optional().meta({ description: "Never use a prompt-training model, fallbacks included (free models count unless their entry says they do not train); works with any selector." }),
 };
 const task = { prompt: str, prompt_file: str, timeout_seconds: optionalNumber, ...route };
 const taskFields = { id: str, ...task };
