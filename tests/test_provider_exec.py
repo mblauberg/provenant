@@ -128,6 +128,38 @@ def test_read_only_git_config_allowlist_is_limited_to_the_two_global_files(monke
     assert f'(literal "{home / ".config/git/config"}")' in default_profile
 
 
+def test_opencode_read_only_grants_configured_instruction_files(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    home = (tmp_path / "home").resolve()
+    product = home / "Repos/provenant"
+    product.mkdir(parents=True)
+    (product / "HARNESS.md").write_text("constitution", encoding="utf-8")
+    (home / ".ssh").mkdir()
+    (home / ".ssh/id_ed25519").write_text("key", encoding="utf-8")
+    config = home / ".config/opencode"
+    config.mkdir(parents=True)
+    (config / "HARNESS.md").symlink_to(product / "HARNESS.md")
+    (config / "opencode.jsonc").write_text(
+        '{\n  // global rules\n  "$schema": "https://opencode.ai/config.json", /* inline */\n'
+        f'  "instructions": ["{config / "HARNESS.md"}", "{home / ".ssh/id_ed25519"}", "docs/*.md",],\n}}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(supervisor.Path, "home", lambda: home)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    workspace = (tmp_path / "elsewhere").resolve()
+    workspace.mkdir()
+    plan = {
+        "adapter": "opencode", "mode": "read_only", "workspace_root": str(workspace),
+        "cwd": str(workspace), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    }
+    profile = supervisor.os_confinement_profile(plan)
+
+    assert f'(literal "{product / "HARNESS.md"}")' in profile
+    assert f'(literal "{product}")' in profile
+    assert f'(literal "{home / "Repos"}")' in profile
+    assert "id_ed25519" not in profile
+
+
 def test_opencode_read_only_discovery_skips_symlinks_to_credentials(monkeypatch, tmp_path):
     supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
     home = (tmp_path / "home").resolve()
