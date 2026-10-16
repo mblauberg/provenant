@@ -154,6 +154,8 @@ describe("lean surface over the fixture owners", () => {
       const slow = idOf((await call("fabric_dispatch", { adapter: "codex", model: "fixture", prompt: "slow", wait_seconds: 1 })).text);
       const live = await call("fabric_status", { id: slow });
       expect(live.text).toContain("provenant lanes --wait --all --timeout");
+      expect(live.text).toContain("wait_seconds: 55");
+      expect((await call("fabric_status", { id: slow, wait_seconds: 0 })).text).not.toContain("wait_seconds: 55");
       const cancelled = await call("fabric_cancel", { task_id: slow });
       expect(cancelled.result.structuredContent).toBeUndefined();
       expect(cancelled.text).toContain("cancelled");

@@ -891,7 +891,8 @@ def parse_fast_route_json(raw: str) -> dict:
 
 
 PLANNER_MODEL_STATUSES = {"capability_model_unavailable", "no_candidate_available", "alias_unavailable",
-                          "adapter_default_model_invalid", "model_required_for_broker"}
+                          "adapter_default_model_invalid", "model_required_for_broker",
+                          "model_ambiguous", "model_not_found"}
 PLANNER_TRANSIENT_STATUSES = {"capability_discovery_failed", "capability_snapshot_untrusted",
                               "capability_snapshot_stale", "probe_unavailable", "probe_cache_busy"}
 
@@ -913,14 +914,16 @@ def route_refusal(record, adapter=""):
     status = record.get("status")
     if not status or status in TERMINAL_STATUSES or "provenance" in record or record.get("schema") == "fabric.exec-plan.v1":
         return None
-    return router_failure(str(status), adapter)
+    return router_failure(str(status), adapter, record.get("message"))
 
 
-def router_failure(signature, adapter=""):
+def router_failure(signature, adapter="", message=None):
     """Fabric's status and fix for a router refusal; the router's own status stays the signature."""
     if signature in PLANNER_MODEL_STATUSES:
         status = "model_unavailable"
         fix = provider_exec._model_unavailable_fix({"adapter": adapter, "route": {"identity_source": "passed-through"}})
+        if signature in {"model_ambiguous", "model_not_found"} and isinstance(message, str) and message:
+            fix = message[:600]
     elif signature in PLANNER_TRANSIENT_STATUSES:
         status, fix = "failed", f"provider capability check failed ({signature}); check the provider CLI login and retry"
     else:
@@ -1196,7 +1199,7 @@ def _retire_provider_process(run_dir: Path, process: subprocess.Popen[Any] | Non
 
 
 # Fabric grants a read root only for a directory inside a registered project.
-PROMPT_PATH_FIX = ("Pass prompt_file=<readable regular file inside the workspace or a registered Fabric project>; "
+PROMPT_PATH_FIX = ("Pass prompt_file=<readable regular file inside the workspace, a caller temp directory or a registered Fabric project>; "
                    "register another project by running `fabric whoami` there, or dispatch from it.")
 
 
@@ -1204,6 +1207,12 @@ class PreflightError(ValueError):
     def __init__(self, code: str, fix: str):
         super().__init__(fix)
         self.code = code
+
+
+def prompt_temp_roots() -> tuple[Path, ...]:
+    roots = [Path(value).expanduser() for value in
+             (os.environ.get("TMPDIR", ""), "/tmp", "/private/tmp", "/private/var/folders") if value]
+    return tuple(dict.fromkeys(candidate for root in roots if root.is_absolute() for candidate in (root, root.resolve())))
 
 
 def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path, read_roots=()) -> bytes:
@@ -1216,10 +1225,11 @@ def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path, read_ro
     if prompt_source is not None:
         if not prompt_source.exists():
             raise PreflightError("prompt_unavailable", f"cannot read prompt file: {prompt_source}")
-        roots = (run_dir, workspace, run_workspace(run_dir, workspace), *(Path(root) for root in read_roots))
+        roots = (run_dir, workspace, run_workspace(run_dir, workspace), *(Path(root) for root in read_roots),
+                 *prompt_temp_roots())
         prompt_root = next((root for root in roots if prompt_source.is_relative_to(root)), None)
         if prompt_root is None:
-            raise PreflightError("prompt_path_forbidden", "prompt file must be inside the run directory, current workspace or a read root")
+            raise PreflightError("prompt_path_forbidden", PROMPT_PATH_FIX)
         sensitive_roots = {".ssh", ".aws", ".azure", ".gnupg"}
         sensitive_files = {
             ".env", ".env.local", ".env.production", "credentials.json",
@@ -1439,6 +1449,8 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                            if choices else "Pass an explicit provider/model id supported by " + adapter + ".")
                     if "effort" in code:
                         fix = "Omit effort, or pass a supported level: low, medium, high, xhigh, max, ultra."
+                    if code in {"model_ambiguous", "model_not_found"} and route.get("message"):
+                        fix = str(route["message"])[:600]
                     raise PreflightError(code, fixes.get(code, fix))
                 if task.get("confidential") is True:
                     risk = confidential_refusal(adapter, route.get("resolved_model") or task.get("model"), route)
@@ -1466,15 +1478,13 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                 if task.get("prompt_file") is not None:
                     read_prompt_input(Path(task["prompt_file"]), workspace, workspace, read_roots)
                 if os.environ.get('PROVENANT_REMOTE_LANE') == '1':
-                    if mode != 'read_only':
-                        raise PreflightError('remote_writer_unavailable', 'Remote writer transport belongs to slice 3')
                     hosts = _fabric_hosts_owner()
                     diagnostic = hosts.adapter_doctor(adapter, workspace)
                     if diagnostic['signin']['status'] == 'unusable':
                         raise PreflightError('remote_signin_unusable', diagnostic['signin']['reason'])
                     plan = provider_exec.build_plan(adapter, route, '', mode=mode,
-                        cwd=str(task.get('cwd') or workspace), workspace_root=str(workspace),
-                        sandbox=task.get('sandbox'), network=task.get('network'),
+                        cwd=str(worktree if mode == 'worktree_write' else task.get('cwd') or workspace), workspace_root=str(workspace),
+                        worktree=str(worktree) if mode == 'worktree_write' else None, sandbox=task.get('sandbox'), network=task.get('network'),
                         capabilities=task.get('capabilities', []), add_dirs=task.get('add_dirs', []),
                         read_roots=read_roots)
                     if plan['applied'].get('confinement') in {None, 'none'}:
@@ -1532,7 +1542,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     if getattr(args,"confidential",False): provenance["requested"]["confidential"]=True
     placement = json.loads(os.environ.get('PROVENANT_PLACEMENT_FALLBACK', 'null'))
     if placement:
-        note = f'local fallback from {placement["from_host"]}: {placement["reason"]}'
+        note = f'local fallback from {placement["from_host"]}: {placement["reason"]}' + (f': {placement["detail"]}' if placement.get('detail') else '')
         if note not in plan.setdefault('warnings', []):
             plan['warnings'].append(note)
     return {"schema":"fabric.attempt.v1", **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
@@ -1645,6 +1655,8 @@ def prepare_resume(args):
     args.tool=requested["adapter"];args.model=previous["provenance"]["resolved_model"];args.alias=None;args.task_class=None
     # An effort the provider only reported was never sent, so resume does not send it.
     args.effort=None if previous["provenance"].get("effort_observed_source") else previous["provenance"]["effort_applied"];args.task_id=previous["task_id"]
+    # OpenCode applies effort only as a `#variant`; keep that intent so the router sends it again.
+    if args.tool=="opencode" and args.effort and "#" not in args.model: args.model=args.model+"#"+args.effort
     args.access_mode=previous["mode"];args.worktree=Path(previous["worktree"]) if previous.get("worktree") else None
     args.provider_cwd=Path(previous["cwd"]) if previous["mode"]=="read_only" else None
     args.workspace_root=Path(previous.get("workspace_root") or (previous.get("workspace") or {}).get("root") or Path.cwd()).expanduser().resolve()
@@ -1938,6 +1950,14 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
             worktree_lease = acquire_worktree_lease(args.worktree)
         except WorktreeLeaseError as exc:
             return fail(run_dir, "worktree_busy", str(exc))
+        hosts = _fabric_hosts_owner()
+        try:
+            transport = hosts._load_module('provenant_fabric_git', hosts.PRODUCT_ROOT / 'scripts/fabric_git.py')
+            transport.validate_launch(hosts, hosts.config_path().parent, args.worktree,
+                run_identity(run_dir, run_receipt), args.task_id)
+        except hosts.HostError as exc:
+            release_worktree_lease(worktree_lease)
+            return fail(run_dir, exc.code, str(exc))
     started_at = now()
     started = time.monotonic()
     observed_exit = False
@@ -2629,11 +2649,11 @@ def dispatch(args: argparse.Namespace) -> int:
     if os.environ.get('PROVENANT_HOST_LOCAL_ONLY') != '1':
         hosts = _fabric_hosts_owner()
         try:
-            config = hosts.load_config()
+            owner = hosts.lane_owner()
         except hosts.HostError as exc:
             print(json.dumps({'status': 'rejected', 'error': exc.code, 'fix': str(exc)}))
             return 1
-        if config.peers or getattr(args, 'host', None) or any('@' in str(value) for value in (args.resume or '', args.task_id or '')):
+        if owner.config.peers or owner.config_error or getattr(args, 'host', None) or any('@' in str(value) for value in (args.resume or '', args.task_id or '')):
             request = {key: value for key, value in {
                 'host': getattr(args, 'host', None), 'operation_id': getattr(args, 'operation_id', None),
                 'adapter': args.tool, 'model': args.model, 'alias': args.alias, 'task_class': args.task_class, 'effort': args.effort,
@@ -2665,7 +2685,7 @@ def dispatch(args: argparse.Namespace) -> int:
             if args.git_evidence:
                 request['git_evidence'] = str(args.git_evidence)
             try:
-                result = hosts.lane_owner().client_call('resume' if args.resume else 'dispatch', str(Path.cwd()), request)
+                result = owner.client_call('resume' if args.resume else 'dispatch', str(Path.cwd()), request)
             except hosts.HostError as exc:
                 result = {'status': 'rejected', 'error': exc.code, 'fix': str(exc)}
             if not result.get('local'):
@@ -2784,7 +2804,8 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--no-preface", dest="preface", action="store_false")
     root.add_argument("--fallback", default=None, help="false, true, any, or JSON route list")
     root.add_argument("--confidential", action="store_true",
-                      help="never route this task, or any fallback, to a free or prompt-training model")
+                      help="never route this task, or any fallback, to a prompt-training model; "
+                           "a free model counts unless its entry sets trains_on_prompts false")
     root.add_argument("--pick-reason", help="why a route pool picked this model; appended to the Route line")
     return root
 

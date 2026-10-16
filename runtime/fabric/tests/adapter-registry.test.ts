@@ -164,14 +164,14 @@ describe("adapter rejection", () => {
 
   it("returns each invalid task as a rejected row and creates no run when none is valid", async () => {
     const result = await dispatchConfiguredBatch({ tasks: [
-      { id: "bad-prompt", adapter: "claude", prompt_file: "absent.md" },
+      { id: "bad-prompt", adapter: "codex", prompt_file: "absent.md" },
       { id: "bad-prompt-too", adapter: "codex", prompt_file: "also-absent.md" },
     ], wait_seconds: 0 }, identity, new AbortController().signal,
     { ...process.env, AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot, AGENT_FABRIC_INSTANCE_ROOT: repositoryRoot });
     expect(result.status).toBe("rejected");
     const rows = result.tasks as Record<string, unknown>[];
     expect(rows.map((row) => row.task_id).sort()).toEqual(["bad-prompt", "bad-prompt-too"]);
-    expect(rows.every((row) => row.status === "rejected" && typeof row.fix === "string")).toBe(true);
+    expect(rows.every((row) => row.status === "rejected" && row.error === "prompt_unavailable" && typeof row.fix === "string")).toBe(true);
     expect(existsSync(join(workspace, ".agent-run"))).toBe(false);
   });
 

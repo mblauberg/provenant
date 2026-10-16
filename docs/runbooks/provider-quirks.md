@@ -61,7 +61,55 @@ in `skills/orchestrate`; this page records the traps.
   headless `claude -p --model <m> --effort <e>` does. `--bare` gives a clean
   minimal context for an independent verifier.
 
-## OpenCode, Cursor, Kiro, Copilot
+## OpenCode (v2)
+
+Fabric drives OpenCode v2 only (tested on 2.0.30). A v1 binary fails planning with
+a typed error ("upgrade OpenCode to v2: `opencode upgrade`"); `opencode --version`
+is checked once per process.
+
+- **Argv:** `opencode run --standalone --format json --auto --print-logs --log-level error
+  [-s SESSION] [--model provider/model#variant] PROMPT`. v1 flags `--dir` and `--variant` do
+  not exist in v2 (help, exit 1); the working directory is the process cwd, and effort is a
+  variant suffix on the model id. The log level is lowercase only (`ERROR` is rejected).
+- **Always `--standalone`.** The default mode talks to a shared background service that ignores
+  the per-dispatch `OPENCODE_CONFIG_CONTENT` permissions: a read-only model wrote a file with
+  edit and bash denied. Standalone honours them and leaves no daemon behind. The same flag is
+  used for `opencode session export <id>`, which replaces v1 `opencode export` and supplies the
+  observed model (`info.model`) and session for resume.
+- **Stdin must be null.** `opencode run` waits on a non-tty stdin; Fabric spawns it with
+  `/dev/null`. A hand-run backgrounded call without that hangs or exits 0 with no output.
+  Exit 0 with no assistant text is classified `empty_output`.
+- **Models and effort.** Shorthands (`deepseek`, `glm`, `deepseek-free`, `glm-free`,
+  `deepseek-paid`, `glm-paid`, ...) resolve through the catalogue. `model#variant` or `--effort`
+  is sent as the variant; variants are not listable, so an unsupported one returns a typed
+  `invalid_input` ("Variant unavailable for ..."). Catalogued models without an `efforts` list
+  ignore `--effort` with a note. A bare uncatalogued name is resolved against the live
+  `opencode models` listing: exact tail match wins, a unique prefix match runs with a note, several
+  matches give `model_ambiguous` (candidates listed), none gives `model_not_found` (closest names
+  and a fix). Prefixed ids (`opencode/`, `opencode-go/`, `openrouter/`) in the live listing run with
+  a note; an id the provider rejects returns `model_unavailable` ("list every id with `opencode models`").
+- **Errors** arrive as stdout events `{"type":"error","error":{"type","message"}}`:
+  `provider.no-route` (unknown model or variant), `provider.quota` (free-tier throttle, 429,
+  `FreeUsageLimitError`; classified `rate_limited`), `unknown` ("Invalid model reference").
+  Stderr carries INFO logs even at `--log-level error`; only `level=ERROR` lines are fatal.
+- **Read-only sandbox.** The macOS profile keeps the blanket read deny on HOME for OpenCode and
+  re-allows only what v2 needs to start: listings (not contents) of every ancestor of the cwd, of
+  `~/.claude` and `~/.agents`, plus the instruction files `AGENTS.md`, `CLAUDE.md` and `HARNESS.md`
+  in each ancestor and `~/.agents/AGENTS.md` and `~/.claude/CLAUDE.md`. v2 realPath()s those at
+  startup and follows `@imports`; without them the server fails with `UnexpectedStatus: 500` or
+  `Instruction initialization blocked` (EPERM on `lstat ~/.agents/AGENTS.md`). The provider state
+  grant stays: `~/.local/share/opencode` (including `auth.json`, which holds the login) and
+  `~/.cache/opencode` are readable, because OpenCode needs them, so credentials are not
+  denied to the model at the OS layer there; the config's `external_directory: deny` keeps the
+  model's tools to the project. `~/.zshrc`, `~/.ssh` and the rest of HOME stay unreadable (checked
+  with `sandbox-exec`). The fabric MCP server named in the user's OpenCode config cannot start under
+  it, which is intended. The run also sets `OPENCODE_DISABLE_CLAUDE_CODE`, `..._CLAUDE_CODE_SKILLS`,
+  `..._AUTOUPDATE` and `..._FILEWATCHER` so foreign instruction files, auto-update and watchers stay out.
+- **Herdr plugin.** A user plugin `~/.config/opencode/plugins/herdr-agent-state.js` fails to load
+  in v2 ("must export default definition with id and effect/setup"). It is logged as a warning
+  and is non-fatal; it lives outside the repo and needs updating by its owner.
+
+## Cursor, Kiro, Copilot
 
 - These are backup lanes for breadth or when a primary is rate-limited. Kiro is
   a cheap gateway to other families; Copilot is a multi-model gateway with

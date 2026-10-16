@@ -3,8 +3,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { setTimeout as delay } from "node:timers/promises";
 import { z } from "zod";
 
-import { fabricHosts, releaseHostChecks } from "./hosts.js";
-import { databasePath, identify, resolveCommitSha } from "./identity.js";
+import { federatedLane, fabricHosts, releaseHostChecks } from "./hosts.js";
+import { CommitShaError, databasePath, identify, resolveCommitSha } from "./identity.js";
 import { federatedStatusRows as statusRows, fabricOutput, resultTail } from "./run-registry.js";
 import { reply, digest, serverBuild, mailboxView, adapterView, runView, fullView, lanesDigest, cancelDigest } from "./surface.js";
 import { catalogueSnapshot, liveModels, resetCooldowns } from "./catalogue.js";
@@ -151,7 +151,7 @@ const route = {
   operation_id: str,
   adapter: str,
   alias: str,
-  model: str,
+  model: str.meta({ description: "A model name or catalogue alias (for example sonnet, sol, luna, deepseek-free, glm-free); the most predictable selector. adapter/model also works." }),
   effort: str,
   mode: z.enum(ACCESS_MODES).optional(),
   worktree: str,
@@ -166,11 +166,11 @@ const route = {
   fallback: z
     .union([z.boolean(), z.literal("any"), z.array(z.union([z.string(), z.record(z.string(), z.unknown())]))])
     .optional(),
-  route: z.string().optional().meta({ description: "Global pool: strong, bulk, design or writing; task classes and flagship/workhorse/scout map onto these. adapter narrows the pool; an explicit model wins over route." }),
+  route: z.string().optional().meta({ description: "Tier pool: junior (laid-out work, cheap lenses), senior (judgement, review, delegation) or principal (critical decisions); or design or writing. Old names map on: bulk/scout to junior, workhorse/strong/review to senior, flagship to principal. adapter narrows the pool; an explicit model wins over route. Prefer naming a model (deepseek-free, glm-free, sonnet, sol) when you know what you want." }),
   rotate: z.boolean().optional().meta({ description: "Cycle the route's pool per project instead of taking its top model; ignored with council." }),
   council: z.number().int().min(1).max(8).optional().meta({ description: "Run 1-8 members from the route as one batch, families spread first; members repeat when fewer are available." }),
   models: z.array(z.string()).min(1).max(8).optional().meta({ description: "Ad-hoc council of adapter/model[@effort] entries; bypasses route and adapter." }),
-  confidential: z.boolean().optional().meta({ description: "Never use a free or prompt-training model, fallbacks included; works with any selector." }),
+  confidential: z.boolean().optional().meta({ description: "Never use a prompt-training model, fallbacks included (free models count unless their entry says they do not train); works with any selector." }),
 };
 const task = { prompt: str, prompt_file: str, timeout_seconds: optionalNumber, ...route };
 const taskFields = { id: str, ...task };
@@ -181,6 +181,7 @@ const batch = {
 };
 // The first listed target a tool actually has wins, so run_id is `id` on status and `ids` on runs.
 const INPUT_SYNONYMS: Record<string, string[]> = {
+  ttl_seconds: ["seconds"],
   prompt_path: ["prompt_file"], file: ["prompt_file"],
   dir: ["cwd"], path: ["cwd"], task: ["task_id", "id"],
   run_id: ["id", "ids"], task_id: ["id"], id: ["task_id", "ids"],
@@ -310,7 +311,7 @@ function register(
       return {
         ...reply({
           status: "rejected",
-          error: "request_failed",
+          error: error instanceof CommitShaError ? error.code : "request_failed",
           fix: String(error instanceof Error ? error.message : error).replace(/\s+/gu, " "),
         }, includeStructuredContent),
         isError: true,
@@ -542,9 +543,12 @@ register(
       return tail ? [`result tail ${row.task_id ?? row.run_id}${tail.total > tail.text.length ? " (end)" : ""}:\n${tail.text}`] : [];
     });
     const running = rows.some((row) => row.state === "running" || row.state === "queued");
+    const pollHint = wait_seconds === undefined && rows.length > 0 && rows.every((row) => row.state === "running")
+      ? 'hint: pass wait_seconds: 55 to block (or use `provenant lanes --wait --all --timeout 900`)'
+      : 'hint: shell `provenant lanes --wait --all --timeout 900` blocks until they finish';
     const ownership = [
       ...tails,
-      ...(running ? ['hint: shell `provenant lanes --wait --all --timeout 900` blocks until they finish'] : []),
+      ...(running ? [pollHint] : []),
       ...workClaims.map((claim) => `claim ${claim.issue ?? claim.paths.join(",")} ${claim.holder} g${claim.generation}`),
       ...(landingLease ? [`landing ${landingLease.holder} g${landingLease.generation} ${landingLease.expectedSha}`] : []),
     ];
@@ -556,11 +560,13 @@ register(
 register("fabric_work_claim", "Acquire, renew, verify or release an advisory issue or path claim.", {
   action: z.enum(["acquire", "renew", "verify", "release"]), session_id: z.string().min(1),
   issue: str, paths: z.array(z.string()).optional(), id: str,
-  generation: z.number().int().positive().optional(), seconds: z.number().int().min(1).max(3600).optional(),
+  generation: z.number().int().positive().optional(), seconds: z.number().int().min(1).optional(),
 }, ({ action, session_id, issue, paths, id, generation, seconds }) => {
-  if (action === "acquire") return readyStore().acquireWork(who, session_id, { issue, paths }, seconds ?? 900);
+  const ttl = Math.min(seconds ?? 900, 3600);
+  const warnings = seconds > 3600 ? [`seconds ${seconds} clamped to 3600`] : [];
+  if (action === "acquire") return withWarnings(readyStore().acquireWork(who, session_id, { issue, paths }, ttl), warnings);
   if (!id || generation === undefined) throw new Error("id and generation are required");
-  if (action === "renew") return readyStore().renewWork(who, session_id, id, generation, seconds ?? 900);
+  if (action === "renew") return withWarnings(readyStore().renewWork(who, session_id, id, generation, ttl), warnings);
   if (action === "verify") return readyStore().verifyWork(who, session_id, id, generation);
   readyStore().releaseWork(who, session_id, id, generation);
   return { released: id, generation };
@@ -623,6 +629,11 @@ register("fabric_cancel", "Stop a run and its provider group, or one task of a b
   const view = runView(result);
   return detail === "full" ? view : { ...view, digest: cancelDigest(view) };
 });
+register("fabric_fetch", "Fetch one terminal remote writer: verify on the owning host, import its commits and compare the bound head.",
+  { id: z.string() }, async (input, { signal }) =>
+    await federatedLane("fetch", who.cwd, input, signal) ??
+      { status: "rejected", error: "remote_host_required", fix: "Qualify a remote writer ID with its host." },
+);
 register(
   "fabric_output",
   "Read output; continue at next_offset. max_bytes above 20000 is clamped with a warning; invalid numeric values return a typed rejection.",

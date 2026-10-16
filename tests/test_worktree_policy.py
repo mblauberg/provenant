@@ -1,4 +1,5 @@
 import importlib.util
+import argparse
 import hashlib
 import json
 import os
@@ -47,6 +48,32 @@ def test_detached_worktree_uses_shared_project_directory(tmp_path, capsys):
     assert subprocess.check_output(
         ["git", "-C", str(expected), "rev-parse", "--show-toplevel"], text=True,
     ).strip() == str(expected)
+
+
+def test_failed_checkout_removes_only_the_branch_it_created(tmp_path):
+    repo = tmp_path / 'project'
+    head = init_repo(repo)
+    (repo / '.gitattributes').write_text('*.txt filter=broken\n')
+    subprocess.run(['git', '-C', str(repo), 'add', '.gitattributes'], check=True)
+    subprocess.run(['git', '-C', str(repo), 'commit', '-qm', 'require filter'], check=True)
+    subprocess.run(['git', '-C', str(repo), 'config', 'filter.broken.smudge', 'false'], check=True)
+    subprocess.run(['git', '-C', str(repo), 'config', 'filter.broken.required', 'true'], check=True)
+    args = argparse.Namespace(repo=repo, name='feat-failed', existing_branch=None,
+        new_branch='feat/failed', detach=None, start_point='HEAD', no_node_modules=True)
+    with pytest.raises(worktree_policy.PolicyError):
+        worktree_policy.create(args)
+    assert not (repo / '.worktrees/feat-failed').exists()
+    assert subprocess.run(['git', '-C', str(repo), 'show-ref', '--verify', '--quiet',
+        'refs/heads/feat/failed']).returncode == 1
+    # A failed add of an existing branch must preserve that branch.
+    current = subprocess.check_output(['git', '-C', str(repo), 'rev-parse', 'HEAD'], text=True).strip()
+    subprocess.run(['git', '-C', str(repo), 'branch', 'feat/failed', current], check=True)
+    args.existing_branch, args.new_branch = 'feat/failed', None
+    with pytest.raises(worktree_policy.PolicyError):
+        worktree_policy.create(args)
+    assert not (repo / '.worktrees/feat-failed').exists()
+    assert subprocess.check_output(['git', '-C', str(repo), 'rev-parse',
+        'refs/heads/feat/failed'], text=True).strip() == current
 
 
 def test_create_cow_clones_root_and_workspace_node_modules(tmp_path, capsys, monkeypatch):
