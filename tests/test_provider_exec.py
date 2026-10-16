@@ -1677,6 +1677,66 @@ def codex_options(plan):
     return {argv[index + 1] for index, arg in enumerate(argv) if arg == "-c"}
 
 
+def test_codex_read_only_lane_disables_inherited_mcp_servers_and_writer_keeps_them(tmp_path):
+    mod = supervisor()
+    (Path(os.environ["CODEX_HOME"]) / "config.toml").write_text(
+        '[mcp_servers.fabric]\ncommand = "x"\n', encoding="utf-8")
+    route = {"resolved_model": "fixture"}
+    reader = mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True)
+    options = codex_options(reader)
+    assert "mcp_servers.fabric.enabled=false" in options
+    assert not any("default_tools_approval_mode" in option for option in options)
+    assert reader["applied"]["mcp_disabled"] == ["fabric"]
+    _, worktree = linked_worktree(tmp_path)
+    writer = mod.build_plan("codex", route, "hello", mode="worktree_write", worktree=worktree,
+                            workspace_root=worktree, network=True)
+    assert 'mcp_servers.fabric.default_tools_approval_mode="approve"' in codex_options(writer)
+    assert "mcp_servers.fabric.enabled=false" not in codex_options(writer)
+
+
+def test_codex_native_route_pins_openai_provider_over_user_config(tmp_path):
+    mod = supervisor()
+    options = codex_options(mod.build_plan("codex", {"resolved_model": "fixture"}, "hello", cwd=tmp_path))
+    assert {'model_provider="openai"', 'openai_base_url=""'} <= options
+    endpoint = {"resolved_model": "m", "endpoint_base_url": "https://x.example/v1", "endpoint_token_env": "X_KEY"}
+    options = codex_options(mod.build_plan("codex", endpoint, "hello", cwd=tmp_path))
+    assert 'model_provider="provenant_endpoint"' in options
+    assert 'model_provider="openai"' not in options
+
+
+def test_codex_state_grant_is_skipped_when_it_overlaps_the_workspace(tmp_path, monkeypatch):
+    mod = supervisor()
+    route = {"resolved_model": "fixture"}
+    state = tmp_path / "state"
+    monkeypatch.setenv("XDG_STATE_HOME", str(state))
+    work = tmp_path / "work"
+    work.mkdir()
+    plan = mod.build_plan("codex", route, "hello", cwd=work, network=True)
+    granted = str((state / "provenant").resolve())
+    assert plan["applied"]["write_boundary"]["state_dir"] == granted
+    assert granted in " ".join(plan["argv"]) and not (state / "provenant").exists()
+    # XDG_STATE_HOME above the workspace: the grant would cover the workspace.
+    repo = tmp_path / "projects" / "provenant" / "repo"
+    repo.mkdir(parents=True)
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "projects"))
+    plan = mod.build_plan("codex", route, "hello", cwd=repo, network=True)
+    boundary = plan["applied"]["write_boundary"]
+    assert "state_dir" not in boundary and "overlaps" in boundary["state_dir_skipped"]
+    assert str(tmp_path / "projects" / "provenant") not in " ".join(plan["argv"])
+    # A symlinked state directory and a glob character are refused too.
+    link = tmp_path / "linked"
+    (link).mkdir()
+    (link / "provenant").symlink_to(repo)
+    monkeypatch.setenv("XDG_STATE_HOME", str(link))
+    assert "symlink" in mod.build_plan("codex", route, "hello", cwd=work, network=True)[
+        "applied"]["write_boundary"]["state_dir_skipped"]
+    star = tmp_path / "st*r"
+    star.mkdir()
+    monkeypatch.setenv("XDG_STATE_HOME", str(star))
+    assert "glob" in mod.build_plan("codex", route, "hello", cwd=repo, network=True)[
+        "applied"]["write_boundary"]["state_dir_skipped"]
+
+
 def test_codex_ordinary_lane_inherits_user_config_and_assurance_stays_clean(monkeypatch, tmp_path):
     mod = supervisor()
     home = Path(os.environ["CODEX_HOME"])
@@ -1687,8 +1747,8 @@ def test_codex_ordinary_lane_inherits_user_config_and_assurance_stays_clean(monk
     assert ordinary["applied"]["config"] == "inherited"
     assert "--ignore-user-config" not in ordinary["argv"] and "--ignore-rules" not in ordinary["argv"]
     assert {'web_search="live"', "notify=[]", 'approval_policy="never"',
-            'mcp_servers.fabric.default_tools_approval_mode="approve"',
-            'mcp_servers.computer-use.default_tools_approval_mode="approve"'} <= codex_options(ordinary)
+            "mcp_servers.fabric.enabled=false",
+            "mcp_servers.computer-use.enabled=false"} <= codex_options(ordinary)
     # The route and permission overrides come after any user config, so they still win.
     assert any(option.startswith("default_permissions=") for option in codex_options(ordinary))
     assured = mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True, intent="assurance")

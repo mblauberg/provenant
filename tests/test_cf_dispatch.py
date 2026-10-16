@@ -2955,7 +2955,7 @@ def test_ordinary_codex_dispatch_inherits_user_config_and_assurance_ignores_it()
     assert record["model_family"] == "openai"
     assert "--ignore-user-config" not in recorded and "--ignore-rules" not in recorded
     assert 'web_search="live"' in recorded
-    assert not [arg for arg in recorded if arg.startswith("model_provider")]
+    assert [arg for arg in recorded if arg.startswith("model_provider")] == ['model_provider="openai"']
 
     # Assurance is the dispatcher's default intent; it runs on a clean, recorded configuration.
     result, recorded = run_codex_dispatch(extra_args=["--model", "gpt-6-luna"])

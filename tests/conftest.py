@@ -102,8 +102,12 @@ def _isolated_route_state(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _isolated_codex_home_and_state(tmp_path_factory, monkeypatch):
-    """Codex argv reads the operator's MCP servers and names Provenant's state dir; pin both."""
+def _isolated_codex_home_and_state(tmp_path_factory, monkeypatch, request):
+    """Codex argv reads the operator's MCP servers and names Provenant's state dir; pin both.
+
+    The installer tests build their own HOME and expect CODEX_HOME to follow it."""
+    if request.node.path.name == "test_install_harness.py":
+        return
     monkeypatch.setenv("CODEX_HOME", str(tmp_path_factory.mktemp("codex-home")))
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path_factory.mktemp("state-home")))
 

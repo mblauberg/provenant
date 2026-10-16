@@ -45,17 +45,37 @@ def configured_mcp_servers():
     return sorted(name for name in servers if re.fullmatch(r"[A-Za-z0-9_-]+", name))
 
 
-def provenant_state_dir():
-    """Provenant's own per-user state (admission lock): a lane's nested dispatch needs to write it."""
+def provenant_state_dir(p):
+    """Provenant's own per-user state (admission lock): a lane's nested dispatch needs to write it.
+
+    Returns (path, note). The grant is skipped, with a note, when the directory is a link, holds a
+    glob character, or equals, contains or sits inside the workspace, cwd, worktree or any other
+    root the lane reads or writes under its own rules. The directory is created at execution time.
+    """
     state_home = Path(os.environ.get("XDG_STATE_HOME") or Path.home() / ".local/state")
     if not state_home.is_absolute():
         state_home = Path.home() / ".local/state"
     path = state_home / "provenant"
-    try:
-        path.mkdir(parents=True, exist_ok=True, mode=0o700)
-    except OSError:
-        return None
-    return None if path.is_symlink() or not path.is_dir() else str(path)
+    if path.is_symlink():
+        return None, "state directory is a symlink"
+    path = path.resolve()
+    if path.exists() and not path.is_dir():
+        return None, "state directory is not a directory"
+    if PERMISSION_PATTERN_CHARACTERS.intersection(str(path)):
+        return None, "state directory holds a glob character"
+    roots = [p.get("cwd"), p.get("workspace_root"), p.get("worktree"), *p["applied"].get("add_dirs", []),
+             *p["applied"].get("protected_paths", []), *p.get("protected_paths", [])]
+    for root in filter(None, roots):
+        root = Path(root).expanduser().resolve()
+        if path == root or path.is_relative_to(root) or root.is_relative_to(path):
+            return None, "state directory overlaps " + str(root)
+    return str(path), None
+
+
+def disabled_mcp_servers(p):
+    """Inherited MCP servers a lane must not start: stdio servers run outside Codex's command
+    sandbox, so only a worktree writer keeps them."""
+    return [] if p.get("mode") == "worktree_write" else configured_mcp_servers()
 
 
 def read_only_writable_dirs(p):
@@ -98,8 +118,14 @@ def argv(p):
     else:
         # A lane has no one to approve a call, and the operator's notify hook is a desktop alert.
         command += ["-c", "notify=[]", "-c", 'web_search="live"']
+        disabled = disabled_mcp_servers(p)
         for name in configured_mcp_servers():
-            command += ["-c", "mcp_servers." + name + '.default_tools_approval_mode="approve"']
+            if name in disabled:
+                command += ["-c", "mcp_servers." + name + ".enabled=false"]
+            else:
+                command += ["-c", "mcp_servers." + name + '.default_tools_approval_mode="approve"']
+        if disabled:
+            p["applied"]["mcp_disabled"] = disabled
     command += [
         "-c",
         'service_tier="default"',
@@ -110,7 +136,10 @@ def argv(p):
     capabilities = p["applied"].get("capabilities", [])
     if sys.platform == "darwin" and sandbox != "full" and not inherited:
         command += ["-c", "allow_login_shell=false"]
-    state_dir = provenant_state_dir()
+    state_dir, state_note = provenant_state_dir(p)
+    boundary = p["applied"].get("write_boundary")
+    if boundary is not None and (state_dir or state_note):
+        boundary.update({"state_dir": state_dir} if state_dir else {"state_dir_skipped": state_note})
     # exec resume inherits its session sandbox; config overrides apply to both forms.
     if capabilities:
         if p["resume_session"]:
@@ -143,6 +172,9 @@ def argv(p):
         if p["worktree"]:
             command += ["--cd", p["worktree"]]
     route = p["route"]
+    if not (route.get("endpoint_base_url") and route.get("endpoint_token_env")):
+        # A user's model_provider or openai_base_url must not redirect a native route.
+        command += ["-c", 'model_provider="openai"', "-c", 'openai_base_url=""']
     if route.get("endpoint_base_url") and route.get("endpoint_token_env"):
         for key, value in [
             ("name", route.get("endpoint_profile", "endpoint")),

@@ -2288,6 +2288,16 @@ def _observed_model(plan, parsed, env):
     return None, None
 
 
+def _prepare_codex_state_dir(plan):
+    """Create the Provenant state directory the plan granted, now rather than while planning."""
+    state_dir = plan.get("applied", {}).get("write_boundary", {}).get("state_dir")
+    if plan["adapter"] == "codex" and state_dir:
+        try:
+            Path(state_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError:
+            pass
+
+
 def _prepare_codex_capability_home(plan, environment):
     capabilities = plan.get("applied", {}).get("capabilities", [])
     if plan.get("adapter") != "codex" or not capabilities:
@@ -2983,6 +2993,7 @@ def execute(
     selector = selectors.DefaultSelector()
     try:
         _prepare_codex_capability_home(plan, environment)
+        _prepare_codex_state_dir(plan)
         if plan["adapter"] != "codex" and "browser" in plan["applied"].get("capabilities", []):
             environment["MAC_CHROMIUM_TMPDIR"] = str(private_tmp)  # Chrome's default temp is outside the boundary.
         if plan["stdin_policy"] == "prompt":

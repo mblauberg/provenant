@@ -119,11 +119,21 @@ applied block of the receipt records `config: inherited` or `config: clean`.
   still wins over the user file, so a user config that grants unrestricted
   filesystem access does not widen a lane: read-only lanes stay unable to write
   the workspace and writers stay inside their worktree.
-- An inheriting lane also sets `web_search="live"`, `notify=[]`, and
-  `mcp_servers.<name>.default_tools_approval_mode="approve"` for each server in
-  the user config, since no one is present to approve a tool call.
+- An inheriting lane also sets `web_search="live"` and `notify=[]`. A worktree
+  writer sets `mcp_servers.<name>.default_tools_approval_mode="approve"` for each
+  server in the user config, since no one is present to approve a tool call. Any
+  other lane sets `mcp_servers.<name>.enabled=false`, because a stdio MCP server
+  starts outside Codex's command sandbox and could write the workspace; the
+  receipt lists them as `applied.mcp_disabled`.
+- Every native-route lane pins `model_provider="openai"` and clears
+  `openai_base_url`, so a provider or base URL in the user file cannot redirect
+  the route and misattribute the receipt. An endpoint route keeps its own pin.
 - A lane may write Provenant's own state directory (`$XDG_STATE_HOME/provenant`,
-  holding the admission lock).
+  holding the admission lock), created at execution time and recorded as
+  `applied.write_boundary.state_dir`. The grant is skipped, with
+  `state_dir_skipped` noting why, when the path is a symlink, holds a glob
+  character, or equals, contains or lies inside the cwd, workspace, worktree or
+  an add-dir.
 
 ## Non-goals
 
