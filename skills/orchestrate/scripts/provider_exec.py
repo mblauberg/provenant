@@ -515,11 +515,12 @@ def os_confinement_profile(plan, search_path=None):
     project_files, project_directories = _project_config_reads(plan, root)
     discovery_dirs, discovery_files = [], []
     if plan.get("adapter") == "opencode":
-        # OpenCode v2 resolves every ancestor of its cwd, ~/.claude and ~/.agents at startup and reads the
+        # OpenCode v2 resolves every ancestor of its cwd, home, ~/.claude and ~/.agents at startup and reads the
         # instruction files it finds there. Home stays denied; re-allow those directories as listings
         # (never their contents) and the instruction files by name.
         cwd_path = Path(plan["cwd"]).resolve()
-        discovery_dirs = [*cwd_path.parents, home / ".claude", home / ".agents"]
+        # Home is listed even when the cwd sits outside it, as in a /tmp worktree.
+        discovery_dirs = [*dict.fromkeys([*cwd_path.parents, home]), home / ".claude", home / ".agents"]
         discovery_files = [d / name for d in cwd_path.parents for name in OPENCODE_INSTRUCTION_FILES]
         discovery_files += [home / ".agents/AGENTS.md", home / ".claude/CLAUDE.md"]
         discovery_dirs = [d for d in discovery_dirs if _opencode_discovery_grantable(d, directory=True)]

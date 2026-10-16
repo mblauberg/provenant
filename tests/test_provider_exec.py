@@ -118,6 +118,8 @@ def test_read_only_git_config_allowlist_is_limited_to_the_two_global_files(monke
     assert f'(literal "{home / ".agents/AGENTS.md"}")' in profile
     assert f'(literal "{tmp_path.resolve() / "AGENTS.md"}")' in profile
     assert f'(subpath "{home / ".opencode"}")' in profile
+    outside = supervisor.os_confinement_profile({**plan, "cwd": "/private/tmp", "workspace_root": "/private/tmp"})
+    assert f'(literal "{home}")' in outside
     other = supervisor.os_confinement_profile({**plan, "adapter": "gemini"})
     assert f'(subpath "{home}")' in other
 
