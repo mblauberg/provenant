@@ -4866,3 +4866,58 @@ def test_opencode_resolve_end_to_end_with_a_fake_cli(tmp_path):
     assert route["effort_applied"] == "high"
     code, route = run("deepseek")
     assert code == 0 and route["resolved_model"] == "opencode/deepseek-v4.1-flash-free"
+
+
+def test_opencode_variant_matching_explicit_effort_still_sends_the_variant(tmp_path):
+    env = {**os.environ, "PATH": "/usr/bin:/bin", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+           "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
+    out = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve", "--adapter",
+                          "opencode", "--role", "worker", "--model", "opencode/deepseek-v4.1-flash-free#high",
+                          "--effort", "high"], text=True, capture_output=True, env=env)
+    route = json.loads(out.stdout)
+    assert out.returncode == 0, route
+    assert route["effort_applied"] == "high"
+    assert route["requested_model"] == "opencode/deepseek-v4.1-flash-free"
+    assert route["requested_input"] == "opencode/deepseek-v4.1-flash-free#high"
+
+
+def test_opencode_requested_input_keeps_the_callers_bare_token(tmp_path):
+    cli = tmp_path / "bin" / "opencode"
+    cli.parent.mkdir()
+    cli.write_text("#!/bin/sh\n"
+                   "if [ \"$1\" = --version ]; then echo 'opencode v2.0.30'; exit 0; fi\n"
+                   "if [ \"$1\" = models ]; then printf '%s\\n' " + " ".join(LIVE_OPENCODE) + "; fi\n")
+    cli.chmod(0o755)
+    env = {**os.environ, "PATH": f"{cli.parent}:/usr/bin:/bin", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+           "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
+    out = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve", "--adapter",
+                          "opencode", "--role", "worker", "--model", "QWEN3.8-FLASH"],
+                         text=True, capture_output=True, env=env)
+    route = json.loads(out.stdout)
+    assert route["resolved_model"] == "opencode-go/qwen3.8-flash"
+    assert route["requested_input"] == "QWEN3.8-FLASH"
+
+
+def test_failed_opencode_refresh_keeps_the_last_good_listing(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    cli = tmp_path / "opencode"
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.0.30; exit; fi\n"
+                   "if [ \"$1\" = --help ]; then exit; fi\nprintf 'a/one\\na/two\\n'\n")
+    cli.chmod(0o755)
+    record, code = router.probe_capabilities("opencode", str(cli), listing_only=True)
+    assert code == 0 and record["models"] == ["a/one", "a/two"]
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.0.30; exit; fi\nexit 1\n")
+    failed, code = router.probe_capabilities("opencode", str(cli), listing_only=True, refresh=True)
+    assert code == 0 and failed["models"] == ["a/one", "a/two"] and failed["refresh_failed"]
+    cached, code = router.probe_capabilities("opencode", str(cli), listing_only=True)
+    assert code == 0 and cached["cache_hit"] and cached["models"] == ["a/one", "a/two"]
+
+
+def test_opencode_refresh_is_skipped_when_the_shared_budget_is_nearly_spent(monkeypatch):
+    router = load_router()
+    calls = []
+    monkeypatch.setattr(router, "probe_capabilities", lambda *a, **k: calls.append(k) or ({"models": ["x/y"]}, 0))
+    assert router._opencode_live_models(refresh=True, deadline=router.time.monotonic() + 1) == ([], False)
+    assert not calls
+    assert router._opencode_live_models(refresh=True, deadline=router.time.monotonic() + 10)[0] == ["x/y"]

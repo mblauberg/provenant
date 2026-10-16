@@ -696,6 +696,11 @@ def probe_capabilities(adapter: str, executable: str, deadline: float | None = N
         help_text = subprocess.run([executable, "--help"], capture_output=True, text=True,
                                    timeout=remaining(3), check=False).stdout
     except (OSError, subprocess.SubprocessError):
+        if adapter == "opencode" and isinstance(previous, dict) and previous.get("status") != "probe_unavailable" \
+                and previous.get("models"):
+            # A failed refresh must not replace the last good listing; report it without touching the cache.
+            return {**previous, "cache_hit": False,
+                    "refresh_failed": "Model list refresh failed; using the last good listing"}, 0
         record = {"status": "probe_unavailable", "adapter": adapter, "version": version,
                   "executable": executable_path,
                   "observed_at": datetime.now(timezone.utc).isoformat(), "models": [],
@@ -870,14 +875,23 @@ def _fallback_candidates(
     return results
 
 
-def _opencode_live_models(refresh: bool = False) -> tuple[list[str], bool]:
+# Discovery shares one budget that fits inside dispatch preflight's 15 s routing timeout.
+OPENCODE_DISCOVERY_BUDGET = 12.0
+OPENCODE_REFRESH_MIN_REMAINING = 4.0
+
+
+def _opencode_live_models(refresh: bool = False, deadline: float | None = None) -> tuple[list[str], bool]:
     """Ids from the cached `opencode models` probe and whether the cache answered.
 
     An unavailable probe or an empty listing means unknown, so the list is empty (and the cache
     keeps such a record for an hour only).
     """
+    if deadline is None:
+        deadline = time.monotonic() + OPENCODE_DISCOVERY_BUDGET
+    if refresh and deadline - time.monotonic() < OPENCODE_REFRESH_MIN_REMAINING:
+        return [], False
     try:
-        record, _ = probe_capabilities("opencode", "opencode", time.monotonic() + 25, listing_only=True,
+        record, _ = probe_capabilities("opencode", "opencode", deadline, listing_only=True,
                                        refresh=refresh)
     except Exception:  # noqa: BLE001 - discovery must never break routing
         return [], False
@@ -947,6 +961,7 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if not requested:
         return emit({"schema_version": 1, "status": "model_required_for_broker", "adapter": adapter_name,
                      "message": "No model default; fix: pass --model"}, 2)
+    requested_input = requested
     if adapter_name == "opencode" and "#" in requested:
         # `provider/model#variant`: the variant is OpenCode's own effort knob, sent as given.
         requested, _, variant = requested.partition("#")
@@ -954,21 +969,26 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
             args.effort = variant
             args.explicit_variant = True
             explicit = True
-        elif variant and args.effort != variant:
+        elif variant and args.effort == variant:
+            args.explicit_variant = True
+        elif variant:
             notes.append(f"#{variant} in the model id ignored: explicit effort {args.effort} wins")
     registered, match_notes = _registered_match(adapter_name, requested, catalog)
     notes.extend(match_notes)
     live_models: list[str] = []
     live_resolved = False
     if adapter_name == "opencode" and registered is None and requested.casefold() != "auto":
-        live_models, from_cache = _opencode_live_models()
+        discovery_deadline = time.monotonic() + OPENCODE_DISCOVERY_BUDGET
+        live_models, from_cache = _opencode_live_models(deadline=discovery_deadline)
         if not live_models and "/" not in requested:
             notes.append("the live opencode model listing is unavailable, so the name was not checked; "
                          "run `opencode models` and pass a full provider/model id if the model is rejected")
         resolved_name, name_notes, refusal = _resolve_opencode_name(requested, live_models)
         if refusal and refusal["status"] == "model_not_found" and from_cache:
             # A cached listing can predate the model; look once without the cache.
-            live_models, _ = _opencode_live_models(refresh=True)
+            fresh, _ = _opencode_live_models(refresh=True, deadline=discovery_deadline)
+            if fresh:  # a skipped or failed refresh keeps the cached listing
+                live_models = fresh
             resolved_name, name_notes, refusal = _resolve_opencode_name(requested, live_models)
         if refusal:
             return emit({"schema_version": 1, "adapter": adapter_name, **refusal}, 2)
@@ -1081,6 +1101,7 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     return emit({"schema_version": 1, "status": "ok", "adapter": adapter_name,
                  "alias": "" if args.model and not getattr(args, "alias_supplied", True) else args.alias or "",
                  "role": args.role, "requested_model": requested if explicit else "",
+                 "requested_input": requested_input if explicit else "",
                  "resolved_model": model, "model_family": family, "family_source": family_source,
                  "identity_source": "registry" if registered else "passed-through",
                  "endpoint_provider": adapter.get("endpoint_provider", adapter_name), "provider": provider,
