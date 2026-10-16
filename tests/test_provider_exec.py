@@ -4629,6 +4629,13 @@ def test_opencode_v2_error_events_are_typed(message, status, signature):
     assert (parsed["status"], parsed["signature"]) == (status, signature)
 
 
+def test_opencode_bad_variant_fix_names_the_variant_to_drop():
+    event = json.dumps({"type": "error", "error": {"type": "provider.no-route", "message": "Variant unavailable for opencode/x: high"}})
+    fix = supervisor()._variant_fix(event)
+    assert fix.startswith("opencode/x has no `high` variant; drop --effort or `#high`")
+    assert supervisor()._variant_fix("plain input error") == "plain input error"
+
+
 def test_opencode_v2_events_yield_text_session_and_terminal():
     lines = [
         {"type": "step_start", "sessionID": "ses_9", "part": {"type": "step-start"}},

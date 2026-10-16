@@ -1264,6 +1264,15 @@ SIGNATURES = (
 )
 
 
+def _variant_fix(failure_text):
+    """The fix for a rejected input; OpenCode's bad variant names the model and the variant to drop."""
+    found = re.search(r"Variant unavailable for ([^\s:\"]+): ([^\s\"}]+)", failure_text)
+    if found:
+        return (f"{found[1]} has no `{found[2]}` variant; drop --effort or `#{found[2]}`, "
+                "or pass a variant that model supports")
+    return failure_text.strip()[:400]
+
+
 def _model_unavailable_fix(plan):
     route = plan.get("route") or {}
     if route.get("identity_source") != "passed-through":
@@ -3475,7 +3484,7 @@ def execute(
         "run `kiro-cli whoami` outside the sandbox"
         if status == "auth_required" and parsed["signature"] == "auth_expired"
         else
-        parsed["failure_text"].strip()[:400]
+        _variant_fix(parsed["failure_text"])
         if status == "rejected" and parsed["signature"] == "invalid_input"
         else
         "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"
