@@ -1442,6 +1442,8 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                            if choices else "Pass an explicit provider/model id supported by " + adapter + ".")
                     if "effort" in code:
                         fix = "Omit effort, or pass a supported level: low, medium, high, xhigh, max, ultra."
+                    if code in {"model_ambiguous", "model_not_found"} and route.get("message"):
+                        fix = str(route["message"])[:600]
                     raise PreflightError(code, fixes.get(code, fix))
                 if task.get("confidential") is True:
                     risk = confidential_refusal(adapter, route.get("resolved_model") or task.get("model"), route)
