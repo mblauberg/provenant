@@ -110,12 +110,42 @@ def test_read_only_git_config_allowlist_is_limited_to_the_two_global_files(monke
 
     assert f'(literal "{home / ".gitconfig"}")' in profile
     assert f'(literal "{xdg / "git/config"}")' in profile
-    assert f'(subpath "{home}")' in profile
     assert f'(literal "{home / ".ssh/config"}")' not in profile
+    # OpenCode v2 stats the home ancestry: home stays denied, discovery is re-allowed by literal.
+    assert f'(subpath "{home}")' in profile
+    assert f'(literal "{(tmp_path).resolve()}")' in profile
+    assert f'(literal "{home / ".claude"}")' in profile
+    assert f'(literal "{home / ".agents/AGENTS.md"}")' in profile
+    assert f'(literal "{tmp_path.resolve() / "AGENTS.md"}")' in profile
+    other = supervisor.os_confinement_profile({**plan, "adapter": "gemini"})
+    assert f'(subpath "{home}")' in other
 
     monkeypatch.delenv("XDG_CONFIG_HOME")
     default_profile = supervisor.os_confinement_profile(plan)
     assert f'(literal "{home / ".config/git/config"}")' in default_profile
+
+
+def test_opencode_read_only_discovery_skips_symlinks_to_credentials(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    home = (tmp_path / "home").resolve()
+    (home / ".ssh").mkdir(parents=True)
+    key = home / ".ssh/id_ed25519"
+    key.write_text("secret")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (tmp_path / "AGENTS.md").symlink_to(key)
+    real = tmp_path / "real" / "CLAUDE.md"
+    real.parent.mkdir()
+    real.write_text("ok")
+    (tmp_path / "CLAUDE.md").symlink_to(real)
+    monkeypatch.setattr(supervisor.Path, "home", lambda: home)
+    plan = {
+        "adapter": "opencode", "mode": "read_only", "workspace_root": str(workspace),
+        "cwd": str(workspace), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    }
+    profile = supervisor.os_confinement_profile(plan)
+    assert "id_ed25519" not in profile
+    assert f'(literal "{real.resolve()}")' in profile
 
 
 @pytest.mark.parametrize("adapter", ["agy", "claude", "cursor", "opencode", "kiro"])
@@ -734,6 +764,63 @@ def test_claude_read_only_profile_reads_login_keychain_only_for_oauth_lanes(
     assert f'(subpath "{home / "Library/Keychains"}")' not in allow
 
 
+def test_read_only_profile_reads_the_adapter_binary_through_its_launcher_link_and_install_folder(monkeypatch, tmp_path):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    workspace = home / "repo"
+    install = home / ".local/share/cursor-agent/versions/1.0-abc"
+    other = home / ".local/share/cursor-agent/versions/0.9-old"
+    for directory in (workspace, install, other, home / ".local/bin", home / ".ssh"):
+        directory.mkdir(parents=True)
+    (install / "cursor-agent").write_text("#!/bin/sh\nexec cat \"$(dirname \"$(readlink \"$0\")\")/index.js\"\n", encoding="utf-8")
+    (install / "cursor-agent").chmod(0o755)
+    (install / "index.js").write_text("ok\n", encoding="utf-8")
+    (other / "index.js").write_text("old\n", encoding="utf-8")
+    (home / ".ssh/id").write_text("secret\n", encoding="utf-8")
+    (home / ".local/bin/cursor-agent").symlink_to(install / "cursor-agent")
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    plan = {"adapter": "cursor", "mode": "read_only", "workspace_root": str(workspace), "cwd": str(workspace),
+            "argv": ["cursor-agent"], "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    search_path = os.pathsep.join([str(home / ".local/bin"), "/usr/bin", "/bin"])
+    profile = mod.os_confinement_profile(plan, search_path)
+    reads = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-read-data "))
+    assert f'(literal "{home}/.local/bin/cursor-agent")' in reads
+    assert f'(subpath "{install}")' in reads
+    # cursor-agent signs in through the login keychain.
+    assert f'(subpath "{home}/Library/Keychains/login.keychain-db")' in reads
+    # The link's folder, its sibling versions and the rest of home stay closed.
+    assert f'(subpath "{home / ".local/bin"}")' not in reads
+    assert f'(subpath "{other}")' not in reads
+    assert f'(subpath "{home / ".local/share/cursor-agent"}")' not in reads
+    sandbox_exec = mod._sandbox_exec_path()
+    if sys.platform != "darwin" or not sandbox_exec:
+        return
+    launched = subprocess.run([sandbox_exec, "-p", profile, str(home / ".local/bin/cursor-agent")],
+                              capture_output=True, text=True)
+    if launched.returncode and "sandbox_apply" in launched.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert launched.returncode == 0, launched.stderr
+    assert launched.stdout == "ok\n"
+    for denied in (other / "index.js", home / ".ssh/id"):
+        refused = subprocess.run([sandbox_exec, "-p", profile, "/bin/cat", str(denied)],
+                                 capture_output=True, text=True)
+        assert refused.returncode != 0, denied
+
+
+def test_adapter_binary_in_a_plain_bin_directory_grants_the_file_alone(monkeypatch, tmp_path):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    (home / ".local/bin").mkdir(parents=True)
+    tool = home / ".local/bin/tool"
+    tool.write_text("#!/bin/sh\n", encoding="utf-8")
+    tool.chmod(0o755)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    links, directories = mod._adapter_binary_reads({"argv": ["tool"]}, str(home / ".local/bin"))
+    assert links == [tool]
+    assert directories == []
+
+
 KIRO_SUPPORT = "Library/Application Support/kiro-cli"
 # Files in Kiro's support directory that the user's shell sources or that Kiro executes.
 KIRO_EXECUTABLES = ("shell/zshrc.pre.zsh", "shell/bashrc.post.bash", "node", "bun", "tui.js",
@@ -1192,6 +1279,21 @@ def test_sandbox_exec_profile_confines_reads_to_temp_subdirectory(tmp_path):
 
 def supervisor():
     return importlib.import_module("skills.orchestrate.scripts.provider_exec")
+
+
+def test_daily_catalogue_notes_are_not_promoted_back_to_dispatch_warnings(tmp_path, monkeypatch, capsys):
+    router = importlib.import_module('scripts.model_route')
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    monkeypatch.setenv('PROVENANT_NO_OS_CONFINEMENT', '1')
+    note = router._NEWER_NOTE.format('fixture-new-model')
+    for first in (True, False):
+        router.emit({'status': 'ok', 'resolved_model': 'fixture', 'notes': ['ordinary route note'],
+                     'warnings': [note]}, 0)
+        route = json.loads(capsys.readouterr().out)
+        plan = supervisor().build_plan('codex', route, 'hello', cwd=tmp_path, workspace_root=tmp_path)
+        assert (note in plan['warnings']) is first
+        assert 'ordinary route note' in plan['warnings']
+        assert note in plan['route']['notes']
 
 
 @pytest.mark.parametrize(
@@ -2032,6 +2134,12 @@ def test_opencode_read_only_declares_fully_denied_bash_tool(tmp_path):
     permission = json.loads((tmp_path / "result.md").read_text())["permission"]
     assert permission["bash"]["*"] == "deny"
     assert permission["bash"]["provenant-no-shell"] == "allow"
+
+
+def test_opencode_run_disables_foreign_instruction_discovery(tmp_path):
+    code = "import json, os; print(json.dumps({'type':'result','result':os.environ.get('OPENCODE_DISABLE_CLAUDE_CODE','') + os.environ.get('OPENCODE_DISABLE_AUTOUPDATE','')}))"
+    supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert (tmp_path / "result.md").read_text() == "11"
 
 
 def test_opencode_free_tier_refusal_is_model_unavailable(tmp_path):
@@ -3338,7 +3446,7 @@ def test_opencode_launch_exposes_error_logs_for_silent_quota_hangs(tmp_path):
     plan = fixture_plan(tmp_path, "pass", "opencode")
     command = opencode.argv(plan)
     assert "--print-logs" in command
-    assert command[command.index("--log-level") + 1] == "ERROR"
+    assert command[command.index("--log-level") + 1] == "error"
 
 
 @pytest.mark.parametrize("stream", ["stdout", "stderr"])
@@ -3799,9 +3907,9 @@ def test_opencode_observed_model_comes_from_export(tmp_path):
     cli.write_text(
         "#!/usr/bin/env python3\n"
         "import json, os, pathlib, sys\n"
-        "if sys.argv[1] == 'export':\n"
+        "if sys.argv[1:3] == ['session', 'export'] and '--standalone' in sys.argv:\n"
         f"    pathlib.Path({str(pwd_file)!r}).write_text(os.environ['PWD'])\n"
-        "    print(json.dumps({'messages':[{'info':{'providerID':'opencode-go','modelID':'deepseek-v4.1-flash'}}]}))\n"
+        "    print(json.dumps({'info':{'model':{'providerID':'opencode-go','id':'deepseek-v4.1-flash','variant':'default'}}}))\n"
     )
     cli.chmod(0o755)
     plan = fixture_plan(
@@ -3816,7 +3924,7 @@ def test_opencode_observed_model_comes_from_export(tmp_path):
         env={**os.environ, "PATH": str(tmp_path) + ":" + os.environ["PATH"], "PWD": str(tmp_path)},
     )
     assert record["provenance"]["observed_model"] == "opencode-go/deepseek-v4.1-flash"
-    assert record["provenance"]["observed_source"] == "opencode:export.modelID"
+    assert record["provenance"]["observed_source"] == "opencode:session-export.info.model"
     assert pwd_file.read_text() == str(child)
 
 
@@ -4500,7 +4608,7 @@ def test_plan_only_honors_read_only_cwd_inside_workspace(tmp_path):
     assert json.loads(result.stdout)["cwd"] == str(child)
 
 
-def test_opencode_argv_always_pins_plan_cwd(tmp_path):
+def test_opencode_v2_argv_is_standalone_and_has_no_v1_flags(tmp_path):
     adapter = importlib.import_module("skills.orchestrate.scripts.adapters.opencode")
     plan = {
         "worktree": "",
@@ -4511,7 +4619,96 @@ def test_opencode_argv_always_pins_plan_cwd(tmp_path):
         "prompt": "hello",
     }
     argv = adapter.argv(plan)
-    assert argv[argv.index("--dir") + 1] == str(tmp_path)
+    assert argv[:3] == ["opencode", "run", "--standalone"]
+    assert "--dir" not in argv and "--variant" not in argv
+    assert argv[argv.index("--model") + 1] == "opencode/mimo-v2.6-flash-free"
+
+
+def test_opencode_v2_argv_carries_effort_as_model_variant_and_resume(tmp_path):
+    adapter = importlib.import_module("skills.orchestrate.scripts.adapters.opencode")
+    base = {"worktree": "", "cwd": str(tmp_path), "resume_session": "ses_1", "prompt": "hi"}
+    argv = adapter.argv({**base, "model": "opencode/glm-5.3-flash-free", "effort": "high"})
+    assert argv[argv.index("--model") + 1] == "opencode/glm-5.3-flash-free#high"
+    assert argv[argv.index("-s") + 1] == "ses_1"
+    # An id that already names its variant is not suffixed twice.
+    argv = adapter.argv({**base, "model": "opencode/x#low", "effort": "high"})
+    assert argv[argv.index("--model") + 1] == "opencode/x#low"
+
+
+@pytest.mark.parametrize("text,ok", [("opencode v2.0.30", True), ("2.1.0", True), ("1.14.2", False),
+                                     ("opencode v1.0.0", False), ("", True), ("garbage", True)])
+def test_opencode_version_gate_names_a_fix_for_v1(text, ok):
+    adapter = importlib.import_module("skills.orchestrate.scripts.adapters.opencode")
+    error = adapter.version_error(text)
+    assert (error is None) is ok
+    assert ok or "fix: upgrade OpenCode to v2" in error
+
+
+def test_opencode_version_probe_failure_is_not_cached(tmp_path, monkeypatch):
+    cli = tmp_path / "bin" / "opencode"
+    cli.parent.mkdir()
+    cli.write_text("#!/bin/sh\necho nothing\n")
+    cli.chmod(0o755)
+    mod = supervisor()
+    mod._OPENCODE_VERSION_CACHE.clear()
+    assert mod._opencode_version_error("opencode", str(cli.parent)) is None
+    assert mod._OPENCODE_VERSION_CACHE == {}
+    cli.write_text("#!/bin/sh\necho 1.2.3\n")
+    assert "unsupported" in mod._opencode_version_error("opencode", str(cli.parent))
+    mod._OPENCODE_VERSION_CACHE.clear()
+
+
+def test_opencode_v1_cli_is_refused_at_planning(tmp_path, monkeypatch):
+    cli = tmp_path / "bin" / "opencode"
+    cli.parent.mkdir()
+    cli.write_text("#!/bin/sh\necho 1.14.2\n")
+    cli.chmod(0o755)
+    monkeypatch.setenv("PATH", str(cli.parent) + ":" + os.environ["PATH"])
+    mod = supervisor()
+    mod._OPENCODE_VERSION_CACHE.clear()
+    with pytest.raises(ValueError, match="unsupported; fix: upgrade OpenCode to v2"):
+        mod.build_plan("opencode", {"resolved_model": "opencode/x"}, "hello", cwd=tmp_path, workspace_root=tmp_path)
+    mod._OPENCODE_VERSION_CACHE.clear()
+
+
+@pytest.mark.parametrize("message,status,signature", [
+    ("Model unavailable: opencode/nope", "model_unavailable", "model_unavailable"),
+    ("Invalid model reference: bogus", "model_unavailable", "model_unavailable"),
+    ("Variant unavailable for opencode/x: bogusvar", "rejected", "invalid_input"),
+])
+def test_opencode_v2_error_events_are_typed(message, status, signature):
+    event = json.dumps({"type": "error", "sessionID": "ses_1", "error": {"type": "provider.no-route", "message": message}})
+    parsed = supervisor().parse_output("opencode", event + "\n", "", 1)
+    assert (parsed["status"], parsed["signature"]) == (status, signature)
+
+
+def test_opencode_bad_variant_fix_names_the_variant_to_drop():
+    event = json.dumps({"type": "error", "error": {"type": "provider.no-route", "message": "Variant unavailable for opencode/x: high"}})
+    fix = supervisor()._variant_fix(event)
+    assert fix.startswith("opencode/x has no `high` variant; drop --effort or `#high`")
+    assert supervisor()._variant_fix("plain input error") == "plain input error"
+
+
+def test_opencode_v2_events_yield_text_session_and_terminal():
+    lines = [
+        {"type": "step_start", "sessionID": "ses_9", "part": {"type": "step-start"}},
+        {"type": "tool_use", "sessionID": "ses_9", "part": {"tool": "read", "state": {"status": "completed"}}},
+        {"type": "text", "sessionID": "ses_9", "part": {"type": "text", "text": "PONG"}},
+        {"type": "step_finish", "sessionID": "ses_9", "part": {"type": "step-finish", "reason": "stop"}},
+    ]
+    parsed = supervisor().parse_output("opencode", "\n".join(map(json.dumps, lines)) + "\n", "", 0)
+    assert (parsed["status"], parsed["text"], parsed["session_id"], parsed["terminal"]) == ("ok", "PONG", "ses_9", True)
+
+
+def test_opencode_v2_single_text_event_without_step_events_is_ok():
+    event = {"type": "text", "sessionID": "ses_9", "part": {"type": "text", "text": "PONG"}}
+    assert supervisor().parse_output("opencode", json.dumps(event) + "\n", "", 0)["status"] == "ok"
+
+
+@pytest.mark.parametrize("stdout", ["", json.dumps({"type": "step_start", "sessionID": "s", "part": {}}) + "\n"])
+def test_opencode_exit_zero_without_assistant_text_is_empty_output(stdout):
+    parsed = supervisor().parse_output("opencode", stdout, "", 0)
+    assert (parsed["status"], parsed["signature"]) == ("failed", "empty_output")
 
 
 def test_unsupported_controls_are_not_claimed_as_applied(tmp_path):
@@ -4752,7 +4949,8 @@ for i in range(10000): print(json.dumps({'type':'telemetry','data':'x'*100}))
 def test_plan_uses_router_applied_effort(tmp_path):
     plan = supervisor().build_plan('opencode', {'resolved_model':'fixture', 'effort':'high', 'effort_applied':'medium'}, 'hello', cwd=tmp_path, workspace_root=tmp_path)
     assert plan['effort'] == 'medium'
-    assert plan['argv'][plan['argv'].index('--variant') + 1] == 'medium'
+    assert plan['argv'][plan['argv'].index('--model') + 1] == 'fixture#medium'
+    assert '--variant' not in plan['argv']
 
 
 def test_fallback_uses_router_candidates_and_parses_explicit_routes():
@@ -6090,3 +6288,29 @@ def test_explicit_model_runs_despite_a_cooldown_with_a_warning(tmp_path):
     row = json.loads(next((run / "tasks").glob("*/attempt-*/attempt.json")).read_text())
     assert row["status"] == "ok"
     assert any("explicit model is cooling" in warning for warning in row.get("warnings", []))
+
+
+def test_opencode_v2_structured_error_log_lines_are_fatal_and_info_is_not():
+    fatal = supervisor().OPENCODE_FATAL_LOG
+    quiet = supervisor().OPENCODE_QUIET_LOG
+    assert re.search(fatal, "timestamp=2026-10-16T07:38:10.410Z level=ERROR run=ab message=boom", re.I | re.M)
+    assert not re.search(fatal, 'timestamp=2026-10-16T07:38:10.410Z level=INFO run=ab message="cli starting"', re.I | re.M)
+    assert re.match(quiet, "timestamp=x level=WARN message=y")
+
+
+def test_opencode_v2_free_quota_event_is_rate_limited():
+    event = {"type": "error", "sessionID": "ses_1", "error": {
+        "type": "provider.quota", "message": "Rate limit exceeded. Please try again later.", "status": 429,
+        "response": {"body": json.dumps({"type": "error", "error": {"type": "FreeUsageLimitError"}})}}}
+    parsed = supervisor().parse_output("opencode", json.dumps(event) + "\n", "", 1)
+    assert parsed["status"] == "rate_limited"
+
+
+def test_opencode_v1_cli_is_a_typed_refusal_on_the_provider_exec_cli(tmp_path, monkeypatch, capsys):
+    mod = supervisor()
+    monkeypatch.setattr(mod, "_opencode_version_error",
+                        lambda *_: "OpenCode 1.14.2 is unsupported; fix: upgrade OpenCode to v2")
+    with pytest.raises(mod.CapabilityError) as caught:
+        mod.build_plan("opencode", {"resolved_model": "opencode/x"}, "hello", cwd=tmp_path, workspace_root=tmp_path)
+    assert caught.value.code == "unsupported_cli_version"
+    assert isinstance(caught.value, ValueError)

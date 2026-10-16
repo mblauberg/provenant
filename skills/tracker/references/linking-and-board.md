@@ -23,10 +23,11 @@ active), `Awaiting user` (machine work done, a user decision remains), `Done`
 (integrated or closed with its terminal reason recorded). Move an issue's
 Status when its state actually changes, not on a schedule.
 
-## Horizon
+## Priority or horizon
 
-Horizon is the owner's priority signal, not an agent's. Agents start new
-epics at `Later` and may promote an item only under the repository's own
-documented promotion rule — never on judgement alone — and every promotion
+The repository's priority or horizon field, when it declares one, is the
+owner's signal, not an agent's. Agents start new items at its documented
+default and may promote an item only under the repository's own documented
+promotion rule — never on judgement alone — and every promotion
 gets a ledger entry (what moved, why, who/what rule authorised it). The same
 restraint applies to demoting: record the reason.

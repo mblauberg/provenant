@@ -1,5 +1,8 @@
 import {
   normaliseRoute,
+  namesExplicitRoute,
+  nativeAdapter,
+  type RouteInput,
   preflight,
   routeArguments,
   applyDispatchDefaults,
@@ -147,7 +150,7 @@ export function releaseActiveExecutions(): void {
 
 function canonical(path: string): string {
   try {
-    return realpathSync(path);
+    return realpathSync.native(path);
   } catch {
     return resolve(path);
   }
@@ -297,6 +300,10 @@ async function initialiseRun(
  */
 export interface LaunchObserver {
   onLaunch?: (launch: { runId: string; taskId: string; attempt: number }) => void;
+  /** Set by a handoff: its route is inherited, so the own-seat guard for new explicit dispatches does not apply. */
+  continuation?: boolean;
+  /** Set by a single dispatch's council: its members come from the caller's own `models`/selectors. */
+  guardedCouncil?: boolean;
 }
 
 export interface OwnerIdentification {
@@ -666,6 +673,7 @@ async function dispatchConfiguredProviderUnchecked(
 ): Promise<Record<string, unknown>> {
   const workspaceIdentity = identity;
   const root = productRoot(env);
+  const ownSeatGuard = !launch.continuation && namesExplicitRoute(withoutEmptySelectors(input));
   const preferred = nativeFirst(input, identity);
   input = preferred.task;
   let poolWarnings: string[] = preferred.warnings;
@@ -686,7 +694,7 @@ async function dispatchConfiguredProviderUnchecked(
         tasks: expanded.tasks,
         concurrency: Math.min(8, expanded.tasks.length),
         wait_seconds: wait_seconds ?? DEFAULT_WAIT_SECONDS,
-      }, identity, signal, env, launch);
+      }, identity, signal, env, { ...launch, guardedCouncil: ownSeatGuard || input.models !== undefined });
       return withWarnings(result, [...preferred.warnings, ...expanded.warnings]);
     }
     // A single pick, or a selector that won precedence, replaces the request's own selectors.
@@ -695,13 +703,13 @@ async function dispatchConfiguredProviderUnchecked(
     poolWarnings = [...preferred.warnings, ...expanded.warnings];
   }
   const snapshotStarted = performance.now(), catalogue = catalogueSnapshot(root, env);
-  const initialRoute = normaliseRoute(input, identity, catalogue);
+  const initialRoute = normaliseRoute(input, identity, catalogue, ownSeatGuard);
   input = { ...input, mode: initialRoute.access_mode };
   const providerIdentity = workingIdentity(input, identity);
   input = { ...input, ...(input.cwd === undefined ? {} : { cwd: providerIdentity.cwd }),
     ...(input.prompt_file === undefined ? {} : { prompt_file: ownerPromptPath(identity, input.prompt_file) }) };
   const policy = dispatchDefaults(identity.cwd);
-  const route = applyDispatchDefaults(normaliseRoute(input, identity, catalogue), policy.defaults);
+  const route = applyDispatchDefaults(normaliseRoute(input, identity, catalogue, ownSeatGuard), policy.defaults);
   route.warnings = [...new Set([...(initialRoute.warnings ?? []), ...(route.warnings ?? []), ...poolWarnings, ...policy.warnings])];
   validatePrompt(input.prompt, input.prompt_file);
   const roots = [...new Set([...readRoots(identity, input.cwd, input.prompt_file), ...(input.read_roots ?? [])])];
@@ -819,6 +827,9 @@ function withWarnings(result: Record<string, unknown>, warnings: string[]): Reco
     ...(rest.length ? [`warning: ${rest.join("; ")}`] : [])] };
 }
 
+/** Marks a batch task whose caller named its route (a task, a batch default or `models`), before pool expansion. */
+const OWN_SEAT_GUARD = "_own_seat_guard";
+
 function normaliseTask(
   task: BatchTaskInput,
   index: number,
@@ -826,12 +837,14 @@ function normaliseTask(
   catalogue: CatalogueSnapshot,
   defaults: DispatchDefaults = {},
 ): Record<string, unknown> {
-  const initialRoute = normaliseRoute(task, identity, catalogue);
+  const { [OWN_SEAT_GUARD]: ownSeatGuard, ...plain } = task as BatchTaskInput & { [OWN_SEAT_GUARD]?: boolean };
+  task = plain;
+  const initialRoute = normaliseRoute(task, identity, catalogue, ownSeatGuard === true);
   task = { ...task, mode: initialRoute.access_mode };
   validatePrompt(task.prompt, task.prompt_file);
   const providerIdentity = workingIdentity(task, identity);
   task = { ...task, ...(task.cwd === undefined ? {} : { cwd: providerIdentity.cwd }) };
-  const route = applyDispatchDefaults(normaliseRoute(task, identity, catalogue), defaults);
+  const route = applyDispatchDefaults(normaliseRoute(task, identity, catalogue, ownSeatGuard === true), defaults);
   route.warnings = [...new Set([...(initialRoute.warnings ?? []), ...(route.warnings ?? [])])];
   const roots = readRoots(identity, task.cwd, task.prompt_file);
   if (roots.length) route.read_roots = roots;
@@ -841,6 +854,21 @@ function normaliseTask(
     timeout: timeoutSeconds(task.timeout_seconds ?? defaults.timeout_seconds, task.mode),
     ...route,
   };
+}
+
+function batchDefaults(input: BatchInput): Record<string, any> {
+  return withoutEmptySelectors(Object.fromEntries(Object.entries(input).filter(([key]) =>
+    ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", ...POOL_FIELDS].includes(key))));
+}
+
+function mergeBatchTask(defaults: Record<string, any>, input: BatchTaskInput, index: number): BatchTaskInput {
+  const task = withoutEmptySelectors(input);
+  // A task's selector replaces a default pool; its pool replaces a default selector.
+  const own = usesPool(task) ? Object.fromEntries(Object.entries(defaults).filter(([key]) => !["alias", "model"].includes(key)))
+    : task.alias !== undefined || task.model !== undefined
+      ? Object.fromEntries(Object.entries(defaults).filter(([key]) => !(POOL_FIELDS as readonly string[]).includes(key)))
+      : defaults;
+  return { ...own, ...task, id: task.id ?? `task-${index + 1}` };
 }
 
 async function dispatchConfiguredBatchUnchecked(
@@ -863,24 +891,21 @@ async function dispatchConfiguredBatchUnchecked(
   const catalogue = catalogueSnapshot(root, env);
   const policy = dispatchDefaults(identity.cwd);
   const errors: Record<string, unknown>[] = [];
-  const defaults = withoutEmptySelectors(Object.fromEntries(Object.entries(input).filter(([key]) =>
-    ["adapter", "alias", "model", "effort", "mode", "worktree", "cwd", "network", "sandbox", "capabilities", "add_dirs", "fallback", "timeout_seconds", "context_ceiling", "allow_secrets", "confidential", ...POOL_FIELDS].includes(key))));
+  const defaults = batchDefaults(input);
   let merged: BatchTaskInput[] = input.tasks.map((task) => withoutEmptySelectors(task)).flatMap((task, index) => {
     const taskError = (task as BatchTaskInput & { _fabric_error?: Record<string, unknown> })._fabric_error;
     if (taskError) {
       errors.push({ task_id: task.id ?? `task-${index + 1}`, ...taskError });
       return [];
     }
-    // A task's own selector replaces a default pool, and a task's own pool replaces a default selector.
-    const own = usesPool(task) ? Object.fromEntries(Object.entries(defaults).filter(([key]) => !["alias", "model"].includes(key)))
-      : task.alias !== undefined || task.model !== undefined
-        ? Object.fromEntries(Object.entries(defaults).filter(([key]) => !(POOL_FIELDS as readonly string[]).includes(key)))
-        : defaults;
-    return [{ ...own, ...task, id: task.id ?? `task-${index + 1}` }];
+    return [mergeBatchTask(defaults, task, index)];
   });
   const poolWarnings: string[] = [];
   merged = merged.map((task) => {
-    const preferred = nativeFirst(task, identity);
+    // Never trust the field from the caller: it is recomputed here and only ever set by this function.
+    const marked = { ...task, [OWN_SEAT_GUARD]: !launch.continuation &&
+      (namesExplicitRoute(task) || task.models !== undefined || launch.guardedCouncil === true) };
+    const preferred = nativeFirst(marked, identity);
     poolWarnings.push(...preferred.warnings);
     return preferred.task;
   });
@@ -984,6 +1009,40 @@ async function dispatchConfiguredBatchUnchecked(
 }
 
 
+/**
+ * The own-seat guard runs on the initiating side before any placement, so a request for the seat's own Claude model
+ * is refused the same way whether it would run here or on a peer. A continuation that inherits its route is exempt.
+ */
+export function rejectOwnSeatClaude(input: Record<string, any>, identity: Identity, env: NodeJS.ProcessEnv, launch: LaunchObserver = {}): void {
+  if (launch.continuation || nativeAdapter(identity) !== "claude") return;
+  const batch = Array.isArray(input.tasks);
+  const defaults = batch ? batchDefaults(input as BatchInput) : {};
+  const tasks: Record<string, any>[] = batch
+    ? input.tasks.flatMap((task: BatchTaskInput & { _fabric_error?: unknown }, index: number) =>
+      task._fabric_error ? [] : [mergeBatchTask(defaults, task, index)])
+    : [input];
+  const candidates = tasks.flatMap((task) => {
+    const effective = nativeFirst(task, identity).task;
+    // Malformed councils belong to per-task validation, not a batch-wide guard refusal.
+    if (effective.models !== undefined && (!Array.isArray(effective.models) ||
+      effective.models.some((model: unknown) => typeof model !== "string"))) return [];
+    const routes = effective.models !== undefined ? effective.models.map((model: string) => ({ model })) : [effective];
+    return routes.filter(namesExplicitRoute).map((route: RouteInput) => ({ route, taskId: batch ? task.id : undefined }));
+  });
+  if (!candidates.length) return;
+  const catalogue = catalogueSnapshot(productRoot(env), env);
+  for (const { route, taskId } of candidates) {
+    try {
+      normaliseRoute({ ...route }, identity, catalogue, true);
+    } catch (error) {
+      if (error instanceof InputError && error.code === "native_seat_model") {
+        if (batch) throw new InputError(error.code, `Task ${taskId}: ${error.fix} Entire batch refused before placement.`);
+        throw error;
+      }
+    }
+  }
+}
+
 export async function dispatchConfiguredProvider(
   input: DispatchInput,
   identity: Identity,
@@ -992,13 +1051,14 @@ export async function dispatchConfiguredProvider(
   launch: LaunchObserver = {},
 ): Promise<Record<string, unknown>> {
   try {
+    rejectOwnSeatClaude(input, identity, env, launch);
     const remote = env.PROVENANT_HOST_LOCAL_ONLY === "1" ? undefined : await federatedLane("dispatch", identity.cwd, input as Record<string, unknown>, signal);
     if (remote) return remote;
     const localEnv = { ...env, PROVENANT_HOST_LOCAL_ONLY: "1", ...(input.placement_fallback ? { PROVENANT_PLACEMENT_FALLBACK: JSON.stringify(input.placement_fallback) } : {}) };
     const result = await dispatchConfiguredProviderUnchecked(input, identity, signal, localEnv, launch);
     if (input.placement_fallback) {
       const fallback = input.placement_fallback;
-      const note = `local fallback from ${fallback.from_host}: ${fallback.reason}`;
+      const note = `local fallback from ${fallback.from_host}: ${fallback.reason}${fallback.detail ? `: ${fallback.detail}` : ""}`;
       const runDir = result.run_dir;
       return { ...result, placement_fallback: fallback, warnings: [...((result.warnings as string[]) ?? []), note],
         digest: `${String(result.digest ?? result.status)}\n${note}` };
@@ -1018,12 +1078,19 @@ export async function dispatchConfiguredBatch(
   launch: LaunchObserver = {},
 ): Promise<Record<string, unknown>> {
   try {
+    try {
+      rejectOwnSeatClaude(input as unknown as Record<string, any>, identity, env, launch);
+    } catch (error) {
+      // Refused before placement: every task of the batch is reported, as for any rejected batch.
+      const refusal = rejected(error);
+      return { ...refusal, tasks: (input.tasks ?? []).map((task, index) => ({ ...refusal, task_id: task.id ?? `task-${index + 1}`, state: "terminal" })) };
+    }
     const remote = env.PROVENANT_HOST_LOCAL_ONLY === "1" ? undefined : await federatedLane("dispatch", identity.cwd, input as unknown as Record<string, unknown>, signal);
     if (remote) return remote;
     const localEnv = { ...env, PROVENANT_HOST_LOCAL_ONLY: "1", ...(input.placement_fallback ? { PROVENANT_PLACEMENT_FALLBACK: JSON.stringify(input.placement_fallback) } : {}) };
     const result = await dispatchConfiguredBatchUnchecked(input, identity, signal, localEnv, launch);
     return input.placement_fallback ? { ...result, placement_fallback: input.placement_fallback,
-      warnings: [...((result.warnings as string[]) ?? []), `local fallback from ${input.placement_fallback.from_host}: ${input.placement_fallback.reason}`] } : result;
+      warnings: [...((result.warnings as string[]) ?? []), `local fallback from ${input.placement_fallback.from_host}: ${input.placement_fallback.reason}${input.placement_fallback.detail ? `: ${input.placement_fallback.detail}` : ""}`] } : result;
   } catch (error) {
     if (signal.aborted && !(error instanceof InputError)) throw error;
     return rejected(error);

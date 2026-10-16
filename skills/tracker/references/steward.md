@@ -45,7 +45,7 @@ the filing and linking rules in [filing.md](filing.md) and
 [linking-and-board.md](linking-and-board.md) — then records the outcome via
 `record_outcome` (directly, or through `replay`'s handler contract). A status
 of `flagged` marks an outcome that still needs a coordinator or owner call
-(an unsettled possible duplicate, a Horizon promotion, a Decision); everything
+(an unsettled possible duplicate, a priority promotion, a Decision); everything
 else is `status: done` or `status: no-op` with a one-line `summary`.
 
 ## Digest
@@ -59,5 +59,6 @@ detail stays in the queue file and the tracker itself.
 ## Authority recap
 
 Create, edit, link, close and set Status inside the repo's rules. Never
-delete an issue, never transfer it, never change Horizon except by the repo's
-own promotion rule (logged), never close a Decision, and never write code.
+delete an issue, never transfer it, never change a priority or horizon field
+except by the repo's own promotion rule (logged), never close a Decision, and
+never write code.

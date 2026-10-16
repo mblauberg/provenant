@@ -32,6 +32,19 @@ it fail before the repair and pass after it. Also rerun the original scenario
 and relevant broader suite. If the seam cannot be built, report the coupling
 that prevents it.
 
+## Evidence before claims
+
+- A failed or stochastic search proves nothing about impossibility. State
+  "none exists" or "best achievable" only from an exact formulation or an
+  exhaustive check; otherwise say "best found within this sampled envelope".
+  Recheck that a threshold borrowed from someone else's numbers survives a
+  change of metric.
+- Search for a name you do not confidently recognise, or one from a
+  fast-moving area, before answering about it. Familiarity makes a stale
+  answer sound authoritative.
+- Before asserting absence, identity or drift, run the exact check that would
+  prove it.
+
 ## Closure checks
 
 - original reproduction no longer fails;

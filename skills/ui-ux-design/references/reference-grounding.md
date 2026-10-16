@@ -44,3 +44,10 @@ This adds no mandatory approval or questionnaire when intent is sufficient.
 If local owners conflict, identify the canonical owner and actual consumer
 behaviour. If no owner exists and choosing one would establish a durable
 system, return to `scope`; document placement belongs to `engineering-docs`.
+
+## Apple Human Interface Guidelines
+
+The guideline pages are rendered by JavaScript, so a plain page fetch returns
+only a title. Fetch the page's DocC JSON instead, which carries the full text
+and the specification tables (type scales, label tiers):
+`https://developer.apple.com/tutorials/data/design/human-interface-guidelines/<slug>.json`.

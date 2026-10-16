@@ -558,11 +558,7 @@ export class Store {
     return this.#db.transaction(() => {
       const recipients = this.#resolveRecipients(who, to);
       if (recipients.length === 0) {
-        throw new Error(
-          `no recipients for "${to}" in ${who.project}. ` +
-            `Use an agent label, team id, or "all". Known agents: ` +
-            `${this.agents(who.project).map((agent) => agent.agentId).join(", ") || "none yet"}`,
-        );
+        throw new Error(this.#recipientFix(who, to));
       }
       const parentConversation = options.replyTo === undefined
         ? undefined
@@ -1050,6 +1046,14 @@ export class Store {
     return row?.conversation_id;
   }
 
+  #recipientFix(who: Identity, to: string): string {
+    const agents = this.agents(who.project).map((agent) => agent.agentId).sort();
+    const teams = (this.#db.prepare(`SELECT DISTINCT team_id FROM team_members WHERE project = ? AND agent_id != ? ORDER BY team_id`)
+      .all(who.project, who.agentId) as { team_id: string }[]).map((team) => team.team_id);
+    return `unbound recipient "${to}"; fix: pass to:<seat> from these valid recipients: ` +
+      `labels/seats: ${agents.join(", ") || "none"}; teams: ${teams.join(", ") || "none"}; all`;
+  }
+
   #resolveRecipients(who: Identity, to: string): string[] {
     const known=this.agents(who.project).map(agent=>agent.agentId);
     const chair=process.env.PROVENANT_CHAIR;
@@ -1057,7 +1061,7 @@ export class Store {
     const chairSeat=chair && known.includes(chair) ? chair : known.includes("chair") ? "chair" : undefined;
     if (["chair", "/root", "root", "parent"].includes(to)) {
       const seat = to === "chair" ? chairSeat : parent && known.includes(parent) ? parent : chairSeat;
-      if (!seat) throw new Error(`unbound recipient "${to}"; fix: pass to:<seat> from fabric_whoami{detail:"full"}`);
+      if (!seat) throw new Error(this.#recipientFix(who, to));
       to = seat;
     }
     if (to === "all") {

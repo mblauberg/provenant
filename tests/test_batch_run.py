@@ -49,6 +49,17 @@ def load_module():
     return module
 
 
+def test_batch_accepts_prompt_files_in_caller_temp_directories(tmp_path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv('TMPDIR', str(tmp_path))
+    module = load_module()
+    manifest = task_manifest(tmp_path, [task(tmp_path, 'temp-prompt')])
+    loaded = module.load_manifest(manifest)
+    assert len(loaded) == 1 and loaded[0]['id'] == 'temp-prompt'
+
+
 def fake_dispatch(path: Path) -> None:
     write_executable(path, """
         #!/usr/bin/env python3
@@ -212,17 +223,20 @@ def test_batch_keeps_valid_task_when_another_task_is_rejected(tmp_path, monkeypa
         task(tmp_path, 'valid'),
         task(tmp_path, 'malformed', bad_output='1'),
         task(tmp_path, 'bad-route', route_reject='alias_unavailable'),
+        task(tmp_path, 'effort-conflict', reject='task_class_effort_conflict'),
     ])
 
     assert module.batch(args(module, run_dir, manifest, 2)) == 1
 
     summary = json.loads((run_dir / 'dispatch/batches/batch-001/summary.json').read_text())
     assert [(row['task_id'], row['status']) for row in summary['tasks']] == [
-        ('rejected', 'rejected'), ('valid', 'ok'), ('malformed', 'failed'), ('bad-route', 'rejected')]
+        ('rejected', 'rejected'), ('valid', 'ok'), ('malformed', 'failed'), ('bad-route', 'rejected'),
+        ('effort-conflict', 'rejected')]
     assert summary['tasks'][0]['error'] == 'secret_scan_budget_exceeded'
     assert summary['tasks'][0]['fix'] == 'narrow this task'
     assert summary['tasks'][2]['outcome'] == 'child_receipt_invalid'
     assert summary['tasks'][3]['error'] == 'alias_unavailable'
+    assert summary['tasks'][4]['error'] == 'task_class_effort_conflict'
 
 
 def args(module, run_dir: Path, manifest: Path, concurrency: int = 3):
@@ -380,12 +394,13 @@ def test_batch_accepts_a_prompt_file_in_a_read_root_and_forwards_the_root(tmp_pa
     other.mkdir()
     monkeypatch.chdir(workspace)
     module = load_module()
+    monkeypatch.setattr(module, 'prompt_temp_roots', lambda: ())
     prompt = other / 'brief.md'
     prompt.write_text('read the other project\n', encoding='utf-8')
     task = {'id': 'reader', 'prompt_file': str(prompt), 'adapter': 'claude', 'model': 'opus',
             'cwd': str(other)}
 
-    with pytest.raises(module.BatchInputError, match='inside the workspace or a read root'):
+    with pytest.raises(module.BatchInputError, match='inside the workspace, a caller temp directory or a read root'):
         module.load_manifest(task_manifest(workspace, [task]))
     loaded = module.load_manifest(task_manifest(workspace, [{**task, 'read_roots': [str(other)]}]))
     command = module._command(loaded[0], workspace / 'run')
