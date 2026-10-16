@@ -14,7 +14,8 @@ import fabric_policy
 MAX_FILES = 10_000
 MAX_TOTAL_BYTES = 64 * 1024 * 1024
 SKIP_DIRS = {".git", "node_modules", ".venv", "vendor", "vendors", "third_party",
-             "third-party", "dist", "build", "coverage", ".agent-run"}
+             "third-party", "dist", "build", "coverage", ".agent-run", "__pycache__",
+             ".pytest_cache", ".mypy_cache", ".ruff_cache", ".next", ".turbo"}
 SKIP_SUFFIXES = {".7z", ".a", ".bin", ".class", ".dll", ".dylib", ".exe", ".gif", ".gz",
                  ".jar", ".jpeg", ".jpg", ".mp3", ".mp4", ".o", ".pdf", ".png", ".pyc",
                  ".so", ".tar", ".webp", ".zip"}
@@ -45,12 +46,15 @@ class ScanResult:
     budget_exceeded: bool = False
     budget_path: str | None = None
     budget_subtree: str | None = None
+    largest_files: list[tuple[int, str]] = field(default_factory=list)
 
     def fix(self) -> str:
         if self.budget_exceeded:
             location = f" in {self.budget_path}" if self.budget_path else ""
             subtree = f" ({self.budget_subtree})" if self.budget_subtree else ""
-            return (f"Secret scan budget exceeded{location}{subtree}; narrow the prompt or pass a narrower path, "
+            largest = ", ".join(f"{path} ({_size(size)})" for size, path in self.largest_files)
+            files = f"; largest files encountered: {largest}" if largest else ""
+            return (f"Secret scan budget exceeded{location}{subtree}{files}; narrow add_dirs to a narrower path or narrow the prompt, "
                     f"list the subtree under secret_scan_exclude in {fabric_policy.POLICY}, "
                     "or pass allow_secrets: true and explain why in the prompt.")
         finding = self.findings[0]
@@ -191,6 +195,8 @@ def scan_inputs(prompt: bytes, prompt_path: str, add_dirs: list[str] | None = No
                     content = stream.read(MAX_TOTAL_BYTES - bytes_seen + 1)
                 if b"\0" in content[:8000]:
                     continue
+                result.largest_files = sorted(
+                    [*result.largest_files, (metadata.st_size, _shown(path))], reverse=True)[:3]
                 if files_seen >= MAX_FILES or bytes_seen + len(content) > MAX_TOTAL_BYTES:
                     result.budget_exceeded = True
                     result.budget_path = str(base)

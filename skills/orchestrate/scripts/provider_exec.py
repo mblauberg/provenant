@@ -130,19 +130,41 @@ def now():
     return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+# Home-relative credential stores. No lane reads them, whatever else its profile grants.
+CREDENTIAL_STORES = (
+    '.ssh', '.aws', '.azure', '.gnupg', '.codex', '.claude',
+    '.gemini', '.cursor', '.kiro', '.docker', '.kube', '.netrc', '.npmrc',
+    '.git-credentials', '.pypirc', '.pgpass', '.vault-token', '.password-store', '.boto',
+    '.s3cfg', '.terraform.d', '.cargo/credentials', '.cargo/credentials.toml',
+    '.gem/credentials', '.config/git/credentials', '.config/hub', '.config/op',
+    '.config/gh', '.config/gcloud', '.config/claude', '.config/codex',
+    '.config/openai', '.config/opencode', '.local/share/opencode', 'Library/Keychains',
+    'Library/Application Support',
+)
+
+
+# Instruction files OpenCode v2 reads from each ancestor of its cwd.
+OPENCODE_INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "HARNESS.md")
+
+
+def _opencode_discovery_grantable(path, *, directory=False):
+    # A symlinked discovery entry must not carry a read grant to its target: files only when the target is an
+    # instruction file outside credential stores, directories only when the target is not a credential store.
+    path = Path(path)
+    if not path.is_symlink():
+        return True
+    target = path.resolve()
+    if credential_path(target) and not target.is_relative_to(Path.home().resolve() / ".claude"):
+        return False
+    if directory:
+        return target.is_dir()
+    return target.is_file() and target.name in OPENCODE_INSTRUCTION_FILES
+
+
 def credential_path(path):
     candidate = Path(path).expanduser().resolve()
     home = Path.home().resolve()
-    stores = [home / name for name in (
-        '.ssh', '.aws', '.azure', '.gnupg', '.codex', '.claude',
-        '.gemini', '.cursor', '.kiro', '.docker', '.kube', '.netrc', '.npmrc',
-        '.git-credentials', '.pypirc', '.pgpass', '.vault-token', '.password-store', '.boto',
-        '.s3cfg', '.terraform.d', '.cargo/credentials', '.cargo/credentials.toml',
-        '.gem/credentials', '.config/git/credentials', '.config/hub', '.config/op',
-        '.config/gh', '.config/gcloud', '.config/claude', '.config/codex',
-        '.config/openai', '.config/opencode', '.local/share/opencode', 'Library/Keychains',
-        'Library/Application Support',
-    )]
+    stores = [home / name for name in CREDENTIAL_STORES]
     if any(candidate.is_relative_to(store) or store.is_relative_to(candidate) for store in stores):
         return True
     parts = [part.lower() for part in candidate.parts]
@@ -489,6 +511,17 @@ def os_confinement_profile(plan, search_path=None):
     git_config_files = [home / ".gitconfig", xdg_config_home / "git/config"]
     reads = [*state.get("read", ()), *(() if _uses_api_key(plan) else state.get("oauth_read", ()))]
     project_files, project_directories = _project_config_reads(plan, root)
+    discovery_dirs, discovery_files = [], []
+    if plan.get("adapter") == "opencode":
+        # OpenCode v2 resolves every ancestor of its cwd, ~/.claude and ~/.agents at startup and reads the
+        # instruction files it finds there. Home stays denied; re-allow those directories as listings
+        # (never their contents) and the instruction files by name.
+        cwd_path = Path(plan["cwd"]).resolve()
+        discovery_dirs = [*cwd_path.parents, home / ".claude", home / ".agents"]
+        discovery_files = [d / name for d in cwd_path.parents for name in OPENCODE_INSTRUCTION_FILES]
+        discovery_files += [home / ".agents/AGENTS.md", home / ".claude/CLAUDE.md"]
+        discovery_dirs = [d for d in discovery_dirs if _opencode_discovery_grantable(d, directory=True)]
+        discovery_files = [f for f in discovery_files if _opencode_discovery_grantable(f)]
     toolchain_files, uv_project_files, toolchain_directories = _toolchain_reads(plan, root, search_path)
     launcher_links, install_directories = _adapter_binary_reads(plan, search_path)
     return (
@@ -498,6 +531,7 @@ def os_confinement_profile(plan, search_path=None):
         + _state_write_guards(home, state)
         + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
         + _sbpl_rule("deny", "file-read-data", [root, *add_dirs])
+        + _sbpl_rule("allow", "file-read-data", [*discovery_dirs, *discovery_files], literal=True)
         + _sbpl_rule("allow", "file-read-data", [*([run_dir] if run_dir else [])])
         + _sbpl_rule("allow", "file-read-data", state_writes, canonical=True)
         + _sbpl_rule("allow", "file-read-data", [home / path for path in reads])
@@ -691,7 +725,38 @@ def _runtime_component(prefix, name, *, directory):
     return canonical
 
 
-OPENCODE_FATAL_LOG = r"^\s*ERROR\b|(?:monthly|weekly|5.hour) (?:usage )?limit"
+# v2 logs are `timestamp=... level=ERROR ...`; v1 printed `ERROR ...` at line start.
+OPENCODE_FATAL_LOG = r"^\s*ERROR\b|\blevel=ERROR\b|(?:monthly|weekly|5.hour) (?:usage )?limit"
+OPENCODE_QUIET_LOG = r"\s*(?:WARN|INFO|DEBUG)\b|.*\blevel=(?:WARN|INFO|DEBUG)\b"
+
+
+_OPENCODE_VERSION_CACHE = {}
+
+
+def _opencode_version_error(executable, path):
+    """Typed refusal for an OpenCode older than v2; unknown versions pass (tool_missing reports absence).
+
+    Only a parsed answer is cached, keyed on the binary's mtime, so a timeout is retried and
+    `opencode upgrade` is noticed by a long-lived process.
+    """
+    found = shutil.which(executable, path=path)
+    if not found:
+        return None
+    try:
+        key = (found, os.stat(found).st_mtime_ns)
+    except OSError:
+        return None
+    if key in _OPENCODE_VERSION_CACHE:
+        return _OPENCODE_VERSION_CACHE[key]
+    try:
+        text = subprocess.run([found, "--version"], capture_output=True, text=True, timeout=10,
+                              stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    error = profile("opencode").version_error(text)
+    if re.search(r"\d+\.\d+", text or ""):
+        _OPENCODE_VERSION_CACHE[key] = error
+    return error
 
 
 def _pyenv_version_dir(root, selected):
@@ -895,6 +960,10 @@ def build_plan(
     original_prompt_file = metadata.pop("original_prompt_file", prompt_file)
     run_dir = metadata.pop("run_dir", None)
     config = profile(adapter)
+    if adapter == "opencode":
+        version_error = _opencode_version_error(config.CLI, os.environ.get("PATH"))
+        if version_error:
+            raise CapabilityError("unsupported_cli_version", version_error)
     selected_cwd = Path(worktree or cwd or workspace_root or Path.cwd()).expanduser().resolve()
     if not selected_cwd.is_dir():
         raise ValueError("cwd must be a readable directory")
@@ -933,7 +1002,11 @@ def build_plan(
         raise ValueError("invalid sandbox")
     if network is not None and type(network) is not bool:
         raise ValueError("network must be a boolean")
-    warnings = list(route.get("notes") or []) + list(route.get("warnings") or [])
+    # Catalogue notices demoted to receipt notes must not become warnings again.
+    warnings = list(dict.fromkeys([
+        *(note for note in route.get("notes") or [] if " is newer than the catalogue;" not in note),
+        *list(route.get("warnings") or []),
+    ]))
     applied_network = network
     if adapter == "codex":
         applied_network = (
@@ -1229,6 +1302,15 @@ SIGNATURES = (
 )
 
 
+def _variant_fix(failure_text):
+    """The fix for a rejected input; OpenCode's bad variant names the model and the variant to drop."""
+    found = re.search(r"Variant unavailable for ([^\s:\"]+): ([^\s\"}]+)", failure_text)
+    if found:
+        return (f"{found[1]} has no `{found[2]}` variant; drop --effort or `#{found[2]}`, "
+                "or pass a variant that model supports")
+    return failure_text.strip()[:400]
+
+
 def _model_unavailable_fix(plan):
     route = plan.get("route") or {}
     if route.get("identity_source") != "passed-through":
@@ -1244,12 +1326,13 @@ def _model_unavailable_fix(plan):
         registered = route.registered_model_ids(adapter)
     except Exception:
         registered = []
+    listing = "; list every id with `opencode models`" if plan.get("adapter") == "opencode" else ""
     if registered:
         choices = ", ".join(registered[:6])
         if len(registered) > 6:
             choices += ", …"
-        return "choose a registered model: " + choices
-    return "choose another model"
+        return "choose a registered model: " + choices + listing
+    return "choose another model" + listing
 
 
 def _objects(value):
@@ -2260,26 +2343,21 @@ def _observed_model(plan, parsed, env):
     elif adapter == "opencode" and session:
         try:
             exported = subprocess.run(
-                [profile(adapter).CLI, "export", session],
+                [profile(adapter).CLI, "session", "export", "--standalone", session],
                 capture_output=True,
                 text=True,
-                timeout=5,
+                timeout=20,
                 env=env,
                 cwd=plan["cwd"],
                 stdin=subprocess.DEVNULL,
             )
-            value = json.loads(exported.stdout)
-            observed = [
-                (item.get("providerID"), item["modelID"])
-                for item in _objects(value)
-                if isinstance(item.get("modelID"), str)
-            ]
-            if observed:
-                provider, model = observed[-1]
+            observed = (json.loads(exported.stdout).get("info") or {}).get("model") or {}
+            model, provider = observed.get("id"), observed.get("providerID")
+            if isinstance(model, str) and model:
                 return (
-                    provider + "/" + model if provider and "/" not in model else model
+                    provider + "/" + model if isinstance(provider, str) and provider and "/" not in model else model
                 ), profile(adapter).MODEL_SOURCE
-        except (OSError, ValueError, subprocess.SubprocessError):
+        except (OSError, ValueError, AttributeError, subprocess.SubprocessError):
             pass
     if parsed["observed_model"]:
         return parsed["observed_model"], profile(adapter).MODEL_SOURCE
@@ -2839,6 +2917,11 @@ def execute(
         }
         # The sentinel matches no real command and exists only so Zen declares bash.
         environment["OPENCODE_CONFIG_CONTENT"] = json.dumps({"permission": permission})
+        # v2 scans ~/.claude for Claude Code skills and CLAUDE.md, which the confinement profile
+        # denies (startup fails with EPERM) and which holds the owner's private instructions.
+        # Autoupdate and the filewatcher have no place in a supervised, sandboxed run.
+        environment.update(OPENCODE_DISABLE_CLAUDE_CODE="1", OPENCODE_DISABLE_CLAUDE_CODE_SKILLS="1",
+                           OPENCODE_DISABLE_AUTOUPDATE="1", OPENCODE_DISABLE_FILEWATCHER="1")
     warning_text = "\n".join(plan["warnings"])
     if warning_text:
         print(warning_text, file=sys.stderr, flush=True)
@@ -2890,7 +2973,7 @@ def execute(
             relevant = [line for line in text.splitlines()
                         if re.search(OPENCODE_FATAL_LOG, line, re.I)
                         or (re.search(r"\bresets?\b", line, re.I)
-                            and not re.match(r"\s*(?:WARN|INFO|DEBUG)\b", line, re.I))]
+                            and not re.match(OPENCODE_QUIET_LOG, line, re.I))]
             parsed = parse_output(adapter, "", "\n".join(relevant), 1)
             if parsed["status"] == "usage_limited":
                 live_failure = parsed
@@ -3439,7 +3522,7 @@ def execute(
         "run `kiro-cli whoami` outside the sandbox"
         if status == "auth_required" and parsed["signature"] == "auth_expired"
         else
-        parsed["failure_text"].strip()[:400]
+        _variant_fix(parsed["failure_text"])
         if status == "rejected" and parsed["signature"] == "invalid_input"
         else
         "OpenCode rejected the free-tier request; use a paid opencode-go model or report this"
@@ -3688,6 +3771,7 @@ def main():
             json.dumps(
                 {
                     "status": status,
+                    **({"error": exc.code} if isinstance(exc, CapabilityError) else {}),
                     "fix": str(exc),
                     "output_path": "",
                     "output_digest": "",

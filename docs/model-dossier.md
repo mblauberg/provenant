@@ -176,19 +176,35 @@ not read an absent `Watch out for` as an endorsement.
 - **Cost:** cheapest Claude tier ($0.10/$0.50 per Mtok at launch).
 - **Reach:** `haiku` resolves to `claude-haiku-5-5` on the `claude` adapter;
   1M-token context; efforts `low` to `xhigh`, default `medium`. It holds `high`
-  weight in `bulk` beside Luna (Luna is listed first and stays the top pick) and
+  weight in `junior` beside Luna (Luna is listed first and stays the top pick) and
   serves the Claude `bulk` and `mechanical` task classes. `claude-haiku-4-5`
   stays reachable by its full name, with no effort control.
 
 ### OpenCode models
 
-- **Good at:** `opencode-go/deepseek-v4.1-flash` is the preferred go-to and
-  `opencode-go/glm-5.3-flash` the second. Both draw on one small monthly quota,
-  so use both sparingly. They suit reviews, small implementations and design
-  opinions.
-- **Watch out for:** free models (any `opencode/*-free`) rotate often and may
-  train on prompts; keep sensitive, private or client data off them
-  (`confidential: true` skips them).
+- **Good at:** `opencode/deepseek-v4.1-flash-free` is the go-to and the adapter
+  default: free, zero-retention, no training, and a distinct DeepSeek family, so
+  use it heavily for bulk work, small implementations and as an extra cheap
+  review lens. `opencode/glm-5.3-flash-free` (zero-retention, Zhipu family) is
+  the second free pick. Both sit between the Sonnet/Sol and Haiku/Luna tiers,
+  so OpenCode has `workhorse` (`senior`) and `scout` (`junior`) aliases but no `flagship` (`principal`); a flagship
+  request falls to the adapter default with a warning. Both are limited-time
+  offers; `workhorse` falls back to paid Go `opencode-go/deepseek-v4.1-flash`,
+  and paid `opencode-go/glm-5.3-flash` stays reachable by name (`glm-paid`).
+  Both paid models draw on the small Go monthly quota, so use them sparingly.
+- **Watch out for:** free models rotate often, and their data terms differ per
+  model (Zen docs). Zero-retention, no training: `deepseek-v4.1-flash-free`,
+  `glm-5.3-flash-free`, `space-bunny-free`, `longcat-2.5-preview-free`.
+  `cat-jam-free` does not train but keeps data for 30 days. Use or log data:
+  `mimo-v2.6-flash-free`, `muse-spark-*-free`, `big-pickle`, `ll-alpha-free`,
+  `nemotron-*-free`. Space Bunny is an unidentified stealth model with no
+  published benchmarks, so it stays `sparing` in `junior` until local runs
+  justify more; LongCat 2.5 Preview (`longcat`) is catalogued by name only.
+  Gemini 4 Argon Contributor (`argon`, paid Go) is a rare `principal` pick that
+  trains on prompts and is not zero-retention.
+  Keep sensitive, private or client data off the second group
+  (`confidential: true` skips any model whose `trains_on_prompts` is true; an
+  unflagged free model counts as training).
 - **Reach:** `opencode` adapter; other models stay discoverable with
   `opencode models`.
 
@@ -378,7 +394,7 @@ assessment; until then, route these on the hard axis alone.
 | Moonshot Kimi | `moonshot-kimi` endpoint, reached through the `claude` adapter | needs owner review |
 | Zhipu GLM | `zai-glm` endpoint, reached through the `claude` adapter | needs owner review |
 | OpenRouter (any slug) | `openrouter-anthropic` / `openrouter-openai` endpoints; caller picks live slug; not alias-pinned | needs owner review; free/stealth windows rotate |
-| OpenCode free / Zen | `opencode` adapter with explicit `opencode/<model>` (discover via `opencode models`) | needs owner review; not distinct-family assurance |
+| OpenCode free / Zen | `opencode` adapter with explicit `opencode/<model>` (discover via `opencode models`) | needs owner review; not distinct-family assurance; data terms vary per model |
 
 ## Recording the preference
 

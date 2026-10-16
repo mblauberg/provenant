@@ -72,14 +72,15 @@ const USAGE = `fabric <command>
   dispatch --prompt-file F [--adapter A] [--alias NAME | --model M] [--effort E]
            [--mode MODE] [--worktree W | --cwd D] [--id ID] [--wait]
            [--host H] [--operation-id ID] [--resume ID | --handoff ID]
-  dispatch --prompt-file F --route strong|bulk|design|writing
+  dispatch --prompt-file F --route junior|senior|principal|design|writing
                               top model of a global pool; --adapter narrows it
   dispatch --prompt-file F --route R --rotate    cycle the pool per project
   dispatch --prompt-file F --route R --council N  N members (1-8), families
                               spread first; rotate is ignored with a council
   dispatch --prompt-file F --models a/m[@e],b/m  ad-hoc council; bypasses --route
-  --confidential              with any selector: never a free or prompt-training
-                              model, fallbacks included
+  --confidential              with any selector: never a prompt-training model,
+                              fallbacks included; free models count unless
+                              their entry says they do not train
   An explicit --model wins over --route; see
   skills/orchestrate/references/routing-and-tiers.md#route-pools
   dispatch --tasks F [route flags]  run a JSON task manifest; flags set task defaults
@@ -107,6 +108,16 @@ if (command === "--help" || command === "-h" || command === "help") {
 if (!commands.has(command)) {
   console.error(`unknown command "${command}"\n\n${USAGE}`);
   process.exit(2);
+}
+if (argv.slice(1).some((arg) => arg === "--help" || arg === "-h")) {
+  let include = false;
+  const lines = USAGE.split("\n").filter((line) => {
+    if (/^  \S/u.test(line)) include = line.startsWith(`  ${command} `) || line.trim() === command;
+    else if (!line.startsWith("  ")) include = false;
+    return include;
+  });
+  console.log(`fabric ${command}\n\n${lines.join("\n")}`);
+  process.exit(0);
 }
 
 /** Read `--flag value` out of argv, so the remaining words form the body. */

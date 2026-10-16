@@ -891,7 +891,8 @@ def parse_fast_route_json(raw: str) -> dict:
 
 
 PLANNER_MODEL_STATUSES = {"capability_model_unavailable", "no_candidate_available", "alias_unavailable",
-                          "adapter_default_model_invalid", "model_required_for_broker"}
+                          "adapter_default_model_invalid", "model_required_for_broker",
+                          "model_ambiguous", "model_not_found"}
 PLANNER_TRANSIENT_STATUSES = {"capability_discovery_failed", "capability_snapshot_untrusted",
                               "capability_snapshot_stale", "probe_unavailable", "probe_cache_busy"}
 
@@ -913,14 +914,16 @@ def route_refusal(record, adapter=""):
     status = record.get("status")
     if not status or status in TERMINAL_STATUSES or "provenance" in record or record.get("schema") == "fabric.exec-plan.v1":
         return None
-    return router_failure(str(status), adapter)
+    return router_failure(str(status), adapter, record.get("message"))
 
 
-def router_failure(signature, adapter=""):
+def router_failure(signature, adapter="", message=None):
     """Fabric's status and fix for a router refusal; the router's own status stays the signature."""
     if signature in PLANNER_MODEL_STATUSES:
         status = "model_unavailable"
         fix = provider_exec._model_unavailable_fix({"adapter": adapter, "route": {"identity_source": "passed-through"}})
+        if signature in {"model_ambiguous", "model_not_found"} and isinstance(message, str) and message:
+            fix = message[:600]
     elif signature in PLANNER_TRANSIENT_STATUSES:
         status, fix = "failed", f"provider capability check failed ({signature}); check the provider CLI login and retry"
     else:
@@ -1200,7 +1203,7 @@ def _retire_provider_process(run_dir: Path, process: subprocess.Popen[Any] | Non
 
 
 # Fabric grants a read root only for a directory inside a registered project.
-PROMPT_PATH_FIX = ("Pass prompt_file=<readable regular file inside the workspace or a registered Fabric project>; "
+PROMPT_PATH_FIX = ("Pass prompt_file=<readable regular file inside the workspace, a caller temp directory or a registered Fabric project>; "
                    "register another project by running `fabric whoami` there, or dispatch from it.")
 
 
@@ -1208,6 +1211,12 @@ class PreflightError(ValueError):
     def __init__(self, code: str, fix: str):
         super().__init__(fix)
         self.code = code
+
+
+def prompt_temp_roots() -> tuple[Path, ...]:
+    roots = [Path(value).expanduser() for value in
+             (os.environ.get("TMPDIR", ""), "/tmp", "/private/tmp", "/private/var/folders") if value]
+    return tuple(dict.fromkeys(candidate for root in roots if root.is_absolute() for candidate in (root, root.resolve())))
 
 
 def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path, read_roots=(), max_bytes=None) -> bytes:
@@ -1220,10 +1229,11 @@ def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path, read_ro
     if prompt_source is not None:
         if not prompt_source.exists():
             raise PreflightError("prompt_unavailable", f"cannot read prompt file: {prompt_source}")
-        roots = (run_dir, workspace, run_workspace(run_dir, workspace), *(Path(root) for root in read_roots))
+        roots = (run_dir, workspace, run_workspace(run_dir, workspace), *(Path(root) for root in read_roots),
+                 *prompt_temp_roots())
         prompt_root = next((root for root in roots if prompt_source.is_relative_to(root)), None)
         if prompt_root is None:
-            raise PreflightError("prompt_path_forbidden", "prompt file must be inside the run directory, current workspace or a read root")
+            raise PreflightError("prompt_path_forbidden", PROMPT_PATH_FIX)
         sensitive_roots = {".ssh", ".aws", ".azure", ".gnupg"}
         sensitive_files = {
             ".env", ".env.local", ".env.production", "credentials.json",
@@ -1443,6 +1453,8 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                            if choices else "Pass an explicit provider/model id supported by " + adapter + ".")
                     if "effort" in code:
                         fix = "Omit effort, or pass a supported level: low, medium, high, xhigh, max, ultra."
+                    if code in {"model_ambiguous", "model_not_found"} and route.get("message"):
+                        fix = str(route["message"])[:600]
                     raise PreflightError(code, fixes.get(code, fix))
                 if task.get("confidential") is True:
                     risk = confidential_refusal(adapter, route.get("resolved_model") or task.get("model"), route)
@@ -1645,6 +1657,8 @@ def prepare_resume(args):
     args.tool=requested["adapter"];args.model=previous["provenance"]["resolved_model"];args.alias=None;args.task_class=None
     # An effort the provider only reported was never sent, so resume does not send it.
     args.effort=None if previous["provenance"].get("effort_observed_source") else previous["provenance"]["effort_applied"];args.task_id=previous["task_id"]
+    # OpenCode applies effort only as a `#variant`; keep that intent so the router sends it again.
+    if args.tool=="opencode" and args.effort and "#" not in args.model: args.model=args.model+"#"+args.effort
     args.access_mode=previous["mode"];args.worktree=Path(previous["worktree"]) if previous.get("worktree") else None
     supplied_cwd = args.provider_cwd
     args.provider_cwd=Path(previous["cwd"]) if previous["mode"]=="read_only" else None
@@ -2820,7 +2834,8 @@ def parser() -> argparse.ArgumentParser:
     root.add_argument("--no-preface", dest="preface", action="store_false")
     root.add_argument("--fallback", default=None, help="false, true, any, or JSON route list")
     root.add_argument("--confidential", action="store_true",
-                      help="never route this task, or any fallback, to a free or prompt-training model")
+                      help="never route this task, or any fallback, to a prompt-training model; "
+                           "a free model counts unless its entry sets trains_on_prompts false")
     root.add_argument("--pick-reason", help="why a route pool picked this model; appended to the Route line")
     return root
 

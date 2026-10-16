@@ -285,7 +285,8 @@ def test_preflight_honours_policy_secret_scan_exclusions(tmp_path, monkeypatch):
 
 def test_secret_scan_budget_skips_vendored_build_and_large_binary_before_counting(tmp_path, monkeypatch):
     scan = load_secret_scan_module()
-    for dirname in ("node_modules", ".venv", "dist", "build", "coverage", ".agent-run"):
+    for dirname in ("node_modules", ".venv", "dist", "build", "coverage", ".agent-run",
+                    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".next", ".turbo"):
         target = tmp_path / dirname
         target.mkdir()
         (target / "ignored.txt").write_text("ordinary")
@@ -307,6 +308,19 @@ def test_secret_scan_budget_fix_names_offending_directory(tmp_path, monkeypatch)
     assert result.budget_exceeded
     assert str(directory) in result.fix()
     assert "narrower" in result.fix()
+
+
+def test_secret_scan_budget_names_largest_files_including_the_file_over_the_limit(tmp_path, monkeypatch):
+    scan = load_secret_scan_module()
+    for index, size in enumerate((20, 10, 80, 5)):
+        (tmp_path / f"scratch-{index}.txt").write_text("x" * size)
+    monkeypatch.setattr(scan, "MAX_TOTAL_BYTES", 100)
+    result = scan.scan_inputs(b"hello", "<prompt>", [str(tmp_path)])
+    assert result.budget_exceeded
+    fix = result.fix()
+    assert "largest files" in fix
+    assert "scratch-2.txt" in fix and "scratch-0.txt" in fix
+    assert "add_dirs" in fix and "allow_secrets" in fix
 
 
 def test_secret_scan_skips_git_metadata_file(tmp_path):
@@ -2757,6 +2771,7 @@ def test_preflight_accepts_a_prompt_file_only_inside_a_read_root(tmp_path, monke
     monkeypatch.chdir(workspace)
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
     module = load_dispatch_module()
+    monkeypatch.setattr(module, "prompt_temp_roots", lambda: ())
     prompt = other / 'brief.md'
     prompt.write_text('read the other project')
     task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt)}
@@ -2766,6 +2781,33 @@ def test_preflight_accepts_a_prompt_file_only_inside_a_read_root(tmp_path, monke
     assert 'registered Fabric project' in rejected['fix']
     assert 'dispatch from it' in rejected['fix']
     assert module.preflight_tasks([{**task, 'read_roots': [str(other)]}], workspace)['status'] == 'validated'
+
+
+def test_preflight_accepts_temp_prompts_and_retains_secret_and_link_checks(tmp_path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    scratch = tmp_path / 'scratch'
+    workspace.mkdir()
+    scratch.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv('TMPDIR', str(scratch))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    module = load_dispatch_module()
+    prompt = scratch / 'brief.md'
+    prompt.write_text('hello')
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt)}
+    assert module.preflight_tasks([task], workspace)['status'] == 'validated'
+    prompt.write_text('AKIA' + 'A' * 16)
+    assert module.preflight_tasks([task], workspace)['error'] == 'secret_detected'
+    auth = scratch / '.codex' / 'auth.json'
+    auth.parent.mkdir()
+    auth.write_text('{}')
+    assert module.preflight_tasks([{**task, 'prompt_file': str(auth)}], workspace)['error'] == 'credential_or_auth_store_denied'
+    link = scratch / 'linked.md'
+    link.symlink_to(auth)
+    assert module.preflight_tasks([{**task, 'prompt_file': str(link)}], workspace)['error'] == 'credential_or_auth_store_denied'
+    linked = scratch / 'hardlinked.md'
+    linked.hardlink_to(prompt)
+    assert module.preflight_tasks([{**task, 'prompt_file': str(linked)}], workspace)['error'] == 'prompt_hard_link_denied'
 
 
 def test_preflight_scans_a_read_root_prompt_for_secrets(tmp_path, monkeypatch):
@@ -2799,6 +2841,34 @@ def test_preflight_refuses_a_credential_store_prompt_in_any_root(tmp_path, monke
     for prompt, roots in ((auth, [str(other)]), (local, [])):
         result = module.preflight_tasks([{**task, 'prompt_file': str(prompt), 'read_roots': roots}], workspace)
         assert result['error'] == 'credential_or_auth_store_denied', prompt
+
+
+def test_prepare_resume_keeps_an_opencode_variant_as_model_hash_variant(tmp_path: Path):
+    module = load_dispatch_module()
+    run_dir = make_run(tmp_path, "resume-variant")
+    attempt_dir = run_dir / "tasks/task-1/attempt-001"
+    attempt_dir.mkdir(parents=True)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    previous = {
+        "run_id": "resume-me", "task_id": "task-1", "attempt": 1, "state": "terminal",
+        "status": "ok", "mode": "read_only", "cwd": str(workspace), "worktree": None,
+        "workspace": {"root": str(workspace)}, "session_id": "saved-session", "read_roots": [],
+        "provenance": {"requested": {"adapter": "opencode"}, "resolved_model": "opencode/deepseek-v4.1-flash-free",
+                       "effort_applied": "high"},
+        "applied": {"sandbox": "read-only", "network": None, "add_dirs": [], "capabilities": []},
+        "paths": {"events": None}, "requested_route": {},
+    }
+    (attempt_dir / "attempt.json").write_text(json.dumps(previous), encoding="utf-8")
+    args = SimpleNamespace(
+        run_dir=run_dir, resume="resume-me", task_id=None, tool=None, model=None, effort=None,
+        access_mode=None, worktree=None, provider_cwd=None, sandbox=None, network=None,
+        add_dirs=[], resume_session=None, fallback=None, context_ceiling=None,
+        intent="ordinary", orchestrator_family="", role="worker", risk_tier="",
+        model_override_tier="", reviewer_id="", preface=True,
+    )
+    module.prepare_resume(args)
+    assert args.model == "opencode/deepseek-v4.1-flash-free#high" and args.effort == "high"
 
 
 def test_prepare_resume_refuses_a_read_root_that_now_resolves_elsewhere(tmp_path: Path):
@@ -2847,9 +2917,11 @@ print(json.dumps({"type":"result","result":os.getcwd()}))
     command[command.index(str(prompt))] = str(brief)
     command += ['--cwd', str(other / 'src'), '--no-preface']
 
-    refused = subprocess.run(command, cwd=workspace, capture_output=True, text=True)
+    refused_run = make_run(workspace, 'outside-refused')
+    refused_command = [str(refused_run) if arg == str(run) else arg for arg in command]
+    refused = subprocess.run(refused_command, cwd=workspace, capture_output=True, text=True)
     assert refused.returncode != 0
-    assert 'read root' in refused.stdout + refused.stderr
+    assert json.loads(refused.stdout)['status'] == 'failed'
 
     # A non-canonical root is resolved before use and saved canonical, so resume accepts it.
     result = subprocess.run([*command, '--read-root', str(other / 'src' / '..')], cwd=workspace,
@@ -3927,6 +3999,7 @@ def test_provider_exec_failures_are_not_router_refusals():
 
 
 def _run_fake_codex(tmp_path: Path, name: str, body: str, extra_env: dict[str, str] | None = None):
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, name)
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Reply exactly OK\n", encoding="utf-8")
@@ -4093,3 +4166,22 @@ def test_dispatch_retains_quarantined_result_without_clean_success(tmp_path, mon
         monkeypatch.setenv('PROVENANT_RUN_DIR', str(run_dir))
         module.close_mcp_run(run_dir)
         assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'quarantined'
+
+
+def test_preflight_types_an_opencode_below_v2_as_unsupported_cli_version(monkeypatch, tmp_path):
+    module = load_dispatch_module()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    monkeypatch.setenv("PROVENANT_REMOTE_LANE", "1")
+    monkeypatch.setattr(module, "_fabric_hosts_owner", lambda: SimpleNamespace(
+        adapter_doctor=lambda *_: {"signin": {"status": "ok"}}))
+    monkeypatch.setattr(module.provider_exec, "_opencode_version_error",
+                        lambda *_: "OpenCode 1.14.2 is unsupported; fix: upgrade OpenCode to v2")
+    task = {"id": "old", "adapter": "opencode", "model": "opencode/deepseek-v4.1-flash-free", "prompt": "hello"}
+
+    result = module.preflight_tasks([task], tmp_path)
+
+    assert result["status"] == "rejected"
+    assert result["error"] == "unsupported_cli_version"
+    assert "upgrade OpenCode to v2" in result["fix"]
