@@ -6223,3 +6223,11 @@ def test_opencode_v2_structured_error_log_lines_are_fatal_and_info_is_not():
     assert re.search(fatal, "timestamp=2026-10-16T07:38:10.410Z level=ERROR run=ab message=boom", re.I | re.M)
     assert not re.search(fatal, 'timestamp=2026-10-16T07:38:10.410Z level=INFO run=ab message="cli starting"', re.I | re.M)
     assert re.match(quiet, "timestamp=x level=WARN message=y")
+
+
+def test_opencode_v2_free_quota_event_is_rate_limited():
+    event = {"type": "error", "sessionID": "ses_1", "error": {
+        "type": "provider.quota", "message": "Rate limit exceeded. Please try again later.", "status": 429,
+        "response": {"body": json.dumps({"type": "error", "error": {"type": "FreeUsageLimitError"}})}}}
+    parsed = supervisor().parse_output("opencode", json.dumps(event) + "\n", "", 1)
+    assert parsed["status"] == "rate_limited"

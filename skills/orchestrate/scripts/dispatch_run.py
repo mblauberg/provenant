@@ -891,7 +891,8 @@ def parse_fast_route_json(raw: str) -> dict:
 
 
 PLANNER_MODEL_STATUSES = {"capability_model_unavailable", "no_candidate_available", "alias_unavailable",
-                          "adapter_default_model_invalid", "model_required_for_broker"}
+                          "adapter_default_model_invalid", "model_required_for_broker",
+                          "model_ambiguous", "model_not_found"}
 PLANNER_TRANSIENT_STATUSES = {"capability_discovery_failed", "capability_snapshot_untrusted",
                               "capability_snapshot_stale", "probe_unavailable", "probe_cache_busy"}
 
@@ -913,14 +914,16 @@ def route_refusal(record, adapter=""):
     status = record.get("status")
     if not status or status in TERMINAL_STATUSES or "provenance" in record or record.get("schema") == "fabric.exec-plan.v1":
         return None
-    return router_failure(str(status), adapter)
+    return router_failure(str(status), adapter, record.get("message"))
 
 
-def router_failure(signature, adapter=""):
+def router_failure(signature, adapter="", message=None):
     """Fabric's status and fix for a router refusal; the router's own status stays the signature."""
     if signature in PLANNER_MODEL_STATUSES:
         status = "model_unavailable"
         fix = provider_exec._model_unavailable_fix({"adapter": adapter, "route": {"identity_source": "passed-through"}})
+        if signature in {"model_ambiguous", "model_not_found"} and isinstance(message, str) and message:
+            fix = message[:600]
     elif signature in PLANNER_TRANSIENT_STATUSES:
         status, fix = "failed", f"provider capability check failed ({signature}); check the provider CLI login and retry"
     else:

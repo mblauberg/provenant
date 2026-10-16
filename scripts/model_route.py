@@ -869,6 +869,43 @@ def _fallback_candidates(
     return results
 
 
+def _opencode_live_models() -> list[str]:
+    """Ids from the cached `opencode models` probe; empty when the CLI or listing is unavailable."""
+    try:
+        record, _ = probe_capabilities("opencode", "opencode", time.monotonic() + 25, listing_only=True)
+    except Exception:  # noqa: BLE001 - discovery must never break routing
+        return []
+    models = record.get("models") if isinstance(record, dict) else None
+    return [item for item in models if isinstance(item, str)] if isinstance(models, list) else []
+
+
+def _resolve_opencode_name(requested: str, live: list[str]) -> tuple[str | None, list[str], dict[str, Any] | None]:
+    """Resolve a bare uncatalogued name (`kimi`, `qwen3.8-flash`) against the live listing.
+
+    Returns (model, notes, refusal). An exact name after the provider prefix wins; a unique
+    name-prefix match is allowed with a note; several matches or none are typed refusals.
+    """
+    token = requested.casefold()
+    if not live or "/" in requested or "#" in requested or not token:
+        return None, [], None
+    tails = [(item, item.split("/", 1)[-1].casefold()) for item in live]
+    exact = [item for item, tail in tails if tail == token]
+    near = exact or [item for item, tail in tails if tail.startswith(token)]
+    if len(near) == 1:
+        how = "" if exact else " (unique prefix match)"
+        return near[0], [f"{requested} resolved to {near[0]} from the live opencode listing{how}"], None
+    if near:
+        return None, [], {"status": "model_ambiguous", "candidates": near[:12],
+                          "message": f"{requested} matches several opencode models: {', '.join(near[:12])}; "
+                                     "fix: pass the full provider/model id"}
+    closest = difflib.get_close_matches(token, [tail for _, tail in tails], n=3)
+    names = [item for item, tail in tails if tail in closest]
+    hint = f" Closest: {', '.join(names)}." if names else ""
+    return None, [], {"status": "model_not_found", "candidates": names,
+                      "message": f"{requested} is not an opencode model.{hint} "
+                                 "fix: run `opencode models` and pass a full provider/model id"}
+
+
 def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     requested = args.model or (args.alias if args.alias not in ALIAS_ORDER else "")
     adapter_name = args.adapter or (_owner_adapter(requested, catalog) if requested else "codex")
@@ -901,8 +938,28 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if not requested:
         return emit({"schema_version": 1, "status": "model_required_for_broker", "adapter": adapter_name,
                      "message": "No model default; fix: pass --model"}, 2)
+    if adapter_name == "opencode" and "#" in requested:
+        # `provider/model#variant`: the variant is OpenCode's own effort knob, sent as given.
+        requested, _, variant = requested.partition("#")
+        if variant and not args.effort:
+            args.effort = variant
+            args.explicit_variant = True
+            explicit = True
     registered, match_notes = _registered_match(adapter_name, requested, catalog)
     notes.extend(match_notes)
+    live_models: list[str] = []
+    live_resolved = False
+    if adapter_name == "opencode" and registered is None and requested.casefold() != "auto":
+        live_models = _opencode_live_models()
+        resolved_name, name_notes, refusal = _resolve_opencode_name(requested, live_models)
+        if refusal:
+            return emit({"schema_version": 1, "adapter": adapter_name, **refusal}, 2)
+        if resolved_name:
+            requested = resolved_name
+            live_resolved = True
+            notes.extend(name_notes)
+            registered, match_notes = _registered_match(adapter_name, requested, catalog)
+            notes.extend(match_notes)
     model = registered["id"] if registered else requested
     aliases = adapter.get("aliases", {})
     if not aliases and adapter.get("fixed_model_family"):
@@ -912,7 +969,11 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     )
     # `auto` is the provider's own chooser; a provider prefix is not a new model.
     provider_auto = requested.casefold() == "auto"
-    if registered is None and not provider_auto:
+    if registered is None and not provider_auto and live_resolved:
+        pass  # already named by the live listing; no registry warning
+    elif registered is None and not provider_auto and adapter_name == "opencode" and requested in live_models:
+        notes.append(f"{requested} is not in the Fabric catalogue but is in the live opencode listing; run as given")
+    elif registered is None and not provider_auto:
         registered_ids = registered_model_ids(adapter)
         registry = ", ".join(registered_ids[:6])
         if len(registered_ids) > 6:
@@ -966,9 +1027,16 @@ def resolve_ordinary(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
         effort = requested_effort if requested_effort in EFFORT_ORDER else "medium"
         unverified_effort = True
         notes.append(f"{effort} effort passed through to {model}; provider support unverified")
+    elif requested_effort and adapter_name == "opencode" and (registered is None or getattr(args, "explicit_variant", False)):
+        # OpenCode variants are model-specific and not listed by the CLI: send the one asked for;
+        # OpenCode refuses an unknown variant with a typed error.
+        effort = requested_effort
+        unverified_effort = True
+        notes.append(f"{effort} sent as variant #{effort} to {model}; OpenCode rejects variants the model lacks")
     elif requested_effort:
         # Nothing reaches the provider, so nothing is claimed: applied stays empty.
-        notes.append(_effort_ignored(requested_effort, model))
+        notes.append(_effort_ignored(requested_effort, model)
+                     + ("; to force a variant pass model#variant" if adapter_name == "opencode" else ""))
     if registered and registered.get("effort_transport") == "model-suffix" and effort != "default":
         model += registered.get("suffix", {}).get(effort, "")
     training_model = training_flag(adapter, registered)
@@ -1256,7 +1324,8 @@ def resolve_effort(
     elif args.capability_models and model.lower() not in args.capability_models:
         return None, "", "capability_model_unavailable", "runtime-model-catalog"
     # A model with no effort control is sent none: warn, don't block.
-    if args.effort_transport != "none" and _no_effort_control(registered):
+    if (args.effort_transport != "none" and _no_effort_control(registered)
+            and not getattr(args, "explicit_variant", False)):
         return "", _effort_ignored(requested_effort, model), "", "registry-no-effort-control"
 
     ultra_eligible = (
