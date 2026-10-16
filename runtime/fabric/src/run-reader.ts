@@ -23,6 +23,7 @@ export interface RunRead {
   route: string | null;
   model: string | null;
   started_at: string | null;
+  ended_at: string | null;
   last_progress_at: string | null;
   pgid: number | null;
   pgid_alive: boolean | null;
@@ -64,8 +65,8 @@ function rootPath(root: string, runDir: string, value: unknown): string | null {
   let canonicalRunDir: string;
   try {
     if (missing.length && !statSync(ancestor).isDirectory()) return null;
-    candidate = resolve(realpathSync(ancestor), ...missing);
-    canonicalRunDir = realpathSync(runDir);
+    candidate = resolve(realpathSync.native(ancestor), ...missing);
+    canonicalRunDir = realpathSync.native(runDir);
   } catch { return null; }
   const local = relative(canonicalRunDir, candidate);
   const rel = relative(root, candidate);
@@ -96,7 +97,7 @@ export async function readRuns(
     const source = await statusRows(workspace, ids, waitSeconds, "all", signal, "brief", false, null, includeHistory);
     if (!source.runs) return { schema: "fabric.runs.v1", status: "unknown" as const,
       error: String(source.error ?? "run_read_failed"), runs: [] as RunRead[] };
-    const root = existsSync(runRoot(workspace)) ? realpathSync(runRoot(workspace)) : resolve(runRoot(workspace));
+    const root = existsSync(runRoot(workspace)) ? realpathSync.native(runRoot(workspace)) : resolve(runRoot(workspace));
     const runs: RunRead[] = source.runs.map((row) => {
       const runDir = String(row.run_dir);
       const latest = Array.isArray(row.attempts) ? row.attempts.at(-1) : undefined;
@@ -130,6 +131,7 @@ export async function readRuns(
           ? `${adapter}/${model}${typeof effort === "string" ? `@${effort}` : ""}` : null,
         model: typeof model === "string" ? model : null,
         started_at: typeof row.started_at === "string" ? row.started_at : null,
+        ended_at: typeof row.ended_at === "string" ? row.ended_at : null,
         last_progress_at: typeof row.last_progress_at === "string" ? row.last_progress_at : null,
         pgid: typeof row.pgid === "number" ? row.pgid : provider?.provider_pgid ?? owner?.owner_pgid ?? null,
         pgid_alive: pid === undefined || started == null ? null
@@ -165,7 +167,7 @@ export async function readEvents(workspace: string, cursor?: string, messages: M
     : { runs: {}, messages: [] };
   const source = await statusRows(workspace, undefined, 0, "all", undefined, "brief", false);
   if (!source.runs) return { schema: "fabric.events.v1", status: "unknown", error: source.error, events: [], cursor: cursor ?? "" };
-  const root = existsSync(runRoot(workspace)) ? realpathSync(runRoot(workspace)) : resolve(runRoot(workspace));
+  const root = existsSync(runRoot(workspace)) ? realpathSync.native(runRoot(workspace)) : resolve(runRoot(workspace));
   const key = (id: string) => createHash("sha256").update(id).digest("hex").slice(0, 16);
   const runMarks: Record<string, [number, string]> = {};
   const events: Record<string, unknown>[] = [];

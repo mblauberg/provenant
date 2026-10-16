@@ -1,5 +1,5 @@
 /** Fixed peer boundary. Provider mechanics remain with the local owners. */
-import { readFileSync, writeFileSync } from "node:fs";
+import { closeSync, readFileSync, writeFileSync } from "node:fs";
 import { identify, databasePath } from "./identity.js";
 import { dispatchConfiguredProvider, dispatchConfiguredBatch, cancelConfiguredRun, hostOwnersInThemselves, releaseActiveExecutions } from "./execution.js";
 import { statusRows, fabricOutput } from "./run-registry.js";
@@ -12,8 +12,17 @@ const request = JSON.parse(readFileSync(process.argv[2]!, "utf8"));
 const identity = identify();
 const signal = new AbortController().signal;
 hostOwnersInThemselves();
+// The caller's operation lock, shared until the launch is recorded. Releasing
+// it before any owner starts keeps detached owners from inheriting it.
+let lockFd: number | null = Number(process.env.PROVENANT_OPERATION_LOCK_FD ?? "");
+delete process.env.PROVENANT_OPERATION_LOCK_FD;
+const recorded = () => {
+  if (lockFd !== null && Number.isInteger(lockFd) && lockFd > 2) try { closeSync(lockFd); } catch { /* already closed */ }
+  lockFd = null;
+};
 const launch = { onLaunch: (value: unknown) => {
   if (request.launch_path) writeFileSync(request.launch_path, JSON.stringify(value), { mode: 0o600 });
+  recorded();
 } };
 let result: unknown;
 try {
@@ -41,6 +50,7 @@ try {
       if (request.launch_path && current.runs?.length) writeFileSync(request.launch_path, JSON.stringify({
         targets: current.runs.map((row) => ({ runId: row.run_id, taskId: row.task_id, attempt: row.attempt })),
       }), { mode: 0o600 });
+      recorded();
       result = await cancelConfiguredRun(input.id, identity, input.reason);
       break;
     }

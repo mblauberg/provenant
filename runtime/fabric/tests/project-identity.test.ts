@@ -1,6 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import {
-  cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync,
+  cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -11,6 +11,8 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import { identify, projectRoot } from "../src/identity.js";
+import { workingIdentity } from "../src/execution-input.js";
+import { Store } from "../src/store.js";
 
 const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
@@ -80,6 +82,37 @@ beforeEach(() => {
 afterEach(() => rmSync(fixture, { recursive: true, force: true }));
 
 describe("project identity", () => {
+  it.for(["Git", "directory"])("accepts alternate-case cwd for a registered %s project", (kind, context) => {
+    const project = join(fixture, "CaseProject");
+    const alternate = join(fixture, "cASEpROJECT");
+    mkdirSync(project);
+    try {
+      if (!statSync(alternate).isDirectory()) return context.skip();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return context.skip();
+      throw error;
+    }
+    if (kind === "Git") initialise(project, "README");
+
+    const trueCase = realpathSync.native(project);
+    const state = join(fixture, "case-state");
+    const announced = runCli(trueCase, state, "worker", "whoami");
+    expect(announced.status, announced.stderr).toBe(0);
+    const store = new Store(join(state, "fabric.sqlite3"));
+    try {
+      const caller = { ...identify({ AGENT_FABRIC_SEAT: "codex" }, separate), registeredProjects: store.projects() };
+      expect(caller.registeredProjects).toEqual([trueCase]);
+      expect(workingIdentity({ cwd: alternate }, caller).cwd).toBe(trueCase);
+      expect(projectRoot(alternate)).toBe(trueCase);
+      const worker = identify({ AGENT_FABRIC_SEAT: "codex", AGENT_FABRIC_LABEL: "worker" }, alternate);
+      expect(worker).toMatchObject({ project: trueCase, cwd: trueCase });
+      store.announce(worker);
+      expect(store.projects()).toEqual([trueCase]);
+    } finally {
+      store.close();
+    }
+  });
+
   it("shares persistent MCP and CLI coordination across registered worktrees", async () => {
     const chair = identify({
       AGENT_FABRIC_SEAT: "codex",

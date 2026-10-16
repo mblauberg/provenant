@@ -121,7 +121,7 @@ def test_agy_gemini_keeps_its_supported_effort(tmp_path):
 def test_other_models_without_effort_control_ignore_effort(tmp_path, adapter, model):
     route = resolve("--adapter", adapter, "--model", model, "--role", "worker", "--effort", "high")
     assert route["effort_applied"] == ""
-    assert any(note.startswith("effort high ignored: ") and note.endswith(" has no effort control")
+    assert any(note.startswith("effort high ignored: ") and " has no effort control" in note
                for note in route["notes"])
     plan = planned(adapter, route, tmp_path, requested_effort="high")
     assert effort_argv(plan) == []

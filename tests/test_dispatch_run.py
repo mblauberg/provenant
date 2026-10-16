@@ -285,7 +285,8 @@ def test_preflight_honours_policy_secret_scan_exclusions(tmp_path, monkeypatch):
 
 def test_secret_scan_budget_skips_vendored_build_and_large_binary_before_counting(tmp_path, monkeypatch):
     scan = load_secret_scan_module()
-    for dirname in ("node_modules", ".venv", "dist", "build", "coverage", ".agent-run"):
+    for dirname in ("node_modules", ".venv", "dist", "build", "coverage", ".agent-run",
+                    "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", ".next", ".turbo"):
         target = tmp_path / dirname
         target.mkdir()
         (target / "ignored.txt").write_text("ordinary")
@@ -307,6 +308,19 @@ def test_secret_scan_budget_fix_names_offending_directory(tmp_path, monkeypatch)
     assert result.budget_exceeded
     assert str(directory) in result.fix()
     assert "narrower" in result.fix()
+
+
+def test_secret_scan_budget_names_largest_files_including_the_file_over_the_limit(tmp_path, monkeypatch):
+    scan = load_secret_scan_module()
+    for index, size in enumerate((20, 10, 80, 5)):
+        (tmp_path / f"scratch-{index}.txt").write_text("x" * size)
+    monkeypatch.setattr(scan, "MAX_TOTAL_BYTES", 100)
+    result = scan.scan_inputs(b"hello", "<prompt>", [str(tmp_path)])
+    assert result.budget_exceeded
+    fix = result.fix()
+    assert "largest files" in fix
+    assert "scratch-2.txt" in fix and "scratch-0.txt" in fix
+    assert "add_dirs" in fix and "allow_secrets" in fix
 
 
 def test_secret_scan_skips_git_metadata_file(tmp_path):
@@ -676,6 +690,22 @@ def test_explicit_model_receipt_does_not_record_an_implied_alias(tmp_path):
     )
     row = mod.contract_row(args, tmp_path, 1, tmp_path / "attempt", {}, "now")
     assert row["provenance"]["requested"]["alias"] == ""
+
+
+def test_config_fallback_detail_is_persisted_in_the_attempt_record(tmp_path, monkeypatch):
+    mod = load_dispatch_module()
+    args = SimpleNamespace(
+        tool="opencode", alias="workhorse", model="gpt-6-luna", alias_supplied=True,
+        effort=None, task_id="dispatch-001", access_mode="read_only", worktree=None,
+        _phase_timings={}, reviewer_id=None, risk_tier=None,
+        model_override_tier=None,
+    )
+    fallback = {"from_host": "hosts.json", "reason": "invalid_config", "detail": "Response deadline must be positive and finite"}
+    monkeypatch.setenv("PROVENANT_PLACEMENT_FALLBACK", json.dumps(fallback))
+    plan = {}
+    row = mod.contract_row(args, tmp_path, 1, tmp_path / "attempt", plan, "now")
+    assert row["placement_fallback"] == fallback
+    assert plan["warnings"] == ["local fallback from hosts.json: invalid_config: Response deadline must be positive and finite"]
 
 
 def test_explicit_model_and_alias_are_both_recorded_in_receipt(tmp_path):
@@ -2712,6 +2742,7 @@ def test_preflight_accepts_a_prompt_file_only_inside_a_read_root(tmp_path, monke
     monkeypatch.chdir(workspace)
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
     module = load_dispatch_module()
+    monkeypatch.setattr(module, "prompt_temp_roots", lambda: ())
     prompt = other / 'brief.md'
     prompt.write_text('read the other project')
     task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt)}
@@ -2721,6 +2752,33 @@ def test_preflight_accepts_a_prompt_file_only_inside_a_read_root(tmp_path, monke
     assert 'registered Fabric project' in rejected['fix']
     assert 'dispatch from it' in rejected['fix']
     assert module.preflight_tasks([{**task, 'read_roots': [str(other)]}], workspace)['status'] == 'validated'
+
+
+def test_preflight_accepts_temp_prompts_and_retains_secret_and_link_checks(tmp_path, monkeypatch):
+    workspace = tmp_path / 'workspace'
+    scratch = tmp_path / 'scratch'
+    workspace.mkdir()
+    scratch.mkdir()
+    monkeypatch.chdir(workspace)
+    monkeypatch.setenv('TMPDIR', str(scratch))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(ROOT))
+    module = load_dispatch_module()
+    prompt = scratch / 'brief.md'
+    prompt.write_text('hello')
+    task = {'id': 'task-1', 'adapter': 'claude', 'alias': 'workhorse', 'prompt_file': str(prompt)}
+    assert module.preflight_tasks([task], workspace)['status'] == 'validated'
+    prompt.write_text('AKIA' + 'A' * 16)
+    assert module.preflight_tasks([task], workspace)['error'] == 'secret_detected'
+    auth = scratch / '.codex' / 'auth.json'
+    auth.parent.mkdir()
+    auth.write_text('{}')
+    assert module.preflight_tasks([{**task, 'prompt_file': str(auth)}], workspace)['error'] == 'credential_or_auth_store_denied'
+    link = scratch / 'linked.md'
+    link.symlink_to(auth)
+    assert module.preflight_tasks([{**task, 'prompt_file': str(link)}], workspace)['error'] == 'credential_or_auth_store_denied'
+    linked = scratch / 'hardlinked.md'
+    linked.hardlink_to(prompt)
+    assert module.preflight_tasks([{**task, 'prompt_file': str(linked)}], workspace)['error'] == 'prompt_hard_link_denied'
 
 
 def test_preflight_scans_a_read_root_prompt_for_secrets(tmp_path, monkeypatch):
@@ -2754,6 +2812,34 @@ def test_preflight_refuses_a_credential_store_prompt_in_any_root(tmp_path, monke
     for prompt, roots in ((auth, [str(other)]), (local, [])):
         result = module.preflight_tasks([{**task, 'prompt_file': str(prompt), 'read_roots': roots}], workspace)
         assert result['error'] == 'credential_or_auth_store_denied', prompt
+
+
+def test_prepare_resume_keeps_an_opencode_variant_as_model_hash_variant(tmp_path: Path):
+    module = load_dispatch_module()
+    run_dir = make_run(tmp_path, "resume-variant")
+    attempt_dir = run_dir / "tasks/task-1/attempt-001"
+    attempt_dir.mkdir(parents=True)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+    previous = {
+        "run_id": "resume-me", "task_id": "task-1", "attempt": 1, "state": "terminal",
+        "status": "ok", "mode": "read_only", "cwd": str(workspace), "worktree": None,
+        "workspace": {"root": str(workspace)}, "session_id": "saved-session", "read_roots": [],
+        "provenance": {"requested": {"adapter": "opencode"}, "resolved_model": "opencode/deepseek-v4.1-flash-free",
+                       "effort_applied": "high"},
+        "applied": {"sandbox": "read-only", "network": None, "add_dirs": [], "capabilities": []},
+        "paths": {"events": None}, "requested_route": {},
+    }
+    (attempt_dir / "attempt.json").write_text(json.dumps(previous), encoding="utf-8")
+    args = SimpleNamespace(
+        run_dir=run_dir, resume="resume-me", task_id=None, tool=None, model=None, effort=None,
+        access_mode=None, worktree=None, provider_cwd=None, sandbox=None, network=None,
+        add_dirs=[], resume_session=None, fallback=None, context_ceiling=None,
+        intent="ordinary", orchestrator_family="", role="worker", risk_tier="",
+        model_override_tier="", reviewer_id="", preface=True,
+    )
+    module.prepare_resume(args)
+    assert args.model == "opencode/deepseek-v4.1-flash-free#high" and args.effort == "high"
 
 
 def test_prepare_resume_refuses_a_read_root_that_now_resolves_elsewhere(tmp_path: Path):
@@ -2802,9 +2888,11 @@ print(json.dumps({"type":"result","result":os.getcwd()}))
     command[command.index(str(prompt))] = str(brief)
     command += ['--cwd', str(other / 'src'), '--no-preface']
 
-    refused = subprocess.run(command, cwd=workspace, capture_output=True, text=True)
+    refused_run = make_run(workspace, 'outside-refused')
+    refused_command = [str(refused_run) if arg == str(run) else arg for arg in command]
+    refused = subprocess.run(refused_command, cwd=workspace, capture_output=True, text=True)
     assert refused.returncode != 0
-    assert 'read root' in refused.stdout + refused.stderr
+    assert json.loads(refused.stdout)['status'] == 'failed'
 
     # A non-canonical root is resolved before use and saved canonical, so resume accepts it.
     result = subprocess.run([*command, '--read-root', str(other / 'src' / '..')], cwd=workspace,
@@ -3096,6 +3184,88 @@ def real_owner_fixture(tmp_path, monkeypatch, code):
     command = [sys.executable, str(SCRIPT), '--run-dir', str(run), '--adapter', 'claude',
                '--model', 'opus', '--prompt-file', str(prompt), '--fallback', 'false']
     return run, prompt, command
+
+
+def test_local_writer_launch_does_not_read_the_host_configuration(tmp_path, monkeypatch):
+    code = '''import json,sys
+sys.stdin.read()
+print(json.dumps({'type':'system','subtype':'init','session_id':'writer-session','model':'opus'}))
+print(json.dumps({'type':'result','result':'DONE'}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path)
+    instance = tmp_path / 'writer-instance'
+    (instance / '.agent-fabric/writer-owners').mkdir(parents=True)
+    (instance / '.agent-fabric/hosts.json').write_text('{broken')
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(instance))
+    monkeypatch.setenv('PROVENANT_HOST_LOCAL_ONLY', '1')
+    monkeypatch.delenv('PROVENANT_RUN_ID', raising=False)
+    result = subprocess.run([*command, '--access-mode', 'worktree_write', '--worktree', str(worktree)],
+                            cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize('ownership', ['current', 'superseded', 'unresolved', 'stale'])
+def test_local_writer_resume_requires_its_durable_context_owner(tmp_path, monkeypatch, ownership):
+    """A transported run needs its claim; an ordinary local writer clears a stale one."""
+    code = '''import json,sys
+from pathlib import Path
+sys.stdin.read()
+Path('provider-launched.txt').write_text('writer ran')
+print(json.dumps({'type':'system','subtype':'init','session_id':'writer-session','model':'opus'}))
+print(json.dumps({'type':'result','result':'DONE'}))
+'''
+    run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
+    worktree = make_worktree(tmp_path)
+    instance = tmp_path / 'writer-instance'
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(instance))
+    monkeypatch.setenv('PROVENANT_HOST_LOCAL_ONLY', '1')
+    monkeypatch.delenv('PROVENANT_RUN_ID', raising=False)
+    first = subprocess.run([*command, '--access-mode', 'worktree_write', '--worktree', str(worktree)],
+                           cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    assert first.returncode == 0, first.stdout + first.stderr
+    previous = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
+    provider_effect = worktree / 'provider-launched.txt'
+    assert provider_effect.exists()
+    provider_effect.unlink()
+    git_dir = subprocess.check_output(
+        ['git', '-C', str(worktree), 'rev-parse', '--absolute-git-dir'], text=True).strip()
+    state = instance / '.agent-fabric'
+    owners = state / 'writer-owners'
+    owners.mkdir(parents=True)
+    operations = state / 'operations'
+    operations.mkdir()
+    marker = owners / (hashlib.sha256(git_dir.encode()).hexdigest() + '.json')
+    operation = 'current-writer' if ownership in {'current', 'stale'} else 'replacement-writer'
+    marker.write_text(json.dumps({'operation_id': operation}))
+    if ownership != 'stale':
+        # A peer operation launched this run for a transported writer.
+        (operations / 'current-writer.json').write_text(json.dumps({
+            'runId': previous['run_id'], 'taskId': 'dispatch-001', 'attempt': 1}))
+        (state / 'writer-contexts').mkdir()
+        (state / 'writer-contexts/current-writer.json').write_text('[]')
+    if ownership == 'superseded':
+        (operations / 'replacement-writer.json').write_text(json.dumps({
+            'runId': 'mcp-replacement', 'taskId': 'dispatch-001', 'attempt': 1}))
+    resumed = subprocess.run([sys.executable, str(SCRIPT), '--run-dir', str(run),
+                              '--resume', previous['run_id'], '--prompt-file', str(prompt)],
+                             cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    if ownership in {'current', 'stale'}:
+        assert resumed.returncode == 0, resumed.stdout + resumed.stderr
+        assert provider_effect.exists()
+        assert (run / 'tasks/dispatch-001/attempt-002/attempt.json').is_file()
+    else:
+        assert resumed.returncode != 0, resumed.stdout + resumed.stderr
+        assert json.loads(resumed.stdout)['error'] == 'writer_context_superseded'
+        assert not provider_effect.exists()
+        assert not (run / 'tasks/dispatch-001/attempt-002/attempt.json').exists()
+    if ownership == 'stale':
+        assert not marker.exists()
+    else:
+        assert json.loads(marker.read_text()) == {'operation_id': operation}
+    lease_owner = load_dispatch_module()
+    lease = lease_owner.acquire_worktree_lease(worktree)
+    lease_owner.release_worktree_lease(lease)
 
 
 def test_normal_attempt_records_reaped_new_session_child(tmp_path, monkeypatch):
@@ -3800,6 +3970,7 @@ def test_provider_exec_failures_are_not_router_refusals():
 
 
 def _run_fake_codex(tmp_path: Path, name: str, body: str, extra_env: dict[str, str] | None = None):
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, name)
     prompt = tmp_path / "prompt.md"
     prompt.write_text("Reply exactly OK\n", encoding="utf-8")
@@ -3826,6 +3997,42 @@ def _run_fake_codex(tmp_path: Path, name: str, body: str, extra_env: dict[str, s
     return run_dir / "dispatch/tasks/task-1/attempt-001", result
 
 
+def _invalid_hosts_env(tmp_path: Path, config: dict) -> dict[str, str]:
+    state = tmp_path / ".agents/.agent-fabric"
+    state.mkdir(parents=True)
+    (state / "hosts.json").write_text(json.dumps(config))
+    return {"HOME": str(tmp_path), "AGENT_FABRIC_INSTANCE_ROOT": str(tmp_path / ".agents"),
+            "AGENT_FABRIC_STATE_DIRECTORY": str(tmp_path / "state"), "PROVENANT_HOST_LOCAL_ONLY": "0"}
+
+
+@pytest.mark.parametrize("config", [
+    {"schema_version": 1, "local_host": "here", "peers": {"there": {"ssh_destination": "there", "response_deadline": 0}}},
+    {"schema_version": 1, "local_host": "here", "projects": {"/absolute/project": {}}},
+])
+def test_cli_dispatch_runs_locally_and_reports_an_invalid_hosts_config(tmp_path: Path, config) -> None:
+    env = _invalid_hosts_env(tmp_path, config)
+    attempt, result = _run_fake_codex(tmp_path, "badcfg", "printf 'OK\\n'\n", env)
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "local fallback" in result.stderr and "invalid_config" in result.stderr
+    row = json.loads((attempt.parents[3] / "tasks/task-1/attempt-001/attempt.json").read_text())
+    assert row["placement_fallback"]["reason"] == "invalid_config"
+    assert row["placement_fallback"]["detail"]
+
+
+def test_cli_dispatch_to_an_explicit_peer_still_rejects_with_invalid_hosts_config(tmp_path: Path) -> None:
+    env = _invalid_hosts_env(tmp_path, {"schema_version": 1, "local_host": "here", "peers": {
+        "there": {"ssh_destination": "there", "response_deadline": 0}}})
+    run_dir = make_run(tmp_path, "explicit")
+    prompt = tmp_path / "prompt.md"
+    prompt.write_text("hi\n")
+    result = subprocess.run(
+        [str(SCRIPT), "--run-dir", str(run_dir), "--task-id", "task-1", "--adapter", "codex", "--host", "there",
+         "--prompt-file", str(prompt), "--orchestrator-family", "openai", "--alias", "workhorse", "--role", "worker"],
+        cwd=tmp_path, env={**os.environ, **env}, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    assert result.returncode == 1
+    assert json.loads(result.stdout)["error"] == "unknown_host"
+
+
 def test_terminal_ok_attempt_prunes_private_tmp_but_keeps_records(tmp_path: Path) -> None:
     outside = tmp_path / "outside.txt"
     outside.write_text("keep\n")
@@ -3848,6 +4055,39 @@ def test_keep_attempt_tmp_env_retains_private_tmp(tmp_path: Path) -> None:
         {"PROVENANT_KEEP_ATTEMPT_TMP": "1"})
     assert result.returncode == 0, result.stderr + result.stdout
     assert (attempt / "tmp/note").is_file()
+
+@pytest.mark.parametrize(('signin', 'sandbox', 'expected'), [
+    (0, 'workspace-write', 'validated'),
+    (1, 'workspace-write', 'remote_signin_unusable'),
+    (0, 'full', 'remote_confinement_degraded'),
+])
+def test_remote_writer_preflight_uses_host_signin_and_effective_writer_confinement(tmp_path, monkeypatch, signin, sandbox, expected):
+    """Exercise the real preflight with only provider/routing process fixtures."""
+    module = load_dispatch_module()
+    repo = tmp_path / 'project'
+    repo.mkdir()
+    subprocess.run(['git', '-C', str(repo), 'init', '-q'], check=True)
+    subprocess.run(['git', '-C', str(repo), '-c', 'user.name=Fixture',
+        '-c', 'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'base'], check=True)
+    worktree = repo / '.worktrees/feat-writer'
+    subprocess.run(['git', '-C', str(repo), 'worktree', 'add', '-qb', 'feat/writer', str(worktree)], check=True)
+    binary = tmp_path / 'bin/codex'
+    binary.parent.mkdir()
+    write_executable(binary, '#!/bin/sh\necho ' + ('Not logged in' if signin else 'Logged in') + '\nexit ' + str(signin) + '\n')
+    monkeypatch.setenv('PATH', str(binary.parent) + os.pathsep + os.environ['PATH'])
+    monkeypatch.setenv('PROVENANT_REMOTE_LANE', '1')
+    monkeypatch.setenv('AGENT_FABRIC_PRODUCT_ROOT', str(ROOT))
+    original_run = subprocess.run
+    def process(command, **kwargs):
+        if any(str(part).endswith('model_route.py') for part in command):
+            return subprocess.CompletedProcess(command, 0, json.dumps({
+                'status': 'ok', 'adapter': 'codex', 'resolved_model': 'gpt-6.1-sol',
+                'provider_family': 'openai', 'execution_intent': 'ordinary', 'notes': []}), '')
+        return original_run(command, **kwargs)
+    monkeypatch.setattr(module.subprocess, 'run', process)
+    value = module.preflight_tasks([{'id': 'writer', 'adapter': 'codex', 'model': 'gpt-6.1-sol',
+        'access_mode': 'worktree_write', 'worktree': str(worktree), 'sandbox': sandbox, 'prompt': 'fixture only'}], repo)
+    assert (value.get('error') or value['status']) == expected, value
 
 
 @pytest.mark.parametrize('invalid_digest', [False, True])
@@ -3897,3 +4137,22 @@ def test_dispatch_retains_quarantined_result_without_clean_success(tmp_path, mon
         monkeypatch.setenv('PROVENANT_RUN_DIR', str(run_dir))
         module.close_mcp_run(run_dir)
         assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'quarantined'
+
+
+def test_preflight_types_an_opencode_below_v2_as_unsupported_cli_version(monkeypatch, tmp_path):
+    module = load_dispatch_module()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    monkeypatch.setenv("PROVENANT_REMOTE_LANE", "1")
+    monkeypatch.setattr(module, "_fabric_hosts_owner", lambda: SimpleNamespace(
+        adapter_doctor=lambda *_: {"signin": {"status": "ok"}}))
+    monkeypatch.setattr(module.provider_exec, "_opencode_version_error",
+                        lambda *_: "OpenCode 1.14.2 is unsupported; fix: upgrade OpenCode to v2")
+    task = {"id": "old", "adapter": "opencode", "model": "opencode/deepseek-v4.1-flash-free", "prompt": "hello"}
+
+    result = module.preflight_tasks([task], tmp_path)
+
+    assert result["status"] == "rejected"
+    assert result["error"] == "unsupported_cli_version"
+    assert "upgrade OpenCode to v2" in result["fix"]

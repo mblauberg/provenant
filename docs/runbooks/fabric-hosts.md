@@ -7,8 +7,9 @@ Host diagnostics work over the user's OpenSSH configuration. Each host keeps
 its own instance state and provider sign-ins. The [accepted
 specification](../specs/fabric-hosts.md) and [ADR
 0026](../adr/0026-federate-fabric-across-own-hosts-over-ssh.md) own the design.
-Slices 1–2 provide configuration, diagnostics and remote read-only lanes.
-Writer code transport, messages, tasks, activity and landing follow in slices 3–5.
+Slices 1–3 provide configuration, diagnostics, remote lanes and writer code
+transport. Messages, tasks and activity follow in slice 4; home-host landing
+and work claims follow in slice 5.
 
 ## Configure each host
 
@@ -42,7 +43,7 @@ Writer code transport, messages, tasks, activity and landing follow in slices 3�
    file, the local name is `local`. Missing `peers` or an empty object means
    local-only operation. Project keys are primary checkout paths relative to
    home. An optional `modes` object overrides `default_host` for `read_only` or
-   `worktree_write`; remote writers are refused until slice 3. Defaults name
+   `worktree_write`. Defaults name
    the local host or a configured peer.
 3. Configure the SSH aliases yourself. The destination may be an alias or
    `user@alias`; options, whitespace and shell metacharacters are refused.
@@ -133,7 +134,10 @@ identity, version or diagnostic fields produce `bad_response`.
 Protocol version 1 accepts one UTF-8 JSON document on stdin, at most 65,536
 bytes, followed by EOF. The request has `protocol_version`, `verb` and optional
 `params`. The fixed verbs are `hello`, `doctor`, `dispatch`, `lanes`, `status`,
-`cancel`, `resume`, `handoff`, `output` and `operation`. Doctor accepts optional
+`cancel`, `resume`, `handoff`, `output`, `operation`, `git-have`,
+`git-upload`, `git-result` and `git-download`. Git verbs require an explicitly configured project and
+accept the same `project_path`/`input` envelope; callers cannot choose a ref
+namespace or shell command. Doctor accepts optional
 `project_path`; lane verbs require it and accept an `input` object. There is
 one newline-terminated JSON response on stdout:
 
@@ -221,7 +225,178 @@ Codex, agy and Claude seats use the same `fabric_dispatch`, `fabric_batch`,
 Dispatch/batch inputs accept `host` and `operation_id`; dispatch also accepts
 `resume` and `handoff`. Qualified IDs route read/control tools to their owner.
 
-## Verify slices 1–2
+## Transport a writer
+
+1. On both hosts, configure the project key, even when it has no placement
+   default: `"projects": {"Repos/project": {}}`. Git transfer refuses
+   unconfigured repositories. Both hosts need full, registered primary
+   checkouts at that home-relative path; shallow repositories and grafts are
+   refused.
+2. Create a chair worktree with the normal helper, using its branch-derived
+   name, and commit the base the writer should start from:
+
+   ```sh
+   provenant worktree create --new-branch feat/example
+   ```
+
+3. Dispatch the writer:
+
+   ```sh
+   provenant fabric dispatch --host workshop --mode worktree_write \
+     --worktree .worktrees/feat-example --prompt-file brief.md \
+     --adapter codex --id example-task
+   ```
+
+   The reply names the operation ID. Pass `--operation-id` only to retry the
+   same request.
+4. Wait for it to finish:
+
+   ```sh
+   provenant fabric lanes --wait --all example-task@workshop
+   ```
+
+5. Fetch the verified result. Fetch accepts the qualified operation, run or
+   task ID; a batch requires one writer task at a time.
+
+   ```sh
+   provenant fabric fetch example-task@workshop
+   ```
+
+6. Land it. Fetch imports the head into
+   `refs/provenant/hosts/<host>/<result>/result` and never moves a branch. Its
+   reply carries `merge_command`, also printed in the digest, which
+   fast-forwards the chair worktree:
+
+   ```sh
+   git -C ~/Repos/project/.worktrees/feat-example merge --ff-only \
+     refs/provenant/hosts/workshop/<result>/result
+   ```
+
+The MCP equivalents are `fabric_dispatch` with `host`, `mode`, `worktree` and
+`operation_id` (a `fabric_batch` carries these per task), followed by
+`fabric_fetch` with `id`. These operations use the same owner for Codex, agy
+and Claude chairs.
+
+### Errors
+
+| Code | Fix |
+| --- | --- |
+| `project_not_configured` | Add the project key to the receiving host's `hosts.json`. |
+| `worktree_required`, `worktree_invalid` (chair) | Pass a registered `.worktrees/<branch-derived-name>` linked worktree. |
+| `worktree_invalid` (peer) | The named peer worktree is unrelated, dirty or off its transported base. Fetch or remove it on the peer, or use another branch. |
+| `worktree_busy` | The named operation still owns the peer worktree. Wait for it, cancel it, or reconcile its operation ID with `lanes`. |
+| `writer_context_superseded` | A later operation owns the worktree. Continue the newest run. |
+| `code_transport_unsupported` | Unshallow the repository or remove its grafts. |
+| `code_transport_too_large` | The bundle exceeds 64 MiB. Fetch the project's main branch on the peer first, so only newer history travels. |
+| `code_transport_failed` | The message names the Git command, its last error line and the retry action. A chair input preparation failure before send, or a result fetch failure, can be repaired and retried with the same operation ID. A peer prelaunch rejection is journalled permanently: repair the peer, then dispatch with a new operation ID. |
+| `timeout`, `unreachable` | A peer call or Git command did not finish. A chair input preparation failure before send releases the writer binding and frozen inputs: retry with the same ID, or dispatch locally. A peer prelaunch rejection requires repair and a new operation ID. After send with an unknown outcome, see `launch_unknown`. |
+| `launch_unknown` | The request may have landed. Run `lanes`; it reconciles and resends frozen input only when the peer never recorded the operation. |
+| `launch_not_started` | The peer stopped before launching. Dispatch again with a new operation ID. |
+| `code_input_incomplete`, `code_input_missing` | The committed input did not arrive whole. Dispatch again with a new operation ID. |
+| `operation_conflict` | The operation ID already binds another request, host or input. Use a new ID. |
+| `writer_not_terminal` | Wait for the writer to finish. |
+| `writer_verification_failed` | Commit beyond the base, leave the peer worktree clean on its branch, and let the lane finish. |
+| `writer_binding_missing`, `code_result_ambiguous` | Select one writer by its qualified operation, run or task ID. |
+| `writer_head_mismatch`, `bad_response` | The peer's result contradicts its verification. Nothing was imported; investigate the peer. |
+
+### What travels
+
+Only the chair worktree's committed HEAD travels. The reply states that
+uncommitted changes were not transported. After contact, the chair offers the
+peer up to 64 first-parent ancestors of that base (`git-have`); the peer names
+the nearest one a local ref already reaches, and the bundle carries only the
+history after it. A peer with no shared history receives the full history.
+Verified results return as base-to-head bundles. Uploads travel in 32 KiB
+chunks and downloads in 512 KiB chunks, with a 64 MiB bundle limit, through the
+restricted peer entrypoint; GitHub is not involved, and neither host needs
+GitHub credentials. A peer that already fetched the project's main branch
+therefore receives a few commits even when the full history exceeds the limit.
+The peer publishes each chunk whole, so an interrupted upload resumes cleanly.
+Each host deletes its copy of the input bundle once the peer has consumed it.
+References live under `refs/provenant/hosts/`.
+
+The peer creates the worktree with its own helper, without dependency
+provisioning, and its dispatch owner holds the host-local writer lease and
+checks sign-in, confinement and capability policy. Transport Git runs ignore
+repository hooks, `core.fsmonitor`, filter drivers, replace refs, lazy fetches,
+submodule recursion and automatic maintenance; the writer lane itself uses the
+repository normally. Writer operation IDs are limited to 120 characters.
+Replays preserve the frozen base and destination; changing host or request is
+refused, including after a successful launch. An interrupted upload remains
+`launch_unknown` and resumes from the frozen input before dispatch
+reconciliation. A peer that stops before launching settles as
+`launch_not_started` and releases its worktree claim. A failed prepare or an
+unlaunched operation also removes any worktree and branch it created, provided
+they remain clean at the transported base and no later writer owns them.
+An unreachable implicit placement may fall back only at initial placement; the
+writer operation is then durably bound locally. An existing binding keeps its
+host on every retry, including when the first explicit contact failed before send.
+A failure while preparing the chair input, before anything is sent, retires its
+frozen input records and owned refs before releasing the binding. Repair and
+retry with the same ID, including on another peer. Once the peer records a
+prelaunch rejection, that ID always returns the recorded rejection; repair the
+cause and dispatch with a new operation ID. Result fetch retries use the same
+writer selector and its frozen verification.
+
+Each transfer is a sequence of peer calls bounded by `response_deadline`. For
+large bundles, let SSH reuse one connection in the chair's `~/.ssh/config`:
+
+```text
+Host workshop
+  ControlMaster auto
+  ControlPath ~/.ssh/control-%C
+  ControlPersist 60
+```
+
+### Verification and fetch
+
+Fetch requires a terminal writer. The executing host holds the writer lease,
+checks registered worktree and branch identity, a new head descended from the
+base, and cleanliness using the normal claim verifier. Its receipt binds project,
+operation, base, head, host and worktree. Each operation and head has an
+immutable export. Earlier verified results stay fetchable after handoff; an
+unverified result from a superseded writer is refused. The chair selects its
+recorded input and continuation lineage before checking the receipt. It
+verifies the downloaded pack and ancestry in a temporary object repository,
+then imports only history reachable from the approved head into an owned ref.
+Hidden packed objects and rejected heads stay outside the chair's object
+store. Its existing branch and dirty files stay untouched until the operator
+runs the fast-forward.
+
+### Continuations and ownership
+
+Resume and handoff keep the transported worktree. A new writer worktree requires
+a new dispatch; explicit writer overrides in handoff are refused. Remote writer
+named sessions are refused; use qualified run IDs for continuations. Reusing a
+worktree from an earlier dispatch requires Provenant's recorded context, the
+same branch, an exact base match, cleanliness and an available writer lease.
+An unrelated or changed peer worktree is refused rather than reset or removed.
+Continuations require current ownership; the shared launch owner checks that
+ownership under the writer lease for any run a transported writer launched,
+including local resumes on the executing host. An ordinary local writer that
+finds a stale transported claim clears it. A resumed attempt reserves ownership
+through publication and completion. Read-only handoffs leave writer ownership
+intact, and rejected preflights restore their prior reservation. Ownership and
+transport records live in separate host-state directories outside the writer's
+Git directory.
+
+### Clean up
+
+Transport keeps its refs, worktrees and records until the operator removes
+them. After landing a result:
+
+```sh
+git -C ~/Repos/project for-each-ref --format='%(refname)' refs/provenant/hosts/
+git -C ~/Repos/project update-ref -d refs/provenant/hosts/<host>/<id>/<base|result>
+```
+
+Run both on each host. On the peer, remove the writer worktree with
+`provenant worktree remove feat-example` and its branch with
+`git branch -D feat/example` once nothing will resume it. Frozen inputs and
+result bundles live under `<instance-root>/.agent-fabric/code/`; delete an
+operation's directory there once it is fetched and no retry is pending.
+
+## Verify slices 1–3
 
 Run the focused checks from the product checkout, one test process at a time:
 
@@ -243,8 +418,11 @@ directory outside the checkout when the sandbox permits it.
 Slice 2 covers criteria 2–5 and 7, the lane portion of 10, placement checks
 in 14 and lane-tool parity in 17. Criteria 13 and 16 retain the slice 1
 contracts. Real-host sleep/connection-loss acceptance remains for the chair;
-loopback evidence cannot establish sleep behaviour. Criteria 6, 8–9, 11–12
-and the remaining record/tool portions of 10 and 17 belong to slices 3–5.
+loopback evidence cannot establish sleep behaviour. Slice 3 covers criterion 6 and writer dispatch/fetch parity in criterion 17
+with loopback peers, including unpublished input, dirty chair files, batches,
+continuations and interrupted transfers. Criteria 8–9, 11–12 and the remaining
+record/tool portions of 10 and 17 belong to slices 4–5. Two-host writer and
+forced-command acceptance remain for the owner’s spare Mac.
 
 The real-sshd test is opt-in through `PROVENANT_SSHD_TESTS=1`. Run it outside a
 sandbox that prevents sshd from starting, with `/usr/sbin/sshd` available, to
