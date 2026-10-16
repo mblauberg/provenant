@@ -45,6 +45,8 @@ with a warning rather than rejected: `run_id` or `task_id` for `id`, `id` for a
 dispatch `task_id`, numeric strings such as `wait_seconds:"30"`, and a numeric
 `until:"55"` (read as `wait_seconds`). Relative `cwd` and `worktree` paths resolve from
 the caller directory.
+Every shell subcommand accepts `--help` or `-h` and exits successfully before
+opening the store or validating command arguments.
 No provider output is embedded in status responses.
 
 Without an MCP connection, `provenant fabric dispatch --adapter A --model M
@@ -118,14 +120,19 @@ and finding names. The scan reads whole files, skipping Git-ignored, vendored an
 and directories listed under `secret_scan_exclude` in `.agents/fabric-policy.json`
 (which must resolve inside the project). Past 10,000
 files or 64 MiB, dispatch rejects with `error: secret_scan_budget_exceeded`
-naming the largest subtree; narrow the inputs, exclude it, or explicitly set
+naming the largest scanned subtree and up to three largest files encountered,
+including the file that exceeds the budget. The scan also skips `__pycache__`,
+`.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.next` and `.turbo` caches.
+Narrow `add_dirs`, exclude the subtree, or explicitly set
 `allow_secrets: true` and explain why in the prompt. The same policy's
 `dispatch_defaults` may set `add_dirs`, `timeout_seconds` and `network` (Codex
 only) for dispatches that leave them unset. Writers use `mode: worktree_write` and an
 owned, registered linked worktree. The primary checkout is refused; create a linked
 worktree. `cwd` selects an existing read-only directory inside any registered
 Fabric project, and `prompt_file` may sit in the caller's directory or any
-registered project. A project is registered once any Fabric command, such as
+registered project, or a caller temporary directory (`TMPDIR`, `/tmp`,
+`/private/tmp` or `/private/var/folders`). Credential stores and secret paths
+remain refused. A project is registered once any Fabric command, such as
 `fabric whoami`, has run inside it; an unregistered path is rejected with that
 route or the alternative of dispatching from the other project. For a
 directory outside the caller's, Fabric passes the owner a read root, so the run
@@ -387,6 +394,8 @@ one-line summary per attempt instead of a second copy of the row; `fields`
 returns only the named keys (`fields:["attempts"]` gives the raw history).
 While lanes run, the text ends with a hint to block with `provenant lanes --wait
 --all --timeout 900` instead of polling.
+When every requested lane is running and `wait_seconds` is omitted, the hint
+also suggests `wait_seconds: 55`; the default wait remains unchanged.
 New attempts wait when available host memory is below 10% of physical RAM for
 `worktree_write` or 5% for `read_only`; set either percentage from 0 to 100 in
 `<workspace_root>/.agents/fabric-policy.json` as `{"memory_floor_percent":{"worktree_write":10,"read_only":5}}` (either key may be omitted, and 0 disables that mode's floor).
@@ -527,7 +536,8 @@ acknowledging the delivery. `wait_seconds`, `task_id`, `peek` and
 `chair` resolves through `PROVENANT_CHAIR`; `/root`, `root` and `parent` use
 `PROVENANT_PARENT`, then the chair. Only known project seats are selected. An
 unbound caller can use a registered seat named `chair`; otherwise the request
-is rejected with `fix: pass to:<seat>`. Fabric never guesses the first seat.
+is rejected with `fix: pass to:<seat>` and the currently valid labels, seats
+and teams. Fabric never guesses the first seat.
 Owner completion posts `run_terminal` to the dispatching seat. Observing a
 terminal row through dispatch, cancel or status acknowledges its notices,
 including a notice that arrives after the response.
@@ -562,6 +572,8 @@ and `generation` identify renew, verify and release operations; expired claims
 lapse. `#869` and `869` share an issue key, and path claims compare without case.
 Active claims appear in `fabric work-claims` and `fabric_status` when
 full detail is requested or ownership is present.
+`ttl_seconds` is accepted as an alias of `seconds`; values above 3,600 seconds
+are clamped to 3,600 with a warning.
 
 `fabric_landing_lease` separately acquires one repository-wide landing lease
 with the expected remote integration SHA. It has a holder, expiry, generation,
@@ -569,8 +581,11 @@ verify and release operations. To wait for another chair to land, use
 `fabric_landing_lease` with `action: "wait"` and `wait_seconds` (clamped to 55) or the
 shell `fabric landing-wait --timeout 900` (exit 124 on timeout) instead of
 sleep loops; both return when the holder, generation or release state changes.
-`expected_sha` may be short or uppercase and is resolved with Git in the
-project; ambiguous or unknown values are refused. An expired lease can be taken over; the prior
+`expected_sha` may be a unique prefix of at least seven hex digits or uppercase
+and is resolved with Git in the project. Invalid values return
+`expected_sha_invalid`; unknown or ambiguous prefixes return
+`expected_sha_unresolved` with a command to obtain the full SHA.
+An expired lease can be taken over; the prior
 holder and new generation are recorded in activity. Before pushing, run
 `fabric landing-push <session-id> <generation> <branch> --label <seat>` from the
 landing checkout, using the same label as the MCP lease holder. Alternatively,

@@ -135,23 +135,29 @@ function runGit(cwd: string, args: string[], env: NodeJS.ProcessEnv): string {
   });
 }
 
-/**
- * Resolve a short or uppercase commit SHA to the full lowercase one. A full
- * lowercase SHA passes through untouched; anything git cannot resolve to a
- * single commit (unknown, ambiguous, not hex) is refused with what to pass.
- */
+export class CommitShaError extends Error {
+  constructor(readonly code: "expected_sha_invalid" | "expected_sha_unresolved", message: string) {
+    super(message);
+  }
+}
+
+/** Resolve object prefixes independently of refs; full lowercase SHAs pass through. */
 export function resolveCommitSha(cwd: string, input: string): string {
   const sha = input.trim();
   if (/^[0-9a-f]{40}$/u.test(sha)) return sha;
   const fix = "pass the full 40-digit commit SHA (git rev-parse <branch>)";
-  if (!/^[0-9a-f]{4,40}$/iu.test(sha)) throw new Error(`"${input}" is not a commit SHA; ${fix}`);
+  if (!/^[0-9a-f]{7,40}$/iu.test(sha))
+    throw new CommitShaError("expected_sha_invalid", `"${input}" is not a commit SHA of at least 7 hex digits; ${fix}`);
   try {
-    const full = stripLineEnding(runGit(cwd, ["rev-parse", "--verify", "--quiet", `${sha.toLowerCase()}^{commit}`], {}));
+    const matches = runGit(cwd, ["rev-parse", `--disambiguate=${sha.toLowerCase()}`], {}).trim().split("\n");
+    if (matches.length !== 1 || !/^[0-9a-f]{40}$/u.test(matches[0]!))
+      throw new Error("unknown or ambiguous object prefix");
+    const full = stripLineEnding(runGit(cwd, ["rev-parse", "--verify", "--quiet", `${matches[0]}^{commit}`], {}));
     if (/^[0-9a-f]{40}$/u.test(full)) return full;
   } catch {
     // Unknown or ambiguous: fall through to the actionable message.
   }
-  throw new Error(`"${input}" is not a unique commit in ${cwd}; ${fix}`);
+  throw new CommitShaError("expected_sha_unresolved", `"${input}" is unknown or ambiguous in ${cwd}; ${fix}`);
 }
 
 function gitPath(cwd: string, field: string, env: NodeJS.ProcessEnv): string {

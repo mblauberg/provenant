@@ -1196,7 +1196,7 @@ def _retire_provider_process(run_dir: Path, process: subprocess.Popen[Any] | Non
 
 
 # Fabric grants a read root only for a directory inside a registered project.
-PROMPT_PATH_FIX = ("Pass prompt_file=<readable regular file inside the workspace or a registered Fabric project>; "
+PROMPT_PATH_FIX = ("Pass prompt_file=<readable regular file inside the workspace, a caller temp directory or a registered Fabric project>; "
                    "register another project by running `fabric whoami` there, or dispatch from it.")
 
 
@@ -1204,6 +1204,12 @@ class PreflightError(ValueError):
     def __init__(self, code: str, fix: str):
         super().__init__(fix)
         self.code = code
+
+
+def prompt_temp_roots() -> tuple[Path, ...]:
+    roots = [Path(value).expanduser() for value in
+             (os.environ.get("TMPDIR", ""), "/tmp", "/private/tmp", "/private/var/folders") if value]
+    return tuple(dict.fromkeys(candidate for root in roots if root.is_absolute() for candidate in (root, root.resolve())))
 
 
 def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path, read_roots=()) -> bytes:
@@ -1216,10 +1222,11 @@ def read_prompt_input(prompt_file: Path, workspace: Path, run_dir: Path, read_ro
     if prompt_source is not None:
         if not prompt_source.exists():
             raise PreflightError("prompt_unavailable", f"cannot read prompt file: {prompt_source}")
-        roots = (run_dir, workspace, run_workspace(run_dir, workspace), *(Path(root) for root in read_roots))
+        roots = (run_dir, workspace, run_workspace(run_dir, workspace), *(Path(root) for root in read_roots),
+                 *prompt_temp_roots())
         prompt_root = next((root for root in roots if prompt_source.is_relative_to(root)), None)
         if prompt_root is None:
-            raise PreflightError("prompt_path_forbidden", "prompt file must be inside the run directory, current workspace or a read root")
+            raise PreflightError("prompt_path_forbidden", PROMPT_PATH_FIX)
         sensitive_roots = {".ssh", ".aws", ".azure", ".gnupg"}
         sensitive_files = {
             ".env", ".env.local", ".env.production", "credentials.json",
