@@ -154,7 +154,7 @@
     "orchestration": "flagship",
     "review": "workhorse",
     "second-opinion": "workhorse",
-    "implementation": "bulk",
+    "implementation": "workhorse",
     "legwork": "bulk",
     "lens": "bulk",
     "mechanical": "bulk",

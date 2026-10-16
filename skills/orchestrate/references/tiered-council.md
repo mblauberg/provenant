@@ -7,12 +7,12 @@ route pool, so a dispatch names its tier directly:
 
 | Tier | Pool | Members (seed) | Job |
 |---|---|---|---|
-| 1, lenses | `bulk` | DeepSeek and GLM free, Haiku, Luna, Gemini Flash (low/medium), rotating free models at `sparing` | laid-out work needing little judgement; overlap freely |
-| 2, judges | `workhorse` | Sonnet, Sol, Gemini Flash (high), agy Opus 4.6 at `sparing` | judge the work and the tier-1 claims; medium decisions; delegate to tier 1 |
-| 3, deciders | `flagship` | Opus, Astra, Argon at `sparing` | critical decisions, high-level judgement, consensus |
+| 1, lenses | `bulk` | DeepSeek and GLM free, Haiku and Luna at `high`; Gemini Flash (low/medium); paid OpenCode and rotating free models at `sparing` | laid-out work needing little judgement; overlap freely |
+| 2, judges | `workhorse` | Sonnet and Sol at `high`; Gemini Flash (high effort); agy Opus 4.6 at `sparing` | judge the work and the tier-1 claims; medium decisions; delegate to tier 1 |
+| 3, deciders | `flagship` | Opus at `high`; Astra; Argon at `sparing` | critical decisions, high-level judgement, consensus |
 
-`strong` and `review` map to `workhorse`; `scout`, `mechanical` and `lens` map to
-`bulk`. A Claude chair runs its own Claude members as native subagents: a pool
+`strong`, `review` and `implementation` map to `workhorse`; `scout`, `mechanical`,
+`lens` and `research` map to `bulk`. A Claude chair runs its own Claude members as native subagents: a pool
 hands them back with a spawn line ([routing-and-tiers.md](routing-and-tiers.md)).
 
 ## Depth follows risk

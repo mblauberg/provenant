@@ -238,8 +238,9 @@ def test_task_classes_and_aliases_map_onto_routes(tmp_path):
     assert pick({"route": "Flagship"}, tmp_path, catalog=SEED)["route"] == "flagship"
     assert pick({"route": "critical-review"}, tmp_path, catalog=SEED)["route"] == "flagship"
     assert pick({"route": "ui-taste"}, tmp_path, catalog=SEED)["route"] == "design"
-    for lens in ("scout", "mechanical", "lens", "implementation"):
+    for lens in ("scout", "mechanical", "lens", "research"):
         assert pick({"route": lens}, tmp_path, catalog=SEED)["route"] == "bulk"
+    assert pick({"route": "implementation"}, tmp_path, catalog=SEED)["route"] == "workhorse", "matches its task class"
     assert pick({"route": "workhorse"}, tmp_path, catalog=SEED)["route"] == "workhorse"
     with pytest.raises(pools.PoolError) as error:
         pick({"route": "fastest"}, tmp_path)
