@@ -2883,6 +2883,10 @@ if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
   printf '%s\n' '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
   exit 0
 fi
+if [ "$1" = "mcp" ] && [ "$2" = "list" ]; then
+  echo '[]'
+  exit 0
+fi
 printf '%s\n' "$@" > {args_file}
 cat >/dev/null
 echo OK
