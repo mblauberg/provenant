@@ -891,7 +891,8 @@ def parse_fast_route_json(raw: str) -> dict:
 
 
 PLANNER_MODEL_STATUSES = {"capability_model_unavailable", "no_candidate_available", "alias_unavailable",
-                          "adapter_default_model_invalid", "model_required_for_broker"}
+                          "adapter_default_model_invalid", "model_required_for_broker",
+                          "model_ambiguous", "model_not_found"}
 PLANNER_TRANSIENT_STATUSES = {"capability_discovery_failed", "capability_snapshot_untrusted",
                               "capability_snapshot_stale", "probe_unavailable", "probe_cache_busy"}
 
@@ -913,14 +914,16 @@ def route_refusal(record, adapter=""):
     status = record.get("status")
     if not status or status in TERMINAL_STATUSES or "provenance" in record or record.get("schema") == "fabric.exec-plan.v1":
         return None
-    return router_failure(str(status), adapter)
+    return router_failure(str(status), adapter, record.get("message"))
 
 
-def router_failure(signature, adapter=""):
+def router_failure(signature, adapter="", message=None):
     """Fabric's status and fix for a router refusal; the router's own status stays the signature."""
     if signature in PLANNER_MODEL_STATUSES:
         status = "model_unavailable"
         fix = provider_exec._model_unavailable_fix({"adapter": adapter, "route": {"identity_source": "passed-through"}})
+        if signature in {"model_ambiguous", "model_not_found"} and isinstance(message, str) and message:
+            fix = message[:600]
     elif signature in PLANNER_TRANSIENT_STATUSES:
         status, fix = "failed", f"provider capability check failed ({signature}); check the provider CLI login and retry"
     else:
@@ -1439,6 +1442,8 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                            if choices else "Pass an explicit provider/model id supported by " + adapter + ".")
                     if "effort" in code:
                         fix = "Omit effort, or pass a supported level: low, medium, high, xhigh, max, ultra."
+                    if code in {"model_ambiguous", "model_not_found"} and route.get("message"):
+                        fix = str(route["message"])[:600]
                     raise PreflightError(code, fixes.get(code, fix))
                 if task.get("confidential") is True:
                     risk = confidential_refusal(adapter, route.get("resolved_model") or task.get("model"), route)
@@ -1643,6 +1648,8 @@ def prepare_resume(args):
     args.tool=requested["adapter"];args.model=previous["provenance"]["resolved_model"];args.alias=None;args.task_class=None
     # An effort the provider only reported was never sent, so resume does not send it.
     args.effort=None if previous["provenance"].get("effort_observed_source") else previous["provenance"]["effort_applied"];args.task_id=previous["task_id"]
+    # OpenCode applies effort only as a `#variant`; keep that intent so the router sends it again.
+    if args.tool=="opencode" and args.effort and "#" not in args.model: args.model=args.model+"#"+args.effort
     args.access_mode=previous["mode"];args.worktree=Path(previous["worktree"]) if previous.get("worktree") else None
     args.provider_cwd=Path(previous["cwd"]) if previous["mode"]=="read_only" else None
     args.workspace_root=Path(previous.get("workspace_root") or (previous.get("workspace") or {}).get("root") or Path.cwd()).expanduser().resolve()

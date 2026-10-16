@@ -4807,3 +4807,117 @@ def test_route_tier_names_work_as_adapter_aliases(tmp_path, tier, alias):
     _, original = resolve("--alias", alias, *common)
     assert named["resolved_model"] == original["resolved_model"]
     assert not any("model won" in note for note in named.get("notes", [])), "a tier name is not a model name"
+
+
+LIVE_OPENCODE = ["opencode/big-pickle", "opencode-go/qwen3.8-flash", "opencode-go/kimi-k3",
+                 "opencode-go/kimi-k2.7-code", "opencode-go/mimo-v2.6-flash", "opencode/mimo-v2.6-flash-free"]
+
+
+@pytest.mark.parametrize("name,model", [("qwen3.8-flash", "opencode-go/qwen3.8-flash"),
+                                        ("QWEN3.8-FLASH", "opencode-go/qwen3.8-flash"),
+                                        ("big-pickle", "opencode/big-pickle"),
+                                        ("qwen", "opencode-go/qwen3.8-flash")])
+def test_opencode_bare_name_resolves_against_live_listing(name, model):
+    resolved, notes, refusal = load_router()._resolve_opencode_name(name, LIVE_OPENCODE)
+    assert (resolved, refusal) == (model, None) and notes
+
+
+@pytest.mark.parametrize("name,status", [("kimi", "model_ambiguous"), ("mimo", "model_ambiguous"),
+                                         ("zzzzzz", "model_not_found")])
+def test_opencode_bare_name_refusals_are_typed_with_a_fix(name, status):
+    resolved, _, refusal = load_router()._resolve_opencode_name(name, LIVE_OPENCODE)
+    assert resolved is None and refusal["status"] == status and "fix:" in refusal["message"]
+    if status == "model_ambiguous":
+        assert "opencode-go/kimi-k3" in refusal["message"] or "mimo-v2.6-flash" in refusal["message"]
+
+
+def test_opencode_bare_name_passes_through_without_a_listing_or_with_a_provider_path():
+    router = load_router()
+    assert router._resolve_opencode_name("kimi", []) == (None, [], None)
+    assert router._resolve_opencode_name("opencode/anything", LIVE_OPENCODE) == (None, [], None)
+
+
+def test_opencode_resolve_end_to_end_with_a_fake_cli(tmp_path):
+    cli = tmp_path / "bin" / "opencode"
+    cli.parent.mkdir()
+    cli.write_text("#!/bin/sh\n"
+                   "if [ \"$1\" = --version ]; then echo 'opencode v2.0.30'; exit 0; fi\n"
+                   "if [ \"$1\" = models ]; then printf '%s\\n' " + " ".join(LIVE_OPENCODE) + "; fi\n")
+    cli.chmod(0o755)
+    env = {**os.environ, "PATH": f"{cli.parent}:/usr/bin:/bin", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+           "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
+
+    def run(model):
+        out = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve", "--adapter",
+                              "opencode", "--role", "worker", "--model", model], text=True, capture_output=True,
+                             env=env)
+        return out.returncode, json.loads(out.stdout)
+
+    code, route = run("qwen3.8-flash")
+    assert code == 0 and route["resolved_model"] == "opencode-go/qwen3.8-flash"
+    code, route = run("kimi")
+    assert code == 2 and route["status"] == "model_ambiguous"
+    code, route = run("zzzzzz")
+    assert code == 2 and route["status"] == "model_not_found"
+    code, route = run("opencode-go/kimi-k3")
+    assert code == 0 and any("live opencode listing" in note for note in route["notes"])
+    code, route = run("opencode/deepseek-v4.1-flash-free#high")
+    assert code == 0 and route["resolved_model"] == "opencode/deepseek-v4.1-flash-free"
+    assert route["effort_applied"] == "high"
+    code, route = run("deepseek")
+    assert code == 0 and route["resolved_model"] == "opencode/deepseek-v4.1-flash-free"
+
+
+def test_opencode_variant_matching_explicit_effort_still_sends_the_variant(tmp_path):
+    env = {**os.environ, "PATH": "/usr/bin:/bin", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+           "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
+    out = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve", "--adapter",
+                          "opencode", "--role", "worker", "--model", "opencode/deepseek-v4.1-flash-free#high",
+                          "--effort", "high"], text=True, capture_output=True, env=env)
+    route = json.loads(out.stdout)
+    assert out.returncode == 0, route
+    assert route["effort_applied"] == "high"
+    assert route["requested_model"] == "opencode/deepseek-v4.1-flash-free"
+    assert route["requested_input"] == "opencode/deepseek-v4.1-flash-free#high"
+
+
+def test_opencode_requested_input_keeps_the_callers_bare_token(tmp_path):
+    cli = tmp_path / "bin" / "opencode"
+    cli.parent.mkdir()
+    cli.write_text("#!/bin/sh\n"
+                   "if [ \"$1\" = --version ]; then echo 'opencode v2.0.30'; exit 0; fi\n"
+                   "if [ \"$1\" = models ]; then printf '%s\\n' " + " ".join(LIVE_OPENCODE) + "; fi\n")
+    cli.chmod(0o755)
+    env = {**os.environ, "PATH": f"{cli.parent}:/usr/bin:/bin", "AGENT_FABRIC_INSTANCE_ROOT": str(ROOT),
+           "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
+    out = subprocess.run([sys.executable, str(ROOT / "scripts" / "model_route.py"), "resolve", "--adapter",
+                          "opencode", "--role", "worker", "--model", "QWEN3.8-FLASH"],
+                         text=True, capture_output=True, env=env)
+    route = json.loads(out.stdout)
+    assert route["resolved_model"] == "opencode-go/qwen3.8-flash"
+    assert route["requested_input"] == "QWEN3.8-FLASH"
+
+
+def test_failed_opencode_refresh_keeps_the_last_good_listing(tmp_path, monkeypatch):
+    router = load_router()
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    cli = tmp_path / "opencode"
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.0.30; exit; fi\n"
+                   "if [ \"$1\" = --help ]; then exit; fi\nprintf 'a/one\\na/two\\n'\n")
+    cli.chmod(0o755)
+    record, code = router.probe_capabilities("opencode", str(cli), listing_only=True)
+    assert code == 0 and record["models"] == ["a/one", "a/two"]
+    cli.write_text("#!/bin/sh\nif [ \"$1\" = --version ]; then echo 2.0.30; exit; fi\nexit 1\n")
+    failed, code = router.probe_capabilities("opencode", str(cli), listing_only=True, refresh=True)
+    assert code == 0 and failed["models"] == ["a/one", "a/two"] and failed["refresh_failed"]
+    cached, code = router.probe_capabilities("opencode", str(cli), listing_only=True)
+    assert code == 0 and cached["cache_hit"] and cached["models"] == ["a/one", "a/two"]
+
+
+def test_opencode_refresh_is_skipped_when_the_shared_budget_is_nearly_spent(monkeypatch):
+    router = load_router()
+    calls = []
+    monkeypatch.setattr(router, "probe_capabilities", lambda *a, **k: calls.append(k) or ({"models": ["x/y"]}, 0))
+    assert router._opencode_live_models(refresh=True, deadline=router.time.monotonic() + 1) == ([], False)
+    assert not calls
+    assert router._opencode_live_models(refresh=True, deadline=router.time.monotonic() + 10)[0] == ["x/y"]
