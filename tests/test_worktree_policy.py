@@ -76,6 +76,26 @@ def test_failed_checkout_removes_only_the_branch_it_created(tmp_path):
         'refs/heads/feat/failed'], text=True).strip() == current
 
 
+
+def test_late_metadata_failure_is_a_post_creation_error(tmp_path, monkeypatch):
+    repo = tmp_path / 'project'
+    init_repo(repo)
+    args = argparse.Namespace(repo=repo, name='feat-late', existing_branch=None,
+        new_branch='feat/late', detach=None, start_point='HEAD', no_node_modules=True)
+    original = worktree_policy.common_git_dir
+    calls = []
+
+    def fail_after_add(root):
+        calls.append(root)
+        if (repo / '.worktrees/feat-late').exists():
+            raise worktree_policy.PolicyError('cannot resolve common git dir')
+        return original(root)
+
+    monkeypatch.setattr(worktree_policy, 'common_git_dir', fail_after_add)
+    with pytest.raises(worktree_policy.PostCreationError):
+        worktree_policy.create(args)
+    assert (repo / '.worktrees/feat-late').is_dir()
+
 def test_create_cow_clones_root_and_workspace_node_modules(tmp_path, capsys, monkeypatch):
     repo = tmp_path / "project"
     head = init_repo(repo)

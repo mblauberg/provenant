@@ -730,6 +730,7 @@ def create(args: argparse.Namespace) -> dict[str, object]:
         if branch_result.returncode not in {0, 1}:
             raise PolicyError(branch_result.stderr.strip() or "cannot determine new worktree branch identity")
         branch = branch_result.stdout.strip() if branch_result.returncode == 0 else None
+        shared_git_dir = common_git_dir(root)
     except PolicyError as exc:
         raise PostCreationError(str(exc)) from exc
     return {
@@ -737,7 +738,7 @@ def create(args: argparse.Namespace) -> dict[str, object]:
         "name": args.name,
         "primary_root": str(root),
         "worktree_root": str(target),
-        "common_git_dir": str(common_git_dir(root)),
+        "common_git_dir": str(shared_git_dir),
         "head_revision": head_revision,
         "branch": branch,
         "detached": branch is None,
