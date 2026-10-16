@@ -963,7 +963,7 @@ def build_plan(
     if adapter == "opencode":
         version_error = _opencode_version_error(config.CLI, os.environ.get("PATH"))
         if version_error:
-            raise ValueError(version_error)
+            raise CapabilityError("unsupported_cli_version", version_error)
     selected_cwd = Path(worktree or cwd or workspace_root or Path.cwd()).expanduser().resolve()
     if not selected_cwd.is_dir():
         raise ValueError("cwd must be a readable directory")
@@ -3767,6 +3767,7 @@ def main():
             json.dumps(
                 {
                     "status": status,
+                    **({"error": exc.code} if isinstance(exc, CapabilityError) else {}),
                     "fix": str(exc),
                     "output_path": "",
                     "output_digest": "",

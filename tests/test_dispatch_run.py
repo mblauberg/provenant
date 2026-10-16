@@ -4092,3 +4092,22 @@ def test_dispatch_retains_quarantined_result_without_clean_success(tmp_path, mon
         monkeypatch.setenv('PROVENANT_RUN_DIR', str(run_dir))
         module.close_mcp_run(run_dir)
         assert json.loads((run_dir / 'RUN_RECEIPT.json').read_text())['status'] == 'quarantined'
+
+
+def test_preflight_types_an_opencode_below_v2_as_unsupported_cli_version(monkeypatch, tmp_path):
+    module = load_dispatch_module()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGENT_FABRIC_PRODUCT_ROOT", str(ROOT))
+    monkeypatch.setenv("AGENT_FABRIC_INSTANCE_ROOT", str(ROOT))
+    monkeypatch.setenv("PROVENANT_REMOTE_LANE", "1")
+    monkeypatch.setattr(module, "_fabric_hosts_owner", lambda: SimpleNamespace(
+        adapter_doctor=lambda *_: {"signin": {"status": "ok"}}))
+    monkeypatch.setattr(module.provider_exec, "_opencode_version_error",
+                        lambda *_: "OpenCode 1.14.2 is unsupported; fix: upgrade OpenCode to v2")
+    task = {"id": "old", "adapter": "opencode", "model": "opencode/deepseek-v4.1-flash-free", "prompt": "hello"}
+
+    result = module.preflight_tasks([task], tmp_path)
+
+    assert result["status"] == "rejected"
+    assert result["error"] == "unsupported_cli_version"
+    assert "upgrade OpenCode to v2" in result["fix"]

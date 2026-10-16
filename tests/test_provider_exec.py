@@ -6289,3 +6289,13 @@ def test_opencode_v2_free_quota_event_is_rate_limited():
         "response": {"body": json.dumps({"type": "error", "error": {"type": "FreeUsageLimitError"}})}}}
     parsed = supervisor().parse_output("opencode", json.dumps(event) + "\n", "", 1)
     assert parsed["status"] == "rate_limited"
+
+
+def test_opencode_v1_cli_is_a_typed_refusal_on_the_provider_exec_cli(tmp_path, monkeypatch, capsys):
+    mod = supervisor()
+    monkeypatch.setattr(mod, "_opencode_version_error",
+                        lambda *_: "OpenCode 1.14.2 is unsupported; fix: upgrade OpenCode to v2")
+    with pytest.raises(mod.CapabilityError) as caught:
+        mod.build_plan("opencode", {"resolved_model": "opencode/x"}, "hello", cwd=tmp_path, workspace_root=tmp_path)
+    assert caught.value.code == "unsupported_cli_version"
+    assert isinstance(caught.value, ValueError)
