@@ -198,9 +198,9 @@ not read an absent `Watch out for` as an endorsement.
   `cat-jam-free` does not train but keeps data for 30 days. Use or log data:
   `mimo-v2.6-flash-free`, `muse-spark-*-free`, `big-pickle`, `ll-alpha-free`,
   `nemotron-*-free`. Space Bunny is an unidentified stealth model with no
-  published benchmarks, so it stays `sparing` in `scout` until local runs
+  published benchmarks, so it stays `sparing` in `bulk` until local runs
   justify more; LongCat 2.5 Preview (`longcat`) is catalogued by name only.
-  Gemini 4 Argon Contributor (`argon`, paid Go) is a rare `strong` pick that
+  Gemini 4 Argon Contributor (`argon`, paid Go) is a rare `flagship` pick that
   trains on prompts and is not zero-retention.
   Keep sensitive, private or client data off the second group
   (`confidential: true` skips any model whose `trains_on_prompts` is true; an

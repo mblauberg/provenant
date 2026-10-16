@@ -26,9 +26,9 @@ Task class selects `flagship`, `workhorse` or `scout` when no explicit model is 
 
 Prefer a direct model name (`sonnet`, `sol`, `luna`, `deepseek-free`, `glm-free`, `flash`) when you know what the work needs; recorded dispatches use explicit names about three times as often as aliases, and a name is the most predictable selector. Reach for a pool when you want spread, rotation or a council.
 
-`strong` is for review, adjudication and hard implementation; `bulk` for ordinary implementation and drafting; `scout` for cheap, bounded first passes (Haiku and Luna lead, then the zero-retention DeepSeek and GLM free models and agy Flash, with the other rotating free models at `sparing`); `design` and `writing` for those crafts.
+The three tier pools form a hierarchy ([tiered-council.md](tiered-council.md)): `bulk` is tier 1, laid-out work and cheap lenses that need little judgement (the zero-retention DeepSeek and GLM free models, Haiku and Luna lead, then agy Flash, with paid OpenCode and the other rotating free models at `sparing`); `workhorse` is tier 2, review, judgement and hard implementation (Sonnet, Sol, agy Flash at high effort); `flagship` is tier 3, critical decisions and consensus (Opus, Astra, Argon at `sparing`). `design` and `writing` serve those crafts.
 
-`route: "strong" | "bulk" | "scout" | "design" | "writing"` picks from a weighted pool that spans adapters (`config/model-routing.json` `routes`; the user overlay may reorder or reweight). Weights are `high` (8), `normal` (4), `sparing` (1) or `off` (0), or any non-negative number on the same scale. An entry's `effort` band clamps the caller's effort in either direction, raising a low request or lowering a high one, and a warning names each move. Every mode skips a model that is not installed, is cooling down, whose adapter is disabled, or whose adapter cannot run it (the adapter-compatibility family and model gates), and names the skip in the warnings:
+`route: "bulk" | "workhorse" | "flagship" | "design" | "writing"` picks from a weighted pool that spans adapters (`config/model-routing.json` `routes`; the user overlay may reorder or reweight). Weights are `high` (8), `normal` (4), `sparing` (1) or `off` (0), or any non-negative number on the same scale. An entry's `effort` band clamps the caller's effort in either direction, raising a low request or lowering a high one, and a warning names each move. Every mode skips a model that is not installed, is cooling down, whose adapter is disabled, or whose adapter cannot run it (the adapter-compatibility family and model gates), and names the skip in the warnings:
 
 - default: the highest-weight available model, first listed on a tie;
 - `rotate: true`: weighted round-robin per project (`route-rotation.json` under the Fabric state root);
@@ -37,7 +37,7 @@ Prefer a direct model name (`sonnet`, `sol`, `luna`, `deepseek-free`, `glm-free`
 
 Mixed selectors settle by precedence rather than rejection, and a warning names every ignored field: `models` beats `route`, `alias`, `model`, `council` and `rotate`; an explicit `model` beats `route`, `council` and `rotate`; `route` beats `alias`; `council` beats `rotate`; an `alias` without a `route` ignores `council` and `rotate`. `adapter` with `route` narrows the pool to that adapter's entries.
 
-`confidential: true` is a disclosure filter, not a selector: it works with a route, alias, model, adapter alone or task class, and removes every prompt-training model (`model_traits`, or a free model, that is a zero plan cap or `free_pattern` id, unless its own `trains_on_prompts` is `false`) from the resolved candidates, fallbacks included, even under `fallback: "any"`. An alias or task class whose first member is unsafe steps to its first safe member; dispatch refuses, with a fix, only when nothing safe remains. A resume or handoff of a confidential run stays confidential unless the caller passes `confidential: false`. Without it, such models stay in the pool; the warning appears only when one is actually selected. Task classes and the tier aliases map onto routes through `route_synonyms` (`review` → `strong`, `workhorse` → `bulk`, `scout` and `mechanical` → `scout`). The route line names the pick, for example `Route: opencode/deepseek-v4.1-flash (deepseek; observed; design council 2/3)`. `provenant routes` prints every pool with live availability; `--health` adds task-class routes and recent health (the same view as `provenant help routes`).
+`confidential: true` is a disclosure filter, not a selector: it works with a route, alias, model, adapter alone or task class, and removes every prompt-training model (`model_traits`, or a free model, that is a zero plan cap or `free_pattern` id, unless its own `trains_on_prompts` is `false`) from the resolved candidates, fallbacks included, even under `fallback: "any"`. An alias or task class whose first member is unsafe steps to its first safe member; dispatch refuses, with a fix, only when nothing safe remains. A resume or handoff of a confidential run stays confidential unless the caller passes `confidential: false`. Without it, such models stay in the pool; the warning appears only when one is actually selected. Task classes and the tier aliases map onto routes through `route_synonyms` (`strong`, `review` and `second-opinion` → `workhorse`; `scout`, `mechanical`, `lens`, `research` and `implementation` → `bulk`; `top`, `decision` and `critical-review` → `flagship`). The route line names the pick, for example `Route: opencode/deepseek-v4.1-flash (deepseek; observed; design council 2/3)`. `provenant routes` prints every pool with live availability; `--health` adds task-class routes and recent health (the same view as `provenant help routes`).
 
 To add a model, list it in the user overlay (`~/.agents/config/model-routing.json`); unlisted product entries keep their place after the listed ones:
 
@@ -181,7 +181,7 @@ adapter default, `high` in `bulk`; `opencode/glm-5.3-flash-free` (also zero-rete
 second. OpenCode has `workhorse` and `scout` aliases only: its models sit between the
 Sonnet/Sol and Haiku/Luna tiers, so a `flagship` request takes the adapter default and warns.
 Paid `opencode-go/deepseek-v4.1-flash` is the `workhorse` backup; paid `opencode-go/glm-5.3-flash`
-is reachable by name. The two paid models share one small monthly quota, so both are `sparing` in the pools. `opencode-go/gemini-4-argon-contributor` (`argon`) is a rare `sparing` entry in `strong`: it is a Contributor-tier model that trains on prompts and is not zero-retention, so never send it private or client data. Any registered or unregistered
+is reachable by name. The two paid models share one small monthly quota, so both are `sparing` in the pools. `opencode-go/gemini-4-argon-contributor` (`argon`) is a rare `sparing` entry in `flagship`: it is a Contributor-tier model that trains on prompts and is not zero-retention, so never send it private or client data. Any registered or unregistered
 model whose id matches the adapter's `free_pattern` (`-free$`) is free and, unless its
 entry sets `trains_on_prompts: false`, may train on prompts: it is then warned on and
 skipped by `confidential: true`. Free models
@@ -220,8 +220,8 @@ two different-family passes where practical. Prefer the safest adapter that can 
 artifact. If no safe external adapter is available under the host data policy, use objective local
 checks and record `CROSS-FAMILY-NOT-RUN` instead of pretending it happened.
 
-In dynamic workflows, bind every stage from its task class. Route bulk
-scan/extract stages to scout and reserve flagship for synthesis/adjudication
+In dynamic workflows, bind every stage from its task class. Route
+scan/extract stages to the `bulk` tier and reserve `flagship` for synthesis/adjudication
 (`dynamic-workflows.md`).
 
 ## Adaptive review topology
@@ -247,7 +247,7 @@ Express chains by **role → tier/family**, resolving names at runtime:
 verify      → safest different-family read-only adapter → objective checks → user if needed
 adversary   → strong different-family critic → source/test-backed fix list
 long-ctx    → long-context scout → file-backed synthesis → flagship decision
-bulk/scout  → cheap diverse scout → strict schema → sampled verification
+bulk        → cheap diverse tier-1 lenses → strict schema → sampled verification
 ```
 
 On an auth/quota/limit/safety error from a tool: log it to the run scratchpad and advance to the next

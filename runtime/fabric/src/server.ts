@@ -166,7 +166,7 @@ const route = {
   fallback: z
     .union([z.boolean(), z.literal("any"), z.array(z.union([z.string(), z.record(z.string(), z.unknown())]))])
     .optional(),
-  route: z.string().optional().meta({ description: "Global pool: strong, bulk, scout, design or writing; task classes and workhorse/scout aliases map onto these. adapter narrows the pool; an explicit model wins over route. Prefer naming a model directly (for example deepseek-free, glm-free, sonnet, sol) when you know what you want." }),
+  route: z.string().optional().meta({ description: "Tier pool: bulk (tier-1 lenses), workhorse (judges) or flagship (deciders); or design or writing. strong/review map to workhorse, scout/mechanical to bulk. adapter narrows the pool; an explicit model wins over route. Prefer naming a model (deepseek-free, glm-free, sonnet, sol) when you know what you want." }),
   rotate: z.boolean().optional().meta({ description: "Cycle the route's pool per project instead of taking its top model; ignored with council." }),
   council: z.number().int().min(1).max(8).optional().meta({ description: "Run 1-8 members from the route as one batch, families spread first; members repeat when fewer are available." }),
   models: z.array(z.string()).min(1).max(8).optional().meta({ description: "Ad-hoc council of adapter/model[@effort] entries; bypasses route and adapter." }),

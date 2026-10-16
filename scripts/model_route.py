@@ -2040,7 +2040,7 @@ def parser() -> argparse.ArgumentParser:
     )
     routes = commands.add_parser(
         "routes", help="print each route pool with live availability",
-        description="Print every global route pool (strong, bulk, scout, design, writing) with each model's weight, "
+        description="Print every global route pool (bulk, workhorse, flagship, design, writing) with each model's weight, "
                     "effort band, caveats and live availability.")
     routes.add_argument("--json", action="store_true", help="print one fabric.routes.v1 JSON document")
     routes.add_argument("--health", action="store_true",

@@ -63,7 +63,7 @@ def models(result):
 
 def test_seed_routes_name_registered_models_with_the_tiny_weight_vocabulary():
     CATALOG = SEED
-    assert set(CATALOG["routes"]) == {"strong", "bulk", "scout", "design", "writing"}
+    assert set(CATALOG["routes"]) == {"flagship", "workhorse", "bulk", "design", "writing"}
     for name, entries in CATALOG["routes"].items():
         for entry in entries:
             assert entry["weight"] in {"high", "normal", "sparing"}
@@ -81,17 +81,18 @@ def test_top_is_the_highest_weight_available_and_deterministic(tmp_path):
     assert models(first) == ["claude/claude-opus-5-5"]
     assert first["picks"][0]["reason"] == "strong top"
     assert models(pick({"route": "strong"}, tmp_path, seed=99)) == models(first)
-    assert models(pick({"route": "bulk"}, tmp_path)) == ["codex/gpt-6-luna"]
-    # Haiku 5.5 ties Luna at high weight in scout; listing order keeps Haiku the single-mode top pick.
-    scout = {entry["model"]: entry for entry in SEED["routes"]["scout"]}
-    assert scout["claude/claude-haiku-5-5"]["weight"] == scout["codex/gpt-6-luna"]["weight"] == "high"
-    assert [e["model"] for e in SEED["routes"]["scout"]][:2] == ["claude/claude-haiku-5-5", "codex/gpt-6-luna"]
-    # Rotating free tiers stay in scout at the lowest weight, out of bulk.
-    assert all(entry["weight"] == "sparing" for entry in SEED["routes"]["scout"]
-               if entry["model"].startswith("opencode/opencode/")
-               and not entry["model"].endswith(("deepseek-v4.1-flash-free", "glm-5.3-flash-free")))
-    assert not any(entry["model"].endswith(("space-bunny-free", "mimo-v2.6-flash-free"))
-                   for entry in SEED["routes"]["bulk"])
+    # The seed pools are the three tiers: deciders, mid-level judges and tier-1 lenses.
+    assert models(pick({"route": "flagship"}, tmp_path, catalog=SEED)) == ["claude/claude-opus-5-5"]
+    assert models(pick({"route": "workhorse"}, tmp_path, catalog=SEED)) == ["claude/claude-sonnet-5-5"]
+    assert models(pick({"route": "bulk"}, tmp_path, catalog=SEED)) == ["opencode/opencode/deepseek-v4.1-flash-free"]
+    bulk = {entry["model"]: entry["weight"] for entry in SEED["routes"]["bulk"]}
+    assert {bulk[model] for model in ("opencode/opencode/glm-5.3-flash-free", "claude/claude-haiku-5-5",
+                                       "codex/gpt-6-luna")} == {"high"}
+    # Rotating free tiers stay in bulk at the lowest weight; no mid or top model sits in bulk.
+    assert all(weight == "sparing" for model, weight in bulk.items()
+               if model.startswith("opencode/opencode/")
+               and not model.endswith(("deepseek-v4.1-flash-free", "glm-5.3-flash-free")))
+    assert not set(bulk) & {"claude/claude-sonnet-5-5", "codex/gpt-6.1-sol", "claude/claude-opus-5-5"}
 
 
 def test_every_mode_filters_cooling_uninstalled_and_disabled_models(tmp_path):
@@ -141,11 +142,11 @@ def test_council_weights_are_sampling_odds_and_sparing_is_rare(tmp_path):
 
 def test_a_prompt_training_model_never_takes_a_council_seat_for_its_family(tmp_path):
     argon = "opencode/opencode-go/gemini-4-argon-contributor"
-    assert {"model": argon, "weight": "sparing"} in SEED["routes"]["strong"]
+    assert {"model": argon, "weight": "sparing"} in SEED["routes"]["flagship"]
     drawn = Counter(model for seed in range(200)
-                    for model in models(pick({"route": "strong", "council": 3}, tmp_path, catalog=SEED, seed=seed)))
-    # As the lone Google family Argon would sit on nearly every council; by odds it takes about one seat in twelve.
-    assert 0 < drawn[argon] < 200 / 3
+                    for model in models(pick({"route": "flagship", "council": 2}, tmp_path, catalog=SEED, seed=seed)))
+    # As the lone Google family Argon would sit on every two-member council; by odds it sits on about one in thirteen.
+    assert 0 < drawn[argon] < 200 / 6
 
 
 def test_council_larger_than_the_pool_repeats_with_a_warning(tmp_path):
@@ -232,12 +233,14 @@ def test_availability_skips_entries_the_adapter_cannot_run(tmp_path):
 
 
 def test_task_classes_and_aliases_map_onto_routes(tmp_path):
-    assert pick({"route": "review"}, tmp_path)["route"] == "strong"
-    assert pick({"route": "Flagship"}, tmp_path)["route"] == "strong"
-    assert pick({"route": "ui-taste"}, tmp_path)["route"] == "design"
-    assert pick({"route": "scout"}, tmp_path)["route"] == "scout"
-    assert pick({"route": "mechanical"}, tmp_path)["route"] == "scout"
-    assert pick({"route": "workhorse"}, tmp_path)["route"] == "bulk"
+    assert pick({"route": "review"}, tmp_path, catalog=SEED)["route"] == "workhorse"
+    assert pick({"route": "strong"}, tmp_path, catalog=SEED)["route"] == "workhorse"
+    assert pick({"route": "Flagship"}, tmp_path, catalog=SEED)["route"] == "flagship"
+    assert pick({"route": "critical-review"}, tmp_path, catalog=SEED)["route"] == "flagship"
+    assert pick({"route": "ui-taste"}, tmp_path, catalog=SEED)["route"] == "design"
+    for lens in ("scout", "mechanical", "lens", "implementation"):
+        assert pick({"route": lens}, tmp_path, catalog=SEED)["route"] == "bulk"
+    assert pick({"route": "workhorse"}, tmp_path, catalog=SEED)["route"] == "workhorse"
     with pytest.raises(pools.PoolError) as error:
         pick({"route": "fastest"}, tmp_path)
     assert error.value.code == "route_invalid"
@@ -274,10 +277,16 @@ def test_instance_overlay_reorders_and_reweights_a_pool(tmp_path):
     document = json.loads(run.stdout)
     strong = document["routes"]["strong"]
     listed = ["codex/gpt-6-astra", "claude/claude-opus-5-5"]
-    assert [entry["model"] for entry in strong] == [
-        *listed, *(entry["model"] for entry in SEED["routes"]["strong"] if entry["model"] not in listed)]
+    assert [entry["model"] for entry in strong] == listed, "an overlay may add a pool the seed lacks"
     assert strong[1]["weight"] == "off" and strong[1]["availability"] == "off"
-    sol = next(entry for entry in strong if entry["model"] == "codex/gpt-6.1-sol")
+    second = tmp_path / "second"
+    second.mkdir()
+    workhorse = model_route(overlay_environment(second, {"routes": {
+        "workhorse": [{"model": "codex/gpt-6-astra", "weight": "high"}]}}), "routes", "--json")
+    merged = json.loads(workhorse.stdout)["routes"]["workhorse"]
+    assert [entry["model"] for entry in merged] == [
+        "codex/gpt-6-astra", *(entry["model"] for entry in SEED["routes"]["workhorse"])]
+    sol = next(entry for entry in merged if entry["model"] == "codex/gpt-6.1-sol")
     assert sol["effort"] == "high-xhigh", "unlisted entries keep their fields"
     assert document["routes"]["local"][0]["weight"] == "normal"
     assert "broken" not in document["routes"]
@@ -311,7 +320,7 @@ def test_routes_prints_each_pool_with_live_availability(tmp_path):
     (state / "cooldowns.json").write_text(json.dumps({"cooldowns": {"codex/gpt-6-luna": {"cooling_until": until}}}))
     run = model_route(env, "routes")
     assert run.returncode == 0, run.stderr
-    for name in ("strong", "bulk", "design", "writing"):
+    for name in ("flagship", "workhorse", "bulk", "design", "writing"):
         assert f"\n{name}\n" in f"\n{run.stdout}"
     assert "not installed" in run.stdout
     bin_dir = tmp_path / "bin"
@@ -327,7 +336,7 @@ def test_routes_prints_each_pool_with_live_availability(tmp_path):
                                text=True, capture_output=True, check=False,
                                env={**env, "PATH": os.environ["PATH"]})
     assert provenant.returncode == 0, provenant.stderr
-    assert set(json.loads(provenant.stdout)["routes"]) >= {"strong", "bulk", "design", "writing"}
+    assert set(json.loads(provenant.stdout)["routes"]) >= {"flagship", "workhorse", "bulk", "design", "writing"}
 
 
 def test_route_line_names_why_the_pool_picked_the_model():

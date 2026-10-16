@@ -1,6 +1,6 @@
 """Pick models from the global weighted route pools (#848).
 
-A route (`strong`, `bulk`, `scout`, `design`, `writing`) is a weighted pool of
+A route (the tiers `bulk`, `workhorse`, `flagship`, or the crafts `design`, `writing`) is a weighted pool of
 `adapter/model` entries across adapters. This module filters a pool on
 availability and picks from it in one of four modes: single (highest weight),
 rotate (smooth weighted round-robin per project), council (N picks, families

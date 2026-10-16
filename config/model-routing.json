@@ -5,39 +5,69 @@
     "ceiling_tokens": 300000
   },
   "routes": {
-    "strong": [
+    "flagship": [
       {
-        "model": "claude/claude-sonnet-5-5",
+        "model": "claude/claude-opus-5-5",
         "weight": "high"
       },
       {
-        "model": "codex/gpt-6.1-sol",
-        "weight": "normal",
-        "effort": [
-          "high",
-          "xhigh"
-        ]
-      },
-      {
-        "model": "claude/claude-opus-5-5",
-        "weight": "normal"
-      },
-      {
         "model": "codex/gpt-6-astra",
-        "weight": "sparing"
+        "weight": "normal"
       },
       {
         "model": "opencode/opencode-go/gemini-4-argon-contributor",
         "weight": "sparing"
       }
     ],
+    "workhorse": [
+      {
+        "model": "claude/claude-sonnet-5-5",
+        "weight": "high"
+      },
+      {
+        "model": "codex/gpt-6.1-sol",
+        "weight": "high",
+        "effort": [
+          "high",
+          "xhigh"
+        ]
+      },
+      {
+        "model": "agy/gemini-3.8-flash",
+        "weight": "normal",
+        "effort": [
+          "high",
+          "high"
+        ]
+      },
+      {
+        "model": "agy/claude-opus-4-6-thinking",
+        "weight": "sparing"
+      }
+    ],
     "bulk": [
+      {
+        "model": "opencode/opencode/deepseek-v4.1-flash-free",
+        "weight": "high"
+      },
+      {
+        "model": "opencode/opencode/glm-5.3-flash-free",
+        "weight": "high"
+      },
+      {
+        "model": "claude/claude-haiku-5-5",
+        "weight": "high",
+        "effort": [
+          "low",
+          "medium"
+        ]
+      },
       {
         "model": "codex/gpt-6-luna",
         "weight": "high"
       },
       {
-        "model": "claude/claude-haiku-5-5",
+        "model": "agy/gemini-3.8-flash",
         "weight": "normal",
         "effort": [
           "low",
@@ -45,40 +75,8 @@
         ]
       },
       {
-        "model": "agy/gemini-3.8-flash",
-        "weight": "normal"
-      },
-      {
-        "model": "opencode/opencode/deepseek-v4.1-flash-free",
-        "weight": "high"
-      },
-      {
-        "model": "opencode/opencode/glm-5.3-flash-free",
-        "weight": "normal"
-      },
-      {
-        "model": "agy/claude-opus-4-6-thinking",
-        "weight": "sparing"
-      },
-      {
         "model": "agy/claude-sonnet-4-6",
         "weight": "sparing"
-      },
-      {
-        "model": "claude/claude-sonnet-5-5",
-        "weight": "sparing",
-        "effort": [
-          "medium",
-          "high"
-        ]
-      },
-      {
-        "model": "codex/gpt-6.1-sol",
-        "weight": "sparing",
-        "effort": [
-          "medium",
-          "high"
-        ]
       },
       {
         "model": "opencode/opencode-go/deepseek-v4.1-flash",
@@ -87,40 +85,6 @@
       {
         "model": "opencode/opencode-go/glm-5.3-flash",
         "weight": "sparing"
-      }
-    ],
-    "scout": [
-      {
-        "model": "claude/claude-haiku-5-5",
-        "weight": "high",
-        "effort": [
-          "low",
-          "medium"
-        ]
-      },
-      {
-        "model": "codex/gpt-6-luna",
-        "weight": "high",
-        "effort": [
-          "low",
-          "medium"
-        ]
-      },
-      {
-        "model": "opencode/opencode/deepseek-v4.1-flash-free",
-        "weight": "normal"
-      },
-      {
-        "model": "opencode/opencode/glm-5.3-flash-free",
-        "weight": "normal"
-      },
-      {
-        "model": "agy/gemini-3.8-flash",
-        "weight": "normal",
-        "effort": [
-          "low",
-          "medium"
-        ]
       },
       {
         "model": "opencode/opencode/space-bunny-free",
@@ -181,16 +145,19 @@
     ]
   },
   "route_synonyms": {
-    "flagship": "strong",
-    "workhorse": "bulk",
-    "scout": "scout",
-    "critical-review": "strong",
-    "orchestration": "strong",
-    "review": "strong",
-    "second-opinion": "strong",
+    "strong": "workhorse",
+    "scout": "bulk",
+    "top": "flagship",
+    "mid": "workhorse",
+    "critical-review": "flagship",
+    "decision": "flagship",
+    "orchestration": "flagship",
+    "review": "workhorse",
+    "second-opinion": "workhorse",
     "implementation": "bulk",
     "legwork": "bulk",
-    "mechanical": "scout",
+    "lens": "bulk",
+    "mechanical": "bulk",
     "research": "bulk",
     "screenshots": "bulk",
     "ui-taste": "design"

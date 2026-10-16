@@ -64,7 +64,8 @@ surface. An authorised merge prunes its own worktree and merged refs; other dele
 force-removal, history rewrites and shared-branch pushes outside authorised merges stay gated.
 
 Route each dispatch by task class to `flagship`, `workhorse` or `scout`, or by
-an explicit model the adapter resolves. Bind the applied route and receipt.
+an explicit model the adapter resolves; with several families available, work as a tiered
+council whose depth follows the risk tier. Bind the applied route and receipt.
 An ordinary alias-only adapter route records its alias and capability limit;
 never invent task-class, role or effort fields. Runtime governs, catalogues
 cache, mechanics live in `orchestrate`.
