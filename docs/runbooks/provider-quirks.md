@@ -94,12 +94,16 @@ is checked once per process.
   Stderr carries INFO logs even at `--log-level error`; only `level=ERROR` lines are fatal.
 - **Read-only sandbox.** The macOS profile keeps the blanket read deny on HOME for OpenCode and
   re-allows only what v2 needs to start: listings (not contents) of every ancestor of the cwd, of
-  `~/.claude` and `~/.agents`, plus the instruction files `AGENTS.md`, `CLAUDE.md` and `HARNESS.md`
-  in each ancestor and `~/.agents/AGENTS.md` and `~/.claude/CLAUDE.md`. v2 realPath()s those at
+  home, `~/.claude` and `~/.agents`, plus the instruction files `AGENTS.md`, `CLAUDE.md` and
+  `HARNESS.md` in each ancestor and `~/.agents/AGENTS.md` and `~/.claude/CLAUDE.md`. Absolute
+  `instructions` entries in the global `opencode.json(c)`, such as the installer's
+  `~/Repos/provenant/HARNESS.md`, are granted with their ancestors' listings unless they are globs,
+  URLs or credential paths, so a lane in another project still starts. v2 realPath()s those at
   startup and follows `@imports`; without them the server fails with `UnexpectedStatus: 500` or
   `Instruction initialization blocked` (EPERM on `lstat ~/.agents/AGENTS.md`). The provider state
   grant stays: `~/.local/share/opencode` (including `auth.json`, which holds the login) and
-  `~/.cache/opencode` are readable, because OpenCode needs them, so credentials are not
+  `~/.cache/opencode` are readable, as are `~/.config/opencode` and `~/.opencode` (the install
+  script's home, which v2's config discovery stats), because OpenCode needs them, so credentials are not
   denied to the model at the OS layer there; the config's `external_directory: deny` keeps the
   model's tools to the project. `~/.zshrc`, `~/.ssh` and the rest of HOME stay unreadable (checked
   with `sandbox-exec`). The fabric MCP server named in the user's OpenCode config cannot start under

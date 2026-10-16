@@ -327,8 +327,11 @@ implementation belongs to Claude Sonnet 5.5 or Gemini legwork.
 
 **Sonnet 5.5 is Claude's default; Opus 5.5 is for critical work.** Sonnet takes
 implementation, research, screenshots, second opinions, ordinary review and
-UI/design. Opus takes chairing, critical review, orchestration, crucial and
-terminal synthesis and hard reasoning, and still serves review. Prefer Opus over
+UI/design. Claude leads frontend and taste work (Opus for hard design), with
+Gemini Flash and Claude critiquing captures blind. Opus takes chairing,
+critical review, orchestration, crucial and terminal synthesis and hard
+reasoning, and still serves review. Opus and Astra plan as peers. Count Claude
+helpers toward a cap of about four concurrent Claude agents. Prefer Opus over
 Claude Fable 5.1 (`claude-fable-5-1`) for critical judgement most of the time.
 Luna and Haiku 5.5 are the bulk legwork routes.
 
