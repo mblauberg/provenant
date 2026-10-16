@@ -117,12 +117,74 @@ def test_read_only_git_config_allowlist_is_limited_to_the_two_global_files(monke
     assert f'(literal "{home / ".claude"}")' in profile
     assert f'(literal "{home / ".agents/AGENTS.md"}")' in profile
     assert f'(literal "{tmp_path.resolve() / "AGENTS.md"}")' in profile
+    assert f'(subpath "{home / ".opencode"}")' in profile
+    outside = supervisor.os_confinement_profile({**plan, "cwd": "/private/tmp", "workspace_root": "/private/tmp"})
+    assert f'(literal "{home}")' in outside
     other = supervisor.os_confinement_profile({**plan, "adapter": "gemini"})
     assert f'(subpath "{home}")' in other
 
     monkeypatch.delenv("XDG_CONFIG_HOME")
     default_profile = supervisor.os_confinement_profile(plan)
     assert f'(literal "{home / ".config/git/config"}")' in default_profile
+
+
+def test_opencode_read_only_grants_configured_instruction_files(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    home = (tmp_path / "home").resolve()
+    product = home / "Repos/provenant"
+    product.mkdir(parents=True)
+    (product / "HARNESS.md").write_text("constitution", encoding="utf-8")
+    (home / ".ssh").mkdir()
+    (home / ".ssh/id_ed25519").write_text("key", encoding="utf-8")
+    config = home / ".config/opencode"
+    config.mkdir(parents=True)
+    (config / "HARNESS.md").symlink_to(product / "HARNESS.md")
+    (config / "opencode.jsonc").write_text(
+        '{\n  // global rules\n  "$schema": "https://opencode.ai/config.json", /* inline */\n'
+        f'  "instructions": ["{config / "HARNESS.md"}", "{home / ".ssh/id_ed25519"}", "docs/*.md",],\n}}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(supervisor.Path, "home", lambda: home)
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    workspace = (tmp_path / "elsewhere").resolve()
+    workspace.mkdir()
+    plan = {
+        "adapter": "opencode", "mode": "read_only", "workspace_root": str(workspace),
+        "cwd": str(workspace), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    }
+    profile = supervisor.os_confinement_profile(plan)
+
+    assert f'(literal "{product / "HARNESS.md"}")' in profile
+    assert f'(literal "{product}")' in profile
+    assert f'(literal "{home / "Repos"}")' in profile
+    assert "id_ed25519" not in profile
+
+
+def test_read_only_state_link_into_a_credential_store_is_not_granted(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    home = (tmp_path / "home").resolve()
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".opencode").symlink_to(home / ".ssh")
+    monkeypatch.setattr(supervisor.Path, "home", lambda: home)
+    workspace = (tmp_path / "workspace").resolve()
+    workspace.mkdir()
+    plan = {
+        "adapter": "opencode", "mode": "read_only", "workspace_root": str(workspace),
+        "cwd": str(workspace), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    }
+    profile = supervisor.os_confinement_profile(plan)
+
+    assert f'(subpath "{home / ".opencode"}")' not in profile
+    assert f'(subpath "{home / ".ssh"}")' not in profile
+    assert f'(subpath "{home / ".config/opencode"}")' in profile
+
+
+def test_strip_jsonc_keeps_comment_and_comma_text_inside_strings():
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    text = '{"a": "x,}y // not a comment /* nor this */", "b": [1, 2, /* c */ ], // tail\n}'
+    assert supervisor.json.loads(supervisor._strip_jsonc(text)) == {
+        "a": "x,}y // not a comment /* nor this */", "b": [1, 2],
+    }
 
 
 def test_opencode_read_only_discovery_skips_symlinks_to_credentials(monkeypatch, tmp_path):
