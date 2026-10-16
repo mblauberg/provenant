@@ -1332,6 +1332,8 @@ def build_plan(
         **metadata,
     }
     context_usage.apply_ceiling(plan, context_ceiling)
+    if hasattr(config, "config_policy"):
+        plan["applied"]["config"] = config.config_policy(plan)
     plan["argv"] = config.argv(plan)
     if config.PROMPT_TRANSPORT == "argv":
         ceiling = int(os.environ.get("CF_DISPATCH_ARGV_PROMPT_MAX_BYTES", "65536"))
@@ -2432,6 +2434,16 @@ def _observed_model(plan, parsed, env):
     return None, None
 
 
+def _prepare_codex_state_dir(plan):
+    """Create the Provenant state directory the plan granted, now rather than while planning."""
+    state_dir = plan.get("applied", {}).get("write_boundary", {}).get("state_dir")
+    if plan["adapter"] == "codex" and state_dir:
+        try:
+            Path(state_dir).mkdir(parents=True, exist_ok=True, mode=0o700)
+        except OSError:
+            pass
+
+
 def _prepare_codex_capability_home(plan, environment):
     capabilities = plan.get("applied", {}).get("capabilities", [])
     if plan.get("adapter") != "codex" or not capabilities:
@@ -2940,6 +2952,8 @@ def execute(
                        TMPPREFIX=str(private_tmp / "zsh"),
                        XDG_CACHE_HOME=str(private_cache),
                        COREPACK_HOME=str(private_cache / "node" / "corepack"))
+    # Corepack downloads a pinned pnpm or yarn into COREPACK_HOME; no one is present to confirm the prompt.
+    environment.setdefault("COREPACK_ENABLE_DOWNLOAD_PROMPT", "0")
     environment.update(tool_cache_environment(plan, private_cache, environment))
     if plan["mode"] == "worktree_write":
         # Inherited GIT_ variables were dropped above, so this list is the whole command-line scope.
@@ -3130,6 +3144,7 @@ def execute(
     selector = selectors.DefaultSelector()
     try:
         _prepare_codex_capability_home(plan, environment)
+        _prepare_codex_state_dir(plan)
         if plan["adapter"] != "codex" and "browser" in plan["applied"].get("capabilities", []):
             environment["MAC_CHROMIUM_TMPDIR"] = str(private_tmp)  # Chrome's default temp is outside the boundary.
         if plan["stdin_policy"] == "prompt":

@@ -616,6 +616,7 @@ def test_same_route_retry_runs_full_provider_free_chain_and_retains_risk_and_pro
     write_executable(
         bin_dir / "codex",
         f"""#!/usr/bin/env bash
+        if [ "$1" = "mcp" ]; then printf '[]'; exit 0; fi
         if [ "$1" = "debug" ] && [ "$2" = "models" ]; then
           printf '%s\n' '{{"models":[{{"slug":"gpt-6-luna","supported_reasoning_levels":[{{"effort":"high"}}]}}]}}'
           exit 0

@@ -100,6 +100,68 @@ rather than hard-coded so the catalogue can follow the CLI.
   rule: a third-party endpoint exposes no effort control the harness can claim.
 - Ordinary Codex dispatch is unchanged and still inherits nothing.
 
+## Amendment 2026-10-16: ordinary lanes inherit the user config
+
+Context and Decision above describe the clean configuration, which is now the
+assurance behaviour only. A lane reached through `dispatch_run` with
+`--intent ordinary` (the Fabric default) previously lost the operator's MCP
+servers, plugins, hooks, execpolicy rules, memories and subagent settings, and
+so had less reach than a native Codex subagent. It now loads them, and the
+applied block of the receipt records `config: inherited` or `config: clean`.
+
+- `assurance` intent (the `cf_dispatch.sh` default), capability lanes (which run
+  under their own `CODEX_HOME`) and `CF_DISPATCH_CODEX_CONFIG=clean` keep
+  `--ignore-user-config --ignore-rules` and `allow_login_shell=false`.
+  `CF_DISPATCH_CODEX_CONFIG` accepts `clean` or `inherited`; any other value is
+  an error.
+- Every route and permission override Provenant passes with `-c` (permission
+  profile, model, effort, approval policy, service tier, endpoint provider)
+  still wins over the user file, so a user config that grants unrestricted
+  filesystem access does not widen a lane: read-only lanes stay unable to write
+  the workspace and writers stay inside their worktree.
+- An inheriting lane also sets `web_search="live"` and `notify=[]`, and sets
+  `default_tools_approval_mode="approve"` for each server it keeps, since no one
+  is present to approve a tool call. Per-server settings go in one
+  `mcp_servers={...}` parent-table override: Codex splits a dotted `-c` key on
+  every dot even when quoted, so `mcp_servers."a.b".enabled=false` fails.
+- Read-only and every other non-writer lane runs no hook and no stdio MCP
+  server. Hooks (user, trusted project and plugin) and stdio servers run outside
+  Codex's command sandbox and the permission profile, so the lane sets
+  `features.hooks=false` (receipt: `applied.hooks_disabled`) and
+  `enabled=false` for each server that executes a local process (receipt:
+  `applied.mcp_disabled`): stdio servers, and remote servers with a command
+  field such as `http_headers_helper`. It keeps plain remote (`url`) servers. A
+  plugin-supplied server has no config-table transport, so a per-server override
+  makes Codex exit `invalid transport`; when one executes, the lane sets
+  `features.plugins=false` instead (receipt: `applied.plugins_disabled`). A
+  server name that cannot be spelt in an override sends the lane clean. The
+  server inventory comes from `codex mcp list --json` run in the
+  lane's directory, which resolves every layer Codex loads (user config, trusted
+  project `.codex/config.toml` files, plugin servers); a second listing under
+  `features.plugins=false` identifies the plugin servers. Discovery has an 8
+  second budget. The decision is taken once per plan and reused when the argv is
+  rebuilt (context ceiling, effort retry, resume), so receipts match the argv. If
+  discovery fails or times out the
+  lane runs clean (`--ignore-user-config --ignore-rules`) and the receipt carries
+  `applied.config_note`, rather than inheriting blind.
+- Accepted boundary for worktree writers: a writer keeps every hook and server, as
+  a native Codex session does, and these run with the operator's privileges
+  outside the worktree confinement; a stdio server or hook can write anywhere the
+  operator can. This is a deliberate parity choice, not a guard. The receipt
+  records it as `applied.hooks_unconfined` and `applied.mcp_unconfined` (the
+  servers that execute; `applied.mcp_unapproved` lists plugin servers, which
+  take no override). Assurance and capability lanes, which run clean, are
+  unaffected.
+- Every native-route lane pins `model_provider="openai"` and clears
+  `openai_base_url`, so a provider or base URL in the user file cannot redirect
+  the route and misattribute the receipt. An endpoint route keeps its own pin.
+- A lane may write Provenant's own state directory (`$XDG_STATE_HOME/provenant`,
+  holding the admission lock), created at execution time and recorded as
+  `applied.write_boundary.state_dir`. The grant is skipped, with
+  `state_dir_skipped` noting why, when the path is a symlink, holds a glob
+  character, or equals, contains or lies inside the cwd, workspace, worktree or
+  an add-dir.
+
 ## Non-goals
 
 This decision does not add an endpoint profile for any particular provider, does
