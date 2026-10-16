@@ -151,7 +151,7 @@ const route = {
   operation_id: str,
   adapter: str,
   alias: str,
-  model: str,
+  model: str.meta({ description: "A model name or catalogue alias (for example sonnet, sol, luna, deepseek-free, glm-free); the most predictable selector. adapter/model also works." }),
   effort: str,
   mode: z.enum(ACCESS_MODES).optional(),
   worktree: str,
@@ -166,7 +166,7 @@ const route = {
   fallback: z
     .union([z.boolean(), z.literal("any"), z.array(z.union([z.string(), z.record(z.string(), z.unknown())]))])
     .optional(),
-  route: z.string().optional().meta({ description: "Global pool: strong, bulk, design or writing; task classes and flagship/workhorse/scout map onto these. adapter narrows the pool; an explicit model wins over route." }),
+  route: z.string().optional().meta({ description: "Global pool: strong, bulk, scout, design or writing; task classes and workhorse/scout aliases map onto these. adapter narrows the pool; an explicit model wins over route. Prefer naming a model directly (for example deepseek-free, glm-free, sonnet, sol) when you know what you want." }),
   rotate: z.boolean().optional().meta({ description: "Cycle the route's pool per project instead of taking its top model; ignored with council." }),
   council: z.number().int().min(1).max(8).optional().meta({ description: "Run 1-8 members from the route as one batch, families spread first; members repeat when fewer are available." }),
   models: z.array(z.string()).min(1).max(8).optional().meta({ description: "Ad-hoc council of adapter/model[@effort] entries; bypasses route and adapter." }),

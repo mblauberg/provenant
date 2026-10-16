@@ -63,7 +63,7 @@ def models(result):
 
 def test_seed_routes_name_registered_models_with_the_tiny_weight_vocabulary():
     CATALOG = SEED
-    assert set(CATALOG["routes"]) == {"strong", "bulk", "design", "writing"}
+    assert set(CATALOG["routes"]) == {"strong", "bulk", "scout", "design", "writing"}
     for name, entries in CATALOG["routes"].items():
         for entry in entries:
             assert entry["weight"] in {"high", "normal", "sparing"}
@@ -82,10 +82,16 @@ def test_top_is_the_highest_weight_available_and_deterministic(tmp_path):
     assert first["picks"][0]["reason"] == "strong top"
     assert models(pick({"route": "strong"}, tmp_path, seed=99)) == models(first)
     assert models(pick({"route": "bulk"}, tmp_path)) == ["codex/gpt-6-luna"]
-    # Haiku 5.5 ties Luna at high weight; listing order keeps Luna the single-mode top pick.
-    bulk = {entry["model"]: entry for entry in SEED["routes"]["bulk"]}
-    assert bulk["claude/claude-haiku-5-5"]["weight"] == bulk["codex/gpt-6-luna"]["weight"] == "high"
-    assert [e["model"] for e in SEED["routes"]["bulk"]][:2] == ["codex/gpt-6-luna", "claude/claude-haiku-5-5"]
+    # Haiku 5.5 ties Luna at high weight in scout; listing order keeps Haiku the single-mode top pick.
+    scout = {entry["model"]: entry for entry in SEED["routes"]["scout"]}
+    assert scout["claude/claude-haiku-5-5"]["weight"] == scout["codex/gpt-6-luna"]["weight"] == "high"
+    assert [e["model"] for e in SEED["routes"]["scout"]][:2] == ["claude/claude-haiku-5-5", "codex/gpt-6-luna"]
+    # Rotating free tiers stay in scout at the lowest weight, out of bulk.
+    assert all(entry["weight"] == "sparing" for entry in SEED["routes"]["scout"]
+               if entry["model"].startswith("opencode/opencode/")
+               and not entry["model"].endswith(("deepseek-v4.1-flash-free", "glm-5.3-flash-free")))
+    assert not any(entry["model"].endswith(("space-bunny-free", "mimo-v2.6-flash-free"))
+                   for entry in SEED["routes"]["bulk"])
 
 
 def test_every_mode_filters_cooling_uninstalled_and_disabled_models(tmp_path):
@@ -131,6 +137,15 @@ def test_council_weights_are_sampling_odds_and_sparing_is_rare(tmp_path):
     drawn = Counter(models(pick({"route": "strong", "council": 1}, tmp_path, seed=seed))[0] for seed in range(400))
     assert drawn["claude/claude-opus-5-5"] > drawn["codex/gpt-6.1-sol"] > drawn["codex/gpt-6-astra"] > 0
     assert drawn["codex/gpt-6-astra"] < 400 / 8
+
+
+def test_a_prompt_training_model_never_takes_a_council_seat_for_its_family(tmp_path):
+    argon = "opencode/opencode-go/gemini-4-argon-contributor"
+    assert {"model": argon, "weight": "sparing"} in SEED["routes"]["strong"]
+    drawn = Counter(model for seed in range(200)
+                    for model in models(pick({"route": "strong", "council": 3}, tmp_path, catalog=SEED, seed=seed)))
+    # As the lone Google family Argon would sit on nearly every council; by odds it takes about one seat in twelve.
+    assert 0 < drawn[argon] < 200 / 3
 
 
 def test_council_larger_than_the_pool_repeats_with_a_warning(tmp_path):
@@ -220,7 +235,9 @@ def test_task_classes_and_aliases_map_onto_routes(tmp_path):
     assert pick({"route": "review"}, tmp_path)["route"] == "strong"
     assert pick({"route": "Flagship"}, tmp_path)["route"] == "strong"
     assert pick({"route": "ui-taste"}, tmp_path)["route"] == "design"
-    assert pick({"route": "scout"}, tmp_path)["route"] == "bulk"
+    assert pick({"route": "scout"}, tmp_path)["route"] == "scout"
+    assert pick({"route": "mechanical"}, tmp_path)["route"] == "scout"
+    assert pick({"route": "workhorse"}, tmp_path)["route"] == "bulk"
     with pytest.raises(pools.PoolError) as error:
         pick({"route": "fastest"}, tmp_path)
     assert error.value.code == "route_invalid"

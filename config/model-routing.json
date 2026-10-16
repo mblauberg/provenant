@@ -25,6 +25,10 @@
       {
         "model": "codex/gpt-6-astra",
         "weight": "sparing"
+      },
+      {
+        "model": "opencode/opencode-go/gemini-4-argon-contributor",
+        "weight": "sparing"
       }
     ],
     "bulk": [
@@ -34,7 +38,7 @@
       },
       {
         "model": "claude/claude-haiku-5-5",
-        "weight": "high",
+        "weight": "normal",
         "effort": [
           "low",
           "medium"
@@ -50,18 +54,6 @@
       },
       {
         "model": "opencode/opencode/glm-5.3-flash-free",
-        "weight": "normal"
-      },
-      {
-        "model": "opencode/opencode/space-bunny-free",
-        "weight": "sparing"
-      },
-      {
-        "model": "opencode/opencode/mimo-v2.6-flash-free",
-        "weight": "normal"
-      },
-      {
-        "model": "opencode/opencode/muse-spark-1.3-contributor-free",
         "weight": "normal"
       },
       {
@@ -94,6 +86,52 @@
       },
       {
         "model": "opencode/opencode-go/glm-5.3-flash",
+        "weight": "sparing"
+      }
+    ],
+    "scout": [
+      {
+        "model": "claude/claude-haiku-5-5",
+        "weight": "high",
+        "effort": [
+          "low",
+          "medium"
+        ]
+      },
+      {
+        "model": "codex/gpt-6-luna",
+        "weight": "high",
+        "effort": [
+          "low",
+          "medium"
+        ]
+      },
+      {
+        "model": "opencode/opencode/deepseek-v4.1-flash-free",
+        "weight": "normal"
+      },
+      {
+        "model": "opencode/opencode/glm-5.3-flash-free",
+        "weight": "normal"
+      },
+      {
+        "model": "agy/gemini-3.8-flash",
+        "weight": "normal",
+        "effort": [
+          "low",
+          "medium"
+        ]
+      },
+      {
+        "model": "opencode/opencode/space-bunny-free",
+        "weight": "sparing"
+      },
+      {
+        "model": "opencode/opencode/mimo-v2.6-flash-free",
+        "weight": "sparing"
+      },
+      {
+        "model": "opencode/opencode/muse-spark-1.3-contributor-free",
         "weight": "sparing"
       }
     ],
@@ -145,14 +183,14 @@
   "route_synonyms": {
     "flagship": "strong",
     "workhorse": "bulk",
-    "scout": "bulk",
+    "scout": "scout",
     "critical-review": "strong",
     "orchestration": "strong",
     "review": "strong",
     "second-opinion": "strong",
     "implementation": "bulk",
     "legwork": "bulk",
-    "mechanical": "bulk",
+    "mechanical": "scout",
     "research": "bulk",
     "screenshots": "bulk",
     "ui-taste": "design"
@@ -790,6 +828,17 @@
           ],
           "plan_cap_usd": 30,
           "trains_on_prompts": false
+        },
+        {
+          "id": "opencode-go/gemini-4-argon-contributor",
+          "names": [
+            "argon",
+            "gemini-argon",
+            "gemini-4-argon"
+          ],
+          "plan_cap_usd": 30,
+          "trains_on_prompts": true,
+          "warning": "Contributor tier: prompts are used for training and not zero-retention. Do not send sensitive, private or client data."
         },
         {
           "id": "opencode/space-bunny-free",

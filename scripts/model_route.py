@@ -823,8 +823,10 @@ def _fallback_candidates(
     current = _canonical_model(adapter_name, model, catalog)
     candidates = [(adapter_name, candidate) for candidate in own]
     if adapter_name != "opencode":
+        # OpenCode has no flagship tier, so a flagship route falls back to its workhorse list.
+        opencode_tiers = catalog["adapters"].get("opencode", {}).get("aliases", {})
         candidates += [("opencode", candidate) for candidate in
-                       catalog["adapters"].get("opencode", {}).get("aliases", {}).get(tier, [])]
+                       opencode_tiers.get(tier) or opencode_tiers.get("workhorse", [])]
     if fallback == "any":
         candidates += [("opencode", item["id"]) for item in
                        catalog["adapters"].get("opencode", {}).get("models", [])]
@@ -2038,7 +2040,7 @@ def parser() -> argparse.ArgumentParser:
     )
     routes = commands.add_parser(
         "routes", help="print each route pool with live availability",
-        description="Print every global route pool (strong, bulk, design, writing) with each model's weight, "
+        description="Print every global route pool (strong, bulk, scout, design, writing) with each model's weight, "
                     "effort band, caveats and live availability.")
     routes.add_argument("--json", action="store_true", help="print one fabric.routes.v1 JSON document")
     routes.add_argument("--health", action="store_true",

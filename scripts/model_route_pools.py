@@ -1,6 +1,6 @@
 """Pick models from the global weighted route pools (#848).
 
-A route (`strong`, `bulk`, `design`, `writing`) is a weighted pool of
+A route (`strong`, `bulk`, `scout`, `design`, `writing`) is a weighted pool of
 `adapter/model` entries across adapters. This module filters a pool on
 availability and picks from it in one of four modes: single (highest weight),
 rotate (smooth weighted round-robin per project), council (N picks, families
@@ -258,13 +258,20 @@ def _effort(entry: dict[str, Any], requested: str | None, effort_order: dict[str
 
 
 def _council(entries: list[dict[str, Any]], count: int, rng: random.Random) -> list[dict[str, Any]]:
-    """Pick `count` entries: unused families first, weights as odds, repeats only once exhausted."""
+    """Pick `count` entries: unused families first, weights as odds, repeats only once exhausted.
+
+    A prompt-training model never claims a seat for a new family: it joins a council
+    only by its odds, so a rare contributor model is not drawn into every council.
+    """
     picks: list[dict[str, Any]] = []
     while len(picks) < count:
         remaining = list(entries)
         families: set[str] = set()
         while remaining and len(picks) < count:
-            fresh = [entry for entry in remaining if entry["family"] not in families] or remaining
+            fresh = remaining if not families else [
+                entry for entry in remaining
+                if entry["family"] not in families
+                and not PRIVATE_UNSAFE_TRAITS.intersection(entry["traits"])] or remaining
             chosen = rng.choices(fresh, weights=[entry["weight"] for entry in fresh])[0]
             picks.append(chosen)
             families.add(chosen["family"])

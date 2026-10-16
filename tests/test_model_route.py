@@ -23,9 +23,12 @@ def test_free_opencode_models_are_derived_from_the_free_pattern():
     assert adapter["free_pattern"]
     for model in adapter["models"]:
         free = router.is_free_model(adapter, model["id"])
-        assert router.training_flag(adapter, model) is free or model["trains_on_prompts"] is False
+        training = router.training_flag(adapter, model)
+        # Free ids default to training unless flagged zero-retention; paid ids train only when flagged.
+        assert training is ((model.get("trains_on_prompts") is not False) if free
+                            else model.get("trains_on_prompts") is True)
         assert (model["plan_cap_usd"] == 0) is free
-        assert bool(model.get("warning")) is (free and model.get("trains_on_prompts") is not False)
+        assert bool(model.get("warning")) is training
     fixture = {"free_pattern": "-free$", "models": [{"id": "opencode/rotating-free"}]}
     router._apply_free_pattern(fixture)
     assert fixture["models"][0]["trains_on_prompts"] is True and fixture["models"][0]["plan_cap_usd"] == 0

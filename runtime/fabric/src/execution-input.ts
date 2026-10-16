@@ -97,7 +97,7 @@ export interface RouteInput {
   allow_secrets?: boolean;
   fallback?: boolean | "any" | Array<string | Record<string, unknown>>;
   context_ceiling?: number;
-  /** A global weighted pool (strong, bulk, design, writing) or a task-class/alias synonym. */
+  /** A global weighted pool (strong, bulk, scout, design, writing) or a task-class/alias synonym. */
   route?: string;
   rotate?: boolean;
   council?: number;
