@@ -1408,7 +1408,7 @@ class LaneLoopbackContracts(unittest.TestCase):
         metadata = Path(git(target, 'rev-parse', '--absolute-git-dir'))
         (metadata / 'locked').write_text('initializing')
         # An interrupted checkout can leave tracked files absent and a partial index.
-        (target / 'code.txt').write_text('partial checkout')
+        (target / 'code.txt').write_text('committed base\n')
         context = dict(project_path='Repos/project', worktree_path=str(target), branch='feat/initializing',
             base_revision=base, host='workshop', operation_id=identifier, created_worktree=True, created_branch=True)
         with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
@@ -1446,6 +1446,160 @@ class LaneLoopbackContracts(unittest.TestCase):
             self.assertFalse(metadata.exists())
             self.assertEqual(git(self.peer_workspace, 'for-each-ref', '--format=%(refname)',
                 'refs/heads/feat/initializing'), '')
+
+    def interrupted_checkout(self, git, base, branch=None):
+        """A Git worktree stopped while its initializing lock was held."""
+        name = (branch or 'read-interrupted').replace('/', '-')
+        target = self.peer_workspace / '.worktrees' / name
+        command = ['worktree', 'add', '--no-checkout', *(['-b', branch, str(target), base] if branch
+            else ['--detach', str(target), base])]
+        git(self.peer_workspace, *command)
+        metadata = Path(git(target, 'rev-parse', '--absolute-git-dir'))
+        (metadata / 'locked').write_text('initializing')
+        return target, metadata
+
+    def settle_with(self, directory, context, identifier):
+        import fabric_hosts as hosts
+        patcher = patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+            'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')})
+        patcher.start()
+        self.addCleanup(patcher.stop)  # Later settlements in the test run as the peer too.
+        code = hosts.lane_owner().code()
+        code.write_json(code.state_file(directory, identifier), [context])
+        with code.f.database() as db:
+            db.execute('INSERT OR IGNORE INTO operations VALUES (?,?,NULL)', (identifier,
+                json.dumps({'project': 'Repos/project', 'verb': 'dispatch', 'digest': 'fixture'})))
+        return code, code.f.settle(identifier)
+
+    def test_initializing_cleanup_keeps_edited_or_untracked_work(self):
+        git, base, _ = self.writer_fixture()
+        git(self.peer_workspace, 'fetch', str(self.workspace), 'HEAD')
+        target, metadata = self.interrupted_checkout(git, base, 'feat/edited')
+        context = dict(project_path='Repos/project', worktree_path=str(target), branch='feat/edited',
+            base_revision=base, host='workshop', operation_id='edited-init', created_worktree=True, created_branch=True)
+        (target / 'code.txt').write_text('tracked edit made during recovery\n')
+        (target / 'notes.md').write_text('untracked recovery notes\n')
+        code, result = self.settle_with('writer-contexts', context, 'edited-init')
+        self.assertEqual(result['cleanup_pending'], [str(target)])
+        self.assertEqual((target / 'code.txt').read_text(), 'tracked edit made during recovery\n')
+        (target / 'code.txt').write_text('committed base\n')
+        self.assertEqual(code.f.settle('edited-init')['cleanup_pending'], [str(target)])
+        self.assertEqual((target / 'notes.md').read_text(), 'untracked recovery notes\n')
+        (target / 'notes.md').unlink()
+        self.assertNotIn('cleanup_pending', code.f.settle('edited-init'))
+        self.assertFalse(target.exists())
+        self.assertFalse(metadata.exists())
+
+    def test_interrupted_reader_initialization_settles_only_when_proven_ours_and_unchanged(self):
+        git, base, _ = self.writer_fixture()
+        git(self.peer_workspace, 'fetch', str(self.workspace), 'HEAD')
+        target, metadata = self.interrupted_checkout(git, base)
+        context = dict(project_path='Repos/project', worktree_path=str(target), worktree=target.name,
+            read_only=True, base_revision=base, host='workshop', operation_id='reader-init',
+            created_worktree=True)
+        (target / 'code.txt').write_text('committed base\n')  # A partial but faithful checkout.
+        (target / 'notes.md').write_text('someone else wrote this\n')
+        code, result = self.settle_with('reader-contexts', context, 'reader-init')
+        self.assertEqual(result['cleanup_pending'], [str(target)])
+        (target / 'notes.md').unlink()
+        code.write_json(code.state_file('reader-contexts', 'reader-init'), [{**context, 'created_worktree': False}])
+        self.assertEqual(code.f.settle('reader-init')['cleanup_pending'], [str(target)])
+        code.write_json(code.state_file('reader-contexts', 'reader-init'), [{**context, 'operation_id': 'other'}])
+        self.assertEqual(code.f.settle('reader-init')['cleanup_pending'], [str(target)])
+        self.assertTrue(target.exists())
+        code.write_json(code.state_file('reader-contexts', 'reader-init'), [context])
+        self.assertNotIn('cleanup_pending', code.f.settle('reader-init'))
+        self.assertFalse(target.exists())
+        self.assertFalse(metadata.exists())
+        self.assertFalse(code.state_file('reader-contexts', 'reader-init').exists())
+
+    def reader_input(self, git, identifier, cwd=None):
+        """Upload a frozen reader input to the peer, returning the request and the peer environment."""
+        import fabric_hosts as hosts
+        _, _, local = self.writer_fixture_state
+        with patch.dict(os.environ, self.env):
+            code = hosts.lane_owner().code()
+            client = hosts.PeerClient('workshop', code.f.config.peers['workshop'])
+            request = code.outgoing('Repos/project', dict(adapter='codex', model='fixture', mode='read_only',
+                prompt='fixture only', cwd=str(cwd or local)), str(self.workspace), identifier, 'workshop', client)
+            code.send(client, 'Repos/project', request['code_transport'])
+        return request
+
+    def test_refused_reader_creation_never_lets_cleanup_remove_a_competitors_checkout(self):
+        import fabric_hosts as hosts
+        git, base, local = self.writer_fixture()
+        self.writer_fixture_state = (git, base, local)
+        request = self.reader_input(git, 'reader-collision')
+        target = self.peer_workspace / '.worktrees/read-reader-collision-0'
+        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+            code = hosts.lane_owner().code()
+            with code.f.database() as db:
+                db.execute('INSERT INTO operations VALUES (?,?,NULL)', ('reader-collision',
+                    json.dumps({'project': 'Repos/project', 'verb': 'dispatch', 'digest': 'fixture'})))
+
+            def competitor(args):
+                git(self.peer_workspace, 'worktree', 'add', '--detach', str(target), base)
+                (target / 'unrelated.txt').write_text('belongs to the competitor\n')
+                raise code.w.PolicyError('worktree target already exists')
+
+            with code.f.operation_lock('reader-collision'), \
+                    patch.object(code.w, 'create', side_effect=competitor), self.assertRaises(hosts.HostError) as raised:
+                code.prepare('Repos/project', request, 'reader-collision')
+            self.assertEqual(raised.exception.code, 'worktree_invalid')
+            self.assertEqual(code.release('reader-collision'), [])
+            self.assertEqual((target / 'unrelated.txt').read_text(), 'belongs to the competitor\n')
+            self.assertFalse(code.state_file('reader-contexts', 'reader-collision').exists())
+            self.assertEqual(list((self.peer_home / '.agents/.agent-fabric/code').glob('*/reader-collision-0/input.bundle')), [])
+
+    def test_reader_keeps_the_requested_subdirectory_through_dispatch_and_resume(self):
+        git, base, local = self.writer_fixture()
+        (local / 'pkg').mkdir()
+        (local / 'pkg/input.txt').write_text('package input\n')
+        git(local, 'add', 'pkg/input.txt')
+        git(local, 'commit', '-qm', 'package input')
+        launched = self.client('dispatch', host='workshop', adapter='codex', model='fixture',
+            prompt='fixture only', mode='read_only', cwd=str(local / 'pkg'), task_id='reader-pkg', operation_id='reader-pkg')
+        self.assertEqual(launched['status'], 'running', launched)
+        reader = launched['code_transport']['readers'][0]
+        root = Path(reader['worktree_path'])
+        self.assertEqual(reader['subdir'], 'pkg')
+        self.assertTrue((root / 'pkg/input.txt').exists())
+        row = self.client('status', ids=[launched['id']], detail='full')['runs'][0]
+        self.assertEqual(row['cwd'], str(root / 'pkg'))
+        self.wait_writer(launched['id'])
+        self.assertFalse(root.exists())
+        resumed = self.client('resume', resume=launched['id'], prompt='slow', operation_id='reader-pkg-next')
+        self.assertNotEqual(resumed.get('status'), 'rejected', resumed)
+        try:
+            again = Path(resumed['code_transport']['readers'][0]['worktree_path'])
+            row = self.client('status', ids=[resumed['id']], detail='full')['runs'][0]
+            self.assertEqual(row['cwd'], str(again / 'pkg'))
+            self.assertTrue((again / 'pkg/input.txt').exists())
+        finally:
+            self.client('cancel', id=launched['id'], operation_id='stop-reader-pkg')
+        self.wait_writer(launched['id'])
+
+    def test_unexpected_preparation_error_releases_input_and_records_a_rejection(self):
+        import fabric_hosts as hosts
+        self.writer_fixture()
+        with patch.dict(os.environ, {**self.env, 'HOME': str(self.peer_home),
+                'AGENT_FABRIC_INSTANCE_ROOT': str(self.peer_home / '.agents')}):
+            owner = hosts.lane_owner()
+            code = owner.code()
+            transfer = code.directory('Repos/project', 'prepare-boom-0', receiving=True)
+            (transfer / 'input.bundle').write_bytes(b'unconsumed')
+            (transfer / 'chunks').mkdir()
+            with patch.object(owner, 'code', return_value=code), \
+                    patch.object(code, 'prepare', side_effect=ValueError('unexpected')):
+                result = owner.peer_call('dispatch', {'project_path': 'Repos/project', 'input': {
+                    'operation_id': 'prepare-boom', 'prompt': 'review', 'mode': 'read_only',
+                    'code_transport': [{'index': 0}]}})
+            self.assertEqual(result['status'], 'rejected', result)
+            self.assertFalse((transfer / 'input.bundle').exists())
+            self.assertFalse((transfer / 'chunks').exists())
+            with owner.database() as db:
+                self.assertIsNotNone(db.execute('SELECT result FROM operations WHERE id=?', ('prepare-boom',)).fetchone()[0])
 
     def test_failed_prepare_settles_after_project_disappears_from_peer_config(self):
         import fabric_hosts as hosts

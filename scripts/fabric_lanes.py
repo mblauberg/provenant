@@ -264,13 +264,13 @@ class LaneFederation:
                     else transport.continuation(project, verb, clean, identifier) if verb in {'resume', 'handoff'} else [])
                 preparing_reader = False
                 reader = next((c for c in contexts if c.get('read_only')), None)
-                result = (self.worker(verb, project, clean, launch_path, held, reader_cwd=reader['worktree_path'])
+                result = (self.worker(verb, project, clean, launch_path, held, reader_cwd=str(transport.reader_cwd(reader)))
                     if reader and (verb in {'resume', 'handoff'} or clean.get('session')) else self.worker(verb, project, clean, launch_path, held))
                 if contexts:
                     result['code_transport'] = {'writers': [c for c in contexts if not c.get('read_only')],
                         'readers': [c for c in contexts if c.get('read_only')], 'uncommitted_changes_transported': False}
                     result['digest'] = result.get('digest', '') + '\n  committed input only; uncommitted chair changes were not transported'
-            except (self.h.HostError, OSError, subprocess.SubprocessError) as exc:
+            except Exception as exc:  # Anything before launch must still release the preparation.
                 if launch_path.exists():
                     raise self.h.HostError('lane_owner_failed', 'Owner response was lost after launch was recorded') from exc
                 # The fixed worker records intent before starting an owner. Once
