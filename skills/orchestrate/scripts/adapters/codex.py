@@ -35,14 +35,19 @@ def config_policy(p):
     return "inherited"
 
 
-def configured_mcp_servers():
-    """Names of the MCP servers in the operator's Codex config, which a lane cannot prompt to approve."""
+def _mcp_server_table():
     path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser() / "config.toml"
     try:
         servers = tomllib.loads(path.read_text(encoding="utf-8")).get("mcp_servers", {})
     except (OSError, tomllib.TOMLDecodeError):
-        return []
-    return sorted(name for name in servers if re.fullmatch(r"[A-Za-z0-9_-]+", name))
+        return {}
+    return {name: server for name, server in servers.items()
+            if isinstance(server, dict) and re.fullmatch(r"[A-Za-z0-9_-]+", name)}
+
+
+def configured_mcp_servers():
+    """Names of the MCP servers in the operator's Codex config, which a lane cannot prompt to approve."""
+    return sorted(_mcp_server_table())
 
 
 def provenant_state_dir(p):
@@ -74,8 +79,10 @@ def provenant_state_dir(p):
 
 def disabled_mcp_servers(p):
     """Inherited MCP servers a lane must not start: stdio servers run outside Codex's command
-    sandbox, so only a worktree writer keeps them."""
-    return [] if p.get("mode") == "worktree_write" else configured_mcp_servers()
+    sandbox, so only a worktree writer keeps them. A remote (url) server starts no local process."""
+    if p.get("mode") == "worktree_write":
+        return []
+    return sorted(name for name, server in _mcp_server_table().items() if "url" not in server)
 
 
 def read_only_writable_dirs(p):

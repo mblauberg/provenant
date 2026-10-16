@@ -119,12 +119,13 @@ applied block of the receipt records `config: inherited` or `config: clean`.
   still wins over the user file, so a user config that grants unrestricted
   filesystem access does not widen a lane: read-only lanes stay unable to write
   the workspace and writers stay inside their worktree.
-- An inheriting lane also sets `web_search="live"` and `notify=[]`. A worktree
-  writer sets `mcp_servers.<name>.default_tools_approval_mode="approve"` for each
-  server in the user config, since no one is present to approve a tool call. Any
-  other lane sets `mcp_servers.<name>.enabled=false`, because a stdio MCP server
-  starts outside Codex's command sandbox and could write the workspace; the
-  receipt lists them as `applied.mcp_disabled`.
+- An inheriting lane also sets `web_search="live"` and `notify=[]`, and sets
+  `mcp_servers.<name>.default_tools_approval_mode="approve"` for each server it
+  keeps, since no one is present to approve a tool call. A worktree writer keeps
+  every server. Any other lane sets `mcp_servers.<name>.enabled=false` for each
+  stdio server, because a stdio server starts outside Codex's command sandbox
+  and could write the workspace; it keeps remote (`url`) servers, which start no
+  local process. The receipt lists the disabled servers as `applied.mcp_disabled`.
 - Every native-route lane pins `model_provider="openai"` and clears
   `openai_base_url`, so a provider or base URL in the user file cannot redirect
   the route and misattribute the receipt. An endpoint route keeps its own pin.

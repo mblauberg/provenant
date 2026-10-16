@@ -1680,12 +1680,15 @@ def codex_options(plan):
 def test_codex_read_only_lane_disables_inherited_mcp_servers_and_writer_keeps_them(tmp_path):
     mod = supervisor()
     (Path(os.environ["CODEX_HOME"]) / "config.toml").write_text(
-        '[mcp_servers.fabric]\ncommand = "x"\n', encoding="utf-8")
+        '[mcp_servers.fabric]\ncommand = "x"\n[mcp_servers.docs]\nurl = "https://example.invalid/mcp"\n',
+        encoding="utf-8")
     route = {"resolved_model": "fixture"}
     reader = mod.build_plan("codex", route, "hello", cwd=tmp_path, network=True)
     options = codex_options(reader)
     assert "mcp_servers.fabric.enabled=false" in options
-    assert not any("default_tools_approval_mode" in option for option in options)
+    assert "mcp_servers.docs.enabled=false" not in options, "a remote server starts no local process"
+    assert 'mcp_servers.docs.default_tools_approval_mode="approve"' in options
+    assert not any(option.startswith("mcp_servers.fabric.default_tools") for option in options)
     assert reader["applied"]["mcp_disabled"] == ["fabric"]
     _, worktree = linked_worktree(tmp_path)
     writer = mod.build_plan("codex", route, "hello", mode="worktree_write", worktree=worktree,
