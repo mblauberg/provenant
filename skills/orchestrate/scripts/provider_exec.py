@@ -147,6 +147,20 @@ CREDENTIAL_STORES = (
 OPENCODE_INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "HARNESS.md")
 
 
+def _opencode_discovery_grantable(path, *, directory=False):
+    # A symlinked discovery entry must not carry a read grant to its target: files only when the target is an
+    # instruction file outside credential stores, directories only when the target is not a credential store.
+    path = Path(path)
+    if not path.is_symlink():
+        return True
+    target = path.resolve()
+    if credential_path(target) and not target.is_relative_to(Path.home().resolve() / ".claude"):
+        return False
+    if directory:
+        return target.is_dir()
+    return target.is_file() and target.name in OPENCODE_INSTRUCTION_FILES
+
+
 def credential_path(path):
     candidate = Path(path).expanduser().resolve()
     home = Path.home().resolve()
@@ -506,6 +520,8 @@ def os_confinement_profile(plan, search_path=None):
         discovery_dirs = [*cwd_path.parents, home / ".claude", home / ".agents"]
         discovery_files = [d / name for d in cwd_path.parents for name in OPENCODE_INSTRUCTION_FILES]
         discovery_files += [home / ".agents/AGENTS.md", home / ".claude/CLAUDE.md"]
+        discovery_dirs = [d for d in discovery_dirs if _opencode_discovery_grantable(d, directory=True)]
+        discovery_files = [f for f in discovery_files if _opencode_discovery_grantable(f)]
     toolchain_files, uv_project_files, toolchain_directories = _toolchain_reads(plan, root, search_path)
     launcher_links, install_directories = _adapter_binary_reads(plan, search_path)
     return (

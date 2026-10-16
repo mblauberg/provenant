@@ -125,6 +125,29 @@ def test_read_only_git_config_allowlist_is_limited_to_the_two_global_files(monke
     assert f'(literal "{home / ".config/git/config"}")' in default_profile
 
 
+def test_opencode_read_only_discovery_skips_symlinks_to_credentials(monkeypatch, tmp_path):
+    supervisor = importlib.import_module("skills.orchestrate.scripts.provider_exec")
+    home = (tmp_path / "home").resolve()
+    (home / ".ssh").mkdir(parents=True)
+    key = home / ".ssh/id_ed25519"
+    key.write_text("secret")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (tmp_path / "AGENTS.md").symlink_to(key)
+    real = tmp_path / "real" / "CLAUDE.md"
+    real.parent.mkdir()
+    real.write_text("ok")
+    (tmp_path / "CLAUDE.md").symlink_to(real)
+    monkeypatch.setattr(supervisor.Path, "home", lambda: home)
+    plan = {
+        "adapter": "opencode", "mode": "read_only", "workspace_root": str(workspace),
+        "cwd": str(workspace), "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    }
+    profile = supervisor.os_confinement_profile(plan)
+    assert "id_ed25519" not in profile
+    assert f'(literal "{real.resolve()}")' in profile
+
+
 @pytest.mark.parametrize("adapter", ["agy", "claude", "cursor", "opencode", "kiro"])
 def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_path, adapter):
     mod = supervisor()
