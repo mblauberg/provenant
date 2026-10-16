@@ -23,6 +23,10 @@ strategy without copying another product's protected assets or claims. Source
 can reveal tokens and semantics; pixels reveal the composed result. Neither
 alone proves the other.
 
+Apple HIG pages are JS-rendered; fetch
+`developer.apple.com/tutorials/data/design/human-interface-guidelines/<slug>.json`
+instead.
+
 Inventory real logos, icons, imagery, fonts, and data before approximating
 them. Reuse approved assets when their licence, resolution, and role are known.
 If a missing raster asset materially blocks the result, route generation to the
