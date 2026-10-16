@@ -31,7 +31,7 @@ and optional `selector`) clears cooldowns: a bare adapter clears `adapter/*` and
 argument clears all. Run it after switching accounts. An `ok` attempt on a non-per-model adapter
 also clears `adapter/*` when it started after that entry was recorded.
 
-Global route pools (`routes`: the tiers `bulk`, `workhorse` and `flagship`, and the crafts `design` and `writing`) sit
+Global route pools (`routes`: the tiers `junior`, `senior` and `principal`, and the crafts `design` and `writing`) sit
 beside the task classes. Each entry names `adapter/model`, a `weight` (`high`,
 `normal`, `sparing`, `off` or a number) and an optional two-value `effort`
 band; `model_traits` adds traits beyond the OpenCode `free_pattern` (which supplies a default `trains_on_prompts: true` that an explicit per-model value overrides, so a zero-retention free model is not skipped under `confidential`), and

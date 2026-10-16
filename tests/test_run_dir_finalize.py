@@ -993,3 +993,16 @@ def test_finalisation_fails_if_canonical_receipt_inode_is_replaced(tmp_path, mon
     monkeypatch.setattr(run_dir_finalize, "_receipt_path_is_bound", replace_visible_receipt)
     assert run_dir_finalize.main([str(run), "--status", "failed", "--reason", "custody race"]) == 1
     assert json.loads(receipt.read_text())["status"] == "active"
+
+
+@pytest.mark.parametrize("tier", ["principal", "flagship"])
+def test_review_tier_accepts_tier_names(tier):
+    plan = substantial_plan()
+    plan["reviews"][3]["tier"] = tier
+    assert not any("tier is invalid" in e or "flagship strength" in e for e in run_dir_finalize._validate_review_plan(plan))
+
+
+def test_review_tier_senior_is_not_flagship_strength():
+    plan = substantial_plan()
+    plan["reviews"][3]["tier"] = "senior"
+    assert any("flagship strength" in e for e in run_dir_finalize._validate_review_plan(plan))

@@ -1,6 +1,6 @@
 """Pick models from the global weighted route pools (#848).
 
-A route (the tiers `bulk`, `workhorse`, `flagship`, or the crafts `design`, `writing`) is a weighted pool of
+A route (the tiers `junior`, `senior`, `principal`, or the crafts `design`, `writing`) is a weighted pool of
 `adapter/model` entries across adapters. This module filters a pool on
 availability and picks from it in one of four modes: single (highest weight),
 rotate (smooth weighted round-robin per project), council (N picks, families
@@ -79,17 +79,20 @@ def merge_route(base: list[Any], overlay: list[Any], path: str, drift: list[str]
     return merged + [entry for entry in base if isinstance(entry, dict) and entry.get("model") not in listed]
 
 
-# Pools renamed when the routes became tiers; an older overlay still names them.
-LEGACY_ROUTES = {"strong": "workhorse", "scout": "bulk"}
+# Pools renamed when the routes became the junior, senior and principal tiers; an older overlay
+# still names them.
+LEGACY_ROUTES = {"strong": "senior", "workhorse": "senior", "scout": "junior", "bulk": "junior",
+                 "flagship": "principal"}
+TIER_ROUTES = ("junior", "senior", "principal")
 
 
 def migrate_legacy_routes(overlay: Any, drift: list[str]) -> Any:
     """Fold an overlay's renamed pools into their tiers and repoint its synonyms.
 
     A legacy pool's entries follow the tier's own overlay entries, so a reweight
-    of `strong` still applies to `workhorse`. A synonym whose name is now a pool
-    can never resolve (a pool name wins), and one aimed at a renamed pool is
-    repointed; both are noted in `drift`.
+    of `strong` still applies to `senior`. A synonym named after a pool or an old
+    tier is dropped, since the product maps those names, and one aimed at a
+    renamed pool is repointed; both are noted in `drift`.
     """
     if not isinstance(overlay, dict):
         return overlay
@@ -114,8 +117,8 @@ def migrate_legacy_routes(overlay: Any, drift: list[str]) -> Any:
     if isinstance(synonyms, dict):
         kept: dict[str, Any] = {}
         for name, target in synonyms.items():
-            if name in LEGACY_ROUTES.values() or name in {"flagship", "design", "writing"}:
-                drift.append(f"route_synonyms.{name}: dropped, a pool of that name exists; fix: remove it")
+            if name in {*TIER_ROUTES, *LEGACY_ROUTES, "design", "writing"}:
+                drift.append(f"route_synonyms.{name}: dropped, the product maps tier names; fix: remove it")
                 continue
             if target in LEGACY_ROUTES:
                 drift.append(f"route_synonyms.{name}: {target} is now {LEGACY_ROUTES[target]}; fix: repoint it")

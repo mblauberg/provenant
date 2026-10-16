@@ -4797,3 +4797,13 @@ def test_agy_effort_suffixed_live_ids_match_their_family_and_keep_the_dispatch_i
                           "--role", "worker"], capture_output=True, text=True, env=_resolve_env(tmp_path))
     route = json.loads(run.stdout)
     assert run.returncode == 0 and route["resolved_model"] == "gemini-3.9-flash-high", route
+
+
+@pytest.mark.parametrize(("tier", "alias"), [("junior", "scout"), ("Senior", "workhorse"), ("principal", "flagship")])
+def test_route_tier_names_work_as_adapter_aliases(tmp_path, tier, alias):
+    capability = write_codex_capability_snapshot(tmp_path)
+    common = ("--adapter", "codex", "--role", "worker", "--capabilities-file", str(capability))
+    _, named = resolve("--alias", tier, *common)
+    _, original = resolve("--alias", alias, *common)
+    assert named["resolved_model"] == original["resolved_model"]
+    assert not any("model won" in note for note in named.get("notes", [])), "a tier name is not a model name"

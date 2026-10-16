@@ -115,6 +115,8 @@ if _pools is None:
 
 EFFORT_ORDER = _catalog_validation.EFFORT_ORDER
 ALIAS_ORDER = _catalog_validation.ALIAS_ORDER
+# The route-pool tier names, accepted wherever an adapter's own alias is asked for.
+TIER_ALIASES = {"junior": "scout", "senior": "workhorse", "principal": "flagship"}
 infer_family = _catalog_validation.infer_family
 matching_model_families = _catalog_validation.matching_model_families
 model_slug_for_family = _catalog_validation.model_slug_for_family
@@ -2054,7 +2056,7 @@ def parser() -> argparse.ArgumentParser:
     )
     routes = commands.add_parser(
         "routes", help="print each route pool with live availability",
-        description="Print every global route pool (bulk, workhorse, flagship, design, writing) with each model's weight, "
+        description="Print every global route pool (junior, senior, principal, design, writing) with each model's weight, "
                     "effort band, caveats and live availability.")
     routes.add_argument("--json", action="store_true", help="print one fabric.routes.v1 JSON document")
     routes.add_argument("--health", action="store_true",
@@ -2115,6 +2117,8 @@ def route_pick(requests: Any, seed: int | None = None) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     argument_parser = parser()
     args = argument_parser.parse_args(argv)
+    if isinstance(getattr(args, "alias", None), str) and args.alias.casefold() in TIER_ALIASES:
+        args.alias = TIER_ALIASES[args.alias.casefold()]
     if args.command == "select":
         return _preferences.select(args, TASK_CLASS_POLICY, ALIAS_ORDER, EFFORT_ORDER)
     if args.command == "snapshot":

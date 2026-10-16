@@ -67,6 +67,12 @@ describe("Fabric input corrections", () => {
     expect(result.warnings).toBeDefined();
     expect(normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, catalogue).model).toBe("gpt-6-luna");
     expect(normaliseRoute({ adapter: "codex", alias: "workhorze" }, identity, catalogue).alias).toBe("workhorse");
+    for (const [tier, alias] of [["junior", "scout"], ["Senior", "workhorse"], ["principal", "flagship"], ["senir", "workhorse"]]) {
+      const named = normaliseRoute({ adapter: "codex", alias: tier }, identity, catalogue);
+      expect(named.alias, tier).toBe(alias);
+      expect(named.model, tier).toBeUndefined();
+      expect((named.warnings ?? []).some((warning) => warning.startsWith("corrected alias")), tier).toBe(tier === "senir");
+    }
     const unsure = normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, {
       adapters: [{ name: "codex", models: ["gpt-6-luna", "gpt-6-luno"], model_details: [], aliases: {} }],
     } as any);
@@ -1326,9 +1332,9 @@ describe("route pools", () => {
     ], fixturePython, product, { ...identity, provider: "agent" }, env, new AbortController().signal);
     expect(expanded.errors.map((error) => [error.task_id, error.error])).toEqual([["nope", "route_invalid"]]);
     const byId = Object.fromEntries(expanded.tasks.map((task) => [task.id, task]));
-    expect(byId.one).toMatchObject({ adapter: "claude", model: "claude-sonnet-5-5", pick_reason: "workhorse top" });
+    expect(byId.one).toMatchObject({ adapter: "claude", model: "claude-sonnet-5-5", pick_reason: "senior top" });
     expect(byId.one).not.toHaveProperty("route");
-    expect([byId["pair-1"]?.pick_reason, byId["pair-2"]?.pick_reason]).toEqual(["workhorse council 1/2", "workhorse council 2/2"]);
+    expect([byId["pair-1"]?.pick_reason, byId["pair-2"]?.pick_reason]).toEqual(["senior council 1/2", "senior council 2/2"]);
     expect(new Set([byId["pair-1"]?.adapter, byId["pair-2"]?.adapter])).toEqual(new Set(["claude", "codex"]));
     expect(byId["adhoc-1"]).toMatchObject({ adapter: "codex", model: "gpt-6-luna", effort: "low", pick_reason: "ad-hoc council 1/2" });
     expect(byId["adhoc-2"]).toMatchObject({ adapter: "claude", model: "claude-haiku-5-5", pick_reason: "ad-hoc council 2/2" });
@@ -1464,7 +1470,7 @@ describe("native-first routing", () => {
     const expanded = await expandPools([{ id: "pair", prompt: "p", route: "strong", council: 2 }],
       fixturePython, product, claudeSeat(), poolEnvironment(), new AbortController().signal);
     expect(expanded.tasks.map((task) => task.adapter)).toEqual(["codex"]);
-    expect(expanded.tasks[0]).toMatchObject({ id: "pair-1", pick_reason: "workhorse council 1/1" });
+    expect(expanded.tasks[0]).toMatchObject({ id: "pair-1", pick_reason: "senior council 1/1" });
     expect(expanded.warnings.some((warning) =>
       /^spawn 1 native claude member \(claude-\S+\); Fabric runs 1 of 2$/u.test(warning))).toBe(true);
   });

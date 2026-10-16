@@ -72,7 +72,7 @@ const USAGE = `fabric <command>
   dispatch --prompt-file F [--adapter A] [--alias NAME | --model M] [--effort E]
            [--mode MODE] [--worktree W | --cwd D] [--id ID] [--wait]
            [--host H] [--operation-id ID] [--resume ID | --handoff ID]
-  dispatch --prompt-file F --route bulk|workhorse|flagship|design|writing
+  dispatch --prompt-file F --route junior|senior|principal|design|writing
                               top model of a global pool; --adapter narrows it
   dispatch --prompt-file F --route R --rotate    cycle the pool per project
   dispatch --prompt-file F --route R --council N  N members (1-8), families

@@ -1,61 +1,66 @@
 # Tiered council
 
-When several model families are available, work as a hierarchy. Many cheap
-lenses from different families cover the fine grain. Mid-tier judges weigh the
-work together with the lens claims. The top tier decides. Each tier is a
-route pool, so a dispatch names its tier directly:
+When several model families are available, work as a hierarchy, like an
+engineering team. Juniors from many families do the laid-out work and the
+fine-grained passes. Seniors judge that work, make the medium decisions and
+delegate to juniors. Principals make the critical calls. Each tier is a route
+pool, so a dispatch names its tier directly:
 
-| Tier | Pool | Members (seed) | Job |
+| Tier | Route | Members (seed) | Job |
 |---|---|---|---|
-| 1, lenses | `bulk` | DeepSeek and GLM free, Haiku and Luna at `high`; Gemini Flash (low/medium); paid OpenCode and rotating free models at `sparing` | laid-out work needing little judgement; overlap freely |
-| 2, judges | `workhorse` | Sonnet and Sol at `high`; Gemini Flash (high effort); agy Opus 4.6 at `sparing` | judge the work and the tier-1 claims; medium decisions; delegate to tier 1 |
-| 3, deciders | `flagship` | Opus at `high`; Astra; Argon at `sparing` | critical decisions, high-level judgement, consensus |
+| Junior | `junior` | DeepSeek and GLM free, Haiku and Luna at `high`; Gemini Flash (low/medium); paid OpenCode and rotating free models at `sparing` | laid-out work and lens passes that need little judgement; overlap freely |
+| Senior | `senior` | Sonnet and Sol at `high`; Gemini Flash (high effort) and Grok 4.7; agy Opus 4.6 at `sparing` | judge the work and the junior claims; medium decisions; delegate to juniors |
+| Principal | `principal` | Opus at `high`; Astra; Argon at `sparing` | critical decisions, high-level judgement, consensus |
 
-`strong`, `review` and `implementation` map to `workhorse`; `scout`, `mechanical`,
-`lens` and `research` map to `bulk`. A Claude chair runs its own Claude members as native subagents: a pool
-hands them back with a spawn line ([routing-and-tiers.md](routing-and-tiers.md)).
+The same three names work as an adapter alias (`alias: "senior"`) for that
+adapter's own model of the tier. Old names still resolve: `bulk`, `scout`,
+`mechanical`, `lens` and `research` mean `junior`; `workhorse`, `strong`,
+`review` and `implementation` mean `senior`; `flagship` means `principal`. A
+Claude chair runs its own Claude members as native subagents: a pool hands them
+back with a spawn line ([routing-and-tiers.md](routing-and-tiers.md)).
 
 ## Depth follows risk
 
 Use the `HARNESS.md` risk tier as the mode, not a separate switch:
 
 - `routine`: no hierarchy; one lane or the chair alone.
-- `substantial`: tiers 1 and 2.
-- `crucial` and `terminal`: all three tiers, ending in consensus and one
-  synthesis.
+- `substantial`: juniors and seniors.
+- `crucial` and `terminal`: all three tiers, ending in principal consensus and
+  one synthesis.
 
 ## Bottom-up: review, research, visual review
 
-1. **Split.** Cut the subject into parts small enough for one lens each: files,
-   screens, claims or sources.
-2. **Tier 1.** Give each part its own council, for example `route: "bulk",
+1. **Split.** Cut the subject into parts small enough for one junior each:
+   files, screens, claims or sources.
+2. **Juniors.** Give each part its own council, for example `route: "junior",
    council: 3`. Councils seat new families first, so each part gets cross-family
-   cover for blind spots. Lenses return claims with evidence (path:line,
+   cover for blind spots. Juniors return claims with evidence (path:line,
    screenshot, source), not verdicts.
-3. **Tier 2.** Each judge works separately over a wider scope (several parts or
-   the whole) and receives the subject plus the tier-1 claims for that scope.
+3. **Seniors.** Each senior works separately over a wider scope (several parts
+   or the whole) and receives the subject plus the junior claims for that scope.
    It confirms, rejects or merges each claim and adds its own view.
-4. **Tier 3.** Each decider reads everything, including every tier-2 review,
-   and the deciders work towards consensus. Disagreements are settled on
-   evidence, never by vote.
-5. **Synthesis.** One fresh top-tier agent writes the outcome with the reasons
-   ("the why"), so implementers know what to do and why.
+4. **Principals.** Each principal reads everything, including every senior
+   review, and the principals work towards consensus. Disagreements are settled
+   on evidence, never by vote.
+5. **Synthesis.** One fresh principal writes the outcome with the reasons ("the
+   why"), so implementers know what to do and why.
 
 Pass structured handoffs between tiers ([layering-and-context.md](layering-and-context.md)):
-each claim keeps its id, evidence and origin lens, so a higher tier can cite and
+each claim keeps its id, evidence and origin, so a higher tier can cite and
 overrule it.
 
 ## Top-down: implementation
 
-1. **Tier 3** scopes the change and decides the approach and slice boundaries.
-2. **Tier 2** turns each slice into a precise brief and owns its medium
+1. **Principals** scope the change and decide the approach and slice boundaries.
+2. **Seniors** turn each slice into a precise brief and own its medium
    decisions.
-3. **Tier 1** implements the laid-out slices in partitioned worktrees.
-4. Checks flow back up: tier 2 reviews its slices, and tier 3 accepts the whole.
+3. **Juniors** implement the laid-out slices in partitioned worktrees.
+4. Checks flow back up: seniors review their slices, and a principal accepts
+   the whole.
 
 ## Practical limits
 
-- Free tiers rotate and rate-limit. Spread tier-1 lenses across adapters rather
+- Free models rotate and rate-limit. Spread junior lenses across adapters rather
   than stacking one free model, and treat `rate_limited` as a re-route signal.
 - Keep private or client data off prompt-training models: pass
   `confidential: true` and the pools skip them.

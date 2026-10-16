@@ -5,7 +5,7 @@
     "ceiling_tokens": 300000
   },
   "routes": {
-    "flagship": [
+    "principal": [
       {
         "model": "claude/claude-opus-5-5",
         "weight": "high"
@@ -19,7 +19,7 @@
         "weight": "sparing"
       }
     ],
-    "workhorse": [
+    "senior": [
       {
         "model": "claude/claude-sonnet-5-5",
         "weight": "high"
@@ -41,11 +41,19 @@
         ]
       },
       {
+        "model": "cursor/grok-4.7",
+        "weight": "normal",
+        "effort": [
+          "high",
+          "xhigh"
+        ]
+      },
+      {
         "model": "agy/claude-opus-4-6-thinking",
         "weight": "sparing"
       }
     ],
-    "bulk": [
+    "junior": [
       {
         "model": "opencode/opencode/deepseek-v4.1-flash-free",
         "weight": "high"
@@ -145,21 +153,24 @@
     ]
   },
   "route_synonyms": {
-    "strong": "workhorse",
-    "scout": "bulk",
-    "top": "flagship",
-    "mid": "workhorse",
-    "critical-review": "flagship",
-    "decision": "flagship",
-    "orchestration": "flagship",
-    "review": "workhorse",
-    "second-opinion": "workhorse",
-    "implementation": "workhorse",
-    "legwork": "bulk",
-    "lens": "bulk",
-    "mechanical": "bulk",
-    "research": "bulk",
-    "screenshots": "bulk",
+    "flagship": "principal",
+    "top": "principal",
+    "critical-review": "principal",
+    "decision": "principal",
+    "orchestration": "principal",
+    "workhorse": "senior",
+    "strong": "senior",
+    "mid": "senior",
+    "review": "senior",
+    "second-opinion": "senior",
+    "implementation": "senior",
+    "bulk": "junior",
+    "scout": "junior",
+    "legwork": "junior",
+    "lens": "junior",
+    "mechanical": "junior",
+    "research": "junior",
+    "screenshots": "junior",
     "ui-taste": "design"
   },
   "model_traits": {},

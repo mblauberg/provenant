@@ -63,7 +63,7 @@ def models(result):
 
 def test_seed_routes_name_registered_models_with_the_tiny_weight_vocabulary():
     CATALOG = SEED
-    assert set(CATALOG["routes"]) == {"flagship", "workhorse", "bulk", "design", "writing"}
+    assert set(CATALOG["routes"]) == {"principal", "senior", "junior", "design", "writing"}
     for name, entries in CATALOG["routes"].items():
         for entry in entries:
             assert entry["weight"] in {"high", "normal", "sparing"}
@@ -82,10 +82,10 @@ def test_top_is_the_highest_weight_available_and_deterministic(tmp_path):
     assert first["picks"][0]["reason"] == "strong top"
     assert models(pick({"route": "strong"}, tmp_path, seed=99)) == models(first)
     # The seed pools are the three tiers: deciders, mid-level judges and tier-1 lenses.
-    assert models(pick({"route": "flagship"}, tmp_path, catalog=SEED)) == ["claude/claude-opus-5-5"]
-    assert models(pick({"route": "workhorse"}, tmp_path, catalog=SEED)) == ["claude/claude-sonnet-5-5"]
-    assert models(pick({"route": "bulk"}, tmp_path, catalog=SEED)) == ["opencode/opencode/deepseek-v4.1-flash-free"]
-    bulk = {entry["model"]: entry["weight"] for entry in SEED["routes"]["bulk"]}
+    assert models(pick({"route": "principal"}, tmp_path, catalog=SEED)) == ["claude/claude-opus-5-5"]
+    assert models(pick({"route": "senior"}, tmp_path, catalog=SEED)) == ["claude/claude-sonnet-5-5"]
+    assert models(pick({"route": "junior"}, tmp_path, catalog=SEED)) == ["opencode/opencode/deepseek-v4.1-flash-free"]
+    bulk = {entry["model"]: entry["weight"] for entry in SEED["routes"]["junior"]}
     assert {bulk[model] for model in ("opencode/opencode/glm-5.3-flash-free", "claude/claude-haiku-5-5",
                                        "codex/gpt-6-luna")} == {"high"}
     # Rotating free tiers stay in bulk at the lowest weight; no mid or top model sits in bulk.
@@ -142,9 +142,9 @@ def test_council_weights_are_sampling_odds_and_sparing_is_rare(tmp_path):
 
 def test_a_prompt_training_model_never_takes_a_council_seat_for_its_family(tmp_path):
     argon = "opencode/opencode-go/gemini-4-argon-contributor"
-    assert {"model": argon, "weight": "sparing"} in SEED["routes"]["flagship"]
+    assert {"model": argon, "weight": "sparing"} in SEED["routes"]["principal"]
     drawn = Counter(model for seed in range(200)
-                    for model in models(pick({"route": "flagship", "council": 2}, tmp_path, catalog=SEED, seed=seed)))
+                    for model in models(pick({"route": "principal", "council": 2}, tmp_path, catalog=SEED, seed=seed)))
     # As the lone Google family Argon would sit on every two-member council; by odds it sits on about one in thirteen.
     assert 0 < drawn[argon] < 200 / 6
 
@@ -233,15 +233,16 @@ def test_availability_skips_entries_the_adapter_cannot_run(tmp_path):
 
 
 def test_task_classes_and_aliases_map_onto_routes(tmp_path):
-    assert pick({"route": "review"}, tmp_path, catalog=SEED)["route"] == "workhorse"
-    assert pick({"route": "strong"}, tmp_path, catalog=SEED)["route"] == "workhorse"
-    assert pick({"route": "Flagship"}, tmp_path, catalog=SEED)["route"] == "flagship"
-    assert pick({"route": "critical-review"}, tmp_path, catalog=SEED)["route"] == "flagship"
+    assert pick({"route": "review"}, tmp_path, catalog=SEED)["route"] == "senior"
+    assert pick({"route": "strong"}, tmp_path, catalog=SEED)["route"] == "senior"
+    assert pick({"route": "Flagship"}, tmp_path, catalog=SEED)["route"] == "principal"
+    assert pick({"route": "critical-review"}, tmp_path, catalog=SEED)["route"] == "principal"
     assert pick({"route": "ui-taste"}, tmp_path, catalog=SEED)["route"] == "design"
     for lens in ("scout", "mechanical", "lens", "research"):
-        assert pick({"route": lens}, tmp_path, catalog=SEED)["route"] == "bulk"
-    assert pick({"route": "implementation"}, tmp_path, catalog=SEED)["route"] == "workhorse", "matches its task class"
-    assert pick({"route": "workhorse"}, tmp_path, catalog=SEED)["route"] == "workhorse"
+        assert pick({"route": lens}, tmp_path, catalog=SEED)["route"] == "junior"
+    assert pick({"route": "implementation"}, tmp_path, catalog=SEED)["route"] == "senior", "matches its task class"
+    for old, new in (("workhorse", "senior"), ("flagship", "principal"), ("bulk", "junior")):
+        assert pick({"route": old}, tmp_path, catalog=SEED)["route"] == new
     with pytest.raises(pools.PoolError) as error:
         pick({"route": "fastest"}, tmp_path)
     assert error.value.code == "route_invalid"
@@ -277,20 +278,20 @@ def test_instance_overlay_reorders_and_reweights_a_pool(tmp_path):
     assert run.returncode == 0, run.stderr
     document = json.loads(run.stdout)
     assert "strong" not in document["routes"], "a legacy pool folds into its tier"
-    folded = document["routes"]["workhorse"]
+    folded = document["routes"]["senior"]
     assert [entry["model"] for entry in folded][:2] == ["codex/gpt-6-astra", "claude/claude-opus-5-5"]
     assert folded[1]["weight"] == "off" and folded[1]["availability"] == "off"
-    assert [entry["model"] for entry in folded][2:] == [entry["model"] for entry in SEED["routes"]["workhorse"]], \
+    assert [entry["model"] for entry in folded][2:] == [entry["model"] for entry in SEED["routes"]["senior"]], \
         "the tier keeps its seed fallbacks"
-    assert document["routes"]["flagship"][0]["model"] == SEED["routes"]["flagship"][0]["model"], \
+    assert document["routes"]["principal"][0]["model"] == SEED["routes"]["principal"][0]["model"], \
         "a legacy synonym cannot shadow a pool"
     second = tmp_path / "second"
     second.mkdir()
     workhorse = model_route(overlay_environment(second, {"routes": {
         "workhorse": [{"model": "codex/gpt-6-astra", "weight": "high"}]}}), "routes", "--json")
-    merged = json.loads(workhorse.stdout)["routes"]["workhorse"]
+    merged = json.loads(workhorse.stdout)["routes"]["senior"]
     assert [entry["model"] for entry in merged] == [
-        "codex/gpt-6-astra", *(entry["model"] for entry in SEED["routes"]["workhorse"])]
+        "codex/gpt-6-astra", *(entry["model"] for entry in SEED["routes"]["senior"])]
     sol = next(entry for entry in merged if entry["model"] == "codex/gpt-6.1-sol")
     assert sol["effort"] == "high-xhigh", "unlisted entries keep their fields"
     assert document["routes"]["local"][0]["weight"] == "normal"
@@ -303,8 +304,8 @@ def test_instance_overlay_reorders_and_reweights_a_pool(tmp_path):
         assert results[0]["picks"][0]["model"] == "gpt-6-astra"
     snapshot = json.loads(model_route(env, "snapshot", "--json").stdout)
     assert any(note.startswith("routes.broken") for note in snapshot["drift"])
-    assert any(note.startswith("routes.strong: renamed to workhorse") for note in snapshot["drift"])
-    assert any(note.startswith("route_synonyms.deep: strong is now workhorse") for note in snapshot["drift"])
+    assert any(note.startswith("routes.strong: renamed to senior") for note in snapshot["drift"])
+    assert any(note.startswith("route_synonyms.deep: strong is now senior") for note in snapshot["drift"])
 
 
 def test_pick_command_answers_every_request_and_types_rejections(tmp_path):
@@ -327,7 +328,7 @@ def test_routes_prints_each_pool_with_live_availability(tmp_path):
     (state / "cooldowns.json").write_text(json.dumps({"cooldowns": {"codex/gpt-6-luna": {"cooling_until": until}}}))
     run = model_route(env, "routes")
     assert run.returncode == 0, run.stderr
-    for name in ("flagship", "workhorse", "bulk", "design", "writing"):
+    for name in ("principal", "senior", "junior", "design", "writing"):
         assert f"\n{name}\n" in f"\n{run.stdout}"
     assert "not installed" in run.stdout
     bin_dir = tmp_path / "bin"
@@ -343,7 +344,7 @@ def test_routes_prints_each_pool_with_live_availability(tmp_path):
                                text=True, capture_output=True, check=False,
                                env={**env, "PATH": os.environ["PATH"]})
     assert provenant.returncode == 0, provenant.stderr
-    assert set(json.loads(provenant.stdout)["routes"]) >= {"flagship", "workhorse", "bulk", "design", "writing"}
+    assert set(json.loads(provenant.stdout)["routes"]) >= {"principal", "senior", "junior", "design", "writing"}
 
 
 def test_route_line_names_why_the_pool_picked_the_model():
