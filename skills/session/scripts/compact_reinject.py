@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import re
 import sys
 from typing import Iterator
@@ -59,7 +58,7 @@ def resolve(candidate: str, bases: list[str]) -> str | None:
     for base in bases:
         directory = base
         while directory:
-            found = os.path.normpath(os.path.join(directory, expanded))
+            found = os.path.abspath(os.path.join(directory, expanded))
             if os.path.isfile(found):
                 return found
             parent = os.path.dirname(directory)
