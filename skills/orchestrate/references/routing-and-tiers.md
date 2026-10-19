@@ -14,9 +14,9 @@ Each primary runs its own models as native subagents: Claude Code through the Ag
 
 ### Native tiers
 
-A native Claude subagent's model follows the work's tier, as a Fabric route would:
+The [tier pools](#route-pools) span every adapter, Claude included, but a Claude seat runs its own pool members as native subagents rather than through Fabric. Give the Agent tool the Claude member of the work's tier pool (`config/model-routing.json` `routes`), not the session's model:
 
-| Tier | Agent tool model | Work |
+| Tier | Claude member (Agent tool) | Native work |
 |---|---|---|
 | Junior | `haiku` | search, extraction, transcript and log sweeps, lens passes |
 | Senior | `sonnet` | implementation, review legs, research synthesis, medium decisions |
