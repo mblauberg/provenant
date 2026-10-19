@@ -161,7 +161,7 @@ value = load_pointer_path(Path(sys.argv[2]))
 print(value or "")
 ' "$PRODUCT_ROOT/scripts" "$instance_root")"
 fi
-bootstrap="Read and follow \`$instance_doctrine\` and \`$PRODUCT_ROOT/HARNESS.md\` before making orchestration, delegation, model-routing or memory decisions. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy."
+bootstrap="Read and follow \`$instance_doctrine\`. The harness constitution is \`$PRODUCT_ROOT/HARNESS.md\`: routine work and native sub-agents need no read; read it before cross-provider dispatch, risk-tier or authority decisions, or memory-policy changes. Platform/system policy and explicit user authority lead; the nearest project instruction may specialise or strengthen the global harness but may not silently broaden authority, weaken safety gates or redefine global cross-project memory policy."
 
 is_generated_bootstrap() {
   local content expected

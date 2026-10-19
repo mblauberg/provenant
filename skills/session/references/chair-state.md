@@ -90,18 +90,32 @@ directions in force, open decisions and the next actions. Drop tool output,
 file contents, diffs, images and resolved threads; they are on disk.
 ```
 
-Claude Code runs the check before every compaction once the hook is
-installed, and installing it is part of setting up a Claude Code chair; hosts
-without such a hook run the check at each checkpoint instead. The command adds one
-`PreCompact` entry to `~/.claude/settings.json` (or the settings file given),
-keeps everything else and is idempotent. The hook always exits 0, so it warns
-without blocking compaction:
+Claude Code runs the check before every compaction once the hooks are
+installed, and installing them is part of setting up a Claude Code chair;
+hosts without such a hook run the check at each checkpoint instead. The command
+adds two entries to `~/.claude/settings.json` (or the settings file given),
+keeps everything else and is idempotent: a `PreCompact` check, and a
+`SessionStart` entry with matcher `compact` running `compact_reinject.py`. Both
+always exit 0, so neither blocks compaction or the session:
 
 ```sh
 python3 "<installed-session-skill>/scripts/state_check.py" --install-hook
 ```
 
 `--hook-config` prints the same fragment for manual merging.
+
+After compaction `compact_reinject.py` reads the hook's `transcript_path`
+backwards for the last `STATE.md` this session wrote (Write, Edit, MultiEdit,
+or a Bash command that writes it; relative paths resolve against the command's
+`cd` targets, then the transcript line's cwd and its parents). Reads never
+count. It prints that file, capped at 8 KB, under a one-line header naming its
+absolute path, and prints nothing when the session wrote none. It finds the
+chair's file from any working directory and with several sessions on one
+machine.
+
+Because the file is re-injected whole, a short `Standing directions` section
+(owner directions in force) keeps them bound across compaction. It is
+recommended, not a required heading.
 
 Hosts without a pre-compaction hook run the check as part of the checkpoint
 above.

@@ -70,17 +70,40 @@ def names_session(path: Path, session_id: str) -> bool:
     return line.search(text) is not None
 
 
+COMPACT_SCRIPT = Path(__file__).resolve().with_name("compact_reinject.py")
+
+
 def hook_entry() -> dict:
     command = f'python3 "{Path(__file__).resolve()}" --hook'
     return {"hooks": [{"type": "command", "command": command, "timeout": 5}]}
 
 
+def reinject_entry() -> dict:
+    command = f'python3 "{COMPACT_SCRIPT}"'
+    return {"matcher": "compact", "hooks": [{"type": "command", "command": command, "timeout": 5}]}
+
+
 def hook_config() -> str:
-    return json.dumps({"hooks": {"PreCompact": [hook_entry()]}}, indent=2)
+    hooks = {"PreCompact": [hook_entry()], "SessionStart": [reinject_entry()]}
+    return json.dumps({"hooks": hooks}, indent=2)
+
+
+def add_entry(hooks: dict, event: str, entry: dict, marker: str, settings: Path) -> bool:
+    """Append entry under hooks[event] unless a hook command already names marker."""
+    entries = hooks.setdefault(event, [])
+    if not isinstance(entries, list):
+        raise ValueError(f"{settings} has an unexpected hooks shape")
+    for existing in entries:
+        inner = existing.get("hooks") if isinstance(existing, dict) else None
+        for hook in inner if isinstance(inner, list) else []:
+            if isinstance(hook, dict) and marker in str(hook.get("command", "")):
+                return False
+    entries.append(entry)
+    return True
 
 
 def install_hook(settings: Path) -> str:
-    """Add the PreCompact entry to a Claude Code settings file once; keep everything else."""
+    """Add the PreCompact check and SessionStart(compact) re-inject once; keep everything else."""
     settings = settings.resolve()  # write through a dotfile symlink, not over it
     data = json.loads(settings.read_text(encoding="utf-8")) if settings.exists() else {}
     if not isinstance(data, dict):
@@ -88,20 +111,17 @@ def install_hook(settings: Path) -> str:
     hooks = data.setdefault("hooks", {})
     if not isinstance(hooks, dict):
         raise ValueError(f"{settings} has an unexpected hooks shape")
-    entries = hooks.setdefault("PreCompact", [])
-    if not isinstance(entries, list):
-        raise ValueError(f"{settings} has an unexpected hooks shape")
-    for entry in entries:
-        inner = entry.get("hooks") if isinstance(entry, dict) else None
-        for hook in inner if isinstance(inner, list) else []:
-            if isinstance(hook, dict) and "state_check.py" in str(hook.get("command", "")):
-                return f"already installed in {settings}"
-    entries.append(hook_entry())
+    added = [
+        add_entry(hooks, "PreCompact", hook_entry(), "state_check.py", settings),
+        add_entry(hooks, "SessionStart", reinject_entry(), "compact_reinject.py", settings),
+    ]
+    if not any(added):
+        return f"already installed in {settings}"
     settings.parent.mkdir(parents=True, exist_ok=True)
     temporary = settings.with_name(settings.name + ".state-check.tmp")
     temporary.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
     os.replace(temporary, settings)
-    return f"installed PreCompact hook in {settings}"
+    return f"installed compaction hooks in {settings}"
 
 
 def recently_modified(path: Path, now: float) -> bool:
@@ -184,7 +204,7 @@ def main(argv: list[str] | None = None) -> int:
                         help="print the Claude Code settings fragment that registers the hook")
     parser.add_argument("--install-hook", nargs="?", const=Path.home() / ".claude" / "settings.json",
                         type=Path, metavar="SETTINGS",
-                        help="add the PreCompact hook to a Claude Code settings file (default ~/.claude/settings.json)")
+                        help="add the PreCompact check and SessionStart(compact) re-inject to a Claude Code settings file (default ~/.claude/settings.json)")
     args = parser.parse_args(argv)
     if args.hook_config:
         print(hook_config())

@@ -1,7 +1,8 @@
 # Provenant: global agent instructions (all harnesses)
 
-Depth lives in the harness constitution, `HARNESS.md`; read it before
-orchestration, routing, delegation or memory decisions.
+Depth lives in the harness constitution, `HARNESS.md`. Routine work and native
+sub-agents need no read; read it before cross-provider dispatch, risk-tier or
+authority decisions, or memory-policy changes.
 
 - **Objective:** quality per user attention-hour. Verify, delegate and curate.
 - **Sub-agents:** use them; vary model and effort per the harness constitution.
