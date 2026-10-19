@@ -413,3 +413,78 @@ def test_install_hook_registers_reinject_once_with_compact_matcher(tmp_path):
     assert entries[0]["hooks"][0]["command"] == f'python3 "{REINJECT.resolve()}"'
     config = json.loads(run_check(ROOT, "--hook-config").stdout)
     assert config["hooks"]["SessionStart"] == entries
+
+
+def result_line(tool_use_id: str, *, error: bool) -> str:
+    block = {"type": "tool_result", "tool_use_id": tool_use_id, "is_error": error, "content": "x"}
+    return json.dumps({"message": {"content": [block]}})
+
+
+def test_reinject_finds_short_relative_paths(tmp_path):
+    state = tmp_path / "sessions" / "STATE.md"
+    state.parent.mkdir()
+    state.write_text("short path\n", encoding="utf-8")
+
+    nested = reinject(tmp_path, tool_line("Bash", tmp_path, command="cat > sessions/STATE.md <<'EOF'\nx\nEOF"))
+    dotted = reinject(tmp_path, tool_line("Bash", state.parent, command="printf x > ./STATE.md"))
+
+    assert "short path" in nested.stdout and "short path" in dotted.stdout
+
+
+def test_reinject_ignores_copies_from_the_state_file(tmp_path):
+    (tmp_path / "STATE.md").write_text("source only\n", encoding="utf-8")
+
+    result = reinject(
+        tmp_path,
+        tool_line("Bash", tmp_path, command="cat STATE.md > backup.txt"),
+        tool_line("Bash", tmp_path, command="cp STATE.md backup.md"),
+    )
+
+    assert result.stdout == ""
+
+
+def test_reinject_takes_the_last_write_in_one_command_and_chained_cds(tmp_path):
+    for name in ("one", "two"):
+        (tmp_path / name).mkdir()
+        (tmp_path / name / "STATE.md").write_text(f"{name} body\n", encoding="utf-8")
+    deep = tmp_path / "sessions" / "a" / "STATE.md"
+    deep.parent.mkdir(parents=True)
+    deep.write_text("deep body\n", encoding="utf-8")
+
+    ordered = reinject(tmp_path, tool_line("Bash", tmp_path, command="echo 1 > one/STATE.md; echo 2 > two/STATE.md"))
+    chained = reinject(tmp_path, tool_line("Bash", tmp_path, command="cd sessions && cd a && echo x > STATE.md"))
+
+    assert "two body" in ordered.stdout and "one body" not in ordered.stdout
+    assert "deep body" in chained.stdout
+
+
+def test_reinject_skips_writes_that_failed(tmp_path):
+    good, bad = tmp_path / "good" / "STATE.md", tmp_path / "bad" / "STATE.md"
+    for path in (good, bad):
+        path.parent.mkdir()
+        path.write_text(f"{path.parent.name} body\n", encoding="utf-8")
+    first = json.loads(tool_line("Write", tmp_path, file_path=str(good)))
+    first["message"]["content"][0]["id"] = "t1"
+    second = json.loads(tool_line("Edit", tmp_path, file_path=str(bad)))
+    second["message"]["content"][0]["id"] = "t2"
+
+    result = reinject(
+        tmp_path,
+        json.dumps(first),
+        result_line("t1", error=False),
+        json.dumps(second),
+        result_line("t2", error=True),
+    )
+
+    assert "good body" in result.stdout and "bad body" not in result.stdout
+
+
+def test_install_hook_adds_compact_entry_beside_another_matcher(tmp_path):
+    settings = tmp_path / "settings.json"
+    existing = {"matcher": "startup", "hooks": [{"type": "command", "command": f'python3 "{REINJECT}"'}]}
+    settings.write_text(json.dumps({"hooks": {"SessionStart": [existing]}}), encoding="utf-8")
+
+    assert run_check(tmp_path, "--install-hook", str(settings)).returncode == 0
+
+    entries = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["SessionStart"]
+    assert [entry["matcher"] for entry in entries] == ["startup", "compact"]

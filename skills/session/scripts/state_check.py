@@ -89,12 +89,18 @@ def hook_config() -> str:
 
 
 def add_entry(hooks: dict, event: str, entry: dict, marker: str, settings: Path) -> bool:
-    """Append entry under hooks[event] unless a hook command already names marker."""
+    """Append entry under hooks[event] unless an entry covering its matcher already names marker."""
     entries = hooks.setdefault(event, [])
     if not isinstance(entries, list):
         raise ValueError(f"{settings} has an unexpected hooks shape")
+    wanted = entry.get("matcher")
     for existing in entries:
-        inner = existing.get("hooks") if isinstance(existing, dict) else None
+        if not isinstance(existing, dict):
+            continue
+        matcher = existing.get("matcher")
+        if wanted and matcher not in (None, "", "*") and wanted not in str(matcher).split("|"):
+            continue  # same script under another matcher does not cover this one
+        inner = existing.get("hooks")
         for hook in inner if isinstance(inner, list) else []:
             if isinstance(hook, dict) and marker in str(hook.get("command", "")):
                 return False

@@ -22,16 +22,17 @@ CHUNK = 4 << 20
 WRITE_TOOLS = ("Write", "Edit", "MultiEdit")
 
 PATH = re.compile(
-    r"(?:(?<=[\s\"'=(:])|^)((?:~|/|\.{1,2}/|[\w.-]+/)[^\s\"'`;|&<>()]*/"
-    + re.escape(NAME)
-    + r"|"
+    r"(?:(?<=[\s\"'=(:])|^)((?:(?:~|\.{1,2}|[\w.-]+)?/(?:[^\s\"'`;|&<>()]*/)?)?"
     + re.escape(NAME)
     + r")(?![\w.-])"
 )
 CD = re.compile(r"\bcd\s+(\"[^\"]+\"|'[^']+'|[^\s;&|]+)")
-WRITE_HINT = re.compile(
-    r">\s*\S*" + re.escape(NAME) + r"|\bcp\s|\bmv\s|sed\s+-i|\.write\(|open\([^)]*['\"]w|tee\s"
-)
+# A path is written when it follows a redirect or tee, or ends a cp/mv/install command.
+REDIRECT = re.compile(r"(?:>>?|\btee(?:\s+-\w+)*)\s*[\"']?$")
+COPY = re.compile(r"^\s*(?:cp|mv|install)\s")
+SEPARATOR = re.compile(r"[;\n]|&&|\|\|?")
+# Commands that rewrite a named file in place.
+IN_PLACE = re.compile(r"sed\s+-i|\.write\(|\.write_text\(|open\([^)]*['\"][wa]")
 
 
 def reverse_lines(path: str) -> Iterator[bytes]:
@@ -68,8 +69,18 @@ def resolve(candidate: str, bases: list[str]) -> str | None:
     return None
 
 
+def is_written(command: str, match: re.Match) -> bool:
+    if REDIRECT.search(command[: match.start()]):
+        return True
+    starts = [m.end() for m in SEPARATOR.finditer(command, 0, match.start())]
+    segment_start = starts[-1] if starts else 0
+    after = SEPARATOR.search(command, match.end())
+    rest = command[match.end() : after.start() if after else len(command)]
+    return bool(COPY.match(command[segment_start : match.start()])) and not rest.strip(" \"'")
+
+
 def references(block: dict, cwd: str) -> Iterator[tuple[str, bool]]:
-    """Yield (absolute path, is_write) for each STATE.md one tool_use block names."""
+    """Yield (absolute path, is_write) for each STATE.md one tool_use block names, last first."""
     tool, params = block.get("name"), block.get("input") or {}
     if tool in (*WRITE_TOOLS, "Read"):
         target = params.get("file_path") or ""
@@ -81,18 +92,30 @@ def references(block: dict, cwd: str) -> Iterator[tuple[str, bool]]:
     command = params.get("command") or ""
     if tool != "Bash" or NAME not in command:
         return
-    moves = [os.path.expanduser(match.strip("\"'")) for match in CD.findall(command)]
-    bases = [m if os.path.isabs(m) else os.path.join(cwd, m) for m in reversed(moves)] + [cwd]
-    is_write = bool(WRITE_HINT.search(command))
-    for match in PATH.finditer(command):
+    bases, directory = [cwd], cwd
+    for match in CD.findall(command):
+        directory = os.path.join(directory, os.path.expanduser(match.strip("\"'")))
+        bases.insert(0, directory)
+    in_place = bool(IN_PLACE.search(command))
+    for match in reversed(list(PATH.finditer(command))):
         found = resolve(match.group(1), bases)
         if found:
-            yield found, is_write
+            yield found, in_place or is_written(command, match)
+
+
+def failed_ids(entry: dict) -> Iterator[str]:
+    message = entry.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    for block in content if isinstance(content, list) else []:
+        if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
+            yield str(block.get("tool_use_id"))
 
 
 def last_written_state(transcript: str) -> str | None:
+    failed: set[str] = set()
     for raw in reverse_lines(transcript):
-        if NAME.encode() not in raw or b'"tool_use"' not in raw:
+        has_error = b'"is_error":true' in raw or b'"is_error": true' in raw
+        if not has_error and (NAME.encode() not in raw or b'"tool_use"' not in raw):
             continue
         try:
             entry = json.loads(raw)
@@ -100,6 +123,8 @@ def last_written_state(transcript: str) -> str | None:
             continue
         if not isinstance(entry, dict):
             continue
+        if has_error:
+            failed.update(failed_ids(entry))
         message = entry.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, list):
@@ -107,6 +132,8 @@ def last_written_state(transcript: str) -> str | None:
         cwd = entry.get("cwd") if isinstance(entry.get("cwd"), str) else ""
         for block in reversed(content):
             if not isinstance(block, dict) or block.get("type") != "tool_use":
+                continue
+            if str(block.get("id")) in failed:
                 continue
             for path, is_write in references(block, cwd):
                 if is_write:
