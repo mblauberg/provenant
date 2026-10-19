@@ -33,6 +33,8 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
 - Dispatch defaults:
   - Fan out 2-4 independent lanes; go wider only for independent, checkable slices.
   - Set the route or model on every spawn, native subagents included, rather than inheriting the session default; set effort where the tool exposes it, otherwise record the limit. Name the model, or its tier or craft pool when any model of that tier will do.
+  - Pick a native Claude subagent's model by [tier](references/routing-and-tiers.md#native-tiers): `haiku` for junior, `sonnet` for senior, and `opus` only for principal work.
+  - Brief native subagents with paths, not pasted content. End one once its deliverable lands; continue it only for follow-up on that deliverable.
   - Brief in five fields: goal, scope/paths, constraints, output shape and length, verification.
   - Keep tool output bounded: redirect large output to a file and read slices. Avoid unbounded `gh ... --limit 1000` and `rg --files` over run directories.
   - Wait once: run one `provenant lanes --wait` in the background, or one status wait. Never sleep or poll loops.

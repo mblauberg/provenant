@@ -4,13 +4,27 @@ The dated source is `config/model-routing.json`; `scripts/model-route snapshot -
 
 ## Native first
 
-Each primary runs its own models as native subagents: Claude Code through the Agent tool with `opus` or `sonnet` (the 5.5 models), Codex through its native subagents. Fabric carries other providers, agy's Claude 4.6 models included, long or detached runs and sandboxed worktree writers. Fabric enforces this lightly for a known Claude or Codex seat (`AGENT_FABRIC_SEAT`); an unknown seat changes nothing:
+Each primary runs its own models as native subagents: Claude Code through the Agent tool with `opus`, `sonnet` or `haiku` (the 5.5 models), Codex through its native subagents. Fabric carries other providers, agy's Claude 4.6 models included, long or detached runs and sandboxed worktree writers. Fabric enforces this lightly for a known Claude or Codex seat (`AGENT_FABRIC_SEAT`); an unknown seat changes nothing:
 
 - a pool pick (default, `rotate`), a dispatch with no selector and a tier alias skip the seat's own models, with `<adapter>/<model> skipped: use a native subagent`;
 - `council: N` hands native members back as `spawn N native <adapter> member(s) (<models>); Fabric runs m of N`;
 - before this check, empty selectors are dropped, mixed selectors settle by precedence, and a tier alias is read case- and typo-tolerantly (`Workhorse`, `workhorze`);
 - when nothing else is available, the pick is rejected with `route_native_only`, whose fix names the native spawn and `adapter: <seat>`: the seat's own models never run by default;
 - an explicit `adapter`, `model` or `models` entry naming the seat's own model is rejected as `native_seat_model` on a Claude seat (use the host's native subagents); a Codex seat runs it with a leading `NATIVE:` warning.
+
+### Native tiers
+
+A native Claude subagent's model follows the work's tier, as a Fabric route would:
+
+| Tier | Agent tool model | Work |
+|---|---|---|
+| Junior | `haiku` | search, extraction, transcript and log sweeps, lens passes |
+| Senior | `sonnet` | implementation, review legs, research synthesis, medium decisions |
+| Principal | `opus` | critical review, decisions, orchestration, and the final design or taste call |
+
+Opus is not a default for search, implementation or ordinary review: in recorded sessions, subagents spent about three times the chair's tokens and Opus subagents were the largest line. Escalate a lane to `opus` when its task class is principal, not because the chair runs on Opus.
+
+A native subagent's context is re-read on every turn. Brief it with paths and let it read; do not paste files, diffs or transcripts into the prompt. End it once its deliverable lands. Continue it only for follow-up on that same deliverable; unrelated work goes to a fresh subagent.
 
 For ordinary provider work, use `fabric_dispatch`: one top-level task or `tasks[]` (1–64, concurrency at most 8). Pass `prompt` or `prompt_file`, optional `adapter`, `model` or `alias`, `effort`, `mode`, `worktree`, and per-run controls. A model shorthand such as `luna`, `sol`, `astra` or `opus` resolves to its owner. A non-tier `alias` is treated as a model with a note. An explicit model wins over a conflicting alias with a note. With no `adapter`, `model` also takes `adapter/id` or `adapter/id@effort` (a named `effort` wins); `opencode/opencode-go/<id>` keeps its provider path. An id the catalogue does not register runs on its adapter with a note. `fabric_adapters` with `models: <adapter>` and optional `match` (CLI `fabric adapters --models <adapter> [--match S]`) lists live ids from a probe cached for a day; Claude has no list. Unsupported effort moves to the nearest supported value and the receipt records requested and applied values. Applied effort is only what reached the provider. A model the catalogue gives no effort control (no `efforts` list or `effort_transport: "none"`, for example Claude `claude-haiku-4-5`, agy `opus` and `sonnet`, Cursor `auto` and every OpenCode model) is sent no effort flag, even through an alias default. Its applied effort is empty, its route line has no `@effort` suffix, and the receipt keeps the requested value with the note `effort <x> ignored: <model> has no effort control`, shown once among the digest warnings. The run is not blocked. When no effort is sent, applied stays empty unless the provider reports one: Codex writes it to its session rollout, recorded with `effort_observed_source: codex:rollout.turn_context`. Fallback candidates and resumes re-resolve through the router, so they never resend an effort to such a model.
 
