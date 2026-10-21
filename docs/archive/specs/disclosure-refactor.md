@@ -1,4 +1,7 @@
-# Spec: harness progressive disclosure
+# Archived: Spec: harness progressive disclosure
+
+This migration record is retained for provenance. Current requirements live in
+the owning skills and harness documentation.
 
 Canonical decision: [ADR 0020](../../adr/0020-retire-the-daemon-fabric.md)
 owns current Fabric wording. Git owns the refactor's decision and migration

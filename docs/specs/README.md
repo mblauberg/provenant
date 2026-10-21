@@ -15,12 +15,12 @@ described. Fabric is now small enough to be its own documentation: see
 
 ## Fabric
 
+- Current Fabric contract and operations: [`runtime/fabric/README.md`](../../runtime/fabric/README.md)
 - [Fabric across the user's own hosts](fabric-hosts.md)
 - [Host setup and diagnostics](../runbooks/fabric-hosts.md)
 
 ## Harness
 
 - [Adaptive agent harness lifecycle](harness/lifecycle.md)
-- [Progressive-disclosure refactor](harness/disclosure-refactor.md)
 - [Configurable multi-provider execution core](harness/provider-execution-core.md)
 - [Harness operating model: routing, cache, quota and telemetry](harness/operating-model.md)

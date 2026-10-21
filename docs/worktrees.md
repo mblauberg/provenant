@@ -103,7 +103,7 @@ digest. It protects dirty, unmerged, open-PR and active worktrees; `--apply
 after merge proof. The digest names a saved plan (valid for one day); apply deletes only its rows that are still
 eligible and skips the rest, so live lanes do not void an approval. Clean merged worktrees need no
 additional authority to remove. Run artifacts and retention are described in
-[Fabric v2](specs/fabric-v2.md).
+[Fabric runtime guide](../runtime/fabric/README.md#run-storage-and-boundaries).
 
 - One stage owner writes a worktree at a time. Sibling agents use separate
   worktrees or artefact-only scopes.

@@ -12,7 +12,7 @@ four entries; add no others:
 
 | Path | Owner | Holds | Retention |
 |---|---|---|---|
-| `runs/<run-id>/` | Fabric | Receipts, results and logs; read them through Fabric, not by path | Per [Fabric v2](../../../docs/specs/fabric-v2.md#layout-and-retention) |
+| `runs/<run-id>/` | Fabric | Receipts, results and logs; read them through Fabric, not by path | Per the [Fabric runtime guide](../../../runtime/fabric/README.md#run-storage-and-boundaries) |
 | `sessions/<session-id>/` | One chair | `STATE.md`, assumption ledger, lane briefs, scripts the session resumes with, and evidence the chair collects | Triage-only |
 | `locks/` | Project | Lock files and small lock-guarded shared state, nothing else | Kept |
 | `scratch/` | Anyone | Disposable chair-side temp and probes | One day |

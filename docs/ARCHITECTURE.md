@@ -1,7 +1,7 @@
 # Provenant architecture
 
-Fabric v2 run layout, tool contract, provenance and cleanup decisions are
-recorded in [Fabric v2](specs/fabric-v2.md).
+The current Fabric run layout, tool contract, provenance and cleanup are
+documented in [`runtime/fabric/README.md`](../runtime/fabric/README.md).
 
 ## Purpose
 
