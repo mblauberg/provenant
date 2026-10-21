@@ -125,22 +125,18 @@ enum CLI {
     }
 
     static func decode(_ data: Data) -> Result<QuotaReport, Failure> {
-        do {
-            let report = try QuotaReport.decode(data)
-            guard report.schema == QuotaReport.schemaID else { return .failure(Failure(message: "Unsupported report schema \(report.schema).")) }
-            return .success(report)
-        } catch let DecodingError.keyNotFound(key, context) {
-            return .failure(Failure(message: "The report is missing \(path(context.codingPath + [key]))."))
-        } catch let DecodingError.typeMismatch(_, context), let DecodingError.valueNotFound(_, context),
-                let DecodingError.dataCorrupted(context) {
-            return .failure(Failure(message: "The report has an unreadable \(path(context.codingPath)). \(context.debugDescription)"))
-        } catch {
-            return .failure(Failure(message: "Could not read the report: \(error.localizedDescription)"))
+        let report: QuotaReport
+        do { report = try QuotaReport.decode(data) } catch {
+            let (keys, why): ([CodingKey], String) = switch error as? DecodingError {
+            case .keyNotFound(let key, let context): (context.codingPath + [key], "is missing")
+            case .typeMismatch(_, let context), .valueNotFound(_, let context), .dataCorrupted(let context):
+                (context.codingPath, "is unreadable: \(context.debugDescription)")
+            default: ([], "is unreadable: \(error.localizedDescription)")
+            }
+            let path = keys.map { $0.intValue.map { "[\($0)]" } ?? ".\($0.stringValue)" }.joined().trimmingCharacters(in: ["."])
+            return .failure(Failure(message: "The report\(path.isEmpty ? "" : " field \(path)") \(why)"))
         }
-    }
-
-    private static func path(_ keys: [CodingKey]) -> String {
-        keys.isEmpty ? "document" : keys.map { $0.intValue.map { "[\($0)]" } ?? ".\($0.stringValue)" }.joined()
-            .trimmingCharacters(in: ["."])
+        guard report.schema == QuotaReport.schemaID else { return .failure(Failure(message: "Unsupported report schema \(report.schema).")) }
+        return .success(report)
     }
 }

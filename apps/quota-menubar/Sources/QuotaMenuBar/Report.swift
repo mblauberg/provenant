@@ -13,22 +13,18 @@ struct QuotaReport: Decodable {
         let provider, account: String
         let plan, error: String?
         let active: Bool?
+        let priority: Double?
         let status: String          // ok | stale | unavailable | unreported | disabled
-        let state: String           // worst window pace state, or "unreported"
         let observedAt: Date?
         let windows: [Window]
         let unreported: [String]?
         var hasReading: Bool { status == "ok" || status == "stale" }
-        /// Exhausted only while an exhausted window's reset is still ahead (or unknown).
-        func isExhausted(now: Date) -> Bool {
-            windows.contains { $0.pace.state == "exhausted" && ($0.resetAt.map { $0 > now } ?? true) }
-        }
     }
 
     struct Window: Decodable, Identifiable {
         var id: String { name }
         let name: String
-        let usedPercent, windowMinutes: Double?
+        let usedPercent: Double?
         let resetAt: Date?
         let pace: Pace
     }
@@ -47,35 +43,49 @@ struct QuotaReport: Decodable {
         return try decoder.decode(QuotaReport.self, from: data)
     }
 
-    func exhausted(now: Date) -> [Account] { accounts.filter { $0.hasReading && $0.isExhausted(now: now) } }
+    /// Accounts in display order: usable, then unreadable, then exhausted; by priority, then report order.
+    func sorted(now: Date) -> [Account] {
+        accounts.enumerated().sorted { ($0.element.rank(now), $0.element.priority ?? 100, $0.offset)
+            < ($1.element.rank(now), $1.element.priority ?? 100, $1.offset) }.map(\.element)
+    }
+
+    /// The highest-use binding window across every enabled account (the report lists only those) that has a
+    /// current reading and is not exhausted. Exhausted accounts are left out, so a month-long exhaustion does
+    /// not pin the headline at 100% and hide the accounts you can still use.
+    func top(now: Date) -> (account: Account, window: Window)? {
+        accounts.filter { $0.rank(now) == 0 }.compactMap { account in account.binding(now: now).map { (account, $0) } }
+            .max { $0.window.usedPercent! < $1.window.usedPercent! }
+    }
+
+    func exhausted(now: Date) -> [Account] { accounts.filter { $0.rank(now) == 2 } }
     var unavailable: [Account] { accounts.filter { !$0.hasReading } }
 
-    /// Highest used % across every enabled account (the report lists only those) that has a current
-    /// reading. Exhausted accounts are left out, so a month-long exhaustion does not pin the headline at
-    /// 100% and hide the accounts you can still use, and a window whose reset has passed no longer counts.
-    /// It reads 100% only when no account outside exhaustion has a current reading.
-    func headline(now: Date) -> Double? {
-        let used = accounts.filter { $0.hasReading && !$0.isExhausted(now: now) }.flatMap(\.windows)
-            .filter { ($0.resetAt ?? .distantFuture) > now }.compactMap(\.usedPercent)
-        return used.max() ?? (exhausted(now: now).isEmpty ? nil : 100)
+    /// 100% only when no account outside exhaustion has a current reading.
+    func headline(now: Date) -> Double? { top(now: now)?.window.usedPercent ?? (exhausted(now: now).isEmpty ? nil : 100) }
+}
+
+extension QuotaReport.Account {
+    /// The window that binds the account now. A window whose reset has passed no longer counts. An account is
+    /// exhausted while an exhausted window still has a future or unknown reset; the one that resets last binds.
+    /// Otherwise the current window with the highest use binds.
+    func binding(now: Date) -> QuotaReport.Window? {
+        let current = windows.filter { $0.usedPercent != nil && ($0.resetAt ?? .distantFuture) > now }
+        return current.filter { $0.pace.state == "exhausted" }.max { ($0.resetAt ?? .distantFuture) < ($1.resetAt ?? .distantFuture) }
+            ?? current.max { $0.usedPercent! < $1.usedPercent! }
     }
 
-    var byProvider: [(provider: String, accounts: [Account])] {
-        var seen: [String] = []
-        for account in accounts where !seen.contains(account.provider) { seen.append(account.provider) }
-        return seen.map { name in (name, accounts.filter { $0.provider == name }) }
-    }
+    /// 0 usable, 1 no reading, 2 exhausted.
+    func rank(_ now: Date) -> Int { !hasReading ? 1 : binding(now: now)?.pace.state == "exhausted" ? 2 : 0 }
+
+    var title: String { account == "default" ? Fmt.human(provider) : "\(Fmt.human(provider)) · \(account)" }
 }
 
 enum Fmt {
-    private static func formatter(_ style: DateComponentsFormatter.UnitsStyle, units: Int) -> DateComponentsFormatter {
+    private static let span: DateComponentsFormatter = {
         let f = DateComponentsFormatter()
-        f.unitsStyle = style
-        f.allowedUnits = [.day, .hour, .minute]
-        f.maximumUnitCount = units
+        (f.unitsStyle, f.allowedUnits, f.maximumUnitCount) = (.abbreviated, [.day, .hour, .minute], 2)
         return f
-    }
-    private static let span = formatter(.abbreviated, units: 2), length = formatter(.full, units: 1)
+    }()
 
     /// "5d 8h" from now, or nil once the instant has passed.
     static func until(_ date: Date?, now: Date) -> String? {
@@ -96,15 +106,12 @@ enum Fmt {
         return text.prefix(1).uppercased() + text.dropFirst()
     }
 
-    static func windowTitle(_ window: QuotaReport.Window) -> String {
-        // Skip the length when the name already states it ("five_hour").
-        guard let minutes = window.windowMinutes, minutes > 0, let span = length.string(from: minutes * 60),
-              !["hour", "day", "week", "month"].contains(where: window.name.contains) else { return human(window.name) }
-        return "\(human(window.name)) · \(span)"
+    /// "Seven day · runs out in 23h", "Primary · resets in 5d 8h", or "Exhausted · back in 3d 2h".
+    static func status(_ window: QuotaReport.Window, now: Date) -> String {
+        if window.resetAt.map({ $0 <= now }) ?? false { return "\(human(window.name)) · reset passed, awaiting a reading" }
+        let reset = until(window.resetAt, now: now)
+        if window.pace.state == "exhausted" { return "Exhausted · " + (reset.map { "back in \($0)" } ?? "reset time unknown") }
+        if let out = until(window.pace.runsOutAt, now: now) { return "\(human(window.name)) · runs out in \(out)" }
+        return human(window.name) + (reset.map { " · resets in \($0)" } ?? "")
     }
-
-    private static let paceLabels = ["deficit": "Over pace", "reserve": "Under pace", "on_pace": "On pace",
-                                     "early": "Just started", "not_started": "Starts on first use",
-                                     "exhausted": "Exhausted", "unreported": "Not reported"]
-    static func paceLabel(_ state: String) -> String { paceLabels[state] ?? "Pace unknown" }
 }
