@@ -1,17 +1,20 @@
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import fs, { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { afterEach, expect, it } from "vitest";
+import { afterEach, expect, it, vi } from "vitest";
 
+import { Store } from "../src/store.js";
+import { databasePath } from "../src/identity.js";
 import { readRuns, readEvents } from "../src/run-reader.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "fabric-reader-"));
+  // Canonical, as dispatch writes projects: macOS tmpdir is a /var -> /private/var symlink.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "fabric-reader-")));
   roots.push(root);
   return root;
 }
@@ -80,6 +83,231 @@ it("reads both receipt layouts through one versioned root-relative run interface
     expect(row.writer).toBe(false);
     expect(row.worktree).toBe("/repo/worktree");
   }
+});
+
+it("reads local runs without consulting the project registry", async () => {
+  const workspace = fixture();
+  attempt(workspace, "tasks", "local", "terminal", "ok");
+  const state = fixture();
+  writeFileSync(join(state, "fabric.sqlite3"), "invalid database");
+  const previous = process.env.AGENT_FABRIC_STATE_DIRECTORY;
+  process.env.AGENT_FABRIC_STATE_DIRECTORY = state;
+  try {
+    const result = await readRuns(workspace);
+    expect(result.status).toBe("ok");
+    expect(result.runs.map((row) => row.task_id)).toEqual(["local"]);
+    expect(result.discovery_error).toBeUndefined();
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_FABRIC_STATE_DIRECTORY;
+    else process.env.AGENT_FABRIC_STATE_DIRECTORY = previous;
+  }
+});
+
+function pointTo(target: string, source: string, run: string, tasks: string[]) {
+  const directory = join(target, ".agent-run/runs/pointers");
+  mkdirSync(directory, { recursive: true });
+  const path = join(directory, `${run}.json`);
+  writeFileSync(path, JSON.stringify({ source_project: source,
+    run_dir: join(source, ".agent-run/runs", run), task_ids: tasks }));
+  return path;
+}
+
+it("reads only its pointers and local root, without scanning foreign run roots", async () => {
+  const target = fixture(), source = fixture();
+  const { run } = attempt(source, "tasks", "pointed", "terminal", "ok");
+  const runDir = join(source, ".agent-run/runs", run);
+  writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ cwd_projects: { pointed: target } }));
+  const pointer = pointTo(target, source, run, ["pointed"]);
+  const scan = vi.spyOn(fs, "readdirSync");
+  try {
+    const result = await readRuns(target);
+    expect(result.runs).toEqual([expect.objectContaining({ task_id: "pointed", source_project: source })]);
+    expect(scan.mock.calls.map(([path]) => String(path))).not.toContain(join(source, ".agent-run/runs"));
+    expect(scan.mock.calls.map(([path]) => String(path))).not.toContain(join(source, ".agent-run"));
+    const record = JSON.parse(readFileSync(pointer, "utf8"));
+    record.source_project = "/display-only-label";
+    writeFileSync(pointer, JSON.stringify(record));
+    expect((await readRuns(target)).runs).toEqual([expect.objectContaining({ task_id: "pointed",
+      source_project: "/display-only-label" })]);
+  } finally { scan.mockRestore(); }
+});
+
+it("shows an imported lane's paths absolute under its source run", async () => {
+  const target = fixture(), source = fixture();
+  const { run } = attempt(source, "tasks", "located", "terminal", "ok");
+  const runDir = join(source, ".agent-run/runs", run);
+  writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ cwd_projects: { located: target } }));
+  pointTo(target, source, run, ["located"]);
+  const row = (await readRuns(target)).runs[0]!;
+  const canonical = fs.realpathSync.native(runDir);
+  expect(row.run_path).toBe(canonical);
+  expect(row.result_path).toBe(join(canonical, "tasks/located/attempt-001/result.md"));
+  expect(row.receipt_path).toBe(join(canonical, "tasks/located/attempt-001/attempt.json"));
+});
+
+it("isolates a corrupt foreign run and still lists and waits for local lanes", async () => {
+  const target = fixture(), source = fixture();
+  attempt(target, "tasks", "local", "terminal", "ok");
+  const { row, run } = attempt(source, "tasks", "broken", "terminal", "ok");
+  const runDir = join(source, ".agent-run/runs", run);
+  row.attempt = { toString: null, valueOf: null };
+  writeFileSync(join(runDir, "tasks/broken/attempt-001/attempt.json"), JSON.stringify(row));
+  writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ task_id: "broken",
+    task_ids: ["broken"], routes: [{ adapter: "codex", model: "fixture" }], cwd_projects: { broken: target } }));
+  pointTo(target, source, run, ["broken"]);
+  const state = fixture();
+  const store = new Store(databasePath({ AGENT_FABRIC_STATE_DIRECTORY: state }));
+  store.announce({ project: source, cwd: source, provider: "codex", agentId: "fixture" });
+  store.close();
+  const previous = process.env.AGENT_FABRIC_STATE_DIRECTORY;
+  process.env.AGENT_FABRIC_STATE_DIRECTORY = state;
+  try {
+    const result = await readRuns(target);
+    expect(result.status).toBe("ok");
+    expect(result.runs.map((row) => row.task_id)).toEqual(["local"]);
+    expect(result.discovery_error).toBeTypeOf("string");
+    const wait = laneWait(target, state, "--all", "--timeout", "0");
+    expect(wait.status, wait.stdout + wait.stderr).toBe(0);
+    expect(wait.stdout).toContain("local");
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_FABRIC_STATE_DIRECTORY;
+    else process.env.AGENT_FABRIC_STATE_DIRECTORY = previous;
+  }
+});
+
+it("isolates a foreign receipt that fails while converting its public row", async () => {
+  const target = fixture(), source = fixture();
+  attempt(target, "tasks", "local", "terminal", "ok");
+  const { row, run } = attempt(source, "tasks", "corrupt-id", "terminal", "ok");
+  const runDir = join(source, ".agent-run/runs", run);
+  row.attempt = { toString: null, valueOf: null };
+  writeFileSync(join(runDir, "tasks/corrupt-id/attempt-001/attempt.json"), JSON.stringify(row));
+  writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ cwd_projects: { "corrupt-id": target } }));
+  pointTo(target, source, run, ["corrupt-id"]);
+  const result = await readRuns(target);
+  expect(result.status).toBe("ok");
+  expect(result.runs.map((row) => row.task_id)).toEqual(["local"]);
+  expect(result.discovery_error).toBeTypeOf("string");
+});
+
+it("isolates foreign timestamps that cannot be sorted with local lanes", async () => {
+  const target = fixture(), source = fixture();
+  attempt(target, "tasks", "local", "terminal", "ok");
+  const { row, run } = attempt(source, "tasks", "bad-time", "terminal", "ok");
+  const runDir = join(source, ".agent-run/runs", run);
+  row.started_at = { toString: null, valueOf: null };
+  writeFileSync(join(runDir, "tasks/bad-time/attempt-001/attempt.json"), JSON.stringify(row));
+  writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ cwd_projects: { "bad-time": target } }));
+  pointTo(target, source, run, ["bad-time"]);
+  const result = await readRuns(target);
+  expect(result.status).toBe("ok");
+  expect(result.runs.map((row) => row.task_id)).toEqual(["local"]);
+  expect(result.discovery_error).toBeTypeOf("string");
+});
+
+it("ignores a pointer backed only by fabricated dispatch metadata", async () => {
+  const target = fixture(), source = fixture();
+  const run = "20261021-1012-dispatch-forged-abcdef";
+  const runDir = join(source, ".agent-run/runs", run);
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ task_id: "forged", task_ids: ["forged"],
+    routes: [{ adapter: "codex", model: "fixture" }], cwd_projects: { forged: target } }));
+  pointTo(target, source, run, ["forged"]);
+  expect((await readRuns(target)).runs).toEqual([]);
+});
+
+it("ignores forged pointers whose tasks have no corroborating source route", async () => {
+  const target = fixture(), source = fixture();
+  const run = "20261021-1012-batch-forged-abcdef";
+  const runDir = join(source, ".agent-run/runs", run);
+  mkdirSync(runDir, { recursive: true });
+  writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ batch_id: "batch-1",
+    task_ids: ["real", "unrouted"], routes: [{ adapter: "codex", model: "fixture" }, {}],
+    cwd_projects: { forged: target, unrouted: target, real: source } }));
+  pointTo(target, source, run, ["forged", "unrouted", "real"]);
+  const state = fixture();
+  const store = new Store(databasePath({ AGENT_FABRIC_STATE_DIRECTORY: state }));
+  store.announce({ project: source, cwd: source, provider: "codex", agentId: "fixture" });
+  store.close();
+  const previous = process.env.AGENT_FABRIC_STATE_DIRECTORY;
+  process.env.AGENT_FABRIC_STATE_DIRECTORY = state;
+  try {
+    const result = await readRuns(target);
+    expect(result.status).toBe("ok");
+    expect(result.runs).toEqual([]);
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_FABRIC_STATE_DIRECTORY;
+    else process.env.AGENT_FABRIC_STATE_DIRECTORY = previous;
+  }
+});
+
+it("prunes a pointer when its source run is gone", async () => {
+  const target = fixture(), source = fixture();
+  const pointer = pointTo(target, source, "20261021-1012-dispatch-gone-abcdef", ["gone"]);
+  expect((await readRuns(target)).runs).toEqual([]);
+  expect(existsSync(pointer)).toBe(false);
+});
+
+it("canonicalises a symlinked cwd_projects spelling from a hand-made status", async () => {
+  const target = fixture(), source = fixture(), aliases = fixture();
+  const alias = join(aliases, "target-alias");
+  symlinkSync(target, alias, "dir");
+  const { run } = attempt(source, "tasks", "aliased", "terminal", "ok");
+  writeFileSync(join(source, ".agent-run/runs", run, "dispatch-status.json"),
+    JSON.stringify({ cwd_projects: { aliased: alias } }));
+  const pointer = pointTo(target, source, run, ["aliased"]);
+  expect((await readRuns(target)).runs.map((row) => row.task_id)).toEqual(["aliased"]);
+  expect(existsSync(pointer)).toBe(true);
+});
+
+it("skips but keeps a pointer once its source maps the task to another project", async () => {
+  const target = fixture(), moved = fixture(), source = fixture();
+  const { run } = attempt(source, "tasks", "moved", "terminal", "ok");
+  writeFileSync(join(source, ".agent-run/runs", run, "dispatch-status.json"),
+    JSON.stringify({ cwd_projects: { moved } }));
+  const pointer = pointTo(target, source, run, ["moved"]);
+  expect((await readRuns(target)).runs).toEqual([]);
+  // A later resume may move the task back and replace this pointer; only the
+  // source reaper's removal of the run retires it.
+  expect(existsSync(pointer)).toBe(true);
+});
+
+it("skips a terminal pointer outside the lanes window before reading its receipts", async () => {
+  const target = fixture(), source = fixture();
+  const { run } = attempt(source, "tasks", "aged", "terminal", "ok");
+  writeFileSync(join(source, ".agent-run/runs", run, "dispatch-status.json"), JSON.stringify({ status: "ok",
+    finished_at: new Date(Date.now() - 2 * 86400000).toISOString(), cwd_projects: { aged: target } }));
+  const pointer = pointTo(target, source, run, ["aged"]);
+  const reads = vi.spyOn(fs, "readdirSync");
+  try {
+    expect((await readRuns(target)).runs).toEqual([]);
+    expect(reads.mock.calls.map(([path]) => String(path)).filter((path) => path.startsWith(source))).toEqual([]);
+  } finally { reads.mockRestore(); }
+  expect(existsSync(pointer)).toBe(true);
+  expect((await readRuns(target, undefined, 0, undefined, null, undefined, true)).runs.map((row) => row.task_id))
+    .toEqual(["aged"]);
+});
+
+it("keeps an old pointer while the source still retains its run", async () => {
+  // The source reaper keeps resumable and recently failed runs past the
+  // ordinary window, so age alone must not drop them from target history.
+  const target = fixture(), source = fixture();
+  const { run } = attempt(source, "tasks", "retained", "terminal", "ok");
+  writeFileSync(join(source, ".agent-run/runs", run, "dispatch-status.json"), JSON.stringify({ status: "ok",
+    finished_at: new Date(Date.now() - 30 * 86400000).toISOString(), cwd_projects: { retained: target } }));
+  const pointer = pointTo(target, source, run, ["retained"]);
+  expect((await readRuns(target, undefined, 0, undefined, null, undefined, true)).runs.map((row) => row.task_id))
+    .toEqual(["retained"]);
+  expect(existsSync(pointer)).toBe(true);
+});
+
+it("keeps a run without a cwd mapping under the chair's project", async () => {
+  const target = fixture(), source = fixture();
+  const { run } = attempt(source, "tasks", "unmapped", "terminal", "ok");
+  pointTo(target, source, run, ["unmapped"]);
+  writeFileSync(join(source, ".agent-run/runs", run, "dispatch-status.json"), "{}");
+  expect((await readRuns(source)).runs.map((row) => row.task_id)).toEqual(["unmapped"]);
+  expect((await readRuns(target)).runs).toEqual([]);
 });
 
 it("omits the effort suffix when an adapter applies no effort", async () => {
