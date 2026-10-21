@@ -86,11 +86,7 @@ def text_event(text):
 
 def environment(plan):
     """Per-attempt permissions and startup controls for the standalone server."""
-    # The read-only OS profile enforces writes even when the model can inspect with bash.
-    allow_bash = plan["mode"] == "worktree_write" or (
-        plan["mode"] == "read_only" and plan["applied"].get("confinement") == "sandbox-exec"
-    )
-    bash_permission = {"*": "allow"} if allow_bash else {
+    bash_permission = {"*": "allow"} if plan["mode"] == "worktree_write" else {
         "*": "deny",
         "provenant-no-shell": "allow",
     }
