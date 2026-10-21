@@ -138,9 +138,15 @@ route or the alternative of dispatching from the other project. For a
 directory outside the caller's, Fabric passes the owner a read root. The run
 stays in the caller's run root, where `lanes` and `status` find it. Dispatch
 records the cwd-derived project per task, so `lanes` and `lanes --wait` in that
-project also find the task, including from its registered worktrees. Discovery
-reads registered projects' run roots; it does not move existing runs or expose
-other tasks in a mixed-project batch. The secret scan still covers the prompt.
+project also find the task, including from its registered worktrees. Dispatch
+writes a pointer under the target project's `.agent-run/runs/pointers/`;
+discovery reads its own run root and these pointers, corroborating tasks and
+routes against the source owner record or receipts. Missing source runs have
+their pointers pruned. Other tasks in a mixed-project batch stay private to
+their projects. Runs created before this change stay under the chair's project;
+there is no registry-wide backfill. A resume recomputes the resumed task's
+project from its effective cwd and writes its target pointer. The secret scan
+still covers the prompt.
 A prompt in a credential or authentication
 store is refused wherever it sits. A resume reuses the saved read roots only
 while each still resolves to the same directory in a registered project. The Python owner validates provider capabilities and
@@ -470,8 +476,9 @@ project has `source_project` naming the launching project, an empty `run_path`
 and null artifact paths. Read its artifacts, status or output from that source
 project; `lanes --project <source_project>` also returns its local paths. Older
 runs without a recorded cwd project remain readable from their original root.
-If the project registry is unavailable, local runs remain readable and
-`discovery_error` reports that discovery from other projects was unavailable.
+`source_project` is display-only. A corrupt or unreadable pointed run leaves
+local lanes readable and reports `discovery_error`. Lane discovery does not
+consult the project registry.
 `ended_at` is `null` until the
 attempt is terminal; a closure the owner never wrote takes the run's recorded
 finish time. Missing facts are `null`; `pgid_alive: null` means

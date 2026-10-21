@@ -2,9 +2,9 @@ import { existsSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
-import { databasePath, runRoot } from "./identity.js";
+import { runRoot } from "./identity.js";
 import { processMatches, processStartedAt, readOwnerRecord, readProviderRecord, statusRows } from "./run-registry.js";
-import { inspectDatabase, type Message } from "./store.js";
+import { type Message } from "./store.js";
 import { federatedLane } from "./hosts.js";
 
 export interface RunRead {
@@ -76,6 +76,53 @@ function rootPath(root: string, runDir: string, value: unknown): string | null {
     !isAbsolute(local) && local !== ".." && !local.startsWith(`..${sep}`) ? rel : null;
 }
 
+function publicRun(row: Record<string, any>, root: string): RunRead {
+  const runDir = String(row.run_dir);
+  const latest = Array.isArray(row.attempts) ? row.attempts.at(-1) : undefined;
+  const resultForReceipt = latest?.paths?.result ?? row.paths?.result;
+  const taskId = typeof row.task_id === "string" ? row.task_id : "";
+  const attempt = Number(latest?.attempt ?? row.attempt);
+  const layoutReceipt = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(taskId) && Number.isSafeInteger(attempt) && attempt > 0
+    ? ["tasks", "dispatch/tasks"].map((tree) => `${tree}/${taskId}/attempt-${String(attempt).padStart(3, "0")}/attempt.json`)
+      .find((path) => existsSync(resolve(runDir, path)))
+    : undefined;
+  const receipt = row.paths?.receipt ?? latest?.paths?.receipt ??
+    (typeof resultForReceipt === "string" ? `${dirname(resultForReceipt)}/attempt.json` : layoutReceipt);
+  const owner = readOwnerRecord(runDir);
+  const provider = owner && readProviderRecord(runDir, owner.run_token);
+  const liveRecord = provider?.provider_started_at ? provider : owner;
+  const pid = liveRecord && ("provider_pid" in liveRecord ? liveRecord.provider_pid : liveRecord.owner_pid);
+  const started = liveRecord && ("provider_started_at" in liveRecord ? liveRecord.provider_started_at : liveRecord.owner_started_at);
+  const requested = row.provenance?.requested;
+  const adapter = requested?.adapter ?? row.route?.adapter ?? row.adapter;
+  const model = row.provenance?.resolved_model ?? row.route?.resolved_model ?? row.model;
+  const effort = row.provenance?.effort_applied || requested?.effort;
+  return {
+    id: String(row.task_id ?? row.id ?? row.run_id),
+    run_id: String(row.run_id),
+    task_id: typeof row.task_id === "string" ? row.task_id : null,
+    run_path: rootPath(root, root, runDir) ?? "",
+    ...(typeof row.source_project === "string" ? { source_project: row.source_project } : {}),
+    state: String(row.state ?? "unknown"),
+    status: typeof row.status === "string" ? row.status : null,
+    ...(row.landable === false ? { landable: false as const, quarantine: row.quarantine } : {}),
+    route: typeof adapter === "string" && typeof model === "string"
+      ? `${adapter}/${model}${typeof effort === "string" && effort ? `@${effort}` : ""}` : null,
+    model: typeof model === "string" ? model : null,
+    started_at: typeof row.started_at === "string" ? row.started_at : null,
+    ended_at: typeof row.ended_at === "string" ? row.ended_at : null,
+    last_progress_at: typeof row.last_progress_at === "string" ? row.last_progress_at : null,
+    pgid: typeof row.pgid === "number" ? row.pgid : provider?.provider_pgid ?? owner?.owner_pgid ?? null,
+    pgid_alive: pid === undefined || started == null ? null
+      : processStartedAt(pid) === null ? null : processMatches(pid, started),
+    result_path: rootPath(root, runDir, row.paths?.result ?? row.result_path),
+    receipt_path: rootPath(root, runDir, receipt),
+    writer: row.mode === "worktree_write",
+    worktree: typeof row.worktree === "string" ? row.worktree : null,
+    attempt: Number(row.attempt ?? 0),
+  };
+}
+
 /** The public read contract. Receipt layout and absolute paths end here. */
 export async function readRuns(
   workspace: string, ids?: string[], waitSeconds = 0, signal?: AbortSignal,
@@ -96,57 +143,18 @@ export async function readRuns(
     signal?.throwIfAborted();
   }
   try {
-    const registry = inspectDatabase(databasePath(), workspace, "status");
-    const source = await statusRows(workspace, ids, waitSeconds, "all", signal, "brief", false, null, includeHistory,
-      registry.projects);
+    const source = await statusRows(workspace, ids, waitSeconds, "all", signal, "brief", false, null, includeHistory, true);
     if (!source.runs) return { schema: "fabric.runs.v1", status: "unknown" as const,
       error: String(source.error ?? "run_read_failed"), runs: [] as RunRead[] };
     const root = existsSync(runRoot(workspace)) ? realpathSync.native(runRoot(workspace)) : resolve(runRoot(workspace));
-    const runs: RunRead[] = source.runs.map((row) => {
-      const runDir = String(row.run_dir);
-      const latest = Array.isArray(row.attempts) ? row.attempts.at(-1) : undefined;
-      const resultForReceipt = latest?.paths?.result ?? row.paths?.result;
-      const taskId = typeof row.task_id === "string" ? row.task_id : "";
-      const attempt = Number(latest?.attempt ?? row.attempt);
-      const layoutReceipt = /^[A-Za-z0-9][A-Za-z0-9._-]*$/u.test(taskId) && Number.isSafeInteger(attempt) && attempt > 0
-        ? ["tasks", "dispatch/tasks"].map((tree) => `${tree}/${taskId}/attempt-${String(attempt).padStart(3, "0")}/attempt.json`)
-          .find((path) => existsSync(resolve(runDir, path)))
-        : undefined;
-      const receipt = row.paths?.receipt ?? latest?.paths?.receipt ??
-        (typeof resultForReceipt === "string" ? `${dirname(resultForReceipt)}/attempt.json` : layoutReceipt);
-      const owner = readOwnerRecord(runDir);
-      const provider = owner && readProviderRecord(runDir, owner.run_token);
-      const liveRecord = provider?.provider_started_at ? provider : owner;
-      const pid = liveRecord && ("provider_pid" in liveRecord ? liveRecord.provider_pid : liveRecord.owner_pid);
-      const started = liveRecord && ("provider_started_at" in liveRecord ? liveRecord.provider_started_at : liveRecord.owner_started_at);
-      const requested = row.provenance?.requested;
-      const adapter = requested?.adapter ?? row.route?.adapter ?? row.adapter;
-      const model = row.provenance?.resolved_model ?? row.route?.resolved_model ?? row.model;
-      const effort = row.provenance?.effort_applied || requested?.effort;
-      return {
-        id: String(row.task_id ?? row.id ?? row.run_id),
-        run_id: String(row.run_id),
-        task_id: typeof row.task_id === "string" ? row.task_id : null,
-        run_path: rootPath(root, root, runDir) ?? "",
-        ...(typeof row.source_project === "string" ? { source_project: row.source_project } : {}),
-        state: String(row.state ?? "unknown"),
-        status: typeof row.status === "string" ? row.status : null,
-        ...(row.landable === false ? { landable: false as const, quarantine: row.quarantine } : {}),
-        route: typeof adapter === "string" && typeof model === "string"
-          ? `${adapter}/${model}${typeof effort === "string" && effort ? `@${effort}` : ""}` : null,
-        model: typeof model === "string" ? model : null,
-        started_at: typeof row.started_at === "string" ? row.started_at : null,
-        ended_at: typeof row.ended_at === "string" ? row.ended_at : null,
-        last_progress_at: typeof row.last_progress_at === "string" ? row.last_progress_at : null,
-        pgid: typeof row.pgid === "number" ? row.pgid : provider?.provider_pgid ?? owner?.owner_pgid ?? null,
-        pgid_alive: pid === undefined || started == null ? null
-          : processStartedAt(pid) === null ? null : processMatches(pid, started),
-        result_path: rootPath(root, runDir, row.paths?.result ?? row.result_path),
-        receipt_path: rootPath(root, runDir, receipt),
-        writer: row.mode === "worktree_write",
-        worktree: typeof row.worktree === "string" ? row.worktree : null,
-        attempt: Number(row.attempt ?? 0),
-      };
+    const discoveryErrors = source.discovery_error ? [String(source.discovery_error)] : [];
+    const runs = source.runs.flatMap((row): RunRead[] => {
+      try { return [publicRun(row, root)]; }
+      catch (error) {
+        if (typeof row.source_project !== "string") throw error;
+        discoveryErrors.push(`${row.source_project}: ${error instanceof Error ? error.message : String(error)}`);
+        return [];
+      }
     });
     runs.sort((a, b) => (a.state === "running" ? 0 : 1) - (b.state === "running" ? 0 : 1) ||
       Date.parse(b.started_at ?? "") - Date.parse(a.started_at ?? ""));
@@ -158,7 +166,7 @@ export async function readRuns(
     const omitted = capped ? Math.max(0, matching.length - limit) : 0;
     return { schema: "fabric.runs.v1", status: "ok" as const,
       runs: capped ? matching.slice(0, limit ?? matching.length) : matching,
-      ...(registry.status === "error" ? { discovery_error: registry.error ?? "project_registry_unavailable" } : {}),
+      ...(discoveryErrors.length ? { discovery_error: discoveryErrors.join("; ") } : {}),
       ...(omitted ? { omitted, omitted_hint: `Use provenant lanes ID to see a lane past the ${limit}-row cap.` } : {}) };
   } catch (error) {
     return { schema: "fabric.runs.v1", status: "unknown" as const,

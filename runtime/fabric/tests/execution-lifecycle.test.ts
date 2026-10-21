@@ -644,11 +644,33 @@ describe("dispatch CLI", () => {
     await waitForFile(join(run.run_dir, "sleeping.pid"));
     const options = { cwd, encoding: "utf8" as const, env: ownerEnvironment, timeout: 15_000 };
     const args = ["--import", tsxLoader, join(packageRoot, "src/cli.ts"), "lanes"];
-    return { started, options, args, project, worktree };
+    return { started, options, args, project, worktree, runDir: run.run_dir };
   }
 
+  it.each([".agent-run", ".agent-run/runs", ".agent-run/runs/pointers"])(
+    "rejects a symlinked target pointer ancestor %s", async (component) => {
+      const project = realpathSync(mkdtempSync(join(temporaryDirectory, "linked-target-")));
+      const outside = realpathSync(mkdtempSync(join(temporaryDirectory, "outside-target-")));
+      const link = join(project, component);
+      mkdirSync(dirname(link), { recursive: true });
+      symlinkSync(outside, link, "dir");
+      const result = await dispatchConfiguredProvider({ adapter: "codex", cwd: project,
+        prompt: "sleep without provider", task_id: "linked-target", wait_seconds: 0 },
+      { ...identity, registeredProjects: [workspace, project] }, new AbortController().signal, ownerEnvironment);
+      if (typeof result.pid === "number") spawnedPids.push(result.pid);
+      expect(result.status, JSON.stringify(result)).toBe("rejected");
+      expect(readdirSync(outside)).toEqual([]);
+    }, 20_000,
+  );
+
   it("lists a lane from its explicit cwd project when the chair is in another project", async () => {
-    const { started, options, args, project, worktree } = await crossProjectLane();
+    const { started, options, args, project, worktree, runDir } = await crossProjectLane();
+    const pointers = join(project, ".agent-run/runs/pointers");
+    expect(existsSync(pointers)).toBe(true);
+    const [pointer] = readdirSync(pointers);
+    expect(JSON.parse(readFileSync(join(pointers, pointer!), "utf8"))).toMatchObject({
+      source_project: workspace, run_dir: runDir, task_ids: ["cross-project-lane"],
+    });
     for (const cwd of [project, worktree, options.cwd]) {
       const result = JSON.parse(execFileSync(process.execPath, [...args, "--json"], { ...options, cwd }));
       expect(result.runs).toEqual([expect.objectContaining({ run_id: started.id,
@@ -684,29 +706,41 @@ describe("dispatch CLI", () => {
     }
   }, 25_000);
 
-  it("keeps a cross-project lane discoverable while it resumes", async () => {
+  it("recomputes the project pointer when a resume supplies a new cwd", async () => {
     const project = realpathSync(mkdtempSync(join(temporaryDirectory, "resume-target-")));
+    const oldProject = realpathSync(mkdtempSync(join(temporaryDirectory, "old-resume-target-")));
     const store = new Store(databasePath(ownerEnvironment));
     store.announce(identity);
     store.announce({ ...identity, project, cwd: project });
+    store.announce({ ...identity, project: oldProject, cwd: oldProject });
     store.close();
     const runDir = join(workspace, ".agent-run", "mcp-resume-discovery");
     const attempt = join(runDir, "tasks/task-1/attempt-001");
     mkdirSync(attempt, { recursive: true });
     mkdirSync(join(runDir, "_owner"));
     const row = JSON.parse(readFileSync(join(testDirectory, "fixtures/attempt.json"), "utf8"));
-    Object.assign(row, { run_id: "mcp-resume-discovery", cwd: project, read_roots: [project] });
+    Object.assign(row, { run_id: "mcp-resume-discovery", cwd: oldProject, read_roots: [oldProject, project] });
     writeFileSync(join(attempt, "attempt.json"), JSON.stringify(row));
     writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ task_id: "task-1", status: "ok",
-      finished_at: new Date().toISOString(), cwd_projects: { "task-1": project } }));
+      finished_at: new Date().toISOString(), cwd_projects: { "task-1": oldProject } }));
+    const oldPointers = join(oldProject, ".agent-run/runs/pointers");
+    mkdirSync(oldPointers, { recursive: true });
+    writeFileSync(join(oldPointers, "old.json"), JSON.stringify({ source_project: workspace,
+      run_dir: runDir, task_ids: ["task-1"] }));
     const resumed = await resumeConfiguredProvider({ resume: row.run_id, prompt: "sleep without provider", wait_seconds: 0 },
-      { ...identity, registeredProjects: [workspace, project] }, new AbortController().signal, ownerEnvironment);
+      { ...identity, registeredProjects: [workspace, project, oldProject] }, new AbortController().signal, ownerEnvironment, { readOnlyCwd: project });
     expect(resumed.state, JSON.stringify(resumed)).toBe("queued");
+    expect(JSON.parse(readFileSync(join(runDir, "dispatch-status.json"), "utf8")).cwd_projects)
+      .toEqual({ "task-1": project });
+    expect(readdirSync(join(project, ".agent-run/runs/pointers"))).toHaveLength(1);
     spawnedPids.push(listRecordedRuns(workspace).find((run) => run.run_id === row.run_id)!.owner_pid);
     await waitForFile(join(runDir, "sleeping.pid"));
     const result = JSON.parse(execFileSync(process.execPath, ["--import", tsxLoader, join(packageRoot, "src/cli.ts"),
       "lanes", "--json"], { cwd: project, encoding: "utf8", env: ownerEnvironment }));
     expect(result.runs).toEqual([expect.objectContaining({ run_id: row.run_id, task_id: "task-1", state: "queued" })]);
+    const old = JSON.parse(execFileSync(process.execPath, ["--import", tsxLoader, join(packageRoot, "src/cli.ts"),
+      "lanes", "--json"], { cwd: oldProject, encoding: "utf8", env: ownerEnvironment }));
+    expect(old.runs).toEqual([]);
   }, 20_000);
 
   it("forwards read roots for a task manifest in another registered project", () => {

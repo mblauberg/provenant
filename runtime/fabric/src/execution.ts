@@ -23,7 +23,7 @@ export { ACCESS_MODES, DISPATCH_ADAPTERS } from "./execution-input.js";
 export type { AccessMode, RouteInput, DispatchInput, BatchInput, BatchTaskInput } from "./execution-input.js";
 import { compactRoute, basePaths, compactDispatch, compactBatch, type OwnerCompletion } from "./owner-output.js";
 import { execFileSync, execFile, spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   accessSync,
   appendFileSync,
@@ -36,6 +36,7 @@ import {
   existsSync,
   readFileSync,
   realpathSync,
+  renameSync,
   statSync,
   rmSync,
   unlinkSync,
@@ -319,6 +320,33 @@ export interface OwnerIdentification {
   cwdProjects?: Record<string, string>;
 }
 
+/** One index entry per source run in each explicitly targeted project. */
+function writeLanePointers(runDir: string, projects: Record<string, string> | undefined,
+  sourceProject: string, env: NodeJS.ProcessEnv): void {
+  const targets = new Map<string, string[]>();
+  for (const [task, project] of Object.entries(projects ?? {})) {
+    if (runRoot(project, env) === runRoot(sourceProject, env)) continue;
+    const tasks = targets.get(project) ?? [];
+    tasks.push(task);
+    targets.set(project, tasks);
+  }
+  // Run ids are short display ids; the full path prevents index collisions.
+  const name = createHash("sha256").update(runDir).digest("hex");
+  for (const [project, tasks] of targets) {
+    const targetRoot = runRoot(project, env);
+    const directory = join(targetRoot, "runs/pointers");
+    for (const path of [targetRoot, join(targetRoot, "runs"), directory]) {
+      mkdirSync(path, { recursive: true, mode: 0o700 });
+      if (lstatSync(path).isSymbolicLink()) throw new Error("pointer directory must not be a symlink");
+    }
+    const path = join(directory, `${name}.json`);
+    const temporary = `${path}.${process.pid}.tmp`;
+    writeFileSync(temporary, JSON.stringify({ source_project: sourceProject, run_dir: runDir, task_ids: tasks }) + "\n",
+      { mode: 0o600 });
+    renameSync(temporary, path);
+  }
+}
+
 export function startOwner(
   owner: string,
   args: string[],
@@ -353,12 +381,7 @@ export function startOwner(
   const stderrPath = join(runDir, "_owner", `stderr${suffix}.log`);
   // Persist required status before spawning: a failed write cannot orphan a provider.
   const statusPath = join(runDir, "dispatch-status.json");
-  let cwdProjects = identification.cwdProjects;
-  if (cwdProjects === undefined && identification.resume) {
-    try {
-      cwdProjects = (JSON.parse(readFileSync(statusPath, "utf8")) as { cwd_projects?: Record<string, string> }).cwd_projects;
-    } catch { /* Older runs may have only receipts. */ }
-  }
+  const cwdProjects = identification.cwdProjects;
   const metadata = {
     id: shortRunId(runDir),
     ...(identification.kind === "dispatch"
@@ -381,6 +404,9 @@ export function startOwner(
   writeFileSync(statusPath, JSON.stringify(metadata) + "\n", { mode: 0o600 });
   let child: ChildProcess;
   try {
+    const sourceRoot = basename(dirname(runDir)) === "runs" ? dirname(dirname(runDir)) : dirname(runDir);
+    const sourceProject = projectRoot(dirname(sourceRoot), env);
+    writeLanePointers(runDir, cwdProjects, sourceProject, env);
     const stdout = openSync(stdoutPath, "wx", 0o600);
     let stderr: number | undefined;
     try {
