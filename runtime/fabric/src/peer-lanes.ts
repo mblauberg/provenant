@@ -68,6 +68,9 @@ try {
   // Expose that existing liveness field before the Python host considers cleanup.
   const rows = (result as { runs?: Array<Record<string, any>> } | undefined)?.runs;
   for (const row of rows ?? []) {
+    // Imported lanes already carry liveness from their actual owner record;
+    // their intentionally empty project-relative path cannot be probed here.
+    if (typeof row.source_project === "string") continue;
     if (row.state === "terminal") {
       const runDir = typeof row.run_dir === "string" ? row.run_dir
         : typeof row.run_path === "string" ? resolve(runRoot(identity.project), row.run_path) : undefined;

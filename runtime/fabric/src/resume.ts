@@ -16,7 +16,7 @@ import {
   rejectOwnSeatClaude,
   type LaunchObserver,
 } from "./execution.js";
-import type { Identity } from "./identity.js";
+import { projectRoot, type Identity } from "./identity.js";
 import { processMatches, readOwnerRecord, statusRows } from "./run-registry.js";
 
 /** The whole injected handoff text, prefix and result tail together. */
@@ -207,6 +207,8 @@ export async function resumeConfiguredProvider(
         kind: "dispatch",
         identifier: taskId,
         taskIds,
+        cwdProjects: { ...saved.cwd_projects,
+          ...(previous.mode === "read_only" ? { [taskId]: projectRoot(executionIdentity.cwd, env) } : {}) },
         resume: true,
         ...(batch?.batch_id ? { batchId: String(batch.batch_id) } : {}),
         routes,
