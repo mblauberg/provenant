@@ -4106,7 +4106,7 @@ def test_fabric_fast_plan_delegates_valid_shell_only_options(tmp_path, monkeypat
 
 
 def test_fabric_fast_plan_delegates_missing_tmpdir(tmp_path, monkeypatch):
-    """cf_dispatch.sh rejects a TMPDIR that is not a directory; the fast path must not accept it."""
+    """cf_dispatch.py rejects a TMPDIR that is not a directory; the fast path must not accept it."""
     run, prompt, command = real_owner_fixture(tmp_path, monkeypatch, 'import sys\nsys.stdin.read()\n')
     isolate_fabric_plan_env(monkeypatch)
     monkeypatch.chdir(tmp_path)
@@ -4120,8 +4120,8 @@ def test_fabric_fast_plan_delegates_missing_tmpdir(tmp_path, monkeypatch):
 def test_fabric_fast_plan_guard_covers_shell_environment_reads():
     import re
     mod = load_dispatch_module()
-    shell = (ROOT / 'skills/orchestrate/scripts/cf_dispatch.sh').read_text()
-    read_names = set(re.findall(r'\$\{?(CF_DISPATCH_[A-Z0-9_]+)', shell))
+    shell = (ROOT / 'skills/orchestrate/scripts/cf_dispatch.py').read_text()
+    read_names = set(re.findall(r'"(CF_DISPATCH_[A-Z0-9_]+)"', shell))
     assert read_names == mod.FAST_PLAN_SHELL_ENV_READS
 
 
@@ -4139,14 +4139,15 @@ def test_fabric_fast_route_validation_matches_shell_rejections(raw):
 
 
 def test_fabric_fast_route_validation_tracks_shell_fields():
-    import re
+    import importlib.util
     mod = load_dispatch_module()
-    shell = (ROOT / 'skills/orchestrate/scripts/cf_dispatch.sh').read_text()
-    parser = shell.split('parse_route_json() {', 1)[1].split("PY\n", 1)[0]
-    required = parser.split('for key in (', 1)[1].split(')', 1)[0]
-    fields = parser.split('keys = (', 1)[1].split(')', 1)[0]
-    assert set(re.findall(r'"([a-z_]+)"', required)) == set(mod.FAST_PLAN_ROUTE_REQUIRED)
-    assert set(re.findall(r'"([a-z_]+)"', fields)) == set(mod.FAST_PLAN_ROUTE_FIELDS)
+    path = ROOT / 'skills/orchestrate/scripts/cf_dispatch.py'
+    spec = importlib.util.spec_from_file_location('cf_dispatch_under_test', path)
+    dispatcher = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = dispatcher
+    spec.loader.exec_module(dispatcher)
+    assert set(dispatcher.ROUTE_REQUIRED_FIELDS) == set(mod.FAST_PLAN_ROUTE_REQUIRED)
+    assert set(dispatcher.ROUTE_FIELDS) == set(mod.FAST_PLAN_ROUTE_FIELDS)
 
 
 @pytest.mark.parametrize('failure', [

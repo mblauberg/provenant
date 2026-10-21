@@ -36,7 +36,7 @@ def test_plan_only_resolves_without_launch(tmp_path):
     }
     result = subprocess.run(
         [
-            str(SCRIPTS / "cf_dispatch.sh"),
+            str(SCRIPTS / "cf_dispatch.py"),
             "--intent",
             "ordinary",
             "--tool",
@@ -5466,7 +5466,7 @@ def test_plan_only_honors_read_only_cwd_inside_workspace(tmp_path):
     }
     result = subprocess.run(
         [
-            str(SCRIPTS / "cf_dispatch.sh"),
+            str(SCRIPTS / "cf_dispatch.py"),
             "--tool",
             "claude",
             "--intent",

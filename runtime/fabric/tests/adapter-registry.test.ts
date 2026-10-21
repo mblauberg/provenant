@@ -22,14 +22,14 @@ const compatibility = parseYaml(
   dispatch_registry?: Record<string, { dispatch?: string; write_modes?: string[] }>;
 };
 const dispatcher = readFileSync(
-  join(repositoryRoot, "skills", "orchestrate", "scripts", "cf_dispatch.sh"),
+  join(repositoryRoot, "skills", "orchestrate", "scripts", "cf_dispatch.py"),
   "utf8",
 );
 
 function shellList(name: string): string[] {
-  const match = new RegExp(`^${name}="([^"]*)"$`, "mu").exec(dispatcher);
-  if (match === null) throw new Error(`cf_dispatch.sh declares no ${name}`);
-  return match[1]!.split(/\s+/u).filter((entry) => entry.length > 0).sort();
+  const match = new RegExp(`^${name} = \\(([^)]*)\\)$`, "mu").exec(dispatcher);
+  if (match === null) throw new Error(`cf_dispatch.py declares no ${name}`);
+  return [...match[1]!.matchAll(/"([^"]+)"/gu)].map((entry) => entry[1]!).sort();
 }
 
 function registryAdapters(state: string): string[] {
