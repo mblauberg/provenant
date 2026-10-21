@@ -62,6 +62,8 @@ CLOCK_SKEW_SECONDS = 300
 RESET_NOISE = 5         # a smaller drop is reporting noise, not a granted reset
 NEAR_EXHAUSTED = 95
 WAIT_HOURS = 6
+# How routing treats an account whose allowance is spent but whose credits keep it usable (`quota.credits_policy`).
+CREDITS_POLICIES = ('last_resort', 'normal', 'never')
 # Providers name some windows by codename; `quota.window_labels` in telemetry.json adds or overrides labels.
 WINDOW_LABELS = {'iguana_necktie': 'Cloud session credits'}
 SEVERITY = ('exhausted', 'unknown', 'unreported', 'deficit', 'on_pace', 'reserve', 'early', 'not_started')
@@ -375,6 +377,30 @@ def normalise_usage_credits(raw):
     return rows or None
 
 
+def normalise_allowance(raw):
+    """Whether the provider still allows ordinary included use, and whether a spend control or depleted
+    credits stop credit use; each is unknown when unreported."""
+    raw = raw if isinstance(raw, dict) else {}
+    value = {key: raw[key] for key in ('ordinary_usage_allowed', 'spend_control_reached')
+             if isinstance(raw.get(key), bool)}
+    reached = _code(raw.get('limit_reached_type'), r'[a-z][a-z_]{0,63}')
+    return {**value, **({'limit_reached_type': reached} if reached else {})} or None
+
+
+def credit_anchor(previous, credits, observed):
+    """Where the current run of falling balance began, so a burn rate spans the whole run."""
+    balance = credits[0]['balance'] if credits else None
+    if balance is None:
+        return None
+    last = normalise_usage_credits((previous or {}).get('usage_credits'))
+    before, anchor = last[0]['balance'] if last else None, (previous or {}).get('credit_anchor') or {}
+    if before is None or balance >= before:
+        return {'balance': balance, 'observed_at': observed}
+    if (number(anchor.get('balance')) or 0) >= before and parse_time(anchor.get('observed_at')):
+        return anchor
+    return {'balance': before, 'observed_at': previous.get('observed_at')}
+
+
 def normalise_resets(raw):
     """Banked resets available now; zero or an unreported count is left out, never shown as zero."""
     if not isinstance(raw, dict) or type(raw.get('available')) is not int or raw['available'] <= 0:
@@ -557,10 +583,13 @@ def _refresh(account, now=None, force=False):
         unreported += [row['name'] for row in (previous or {}).get('windows', [])
                        if row['name'] not in names and row['name'] not in unreported]
         plan = account.plan or result.get('plan')
-        extras = {'usage_credits': normalise_usage_credits(result.get('usage_credits')),
-                  'resets': normalise_resets(result.get('resets'))}
+        observed = result.get('observed_at') or iso(now)
+        balance = normalise_usage_credits(result.get('usage_credits'))
+        extras = {'usage_credits': balance, 'resets': normalise_resets(result.get('resets')),
+                  'allowance': normalise_allowance(result.get('allowance')),
+                  'credit_anchor': credit_anchor(previous, balance, observed)}
         value = {**blank(account, 'ok' if windows else 'unreported', now=now),
-                 'plan': str(plan) if plan else None, 'observed_at': result.get('observed_at') or iso(now),
+                 'plan': str(plan) if plan else None, 'observed_at': observed,
                  'source': result.get('source'), 'windows': windows, 'unreported': unreported,
                  'credits': result.get('credits') if isinstance(result.get('credits'), dict) else None,
                  **{key: extra for key, extra in extras.items() if extra}}
@@ -704,18 +733,58 @@ def window_labels():
     return {**WINDOW_LABELS, **{str(key): value for key, value in configured.items() if isinstance(value, str)}}
 
 
+def credits_policy():
+    value = settings().get('credits_policy')
+    return value if value in CREDITS_POLICIES else CREDITS_POLICIES[0]
+
+
+def credit_draw(value, worst):
+    """The credit that keeps an account usable once its allowance is spent, or None.
+
+    Only the latest reading's balance counts, and only above `quota.credit_floor`; a spend control or
+    depleted credits stop it. The `never` policy leaves such an account exhausted."""
+    allowance = value.get('allowance') or {}
+    spent = worst and (worst['pace']['state'] == 'exhausted' or allowance.get('ordinary_usage_allowed') is False)
+    if (not spent or credits_policy() == 'never' or allowance.get('spend_control_reached') is True
+            or 'credits_depleted' in allowance.get('limit_reached_type', '')):
+        return None
+    floor = number(settings().get('credit_floor')) or 0
+    return next((entry for entry in normalise_usage_credits(value.get('usage_credits')) or []
+                 if entry['unlimited'] or entry['balance'] > floor), None)
+
+
+def burn_rate(value, entry):
+    """Credits spent per hour since the balance began falling, from successive readings."""
+    anchor = value.get('credit_anchor') or {}
+    start, end = parse_time(anchor.get('observed_at')), parse_time(value.get('observed_at'))
+    spent = (number(anchor.get('balance')) or 0) - (entry['balance'] or 0)
+    hours = (end - start).total_seconds() / 3600 if start and end else 0
+    return round(spent / hours, 2) if spent > 0 and hours > 0 else None
+
+
+def summary(value, worst, drawing, rate):
+    if not worst:
+        return value.get('error') or 'unreported'
+    if not drawing:
+        return f"{worst['name']}: {worst['pace']['summary']}"
+    return (f"{worst['name']}: allowance spent; drawing on credits, {credit_text(drawing)}"
+            + (f', about {rate:,.0f}/h' if rate else ''))
+
+
 def describe(value, banked, now):
     labels = window_labels()
     rows = [{**row, 'pace': pace(row, now), **({'label': labels[row['name']]} if labels.get(row['name']) else {})}
             for row in value.get('windows') or []]
     worst = governing(rows)
+    drawing = credit_draw(value, worst)
+    rate = burn_rate(value, drawing) if drawing else None
     unreported = list(value.get('unreported') or [])
     dated = [row for row in rows if row.get('reset_at') and row.get('window_minutes')]
     longest = max(dated, key=lambda row: row['window_minutes'], default=None)
     return {key: value.get(key) for key in ('provider', 'account', 'plan', 'host', 'active', 'priority',
                                             'observed_at', 'attempted_at', 'status', 'error', 'source')} | {
-        'state': worst['pace']['state'] if worst else 'unreported',
-        'summary': f"{worst['name']}: {worst['pace']['summary']}" if worst else value.get('error') or 'unreported',
+        'state': 'credit_only' if drawing else worst['pace']['state'] if worst else 'unreported',
+        'summary': summary(value, worst, drawing, rate),
         'windows': rows, 'unreported': unreported,
         'coverage_note': f"{', '.join(unreported)} not reported by {value.get('provider')}; missing does not mean 0%"
                          if unreported else '',
@@ -723,7 +792,8 @@ def describe(value, banked, now):
         'use_it_or_lose_it': {'window': longest['name'], 'reset_at': longest['reset_at'],
                               'unused_percent': longest['pace']['headroom_percent'],
                               'expiring_headroom_percent': longest['pace']['expiring_headroom_percent']}
-                             if longest else None} | optional_credits(value, banked)
+                             if longest else None} | optional_credits(value, banked) | (
+        {'drawing_credits': True, 'credit_burn_per_hour': rate} if drawing else {})
 
 
 def optional_credits(value, banked):
@@ -747,7 +817,8 @@ def report(values, now=None):
     def order(row):
         # Spend the account whose longest window resets soonest first, so its headroom is not lost.
         longest = max(row['windows'], key=lambda window: window['window_minutes'] or 0, default=None)
-        return (row['state'] == 'exhausted', row['priority'] if row['priority'] is not None else 100,
+        spare = row['state'] == 'credit_only' and credits_policy() == 'last_resort'
+        return (row['state'] == 'exhausted', spare, row['priority'] if row['priority'] is not None else 100,
                 (longest or {}).get('reset_at') or '9999', row['account'])
     return {'schema': REPORT_SCHEMA, 'generated_at': iso(now), 'host': telemetry_host(), 'enabled': enabled(),
             'providers': registered(), 'accounts': rows,
@@ -782,7 +853,10 @@ def route_states(now=None):
                      if window['pace']['state'] == 'exhausted' and sets_state(window)]
         states[name] = {'adapter': getattr(module, 'ADAPTER', None), 'account': label, 'host': telemetry_host(), 'state': row['state'],
                         'summary': row['summary'], 'observed_at': value.get('observed_at'),
-                        'cooling_until': max(exhausted) if exhausted and all(exhausted) else None}
+                        'cooling_until': max(exhausted) if exhausted and all(exhausted) else None,
+                        # Pools pick a last-resort adapter only when nothing with allowance qualifies.
+                        **({'last_resort': True} if row['state'] == 'credit_only' and
+                           credits_policy() == 'last_resort' else {})}
     return states
 
 
@@ -800,7 +874,8 @@ def apply_to_cooldowns(records, now=None):
             continue
         observed = parse_time(state['observed_at'])
         until = parse_time(state['cooling_until'])
-        if observed and state['state'] in ('reserve', 'on_pace', 'early', 'not_started'):
+        # An account drawing on credits stays usable: it clears usage cooldowns and adds none.
+        if observed and state['state'] in ('reserve', 'on_pace', 'early', 'not_started', 'credit_only'):
             for key, record in records.items():
                 recorded = parse_time((record or {}).get('recorded_at'))
                 if (identity.matches(record, state) and str(key).split('/', 1)[0] == adapter and record.get('status') in ('usage_limited', 'quota_exhausted')

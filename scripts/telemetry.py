@@ -821,7 +821,8 @@ def public_snapshot(value):
                           **quota.window_amounts(row), **({'advisory': True} if row.get('advisory') is True else {})}
                          for row in value.get('windows', []) if isinstance(row, dict)]
     for key, extra in (('usage_credits', quota.normalise_usage_credits(value.get('usage_credits'))),
-                       ('resets', quota.normalise_resets(value.get('resets')))):
+                       ('resets', quota.normalise_resets(value.get('resets'))),
+                       ('allowance', quota.normalise_allowance(value.get('allowance')))):
         if extra:
             result[key] = extra
     credits = value.get('credits')
