@@ -6,6 +6,7 @@ import fcntl
 import hashlib
 import importlib.util
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -33,6 +34,7 @@ TERMINAL_STATUSES = {
     "permission_blocked",
     "stalled",
     "startup_timeout",
+    "writer_changed",
     "timed_out",
     "cancelled",
     "interrupted",
@@ -206,13 +208,72 @@ def identity_resolver():
     return module
 
 
+_PACING_CACHE = {}
+_ROUTE_MODULES = {}
+
+
+def _route_module():
+    """Load model_route once per product and instance root, not on every policy read."""
+    try:
+        from .exec_routing import _model_route_module
+    except ImportError:
+        from exec_routing import _model_route_module
+    key = (os.environ.get("AGENT_FABRIC_PRODUCT_ROOT"), os.environ.get("AGENT_FABRIC_INSTANCE_ROOT"))
+    if key not in _ROUTE_MODULES:
+        _ROUTE_MODULES.clear()
+        _ROUTE_MODULES[key] = _model_route_module()
+    return _ROUTE_MODULES[key]
+
+
+def _catalogue_stamp():
+    """Identify the catalogue files pacing_policy reads, using the router's own paths."""
+    route = _route_module()
+    stamp = []
+    for path in (route.PRODUCT_CATALOG_PATH, route.CATALOG_PATH):
+        try:
+            info = path.stat()
+            stamp.append((str(path), info.st_mtime_ns, info.st_size))
+        except OSError:
+            stamp.append((str(path), None, None))
+    return tuple(stamp)
+
+
+def pacing_policy():
+    """Read pacing knobs through the existing routing catalogue and its overlay.
+
+    Cached per process until either catalogue file changes, so hot paths and the
+    cooldowns lock do not re-execute the routing module on every call.
+    """
+    stamp = _catalogue_stamp()
+    cached = _PACING_CACHE.get(stamp)
+    if cached is None:
+        _PACING_CACHE.clear()
+        cached = _PACING_CACHE[stamp] = _read_pacing_policy()
+    return dict(cached)
+
+
+def _read_pacing_policy():
+    defaults = {"base_delay_seconds": 30, "cap_seconds": 900,
+                "jitter_fraction": 0.2, "minimum_budget_seconds": 30}
+    configured = _route_module().load_catalog().get("rate_limit_pacing", {})
+    for name in defaults:
+        value = configured.get(name) if isinstance(configured, dict) else None
+        lower = 0 if name == "jitter_fraction" else 0.001
+        if (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and math.isfinite(value) and value >= lower
+                and (name != "jitter_fraction" or value <= 1)):
+            defaults[name] = value
+    defaults["cap_seconds"] = max(defaults["base_delay_seconds"], defaults["cap_seconds"])
+    return defaults
+
+
 def cooldown_key(adapter, model, scope):
     # An opaque, collision-free storage key; callers see adapter/model projections.
     return json.dumps([adapter, scope.get('account'), scope.get('host'), model], separators=(',', ':'))
 
 
-def _load_cooldowns(path, at):
-    """Read all live scopes and migrate legacy rows. Caller holds cooldowns.lock."""
+def _load_cooldowns(path, at, *, persist=True):
+    """Read scopes and backoff history; persist migration/pruning only under the lock."""
     if path.is_symlink():
         raise ValueError('cooldown store must not be a symlink')
     try:
@@ -229,7 +290,8 @@ def _load_cooldowns(path, at):
         if not isinstance(entry, dict):
             continue
         try:
-            if parse_time(entry['cooling_until']) <= at:
+            if parse_time(entry['cooling_until']) <= at and not (
+                    entry.get('status') == 'rate_limited' and entry.get('backoff_seconds')):
                 continue
         except (ValueError, TypeError, KeyError, AttributeError):
             continue
@@ -245,17 +307,20 @@ def _load_cooldowns(path, at):
         previous = values.get(scoped)
         if previous is None or parse_time(entry['cooling_until']) > parse_time(previous['cooling_until']):
             values[scoped] = entry
-    if values != entries:
+    if persist and values != entries:
         _store_cooldowns(path, values)
     return values
 
 
-def active_cooldowns(values):
+def active_cooldowns(values, at=None):
     """Project only the current account and host of each adapter to adapter/model."""
+    at = at or datetime.now(UTC)
     resolver = identity_resolver()
     scopes = {}
     active = {}
     for entry in values.values():
+        if parse_time(entry['cooling_until']) <= at:
+            continue
         adapter = entry['adapter']
         if adapter not in scopes:
             scopes[adapter] = resolver.scope(adapter)
@@ -270,8 +335,11 @@ def read_cooldowns(path=None, at=None):
     try:
         if not path.exists():
             return {}
-        with locked(path.with_name('cooldowns.lock')):
-            return active_cooldowns(_load_cooldowns(path, at))
+        try:
+            with locked(path.with_name('cooldowns.lock')):
+                return active_cooldowns(_load_cooldowns(path, at), at)
+        except (OSError, ValueError):  # ValueError: lock refused (hard-linked); the store may still be readable
+            return active_cooldowns(_load_cooldowns(path, at, persist=False), at)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return {}
 
@@ -331,6 +399,8 @@ def write_route_health(row, *, path=None, at=None):
         from .exec_routing import registered_model
     except ImportError:
         from exec_routing import registered_model
+    if row.get("status") == "writer_changed":
+        return
     path = Path(path or route_health_path())
     at = at or datetime.now(UTC)
     provenance = row["provenance"]
@@ -459,16 +529,6 @@ def write_cooldown(row, *, path=None, at=None):
         r"(?:usage|session|weekly|account|plan) limit|individual quota reached|insufficient_quota", excerpt, re.I
     ):
         model = "*"
-    reset = row.get("reset_at")
-    try:
-        until = parse_time(reset) if reset else None
-    except (ValueError, TypeError):
-        until = None
-    if until is None or until <= at:
-        delay = row.get("retry_after")
-        if not isinstance(delay, (int, float)) or delay <= 0:
-            delay = 900 if row["status"] == "rate_limited" else 3600
-        until = at + timedelta(seconds=delay)
     with locked(path.with_name("cooldowns.lock")):
         values = _load_cooldowns(path, at)
         scope = identity_resolver().scope(adapter)
@@ -496,7 +556,27 @@ def write_cooldown(row, *, path=None, at=None):
             for item in gone:
                 del values[item]
         else:
+            policy = pacing_policy()
+            backoff = None
+            if row["status"] == "rate_limited":
+                prior = values.get(key, {}).get("backoff_seconds", 0)
+                if not isinstance(prior, (int, float)) or not math.isfinite(prior) or prior < 0:
+                    prior = 0
+                backoff = min(policy["cap_seconds"], max(policy["base_delay_seconds"], prior * 2))
+            try:
+                until = parse_time(row["reset_at"]) if row.get("reset_at") else None
+            except (ValueError, TypeError):
+                until = None
+            delay = row.get("retry_after")
+            if not isinstance(delay, (int, float)) or not math.isfinite(delay) or delay <= 0:
+                delay = backoff or 3600
+            if until is None or until <= at:
+                until = at + timedelta(seconds=delay)
+            # Provider reset/retry windows are lower bounds, as is local backoff.
+            if backoff is not None:
+                until = max(until, at + timedelta(seconds=backoff))
             values[key] = {
+                **({"backoff_seconds": backoff} if backoff is not None else {}),
                 "adapter": adapter,
                 "model": model,
                 **scope,
