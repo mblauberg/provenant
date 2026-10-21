@@ -1,273 +1,171 @@
 import SwiftUI
-import Combine
-
-// MARK: - Data Models (provenant.quota.report.v1)
-
-struct QuotaReport: Codable {
-    let schema: String?
-    let generatedAt: String?
-    let host: String?
-    let enabled: Bool?
-    let providers: [String]?
-    let accounts: [QuotaAccount]?
-
-    enum CodingKeys: String, CodingKey {
-        case schema
-        case generatedAt = "generated_at"
-        case host, enabled, providers, accounts
-    }
-}
-
-struct QuotaAccount: Codable, Identifiable {
-    var id: String { "\(provider):\(account)" }
-    let provider: String
-    let account: String
-    let plan: String?
-    let active: Bool?
-    let status: String?
-    let error: String?
-    let state: String?
-    let summary: String?
-    let windows: [QuotaWindow]?
-
-    enum CodingKeys: String, CodingKey {
-        case provider, account, plan, active, status, error, state, summary, windows
-    }
-}
-
-struct QuotaWindow: Codable, Identifiable {
-    var id: String { name }
-    let name: String
-    let usedPercent: Double?
-    let windowMinutes: Int?
-    let resetAt: String?
-    let pace: QuotaPace?
-
-    enum CodingKeys: String, CodingKey {
-        case name
-        case usedPercent = "used_percent"
-        case windowMinutes = "window_minutes"
-        case resetAt = "reset_at"
-        case pace
-    }
-}
-
-struct QuotaPace: Codable {
-    let state: String?
-    let summary: String?
-    let deltaPercent: Double?
-    let headroomPercent: Double?
-    let willLastToReset: Bool?
-
-    enum CodingKeys: String, CodingKey {
-        case state, summary
-        case deltaPercent = "delta_percent"
-        case headroomPercent = "headroom_percent"
-        case willLastToReset = "will_last_to_reset"
-    }
-}
-
-// MARK: - Formatters
-
-func formatReset(_ isoString: String?) -> String {
-    guard let isoString = isoString, !isoString.isEmpty else { return "-" }
-    let formatter = ISO8601DateFormatter()
-    formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    var date = formatter.date(from: isoString)
-    if date == nil {
-        formatter.formatOptions = [.withInternetDateTime]
-        date = formatter.date(from: isoString)
-    }
-    guard let target = date else {
-        return String(isoString.prefix(16).replacingOccurrences(of: "T", with: " "))
-    }
-    let diff = target.timeIntervalSince(Date())
-    if diff <= 0 { return "now" }
-    let hours = Int(diff) / 3600
-    let minutes = (Int(diff) % 3600) / 60
-    if hours >= 48 {
-        let days = hours / 24
-        let remH = hours % 24
-        return "\(days)d \(remH)h"
-    } else if hours > 0 {
-        return "\(hours)h \(minutes)m"
-    } else {
-        return "\(minutes)m"
-    }
-}
-
-func deficitMarker(state: String?) -> String {
-    switch state?.lowercased() {
-    case "deficit":
-        return " [deficit]"
-    case "exhausted":
-        return " [exhausted]"
-    default:
-        return ""
-    }
-}
-
-// MARK: - Quota Model & CLI Fetcher
-
-final class QuotaModel: ObservableObject {
-    @Published var title: String = "Q --%"
-    @Published var accounts: [QuotaAccount] = []
-    @Published var statusText: String = "Loading quota..."
-    @Published var lastUpdated: String? = nil
-
-    private var cancellables = Set<AnyCancellable>()
-    private let intervalSeconds: TimeInterval
-
-    init() {
-        if let raw = ProcessInfo.processInfo.environment["QUOTA_INTERVAL_SECONDS"],
-           let val = Double(raw), val >= 5 {
-            self.intervalSeconds = val
-        } else {
-            self.intervalSeconds = 120
-        }
-
-        refresh()
-
-        Timer.publish(every: intervalSeconds, on: .main, in: .common)
-            .autoconnect()
-            .sink { [weak self] _ in self?.refresh() }
-            .store(in: &cancellables)
-    }
-
-    func refresh() {
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let report = Self.fetchReport()
-            DispatchQueue.main.async {
-                self?.applyReport(report)
-            }
-        }
-    }
-
-    private func applyReport(_ report: QuotaReport?) {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH:mm:ss"
-        lastUpdated = formatter.string(from: Date())
-
-        guard let report = report else {
-            title = "Q !"
-            statusText = "Failed to run `provenant quota --json`"
-            return
-        }
-
-        if report.enabled == false {
-            title = "Q off"
-            statusText = "Quota fetching disabled"
-            accounts = report.accounts ?? []
-            return
-        }
-
-        let accts = report.accounts ?? []
-        self.accounts = accts
-
-        let allWindows = accts.flatMap { $0.windows ?? [] }
-        let maxUsed = allWindows.compactMap { $0.usedPercent }.max()
-
-        if let maxUsed = maxUsed {
-            title = "Q \(Int(round(maxUsed)))%"
-        } else if accts.isEmpty {
-            title = "Q --%"
-            statusText = "No accounts configured"
-        } else {
-            title = "Q 0%"
-        }
-    }
-
-    /// Shells out to `provenant quota --json`.
-    /// Never touches credential files or tokens directly.
-    private static func fetchReport() -> QuotaReport? {
-        let process = Process()
-        let pipe = Pipe()
-
-        let bin = ProcessInfo.processInfo.environment["PROVENANT_BIN"]
-        if let customBin = bin, FileManager.default.isExecutableFile(atPath: customBin) {
-            process.executableURL = URL(fileURLWithPath: customBin)
-            process.arguments = ["quota", "--json"]
-        } else {
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            process.arguments = ["-lc", "provenant quota --json"]
-        }
-
-        process.standardOutput = pipe
-        process.standardError = FileHandle.nullDevice
-
-        do {
-            try process.run()
-            // Drain before waiting, or output past the pipe buffer deadlocks the child.
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            process.waitUntilExit()
-            guard process.terminationStatus == 0 else { return nil }
-            return try JSONDecoder().decode(QuotaReport.self, from: data)
-        } catch {
-            return nil
-        }
-    }
-}
-
-// MARK: - SwiftUI Menu & App
-
-struct QuotaMenuView: View {
-    @ObservedObject var model: QuotaModel
-
-    var body: some View {
-        if model.accounts.isEmpty {
-            Text(model.statusText)
-        } else {
-            ForEach(model.accounts) { account in
-                let planStr = account.plan.map { " (\($0))" } ?? ""
-                let activeStr = (account.active == true) ? "*" : ""
-                Text("\(account.provider)/\(account.account)\(activeStr)\(planStr)")
-                    .font(.headline)
-                if let windows = account.windows, !windows.isEmpty {
-                    ForEach(windows) { win in
-                        let used = Int(round(win.usedPercent ?? 0))
-                        let reset = formatReset(win.resetAt)
-                        let marker = deficitMarker(state: win.pace?.state ?? account.state)
-                        Text("  \(win.name): \(used)% • resets \(reset)\(marker)")
-                    }
-                } else {
-                    let err = account.error ?? account.status ?? "unavailable"
-                    Text("  status: \(err)")
-                }
-                Divider()
-            }
-        }
-
-        if let updated = model.lastUpdated {
-            Text("Updated: \(updated)")
-            Divider()
-        }
-
-        Button("Refresh") {
-            model.refresh()
-        }
-        .keyboardShortcut("r")
-
-        Divider()
-
-        Button("Quit") {
-            NSApplication.shared.terminate(nil)
-        }
-        .keyboardShortcut("q")
-    }
-}
 
 @main
 struct QuotaMenuBarApp: App {
-    @StateObject private var model = QuotaModel()
-
-    init() {
-        NSApplication.shared.setActivationPolicy(.accessory)
-    }
+    @State private var model = QuotaModel()
+    init() { NSApplication.shared.setActivationPolicy(.accessory) }   // no Dock icon or app menu
 
     var body: some Scene {
-        MenuBarExtra(model.title) {
-            QuotaMenuView(model: model)
-        }
-        .menuBarExtraStyle(.menu)
+        MenuBarExtra { QuotaPanel(model: model) } label: { MenuBarLabel(model: model) }
+            .menuBarExtraStyle(.window)
     }
+}
+
+/// A template gauge symbol chosen by level, plus monospaced digits.
+struct MenuBarLabel: View {
+    let model: QuotaModel
+
+    var body: some View {
+        let report = model.report, used = report?.headline(now: .now)
+        let levels = ["0", "33", "50", "67", "100"], index = [20, 45, 60, 100].firstIndex { (used ?? 0) < Double($0) } ?? 4
+        HStack(spacing: 4) {
+            Image(systemName: model.error != nil ? "exclamationmark.triangle" : "gauge.with.dots.needle.\(levels[index])percent")
+            Text(report.map { $0.enabled ? used.map(Fmt.percent) ?? "–" : "Off" } ?? "–").monospacedDigit()
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(["Provider quota", used.map { "highest use \(Int($0.rounded(.down))) percent" },
+                             report.flatMap { $0.exhausted.isEmpty ? nil : "\($0.exhausted.count) exhausted" },
+                             report.flatMap { $0.unavailable.isEmpty ? nil : "\($0.unavailable.count) unavailable" },
+                             model.error.map { _ in "last refresh failed" }].compactMap { $0 }.joined(separator: ", "))
+    }
+}
+
+struct QuotaPanel: View {
+    let model: QuotaModel
+
+    var body: some View {
+        TimelineView(.everyMinute) { context in   // keeps relative times current while the panel is open
+            VStack(alignment: .leading, spacing: 12) {
+                header(now: context.date)
+                if let error = model.error {
+                    Label(model.report == nil ? error : "\(error) Showing the last report.", systemImage: "exclamationmark.triangle.fill")
+                        .symbolRenderingMode(.multicolor).font(.caption).textSelection(.enabled)
+                        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                }
+                content(now: context.date)
+                Divider()
+                HStack {
+                    Text(model.report?.host ?? "").foregroundStyle(.tertiary)
+                    Spacer()
+                    Button("Quit Quota") { NSApplication.shared.terminate(nil) }.keyboardShortcut("q").buttonStyle(.borderless)
+                }
+                .font(.callout)
+            }
+            .padding(14)
+            .frame(width: 300)
+        }
+        .onAppear { model.refreshIfStale() }
+    }
+
+    private func header(now: Date) -> some View {
+        HStack(alignment: .firstTextBaseline) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text("Provider Quota").font(.headline)
+                Text(model.updatedAt.map { "Updated \(Fmt.ago($0, now: now))" } ?? (model.error == nil ? "Loading…" : "Not updated")).note()
+            }
+            Spacer()
+            Button(action: model.refresh) {
+                if model.isRefreshing { ProgressView().controlSize(.mini) } else { Image(systemName: "arrow.clockwise") }
+            }
+            .buttonStyle(.borderless).keyboardShortcut("r").disabled(model.isRefreshing)
+            .help("Refresh (⌘R)").accessibilityLabel(model.isRefreshing ? "Refreshing" : "Refresh")
+        }
+    }
+
+    @ViewBuilder private func content(now: Date) -> some View {
+        if let report = model.report {
+            if !report.enabled {
+                Text("Quota fetching is turned off in Provenant's quota settings.").note()
+            } else if report.accounts.isEmpty {
+                Text("No quota accounts are configured.").note()
+            }
+            ForEach(report.enabled ? report.byProvider : [], id: \.provider) { group in
+                let single = group.accounts.count == 1
+                // An error every account shares (say, missing credentials) is shown once under the heading.
+                let errors = Set(group.accounts.map { $0.hasReading ? nil : $0.error ?? "Not reported" })
+                let shared = errors.count == 1 && !single ? errors.first! : nil
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(alignment: .firstTextBaseline) {   // one account: its metadata shares the heading line
+                        Text(Fmt.human(group.provider)).font(.headline)
+                        Spacer()
+                        if single { Text(group.accounts[0].meta(named: false, now: now)).note() }
+                    }
+                    if let shared { Label(shared, systemImage: "exclamationmark.circle").note() }
+                    ForEach(group.accounts) { AccountView(account: $0, named: !single, showError: shared == nil, now: now) }
+                }
+            }
+        } else if model.error == nil {
+            ProgressView().controlSize(.small).frame(maxWidth: .infinity)
+        }
+    }
+}
+
+struct AccountView: View {
+    let account: QuotaReport.Account, named: Bool, showError: Bool, now: Date
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            if named { Text(account.meta(named: true, now: now)).note() }
+            if account.status == "stale" { Label("The latest fetch failed; this reading is older.", systemImage: "clock").note() }
+            if !account.hasReading && showError { Label(account.error ?? "Not reported", systemImage: "exclamationmark.circle").note() }
+            ForEach(account.windows) { WindowRow(window: $0, now: now) }
+            if let missing = account.unreported, !missing.isEmpty {
+                Text("\(missing.map(Fmt.human).joined(separator: ", ")) not reported").note()
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("\(Fmt.human(account.provider)) \(account.account)")
+    }
+}
+
+struct WindowRow: View {
+    let window: QuotaReport.Window, now: Date
+
+    var body: some View {
+        let used = window.usedPercent, expired = window.resetAt.map { $0 <= now } ?? false
+        let state = expired ? "unknown" : window.pace.state
+        let runsOut = state == "deficit" ? Fmt.until(window.pace.runsOutAt, now: now) : nil
+        let left = expired ? "Reset passed; awaiting a new reading" : runsOut.map { "Runs out in \($0)" } ?? Fmt.paceLabel(state)
+        let right = expired ? nil : Fmt.until(window.resetAt, now: now).map { "Resets in \($0)" }
+        VStack(alignment: .leading, spacing: 5) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(Fmt.windowTitle(window))
+                Spacer()
+                Text(used.map(Fmt.percent) ?? "–").monospacedDigit().fontWeight(.medium)
+                    .foregroundStyle(["exhausted", "deficit"].contains(state) ? tint(state) : .primary)
+            }
+            Capsule().fill(.quaternary).frame(height: 5).overlay(alignment: .leading) {
+                GeometryReader { Capsule().fill(tint(state)).frame(width: $0.size.width * min(max(used ?? 0, 0), 100) / 100) }
+            }
+            HStack { Text(left); Spacer(); Text(right ?? "").monospacedDigit() }.note()
+        }
+        .help(window.resetAt.map { "Resets \($0.formatted(.dateTime.weekday().day().month().hour().minute()))" } ?? "Reset time not reported")
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Fmt.windowTitle(window))
+        .accessibilityValue([used.map { "\(Int($0.rounded(.down))) percent used" }, left, right].compactMap { $0 }.joined(separator: ", "))
+    }
+
+    /// Colour only where it carries meaning; system colours adapt to light and dark.
+    private func tint(_ state: String) -> Color {
+        switch state {
+        case "exhausted": return .red
+        case "deficit": return .orange
+        case "on_pace", "reserve", "early", "not_started": return .green
+        default: return .secondary
+        }
+    }
+}
+
+extension QuotaReport.Account {
+    /// Account name (when a provider has several), plan, inactivity, and the reading's age once over 30 minutes.
+    func meta(named: Bool, now: Date) -> String {
+        let observed = observedAt.flatMap { now.timeIntervalSince($0) > 1800 ? "Observed \(Fmt.ago($0, now: now))" : nil }
+        return [named ? account : nil, plan.map(Fmt.human), active == false ? "Inactive" : nil, observed]
+            .compactMap { $0 }.joined(separator: " · ")
+    }
+}
+
+extension View {
+    func note() -> some View { font(.caption).foregroundStyle(.secondary) }
 }
