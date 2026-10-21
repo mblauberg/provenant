@@ -8,7 +8,7 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
 ## Quickstart
 
 1. [Native first](references/routing-and-tiers.md#native-first): run your own provider's models as native subagents (Claude Code: Agent tool `opus`/`sonnet`/`haiku`; Codex: its subagents), not Fabric. Use Fabric for other providers (agy's Claude 4.6 included), long or detached runs, and sandboxed worktree writers.
-2. Call `fabric_dispatch` with `prompt` or `prompt_file`, `adapter` or `model`, and optional `effort`. `model` also takes `adapter/id[@effort]`, whereas `route` takes only a pool name (an explicit id there is `route_invalid`); `fabric_adapters` with `models: <adapter>` lists live ids.
+2. Call `fabric_dispatch`; its tool schema documents the arguments. `model` takes `adapter/id[@effort]`; `route` takes only a [pool name](references/routing-and-tiers.md#route-pools), and an explicit id there is `route_invalid`. `fabric_adapters` with `models: <adapter>` lists live ids.
 3. For writers, pass `mode: "worktree_write"` and the registered `worktree`,
    named per `setup-repo`'s branch naming doctrine; the task id defaults to that
    same branch-derived string. Before dispatch, [confirm the connection's
@@ -19,7 +19,7 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
    enforce claims.
 4. After dispatch, keep one `provenant lanes --wait` running in the background. When it exits, read the printed lanes, act, and re-arm it ([chair-loop.md](references/chair-loop.md#waiting) covers `--all`). A dispatching sub-agent blocks in the foreground ([worker-liveness.md](references/worker-liveness.md)).
 5. Use `provenant lanes` as the source of truth after compaction or restart; inspect a terminal row with `fabric_status` and copy its `Route:` provenance line. Use `events --follow` only for foreground streaming.
-6. For a question, call `fabric_dispatch` with `resume: id` and the answer in `prompt`. To continue one provider conversation across turns or agents, pass the same `session` name each time; `fabric_session` inspects, lists or forgets it.
+6. For a question, call `fabric_dispatch` with `resume: id` and the answer in `prompt`; pass one `session` name to continue a provider conversation across turns or agents.
 7. Use `fabric_cancel` with `id` to stop; use `fabric_output` with `id` and `part` for a bounded tail.
 
 ## Rules
@@ -36,8 +36,12 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
   - Give a native Claude subagent its [tier pool's Claude member](references/routing-and-tiers.md#native-tiers): `haiku` junior, `sonnet` senior, `opus` only for principal work.
   - Brief native subagents with paths, not pasted content. End one once its deliverable lands; continue it only for follow-up on that deliverable.
   - Brief in five fields: goal, scope/paths, constraints, output shape and length, verification.
-  - Keep tool output bounded: redirect large output to a file and read slices. Avoid unbounded `gh ... --limit 1000` and `rg --files` over run directories.
+  - Keep tool output bounded: output over a bound goes to a file, and the command returns a pointer and a short tail. Avoid unbounded `gh ... --limit 1000` and `rg --files` over run directories. A polling loop prints one line.
   - Wait once: run one `provenant lanes --wait` in the background, or one status wait. Never sleep or poll loops.
+  - No subagent or lane blocks in a foreground wait longer than about four minutes. Long waits run in the background (the harness notifies on completion) or belong to the chair. A gap over five minutes turns the next call into a full cache rewrite.
+  - Shape briefs for the cache: stable shared preamble and context pack first, task-specific content last. Resume the lane's session for follow-ups rather than dispatching fresh, and let sibling lanes share one context pack. Cached reads cost roughly 5 to 50 times less than fresh input, depending on provider.
+  - Size lanes by context, not minutes: one logical unit and one commit per lane. The lane keeps a short progress notes file; near its context budget it stops, and the chair restarts it fresh from the brief, contract and notes rather than letting it work from a rotted context.
+  - Research: when a decision rests on external facts (docs, papers, prices, prior art), dispatch research lanes with network access proactively, fanned out across juniors with a senior synthesis.
 - A dispatched lane has no inbox. Peers message sessions, not lanes; a lane gets new instructions only through `resume` or a new dispatch.
 - Prefer per-dispatch flags. Editing global provider configuration requires explicit authority.
 - A chair running lanes across many wakes follows [chair-loop.md](references/chair-loop.md), including its reviewer git-verb denylist and decision council.
