@@ -12,6 +12,7 @@ let stateRoot = env["AGENT_FABRIC_STATE_ROOT"] ?? NSHomeDirectory() + "/.local/s
 let outDir = stateRoot + "/otel"
 let maxBody = Int(env["PROVENANT_OTEL_MAX_BODY_BYTES"] ?? "") ?? 4 << 20
 let retentionDays = Int(env["PROVENANT_OTEL_RETENTION_DAYS"] ?? "") ?? 30
+let requestSeconds = min(30, max(0.01, Double(env["PROVENANT_OTEL_REQUEST_SECONDS"] ?? "") ?? 30))
 let signals: Set<String> = ["logs", "metrics", "traces"]
 let lock = NSLock()
 nonisolated(unsafe) var active = 0
@@ -28,14 +29,22 @@ func stamp(_ date: Date, _ fmt: String) -> String {
     return String(cString: buf)
 }
 
-func prune(day: String) {
+func prune(day: String, dir: Int32) {
     guard day != prunedDay else { return }
+    let scan = dup(dir)
+    guard scan >= 0 else { return }
+    guard let stream = fdopendir(scan) else { close(scan); return }
+    defer { closedir(stream) }
     prunedDay = day
-    let cutoff = Date().addingTimeInterval(-Double(retentionDays) * 86400)
-    for name in (try? FileManager.default.contentsOfDirectory(atPath: outDir)) ?? [] where name.hasSuffix(".ndjson") {
-        let path = outDir + "/" + name
-        if let m = (try? FileManager.default.attributesOfItem(atPath: path))?[.modificationDate] as? Date, m < cutoff {
-            try? FileManager.default.removeItem(atPath: path)
+    let cutoff = Date().timeIntervalSince1970 - Double(retentionDays) * 86400
+    while let entry = readdir(stream) {
+        let name = withUnsafePointer(to: &entry.pointee.d_name) {
+            $0.withMemoryRebound(to: CChar.self, capacity: Int(entry.pointee.d_namlen) + 1) { String(cString: $0) }
+        }
+        var info = stat()
+        if name.hasSuffix(".ndjson"), fstatat(dir, name, &info, AT_SYMLINK_NOFOLLOW) == 0,
+           info.st_mode & S_IFMT == S_IFREG, Double(info.st_mtimespec.tv_sec) < cutoff {
+            _ = unlinkat(dir, name, 0)
         }
     }
 }
@@ -49,18 +58,34 @@ func store(signal: String, body: Data) -> Bool {
     line.append(contentsOf: Array("}\n".utf8))
     lock.lock(); defer { lock.unlock() }
     try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-    prune(day: day)
-    let fd = open("\(outDir)/\(signal)-\(day).ndjson", O_WRONLY | O_APPEND | O_CREAT, 0o600)
+    let dir = open(outDir, O_RDONLY | O_DIRECTORY | O_NOFOLLOW)
+    guard dir >= 0 else { return false }
+    defer { close(dir) }
+    var info = stat()
+    guard fstat(dir, &info) == 0, info.st_uid == getuid(), fchmod(dir, 0o700) == 0 else { return false }
+    prune(day: day, dir: dir)
+    let fd = openat(dir, "\(signal)-\(day).ndjson", O_WRONLY | O_APPEND | O_CREAT | O_NOFOLLOW | O_NONBLOCK, 0o600)
     guard fd >= 0 else { return false }
     defer { close(fd) }
-    return line.withUnsafeBytes { write(fd, $0.baseAddress, line.count) } == line.count
+    guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_uid == getuid(), fchmod(fd, 0o600) == 0 else { return false }
+    if line.withUnsafeBytes({ write(fd, $0.baseAddress, line.count) }) == line.count { return true }
+    _ = ftruncate(fd, info.st_size)
+    return false
 }
 
-func reply(_ fd: Int32, _ code: Int, _ text: String, _ body: String, close: Bool) {
+func timeout(_ fd: Int32, _ option: Int32, _ deadline: TimeInterval?) -> Bool {
+    let seconds = min(10, (deadline ?? (ProcessInfo.processInfo.systemUptime + 10)) - ProcessInfo.processInfo.systemUptime)
+    guard seconds > 0 else { return false }
+    var tv = timeval(tv_sec: Int(seconds), tv_usec: Int32(max(1, (seconds - floor(seconds)) * 1_000_000)))
+    return setsockopt(fd, SOL_SOCKET, option, &tv, socklen_t(MemoryLayout<timeval>.size)) == 0
+}
+
+func reply(_ fd: Int32, _ code: Int, _ text: String, _ body: String, close: Bool, deadline: TimeInterval? = nil) {
     let head = "HTTP/1.1 \(code) \(text)\r\nContent-Type: application/json\r\nContent-Length: \(body.utf8.count)\r\n" + (close ? "Connection: close\r\n" : "") + "\r\n"
     let out = Array((head + body).utf8)
     var sent = 0
     while sent < out.count {
+        guard timeout(fd, SO_SNDTIMEO, deadline) else { return }
         let n = out[sent...].withUnsafeBytes { send(fd, $0.baseAddress, $0.count, 0) }
         if n <= 0 { return }
         sent += n
@@ -71,20 +96,25 @@ func errBody(_ m: String) -> String { "{\"error\":\"\(m)\"}" }
 
 func serve(_ fd: Int32) {
     defer { close(fd); lock.lock(); active -= 1; lastActivity = Date(); lock.unlock() }
-    var tv = timeval(tv_sec: 10, tv_usec: 0)
-    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
+    var deadline: TimeInterval?
+    func respond(_ code: Int, _ text: String, _ body: String, close: Bool) {
+        reply(fd, code, text, body, close: close, deadline: deadline)
+    }
     var buf = Data()
     var chunk = [UInt8](repeating: 0, count: 65536)
     func fill() -> Bool {
+        guard timeout(fd, SO_RCVTIMEO, deadline) else { return false }
         let n = recv(fd, &chunk, chunk.count, 0)
         if n <= 0 { return false }
+        if deadline == nil { deadline = ProcessInfo.processInfo.systemUptime + requestSeconds }
+        guard ProcessInfo.processInfo.systemUptime < deadline! else { return false }
         buf.append(contentsOf: chunk[0..<n]); return true
     }
     while true {
         let sep = Data("\r\n\r\n".utf8)
         var range = buf.range(of: sep)
         while range == nil {
-            if buf.count > 16384 || !fill() { if buf.count > 16384 { reply(fd, 431, "Header Too Large", errBody("headers too large"), close: true) }; return }
+            if buf.count > 16384 || !fill() { if buf.count > 16384 { respond(431, "Header Too Large", errBody("headers too large"), close: true) }; return }
             range = buf.range(of: sep)
         }
         let lines = (String(decoding: buf[..<range!.lowerBound], as: UTF8.self)).components(separatedBy: "\r\n")
@@ -92,12 +122,15 @@ func serve(_ fd: Int32) {
         let parts = lines[0].split(separator: " ")
         var headers: [String: String] = [:]
         for l in lines.dropFirst() { if let i = l.firstIndex(of: ":") { headers[l[..<i].lowercased()] = l[l.index(after: i)...].trimmingCharacters(in: .whitespaces) } }
-        guard parts.count == 3 else { reply(fd, 400, "Bad Request", errBody("bad request line"), close: true); return }
+        guard parts.count == 3 else { respond(400, "Bad Request", errBody("bad request line"), close: true); return }
         let keep = headers["connection"]?.lowercased() != "close"
         let length = Int(headers["content-length"] ?? "0") ?? -1
-        if headers["transfer-encoding"] != nil { reply(fd, 411, "Length Required", errBody("chunked bodies are not supported; send Content-Length"), close: true); return }
-        if length < 0 || length > maxBody { reply(fd, 413, "Payload Too Large", errBody("body exceeds \(maxBody) bytes"), close: true); return }
-        if headers["expect"]?.lowercased() == "100-continue" { _ = send(fd, "HTTP/1.1 100 Continue\r\n\r\n", 25, 0) }
+        if headers["transfer-encoding"] != nil { respond(411, "Length Required", errBody("chunked bodies are not supported; send Content-Length"), close: true); return }
+        if length < 0 || length > maxBody { respond(413, "Payload Too Large", errBody("body exceeds \(maxBody) bytes"), close: true); return }
+        if headers["expect"]?.lowercased() == "100-continue" {
+            guard timeout(fd, SO_SNDTIMEO, deadline) else { return }
+            if send(fd, "HTTP/1.1 100 Continue\r\n\r\n", 25, 0) != 25 { return }
+        }
         while buf.count < length { if !fill() { return } }
         let body = Data(buf.prefix(length)); buf.removeFirst(length)
         lock.lock(); lastActivity = Date(); lock.unlock()
@@ -106,17 +139,18 @@ func serve(_ fd: Int32) {
         let signal = path.hasPrefix("/v1/") ? String(path.dropFirst(4)) : ""
         let type = (headers["content-type"] ?? "").lowercased()
         if parts[0] != "POST" || !signals.contains(signal) {
-            reply(fd, parts[0] == "POST" ? 404 : 405, parts[0] == "POST" ? "Not Found" : "Method Not Allowed", errBody("POST /v1/logs, /v1/metrics or /v1/traces only"), close: !keep)
+            respond(parts[0] == "POST" ? 404 : 405, parts[0] == "POST" ? "Not Found" : "Method Not Allowed", errBody("POST /v1/logs, /v1/metrics or /v1/traces only"), close: !keep)
         } else if !type.hasPrefix("application/json") || headers["content-encoding"] != nil {
-            reply(fd, 415, "Unsupported Media Type", errBody("JSON only: set OTEL_EXPORTER_OTLP_PROTOCOL=http/json (protobuf and compressed bodies are not accepted)"), close: !keep)
+            respond(415, "Unsupported Media Type", errBody("JSON only: set OTEL_EXPORTER_OTLP_PROTOCOL=http/json (protobuf and compressed bodies are not accepted)"), close: !keep)
         } else if (try? JSONSerialization.jsonObject(with: body, options: [.fragmentsAllowed])) == nil {
-            reply(fd, 400, "Bad Request", errBody("body is not valid JSON"), close: !keep)
+            respond(400, "Bad Request", errBody("body is not valid JSON"), close: !keep)
         } else if !store(signal: signal, body: body) {
-            reply(fd, 500, "Internal Server Error", errBody("storage write failed"), close: true); return
+            respond(500, "Internal Server Error", errBody("storage write failed"), close: true); return
         } else {
-            reply(fd, 200, "OK", "{}", close: !keep)
+            respond(200, "OK", "{}", close: !keep)
         }
         if !keep { return }
+        if buf.isEmpty { deadline = nil }
     }
 }
 
@@ -150,7 +184,13 @@ while true {
     if poll(&p, 1, 500) > 0 {
         let c = accept(listener, nil, nil)
         if c >= 0 {
-            lock.lock(); active += 1; lastActivity = Date(); lock.unlock()
+            lock.lock()
+            if active >= 32 {
+                lock.unlock()
+                reply(c, 503, "Service Unavailable", errBody("connection limit reached"), close: true)
+                close(c); continue
+            }
+            active += 1; lastActivity = Date(); lock.unlock()
             Thread.detachNewThread { serve(c) }
         }
     }

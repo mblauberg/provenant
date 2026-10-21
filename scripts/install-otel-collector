@@ -15,7 +15,10 @@ use_launchctl() { [[ "${PROVENANT_OTEL_NO_LAUNCHCTL:-}" != 1 ]] && command -v la
 case "${1:-install}" in
   install)
     command -v swiftc >/dev/null 2>&1 || { echo "otel collector skipped: swiftc not found" >&2; exit 0; }
-    mkdir -p "$bin_dir" "$agents" "$state/otel"
+    [[ ! -L "$state/otel" ]] || { echo "otel collector refused: $state/otel is a symlink" >&2; exit 1; }
+    mkdir -p "$bin_dir" "$agents"
+    mkdir -p -m 0700 "$state/otel"
+    chmod 0700 "$state/otel"
     swiftc -O -swift-version 5 "$ROOT/tools/otlp-collector/otlp-collector.swift" -o "$binary.tmp"
     mv "$binary.tmp" "$binary"
     sed -e "s|@BINARY@|$binary|g" -e "s|@STATE_ROOT@|$state|g" \

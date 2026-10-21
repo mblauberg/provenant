@@ -1,11 +1,15 @@
 import http.client
 import json
 import os
+import resource
 import shutil
+import signal
 import socket
 import stat
 import subprocess
 import time
+from contextlib import ExitStack
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -32,9 +36,138 @@ def free_port():
 
 def post(port, path, body, content_type):
     conn = http.client.HTTPConnection('127.0.0.1', port, timeout=5)
-    conn.request('POST', path, body=body, headers={'Content-Type': content_type})
-    response = conn.getresponse()
-    return response.status, response.read()
+    try:
+        conn.request('POST', path, body=body, headers={'Content-Type': content_type})
+        response = conn.getresponse()
+        return response.status, response.read()
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def collector(binary, tmp_path, request):
+    port = free_port()
+    options = getattr(request, 'param', {}).copy()
+    preexec = options.pop('preexec_fn', None)
+    proc = subprocess.Popen([str(binary), '--listen', f'127.0.0.1:{port}'],
+                            env={**os.environ, 'AGENT_FABRIC_STATE_ROOT': str(tmp_path),
+                                 **options},
+                            stdout=subprocess.PIPE, text=True, preexec_fn=preexec)
+    try:
+        assert proc.stdout.readline().startswith('listening')
+        yield port
+    finally:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+@pytest.mark.parametrize('target', ['file', 'directory'])
+def test_collector_refuses_storage_symlinks(collector, tmp_path, target):
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    original = outside / 'record'
+    original.write_text('preserved\n')
+    directory = tmp_path / 'otel'
+    if target == 'directory':
+        directory.symlink_to(outside, target_is_directory=True)
+    else:
+        directory.mkdir()
+        day = datetime.now(timezone.utc).strftime('%Y%m%d')
+        (directory / f'logs-{day}.ndjson').symlink_to(original)
+
+    assert post(collector, '/v1/logs', '{}', 'application/json')[0] == 500
+    assert original.read_text() == 'preserved\n'
+    assert list(outside.iterdir()) == [original]
+
+
+def test_collector_tightens_existing_storage_permissions(collector, tmp_path):
+    directory = tmp_path / 'otel'
+    directory.mkdir(mode=0o755)
+    day = datetime.now(timezone.utc).strftime('%Y%m%d')
+    daily = directory / f'logs-{day}.ndjson'
+    daily.write_text('')
+    daily.chmod(0o644)
+
+    assert post(collector, '/v1/logs', '{}', 'application/json')[0] == 200
+    assert stat.S_IMODE(daily.stat().st_mode) == 0o600
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
+
+
+def test_collector_prunes_only_expired_regular_files(collector, tmp_path):
+    directory = tmp_path / 'otel'
+    directory.mkdir()
+    old = directory / 'logs-20000101.ndjson'
+    recent = directory / 'logs-20000102.ndjson'
+    outside = tmp_path / 'outside.ndjson'
+    for path in (old, recent, outside):
+        path.write_text('{}\n')
+    link = directory / 'traces-20000101.ndjson'
+    link.symlink_to(outside)
+    expired = time.time() - 31 * 86400
+    os.utime(old, (expired, expired))
+    os.utime(link, (expired, expired), follow_symlinks=False)
+
+    assert post(collector, '/v1/logs', '{}', 'application/json')[0] == 200
+    assert not old.exists()
+    assert recent.read_text() == '{}\n'
+    assert link.is_symlink()
+    assert outside.read_text() == '{}\n'
+
+
+def test_collector_caps_concurrent_connections(collector):
+    with ExitStack() as stack:
+        for _ in range(32):
+            conn = http.client.HTTPConnection('127.0.0.1', collector, timeout=2)
+            stack.callback(conn.close)
+            conn.request('POST', '/v1/logs', '{}', {'Content-Type': 'application/json'})
+            response = conn.getresponse()
+            assert response.status == 200
+            response.read()
+        with socket.create_connection(('127.0.0.1', collector), timeout=1) as extra:
+            response = http.client.HTTPResponse(extra)
+            response.begin()
+            assert response.status == 503
+            assert response.getheader('Connection') == 'close'
+            response.read()
+            assert extra.recv(4096) == b''
+
+
+@pytest.mark.parametrize('collector', [{'PROVENANT_OTEL_REQUEST_SECONDS': '0.25'}], indirect=True)
+@pytest.mark.parametrize('phase', ['headers', 'body'])
+def test_collector_deadline_expires_despite_continued_reads(collector, phase):
+    with socket.create_connection(('127.0.0.1', collector), timeout=0.05) as conn:
+        conn.sendall(b'POST /v1/logs HTTP/1.1\r\n')
+        if phase == 'body':
+            conn.sendall(b'Content-Length: 1000\r\n\r\n')
+        end = time.monotonic() + 0.8
+        closed = False
+        while time.monotonic() < end:
+            conn.sendall(b' ')
+            try:
+                if conn.recv(4096) == b'':
+                    closed = True
+                    break
+            except socket.timeout:
+                pass
+        assert closed, 'request deadline was extended by incoming bytes'
+
+
+def limit_file_size():
+    signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+    resource.setrlimit(resource.RLIMIT_FSIZE, (40, 40))
+
+
+@pytest.mark.parametrize('collector', [{'preexec_fn': limit_file_size}], indirect=True)
+def test_collector_rolls_back_short_write(collector, tmp_path):
+    directory = tmp_path / 'otel'
+    directory.mkdir()
+    day = datetime.now(timezone.utc).strftime('%Y%m%d')
+    daily = directory / f'logs-{day}.ndjson'
+    original = '{"preserved":true}\n'
+    daily.write_text(original)
+
+    assert post(collector, '/v1/logs', '{}', 'application/json')[0] == 500
+    assert daily.read_text() == original
 
 
 def test_collector_stores_json_rejects_protobuf_and_exits_idle(binary, tmp_path):
@@ -65,6 +198,7 @@ def test_collector_stores_json_rejects_protobuf_and_exits_idle(binary, tmp_path)
     finally:
         if proc.poll() is None:
             proc.kill()
+        proc.wait(timeout=5)
 
 
 def test_collector_refuses_non_loopback(binary, tmp_path):
