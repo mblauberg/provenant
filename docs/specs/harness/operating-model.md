@@ -56,7 +56,7 @@ User decisions, 2026-10-21:
 | D3 | Routing is enforced by injection plus a soft gate, with role-typed agents as the easy path. |
 | D4 | Large work decomposes down contract-driven trees with review on the way up, and decomposition can adapt mid-run. |
 | D5 | Claude nodes are hybrid: native when the user wants to watch or the node is short; headless through Fabric when it is long or waiting. |
-| D6 | Chair account switching is automatic, subject to R3's eligibility rules. |
+| D6 | Account switching is automatic for the user's own paid Claude accounts, within R3.7's terms boundary. |
 | D7 | Telemetry is local-first: record everything now, optimise later. |
 | D8 | Jev (TypeSafe AI) is not adopted now; revisit as a shadow classifier once telemetry yields labelled routing decisions. |
 | D9 | Monthly-reset pools are paced, not retired: Cursor Grok is used sparingly; OpenCode free models go first and OpenCode Go paid is conserved. |
@@ -188,13 +188,23 @@ escalates; a cancelled writer exits before its replacement starts.
    checkpoints, takes a single-writer lock on its session, exits, and a
    wrapper relaunches it on the other account, then reports in one line.
    The old process must have exited before the new one starts.
-7. **Policy check before enabling R3.6.** Provider terms read on 2026-10-21
-   (r2 study) prohibit circumventing rate limits (OpenAI, Cursor), multiple
-   accounts used to circumvent limits (OpenCode), and bypassing protective
-   systems (Anthropic), while Claude Code documents multi-account login. The
-   user decides whether automatic switching between their own paid accounts
-   is acceptable; the feature ships behind a configuration flag that is off
-   until they do. Pacing (R3.3) needs no such decision.
+7. **Terms boundary for R3.6** (terms re-read 2026-10-21). Switching is
+   enabled for the user's own paid Claude accounts (user decision,
+   2026-10-21): Anthropic's consumer terms have no clause on holding several
+   accounts, each account's own limit is always respected, and Claude Code is
+   run unmodified with each account's own login. The design stays inside
+   that reading:
+   - each account is signed in by the user through Anthropic's own flow;
+     credentials are never copied between config directories or handed to
+     another tool;
+   - a switch moves work to an account with its own headroom; no account is
+     pushed past its limit and no limit signal is suppressed;
+   - accounts are the user's own and used only by the user's agents.
+
+   OpenCode's terms name "multiple accounts to circumvent usage limits"
+   explicitly, so a second OpenCode account is never a switch target.
+   Rotating between agy accounts stays off until the user confirms it.
+   Switching ships behind a per-provider configuration flag.
 8. Accounts are added or retired by configuration only.
 
 Acceptance: `provenant routes` shows availability per account; with one
@@ -335,7 +345,7 @@ probe suite runs in CI against each adapter's argv.
 3. **Routing:** R1 and role agents; R4.4 reports turn on, and R5's
    acceptance is measured.
 4. **Freedom:** R9 probes, then boxes per adapter.
-5. **Accounts:** R3.4-R3.6, behind the R3.7 flag.
+5. **Accounts:** R3.4-R3.6, behind R3.7's per-provider flags.
 6. **Continuity:** R6.
 7. **Graphs:** R2, then the R4.5 controlled native-versus-headless
    comparison.
@@ -350,7 +360,7 @@ probe suite runs in CI against each adapter's argv.
 
 ## Non-goals
 
-- Disguising traffic, sharing accounts, or any switching the user has not
-  enabled under R3.7.
+- Disguising traffic, sharing or copying credentials, or switching outside
+  R3.7's boundary.
 - Replacing native subagents for interactive work.
 - Sending Sealle content to a third-party classifier or trace service.
