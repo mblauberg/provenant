@@ -158,12 +158,47 @@ quarantine, with `fix: instruction edits remain on the lane branch; restore
 retained and listed. A `quarantined` lane retains the result, sets
 `landable: false` and `retryable: false`, and records `quarantine` with the
 reason, patch paths, whether restoration succeeded and any patch capture error.
-`landable: false` is an advisory marker for the chair, not enforced landing. It
-is never `ok` for landing, certification or session success. Digests, status and
+`landable: false` is never `ok` for landing, certification or session success.
+The retained instruction-check record enforces that hold at reuse, claim
+verification and Fabric landing. Digests, status and
 lanes show the result and a review action; chairs review the quarantine and
 verify the branch diff before landing any application work. Proposed instruction
 edits belong outside `.agents/` for separate chair review, as the default writer
 brief states (omitted when the policy is `allow`).
+
+Writer attempts record `instruction_protection` in the adapter receipt and
+dispatch attempt evidence. Its `verified_tip` is the exact commit examined by
+the final protected-path comparison, repeated after process-group cleanup and
+output publication. That comparison pins the commit object and requires the
+lane ref to still identify it before publishing the check. An owner-written
+record under the common Git directory's `provenant-instruction-checks/` binds
+the lane ref (or detached worktree), attempt directory and checked commit. This
+directory is outside provider Git write grants and persists independently of
+attempt-output retention. A started attempt has no verified tip until it
+finishes checking, so an incomplete check cannot become a trusted base.
+
+Before the next attempt (including resume), before `worktree verify-claim`
+accepts a local or exported remote writer, and before `fabric landing-push`
+pushes a pinned head, the owner checks the retained binding. The invariant is:
+the consumed lane tip equals `verified_tip`, or it descends from that commit
+and **every intervening commit touches no protected `.agents/` path**. The
+history check includes merge parents, case variants and edits later reverted;
+it ignores replace refs. Benign late commits outside `.agents/` are permitted.
+A rewritten history, missing completed check, protected late commit or
+unverifiable check refuses with `protected_instructions_changed` or
+`protected_instructions_unverifiable`. The record stays quarantined and the
+branch, commits and worktree remain intact for chair review, even if someone
+subsequently resets the branch. No new attempt silently adopts that state.
+Branches never dispatched under this mechanism retain the existing chair
+verification workflow. Ordinary merged/pruned refs no longer supply a lane to
+consume. Sibling lanes sharing only a starting commit do not block a landing.
+
+The threat is a surviving provider child, including one detached into a new
+session with its environment scrubbed, committing after finalisation. Cleanup
+is not the safety proof. Manual chair integration must run the orchestration
+protection gate and merge/cherry-pick its emitted immutable SHA. The existing
+trust in integration refs still applies; this does not certify arbitrary Git
+commands that bypass the governed integration workflow.
 
 `protected.patch` is retained even for an index-only change (empty disk patch)
 or an unverifiable check (a comment explaining that the diff is unavailable).

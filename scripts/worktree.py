@@ -20,6 +20,9 @@ import subprocess
 import sys
 from typing import Sequence
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills/orchestrate/scripts"))
+import lane_protection
+
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
@@ -631,6 +634,12 @@ def verify_claim(
         return {"status": "rejected", "reason": "claimed commit SHA is not an exact object ID"}
     if str(expected_record.get("HEAD", "")).lower() != resolved_commit.lower():
         return {"status": "rejected", "reason": "claimed commit does not match claimed worktree context"}
+
+    try:
+        lane_protection.verify(expected_path, tip=resolved_commit)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return {"status": "rejected", "error": getattr(exc, "code", "protected_instructions_unverifiable"),
+                "reason": str(exc)}
 
     return {
         "status": "accepted",

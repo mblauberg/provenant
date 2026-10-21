@@ -2707,7 +2707,8 @@ def _git_output(cwd, *args):
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     result = subprocess.run(
         ["git", "-C", str(cwd), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", *args],
-        capture_output=True, text=True, timeout=30, env={**environment, "GIT_NO_LAZY_FETCH": "1"},
+        capture_output=True, text=True, timeout=30,
+        env={**environment, "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"},
     )
     if result.returncode != 0:
         raise ValueError(result.stderr.strip() or f"git {args[0]} failed")
@@ -2823,7 +2824,7 @@ def _integration_refs(cwd):
     return [ref for ref in (branch, upstream) if ref]
 
 
-def authored_instruction_changes(cwd, start):
+def authored_instruction_changes(cwd, start, *, head="HEAD"):
     """.agents paths the lane changed to content from neither its start nor the integration branch.
 
     HEAD, the index and the files on disk must each match, path by path, the attempt's starting
@@ -2839,7 +2840,7 @@ def authored_instruction_changes(cwd, start):
             pass  # An unset or unfetched ref cannot vouch for anything.
     baselines = [start["disk"], start["index"], *trees]
     index, conflicts = _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)
-    views = [_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", "HEAD"))[0], index,
+    views = [_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", head))[0], index,
              instruction_disk_state(cwd, start["object_format"])]
     changed = set()
     for view in views:
@@ -2851,7 +2852,7 @@ def authored_instruction_changes(cwd, start):
                    if key not in views[2])
     # A path the lane took in from an integration branch must keep that branch's version, so a
     # merge that discards it (git merge -s ours) is caught too.
-    restore = _restore_views(cwd, start)
+    restore = _restore_views(cwd, start, head=head)
     for name, view in zip(("head", "index", "disk"), views):
         changed.update(key for key in restore["integrated"] if view.get(key) != restore[name].get(key))
     return sorted(key + (" (unresolved conflict)" if key in conflicts else "") for key in changed | conflicts)
@@ -2868,7 +2869,7 @@ def _git_bytes(cwd, *args, input=None, env=None):
         ["git", "-C", str(cwd), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
          "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", *args],
         input=input, capture_output=True, timeout=30,
-        env={**environment, "GIT_NO_LAZY_FETCH": "1", **(env or {})},
+        env={**environment, "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1", **(env or {})},
     )
     if result.returncode != 0:
         raise ValueError(os.fsdecode(result.stderr).strip() or f"git {args[0]} failed")
@@ -2889,7 +2890,7 @@ def _is_ancestor(cwd, ancestor, descendant):
     return True
 
 
-def _quarantine_target(cwd, start_head):
+def _quarantine_target(cwd, start_head, *, head="HEAD"):
     """The .agents entries a quarantined path returns to.
 
     That is the start commit's, or an integration ref's the lane has since merged or rebased onto,
@@ -2900,7 +2901,7 @@ def _quarantine_target(cwd, start_head):
 
     target = tree(start_head)
     for ref in _integration_refs(cwd):
-        if not _is_ancestor(cwd, ref, "HEAD") or _is_ancestor(cwd, ref, start_head):
+        if not _is_ancestor(cwd, ref, head) or _is_ancestor(cwd, ref, start_head):
             continue
         incoming = tree(ref)
         if _is_ancestor(cwd, start_head, ref):
@@ -2912,13 +2913,13 @@ def _quarantine_target(cwd, start_head):
     return target
 
 
-def _restore_views(cwd, start):
+def _restore_views(cwd, start, *, head="HEAD"):
     """What each view of a quarantined .agents path returns to.
 
     HEAD returns to the quarantine target. The index and files return to their starting content,
     except a path an integration branch the lane took in changed, which takes that branch's version.
     """
-    target = _quarantine_target(cwd, start["head"])
+    target = _quarantine_target(cwd, start["head"], head=head)
     integrated = {path for path in set(target) | set(start["tree"]) if target.get(path) != start["tree"].get(path)}
 
     def view(entries):
@@ -3125,6 +3126,8 @@ def execute(
     attempt_marker = uuid.uuid4().hex
     environment["PROVENANT_ATTEMPT_MARKER"] = attempt_marker
     instruction_start = None
+    instruction_protection = None
+    protection_error = None
     created_instructions = None
     if instructions_writable(plan):
         try:
@@ -3133,10 +3136,15 @@ def execute(
         except OSError:
             pass  # Present already; the snapshot fails anything but a real directory.
     if plan.get("instruction_policy"):
+        import lane_protection
         try:
+            instruction_protection = lane_protection.begin(plan["cwd"], plan["run_dir"])
             instruction_start = instruction_snapshot(plan["cwd"])
+            if instruction_start["head"] != instruction_protection["start_tip"]:
+                raise lane_protection.ProtectionError("lane moved before the starting instruction snapshot")
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             instruction_start = exc
+            protection_error = exc
         # Running a skill's script must not leave bytecode behind for the check to report.
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
@@ -3347,7 +3355,10 @@ def execute(
                 if plan["stdin_policy"] == "pipe"
                 else subprocess.DEVNULL
             )
-        if plan.get("cooldown_blocked"):
+        if protection_error is not None:
+            forced = "failed"
+            diagnostics.write(str(protection_error).encode())
+        elif plan.get("cooldown_blocked"):
             forced = "usage_limited"
             diagnostics.write(b"all alias candidates cooling\n")
         elif cancelled and cancelled():
@@ -3716,7 +3727,8 @@ def execute(
         instruction_changes = []
     if instruction_changes:
         unverifiable = any("(unverifiable:" in change for change in instruction_changes)
-        signature = "protected_instructions_unverifiable" if unverifiable else "protected_instructions_changed"
+        signature = (getattr(protection_error, "code", None) or
+                     ("protected_instructions_unverifiable" if unverifiable else "protected_instructions_changed"))
         quarantine = {"reason": signature + ": " + ", ".join(instruction_changes),
                       "patches": [], "restored": False, "patch_error": None}
         patch = Path(plan["run_dir"], "protected.patch")
@@ -3789,6 +3801,23 @@ def execute(
     except (OSError, CustodyError):
         status = "output_identity_invalid" if digest_value else "output_write_error"
         digest_value = ""
+    if instruction_protection is not None and not instruction_changes:
+        try:
+            # The earlier check may have restored a quarantine. Recheck after cleanup and
+            # output publication, pinning the exact commit this final comparison examined.
+            verified_tip = _git_output(plan["cwd"], "rev-parse", "--verify", "HEAD^{commit}").strip()
+            remaining = authored_instruction_changes(plan["cwd"], instruction_start, head=verified_tip)
+            if remaining and (plan.get("instruction_policy") != "allow" or not quarantinable(remaining)):
+                raise lane_protection.ProtectionError("late instruction changes: " + ", ".join(remaining),
+                                                      "protected_instructions_changed")
+            instruction_protection = lane_protection.finish(
+                plan["cwd"], instruction_protection, verified_tip, quarantined=quarantine is not None)
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            status = "failed"
+            parsed["signature"] = getattr(exc, "code", "protected_instructions_unverifiable")
+            instruction_changes = [str(exc)]
+            quarantine = {"reason": str(exc), "patches": [], "restored": False, "patch_error": None}
+            protection_error = exc if isinstance(exc, lane_protection.ProtectionError) else lane_protection.ProtectionError(str(exc))
     cross = bool(
         not substituted
         and plan.get("orchestrator_family")
@@ -3823,7 +3852,10 @@ def execute(
             "rate_limited": "retry after the recorded cooldown",
         }.get(status)
     )
-    if quarantine and status == "failed" and instruction_changes:
+    if protection_error is not None and isinstance(protection_error, lane_protection.ProtectionError):
+        fix = (str(protection_error) + "; inspect the retained lane and instruction-check record "
+               "before reuse or landing")
+    elif quarantine and status == "failed" and instruction_changes:
         fix = ("instruction edits remain on the lane branch; restore " + INSTRUCTION_DIR
                + "/ to the start commit before landing; patches: "
                + (", ".join(quarantine["patches"]) or "unavailable")
@@ -3860,6 +3892,7 @@ def execute(
         **({"error": "invalid_input"} if status == "rejected" and parsed["signature"] == "invalid_input" else {}),
         **({"error": parsed["signature"]} if instruction_changes else {}),
         **({"landable": False, "quarantine": quarantine} if quarantine else {}),
+        **({"instruction_protection": instruction_protection} if instruction_protection is not None else {}),
         "reason": parsed["excerpt"],
         "exit": 0
         if status in {"ok", "input_required", "quarantined"}

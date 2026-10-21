@@ -686,6 +686,27 @@ def test_verify_claim_accepts_new_descended_clean_head_with_receipt_evidence(tmp
     assert receipt["claimed_commit"] == claimed
 
 
+@pytest.mark.parametrize("late_path", ["tracked.txt", ".agents/late.md"])
+def test_verify_claim_checks_the_instruction_verified_tip(tmp_path, capsys, late_path):
+    _repo, base, worktree = _implementation_worktree(tmp_path, capsys)
+    state = worktree_policy.lane_protection.begin(worktree, tmp_path / "attempt")
+    worktree_policy.lane_protection.finish(worktree, state, base, quarantined=False)
+    target = worktree / late_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("late commit\n")
+    subprocess.run(["git", "-C", str(worktree), "add", late_path], check=True)
+    subprocess.run(["git", "-C", str(worktree), "commit", "-qm", "late commit"], check=True)
+    claimed = subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
+    result = worktree_policy.verify_claim(worktree, worktree, claimed, base_revision=base)
+    if late_path.startswith(".agents/"):
+        assert result["status"] == "rejected", result
+        assert result["error"] == "protected_instructions_changed"
+        assert "quarantine" in result["reason"]
+        assert target.read_text() == "late commit\n"
+    else:
+        assert result["status"] == "accepted", result
+
+
 def test_verify_claim_allows_only_documented_generated_ignored_paths(tmp_path, capsys):
     _repo, base, worktree = _implementation_worktree(tmp_path, capsys)
     (worktree / "node_modules" / "generated.js").parent.mkdir()

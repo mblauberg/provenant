@@ -59,6 +59,10 @@ scripts/worktree remove NAME
 `validate-context` rejects invalid linked-worktree metadata before a lane
 trusts its own checkout; `verify-claim` enforces claim verification at an
 acceptance boundary.
+For a dispatched writer, claim verification also checks the retained instruction
+protection tip. A late commit touching `.agents/`, rewritten history or an
+incomplete/quarantined check is rejected without deleting or restoring the branch.
+Benign descendant commits are accepted only after checking each intervening commit.
 
 The helper resolves the primary checkout through Git's common directory, checks
 the name and protected root, and refuses unsafe creation/removal. A create

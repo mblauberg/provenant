@@ -16,7 +16,7 @@ wake, in this order:
    requests, free memory. Evidence wins; correct the state file.
 2. **Land** what is ready under the repository's merge workflow, then prune.
 3. **Review** finished lanes; adjudicate returned reviews.
-   A `quarantined` lane kept its result but not its `.agents/` edits: review the listed `protected.patch`, apply it deliberately in a worktree if adopted; `landable: false` is advisory, so the chair must hold the lane. A `failed` lane with a restore fix still carries the edits: restore `.agents/` to the start commit first.
+   A `quarantined` lane retains its result and evidence for chair review. Verify its instruction-check record before consuming the lane through the gate in `orchestrate`; reuse, claim verification and Fabric landing refuse a quarantined or unverifiable branch. A `failed` lane with a restore fix still carries the edits. Preserve its branch and evidence while resolving the quarantine.
 4. **Refill** from the frontier up to the resource budget.
 5. **Tracker:** make issues and the board match what started and landed, when
    tracker writes are authorised — following `tracker`'s filing, linking and

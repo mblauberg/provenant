@@ -5120,6 +5120,170 @@ def test_codex_writer_keeps_changes_its_branch_already_carried(tmp_path):
     assert record["status"] == "ok", record
 
 
+@pytest.mark.parametrize("late_path", [SKILL, "app.txt"], ids=["protected", "benign"])
+def test_writer_reuse_checks_commits_after_the_verified_tip(tmp_path, late_path):
+    _, lane = instruction_lane(tmp_path)
+    first = lane_attempt(tmp_path, lane, "")
+    assert first["status"] == "ok", first
+    (lane / late_path).write_text("late child edit\n")
+    git(lane, "commit", "-q", "-am", "late child")
+    second_root = tmp_path / "second"
+    second_root.mkdir()
+    second = lane_attempt(second_root, lane, "open('launched', 'w').write('yes')\n")
+    if late_path == SKILL:
+        assert second["status"] == "failed", second
+        assert second["error"] == "protected_instructions_changed"
+        assert not (lane / "launched").exists()
+        assert (lane / SKILL).read_text() == "late child edit\n"
+    else:
+        assert second["status"] == "ok", second
+    assert first["instruction_protection"]["verified_tip"] == git(lane, "rev-parse", "HEAD~1").strip()
+
+
+def test_detached_writer_child_cannot_supply_a_new_attempt_or_integration_base(tmp_path, monkeypatch):
+    _, lane = instruction_lane(tmp_path)
+    release, done, pid_file = (tmp_path / name for name in ("release", "done", "child-pid"))
+    child = (
+        "import os, pathlib, subprocess, time\n"
+        "assert not any(k.startswith('PROVENANT_') for k in os.environ)\n"
+        f"release = pathlib.Path({str(release)!r})\n"
+        "deadline = time.monotonic() + 5\n"
+        "while not release.exists():\n"
+        "    if time.monotonic() > deadline: raise SystemExit(2)\n"
+        "    time.sleep(.01)\n"
+        f"pathlib.Path({SKILL!r}).write_text('detached child edit\\n')\n"
+        f"subprocess.run(['git', *{GIT_FIXTURE!r}, 'commit', '-q', '-am', 'late child'], check=True)\n"
+        f"pathlib.Path({str(done)!r}).touch()\n"
+    )
+    script = (
+        f"child = subprocess.Popen([{sys.executable!r}, '-c', {child!r}], start_new_session=True, "
+        "env={k: v for k, v in os.environ.items() if not k.startswith(('PROVENANT_', 'GIT_'))}, "
+        "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        f"open({str(pid_file)!r}, 'w').write(str(child.pid))\n"
+    )
+    # Model the missed/reparented child deterministically; census timing must not be
+    # what makes a branch safe. The real child leaves the provider's process group.
+    monkeypatch.setattr(supervisor()._Descendants, "sample", lambda *args, **kwargs: {})
+    try:
+        first = lane_attempt(tmp_path, lane, script)
+        assert first["status"] == "ok", first
+        checked = first["instruction_protection"]["verified_tip"]
+        release.touch()
+        deadline = time.monotonic() + 3
+        while not done.exists() and time.monotonic() < deadline:
+            time.sleep(.01)
+        assert done.exists(), "detached fixture did not commit"
+        late_tip = git(lane, "rev-parse", "HEAD").strip()
+        assert late_tip != checked
+        gate = subprocess.run([sys.executable, str(SCRIPTS / "lane_protection.py"), "--cwd", str(lane)],
+                              capture_output=True, text=True, timeout=5)
+        assert gate.returncode == 1
+        assert "protected_instructions_changed" in gate.stderr
+        landing = subprocess.run([sys.executable, str(SCRIPTS / "lane_protection.py"), "--cwd", str(lane),
+                                  "--landing-tip", late_tip], capture_output=True, text=True, timeout=5)
+        assert landing.returncode == 1
+        second_root = tmp_path / "second"
+        second_root.mkdir()
+        second = lane_attempt(second_root, lane, "open('launched', 'w').write('yes')\n")
+        assert second["status"] == "failed", second
+        assert not (lane / "launched").exists()
+        assert git(lane, "rev-parse", "HEAD").strip() == late_tip
+    finally:
+        release.touch()
+        if pid_file.exists():
+            pid = int(pid_file.read_text())
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            try:
+                os.waitpid(pid, 0)
+            except ChildProcessError:
+                pass
+
+
+@pytest.mark.parametrize("history", ["revert", "merge", "rewrite", "case-variant"])
+def test_lane_integration_rejects_unverified_protected_history(tmp_path, history):
+    _, lane = instruction_lane(tmp_path)
+    first = lane_attempt(tmp_path, lane, "")
+    checked = first["instruction_protection"]["verified_tip"]
+    if history == "rewrite":
+        git(lane, "reset", "--hard", "HEAD~1")
+    elif history == "case-variant":
+        blob = git(lane, "hash-object", "-w", "--stdin").strip()
+        git(lane, "update-index", "--add", "--cacheinfo", f"100644,{blob},.Agents/new.md")
+        git(lane, "commit", "-qm", "variant")
+    else:
+        (lane / SKILL).write_text("late edit\n")
+        git(lane, "commit", "-qam", "late edit")
+        if history == "revert":
+            git(lane, "revert", "--no-edit", "HEAD")
+        else:
+            git(lane, "branch", "late", "HEAD")
+            git(lane, "reset", "--hard", checked)
+            git(lane, "merge", "--no-ff", "-m", "late merge", "late")
+    before = git(lane, "rev-parse", "HEAD")
+    gate = subprocess.run([sys.executable, str(SCRIPTS / "lane_protection.py"), "--cwd", str(lane)],
+                          capture_output=True, text=True, timeout=5)
+    assert gate.returncode == 1, gate.stdout + gate.stderr
+    assert "protected_instructions_" in gate.stderr
+    assert git(lane, "rev-parse", "HEAD") == before
+
+
+def test_writer_rechecks_final_tip_after_output_publication(tmp_path, monkeypatch):
+    _, lane = instruction_lane(tmp_path)
+    module = supervisor()
+    original = module.install
+
+    def install_then_commit(source, destination):
+        result = original(source, destination)
+        if destination == str(tmp_path / "attempt/result.md"):
+            (lane / SKILL).write_text("late finalisation edit\n")
+            git(lane, "commit", "-qam", "late finalisation")
+        return result
+
+    monkeypatch.setattr(module, "install", install_then_commit)
+    record = lane_attempt(tmp_path, lane, "")
+    assert record["status"] == "failed", record
+    assert record["error"] == "protected_instructions_changed"
+    assert record["landable"] is False
+    assert record["instruction_protection"]["verified_tip"] is None
+    assert (lane / SKILL).read_text() == "late finalisation edit\n"
+
+
+def test_landing_checks_a_consumed_lane_commit_even_when_its_ref_has_advanced(tmp_path):
+    repo, lane = instruction_lane(tmp_path)
+    first = lane_attempt(tmp_path, lane, "")
+    (lane / SKILL).write_text("late protected edit\n")
+    git(lane, "commit", "-qam", "late protected commit")
+    git(repo, "merge", "--no-ff", "-s", "ours", "-m", "consume lane", "lane")
+    landing_tip = git(repo, "rev-parse", "HEAD").strip()
+    (lane / "app.txt").write_text("later benign edit\n")
+    git(lane, "commit", "-qam", "advance lane beyond consumed commit")
+    gate = subprocess.run([sys.executable, str(SCRIPTS / "lane_protection.py"), "--cwd", str(repo),
+                           "--landing-tip", landing_tip], capture_output=True, text=True, timeout=5)
+    assert gate.returncode == 1, gate.stderr
+    assert "protected_instructions_changed" in gate.stderr
+    # Resetting after detection must not silently clear the quarantined binding.
+    git(lane, "reset", "--hard", first["instruction_protection"]["verified_tip"])
+    retry = subprocess.run([sys.executable, str(SCRIPTS / "lane_protection.py"), "--cwd", str(lane)],
+                           capture_output=True, text=True, timeout=5)
+    assert retry.returncode == 1
+    assert "protected_instructions_changed" in retry.stderr
+
+
+def test_landing_does_not_consume_an_unfinished_sibling_lane(tmp_path):
+    repo, lane = instruction_lane(tmp_path)
+    # The sibling has no completed check yet, but none of its contribution is
+    # in the primary head being pushed.
+    protection = importlib.import_module("skills.orchestrate.scripts.lane_protection")
+    protection.begin(lane, tmp_path / "unfinished-attempt")
+    gate = subprocess.run([sys.executable, str(SCRIPTS / "lane_protection.py"), "--cwd", str(repo),
+                           "--landing-tip", git(repo, "rev-parse", "HEAD").strip()],
+                          capture_output=True, text=True, timeout=5)
+    assert gate.returncode == 0, gate.stderr
+
+
 @pytest.mark.parametrize("edit", [
     f"open({SKILL!r}, 'w').write('lane edit\\n')\n",
     f"open({SKILL!r}, 'w').write('lane edit\\n'); git('commit', '-q', '-am', 'edit')\n",

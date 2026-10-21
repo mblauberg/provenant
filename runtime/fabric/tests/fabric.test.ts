@@ -290,7 +290,7 @@ describe("work ownership", () => {
     }
   }, 15_000);
 
-  it("pushes the leased head from the cwd repository despite Git redirects", () => {
+  it.each(["none", "benign", "protected"])("checks the leased head despite Git redirects (late commit: %s)", (late) => {
     const work = join(temporaryDirectory, "landing-work"), bare = join(temporaryDirectory, "landing-remote.git");
     mkdirSync(work);
     const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -306,16 +306,38 @@ describe("work ownership", () => {
     const base = git(work, "rev-parse", "HEAD");
     writeFileSync(join(work, "claim.txt"), "second\n");
     git(work, "commit", "-am", "second");
+    const checked = git(work, "rev-parse", "HEAD");
+    const owner = join(repositoryRoot, "skills/orchestrate/scripts");
+    execFileSync(process.env.HARNESS_PYTHON ?? "python3", ["-c",
+      "import sys; sys.path.insert(0, sys.argv[1]); import lane_protection as p; " +
+      "state = p.begin(sys.argv[2], sys.argv[2]); p.finish(sys.argv[2], state, sys.argv[3], quarantined=False)",
+      owner, work, checked]);
+    if (late !== "none") {
+      const target = late === "protected" ? ".agents/late.md" : "claim.txt";
+      if (late === "protected") mkdirSync(join(work, ".agents"));
+      writeFileSync(join(work, target), "late edit\n");
+      git(work, "add", target);
+      git(work, "commit", "-m", "late commit");
+    }
     const head = git(work, "rev-parse", "HEAD");
     const store = openStore();
     const who = identify({ AGENT_FABRIC_SEAT: "codex", AGENT_FABRIC_LABEL: "cli-reviewer" }, work);
     store.announce(who);
     const lease = store.acquireLanding(who, "landing-session", base, 60);
     const pushed = runCli(["landing-push", "landing-session", String(lease.generation), "main", "--label", "cli-reviewer"],
-      temporaryDirectory, { GIT_DIR: bare, AGENT_FABRIC_SEAT: "agent", AGENT_FABRIC_LABEL: "other-seat", GIT_NAMESPACE: "shadow" }, work);
-    expect(pushed.status, pushed.stderr).toBe(0);
-    expect(git(bare, "rev-parse", "refs/heads/main")).toBe(head);
-    expect(store.landingLease(who.project)).toBeNull();
+      temporaryDirectory, { GIT_DIR: bare, AGENT_FABRIC_SEAT: "agent", AGENT_FABRIC_LABEL: "other-seat", GIT_NAMESPACE: "shadow",
+        AGENT_FABRIC_PRODUCT_ROOT: repositoryRoot }, work);
+    if (late === "protected") {
+      expect(pushed.status).toBe(1);
+      expect(pushed.stderr).toContain("protected_instructions_changed");
+      expect(git(bare, "rev-parse", "refs/heads/main")).toBe(base);
+      expect(git(work, "rev-parse", "HEAD")).toBe(head);
+      expect(store.landingLease(who.project)).not.toBeNull();
+    } else {
+      expect(pushed.status, pushed.stderr).toBe(0);
+      expect(git(bare, "rev-parse", "refs/heads/main")).toBe(head);
+      expect(store.landingLease(who.project)).toBeNull();
+    }
   });
 
   it("removes Git configuration redirects from landing commands", () => {

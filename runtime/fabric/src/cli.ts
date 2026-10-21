@@ -15,7 +15,8 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { databasePath, identify, withoutGitRedirects } from "./identity.js";
 import {
-  dispatchConfiguredBatch, dispatchConfiguredProvider, hostOwnersInThemselves, type BatchInput, type DispatchInput,
+  dispatchConfiguredBatch, dispatchConfiguredProvider, hostOwnersInThemselves, productRoot, pythonOwner,
+  type BatchInput, type DispatchInput,
 } from "./execution.js";
 import type { RouteInput } from "./execution-input.js";
 import {
@@ -606,6 +607,10 @@ try {
     if (remote !== lease.expectedSha) throw new Error("remote integration SHA changed; acquire a new landing lease");
     const head = execFileSync("git", ["rev-parse", "HEAD"], { ...gitOptions, encoding: "utf8" }).trim();
     execFileSync("git", ["merge-base", "--is-ancestor", remote, head], gitOptions);
+    const root = productRoot(process.env);
+    execFileSync(await pythonOwner(root, who, process.env),
+      [resolve(root, "skills/orchestrate/scripts/lane_protection.py"), "--cwd", who.cwd, "--landing-tip", head],
+      { ...gitOptions, stdio: "inherit", timeout: 30_000 });
     const pushed = store.withLandingPush(who, session, generation, remote, () =>
       execFileSync("git", ["push", `--force-with-lease=refs/heads/${branch}:${remote}`,
         "origin", `${head}:refs/heads/${branch}`], { ...gitOptions, stdio: "inherit", timeout: 120_000 }));

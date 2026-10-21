@@ -2675,6 +2675,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         **attempt_scope(args, attempt_number),
         "usage_source": adapter.get("usage_source") or provider_exec.context_usage.usage_source(adapter.get("context") or {}),
         "error_class": provider_exec.error_class(status, (adapter.get("evidence") or {}).get("signature")),
+        **({"instruction_protection": adapter["instruction_protection"]} if adapter.get("instruction_protection") else {}),
         **({"landable": False, "quarantine": adapter.get("quarantine")} if adapter_status == "quarantined" else {}),
         "run_id": run_dir.name,
         "task_id": args.task_id,
