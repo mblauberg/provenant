@@ -15,6 +15,8 @@ changing memory policy.
   ones, are pre-authorised, with one writer per worktree. An authorised merge
   prunes its own worktree and merged refs. Any other deletion, force-removal,
   history rewrite or push to a shared branch needs the user's authority.
+  Merge authority is repository-based: agents merge through the repository's
+  own workflow.
 - **Fabric.** Fabric carries messages, shared tasks and activity for the
   agents in one project, and offers a dispatch and batch front door. Its
   execution tools delegate to the orchestration owners and keep full output

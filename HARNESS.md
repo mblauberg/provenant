@@ -6,8 +6,7 @@ authority, weaken a safety gate or redefine cross-project memory. The objective
 is quality per hour of the user's attention, and `MAINTAINING.md` governs
 changes to this file. A project owner may set the project's own cadence, such
 as when tests run or how decisions are recorded for confirmation. That is not a
-weakening so long as every safety and authority gate still holds before merge
-or promotion. A project may also set its own review ladder and name its own
+weakening so long as every gate still holds before merge or promotion. A project may also set its own review ladder and name its own
 acceptance gate, as described below.
 
 Skills ship in the product checkout and install into `~/.claude/skills/` and
@@ -29,7 +28,7 @@ mechanics itself. Coordination that must return an answer uses a correlated
 Fabric exchange where one is available. Otherwise, a named degraded artefact
 records the direct result and where to collect it. Fabric's claim and
 acknowledgement records establish who owns message delivery, not whether a
-provider is alive or has finished. Herdr only observes panes and sends
+provider is alive or has finished. Herdr only observes and sends
 fire-and-forget steering.
 
 Give concurrent writers separate partitions, or use workers that only produce
@@ -37,12 +36,12 @@ patches and a single serial applier. No author or decision-maker certifies
 their own work. Receipts declare independence and record the route as
 `adapter/model@effort`, copied from the attempt receipt; the provider family is
 derived from that route. Family separation is an assurance property that
-strengthens evidence; it does not restrict ordinary execution.
+needs stronger evidence; it does not restrict ordinary execution.
 
 An authorised chair working in a configured workspace may send ordinary
 workspace content to any configured provider family. This default excludes
-credential and authentication stores, secrets, unrelated paths and any content
-the user has denied. Path and write scopes, resource limits, platform rules and
+credential and authentication stores, secrets, unrelated paths and explicitly
+denied content. Path and write scopes, resource limits, platform rules and
 the gates on external actions still apply.
 
 ## Lifecycle and user gates
@@ -92,8 +91,9 @@ project may name its own landing gate as acceptance.
 machine-readable authority covering paths, actions, disclosure, secrets,
 deployment, irreversible actions, expiry and the approver. Delegation can only
 narrow that authority. Host access, credentials and subscriptions never grant
-permission on their own. `AGENTS.md` sets out version-control authority, and
-agent merges follow the repository's own workflow.
+permission on their own. Merge authority is repository-based: `AGENTS.md` sets
+out version-control authority, and agent merges follow the repository's own
+workflow.
 
 Route each dispatch by task class to a `principal`, `senior` or `junior` model,
 or to an explicit model the adapter resolves. When several families are
@@ -122,15 +122,17 @@ found.
 |---|---|
 | `routine` | The chair plus objective checks. |
 | `substantial` | Adds one independent review from a provider family other than the author's when one is available, otherwise a same-family review through a different lens. |
-| `crucial` | Adds at least two independent reviews with distinct lenses, from two families other than the author's when two are available. |
-| `terminal` | Adds an adversarial lens to `crucial` coverage, and the owner's explicit acceptance before merge. |
+| `crucial` | At least two independent reviews in total, with distinct lenses, from two families other than the author's when two are available. With only one other family available, one review comes from it and the other is a same-family review through a different lens. |
+| `terminal` | Adds an adversarial lens to `crucial` coverage, and the user's explicit acceptance before merge. |
 
 A lens is a named question, such as correctness against the acceptance
 criteria, data and concurrency, security, or operations. Each review records
-who reviewed, from which family and through which lens. When a provider limit
-or outage blocks a cross-family leg, the review records the blocker and makes
-up for it with more thorough same-family review: more lenses, a second pass or
-a fresh context.
+who reviewed, from which family and through which lens. When any leg is
+skipped or unavailable, whether through a provider limit, an outage, a missing
+capability or configuration, or another cause, the review records the reason.
+A blocked cross-family leg is replaced by an independent same-family reviewer
+through a different lens. The required number of independent reviews does not
+change, and another pass by the same reviewer never counts as one.
 
 A project may set its own ladder in its contributing guide. That ladder governs
 the project's work so long as each tier keeps at least the independence above.
