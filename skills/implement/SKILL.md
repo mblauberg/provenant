@@ -53,10 +53,11 @@ reconciliation run.
    attaches them to the review brief; reviewers with vision get them. Record
    omissions and substitutions. Native subagents use the Agent tool model
    parameter and mark the route resolved.
-5. Feed findings from review and the slow checks into one repair round, then
-   repeat verification and re-review only the repair delta, under the `deliver`
-   receipt contract's scaled budget. Every gate still passes before merge.
-   Return evidence to user or `scope` on drift.
+5. Batch findings from review and the slow checks into one repair round, then
+   repeat verification and re-review only the repair delta. A gate that still
+   fails takes the step 2 escalation, within the `deliver` receipt contract's
+   scaled budget. Every gate still passes before merge. Return evidence to
+   user or `scope` on drift.
 6. Update owned docs for behavioural, architectural, operational or decision
    change. For substantial+ apply `session`: refresh recovery checkpoint,
    audit context, graduate durable findings and classify retained/ephemeral

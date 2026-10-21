@@ -8,7 +8,7 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
 ## Quickstart
 
 1. [Native first](references/routing-and-tiers.md#native-first): run your own provider's models as native subagents (Claude Code: Agent tool `opus`/`sonnet`/`haiku`; Codex: its subagents), not Fabric. Use Fabric for other providers (agy's Claude 4.6 included), long or detached runs, and sandboxed worktree writers.
-2. Call `fabric_dispatch`; its tool schema documents the arguments (`fabric_adapters` with `models: <adapter>` lists live ids).
+2. Call `fabric_dispatch`; its tool schema documents the arguments. `model` takes `adapter/id[@effort]`; `route` takes only a [pool name](references/routing-and-tiers.md#route-pools), and an explicit id there is `route_invalid`. `fabric_adapters` with `models: <adapter>` lists live ids.
 3. For writers, pass `mode: "worktree_write"` and the registered `worktree`,
    named per `setup-repo`'s branch naming doctrine; the task id defaults to that
    same branch-derived string. Before dispatch, [confirm the connection's
