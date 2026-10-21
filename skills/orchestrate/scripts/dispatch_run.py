@@ -312,16 +312,16 @@ def modified_since(cwd: str, since: float) -> bool:
     return False
 
 
-def guard_writer_startup_timeout(record: dict[str, Any], start: tuple[Any, ...] | None, cwd: str) -> None:
-    """A silent writer may still have edited files; fall back only over a provably untouched worktree."""
-    if record.get("status") != "startup_timeout":
+def guard_writer_retry(record: dict[str, Any], start: tuple[Any, ...] | None, cwd: str) -> None:
+    """Retry a silent or rate-limited writer only over a provably untouched worktree."""
+    if record.get("status") not in {"startup_timeout", "rate_limited"}:
         return
     state, launched = start or (None, 0.0)
     if (state is not None and not state[1] and writer_worktree_state(cwd) == state
             and not modified_since(cwd, launched - 1.0)):
         return
     record["retryable"] = False
-    record["fix"] = ("inspect the worktree: it changed or was dirty when the silent writer timed out; "
+    record["fix"] = ("inspect the worktree: it changed or was dirty when the writer stopped; "
                      "then dispatch again on another model or adapter")
 
 
@@ -1532,7 +1532,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     family=route.get("model_family") or "unknown"
     label=args.tool+"/"+model+("@"+effort if effort else "")
     identity="resolved" if model else "unknown"
-    task_class = getattr(args, "task_class", None) or ""
+    task_class = getattr(args, "task_class", None) or getattr(args, "_rate_limit_task_class", "")
     provenance={"requested":{"adapter":args.tool,"alias":"" if args.model and not getattr(args,"alias_supplied",True) else args.alias or "","model":args.model,"effort":args.effort,"task_class":task_class},
         "resolved_model":model,"observed_model":None,"observed_source":None,"identity":identity,
         "provider":route.get("endpoint_provider") or args.tool,"transport":args.tool,"family":family,
@@ -1583,6 +1583,8 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     if status not in TERMINAL_STATUSES: status="failed"
     for field in ("session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","warnings","reaped","spared","provenance","pgid","last_progress_at","landable","quarantine"):
         if field in adapter: row[field]=adapter[field]
+    if row.get("task_class") and isinstance(row.get("provenance"), dict):
+        row["provenance"]["requested"] = {**(row["provenance"].get("requested") or {}), "task_class": row["task_class"]}
     # The provider's provenance replaces the recorded one; keep the confidential request so resume and handoff honour it.
     if getattr(args,"confidential",False) and isinstance(row.get("provenance"),dict):
         row["provenance"]["requested"]={**(row["provenance"].get("requested") or {}),"confidential":True}
@@ -1947,7 +1949,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         "preface": args.preface,
         "adapter": args.tool,
         "alias": args.alias or "",
-        "task_class": args.task_class or "",
+        "task_class": args.task_class or getattr(args, "_rate_limit_task_class", ""),
         "role": args.role,
         "model": args.model or "",
         "effort": args.effort or "",
@@ -1986,6 +1988,20 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     old_handlers: dict[int, Any] = {}
     def admit_attempt(active, cancelled_now):
         nonlocal started, started_at, memory_lease, process_error, admission_queued_seconds
+        pacing = vars(args).pop("_rate_limit_retry", None)
+        if pacing:
+            active.update(state="queued", queue_reason="rate_limit", reason="waiting for model cooldown")
+            publish_contract(run_dir, active)
+            while not cancelled_now():
+                delay = (datetime.fromisoformat(pacing["until"].replace("Z", "+00:00")) - datetime.now(UTC)).total_seconds()
+                remaining = pacing["deadline"] - time.monotonic()
+                if delay <= 0 or remaining <= 0:
+                    break
+                time.sleep(min(0.1, delay, remaining))
+            args.timeout_seconds = min(args.timeout_seconds, pacing["deadline"] - time.monotonic())
+            if cancelled_now() or args.timeout_seconds <= 0:
+                process_error = "cancelled" if cancelled_now() else "timeout"
+                return False
         waiting_since = time.monotonic()
         def waiting(reason):
             active["state"] = "queued"
@@ -2017,6 +2033,14 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         active["timing"]["queued_seconds"] = args._queued_seconds
         started = time.monotonic()
         started_at = now()
+        if memory_lease is not None and pacing and active["mode"] == "worktree_write":
+            blocked = {**pacing["row"], "exit": 1, "pgid": None}
+            guard_writer_retry(blocked, pacing["writer_start"], active["cwd"])
+            if not blocked["retryable"]:
+                blocked["evidence"] = {**blocked["evidence"], "signature": "cooldown_active"}
+                args._pacing_blocked = blocked
+                memory_lease.close()
+                memory_lease = None
         if memory_lease is not None:
             active["state"] = "running"
             active.pop("queue_reason", None)
@@ -2137,15 +2161,19 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 def cancellation():
                     return owner_cancel[0] or cancellation_marker_present(run_dir,attempt_dir) or (batch_dir is not None and cancellation_marker_present(run_dir,batch_dir))
                 admitted = admit_attempt(active, cancellation)
+                plan["timeout_seconds"] = args.timeout_seconds
                 # Snapshot before launch: the timeout walk compares mtimes with this wall time.
                 writer_start = ((writer_worktree_state(plan["cwd"]), time.time())
                                 if admitted and plan["mode"] == "worktree_write" else None)
                 spawn_started = time.monotonic()
                 if not admitted:
                     plan["warnings"] = active["warnings"]
-                    process_error = process_error or "cancelled"
-                    adapter_record = {"status": "failed" if process_error == "memory_unavailable" else "cancelled",
-                                      "exit": 1, "warnings": active["warnings"]}
+                    adapter_record = vars(args).pop("_pacing_blocked", None)
+                    if adapter_record is None:
+                        process_error = process_error or "cancelled"
+                        adapter_record = {"status": "failed" if process_error == "memory_unavailable" else
+                                          "timed_out" if process_error == "timeout" else "cancelled",
+                                          "exit": 1, "warnings": active["warnings"]}
                 else:
                     plan["warnings"] = active["warnings"]
                     adapter_record=provider_exec.execute(plan,result_path,events_path=attempt_dir/"events.jsonl",stderr_path=stderr_path,
@@ -2205,7 +2233,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     adapter_record["provenance"]["notes"].append("resumed_by_relaunch")
                     adapter_record["warnings"].append("resume: relaunched")
                 if admitted and plan["mode"] == "worktree_write":
-                    guard_writer_startup_timeout(adapter_record, writer_start, plan["cwd"])
+                    guard_writer_retry(adapter_record, writer_start, plan["cwd"])
+                args._writer_start = writer_start
                 args._last_plan=plan
             else:
                 adapter_record=plan
@@ -2645,17 +2674,40 @@ def execute_attempt_sequence(args,custody=None):
     previous=getattr(args,"_last_row",None)
     plan=getattr(args,"_last_plan",None)
     if plan and previous and previous["retryable"] and not args.resume:
-        for candidate in exec_routing.candidates(plan,args.fallback,confidential=getattr(args,"confidential",False)):
-            remaining=sequence_budget-(time.monotonic()-sequence_start-getattr(args,"_queued_seconds",0.0))
-            if remaining<=0: break
-            args.timeout_seconds=remaining
-            if exec_routing.cooling(candidate["adapter"],candidate["model"]): continue
+        alternatives = iter(exec_routing.candidates(plan,args.fallback,confidential=getattr(args,"confidential",False)))
+        retried = set()
+        while previous and previous["retryable"]:
+            deadline = sequence_start + sequence_budget + getattr(args,"_queued_seconds",0.0)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            current = getattr(args, "_last_plan", plan)
+            key = (current["adapter"], current["model"])
+            cooling = exec_routing.cooling(*key)
+            delay = ((datetime.fromisoformat(cooling["cooling_until"].replace("Z", "+00:00")) - datetime.now(UTC)).total_seconds()
+                     if cooling else 0)
+            pace = (previous["status"] == "rate_limited" and key not in retried
+                    and previous.get("evidence", {}).get("signature") != "cooldown_active" and delay < remaining)
+            if pace:
+                args._rate_limit_task_class = previous.get("task_class", "")
+                retried.add(key)
+                candidate = {"adapter": key[0], "model": key[1], "effort": current.get("effort")}
+                args._rate_limit_retry = {"until": cooling["cooling_until"] if cooling else now(),
+                                          "deadline": deadline, "row": previous,
+                                          "writer_start": getattr(args, "_writer_start", None)}
+            else:
+                candidate = next((item for item in alternatives
+                                  if not exec_routing.cooling(item["adapter"], item["model"])), None)
+                if candidate is None:
+                    break
+                vars(args).pop("_rate_limit_task_class", None)
+            args.task_class = None
+            args.timeout_seconds = remaining
             args.fallback_from={"attempt":previous["attempt"],"status":previous["status"],"reset_at":previous.get("reset_at"),"route":previous["provenance"]["line"].split(" (",1)[0].removeprefix("Route: ")}
             args.tool=candidate["adapter"];args.model=candidate["model"];args.effort=candidate.get("effort")
-            args.alias=None;args.task_class=None;args.retry_of=f"attempt-{previous['attempt']:03d}"
+            args.alias=None;args.retry_of=f"attempt-{previous['attempt']:03d}"
             result=_dispatch(args,custody)
             previous=getattr(args,"_last_row",None)
-            if not previous or not previous["retryable"]: break
     return result
 
 

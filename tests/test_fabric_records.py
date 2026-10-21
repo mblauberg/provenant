@@ -237,7 +237,7 @@ def test_only_success_clears_its_own_cooldown(tmp_path, status):
     path = tmp_path / "cooldowns.json"
     at = datetime(2026, 9, 23, tzinfo=UTC)
     row = json.loads((FIX / "attempt.json").read_text())
-    row.update(status="rate_limited")
+    row.update(status="rate_limited", retry_after=600)
     row["provenance"]["requested"]["adapter"] = "agy"
     for model in ("claude-sonnet-4-6", "gemini-3.5-flash", "*"):
         row["provenance"]["resolved_model"] = model
@@ -373,7 +373,7 @@ def test_success_without_start_time_keeps_account_limit(tmp_path):
 def test_model_quota_adapter_success_keeps_its_wildcard(tmp_path):
     at = datetime(2026, 9, 23, 10, 0, tzinfo=UTC)
     path = tmp_path / "cooldowns.json"
-    limited("agy", "*", at, path, "rate_limited", "429")
+    limited("agy", "*", at, path)
     later = at + timedelta(minutes=5)
     assert "agy/*" in succeed("agy", "gemini-3.5-flash", timestamp(later), path, later)
 
@@ -399,3 +399,34 @@ def test_reset_command_prints_removed_keys_and_exits_zero(tmp_path):
     assert plain.returncode == 0
     assert plain.stdout.strip() == "no cooldowns matched"
     assert "claude/*" in records().read_cooldowns(path)
+
+
+@pytest.mark.parametrize("status", ["rate_limited", "usage_limited"])
+def test_limit_outcomes_never_become_empty_output_failures(tmp_path, monkeypatch, status):
+    from scripts import model_route
+    monkeypatch.setenv("AGENT_FABRIC_STATE_ROOT", str(tmp_path))
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status=status, task_class="mechanical")
+    row["evidence"]["signature"] = "empty_output"
+    row["provenance"]["requested"]["adapter"] = "codex"
+    row["provenance"]["resolved_model"] = "gpt-6.1-sol"
+    path = tmp_path / "route-health.json"
+    at = datetime.now(UTC)
+    records().write_route_health(row, path=path, at=at)
+    health = records().read_route_health(path, cooldowns_path=tmp_path / "cooldowns.json", at=at)
+    item = next(iter(health.values()))
+    assert item["recent"][0]["status"] == status
+    assert item["recent_failures"] == 0
+    assert item["rate_limits"] == 1
+    assert not model_route._recent_failed_task_class_models("codex", "mechanical")
+
+
+def test_rate_limit_defaults_to_short_model_cooldown_then_allows_reprobe(tmp_path):
+    at = datetime(2026, 9, 23, tzinfo=UTC)
+    path = tmp_path / "cooldowns.json"
+    limited("claude", "sonnet", at, path, "rate_limited", "429 too many requests")
+    values = records().read_cooldowns(path, at)
+    assert set(values) == {"claude/claude-sonnet-5-5"}
+    assert values["claude/claude-sonnet-5-5"]["account"] is None
+    assert values["claude/claude-sonnet-5-5"]["cooling_until"] == timestamp(at + timedelta(seconds=30))
+    assert not records().read_cooldowns(path, at + timedelta(seconds=31))

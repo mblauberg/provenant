@@ -1357,13 +1357,14 @@ SIGNATURES = (
     ),
     (
         "usage_limited",
-        r"you.ve hit your (?:usage|session|weekly) limit|usage limit|session limit|weekly limit|individual quota reached|insufficient_quota|quota exceeded|RESOURCE_EXHAUSTED|exhausted your capacity",
+        r"you.ve hit your (?:usage|session|weekly) limit|usage limit|session limit|weekly limit|individual quota reached|insufficient_quota|exhausted your capacity",
     ),
     (
         "auth_required",
         r"authentication required|please sign in|please(?: run)? login|not logged in|not authenticated|unauthenticated|unauthorized|login expired|\b401\b",
     ),
-    ("rate_limited", r"rate.?limit|too many requests|overloaded|\b(?:429|529)\b"),
+    ("rate_limited", r"rate.?limit|too many requests|overloaded|\b(?:429|529)\b|(?:requests|tokens) per (?:minute|second)"),
+    ("usage_limited", r"quota exceeded|RESOURCE_EXHAUSTED"),
     (
         "model_unavailable",
         r"model[^\n]*(?:unavailable|not available|not found|unsupported|does not exist)|unknown model",
