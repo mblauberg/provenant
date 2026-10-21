@@ -347,8 +347,9 @@ review legs and is reachable at `-high`, `-medium` and `-low`. Use
 
 **Route pools carry these preferences as weights.** The pools live only in
 `config/model-routing.json` `routes`; `provenant routes` prints them with live
-availability. To change a preference, edit the weight or order there; nothing
-else restates them.
+availability (available models in full, others behind a per-pool count line;
+`--all` lists everything). To change a preference, edit the weight or order
+there; nothing else restates them.
 
 **Critical review has no fixed family.** The cross-family obligation is relative
 to whoever chairs the run, so the right second family depends on the first. Do
