@@ -19,8 +19,8 @@ author as the only reviewer. Provenant puts structure around that:
 - it **scopes** work in dialogue with the user, returning open decisions as
   questions, and requires approval before implementation starts;
 - it runs **deterministic checks** before any result surfaces for review;
-- it adds **review by the _other_ model family** once the work is substantial:
-  Claude checks Codex, Codex checks Claude; and
+- substantial work adds **one independent review** from another provider
+  family when available, with review depth increasing at higher risk tiers; and
 - it meets **acceptance through checks and required review**, with separate user authority for release.
 
 A change therefore arrives already scoped, verified and read by a context that
@@ -239,12 +239,12 @@ user authority; receipts declare approval rather than authenticating it.
 ```mermaid
 flowchart TB
     accTitle: The delivery loop and its user gates
-    accDescr: After a session sets up clean context, the deliver kernel runs the loop top to bottom: scope writes the specification and risk tier, a user gate approves it, implement writes the test first whenever observable behaviour changes, verify runs deterministic checks, and review reads the work in a fresh context that never wrote it, using targeted lenses plus the other primary from the substantial tier up. Two dotted edges return: the approval gate sends the plan back to scope, and a blocking review finding sends the work back to implement for a bounded repair. Checks and required review meet acceptance; terminal work and approved scope may require explicit user acceptance. The chair reports the outcome and the user may reject it. Release and observe sit outside the loop, behind a separate user gate that authorises the external action.
+    accDescr: After a session sets up clean context, the deliver kernel runs the loop top to bottom: scope writes the specification and risk tier, a user gate approves it, implement writes the test first whenever observable behaviour changes, verify runs deterministic checks, and review reads the work in a fresh context that never wrote it, using the risk-scaled HARNESS.md Review ladder. Two dotted edges return: the approval gate sends the plan back to scope, and a blocking review finding sends the work back to implement for a bounded repair. Checks and required review meet acceptance; terminal work and approved scope may require explicit user acceptance. The chair reports the outcome and the user may reject it. Release and observe sit outside the loop, behind a separate user gate that authorises the external action.
     SC["scope · spec, risk tier, acceptance criteria"] --> G1{{"USER · approve the spec"}}
     G1 -. "send back" .-> SC
     G1 --> IM["implement · test first when behaviour changes"]
     IM --> VF["verify · deterministic checks"]
-    VF --> RV["review · fresh context<br/>targeted lenses + other primary at substantial+"]
+    VF --> RV["review · fresh context<br/>risk-scaled HARNESS.md ladder"]
     RV -. "blocking finding" .-> IM
     RV --> AC["acceptance · checks + required review<br/>or project landing gate"]
     AC --> Q{"terminal or explicit acceptance<br/>required by approved scope?"}
@@ -271,19 +271,15 @@ full lifecycle lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
 ## What the harness guarantees
 
-**Review pressure scales with the risk tier the work is scoped at.** Four tiers
-run from `routine` through `substantial` and `crucial` to `terminal`, each
-adding pressure to the one below: the chair plus objective and native checks at
-the bottom,
-targeted lenses and an other-primary review from `substantial` up, a
-distinct-family review at `crucial`, and adversarial pressure at `terminal`.
-[`HARNESS.md`](HARNESS.md) is the single source of truth for the thresholds.
+**Review pressure scales with risk.** Routine work uses the chair and objective
+checks. Substantial work adds one independent cross-family review when available;
+crucial work needs two with distinct lenses and two non-chair families when
+available. Terminal work adds an adversarial lens. The
+[`HARNESS.md` Review ladder](HARNESS.md#review-ladder) owns the thresholds and
+recorded-blocker fallback when cross-family coverage is unavailable.
 
-Solo `routine` work still completes, but `substantial` and above cannot reach
-acceptance with the other-primary leg missing. Distinct-family review applies
-from `crucial` upwards when available; a skipped distinct-family leg records
-its reason. Evidence and corroboration, not model votes, make a finding
-blocking.
+Only passing independent reviews count towards coverage. Evidence and
+corroboration, not model votes, make a finding blocking.
 
 **Durable boundaries hold regardless of tier:**
 

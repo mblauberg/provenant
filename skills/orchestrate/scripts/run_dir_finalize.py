@@ -215,7 +215,7 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
         if not isinstance(review["status"], str) or review["status"] not in REVIEW_PLAN_STATUSES:
             errors.append(f"receipt review_plan.reviews[{index}].status is invalid")
         for field in ("lens", "family"):
-            if not isinstance(review[field], str) or not review[field]:
+            if not isinstance(review[field], str) or not review[field].strip():
                 errors.append(f"receipt review_plan.reviews[{index}].{field} is required")
         if not isinstance(review["adapter"], str) or not review["adapter"]:
             errors.append(f"receipt review_plan.reviews[{index}].adapter is required")
@@ -395,19 +395,24 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                                 transcript_available=transcript_available,
                                 dispatcher_output_available=dispatcher_output_available,
                             )
+                            if (
+                                leg["status"] == "pass"
+                                and raw.get("chair_family")
+                                and leg["provider_family"] != raw.get("chair_family")
+                                and route_value.get("cross_family") is not True
+                            ):
+                                leg["status"] = "failed"
+                                leg["certifying_vote"] = False
+                                leg["reason"] = "cross-family review requires a cross-family route receipt"
                             if isinstance(review["id"], str):
                                 normalized_legs[review["id"]] = leg
                             if leg["status"] != "pass":
                                 errors.append(
                                     f"receipt review_plan.reviews[{index}] is not a certifying review leg: {leg['reason']}"
                                 )
-                            other_primary_family = (
-                                "anthropic" if raw.get("chair_family") == "openai" else "openai"
-                            )
                             if (
-                                review["scope"] == "primary"
-                                and review["family"] == other_primary_family
-                                and not review["substitution_for"]
+                                raw.get("chair_family")
+                                and leg["provider_family"] != raw.get("chair_family")
                                 and not leg["certifying_vote"]
                             ):
                                 errors.append(
@@ -463,6 +468,20 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                         )
             panel_errors = validate_panel_result(spec, members, panel["result"])
             errors.extend(f"{prefix}: {error}" for error in panel_errors)
+    completed = [r for r in checked if r["status"] == "complete"]
+    if len({r["reviewer_id"] for r in completed}) != len(completed):
+        errors.append("completed reviews require distinct reviewer_id values")
+    for field in ("evidence", "route_receipt"):
+        identities = [
+            (r[field].get("path"), r[field].get("digest"))
+            for r in completed
+            if isinstance(r[field], dict)
+            and isinstance(r[field].get("path"), str)
+            and isinstance(r[field].get("digest"), str)
+        ]
+        digests = [identity[1] for identity in identities]
+        if len(identities) != len(completed) or len(set(digests)) != len(completed):
+            errors.append(f"completed reviews require distinct {field} artifacts")
     if not isinstance(risk, str) or risk not in {"substantial", "crucial", "terminal"}:
         return errors
     chair_value = raw.get("chair_family")
@@ -470,53 +489,27 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
         errors.append("substantial review_plan requires an openai or anthropic chair_family")
     chair = chair_value if isinstance(chair_value, str) else ""
     other_primary = "anthropic" if chair == "openai" else "openai"
-    for review in checked:
-        if (
-            review["scope"] == "primary"
-            and review["family"] == other_primary
-            and not review["substitution_for"]
-            and REVIEW_TIERS.get(review["tier"]) != "flagship"
-        ):
-            errors.append("other-primary review must use flagship strength")
-    targeted = [r for r in checked if r["scope"] == "targeted" and r["status"] == "complete"]
-    if len({r["reviewer_id"] for r in targeted}) != len(targeted):
-        errors.append("completed targeted reviews require distinct reviewer_id values")
-    for field in ("evidence", "route_receipt"):
-        identities = [
-            (r[field].get("path"), r[field].get("digest"))
-            for r in targeted
-            if isinstance(r[field], dict)
-            and isinstance(r[field].get("path"), str)
-            and isinstance(r[field].get("digest"), str)
-        ]
-        digests = [identity[1] for identity in identities]
-        if len(identities) != len(targeted) or len(set(digests)) != len(targeted):
-            errors.append(f"completed targeted reviews require distinct {field} artifacts")
     legs: list[dict[str, object]] = []
     for review in checked:
+        # Roles retain their receipt vocabulary; the shared HARNESS ladder
+        # counts every passing independent leg by family and lens.
         if review["scope"] == "targeted":
             role = "targeted"
-        elif (
-            review["scope"] == "primary"
-            and review["family"] == other_primary
-            and not review["substitution_for"]
-        ):
+        elif review["family"] == other_primary:
             role = "other-primary"
-        elif (
-            review["scope"] == "primary"
-            and review["family"] not in {chair, other_primary}
-            and (REVIEW_TIERS.get(review["tier"]) == "flagship" or review["status"] != "complete")
-        ):
-            role = "distinct-family"
         else:
-            continue
+            role = "distinct-family"
         normalized_leg = normalized_legs.get(review["id"]) if isinstance(review.get("id"), str) else None
         leg_status = (
             normalized_leg["status"]
             if normalized_leg is not None
             else "pass" if review["status"] == "complete" else review["status"]
         )
-        if role == "other-primary" and normalized_leg is not None and not normalized_leg["certifying_vote"]:
+        if (
+            normalized_leg is not None
+            and normalized_leg["provider_family"] != chair
+            and not normalized_leg["certifying_vote"]
+        ):
             leg_status = "failed"
         legs.append({
             "role": role,

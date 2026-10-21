@@ -120,7 +120,7 @@ def bind_complete_reviews(run, plan):
             "read_only_guarantee": "enforced",
             "tool": row["adapter"],
             "route_alias": row["tier"], "reviewer_id": row["reviewer_id"],
-            "cross_family": row["scope"] == "primary",
+            "cross_family": row["family"] != plan["chair_family"],
             "certification_eligible": row["scope"] == "primary",
         }))
         route_value = json.loads(route.read_text())
@@ -139,20 +139,14 @@ def panel(panel_id, preset, membership, reviews, output):
     }
 
 
-def test_real_run_rejects_unavailable_other_primary_with_distinct_family_reviews(tmp_path):
+def test_real_run_accepts_targeted_cross_family_review_when_other_primary_is_unavailable(tmp_path):
     plan = substantial_plan()
-    # Same-family targeted legs add no lens beyond the others, so they cannot cover the skip.
-    plan["reviews"][0]["lens"] = plan["reviews"][1]["lens"] = "routing"
     plan["reviews"][-1] = review(
         "primary-down", "primary", "other-primary", "anthropic", status="unavailable"
     )
-    plan["reviews"].extend([
-        review("sub-google", "primary", "whole-change-a", "google", substitution_for="other-primary", wave=2),
-        review("sub-xai", "primary", "whole-change-b", "xai", substitution_for="other-primary", wave=2),
-    ])
     bind_complete_reviews(tmp_path, plan)
 
-    assert any("same-family targeted review" in error for error in run_dir_finalize._validate_review_plan(plan, tmp_path))
+    assert run_dir_finalize._validate_review_plan(plan, tmp_path) == []
 
 
 def test_real_run_allows_recorded_targeted_omission(tmp_path):
@@ -271,23 +265,91 @@ def test_same_provider_different_model_family_does_not_satisfy_other_primary(tmp
 
     errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
 
-    assert any("not certification eligible" in error for error in errors)
-    assert any("passing other-primary" in error for error in errors)
+    assert any("endpoint/provider identity mismatch" in error for error in errors)
+    assert any("not a certifying review leg" in error for error in errors)
 
 
-def test_clean_distinct_provider_route_does_not_need_route_certification_flags(tmp_path):
+def test_single_cross_family_targeted_review_requires_read_only_certification(tmp_path):
     plan = substantial_plan()
+    plan["reviews"] = [plan["reviews"][2]]
     bind_complete_reviews(tmp_path, plan)
-    route_path = tmp_path / plan["reviews"][3]["route_receipt"]["path"]
+    row = plan["reviews"][0]
+    route_path = tmp_path / row["route_receipt"]["path"]
     route = json.loads(route_path.read_text())
-    route["cross_family"] = False
-    route["certification_eligible"] = False
+    del route["read_only_guarantee"]
     route_path.write_text(json.dumps(route))
-    plan["reviews"][3]["route_receipt"]["digest"] = (
+    row["route_receipt"]["digest"] = (
         "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
     )
 
+    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+
+    assert any("not certification eligible" in error for error in errors)
+    assert any("passing independent leg" in error for error in errors)
+
+
+def test_real_run_same_family_fallback_does_not_require_cross_family_certification(tmp_path):
+    plan = substantial_plan()
+    plan["reviews"] = [
+        plan["reviews"][0],
+        review("provider-down", "primary", "correctness", "anthropic", status="unavailable"),
+    ]
+    bind_complete_reviews(tmp_path, plan)
+
     assert run_dir_finalize._validate_review_plan(plan, tmp_path) == []
+
+
+@pytest.mark.parametrize(("model_family", "provider_family", "passes"), [
+    ("google", "openai", True),
+    ("openai", "anthropic", False),
+])
+def test_broker_review_certification_uses_provider_family(tmp_path, model_family, provider_family, passes):
+    plan = substantial_plan()
+    broker = review("broker", "targeted", "correctness", model_family, "workhorse")
+    broker["adapter"] = "cursor"
+    plan["reviews"] = [
+        broker,
+        review("provider-down", "primary", "security", "anthropic", status="unavailable"),
+    ]
+    bind_complete_reviews(tmp_path, plan)
+    route_path = tmp_path / broker["route_receipt"]["path"]
+    route = json.loads(route_path.read_text())
+    route.update({"provider_family": provider_family, "endpoint_provider": "cursor"})
+    route["cross_family"] = provider_family != plan["chair_family"]
+    del route["read_only_guarantee"]
+    route_path.write_text(json.dumps(route))
+    broker["route_receipt"]["digest"] = (
+        "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
+    )
+
+    errors = run_dir_finalize._validate_review_plan(plan, tmp_path)
+
+    if passes:
+        assert errors == []
+    else:
+        assert any("not certification eligible" in error for error in errors)
+        assert any("passing independent leg" in error for error in errors)
+
+
+@pytest.mark.parametrize("scope", ["targeted", "primary"])
+@pytest.mark.parametrize("cross_family", [False, None, "true"])
+def test_cross_family_review_requires_true_route_flag_regardless_of_scope(tmp_path, scope, cross_family):
+    plan = substantial_plan()
+    row = plan["reviews"][3]
+    row["scope"] = scope
+    bind_complete_reviews(tmp_path, plan)
+    route_path = tmp_path / row["route_receipt"]["path"]
+    route = json.loads(route_path.read_text())
+    route["cross_family"] = cross_family
+    route_path.write_text(json.dumps(route))
+    row["route_receipt"]["digest"] = (
+        "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
+    )
+
+    assert any(
+        "cross-family route receipt" in error
+        for error in run_dir_finalize._validate_review_plan(plan, tmp_path)
+    )
 
 
 def test_inline_fabricated_terminal_result_is_not_a_retained_worker_result(tmp_path):
@@ -374,31 +436,32 @@ def test_substantial_review_topology_is_machine_checked():
     plan["reviews"] = [plan["reviews"][0], plan["reviews"][1], other_primary]
     assert run_dir_finalize._validate_review_plan(plan) == []
     plan["reviews"] = [plan["reviews"][0], other_primary]
-    assert any("targeted lenses" in error for error in run_dir_finalize._validate_review_plan(plan))
+    assert run_dir_finalize._validate_review_plan(plan) == []
+    plan["reviews"] = [other_primary]
+    assert run_dir_finalize._validate_review_plan(plan) == []
+    plan["reviews"] = []
+    assert any("passing independent leg" in error for error in run_dir_finalize._validate_review_plan(plan))
 
 
-def test_other_primary_review_requires_flagship_strength():
+def test_cross_family_primary_review_can_use_workhorse_strength():
     plan = substantial_plan()
     plan["reviews"][3]["tier"] = "workhorse"
-    assert any("flagship strength" in error for error in run_dir_finalize._validate_review_plan(plan))
+    assert run_dir_finalize._validate_review_plan(plan) == []
 
 
-def test_other_primary_unavailability_remains_load_bearing():
+def test_same_family_primary_review_can_cover_a_reasoned_blocker():
     plan = substantial_plan()
-    # Same-family targeted legs add no lens beyond the others, so the distinct-family substitutes do not buy past the skip.
-    plan["reviews"][0]["lens"] = plan["reviews"][1]["lens"] = "routing"
-    plan["reviews"][-1] = review("primary-down", "primary", "other-primary", "anthropic", status="unavailable")
-    plan["reviews"].extend([
-        review("sub-google", "primary", "whole-change-a", "google", substitution_for="other-primary", wave=2),
-        review("sub-xai", "primary", "whole-change-b", "xai", substitution_for="other-primary", wave=2),
-    ])
-    assert any("same-family targeted review" in error for error in run_dir_finalize._validate_review_plan(plan))
+    plan["reviews"] = [
+        review("same-family", "primary", "correctness", "openai", "workhorse"),
+        review("primary-down", "primary", "other-primary", "anthropic", status="unavailable"),
+    ]
+    assert run_dir_finalize._validate_review_plan(plan) == []
 
 
 def test_crucial_review_topology_records_unavailable_second_family():
     plan = substantial_plan("crucial")
     assert any(
-        "distinct-family" in error for error in run_dir_finalize._validate_review_plan(plan)
+        "two non-chair families" in error for error in run_dir_finalize._validate_review_plan(plan)
     )
     plan["reviews"].append(
         review("second-family-down", "primary", "terminal-challenge", "google", status="unavailable", substitution_for="additional-distinct-family", wave=2)
@@ -409,7 +472,7 @@ def test_crucial_review_topology_records_unavailable_second_family():
 def test_crucial_review_topology_blocks_with_no_distinct_family_or_recorded_skip():
     plan = substantial_plan("crucial")
     assert any(
-        "distinct-family review or recorded skip" in error
+        "two non-chair families or a recorded blocker" in error
         for error in run_dir_finalize._validate_review_plan(plan)
     )
 
@@ -418,7 +481,7 @@ def test_terminal_review_topology_blocks_with_no_distinct_family_or_recorded_ski
     plan = substantial_plan("terminal")
     plan["reviews"] = plan["reviews"][:-1]
     assert any(
-        "distinct-family review or recorded skip" in error
+        "two non-chair families or a recorded blocker" in error
         for error in run_dir_finalize._validate_review_plan(plan)
     )
 
@@ -488,6 +551,14 @@ def test_review_topology_binds_explicit_codex_route_and_review_evidence(tmp_path
     assert any("identity does not match" in error for error in run_dir_finalize._validate_review_plan(plan, tmp_path))
 
 
+@pytest.mark.parametrize("risk", ["routine", "substantial", "crucial", "terminal"])
+@pytest.mark.parametrize("field", ["lens", "family"])
+def test_completed_review_requires_non_blank_lens_and_family_at_every_tier(risk, field):
+    plan = substantial_plan(risk)
+    plan["reviews"][0][field] = "   "
+    assert any(f"{field} is required" in error for error in run_dir_finalize._validate_review_plan(plan))
+
+
 def test_review_topology_rejects_malformed_fields_and_symlink_escape(tmp_path):
     plan = substantial_plan()
     plan["reviews"][0]["lens"] = []
@@ -532,8 +603,12 @@ def test_review_topology_rejects_malformed_fields_and_symlink_escape(tmp_path):
     assert any("evidence is missing" in error for error in run_dir_finalize._validate_review_plan(routine, run))
 
 
-def test_targeted_reviews_require_distinct_reviewer_and_artifact_identity():
-    plan = substantial_plan()
+@pytest.mark.parametrize("risk", ["routine", "substantial", "crucial", "terminal"])
+@pytest.mark.parametrize("scopes", [("targeted", "targeted", "targeted"), ("primary", "primary", "primary"), ("targeted", "primary", "primary")])
+def test_completed_reviews_require_distinct_reviewer_and_artifact_identity(risk, scopes):
+    plan = substantial_plan(risk)
+    for row, scope in zip(plan["reviews"], scopes):
+        row["scope"] = scope
     shared_evidence = plan["reviews"][0]["evidence"]
     shared_route = plan["reviews"][0]["route_receipt"]
     for row in plan["reviews"][:3]:
@@ -544,7 +619,9 @@ def test_targeted_reviews_require_distinct_reviewer_and_artifact_identity():
     assert any("distinct reviewer_id" in error for error in errors)
     assert any("distinct evidence" in error for error in errors)
     assert any("distinct route_receipt" in error for error in errors)
-    plan = substantial_plan()
+    plan = substantial_plan(risk)
+    for row, scope in zip(plan["reviews"], scopes):
+        row["scope"] = scope
     evidence_digest = plan["reviews"][0]["evidence"]["digest"]
     route_digest = plan["reviews"][0]["route_receipt"]["digest"]
     for index, row in enumerate(plan["reviews"][:3]):
@@ -556,15 +633,12 @@ def test_targeted_reviews_require_distinct_reviewer_and_artifact_identity():
 
 
 @pytest.mark.parametrize(("family", "tier"), (("openai", "flagship"), ("anthropic", "flagship")))
-def test_primary_family_recorded_omission_does_not_satisfy_distinct_family(family, tier):
+def test_chair_or_already_passing_family_blocker_does_not_cover_missing_family(family, tier):
     plan = substantial_plan("crucial")
     plan["reviews"].append(
         review("invalid-extra", "primary", "terminal-challenge", family, tier=tier, status="omitted", substitution_for="additional-distinct-family", wave=0)
     )
-    assert any(
-        "distinct-family review or recorded skip" in error
-        for error in run_dir_finalize._validate_review_plan(plan)
-    )
+    assert any("two non-chair families" in error for error in run_dir_finalize._validate_review_plan(plan))
 
 
 def test_recorded_distinct_family_skip_counts_regardless_of_tier():
@@ -1002,7 +1076,7 @@ def test_review_tier_accepts_tier_names(tier):
     assert not any("tier is invalid" in e or "flagship strength" in e for e in run_dir_finalize._validate_review_plan(plan))
 
 
-def test_review_tier_senior_is_not_flagship_strength():
+def test_review_tier_senior_does_not_require_flagship_strength():
     plan = substantial_plan()
     plan["reviews"][3]["tier"] = "senior"
-    assert any("flagship strength" in e for e in run_dir_finalize._validate_review_plan(plan))
+    assert run_dir_finalize._validate_review_plan(plan) == []

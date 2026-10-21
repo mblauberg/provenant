@@ -72,7 +72,7 @@ context
   -> authorised delivery profile
   -> deterministic evidence
   -> behavioural/domain evaluation where needed
-  -> independent multi-lens review
+  -> independent review under the HARNESS.md ladder
   -> bounded repair loop
   -> acceptance: objective checks plus tier-required review, or project landing
   -> [USER: explicit acceptance only for terminal or approved scope]
@@ -230,7 +230,8 @@ Required invariants:
 - authority may be narrowed by delegates but not broadened;
 - actual model/provider lineage is recorded when model work affects a gate;
 - reviewer independence is explicit;
-- distinct-family failure records a reason but cannot replace the other-primary gate;
+- passing independent review meets the `HARNESS.md` ladder; unavailable or omitted
+  cross-family coverage records a blocker reason, and failed legs never count;
 - acceptance and release are separate;
 - a profile validator may add requirements but not remove kernel invariants.
 
@@ -271,8 +272,8 @@ model verdict cannot be labelled reproducible.
 
 ### Multi-lens review
 
-Review selects non-overlapping lenses from correctness, specification
-alignment, security, privacy, performance, reliability/concurrency, state/type
+Review selects lenses proportional to the tier and surface from correctness,
+specification alignment, security, privacy, performance, reliability/concurrency, state/type
 boundaries, test/eval coverage, accessibility, evidence quality,
 readability/maintainability and structural simplification.
 
@@ -460,8 +461,8 @@ The lifecycle requirements remain satisfied when:
    record the actual route/model and raw numerator/denominator.
 10. Public-safety, deterministic harness tests, clean-install tests and context
     budgets pass.
-11. The other-primary reviewer and fresh targeted reviewers independently report
-    no unresolved blocking findings.
+11. Independent reviewers required by the `HARNESS.md` ladder report no
+    unresolved blocking findings.
 12. Objective checks and tier-required review meet delivery acceptance; the
     chair reports the outcome and the user may still reject it. Explicit user
     acceptance is required only for `terminal` work or when approved scope

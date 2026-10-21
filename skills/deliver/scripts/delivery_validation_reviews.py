@@ -20,8 +20,8 @@ from delivery_validation_common import (
 
 def _validate_route(
     review: dict[str, Any], linked: dict[str, Any], artifacts: dict[str, dict[str, Any]],
-    artifact_root: Path | None, verify_hashes: bool,
-) -> None:
+    artifact_root: Path | None, verify_hashes: bool, *, chair_family: str | None,
+) -> str:
     route_ref = _mapping(linked.get("route_receipt"), f"review {review.get('id')} route_receipt")
     route_path = _safe_path(route_ref.get("path"), f"review {review.get('id')} route path")
     route_digest = route_ref.get("digest")
@@ -33,7 +33,7 @@ def _validate_route(
     fail(route_artifact.get("digest") != route_digest, f"review {review.get('id')} route receipt digest is not bound")
     fail(review.get("route_receipt_digest") != route_digest, f"review {review.get('id')} route receipt digest is not bound")
     if artifact_root is None:
-        return
+        return review["provider_family"]
     target = (artifact_root / route_path).resolve()
     try:
         target.relative_to(artifact_root.resolve())
@@ -42,7 +42,7 @@ def _validate_route(
     if not target.is_file():
         if verify_hashes:
             raise Invalid(f"review {review.get('id')} route receipt is missing")
-        return
+        return review["provider_family"]
     raw = target.read_bytes()
     if verify_hashes:
         actual = "sha256:" + hashlib.sha256(raw).hexdigest()
@@ -58,11 +58,22 @@ def _validate_route(
         or route.get("reviewer_id") != review.get("reviewer_id")
         or route.get("resolved_model", route.get("model")) != review.get("model")
         or route.get("model_family") != review.get("provider_family")
-        or route.get("certification_eligible") is not True,
+        or not isinstance(route.get("provider_family"), str)
+        or not route.get("provider_family", "").strip()
+        or (
+            route.get("certification_eligible") is not True
+            and not (
+                route.get("certification_eligible") is False
+                and chair_family
+                and route.get("provider_family") == chair_family
+            )
+        ),
         f"review {review.get('id')} route receipt identity does not match review lineage",
     )
-    if review.get("role") == "other-primary":
-        fail(route.get("cross_family") is not True, "other-primary review requires a cross-family route receipt")
+    family = route["provider_family"].strip()
+    if family != chair_family:
+        fail(route.get("cross_family") is not True, "cross-family review requires a cross-family route receipt")
+    return family
 
 
 def _validate_reviews(
@@ -75,13 +86,19 @@ def _validate_reviews(
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
     reviews = []
+    families = []
     for index, raw in enumerate(_list(run.get("reviews"), "reviews")):
         item = _mapping(raw, f"reviews[{index}]")
         fail(item.get("status") not in {"pass", "failed", "unavailable", "skipped"}, f"review {index} status is invalid")
         fail(not item.get("provider_family") or not item.get("adapter") or not item.get("role"), f"review {index} lacks lineage")
         fail(item.get("role") not in REVIEW_ROLES, f"review {index} role is invalid")
         fail(item.get("independent_of_authorship") is not True, f"review {index} is not independent")
-        fail(not item.get("lenses"), f"review {index} requires lenses")
+        lenses = _list(item.get("lenses"), f"review {index} lenses")
+        fail(
+            not lenses or any(not isinstance(lens, str) or not lens.strip() for lens in lenses),
+            f"review {index} requires non-blank lenses",
+        )
+        family = item["provider_family"]
         if item.get("status") == "pass":
             fail(not item.get("model"), f"passing review {index} requires actual model identity")
             _identifier(item.get("reviewer_id"), f"review {index}.reviewer_id")
@@ -95,22 +112,29 @@ def _validate_reviews(
                 or lineage.get("model") != item.get("model"),
                 f"review {index} lineage does not match its evidence",
             )
-            _validate_route(item, linked, artifacts, artifact_root, verify_hashes)
+            family = _validate_route(
+                item, linked, artifacts, artifact_root, verify_hashes,
+                chair_family=run.get("chair_family"),
+            )
         else:
             fail(not item.get("reason"), f"non-passing review {index} requires reason")
         reviews.append(item)
-    optional = [item for item in reviews if item.get("role") == "distinct-family"]
-    fail(any(item.get("provider_family") in {"openai", "anthropic"} for item in optional), "distinct-family review must use a non-primary family")
+        families.append(family)
+    passing = [item for item in reviews if item.get("status") == "pass"]
+    fail(
+        len({item["reviewer_id"] for item in passing}) != len(passing),
+        "passing reviews require distinct reviewer_id values",
+    )
     if not required:
         return
     chair_family = run.get("chair_family")
     legs = []
-    for item in reviews:
+    for item, family in zip(reviews, families):
         role = item.get("role")
         ladder_role = "other-primary" if role == "other-primary" else "distinct-family" if role == "distinct-family" else "targeted"
         legs.append({
             "role": ladder_role,
-            "family": item.get("provider_family"),
+            "family": family,
             # The delivery-run schema calls an intentional omission "skipped";
             # normalize it to the shared review-plan ladder vocabulary.
             "status": "omitted" if item.get("status") == "skipped" else item.get("status"),

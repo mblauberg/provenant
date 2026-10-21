@@ -114,6 +114,7 @@ def route_receipt(
         "resolved_model": model,
         "catalog_model": "",
         "model_family": family,
+        "provider_family": family,
         "route_alias": "flagship",
         "cross_family": False,
         "certification_eligible": True,
@@ -810,7 +811,62 @@ def test_review_add_records_reasoned_skip_without_judgement_evidence(tmp_path):
     load_validator()._validate_reviews(receipt, {}, required=False)
 
 
-def test_validator_rechecks_other_primary_route_receipt_cross_family(tmp_path):
+@pytest.mark.parametrize(("model_family", "provider_family", "passes"), [
+    ("openai", "openai", True),
+    ("anthropic", "anthropic", False),
+    ("google", "openai", True),
+    ("openai", "anthropic", False),
+    ("openai", None, False),
+])
+def test_review_add_requires_certification_by_provider_lineage(tmp_path, model_family, provider_family, passes):
+    run_dir = initialise(tmp_path)
+    (tmp_path / "review.md").write_text("# Review\n\nClean.\n")
+    route = route_receipt(family=model_family)
+    route["certification_eligible"] = False
+    if provider_family is None:
+        del route["provider_family"]
+    else:
+        route["provider_family"] = provider_family
+    (tmp_path / "route.json").write_text(json.dumps(route))
+
+    result = run_cli(tmp_path, *review_args(run_dir, family=model_family))
+
+    if not passes:
+        assert result.returncode != 0
+        assert "route receipt identity" in result.stderr
+        return
+    assert result.returncode == 0, result.stderr
+    blocker = run_cli(
+        tmp_path, "review", "add", "--run-dir", str(run_dir),
+        "--id", "provider-down", "--role", "targeted", "--adapter", "claude",
+        "--provider-family", "anthropic", "--lens", "security",
+        "--status", "unavailable", "--reason", "provider quota",
+    )
+    assert blocker.returncode == 0, blocker.stderr
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    receipt["risk_tier"] = "substantial"
+    validator = load_validator()
+    validator._validate_reviews(
+        receipt, {item["id"]: item for item in receipt["evidence"]},
+        required=True, artifact_root=tmp_path, verify_hashes=True,
+    )
+
+    receipt["reviews"] = [item for item in receipt["reviews"] if item["status"] == "pass"]
+    with pytest.raises(validator.Invalid, match="recorded blocker"):
+        validator._validate_reviews(
+            receipt, {item["id"]: item for item in receipt["evidence"]},
+            required=True, artifact_root=tmp_path, verify_hashes=True,
+        )
+
+
+@pytest.mark.parametrize("role", ["targeted", "other-primary", "distinct-family"])
+@pytest.mark.parametrize(("field", "value", "error"), [
+    ("cross_family", False, "cross-family route receipt"),
+    ("provider_family", None, "identity does not match"),
+    ("provider_family", "", "identity does not match"),
+    ("provider_family", "   ", "identity does not match"),
+])
+def test_validator_rechecks_cross_family_route_lineage_regardless_of_role(tmp_path, role, field, value, error):
     run_dir = initialise(tmp_path)
     (tmp_path / "approval.json").write_text(
         '{"approved":true,"approver":"human-owner"}\n'
@@ -826,7 +882,7 @@ def test_validator_rechecks_other_primary_route_receipt_cross_family(tmp_path):
     route["cross_family"] = True
     (tmp_path / "route.json").write_text(json.dumps(route))
     added = run_cli(
-        tmp_path, *review_args(run_dir, role="other-primary", family="anthropic")
+        tmp_path, *review_args(run_dir, role=role, family="anthropic")
     )
     assert added.returncode == 0, added.stderr
 
@@ -835,7 +891,7 @@ def test_validator_rechecks_other_primary_route_receipt_cross_family(tmp_path):
     receipt = json.loads(receipt_path.read_text())
     validator.validate(receipt, ROOT, workspace_root=tmp_path, verify_hashes=True)
 
-    route["cross_family"] = False
+    route[field] = value
     raw = json.dumps(route).encode()
     (tmp_path / "route.json").write_bytes(raw)
     digest = digest_of(raw)
@@ -850,8 +906,48 @@ def test_validator_rechecks_other_primary_route_receipt_cross_family(tmp_path):
     )["route_receipt_digest"] = digest
     receipt_path.write_text(json.dumps(receipt))
 
-    with pytest.raises(validator.Invalid, match="cross-family route receipt"):
+    with pytest.raises(validator.Invalid, match=error):
         validator.validate(receipt, ROOT, workspace_root=tmp_path, verify_hashes=True)
+
+
+@pytest.mark.parametrize("provider_family", [None, "", "   "])
+def test_review_add_requires_non_blank_route_provider_family(tmp_path, provider_family):
+    run_dir = initialise(tmp_path)
+    (tmp_path / "review.md").write_text("# Review\n\nClean.\n")
+    route = route_receipt(family="anthropic")
+    route.update({"provider_family": provider_family, "cross_family": True})
+    (tmp_path / "route.json").write_text(json.dumps(route))
+
+    rejected = run_cli(tmp_path, *review_args(run_dir, family="anthropic"))
+
+    assert rejected.returncode != 0
+    assert "identity does not match" in rejected.stderr
+
+
+@pytest.mark.parametrize("role", ["targeted", "other-primary", "distinct-family"])
+def test_review_add_checks_cross_family_route_regardless_of_role(tmp_path, role):
+    run_dir = initialise(tmp_path)
+    (tmp_path / "review.md").write_text("# Review\n\nClean.\n")
+    (tmp_path / "route.json").write_text(json.dumps(route_receipt(family="anthropic")))
+
+    rejected = run_cli(tmp_path, *review_args(run_dir, role=role, family="anthropic"))
+
+    assert rejected.returncode != 0
+    assert "cross-family route receipt" in rejected.stderr
+    assert json.loads((run_dir / "RUN.json").read_text())["reviews"] == []
+
+
+def test_review_add_rejects_whitespace_only_lens(tmp_path):
+    run_dir = initialise(tmp_path)
+    (tmp_path / "review.md").write_text("# Review\n\nClean.\n")
+    (tmp_path / "route.json").write_text(json.dumps(route_receipt()))
+    args = review_args(run_dir)
+    args[-1] = "   "
+
+    rejected = run_cli(tmp_path, *args)
+
+    assert rejected.returncode != 0
+    assert "non-empty lens" in rejected.stderr
 
 
 def test_bounded_execution_times_out_and_truncates_output():

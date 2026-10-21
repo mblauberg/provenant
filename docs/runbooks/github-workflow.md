@@ -208,11 +208,10 @@ Authority V2 envelope must allowlist `api.github.com` tool egress and grant
 use-without-disclosure of the `github-cli-auth` secret reference; the binder
 never infers those grants from the operator's login.
 
-Merge authority is repo-based. Review pressure follows [`HARNESS.md`](../../HARNESS.md):
-targeted lenses plus the other-primary leg are load-bearing from substantial up;
-crucial work uses a distinct family when available, and terminal work adds
-stronger targeted/adversarial pressure with any skip recorded. This repository is a personal harness, not
-production: by user directive (2026-07-16), repository auto-merge is enabled
+Merge authority is repo-based. Review pressure follows the
+[`HARNESS.md` Review ladder](../../HARNESS.md#review-ladder), including its
+recorded-blocker fallback when cross-family review is unavailable. This
+repository is a personal harness, not production: by user directive (2026-07-16), repository auto-merge is enabled
 and agents merge directly. An agent merges a pull request once it has passed
 its tier's review pressure (routine: chair plus objective checks; substantial+
 uses the canonical ladder on the exact head) and

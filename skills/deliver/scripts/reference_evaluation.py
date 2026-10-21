@@ -405,6 +405,7 @@ def materialise_reference_run(
             "reviewer_id": reviewer_id,
             "resolved_model": "runtime-resolved",
             "model_family": family,
+            "provider_family": family,
             "cross_family": family == "anthropic",
             "certification_eligible": True,
         }, sort_keys=True) + "\n").encode()

@@ -188,8 +188,6 @@ def command_review_add(args: Any, api: dict[str, Any]) -> dict[str, Any]:
         raise receipt_error("review requires non-empty --adapter")
     if not args.provider_family:
         raise receipt_error("review requires non-empty --provider-family")
-    if args.role == "distinct-family" and args.provider_family in {"openai", "anthropic"}:
-        raise receipt_error("distinct-family review must use a non-primary family")
     if args.status == "pass":
         missing = [
             option for option in ("artifact", "route_receipt", "reviewer_id", "model")
@@ -211,7 +209,7 @@ def command_review_add(args: Any, api: dict[str, Any]) -> dict[str, Any]:
             for item in [*run.get("reviews", []), *run.get("evidence", [])]
         ):
             raise receipt_error(f"review id already exists: {review_id}")
-        if not args.lenses or any(not lens for lens in args.lenses):
+        if not args.lenses or any(not lens.strip() for lens in args.lenses):
             raise receipt_error("review requires at least one non-empty lens")
         if args.status != "pass":
             run["reviews"].append({
@@ -242,11 +240,21 @@ def command_review_add(args: Any, api: dict[str, Any]) -> dict[str, Any]:
             or route.get("reviewer_id") != args.reviewer_id
             or route.get("resolved_model", route.get("model")) != args.model
             or route.get("model_family") != args.provider_family
-            or route.get("certification_eligible") is not True
+            or not isinstance(route.get("provider_family"), str)
+            or not route.get("provider_family", "").strip()
+            or (
+                route.get("certification_eligible") is not True
+                and not (
+                    route.get("certification_eligible") is False
+                    and run.get("chair_family")
+                    and route.get("provider_family") == run.get("chair_family")
+                )
+            )
         ):
             raise receipt_error("route receipt identity does not match review lineage")
-        if args.role == "other-primary" and route.get("cross_family") is not True:
-            raise receipt_error("other-primary review requires a cross-family route receipt")
+        family = route["provider_family"].strip()
+        if family != run.get("chair_family") and route.get("cross_family") is not True:
+            raise receipt_error("cross-family review requires a cross-family route receipt")
         lineage = {
             "adapter": args.adapter, "provider_family": args.provider_family,
             "model": args.model,
