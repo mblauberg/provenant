@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -259,5 +261,22 @@ def main(argv: list[str] | None = None) -> int:
     return 0 if args.hook or not findings else 1
 
 
+def hook_main(argv: list[str] | None = None) -> int:
+    """Run main, but never block compaction: PreCompact treats exit 2 as a block."""
+    args = sys.argv[1:] if argv is None else argv
+    if "--hook" not in args:
+        return main(args)
+    stderr = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(stderr):
+            return main(args)
+    except SystemExit as exc:
+        detail = stderr.getvalue().strip().splitlines()[-1:] or [f"exit status {exc.code}"]
+        print(f"Checkpoint check: warning: {detail[0]}")
+    except Exception as exc:
+        print(f"Checkpoint check: warning: {exc}")
+    return 0
+
+
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(hook_main())

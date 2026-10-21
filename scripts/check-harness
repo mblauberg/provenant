@@ -214,7 +214,11 @@ if [[ "$DOCTOR" == true ]]; then
   elif cmp -s "$instance_agents" "$PRODUCT_ROOT/AGENTS.md"; then
     echo "instance-agents=ok"
   else
-    echo "instance-agents=WARN differs from $PRODUCT_ROOT/AGENTS.md; global CLAUDE.md and AGENTS.md are links to it, so review and copy or edit it"
+    echo "instance-agents=WARN differs from $PRODUCT_ROOT/AGENTS.md; global instructions (CLAUDE.md, AGENTS.md) point to it, so review and copy or edit it"
+  fi
+  claude_agents="${CLAUDE_CONFIG_DIR:-$HOME/.claude}/AGENTS.md"
+  if [[ -e "$claude_agents" || -L "$claude_agents" ]]; then
+    echo "claude-agents=WARN unexpected $claude_agents causes duplicate injection; CLAUDE.md is the single instruction file"
   fi
   if command -v herdr >/dev/null 2>&1; then
     herdr status server || true
