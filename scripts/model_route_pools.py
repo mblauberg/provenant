@@ -569,16 +569,31 @@ def describe(router: Any, catalog: dict[str, Any], availability: Availability,
             "synonyms": dict(sorted(catalog.get("route_synonyms", {}).items()))}
 
 
-def render(document: dict[str, Any]) -> str:
+def render(document: dict[str, Any], full: bool = False) -> str:
+    """Every pool; by default unavailable and cooling models collapse to one line."""
     lines = []
     for name, entries in document["routes"].items():
         lines.append(name)
+        hidden = 0
+        soonest = None
         for entry in entries:
+            if not full and entry["availability"] != "available":
+                # Keep the soonest recovery time and the pointer to the full list.
+                hidden += 1
+                if "cooling until " in entry["availability"]:
+                    until = entry["availability"].split("cooling until ", 1)[1]
+                    if soonest is None or until < soonest:
+                        soonest = until
+                continue
             model = entry["model"] + (f"@{entry['effort']}" if "effort" in entry else "")
             caveat = f"  [{', '.join(entry['traits'])}]" if "traits" in entry else ""
             if entry.get("quota", {}).get("state") == "deficit":
                 caveat += f"  [quota {entry['quota']['summary']}]"
             lines.append(f"  {model:<52} {str(entry['weight']):<8} {entry['availability']}{caveat}")
+        if hidden:
+            lines.append(f"  {hidden} unavailable or cooling"
+                         + (f"; soonest cooling until {soonest}" if soonest else "")
+                         + "; use --all")
     synonyms: dict[str, list[str]] = {}
     for alias, target in document["synonyms"].items():
         synonyms.setdefault(target, []).append(alias)

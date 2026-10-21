@@ -16,10 +16,13 @@ command contacts provider quota services on demand.
    status. Row counts refer to usage rows, except route health and cooldowns,
    where they refer to observations. Codex quota observations are reported
    separately by stats.
-3. Run `provenant stats --since 2026-10-21` (or add `--json`) for provider,
+3. Run `provenant stats --since 2026-10-21` (or add `--json` or `--detail`) for provider,
    adapter and model token totals, cache-read share, estimated cost, latest
    lane status, attempt outcomes, daily provider/account usage, daily limit
-   events and observed Codex quota windows. `--since` accepts an ISO date or
+   events and observed Codex quota windows. The default output is the summary
+   tables only; per-account rows (last limit events, quota observations) and
+   uncapped tables are behind `--detail`, and `--json` prints the full report.
+   `--since` accepts an ISO date or
    timestamp, inclusive; dates and daily buckets use UTC. Undated records are
    included only when no date filter is supplied. Stats reads the last ingest;
    it does not refresh sources.

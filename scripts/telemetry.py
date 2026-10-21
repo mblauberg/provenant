@@ -852,42 +852,74 @@ def compact(value):
 
 def table(headers, rows):
     cells = [[str(cell) for cell in row] for row in rows]
-    widths = [max(len(str(header)), *(len(row[i]) for row in cells)) for i, header in enumerate(headers)]
+    widths = [max([len(str(header)), *(len(row[i]) for row in cells)]) for i, header in enumerate(headers)]
     return [' '.join(str(cell).ljust(width) for cell, width in zip(row, widths)).rstrip()
             for row in [headers, *cells]]
 
 
-def render_stats(report):
+ROW_LIMIT = 12  # rows shown per table before `N more; use --detail/--json`
+
+
+def _nullable_compact(value):
+    return compact(value) if value is not None else None
+
+
+def bounded_table(headers, rows, limit=None):
+    """Render a table of nullable cells; columns missing in every row are dropped.
+
+    None prints as '-' and callers report an elided tail beyond `limit`, so no
+    identifier, status or next-step hint is lost.
+    """
+    shown = rows if limit is None else rows[:limit]
+    keep = [index for index, _ in enumerate(headers) if any(row[index] is not None for row in rows)]
+    cells = [[('-' if row[index] is None else str(row[index])) for index in keep] for row in shown]
+    return table(keep and [headers[index] for index in keep] or list(headers), cells)
+
+
+def render_stats(report, detail=False):
+    """Summary tables plus pointer lines by default; `--detail` adds the per-account ones."""
+    limit = None if detail else ROW_LIMIT
     lines = [f"Usage on {report['host']}" + (f" since {report['since']}" if report['since'] else '') +
              ': costs are API-equivalent USD estimates; - marks missing usage or prices.']
-    lines += table(('provider', 'adapter', 'model', 'rows', 'input', 'cache_read', 'cache_write',
-                    'output', 'reasoning', 'cache%', 'cost_usd', 'billing'),
-                   [(row['provider'] or '-', row['adapter'], row['model'], row['rows'],
-                     *(compact(row[field]) for field in TOKEN_FIELDS),
-                     '-' if row['cache_read_share'] is None else f"{row['cache_read_share']:.0%}",
-                     '-' if row['estimated_cost_usd'] is None else f"{row['estimated_cost_usd']:.2f}",
-                     row['billing'] or '-') for row in report['usage']])
-    if report['outcomes']:
+    lines += bounded_table(
+        ('provider', 'adapter', 'model', 'rows', 'input', 'cache_read', 'cache_write',
+         'output', 'reasoning', 'cache%', 'cost_usd', 'billing'),
+        [(row['provider'] or '-', row['adapter'], row['model'], row['rows'],
+          *(compact(row[field]) if row[field] is not None else None for field in TOKEN_FIELDS),
+          None if row['cache_read_share'] is None else f"{row['cache_read_share']:.0%}",
+          None if row['estimated_cost_usd'] is None else f"{row['estimated_cost_usd']:.2f}",
+          row['billing'] or '-') for row in report['usage']], limit)
+    if not detail and len(report['usage']) > ROW_LIMIT:
+        lines.append(f"{len(report['usage']) - ROW_LIMIT} more; use --detail/--json")
+    outcomes = [(f"{row['adapter']}/{row['model']}" + (f"@{row['effort']}" if row['effort'] else ''),
+                 row['task_class'] or '-', row['route'] or '-', row['lanes'],
+                 None if row['success_rate'] is None else f"{row['success_rate']:.0%}", row['retries'],
+                 ','.join(f'{name}:{count}' for name, count in row['error_classes'].items()) or '-',
+                 *map(_nullable_compact, (row['latency_p50_s'], row['latency_p90_s'],
+                                          row['output_tokens_per_s'])))
+                for row in report['outcomes']]
+    if outcomes:
         lines += ['', 'Outcomes by route (latest attempt per lane):']
-        lines += table(('route', 'task_class', 'alias', 'lanes', 'ok', 'retries', 'errors',
-                        'p50_s', 'p90_s', 'out_tok/s'),
-                       [(f"{row['adapter']}/{row['model']}" + (f"@{row['effort']}" if row['effort'] else ''),
-                         row['task_class'] or '-', row['route'] or '-', row['lanes'],
-                         '-' if row['success_rate'] is None else f"{row['success_rate']:.0%}", row['retries'],
-                         ','.join(f'{name}:{count}' for name, count in row['error_classes'].items()) or '-',
-                         compact(row['latency_p50_s']), compact(row['latency_p90_s']),
-                         compact(row['output_tokens_per_s'])) for row in report['outcomes']])
+        lines += bounded_table(
+            ('route', 'task_class', 'alias', 'lanes', 'ok', 'retries', 'errors',
+             'p50_s', 'p90_s', 'out_tok/s'), outcomes, limit)
+        if not detail and len(outcomes) > ROW_LIMIT:
+            lines.append(f"{len(outcomes) - ROW_LIMIT} more; use --detail/--json")
     for title, rows in (('Lanes', [(row['status'], row['error_class'] or '-', row['lanes']) for row in report['lanes']]),
                         ('Limit events', [(row['day'] or '-', row['provider'] or '-', row['status'], row['events'])
-                                          for row in report['limits_per_day'][-14:]]),
-                        ('Last limit events', [(row['provider'] or '-', row['account'] or 'unattributed',
-                                               row['timestamp'], f"{row['age_seconds']}s ago")
-                                              for row in report.get('last_limit_events', [])]),
-                        ('Latest quota observations', [(row['provider'] or '-', row['window'], f"{row['used_percent']:g}%",
-                                                        row['reset_at'] or '-', row['timestamp'] or '-')
-                                                       for row in report['quota_observations']])):
+                                          for row in report['limits_per_day'][-14:]])):
         if rows:
             lines += ['', f'{title}:', *('  ' + '  '.join(str(cell) for cell in row) for row in rows)]
+    # Per-account rows stay behind `--detail` in the default summary view.
+    if detail:
+        for title, rows in (('Last limit events', [(row['provider'] or '-', row['account'] or 'unattributed',
+                                                    row['timestamp'], f"{row['age_seconds']}s ago")
+                                                  for row in report.get('last_limit_events', [])]),
+                            ('Latest quota observations', [(row['provider'] or '-', row['window'], f"{row['used_percent']:g}%",
+                                                            row['reset_at'] or '-', row['timestamp'] or '-')
+                                                           for row in report['quota_observations']])):
+            if rows:
+                lines += ['', f'{title}:', *('  ' + '  '.join(str(cell) for cell in row) for row in rows)]
     if report['unattributed'] or report['excluded_rows']:
         lines += ['', 'Not attributed to a model: ' + '; '.join(
             f"{row['source']}/{row['adapter'] or '-'} rows={row['rows']}" for row in report['unattributed']) +
@@ -901,6 +933,7 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('command', choices=('ingest', 'sources', 'stats'))
     parser.add_argument('--json', action='store_true')
+    parser.add_argument('--detail', action='store_true')
     parser.add_argument('--since', type=str)
     parser.add_argument('--hosts', nargs='+', help='all or configured host names (stats only)')
     args = parser.parse_args(argv)
@@ -911,13 +944,15 @@ def main(argv=None):
             parser.error('--since applies only to stats')
         if args.hosts and args.command != 'stats':
             parser.error('--hosts applies only to stats')
+        if args.detail and args.command != 'stats':
+            parser.error('--detail applies only to stats')
         with connect() as db:
             if args.command == 'stats':
                 report = host_owner().collect(sys.modules[__name__], db, args.since, args.hosts) if args.hosts else stats(db, args.since)
                 if args.json:
                     print(json.dumps(report, indent=2))
                 else:
-                    render_stats(report)
+                    render_stats(report, detail=args.detail)
                 return 0
             rows = ingest(db) if args.command == 'ingest' else [
                 dict(row) for row in db.execute('SELECT * FROM sources ORDER BY source')]
