@@ -400,6 +400,19 @@ def test_lost_attempt_is_reported_as_a_provider_error(tmp_path):
     assert report['attempts'] == [{'status':'lost','error_class':'provider_error','attempts':1}]
 
 
+def test_cancelled_error_class_survives_ingestion_and_reporting(tmp_path):
+    write_json(tmp_path / '.agent-run/runs/run/tasks/lane/attempt-001/attempt.json', {
+        'run_id':'r','task_id':'lane','attempt':1,'state':'terminal','status':'cancelled',
+        'error_class':'cancelled','ended_at':'2026-10-21T01:00:00Z','cwd':'/repo',
+        'provenance':{'requested':{'adapter':'codex'},'resolved_model':'test'}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    result = cli(tmp_path, 'stats', '--json')
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report['lanes'] == [{'status':'cancelled','error_class':'cancelled','lanes':1}]
+    assert report['attempts'] == [{'status':'cancelled','error_class':'cancelled','attempts':1}]
+
+
 def test_unknown_token_fields_are_not_reported_as_zero(tmp_path):
     jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl', {
         'type':'assistant','timestamp':'2026-10-21T01:00:00Z',
