@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { join, sep } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -26,6 +26,22 @@ describe("scratchRoot", () => {
 
     expect(root.startsWith(agentRun + sep)).toBe(false);
     expect(root.split(sep)).not.toContain(".agent-run");
+    expect(root.startsWith(realpathSync("/tmp") + sep)).toBe(true);
+  });
+
+  it("ignores a TMPDIR symlink that resolves inside a .agent-run tree", () => {
+    const base = realpathSync(mkdtempSync(join("/tmp", "fake-lane-link-")));
+    cleanup.push(base);
+    const attemptTmp = join(base, ".agent-run/runs/attempt/tmp");
+    mkdirSync(attemptTmp, { recursive: true });
+    const link = join(base, "tmp-link");
+    symlinkSync(attemptTmp, link);
+    process.env.TMPDIR = link;
+
+    const root = scratchRoot("fabric-lean-");
+    cleanup.push(root);
+
+    expect(root.startsWith(realpathSync(attemptTmp) + sep)).toBe(false);
     expect(root.startsWith(realpathSync("/tmp") + sep)).toBe(true);
   });
 

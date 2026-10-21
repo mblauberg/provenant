@@ -9,7 +9,7 @@ import { join, resolve, sep } from "node:path";
  * fixed system temp path instead.
  */
 export function scratchRoot(prefix: string): string {
-  const preferred = resolve(tmpdir());
+  const preferred = realpathSync.native(resolve(tmpdir()));
   const base = preferred.split(sep).includes(".agent-run") ? "/tmp" : preferred;
   return realpathSync.native(mkdtempSync(join(base, prefix)));
 }

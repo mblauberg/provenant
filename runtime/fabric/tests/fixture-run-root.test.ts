@@ -1,4 +1,5 @@
-import { realpathSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, rmdirSync, symlinkSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import { assertFixtureRunRoot } from "../src/execution.js";
@@ -22,6 +23,26 @@ describe("assertFixtureRunRoot", () => {
       [{ model: "fixture" }],
       "/a/.agent-run/att/tmp",
     )).toThrow(/fixture run refused/u);
+  });
+
+  it("resolves a symlinked run root before checking the temp boundary", () => {
+    const tempRoot = mkdtempSync(join("/tmp", "fabric-fixture-link-"));
+    const projectRunParent = join(process.cwd(), ".agent-run");
+    const projectRunParentExisted = existsSync(projectRunParent);
+    const projectRunRoot = join(projectRunParent, `fixture-link-${Date.now()}`);
+    try {
+      mkdirSync(projectRunRoot, { recursive: true });
+      const link = join(tempRoot, "project-run");
+      symlinkSync(projectRunRoot, link);
+      expect(() => assertFixtureRunRoot(join(link, "runs"), [{ model: "fixture" }], tempRoot))
+        .toThrow(/acceptable temp root/u);
+    } finally {
+      rmSync(projectRunRoot, { recursive: true, force: true });
+      if (!projectRunParentExisted) {
+        try { rmdirSync(projectRunParent); } catch { /* another test may have populated it */ }
+      }
+      rmSync(tempRoot, { recursive: true, force: true });
+    }
   });
 
   it("allows a fixture run under the OS temp dir", () => {
