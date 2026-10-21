@@ -410,6 +410,11 @@ def _sbpl_filter(path, *, keep_leaf=False, canonical=False):
     return "(subpath " + _sbpl_string(path, keep_leaf=keep_leaf, canonical=canonical) + ")"
 
 
+def _sbpl_expand_counts(pattern: str) -> str:
+    """Spell out `[class]{n}`: Seatbelt regex has no counted repetition and silently matches nothing."""
+    return re.sub(r"(\[[^\]]+\])\{(\d+)\}", lambda match: match.group(1) * int(match.group(2)), pattern)
+
+
 def _sbpl_regex_escape(value):
     regex_metacharacters = set(r'.^$*+?()[]{}|\\"')
     return "".join("\\" + char if char in regex_metacharacters else char for char in value)
@@ -731,7 +736,7 @@ def _state_write_guards(home, state):
     rules += _sbpl_rule("allow", "file-write*", in_place, literal=True, canonical=True)
     for pattern in state.get("write_regex", ()):
         root = state.get("resolved_home", home)
-        rules += f'(allow file-write* (regex #"^{_sbpl_regex_escape(str(root))}/{pattern}$"))\n'
+        rules += f'(allow file-write* (regex #"^{_sbpl_regex_escape(str(root))}/{_sbpl_expand_counts(pattern)}$"))\n'
     rules += _sbpl_rule("deny", "file-write-create file-write-unlink", in_place, literal=True, canonical=True)
     for path in state.get("no_links", ()):
         # Nor a directory or FIFO at a file grant, which would hold or block what the CLI opens.
