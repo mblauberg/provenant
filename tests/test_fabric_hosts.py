@@ -1168,14 +1168,14 @@ class LaneLoopbackContracts(unittest.TestCase):
             with self.assertRaises(hosts.HostError) as error:
                 owner.client_call('dispatch', str(self.workspace), {**request,
                     'host': 'workshop', 'operation_id': 'outside-explicit'})
-            self.assertEqual(error.exception.code, 'worktree_invalid')
+            self.assertEqual(error.exception.code, 'invalid_project_path')
+            self.assertIn(str(outside), str(error.exception))
             with owner.database() as db:
                 self.assertIsNone(db.execute('SELECT id FROM writer_dispatches WHERE id=?',
                     ('outside-explicit',)).fetchone())
-            implicit = owner.client_call('dispatch', str(self.workspace), {
-                **request, 'operation_id': 'outside-implicit'})
-            self.assertTrue(implicit['local'])
-            self.assertEqual(implicit['fallback']['reason'], 'worktree_invalid')
+            with self.assertRaises(hosts.HostError) as implicit:
+                owner.client_call('dispatch', str(self.workspace), {**request, 'operation_id': 'outside-implicit'})
+            self.assertEqual(implicit.exception.code, 'invalid_project_path')
 
     def dispatch_from(self, chair, **request):
         process = subprocess.run([str(ROOT / 'scripts/fabric-hosts'), 'lane'],
@@ -1214,6 +1214,33 @@ class LaneLoopbackContracts(unittest.TestCase):
             self.assertTrue(launched['id'].endswith('@workshop'), launched)
         finally:
             self.client('cancel', id=launched['id'], operation_id='stop-mapped')
+
+    def test_remote_cwd_outside_every_registered_project_is_refused_naming_path_and_host(self):
+        self.writer_fixture()
+        outside = self.local_home / 'Repos/unregistered'
+        outside.mkdir()
+        subprocess.run(['git', 'init', '-q', str(outside)], check=True)
+        refused = self.dispatch_from(self.workspace, host='workshop', adapter='codex', model='fixture',
+            prompt='x', mode='read_only', cwd=str(outside), operation_id='outside-project')
+        self.assertEqual(refused['error'], 'invalid_project_path', refused)
+        self.assertIn(str(outside), refused['fix'])
+        self.assertIn('workshop', refused['fix'])
+
+    def test_project_registered_locally_but_missing_on_the_peer_is_refused_naming_the_host(self):
+        git, _, _ = self.writer_fixture()
+        other = self.local_home / 'Repos/localonly'
+        other.mkdir()
+        subprocess.run(['git', 'init', '-q', str(other)], check=True)
+        git(other, 'commit', '-q', '--allow-empty', '-m', 'base')
+        path = self.local_home / '.agents/.agent-fabric/hosts.json'
+        config = json.loads(path.read_text())
+        config['projects']['Repos/localonly'] = {}
+        path.write_text(json.dumps(config))
+        refused = self.dispatch_from(self.workspace, host='workshop', adapter='codex', model='fixture',
+            prompt='x', mode='read_only', cwd=str(other), operation_id='missing-on-peer')
+        self.assertEqual(refused['status'], 'rejected', refused)
+        self.assertIn('workshop', json.dumps(refused))
+        self.assertIn('Repos/localonly', json.dumps(refused))
 
     def test_unplaceable_project_error_names_the_checked_path_and_host(self):
         self.writer_fixture()
