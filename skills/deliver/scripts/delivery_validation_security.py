@@ -8,9 +8,9 @@ import math
 from pathlib import Path
 from typing import Any
 
-from delivery_run_shape import release_approved, run_closed
+from delivery_run_shape import acceptance_approved, release_approved, run_closed
 from delivery_validation_common import (
-    AGENTIC_RISKS, _list, _mapping, _utc, fail,
+    AGENTIC_RISKS, _list, _mapping, _policy_validation_module, _utc, fail,
 )
 
 def _validate_security(run: dict[str, Any], registry: dict[str, Any], profile: dict[str, Any], artifacts: dict[str, dict[str, Any]], evidence: dict[str, dict[str, Any]], *, required: bool, product_root: Path) -> None:
@@ -74,6 +74,49 @@ def _validate_security(run: dict[str, Any], registry: dict[str, Any], profile: d
             else:
                 fail(not item.get("reason"), "agentic risk not_applicable requires reason")
 
+def _validate_acceptance(run: dict[str, Any], evidence: dict[str, dict[str, Any]],
+                         profile: dict[str, Any], artifacts: dict[str, dict[str, Any]]) -> None:
+    intent = _mapping(run.get("intent"), "intent")
+    fail("requires_user_acceptance" in intent and not isinstance(intent["requires_user_acceptance"], bool),
+         "intent.requires_user_acceptance must be boolean")
+    required = run.get("risk_tier") == "terminal" or intent.get("requires_user_acceptance") is True
+    human = _mapping(run["human_gates"].get("acceptance"), "human_gates.acceptance")
+    if acceptance_approved(run) and required:
+        fail(human.get("status") != "approved", "explicit human acceptance is required by the tier or approved scope")
+    if "delivery_acceptance" not in run:
+        return
+    acceptance = _mapping(run["delivery_acceptance"], "delivery_acceptance")
+    fail(set(acceptance) != {"basis", "evidence_ids"}, "delivery acceptance fields are invalid")
+    basis = acceptance.get("basis")
+    fail(not isinstance(basis, str) or basis not in {"checks-and-review", "project-landing", "user"}, "delivery acceptance basis is invalid")
+    ids = _list(acceptance.get("evidence_ids"), "delivery acceptance evidence_ids")
+    fail(not ids or any(not isinstance(item, str) for item in ids), "delivery acceptance requires evidence IDs")
+    fail(len(set(ids)) != len(ids), "delivery acceptance evidence IDs must be unique")
+    linked = [evidence.get(item) for item in ids]
+    fail(any(not item or item.get("status") != "pass" for item in linked), "delivery acceptance must link passing evidence")
+    if basis == "user":
+        fail(human.get("status") != "approved" or human.get("evidence") not in ids,
+             "user acceptance must bind the approved human acceptance evidence")
+    else:
+        fail(not any(item.get("kind") == "deterministic" for item in linked),
+             "delivery acceptance requires deterministic evidence")
+        fail(any(item.get("kind") not in {"deterministic", "judgement"} for item in linked),
+             "non-human acceptance must bind checks and review evidence")
+        if basis == "project-landing":
+            fail(not run.get("software_delivery") and not any(
+                item.get("kind") == "deterministic" and item.get("gate") == "project-landing" for item in linked
+            ), "project landing acceptance requires bound landing evidence")
+
+    requirements = _policy_validation_module().profile_evidence_requirements(profile, artifacts)
+    for kind in ("deterministic", "judgement"):
+        gates = {item.get("gate") for item in linked if item.get("kind") == kind}
+        fail(not set(requirements[kind]) <= gates,
+             f"delivery acceptance must bind profile {kind} evidence")
+    review_ids = {item.get("evidence_id") for item in run["reviews"]
+                  if isinstance(item, dict) and item.get("status") == "pass"}
+    fail(not review_ids <= set(ids), "delivery acceptance must bind passing review evidence")
+
+
 def _validate_gates_observation(run: dict[str, Any], evidence: dict[str, dict[str, Any]]) -> None:
     gates = _mapping(run.get("human_gates"), "human_gates")
     acceptance = _mapping(gates.get("acceptance"), "human_gates.acceptance")
@@ -87,8 +130,8 @@ def _validate_gates_observation(run: dict[str, Any], evidence: dict[str, dict[st
     released = release_approved(run)
     closed = run_closed(run)
     fail(
-        released and acceptance.get("status") != "approved",
-        "release approval requires recorded human acceptance",
+        released and not acceptance_approved(run),
+        "release approval requires recorded delivery acceptance",
     )
     observation = run.get("observation")
     fail(not isinstance(observation, dict), "observation contract is required")

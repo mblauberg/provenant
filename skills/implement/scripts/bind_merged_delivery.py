@@ -125,6 +125,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--pr-number", type=int, required=True)
     parser.add_argument("--review-artifact", type=Path, action="append", required=True)
     parser.add_argument("--product-root", type=Path, default=PRODUCT_ROOT)
+    parser.add_argument("--accept-as-project-landing", action="store_true",
+                        help="record acceptance when the project names this landing gate")
     args = parser.parse_args(argv)
     resolved_product_root = args.product_root.resolve()
     git_evidence.cache_clear()
@@ -145,10 +147,9 @@ def main(argv: list[str] | None = None) -> int:
             run = json.loads(receipt.read_text())
             preflight(run, receipt, workspace, validator, resolved_product_root)
             fail(run.get("profile") != "software", "receipt profile must be software")
-            acceptance = run.get("human_gates", {}).get("acceptance", {})
             fail(
-                acceptance.get("status") == "approved",
-                "merge evidence must be bound before human acceptance is recorded",
+                validator.acceptance_approved(run),
+                "merge evidence must be bound before delivery acceptance is recorded",
             )
             fail(run.get("software_delivery") is not None, "receipt already has a software_delivery binding")
 
@@ -222,10 +223,22 @@ def main(argv: list[str] | None = None) -> int:
                 "canonical_artifact_id": "merged-source", "pull_request_artifact_id": "github-pr",
                 "ci_artifact_id": "github-ci", "review_artifact_ids": review_ids,
             }
+            requires_user = (run["risk_tier"] == "terminal"
+                             or run["intent"].get("requires_user_acceptance") is True)
+            accepted = args.accept_as_project_landing and not requires_user
+            if accepted:
+                run["delivery_acceptance"] = {
+                    "basis": "project-landing",
+                    "evidence_ids": [item["id"] for item in run["evidence"]
+                                     if item.get("kind") in {"deterministic", "judgement"}
+                                     and item.get("status") == "pass"],
+                }
             run["checkpoint"].update({
                 "generation": run["checkpoint"]["generation"] + 1,
-                "current_slice": "awaiting-acceptance",
-                "next_action": "request human acceptance of the exact merged artifact",
+                "current_slice": "accepted" if accepted else "awaiting-acceptance",
+                "next_action": ("report project-landing acceptance" if accepted else
+                                "request explicit human acceptance" if requires_user else
+                                "record checks-and-review or project-landing acceptance"),
             })
 
             target_dir = workspace / evidence_dir

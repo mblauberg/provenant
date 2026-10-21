@@ -19,7 +19,7 @@
 //                       guarding on a clean target worktree + `git apply --check` before each apply;
 //                       HIGH-risk patches (and any that drift / fail --check) are left validated +
 //                       with a written recommendation for a separate approve-then-apply step. The run
-//   8. human-gate    -> machine work ends awaiting explicit human acceptance.
+//   8. acceptance    -> checks and required review complete ordinary work; terminal/scoped work needs user acceptance.
 //
 // Concrete models are resolved once at bootstrap from durable aliases; later stages receive them.
 //   bulk read / convention sniff / grep-map      -> cheap tier (intent)
@@ -30,7 +30,7 @@
 
 export const meta = {
   name: 'implement-run',
-  description: 'Use for an approved ordinary software change with acceptance criteria, as a Claude workflow over the implement skill (routed build, independent review, bounded repair, serial apply, human gate). Not for unresolved requirements or tiny edits; use scope or implement directly.',
+  description: 'Use for an approved ordinary software change with acceptance criteria, as a Claude workflow over the implement skill (routed build, independent review, bounded repair, serial apply, evidence-based acceptance). Not for unresolved requirements or tiny edits; use scope or implement directly.',
   whenToUse: 'an approved ordinary software change with acceptance criteria; unresolved requirements route to scope',
   phases: [
     { title: 'Bootstrap' },
@@ -61,7 +61,7 @@ const RISK_TIERS = Object.freeze(['routine', 'substantial', 'crucial', 'terminal
 const BOOTSTRAP_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['runDir', 'repoRoot', 'gitCwd', 'baseRevision', 'effectiveRisk', 'riskPreflightPassed', 'conventions', 'modelRoutes'],
+  required: ['runDir', 'repoRoot', 'gitCwd', 'baseRevision', 'effectiveRisk', 'riskPreflightPassed', 'requiresUserAcceptance', 'conventions', 'modelRoutes'],
   properties: {
     runDir: { type: 'string', description: 'Absolute path returned by run_dir_init.sh' },
     repoRoot: { type: 'string', description: 'Absolute path to the project root the task targets' },
@@ -72,6 +72,7 @@ const BOOTSTRAP_SCHEMA = {
     baseRevision: { type: 'string', description: 'Git HEAD captured before any source mutation' },
     effectiveRisk: { type: 'string', enum: ['substantial', 'crucial', 'terminal'] },
     riskPreflightPassed: { type: 'boolean' },
+    requiresUserAcceptance: { type: 'boolean', description: 'Whether the approved scope requires explicit user acceptance' },
     conventions: {
       type: 'object',
       additionalProperties: false,
@@ -245,7 +246,7 @@ const COUNCIL_REDUCTION_SCHEMA = {
 const APPLY_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['applied', 'escalated', 'manifestPath', 'recommendationPath', 'runPath', 'machineGatePassed'],
+  required: ['applied', 'escalated', 'manifestPath', 'recommendationPath', 'runPath', 'machineGatePassed', 'acceptanceBasis'],
   properties: {
     applied: {
       type: 'array',
@@ -274,6 +275,7 @@ const APPLY_SCHEMA = {
     manifestPath: { type: 'string', description: 'Run-dir MANIFEST.md' },
     recommendationPath: { type: 'string', description: 'Run-dir file with the human approve-then-apply recommendation' },
     runPath: { type: 'string', description: 'Run-dir RUN.json lifecycle receipt' },
+    acceptanceBasis: { type: 'string', enum: ['', 'checks-and-review', 'project-landing', 'user'] },
     machineGatePassed: { type: 'boolean' },
   },
 }
@@ -381,6 +383,8 @@ const runIdClause = runId
   : 'No run id was supplied: derive a UNIQUE one yourself (you have a shell + clock, the script does ' +
     'not), e.g. implement-$(date +%Y%m%d-%H%M%S), so the run dir is empty for run_dir_init.sh.'
 const boot = await agent(
+  `Read the approved scope for requiresUserAcceptance (explicit input: ${args.requiresUserAcceptance === true}). ` +
+    `If required, initialise intent.requires_user_acceptance=true using --requires-user-acceptance; return requiresUserAcceptance truthfully. ` +
   'Bootstrap a dynamic-workflow run.\n' +
     `1. For a Git project, run git rev-parse --path-format=absolute --git-common-dir from the target worktree, then take the parent of that directory as the WORKSPACE ROOT (the primary checkout). ` +
     `For a non-Git project use its workspace root. ` +
@@ -427,12 +431,14 @@ const models = boot.modelRoutes
 const effectiveRisk = boot.effectiveRisk
 if (
   !boot.riskPreflightPassed
+  || typeof boot.requiresUserAcceptance !== 'boolean'
   || !['substantial', 'crucial', 'terminal'].includes(effectiveRisk)
   || RISK_TIERS.indexOf(effectiveRisk) < RISK_TIERS.indexOf(minimumRisk)
 ) {
   log('Risk/authority preflight failed or returned a tier below the requested floor. No source mutation is authorised.')
   return
 }
+const requiresExplicitAcceptance = effectiveRisk === 'terminal' || boot.requiresUserAcceptance === true || args.requiresUserAcceptance === true
 const maxRepairCycles = REPAIR_BUDGETS[effectiveRisk]
 log(`Run dir: ${runDir} | repo: ${boot.repoRoot} | test lane: ${conv.testLane || '(none found)'}`)
 
@@ -767,11 +773,17 @@ const apply = await agent(
     `return machineGatePassed=false, and do not pretend the final implementation gate ran. ` +
     `For non-terminal runs only, after all patch apply/escalate decisions and narrow re-checks, use the delivery producer to bind the approved design, declared artifacts, ` +
     `deterministic evidence, applicable assurance rows and review records. Record repairs through the producer, then set checkpoint ` +
-    `current_slice=human-gate/next_action=request explicit human acceptance/in_flight=[] and current artifact paths. ` +
+    `current_slice=verification/next_action=record the appropriate acceptance basis/in_flight=[] and current artifact paths. ` +
+    `Explicit user acceptance required by tier/approved scope: ${requiresExplicitAcceptance}. ` +
+    `When required, keep checkpoint current_slice=human-gate/next_action=request explicit human acceptance. ` +
+    `Otherwise, only after every patch is applied, no escalation remains and all checks/reviews pass, run ` +
+    `delivery_receipt.py accept --run-dir "${runDir}" --basis checks-and-review --evidence <passing-check-id> --evidence <passing-review-id> ` +
+    `repeating --evidence for every required profile check and passing review, using the installed producer. It validates live evidence before recording acceptance. Return acceptanceBasis=checks-and-review only after it succeeds; ` +
+    `set checkpoint current_slice=accepted/next_action=report acceptance/in_flight=[]. ` +
     `Keep human_gates.acceptance.status=pending; only explicit human acceptance may set that gate to approved. ` +
     `Then run the global session context_audit.py read-only; retain its recovery artifacts and record session results in the separate RUN_RECEIPT, never in RUN.json. Never remove unknown or pre-existing files. ` +
     `Update ${runDir}/RUN_RECEIPT.json task/owner, artifact retention and owned/handed-off pane fields; leave its ` +
-    `status=active while this change awaits human acceptance. Set review_plan.concurrency_ceiling=${REVIEW_ANGLES.length} to match the configured review wave. Record unresolved blockers and every reviewer lane ` +
+    `status=ok for accepted ordinary work, otherwise status=active while a real decision remains. Set review_plan.concurrency_ceiling=${REVIEW_ANGLES.length} to match the configured review wave. Record unresolved blockers and every reviewer lane ` +
     `including failures. Every complete review_plan row must preserve its explicit wrapper verdict and the ` +
     `exact worker/provider REVIEW_SCHEMA object at the existing dispatcher output_path, retaining its ` +
     `run-relative path and sha256 digest as terminal_result alongside the dispatcher route receipt's observed exit and ` +
@@ -815,7 +827,9 @@ if (effectiveRisk === 'terminal' && appliedN === 0 && escalatedN > 0) {
     recommendation: apply.recommendationPath, runReceipt: apply.runPath, machineGatePassed: false,
   }
 }
-if (!apply || !apply.machineGatePassed) {
+if (!apply || !apply.machineGatePassed || !checksPass || blocking > 0 || !otherPrimaryRan ||
+    (!requiresExplicitAcceptance && escalatedN === 0 &&
+     !['checks-and-review', 'project-landing'].includes(apply.acceptanceBasis))) {
   await failRun(apply ? 'machine lifecycle gate failed' : 'serial apply returned no result')
   phase('Human gate')
   log('Machine gate FAILED. The run is terminal failed with recovery evidence; do not present it for acceptance.')
@@ -841,7 +855,13 @@ if (!apply || !apply.machineGatePassed) {
 }
 
 phase('Human gate')
-log('Machine work is awaiting human acceptance. Do not mark the change complete until the human approves it.')
+const patchIdentity = patch => JSON.stringify([patch.patchPath, [...patch.targetFiles].sort()])
+const expectedPatches = built.patches.map(patchIdentity).sort()
+const appliedPatches = apply.applied.map(patchIdentity).sort()
+const appliedMatch = new Set(appliedPatches).size === appliedPatches.length &&
+  JSON.stringify(expectedPatches) === JSON.stringify(appliedPatches)
+const complete = !requiresExplicitAcceptance && escalatedN === 0 && appliedMatch
+log(complete ? 'Checks and required review meet acceptance; the chair reports completion and the user may reject it.' : 'A user acceptance or apply decision remains pending.')
 
 return {
   task,
@@ -854,7 +874,8 @@ return {
   otherPrimaryReviewRan: otherPrimaryRan,
   distinctFamilyReviewRan: distinctFamilyRan,
   repairCycles,
-  state: 'awaiting-human',
+  state: complete ? 'complete' : 'awaiting-human',
+  acceptanceBasis: complete ? apply.acceptanceBasis : '',
   applied: appliedN,
   escalated: escalatedN,
   manifest: apply ? apply.manifestPath : `${runDir}/MANIFEST.md`,

@@ -461,6 +461,9 @@ def test_producer_run_reaches_a_validator_clean_closed_receipt(tmp_path):
 
     close_run(tmp_path, run_dir)
 
+    assert json.loads((run_dir / "RUN.json").read_text())["delivery_acceptance"] == {
+        "basis": "user", "evidence_ids": ["tests", "review-1", "acceptance-approval"],
+    }
     closed = validate(run_dir, tmp_path)
     assert closed.returncode == 0, closed.stderr + closed.stdout
     receipt = json.loads((run_dir / "RUN.json").read_text())
@@ -1145,3 +1148,33 @@ def test_bounded_execution_closes_resources_when_termination_raises(
     assert selectors[0].closed
     assert processes[0].stdout is not None and processes[0].stdout.closed
     assert processes[0].stderr is not None and processes[0].stderr.closed
+
+
+def test_ordinary_acceptance_is_validated_and_freezes_bound_sections(tmp_path):
+    run_dir = deliver_run(tmp_path)
+    command = ("accept", "--run-dir", str(run_dir), "--basis", "checks-and-review",
+               "--evidence", "tests", "--evidence", "review-1")
+    before = (run_dir / "RUN.json").read_bytes()
+    refused = run_cli(tmp_path, *command)
+    assert refused.returncode != 0
+    assert (run_dir / "RUN.json").read_bytes() == before
+    reference = load(ROOT / "skills/deliver/scripts/reference_runs.py", "accept_reference")
+    measures = reference.make_reference_run("software", ROOT)["measures"]
+    (tmp_path / "measures.json").write_text(json.dumps(measures))
+    assert run_cli(tmp_path, "bind", "--run-dir", str(run_dir), "--section", "measures",
+                   "--from", "measures.json").returncode == 0
+    accepted = run_cli(tmp_path, *command)
+    assert accepted.returncode == 0, accepted.stderr
+    run = json.loads((run_dir / "RUN.json").read_text())
+    assert run["delivery_acceptance"]["basis"] == "checks-and-review"
+    assert run["human_gates"]["acceptance"]["status"] == "pending"
+    assert run["human_gates"]["release"]["status"] == "pending"
+    assert validate(run_dir, tmp_path).returncode == 0
+    for section in ("measures", "assurance-plan", "security-plan", "software-delivery"):
+        (tmp_path / "replacement.json").write_text('{}')
+        changed = run_cli(tmp_path, "bind", "--run-dir", str(run_dir), "--section", section,
+                          "--from", "replacement.json")
+        assert changed.returncode == 1
+        assert "gate is already closed" in changed.stderr
+    refused = run_cli(tmp_path, *command[:-1], "missing")
+    assert refused.returncode == 1
