@@ -68,6 +68,8 @@ behaviour, actual provider/model/fallback receipts, credential isolation and
 task-local objective evaluation before advisory use. Open models do not satisfy
 a mandatory other-primary gate under the current constitution.
 
+Superseded 2026-10-21: the mandatory other-primary ladder above is historical; [`HARNESS.md`](../../HARNESS.md#review-ladder) now governs review coverage.
+
 ## Unknowns
 
 - OpenCode account, quota and fallback availability at the point of use, plus

@@ -239,20 +239,21 @@ scan/extract stages to the `junior` tier and reserve `principal` for synthesis/a
 
 ## Adaptive review topology
 
-Review pressure follows the current `HARNESS.md` ladder. Substantial work uses
-multiple targeted lenses and one strong other-primary review. Targeted lenses
-may use smaller models; their briefs must differ by failure surface. Crucial work
-uses a distinct family when available. Terminal work adds stronger targeted and
-adversarial pressure, and any skipped distinct-family leg records its reason.
+Review pressure follows the [`HARNESS.md` Review ladder](../../../HARNESS.md#review-ladder).
+Routine work uses the chair and objective checks. Substantial work adds one
+passing independent review, preferably cross-family. Crucial work needs at least
+two passing reviews with distinct lens sets and two non-chair families when
+available. Terminal work adds an adversarial lens to crucial coverage.
 
-The chair schedules these legs under a per-run configurable concurrency ceiling
+When passing reviews lack the required cross-family coverage, record an
+unavailable or omitted leg with a non-empty reason. Substantial fallback also
+requires a passing same-family review with a lens. A failed leg never supplies
+coverage or a blocker record; receipt roles do not determine coverage.
+
+The chair schedules reviews under a per-run configurable concurrency ceiling
 and may sequence them around deterministic checks. It need not wait for a
-particular model. A missing distinct-family leg requires an omitted-leg reason;
-the other-primary leg is expected at substantial and above. A skipped or
-unavailable leg records a reason and is covered by same-family targeted review
-with a distinct lens. Overlap creates
-defect pressure, not votes; objective checks and source evidence remain
-authoritative.
+particular model. Overlap creates defect pressure, not votes; objective checks
+and source evidence remain authoritative.
 
 Express chains by **role → tier/family**, resolving names at runtime:
 

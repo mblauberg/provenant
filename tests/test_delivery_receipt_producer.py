@@ -114,6 +114,7 @@ def route_receipt(
         "resolved_model": model,
         "catalog_model": "",
         "model_family": family,
+        "provider_family": family,
         "route_alias": "flagship",
         "cross_family": False,
         "certification_eligible": True,
@@ -808,6 +809,54 @@ def test_review_add_records_reasoned_skip_without_judgement_evidence(tmp_path):
     assert receipt["reviews"][-1]["reason"] == "provider quota unavailable"
     assert not any(item["id"] == "distinct-family-skip" for item in receipt["evidence"])
     load_validator()._validate_reviews(receipt, {}, required=False)
+
+
+@pytest.mark.parametrize(("model_family", "provider_family", "passes"), [
+    ("openai", "openai", True),
+    ("anthropic", "anthropic", False),
+    ("google", "openai", True),
+    ("openai", "anthropic", False),
+    ("openai", None, False),
+])
+def test_review_add_requires_certification_by_provider_lineage(tmp_path, model_family, provider_family, passes):
+    run_dir = initialise(tmp_path)
+    (tmp_path / "review.md").write_text("# Review\n\nClean.\n")
+    route = route_receipt(family=model_family)
+    route["certification_eligible"] = False
+    if provider_family is None:
+        del route["provider_family"]
+    else:
+        route["provider_family"] = provider_family
+    (tmp_path / "route.json").write_text(json.dumps(route))
+
+    result = run_cli(tmp_path, *review_args(run_dir, family=model_family))
+
+    if not passes:
+        assert result.returncode != 0
+        assert "route receipt identity" in result.stderr
+        return
+    assert result.returncode == 0, result.stderr
+    blocker = run_cli(
+        tmp_path, "review", "add", "--run-dir", str(run_dir),
+        "--id", "provider-down", "--role", "targeted", "--adapter", "claude",
+        "--provider-family", "anthropic", "--lens", "security",
+        "--status", "unavailable", "--reason", "provider quota",
+    )
+    assert blocker.returncode == 0, blocker.stderr
+    receipt = json.loads((run_dir / "RUN.json").read_text())
+    receipt["risk_tier"] = "substantial"
+    validator = load_validator()
+    validator._validate_reviews(
+        receipt, {item["id"]: item for item in receipt["evidence"]},
+        required=True, artifact_root=tmp_path, verify_hashes=True,
+    )
+
+    receipt["reviews"] = [item for item in receipt["reviews"] if item["status"] == "pass"]
+    with pytest.raises(validator.Invalid, match="recorded blocker"):
+        validator._validate_reviews(
+            receipt, {item["id"]: item for item in receipt["evidence"]},
+            required=True, artifact_root=tmp_path, verify_hashes=True,
+        )
 
 
 def test_validator_rechecks_other_primary_route_receipt_cross_family(tmp_path):

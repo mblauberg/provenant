@@ -772,16 +772,26 @@ def test_validator_requires_route_receipt_for_passing_review():
         module.validate(candidate, ROOT)
 
 
-def test_substantial_run_requires_design_and_targeted_other_primary_review_lanes():
+def test_substantial_run_requires_design_and_one_passing_review():
     module = load_validator()
     candidate = fixture("research")
     candidate["design"]["status"] = "not-required"
     with pytest.raises(module.Invalid, match="design"):
         module.validate(candidate, ROOT)
     candidate = fixture("research")
-    candidate["reviews"] = [review for review in candidate["reviews"] if review["provider_family"] != "anthropic"]
-    with pytest.raises(module.Invalid, match="other-primary"):
+    candidate["reviews"] = []
+    with pytest.raises(module.Invalid, match="passing independent leg"):
         module.validate(candidate, ROOT)
+
+
+@pytest.mark.parametrize("role", ["targeted", "other-primary"])
+def test_substantial_accepts_one_cross_family_review_in_existing_roles(role):
+    module = load_validator()
+    candidate = fixture("research")
+    review = candidate["reviews"][1]
+    review["role"] = role
+    candidate["reviews"] = [review]
+    module._validate_reviews(candidate, {item["id"]: item for item in candidate["evidence"]}, required=True)
 
 
 def test_review_ladder_accepts_targeted_lenses_without_whole_change_leg():
@@ -842,7 +852,7 @@ def test_terminal_review_ladder_requires_adversarial_pressure_not_fixed_provider
         )
 
 
-def test_same_family_other_primary_review_is_blocked():
+def test_same_family_legacy_role_needs_a_recorded_blocker():
     module = load_validator()
     candidate = fixture("research")
     candidate["chair_family"] = "openai"
@@ -852,7 +862,8 @@ def test_same_family_other_primary_review_is_blocked():
     other_primary["adapter"] = targeted["adapter"]
     other_primary["model"] = targeted["model"]
     other_primary["evidence_id"] = targeted["evidence_id"]
-    with pytest.raises(module.Invalid, match="distinct primary family"):
+    candidate["reviews"] = [targeted, other_primary]
+    with pytest.raises(module.Invalid, match="cross-family coverage or a recorded blocker"):
         module.validate(candidate, ROOT)
 
 
@@ -871,7 +882,7 @@ def test_crucial_review_ladder_blocks_with_no_distinct_family_or_recorded_skip()
     candidate["reviews"] = [
         review for review in candidate["reviews"] if review["role"] != "distinct-family"
     ]
-    with pytest.raises(module.Invalid, match="distinct-family review or recorded skip"):
+    with pytest.raises(module.Invalid, match="two non-chair families or a recorded blocker"):
         module._validate_reviews(
             candidate,
             {item["id"]: item for item in candidate["evidence"]},
@@ -887,7 +898,7 @@ def test_terminal_review_ladder_blocks_with_no_distinct_family_or_recorded_skip(
         review for review in candidate["reviews"] if review["role"] != "distinct-family"
     ]
     candidate["reviews"][0]["lenses"] = ["correctness", "reliability", "adversarial"]
-    with pytest.raises(module.Invalid, match="distinct-family review or recorded skip"):
+    with pytest.raises(module.Invalid, match="two non-chair families or a recorded blocker"):
         module._validate_reviews(
             candidate,
             {item["id"]: item for item in candidate["evidence"]},

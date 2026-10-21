@@ -23,6 +23,24 @@ targeted and adversarial pressure and records a skipped distinct-family leg. The
 delivery and orchestration validators share one ladder checker and no longer
 count fixed optional-provider attempts.
 
+### Addendum — 2026-10-21, owner decision
+
+The earlier addenda retain the policy at their dates. The owner has adopted a
+lighter default ladder in `HARNESS.md`: routine work uses the chair and objective
+checks; substantial work adds one passing independent review, preferably from
+another provider family; crucial work needs two passing independent reviews
+with distinct lenses and two non-chair families when available. Terminal work
+adds an adversarial lens to crucial coverage. A blocked cross-family review
+records an unavailable or omitted leg with a reason; substantial fallback also
+needs a passing same-family review with a lens. Failed reviews supply neither
+coverage nor blocker records. Receipt roles no longer determine ladder coverage.
+
+Projects may set their own ladders in their contributing guides while retaining
+the constitution's minimum independence. Objective checks and the required review
+meet acceptance unless the scope requires explicit user acceptance; terminal work
+still requires the owner's acceptance before merge. A project may name its
+landing gate as acceptance.
+
 ## Decision
 
 Certifying review pressure follows the current `HARNESS.md` risk table.

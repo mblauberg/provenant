@@ -264,7 +264,14 @@ def command_review_add(args: Any, api: dict[str, Any]) -> dict[str, Any]:
             or route.get("reviewer_id") != args.reviewer_id
             or route.get("resolved_model", route.get("model")) != args.model
             or route.get("model_family") != args.provider_family
-            or route.get("certification_eligible") is not True
+            or (
+                route.get("certification_eligible") is not True
+                and not (
+                    route.get("certification_eligible") is False
+                    and run.get("chair_family")
+                    and route.get("provider_family") == run.get("chair_family")
+                )
+            )
         ):
             raise receipt_error("route receipt identity does not match review lineage")
         if args.role == "other-primary" and route.get("cross_family") is not True:

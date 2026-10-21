@@ -401,13 +401,9 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
                                 errors.append(
                                     f"receipt review_plan.reviews[{index}] is not a certifying review leg: {leg['reason']}"
                                 )
-                            other_primary_family = (
-                                "anthropic" if raw.get("chair_family") == "openai" else "openai"
-                            )
                             if (
-                                review["scope"] == "primary"
-                                and review["family"] == other_primary_family
-                                and not review["substitution_for"]
+                                raw.get("chair_family")
+                                and leg["provider_family"] != raw.get("chair_family")
                                 and not leg["certifying_vote"]
                             ):
                                 errors.append(
@@ -470,14 +466,6 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
         errors.append("substantial review_plan requires an openai or anthropic chair_family")
     chair = chair_value if isinstance(chair_value, str) else ""
     other_primary = "anthropic" if chair == "openai" else "openai"
-    for review in checked:
-        if (
-            review["scope"] == "primary"
-            and review["family"] == other_primary
-            and not review["substitution_for"]
-            and REVIEW_TIERS.get(review["tier"]) != "flagship"
-        ):
-            errors.append("other-primary review must use flagship strength")
     targeted = [r for r in checked if r["scope"] == "targeted" and r["status"] == "complete"]
     if len({r["reviewer_id"] for r in targeted}) != len(targeted):
         errors.append("completed targeted reviews require distinct reviewer_id values")
@@ -494,29 +482,25 @@ def _validate_review_plan(raw: object, run_dir: Path | None = None) -> list[str]
             errors.append(f"completed targeted reviews require distinct {field} artifacts")
     legs: list[dict[str, object]] = []
     for review in checked:
+        # Roles retain their receipt vocabulary; the shared HARNESS ladder
+        # counts every passing independent leg by family and lens.
         if review["scope"] == "targeted":
             role = "targeted"
-        elif (
-            review["scope"] == "primary"
-            and review["family"] == other_primary
-            and not review["substitution_for"]
-        ):
+        elif review["family"] == other_primary:
             role = "other-primary"
-        elif (
-            review["scope"] == "primary"
-            and review["family"] not in {chair, other_primary}
-            and (REVIEW_TIERS.get(review["tier"]) == "flagship" or review["status"] != "complete")
-        ):
-            role = "distinct-family"
         else:
-            continue
+            role = "distinct-family"
         normalized_leg = normalized_legs.get(review["id"]) if isinstance(review.get("id"), str) else None
         leg_status = (
             normalized_leg["status"]
             if normalized_leg is not None
             else "pass" if review["status"] == "complete" else review["status"]
         )
-        if role == "other-primary" and normalized_leg is not None and not normalized_leg["certifying_vote"]:
+        if (
+            normalized_leg is not None
+            and normalized_leg["provider_family"] != chair
+            and not normalized_leg["certifying_vote"]
+        ):
             leg_status = "failed"
         legs.append({
             "role": role,

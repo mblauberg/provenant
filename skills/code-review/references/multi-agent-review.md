@@ -2,8 +2,8 @@
 
 Use for substantial or higher changes, comprehensive reviews, and any surface
 where one reviewer would carry too many unrelated concerns. Routine local
-changes may use one reviewer plus objective checks when the extra coordination
-would add no information.
+changes need only the chair plus objective checks under the
+[`HARNESS.md` Review ladder](../../../HARNESS.md#review-ladder).
 
 ## Select lenses
 
@@ -21,8 +21,9 @@ the dependency cone and risk profile:
 | UX/accessibility | user-facing flow, copy, keyboard/screen-reader/responsive behaviour |
 | Operations/release | config, telemetry, migration order, rollback, mixed versions |
 
-Prefer 2–4 independent reviewers, not one agent per checklist item. Give every
-reviewer one primary lens and one explicit overlap on the highest-risk
+Size the review to the tier and dependency cone. One independent reviewer is
+sufficient at substantial risk; a broader council may use 2–4. Give each reviewer
+a primary lens and, when useful, an explicit overlap on the highest-risk
 invariant. Domain/project skills supply specialised rubrics.
 
 ## Three-stage council
@@ -37,13 +38,11 @@ invariant. Domain/project skills supply specialised rubrics.
    final severity-ordered findings.
 
 The implementer, stage owner or co-author cannot certify the reviewed surface.
-Other-primary and distinct-family lanes follow `HARNESS.md`. Targeted lenses and
-other-primary coverage are required from substantial risk up; distinct-family
-review is used when available. Terminal work adds stronger targeted and
-adversarial pressure, and a skipped distinct-family leg records its reason.
-Missing other-primary coverage without a recorded skip and same-family fallback
-remains a blocking omission. Review repair output
-again because it is a new surface.
+The `HARNESS.md` Review ladder sets family and lens coverage, including the
+recorded-blocker fallback when cross-family review is unavailable. Count passing
+independent reviews by family and lens, regardless of receipt role. A failed leg
+provides neither coverage nor a blocker record. Review repair output again
+because it is a new surface.
 
 Each lens artifact records reviewer/family/model, source and artifact authority,
 scope, base revision, checks, findings, rejected hypotheses and status. The
