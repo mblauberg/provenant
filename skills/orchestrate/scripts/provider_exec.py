@@ -23,6 +23,7 @@ import tempfile
 import threading
 import time
 import uuid
+import unicodedata
 from datetime import UTC, datetime, timedelta
 from dataclasses import dataclass
 
@@ -34,6 +35,7 @@ import fabric_policy
 import layout
 import context_usage
 import process_info
+from trusted_git import GitLocation, owner_location, writer_read_only
 
 
 # Home-relative paths a confined provider needs for its own state and sign-in.
@@ -171,11 +173,10 @@ CAPABILITY_VALUES = frozenset({"postgres", "browser"})
 EXTRA_DENIED_READS = (".claude/projects", ".codex/sessions")
 # Every writer's Git write boundary: its private worktree Git directory plus these common paths.
 # The rest of the common directory (hooks, config, info, other worktrees) runs code or holds state
-# for every checkout, so it stays read-only. Codex writers also keep GIT_PRIVATE_READ_ONLY.
+# for every checkout, so it stays read-only.
 GIT_COMMON_WRITE_DIRS = ("objects", "refs", "logs")
 # Git rewrites packed-refs through the lock and a .new file renamed over it.
 GIT_COMMON_WRITE_FILES = ("packed-refs", "packed-refs.lock", "packed-refs.new")
-GIT_PRIVATE_READ_ONLY = ("config.worktree", "commondir", "gitdir")
 # Automatic gc and rerere write gc.pid, gc.log and rr-cache in the read-only common directory.
 WRITER_GIT_CONFIG = (("gc.auto", "0"), ("maintenance.auto", "false"), ("rerere.enabled", "false"))
 # Repository agent instructions and skills. Codex protects them inside a writable root.
@@ -572,14 +573,10 @@ def os_confinement_profile(plan, search_path=None):
     metadata_grant = _sbpl_rule("allow", "file-read-metadata", discovery_metadata, literal=True, keep_leaf=True)
     if plan.get("mode") == "worktree_write":
         cwd = Path(plan["cwd"])
-        git_dirs = {}
-        for flag in ("--absolute-git-dir", "--git-common-dir"):
-            result = subprocess.run(["git", "-C", str(cwd), "rev-parse", "--path-format=absolute", flag],
-                                    capture_output=True, text=True, timeout=5)
-            if result.returncode == 0 and result.stdout.strip():
-                git_dirs[flag] = Path(result.stdout.strip()).resolve()
-        private = git_dirs.get("--absolute-git-dir")
-        common = git_dirs.get("--git-common-dir")
+        location = owner_location(cwd, common=(plan.get("trusted_git") or {}).get("common"),
+                                  owner=plan.get("workspace_root"))
+        location.validate()
+        private, common = location.private, location.common
         allowed = [cwd, *add_dirs, *([run_dir] if run_dir else []), Path("/dev")]
         shared_paths = plan["applied"].get("shared_write_paths", {})
         locks_dir = plan.get("applied", {}).get("locks_dir")
@@ -604,14 +601,11 @@ def os_confinement_profile(plan, search_path=None):
         for path, literal in shared_paths.items():
             profile += _sbpl_rule("allow", "file-write*", [Path(path)], literal=literal, keep_leaf=True)
         profile += _state_write_guards(home, {"no_links": [path for path, literal in shared_paths.items() if literal]})
+        if private is not None and common is not None:
+            profile += _sbpl_rule("deny", "file-write*", writer_read_only(cwd, private, common), keep_leaf=True)
         if plan.get("adapter") == "codex" and capabilities:
             codex_home = Path(plan["codex_home"])
             auth_path = Path(plan["codex_auth_path"])
-            # Codex's native sandbox keeps these read-only, so a capability lane keeps them too.
-            profile += _sbpl_rule("deny", "file-write*", [cwd / ".git"])
-            if private is not None and private != common:
-                for name in GIT_PRIVATE_READ_ONLY:
-                    profile += _sbpl_rule("deny", "file-write*", [private / name], literal=True)
             profile += _sbpl_rule("allow", "file-write*", [codex_home])
             # Quote without resolving, and allow in-place rewrites only, so the lane cannot swap the
             # entry for a link that would move the next attempt's grant.
@@ -1205,17 +1199,13 @@ def build_plan(
     git_common = None
     git_private = None
     if mode == "worktree_write" and worktree is not None:
-        git_dirs = []
-        for flag in ("--absolute-git-dir", "--git-common-dir"):
-            result = subprocess.run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", flag],
-                                    capture_output=True, text=True, timeout=5)
-            if result.returncode != 0 or not result.stdout.strip():
-                raise ValueError("worktree_write requires a linked worktree; fix: create a linked worktree")
-            git_dirs.append(Path(result.stdout.strip()).resolve())
-        if git_dirs[0] == git_dirs[1]:
+        location = owner_location(cwd, common=metadata.pop("common_git_dir", None), owner=workspace_root)
+        location.validate()
+        if location.private == location.common:
             raise ValueError("worktree_write requires a linked worktree; fix: create a linked worktree")
-        git_private = git_dirs[0]
-        git_common = git_dirs[1]
+        git_private, git_common = location.private, location.common
+        metadata["trusted_git"] = location.record()
+        metadata["lane_ref"] = _git_output(location, "rev-parse", "--symbolic-full-name", "HEAD").strip()
     guarded = check_protected_inputs(route, workspace_root, cwd, worktree=worktree,
                                      prompt_file=original_prompt_file, add_dirs=add_dirs,
                                      read_roots=read_roots)
@@ -1401,9 +1391,8 @@ def build_plan(
                 for path in (git_private, *(git_common / name for name in
                                             GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)):
                     filesystem[str(path)] = "write"
-                for name in GIT_PRIVATE_READ_ONLY:
-                    filesystem[str(git_private / name)] = "read"
-                filesystem[str(Path(cwd, ".git"))] = "read"
+                for path in writer_read_only(cwd, git_private, git_common):
+                    filesystem[str(path)] = "read"
             write_boundary["filesystem"] = filesystem
     else:
         write_boundary = {"kind": "none", "writable_paths": None}
@@ -2706,9 +2695,11 @@ def _git_output(cwd, *args):
     # configured transport command must not fire.
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     result = subprocess.run(
-        ["git", "-C", str(cwd), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", *args],
+        [*(cwd.command() if isinstance(cwd, GitLocation) else ["git", "-C", str(cwd)]),
+         "-c", "core.fsmonitor=false", "-c", "core.commitGraph=false", "-c", "protocol.allow=never", *args],
         capture_output=True, text=True, timeout=30,
-        env={**environment, "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1"},
+        env={**environment, "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1",
+             **(cwd.environment() if isinstance(cwd, GitLocation) else {})},
     )
     if result.returncode != 0:
         raise ValueError(result.stderr.strip() or f"git {args[0]} failed")
@@ -2725,7 +2716,7 @@ def _instruction_path(path):
     # A tree may spell the directory in any case, and a case-insensitive checkout writes it to
     # .agents. The spelling is kept, so a variant is a new path rather than shadowing the original.
     # An entry named .agents itself (a link, file or submodule) counts as well.
-    return path if path.partition("/")[0].casefold() == INSTRUCTION_DIR else None
+    return path if unicodedata.normalize("NFC", path.partition("/")[0]).casefold() == INSTRUCTION_DIR else None
 
 
 def _instruction_entries(cwd, listing, *, index=False):
@@ -2838,7 +2829,7 @@ def authored_instruction_changes(cwd, start, *, head="HEAD"):
             trees.append(_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", ref))[0])
         except ValueError:
             pass  # An unset or unfetched ref cannot vouch for anything.
-    baselines = [start["disk"], start["index"], *trees]
+    baselines = trees
     index, conflicts = _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)
     views = [_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", head))[0], index,
              instruction_disk_state(cwd, start["object_format"])]
@@ -2866,10 +2857,12 @@ def _git_bytes(cwd, *args, input=None, env=None):
     """_git_output for object writes: raw bytes in and out, and no hook or signing command either."""
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     result = subprocess.run(
-        ["git", "-C", str(cwd), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
+        [*(cwd.command() if isinstance(cwd, GitLocation) else ["git", "-C", str(cwd)]),
+         "-c", "core.fsmonitor=false", "-c", "core.commitGraph=false", "-c", "protocol.allow=never",
          "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", *args],
         input=input, capture_output=True, timeout=30,
-        env={**environment, "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1", **(env or {})},
+        env={**environment, "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1",
+             **(cwd.environment() if isinstance(cwd, GitLocation) else {}), **(env or {})},
     )
     if result.returncode != 0:
         raise ValueError(os.fsdecode(result.stderr).strip() or f"git {args[0]} failed")
@@ -3126,6 +3119,7 @@ def execute(
     attempt_marker = uuid.uuid4().hex
     environment["PROVENANT_ATTEMPT_MARKER"] = attempt_marker
     instruction_start = None
+    instruction_cwd = plan["cwd"]
     instruction_protection = None
     protection_error = None
     created_instructions = None
@@ -3138,8 +3132,11 @@ def execute(
     if plan.get("instruction_policy"):
         import lane_protection
         try:
-            instruction_protection = lane_protection.begin(plan["cwd"], plan["run_dir"])
-            instruction_start = instruction_snapshot(plan["cwd"])
+            instruction_cwd = owner_location(plan["cwd"], common=plan["trusted_git"]["common"])
+            instruction_protection = lane_protection.begin(
+                instruction_cwd, plan["run_dir"], run_id=plan.get("run_id", ""),
+                task_id=plan.get("task_id", ""), attempt=plan.get("attempt", 1), ref=plan.get("lane_ref"))
+            instruction_start = instruction_snapshot(instruction_cwd)
             if instruction_start["head"] != instruction_protection["start_tip"]:
                 raise lane_protection.ProtectionError("lane moved before the starting instruction snapshot")
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -3713,7 +3710,7 @@ def execute(
         try:
             if isinstance(instruction_start, Exception):
                 raise instruction_start
-            instruction_changes = authored_instruction_changes(plan["cwd"], instruction_start)
+            instruction_changes = authored_instruction_changes(instruction_cwd, instruction_start)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             instruction_changes = [f"{INSTRUCTION_DIR} (unverifiable: {exc})"]
     # A signal death must retain actual instruction edits as failures rather
@@ -3743,11 +3740,11 @@ def execute(
             if not quarantinable(instruction_changes) or not isinstance(instruction_start, dict):
                 raise ValueError("no safe instruction diff can be captured; inspect the retained worktree")
             patches = quarantine_instruction_changes(
-                plan["cwd"], instruction_start, instruction_changes, Path(plan["run_dir"]),
+                instruction_cwd, instruction_start, instruction_changes, Path(plan["run_dir"]),
                 restore_changes=instruction_policy == "quarantine", published=patches)
             quarantine["patches"] = list(map(str, patches))
             if instruction_policy == "quarantine":
-                remaining = authored_instruction_changes(plan["cwd"], instruction_start)
+                remaining = authored_instruction_changes(instruction_cwd, instruction_start)
                 if remaining:
                     raise ValueError("still changed after restore: " + ", ".join(remaining))
                 quarantine["restored"] = True
@@ -3805,13 +3802,13 @@ def execute(
         try:
             # The earlier check may have restored a quarantine. Recheck after cleanup and
             # output publication, pinning the exact commit this final comparison examined.
-            verified_tip = _git_output(plan["cwd"], "rev-parse", "--verify", "HEAD^{commit}").strip()
-            remaining = authored_instruction_changes(plan["cwd"], instruction_start, head=verified_tip)
+            verified_tip = _git_output(instruction_cwd, "rev-parse", "--verify", "HEAD^{commit}").strip()
+            remaining = authored_instruction_changes(instruction_cwd, instruction_start, head=verified_tip)
             if remaining and (plan.get("instruction_policy") != "allow" or not quarantinable(remaining)):
                 raise lane_protection.ProtectionError("late instruction changes: " + ", ".join(remaining),
                                                       "protected_instructions_changed")
             instruction_protection = lane_protection.finish(
-                plan["cwd"], instruction_protection, verified_tip, quarantined=quarantine is not None)
+                instruction_cwd, instruction_protection, verified_tip, quarantined=quarantine is not None)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             status = "failed"
             parsed["signature"] = getattr(exc, "code", "protected_instructions_unverifiable")

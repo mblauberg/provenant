@@ -49,10 +49,12 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
 - Before landing, acquire a work claim if none is live for this session, verify
   it, and acquire `fabric_landing_lease` with the integration branch's current
   remote SHA. Before any lane merge or cherry-pick, run
-  `python3 "$(provenant root)/skills/orchestrate/scripts/lane_protection.py" --cwd <lane-worktree>`.
+  `python3 "$(provenant root)/skills/orchestrate/scripts/lane_protection.py" --cwd <lane-worktree> --common-dir <owner-common-dir>`.
   Consume the emitted commit SHA, rather than resolving the mutable lane branch
   again. A protected or unverifiable late change refuses reuse and retains the
-  branch in quarantine for chair review. `scripts/worktree verify-claim` applies
+  branch in quarantine for chair review. A missing record for a linked writer
+  fails closed. Only the [audited chair release](../../docs/specs/fabric-v2.md)
+  with matching dispatch evidence clears a hold. `scripts/worktree verify-claim` applies
   the same gate for local claims and remote writer export. Use
   `fabric landing-push <session-id> <generation> <branch> --label <seat>`
   for the final push; it checks the holder, generation, remote SHA and contributing

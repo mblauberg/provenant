@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
+import fcntl
 import hashlib
 import json
 import os
@@ -13,23 +15,23 @@ import stat
 import subprocess
 import sys
 import tempfile
+import uuid
+from datetime import UTC, datetime
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from output_custody import install, open_parent
-from provider_exec import _git_output, _instruction_path, _is_ancestor
+from provider_exec import _git_output, _instruction_entries, _instruction_path, instruction_snapshot
+from trusted_git import GitLocation, owner_location
 
 
 class ProtectionError(ValueError):
     def __init__(self, message, code="protected_instructions_unverifiable"):
         self.code = code
-        super().__init__(f"{code}: {message}; branch retained in quarantine for chair review")
+        super().__init__(f"{code}: {message}")
 
 
 def directory(cwd):
-    # The owner writes here, outside every provider's Git write grants. Keep these
-    # records when a worktree disappears; a branch is not a worktree directory.
-    common = _git_output(cwd, "rev-parse", "--path-format=absolute", "--git-common-dir").strip()
-    return Path(common) / "provenant-instruction-checks"
+    return owner_location(cwd).common / "provenant-instruction-checks"
 
 
 def identity(cwd):
@@ -39,9 +41,11 @@ def identity(cwd):
     return ref
 
 
-def state_path(cwd, ref):
-    key = ref if ref != "HEAD" else _git_output(cwd, "rev-parse", "--absolute-git-dir").strip()
-    return directory(cwd) / (hashlib.sha256(key.encode()).hexdigest() + ".json")
+def state_path(cwd, ref=None):
+    # HEAD, gitdir and branch names are writable by a child. Only the owner's worktree
+    # registration selects a lane; the record's lane_id additionally binds the attempt scope.
+    location = owner_location(cwd)
+    return directory(location) / (hashlib.sha256(os.fsencode(location.worktree)).hexdigest() + ".json")
 
 
 def read(path):
@@ -59,8 +63,10 @@ def read(path):
                 raise ProtectionError("invalid lane protection evidence")
             value = json.loads(handle.read(65537))
             if (not isinstance(value, dict)
-                    or any(not isinstance(value.get(key), str)
-                           for key in ("ref", "start_tip", "attempt_dir", "worktree"))
+                    or any(not isinstance(value.get(key), str) for key in
+                           ("ref", "start_tip", "attempt_dir", "worktree", "common", "private",
+                            "run_id", "task_id", "nonce", "lane_id"))
+                    or type(value.get("attempt")) is not int
                     or not isinstance(value.get("quarantined"), bool)
                     or value.get("verified_tip") is not None and not isinstance(value["verified_tip"], str)):
                 raise ProtectionError("invalid lane protection evidence")
@@ -77,120 +83,247 @@ def write(path, value):
         install(staged.name, str(path))
 
 
-def verify(cwd, ref=None, *, tip=None):
-    """Return a pinned commit; reject protected late history and retain a sticky quarantine."""
-    ref = identity(cwd) if ref is None or ref == "HEAD" else ref
-    if ref != "HEAD" and not ref.startswith("refs/heads/"):
-        raise ProtectionError("pass a full refs/heads/ lane ref")
-    path = state_path(cwd, ref)
+@contextmanager
+def locked(location):
+    root = directory(location)
+    root.mkdir(parents=True, exist_ok=True)
+    parent, leaf = open_parent(str(root / "owner.lock"))
     try:
-        if ref != "HEAD":
-            _git_output(cwd, "check-ref-format", ref)
+        fd = os.open(leaf, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+        with os.fdopen(fd, "r+") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            yield
+    finally:
+        os.close(parent)
+
+
+def bound(location, state, evidence=None):
+    if any(state[key] != value for key, value in location.record().items()):
+        raise ProtectionError("lane differs from owner-recorded Git locations")
+    if evidence is not None and any(evidence.get(key) != state.get(key) for key in
+                                    ("run_id", "task_id", "attempt", "nonce", "lane_id", "verified_tip")):
+        raise ProtectionError("instruction check does not match dispatch attempt evidence")
+
+
+def check_dispatch(state):
+    # Direct provider calls have no dispatch receipt. Fabric attempts must have matching
+    # top-level scope and final nonce; an earlier attempt's successful result cannot stand in.
+    if not state["task_id"]:
+        return
+    dispatch = json.loads((Path(state["attempt_dir"]) / "attempt.json").read_text())
+    if any(dispatch.get(key) != state.get(key) for key in ("run_id", "task_id", "attempt")):
+        raise ProtectionError("instruction check scope differs from dispatch evidence")
+    evidence = dispatch.get("instruction_protection")
+    expected = state
+    if state.get("release"):
+        expected = {**state, "nonce": state["release"]["held_nonce"],
+                    "verified_tip": state["release"]["previous_verified_tip"]}
+    if not isinstance(evidence, dict) or any(evidence.get(key) != expected.get(key) for key in
+                                          ("run_id", "task_id", "attempt", "nonce", "lane_id", "verified_tip")):
+        raise ProtectionError("instruction check differs from dispatch attempt evidence")
+
+
+def current_tip(location, state=None, ref=None):
+    location.validate()
+    actual = identity(location)
+    if state is not None:
+        bound(location, state)
+        if actual != state["ref"]:
+            raise ProtectionError("writer changed its recorded lane branch")
+    if ref is not None and ref != actual:
+        raise ProtectionError("requested ref differs from owner-recorded lane identity")
+    return _git_output(location, "rev-parse", "--verify", actual + "^{commit}").strip()
+
+
+def descendants(location, anchor, tip):
+    if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", anchor):
+        raise ProtectionError("invalid verified lane tip")
+    return _git_output(location, "rev-list", "--ancestry-path", tip, "^" + anchor).splitlines()
+
+
+def check_history(location, anchor, tip):
+    if not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", anchor):
+        raise ProtectionError("invalid verified lane tip")
+    if anchor != tip and tip not in descendants(location, anchor, tip):
+        raise ProtectionError("lane tip rewrote the verified history")
+    for commit in _git_output(location, "rev-list", tip, "^" + anchor).splitlines():
+        names = _git_output(location, "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-m",
+                            "-z", commit).split("\0")
+        if any(_instruction_path(name) for name in names):
+            raise ProtectionError(f"lane changed .agents/ after verified tip {anchor}",
+                                  "protected_instructions_changed")
+
+
+def retain(path, state, exc):
+    error = exc if isinstance(exc, ProtectionError) else ProtectionError(str(exc))
+    if state is not None:
+        write(path, {**state, "quarantined": True, "error": error.code, "reason": str(error)})
+        return ProtectionError(f"{error}; branch retained in quarantine for chair review", error.code)
+    return error
+
+
+def verify(cwd, ref=None, *, tip=None, common=None, evidence=None, initial=False):
+    """Return a pinned commit, resolved solely through owner-selected Git locations."""
+    location = owner_location(cwd, common=common)
+    path = state_path(location)
+    with locked(location):
         state = read(path)
-        current = _git_output(cwd, "rev-parse", "--verify", ref + "^{commit}").strip()
-        if tip is not None and current != tip:
-            raise ProtectionError("lane branch moved while being consumed")
-        if state is None:
-            # Changing the branch name must not erase this worktree's last check.
-            for previous in path.parent.glob("*.json"):
-                prior = read(previous)
-                if (prior and prior.get("worktree") == str(Path(cwd).resolve())
-                        and ref == identity(cwd)):
-                    raise ProtectionError("writer worktree changed its recorded lane branch")
-            return current  # A branch never dispatched here has no attempt check to bind.
-        if state.get("ref") != ref or state.get("quarantined") or not state.get("verified_tip"):
-            raise ProtectionError("lane has no usable completed instruction check",
-                                  state.get("error", "protected_instructions_unverifiable"))
-        checked = state["verified_tip"]
-        if not isinstance(checked, str) or not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", checked):
-            raise ProtectionError("invalid verified lane tip")
-        if current != checked:
-            if not _is_ancestor(cwd, checked, current):
-                raise ProtectionError("lane tip rewrote the verified history")
-            # Inspect every commit, not only the net tree diff: edit-then-revert and merge
-            # commits must not launder instructions into the next attempt's baseline.
-            commits = _git_output(cwd, "rev-list", checked + ".." + current).splitlines()
-            for commit in commits:
-                names = _git_output(cwd, "diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-m",
-                                    "-z", commit).split("\0")
-                if any(_instruction_path(name) for name in names):
-                    raise ProtectionError(f"lane changed .agents/ after verified tip {checked}",
-                                          "protected_instructions_changed")
-        return current
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        error = exc if isinstance(exc, ProtectionError) else ProtectionError(str(exc))
-        # Preserve the offending ref and its commits. Never restore or delete late state.
-        if "state" in locals() and state is not None:
-            write(path, {**state, "quarantined": True, "error": error.code, "reason": str(error)})
-        raise error from exc
+        try:
+            current = current_tip(location, state, ref)
+            if tip is not None and current != tip:
+                raise ProtectionError("lane branch moved while being consumed")
+            if state is None:
+                if location.private != location.common and not initial:
+                    raise ProtectionError("registered writer has no instruction protection record")
+                return current
+            bound(location, state, evidence)
+            check_dispatch(state)
+            if state["quarantined"] or not state.get("verified_tip"):
+                raise ProtectionError("lane has no usable completed instruction check",
+                                      state.get("error", "protected_instructions_unverifiable"))
+            check_history(location, state["verified_tip"], current)
+            return current
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            raise retain(path, state, exc) from exc
 
 
-def begin(cwd, attempt_dir):
-    ref = identity(cwd)
-    tip = verify(cwd, ref)
-    state = {"ref": ref, "start_tip": tip, "verified_tip": None,
-             "attempt_dir": str(attempt_dir), "worktree": str(Path(cwd).resolve()), "quarantined": True}
-    write(state_path(cwd, ref), state)
-    return state
+def begin(cwd, attempt_dir, *, common=None, run_id="", task_id="", attempt=1, ref=None):
+    location = owner_location(cwd, common=common)
+    # Serialize both admission and publication. A concurrent begin cannot silently adopt an
+    # unfinished attempt, and finish compares the nonce under this same owner-only lock.
+    with locked(location):
+        path = state_path(location)
+        previous = read(path)
+        try:
+            tip = current_tip(location, previous, ref)
+            if previous:
+                check_dispatch(previous)
+            if previous:
+                if previous["quarantined"] or not previous.get("verified_tip"):
+                    raise ProtectionError("lane has no usable completed instruction check",
+                                          previous.get("error", "protected_instructions_unverifiable"))
+                check_history(location, previous["verified_tip"], tip)
+            anchor = previous["verified_tip"] if previous else tip
+            snapshot = instruction_snapshot(location)
+            baseline = snapshot["tree"] if anchor == tip else instruction_tree(location, anchor)
+            if (snapshot["disk"] != baseline or snapshot["index"] != baseline
+                    or _instruction_entries(location, ("ls-files", "--stage", "-z"), index=True)[1]):
+                raise ProtectionError("disk or index .agents/ differs from verified tree",
+                                      "protected_instructions_changed")
+            scope = {"run_id": run_id, "task_id": task_id, "attempt": attempt}
+            lane_id = hashlib.sha256(json.dumps({"worktree": str(location.worktree), **scope},
+                                               sort_keys=True).encode()).hexdigest()
+            state = {**location.record(), **scope, "lane_id": lane_id, "nonce": uuid.uuid4().hex,
+                     "ref": identity(location), "start_tip": tip, "verified_tip": None,
+                     "attempt_dir": str(Path(attempt_dir).resolve()), "quarantined": True}
+            write(path, state)
+            return state
+        except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            raise retain(path, previous, exc) from exc
+
+
+def instruction_tree(location, tip):
+    return _instruction_entries(location, ("ls-tree", "-r", "-z", "--full-tree", tip))[0]
 
 
 def finish(cwd, state, verified_tip, *, quarantined):
-    if identity(cwd) != state["ref"]:
-        raise ProtectionError("writer changed branch identity")
-    if _git_output(cwd, "rev-parse", "--verify", state["ref"] + "^{commit}").strip() != verified_tip:
-        raise ProtectionError("lane tip moved during the final instruction check")
-    evidence = {**state, "verified_tip": verified_tip, "quarantined": quarantined}
-    write(state_path(cwd, state["ref"]), evidence)
-    return evidence
+    location = owner_location(cwd, common=state["common"])
+    path = state_path(location)
+    with locked(location):
+        saved = read(path)
+        if saved != state or saved.get("completed"):
+            raise ProtectionError("instruction check attempt nonce was superseded or already finished")
+        if current_tip(location, saved) != verified_tip:
+            raise retain(path, saved, ProtectionError("lane tip moved during the final instruction check"))
+        evidence = {**saved, "verified_tip": verified_tip, "quarantined": quarantined, "completed": True}
+        write(path, evidence)
+        return evidence
 
 
-def verify_landing(cwd, tip):
-    """Check recorded lane refs whose checked or current tips enter a landing commit."""
-    verify(cwd, tip=tip)
-    root = directory(cwd)
-    if not root.exists():
-        return
-    refs = dict(line.split()[::-1] for line in _git_output(cwd, "show-ref", "--heads").splitlines())
-    for path in root.glob("*.json"):
-        state = read(path)
-        if state is None or not isinstance(state.get("ref"), str):
-            raise ProtectionError("invalid lane protection evidence")
-        ref = state["ref"]
-        lane_cwd = state.get("worktree") if ref == "HEAD" else cwd
-        current = (_git_output(lane_cwd, "rev-parse", "--verify", "HEAD^{commit}").strip()
-                   if ref == "HEAD" and lane_cwd and Path(lane_cwd).is_dir() else refs.get(ref))
-        checked = state.get("verified_tip")
-        if current is None and not state.get("quarantined"):
-            continue  # A normally merged/pruned lane no longer supplies a branch to consume.
-        # A common starting commit alone does not mean this landing consumed a
-        # sibling lane. Only its contribution, or the directly pushed lane, does.
-        anchors = {current, checked} - {None, state.get("start_tip")}
-        if current:
+def verify_landing(cwd, tip, *, common=None):
+    """Inspect contributed history in the landing tip, even after refs reset or disappear."""
+    location = owner_location(cwd, common=common)
+    verify(location, tip=tip)
+    with locked(location):
+        for path in directory(location).glob("*.json"):
+            state = read(path)
+            if state is None:
+                raise ProtectionError("missing lane protection evidence")
+            anchor = state.get("verified_tip") or state["start_tip"]
+            commits = descendants(location, anchor, tip)
+            if anchor != tip and tip not in commits:
+                continue
+            # Only descendants of the recorded anchor contributed. Do not consult the mutable
+            # ref (or even the worktree, which may have been pruned) to identify consumed commits.
+            direct = state["worktree"] == str(location.worktree)
+            if (not commits and not direct and anchor == state["start_tip"]
+                    and not (state["quarantined"] and state.get("completed"))):
+                continue
             try:
-                common = _git_output(cwd, "merge-base", "--all", current, tip).splitlines()
-            except ValueError:
-                common = []  # Unrelated history cannot contribute to this landing.
-            anchors.update(anchor for anchor in common if anchor != state["start_tip"]
-                           and _is_ancestor(cwd, state["start_tip"], anchor))
-        if any(_is_ancestor(cwd, anchor, tip) for anchor in anchors):
-            if current is None:
-                raise ProtectionError(f"recorded lane ref is missing: {ref}")
-            verify(lane_cwd, ref)
+                check_dispatch(state)
+                if state["quarantined"] or not state.get("verified_tip"):
+                    raise ProtectionError("landing includes a lane without a usable instruction check",
+                                          state.get("error", "protected_instructions_unverifiable"))
+                for commit in commits:
+                    names = _git_output(location, "diff-tree", "--root", "--no-commit-id", "--name-only",
+                                        "-r", "-m", "-z", commit).split("\0")
+                    if any(_instruction_path(name) for name in names):
+                        raise ProtectionError("landing includes protected lane history",
+                                              "protected_instructions_changed")
+            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+                raise retain(path, state, exc) from exc
+
+
+def release(cwd, *, common=None, reason, actor, evidence):
+    """Chair-only acknowledgement. Audit the exact held nonce before trusting a new baseline."""
+    location = owner_location(cwd, common=common)
+    with locked(location):
+        path = state_path(location)
+        state = read(path)
+        if state is None or not state["quarantined"]:
+            raise ProtectionError("lane has no quarantine to release")
+        bound(location, state, evidence)
+        tip = current_tip(location, state)
+        snapshot = instruction_snapshot(location)
+        if snapshot["disk"] != snapshot["tree"] or snapshot["index"] != snapshot["tree"]:
+            raise ProtectionError("chair must resolve protected disk and index residue before release")
+        audit = {"actor": actor, "reason": reason, "released_at": datetime.now(UTC).isoformat(),
+                 "held_nonce": state["nonce"], "previous_verified_tip": state["verified_tip"], "verified_tip": tip}
+        # Immutable audit entry is installed first. Providers have no write grant here.
+        write(directory(location) / "releases" / (uuid.uuid4().hex + ".json"), {**state, "release": audit})
+        write(path, {**state, "verified_tip": tip, "quarantined": False, "completed": True,
+                     "nonce": uuid.uuid4().hex, "release": audit})
+        return tip
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cwd", type=Path, default=Path.cwd())
+    parser.add_argument("--common-dir", type=Path)
     parser.add_argument("--ref")
     parser.add_argument("--landing-tip")
+    parser.add_argument("--evidence", type=Path, help="dispatch-attempt JSON; match its instruction check and scope")
+    parser.add_argument("--release-quarantine", action="store_true")
+    parser.add_argument("--actor")
+    parser.add_argument("--reason")
     args = parser.parse_args()
     try:
-        if args.landing_tip:
-            verify_landing(args.cwd, args.landing_tip)
+        evidence = None
+        if args.evidence:
+            dispatch = json.loads(args.evidence.read_text())
+            evidence = dispatch["instruction_protection"]
+            if any(dispatch.get(key) != evidence.get(key) for key in ("run_id", "task_id", "attempt")):
+                raise ProtectionError("instruction check scope differs from dispatch evidence")
+        if args.release_quarantine:
+            if not evidence or not args.actor or not args.reason or os.environ.get("PROVENANT_ATTEMPT_MARKER"):
+                raise ProtectionError("chair release requires dispatch evidence, actor and reason outside a writer")
+            print(release(args.cwd, common=args.common_dir, reason=args.reason, actor=args.actor, evidence=evidence))
+        elif args.landing_tip:
+            verify_landing(args.cwd, args.landing_tip, common=args.common_dir)
         else:
-            print(verify(args.cwd, args.ref))
+            print(verify(args.cwd, args.ref, common=args.common_dir, evidence=evidence))
         return 0
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+    except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
         print(str(exc if isinstance(exc, ProtectionError) else ProtectionError(str(exc))), file=sys.stderr)
         return 1
 

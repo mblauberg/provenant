@@ -62,7 +62,12 @@ acceptance boundary.
 For a dispatched writer, claim verification also checks the retained instruction
 protection tip. A late commit touching `.agents/`, rewritten history or an
 incomplete/quarantined check is rejected without deleting or restoring the branch.
-Benign descendant commits are accepted only after checking each intervening commit.
+Linked writer worktrees require a record. Claim reads use the owner's common
+Git directory, including when `--expected-common` is omitted in the canonical
+`.worktrees/` layout. Redirected lane metadata fails closed. Benign descendant
+commits are accepted only after checking each intervening commit. Quarantine
+release requires an attributed chair decision and the matching dispatch receipt;
+see [the release procedure](specs/fabric-v2.md).
 
 The helper resolves the primary checkout through Git's common directory, checks
 the name and protected root, and refuses unsafe creation/removal. A create

@@ -213,15 +213,13 @@ def test_opencode_read_only_discovery_skips_symlinks_to_credentials(monkeypatch,
 @pytest.mark.parametrize("adapter", ["agy", "claude", "cursor", "opencode", "kiro"])
 def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_path, adapter):
     mod = supervisor()
-    worktree = tmp_path / "worktree"
+    primary, worktree = linked_worktree(tmp_path)
     attempt = tmp_path / "run" / "attempt"
-    common = tmp_path / "common.git"
-    private = tmp_path / "linked.git"
+    common = primary / ".git"
+    private = common / "worktrees/lane"
     add_dir = tmp_path / "extra"
-    for path in (worktree, attempt, common, private, add_dir):
+    for path in (attempt, add_dir):
         path.mkdir(parents=True)
-    dirs = iter((private, common))
-    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=0, stdout=str(next(dirs))))
     plan = {"adapter": adapter, "mode": "worktree_write", "cwd": str(worktree),
             "workspace_root": str(worktree), "run_dir": str(attempt),
             "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]}}
@@ -241,6 +239,10 @@ def test_writer_confinement_allows_owned_paths_and_add_dirs(monkeypatch, tmp_pat
         assert f'(literal "{path}")' not in profile
     for path in (Path.home() / ".cache", Path.home() / "Library/Caches", Path("/private/tmp")):
         assert f'(subpath "{path}")' not in profile
+    deny = "\n".join(line for line in profile.splitlines() if line.startswith("(deny file-write* "))
+    for path in (worktree / ".git", private / "commondir", private / "gitdir", private / "config.worktree",
+                 common / "objects/info"):
+        assert f'(subpath "{path}")' in deny
     for state_path in mod.CONFINED_STATE[adapter]["read_write"]:
         assert mod._sbpl_filter(Path.home() / state_path) in profile
     assert f'(subpath "{tmp_path}")' not in profile
@@ -358,12 +360,10 @@ def test_read_only_plan_gets_no_locks_grant(monkeypatch, tmp_path):
 
 def test_writer_protected_path_inside_add_dir_keeps_read_and_write_denied(monkeypatch, tmp_path):
     mod = supervisor()
-    worktree = tmp_path / "worktree"
+    _primary, worktree = linked_worktree(tmp_path)
     add_dir = tmp_path / "extra"
     protected = add_dir / "private"
-    worktree.mkdir()
     protected.mkdir(parents=True)
-    monkeypatch.setattr(mod.subprocess, "run", lambda *a, **k: SimpleNamespace(returncode=1, stdout=""))
     plan = {"adapter": "agy", "mode": "worktree_write", "cwd": str(worktree),
             "workspace_root": str(worktree), "protected_paths": [str(protected)],
             "applied": {"confinement": "sandbox-exec", "add_dirs": [str(add_dir)]}}
@@ -4960,7 +4960,8 @@ def test_codex_writer_gets_the_wrapped_writer_git_boundary(tmp_path, resume):
         assert codex_access(table, granted) == "write", granted
     for denied in (common, common / "hooks", common / "hooks/pre-commit", common / "config",
                    common / "info/exclude", common / "worktrees", sibling, sibling / "HEAD",
-                   private / "config.worktree", private / "commondir", private / "gitdir", lane / ".git"):
+                   private / "config.worktree", private / "commondir", private / "gitdir", lane / ".git",
+                   common / "objects/info", common / "objects/info/alternates"):
         assert codex_access(table, denied) == "read", denied
         assert not any(denied == root or denied.is_relative_to(root) for root in add_dirs), denied
     assert table[lane.resolve() / ".git"] == "read"
@@ -5049,7 +5050,7 @@ def instruction_lane(tmp_path):
     (repo / "app.txt").write_text("app\n")
     git(repo, "add", ".")
     git(repo, "commit", "-q", "-m", "initial")
-    lane = tmp_path / "lane"
+    lane = repo / ".worktrees/lane"
     git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
     (lane / "app.txt").write_text("lane\n")
     git(lane, "commit", "-q", "-am", "lane work")
@@ -5374,7 +5375,7 @@ def test_quarantine_never_follows_a_planted_patch_link(tmp_path):
     assert not patch.is_symlink() and "lane edit" in patch.read_text()
 
 
-def test_quarantine_restores_each_starting_view(tmp_path):
+def test_begin_refuses_different_protected_starting_views(tmp_path):
     _, lane = instruction_lane(tmp_path)
     notes = ".agents/skills/fixture/notes.md"
     (lane / notes).write_text("start notes\n")  # untracked at the start
@@ -5383,30 +5384,28 @@ def test_quarantine_restores_each_starting_view(tmp_path):
     (lane / SKILL).write_text("disk start\n")  # staged and unstaged edits at the start
     record = lane_attempt(tmp_path, lane, f"open({notes!r}, 'w').write('lane notes\\n')\n"
                           f"open({SKILL!r}, 'w').write('lane edit\\n'); git('add', {SKILL!r})\n")
-    assert record["status"] == "quarantined", record
+    assert record["status"] == "failed", record
+    assert record["error"] == "protected_instructions_changed"
     assert (lane / notes).read_text() == "start notes\n"
     assert (lane / SKILL).read_text() == "disk start\n"
     assert git(lane, "show", ":" + SKILL) == "staged start\n"
     assert git(lane, "show", "HEAD:" + SKILL) == "v1\n"
-    git(lane, "apply", str(tmp_path / "attempt" / "protected.patch"))
-    assert (lane / notes).read_text() == "lane notes\n"
-    assert (lane / SKILL).read_text() == "lane edit\n"
 
 
 @pytest.mark.parametrize("script", [
     "os.remove('.agents/local/notes.md')\n",
     "import shutil; shutil.rmtree('.agents/local'); os.symlink('/tmp', '.agents/local')\n",
 ], ids=["removed", "link-swapped"])
-def test_quarantine_restores_and_reports_an_untracked_start_file_the_lane_removed(tmp_path, script):
+def test_begin_refuses_an_untracked_protected_start_file(tmp_path, script):
     _, lane = instruction_lane(tmp_path)
     notes = ".agents/local/notes.md"
     (lane / notes).parent.mkdir()
     (lane / notes).write_text("start notes\n")  # untracked at the start
     record = lane_attempt(tmp_path, lane, script)
-    assert record["status"] == "quarantined", record
+    assert record["status"] == "failed", record
+    assert record["error"] == "protected_instructions_changed"
     assert not (lane / ".agents/local").is_symlink()
     assert (lane / notes).read_text() == "start notes\n"
-    assert any("quarantined" in warning and notes in warning for warning in record["warnings"]), record["warnings"]
 
 
 def test_quarantine_archives_a_staged_change_the_disk_no_longer_shows(tmp_path):
@@ -5500,6 +5499,7 @@ def test_codex_writer_committing_an_instruction_root_entry_fails(tmp_path):
     _, lane = instruction_lane(tmp_path)
     git(lane, "rm", "-r", "-q", "--cached", ".agents")
     git(lane, "commit", "-q", "-m", "untrack instructions")
+    shutil.rmtree(lane / ".agents")
     record = lane_attempt(tmp_path, lane, (
         "blob = subprocess.run(['git', 'hash-object', '-w', '--stdin'], input='/elsewhere', "
         "capture_output=True, text=True, check=True).stdout.strip()\n"
@@ -6418,7 +6418,7 @@ def first_instruction_lane(tmp_path):
     (repo / "app.txt").write_text("app\n")
     git(repo, "add", ".")
     git(repo, "commit", "-q", "-m", "initial")
-    lane = tmp_path / "lane"
+    lane = repo / ".worktrees/lane"
     git(repo, "worktree", "add", "-q", "-b", "lane", str(lane))
     (repo / SKILL).parent.mkdir(parents=True)
     (repo / SKILL).write_text("v1\n")
@@ -7541,3 +7541,223 @@ def test_provider_state_accepts_normal_provider_under_symlink_home(monkeypatch, 
     assert mod.os_confinement_profile(plan).startswith("(version 1)")
     relative = ".gemini" if adapter == "agy" else f".{adapter}"
     assert plan["provider_home"] == str(home / relative)
+
+
+# Reproductions supplied by the two PR #1057 security reviewers.
+def gate(cwd, *extra):
+    return subprocess.run([sys.executable, str(SCRIPTS / "lane_protection.py"), "--cwd", str(cwd), *extra],
+                          capture_output=True, text=True, timeout=10)
+
+
+def test_index_disk_laundering(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    first = lane_attempt(tmp_path, lane, "")
+    assert first["status"] == "ok", first
+    # Late child: stage poison but do not commit (tip unchanged).
+    (lane / SKILL).write_text("POISON\n")
+    git(lane, "add", SKILL)
+    r2 = tmp_path / "second"; r2.mkdir()
+    # Next attempt simply commits whatever is staged.
+    second = lane_attempt(r2, lane, "git('commit', '-q', '-m', 'innocent')\n")
+    assert second["status"] == "failed", second
+    g = gate(lane)
+    assert not (second["status"] == "ok" and g.returncode == 0 and "POISON" in git(lane, "show", "HEAD:" + SKILL)), "laundered"
+
+
+def test_gitfile_redirect(tmp_path):
+    repo, lane = instruction_lane(tmp_path)
+    first = lane_attempt(tmp_path, lane, "")
+    assert first["status"] == "ok", first
+    (lane / SKILL).write_text("POISON\n")
+    git(lane, "commit", "-qam", "late protected")
+    poisoned = git(lane, "rev-parse", "HEAD").strip()
+    assert gate(lane).returncode == 1
+    # Hostile child: build a fake common dir inside the writable worktree, borrowing real objects.
+    real_common = Path(git(lane, "rev-parse", "--path-format=absolute", "--git-common-dir").strip())
+    fake = lane / ".fake"
+    subprocess.run(["git", "init", "-q", "--bare", str(fake)], check=True)
+    (fake / "objects/info/alternates").write_text(str(real_common / "objects") + "\n")
+    wt = fake / "worktrees/lane"; wt.mkdir(parents=True)
+    (wt / "commondir").write_text("../..\n")
+    (wt / "gitdir").write_text(str(lane / ".git") + "\n")
+    (wt / "HEAD").write_text("ref: refs/heads/lane\n")
+    subprocess.run(["git", "--git-dir", str(fake), "update-ref", "refs/heads/lane", poisoned], check=True)
+    import shutil; shutil.copy(real_common / "worktrees/lane/index", wt / "index")
+    (lane / ".git").write_text(f"gitdir: {wt}\n")
+    g = gate(lane)
+    assert g.returncode != 0 or g.stdout.strip() != poisoned, "gate emitted poisoned SHA"
+
+
+@pytest.mark.parametrize("move", ["reset", "delete"])
+def test_landing_after_ref_move(tmp_path, move):
+    repo, lane = instruction_lane(tmp_path)
+    first = lane_attempt(tmp_path, lane, "")
+    checked = first["instruction_protection"]["verified_tip"]
+    (lane / SKILL).write_text("POISON\n")
+    git(lane, "commit", "-qam", "late protected")
+    git(repo, "merge", "--no-ff", "-X", "theirs", "-m", "consume lane", "lane")
+    tip = git(repo, "rev-parse", "HEAD").strip()
+    if move == "reset":
+        git(lane, "update-ref", "refs/heads/lane", checked)
+    else:
+        git(lane, "checkout", "-q", "--detach")
+        git(lane, "update-ref", "-d", "refs/heads/lane")
+    g = gate(repo, "--landing-tip", tip)
+    assert g.returncode != 0, "landing accepted protected late commit"
+
+
+@pytest.mark.parametrize("detached", [False, True], ids=["branch", "detached"])
+@pytest.mark.parametrize("redirect", ["gitfile", "commondir"])
+def test_owner_git_locations_survive_redirected_lane_metadata(tmp_path, detached, redirect):
+    repo, lane = instruction_lane(tmp_path)
+    if detached:
+        git(lane, "checkout", "-q", "--detach")
+    first = lane_attempt(tmp_path, lane, "")
+    assert first["status"] == "ok", first
+    private = Path(git(lane, "rev-parse", "--absolute-git-dir").strip())
+    # The second review's separate common-directory reproduction, sharing the real objects.
+    fake = lane / "fake.git"
+    git(repo, "clone", "--bare", "--shared", "-q", str(repo), str(fake))
+    fake_private = fake / "worktrees/lane"
+    shutil.copytree(private, fake_private, dirs_exist_ok=True)
+    (fake_private / "commondir").write_text("../..\n")
+    (fake_private / "gitdir").write_text(str(lane / ".git") + "\n")
+    if redirect == "gitfile":
+        (lane / ".git").write_text(f"gitdir: {fake_private}\n")
+    else:
+        (private / "commondir").write_text(str(fake) + "\n")
+    result = gate(lane)
+    assert result.returncode == 1, result.stdout
+    assert "protected_instructions_unverifiable" in result.stderr
+    second_root = tmp_path / "second"
+    second_root.mkdir()
+    # Use the previously owner-built plan: a redirect cannot become a fresh trust root.
+    plan = fixture_plan(second_root, "open('launched', 'w').write('yes')", mode="read_only")
+    plan.update(cwd=str(lane), instruction_policy="deny", mode="worktree_write",
+                run_dir=str(second_root), trusted_git=first["instruction_protection"])
+    second = supervisor().execute(plan, second_root / "result.md")
+    assert second["status"] == "failed", second
+    assert not (lane / "launched").exists()
+
+
+def test_registered_writer_without_a_record_fails_closed(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    result = gate(lane)
+    assert result.returncode == 1
+    assert "protected_instructions_unverifiable" in result.stderr
+    assert "retained in quarantine" not in result.stderr
+
+
+@pytest.mark.parametrize("residue", ["disk", "index", "both"])
+def test_begin_rejects_uncommitted_protected_residue(tmp_path, residue):
+    _, lane = instruction_lane(tmp_path)
+    first = lane_attempt(tmp_path, lane, "")
+    assert first["status"] == "ok", first
+    (lane / SKILL).write_text("poison\n")
+    if residue != "disk":
+        git(lane, "add", SKILL)
+    if residue == "index":
+        (lane / SKILL).write_text("v1\n")
+    second_root = tmp_path / "second"
+    second_root.mkdir()
+    second = lane_attempt(second_root, lane, "open('launched', 'w').write('yes')")
+    assert second["error"] == "protected_instructions_changed", second
+    assert not (lane / "launched").exists()
+
+
+def test_finish_cannot_replay_or_overwrite_a_newer_attempt(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    protection = importlib.import_module("skills.orchestrate.scripts.lane_protection")
+    state = protection.begin(lane, tmp_path / "attempt")
+    tip = git(lane, "rev-parse", "HEAD").strip()
+    completed = protection.finish(lane, state, tip, quarantined=False)
+    newer = protection.begin(lane, tmp_path / "attempt2")
+    with pytest.raises(ValueError, match="nonce"):
+        protection.finish(lane, state, tip, quarantined=False)
+    assert protection.read(protection.state_path(lane, newer["ref"])) == newer
+    protection.finish(lane, newer, tip, quarantined=False)
+    with pytest.raises(ValueError, match="nonce"):
+        protection.finish(lane, newer, tip, quarantined=False)
+    assert all(key in completed for key in ("run_id", "task_id", "attempt", "nonce", "lane_id"))
+
+
+def test_consumers_reject_a_different_dispatch_attempt(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    protection = importlib.import_module("skills.orchestrate.scripts.lane_protection")
+    attempt_dir = tmp_path / "attempt"
+    attempt_dir.mkdir()
+    state = protection.begin(lane, attempt_dir)
+    tip = git(lane, "rev-parse", "HEAD").strip()
+    completed = protection.finish(lane, state, tip, quarantined=False)
+    # Model an owner-scoped Fabric attempt without invoking a provider or a second lane.
+    completed.update(run_id="run-1", task_id="task-1", attempt=2)
+    protection.write(protection.state_path(lane, completed["ref"]), completed)
+    (attempt_dir / "attempt.json").write_text(json.dumps({
+        "run_id": "run-1", "task_id": "task-1", "attempt": 1,
+        "instruction_protection": {**completed, "attempt": 1},
+    }))
+    result = gate(lane)
+    assert result.returncode == 1
+    assert "dispatch" in result.stderr
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS writer confinement")
+@pytest.mark.parametrize("adapter", ["claude", "cursor", "opencode", "kiro", "codex"])
+def test_all_writer_sandboxes_deny_git_trust_metadata(tmp_path, monkeypatch, adapter):
+    repo, lane = instruction_lane(tmp_path)
+    module = supervisor()
+    monkeypatch.setattr(module, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    monkeypatch.setattr(module, "_require_kiro_engine", lambda: None)
+    monkeypatch.setattr(module, "_opencode_version_error", lambda *a: None)
+    # Exercise the generated OS profile even for a native Codex writer.
+    plan = module.build_plan(adapter, {}, "hello", worktree=lane, mode="worktree_write",
+                             workspace_root=repo, run_dir=tmp_path)
+    private = Path(plan["trusted_git"]["private"])
+    targets = [lane / ".git", *(private / name for name in ("commondir", "gitdir", "config.worktree")),
+               repo / ".git/objects/info/alternates"]
+    script = "import pathlib\nfor target in " + repr(list(map(str, targets))) + ":\n" + (
+        " try: pathlib.Path(target).open('a').close(); print('writable')\n"
+        " except PermissionError: print('denied')\n")
+    result = subprocess.run(["/usr/bin/sandbox-exec", "-p", module.os_confinement_profile(plan),
+                             sys.executable, "-c", script], capture_output=True, text=True)
+    if result.returncode and "sandbox_apply" in result.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["denied"] * len(targets)
+
+
+def test_chair_quarantine_release_is_scoped_and_audited(tmp_path, monkeypatch):
+    monkeypatch.delenv("PROVENANT_ATTEMPT_MARKER", raising=False)
+    repo, lane = instruction_lane(tmp_path)
+    first = lane_attempt(tmp_path, lane, "")
+    evidence = tmp_path / "dispatch.json"
+    state = first["instruction_protection"]
+    evidence.write_text(json.dumps({**{key: state[key] for key in ("run_id", "task_id", "attempt")},
+                                    "instruction_protection": state}))
+    (lane / SKILL).write_text("chair reviewed\n")
+    git(lane, "commit", "-qam", "late edit")
+    assert gate(lane).returncode == 1
+    assert gate(lane, "--release-quarantine").returncode == 1
+    # Owner command accepts only the exact held check plus an attributed reason.
+    released = gate(lane, "--release-quarantine", "--evidence", str(evidence),
+                    "--actor", "chair", "--reason", "Reviewed protected changes")
+    assert released.returncode == 0, released.stderr
+    assert gate(lane).returncode == 0
+    audits = list((repo / ".git/provenant-instruction-checks/releases").glob("*.json"))
+    assert len(audits) == 1
+    audit = json.loads(audits[0].read_text())["release"]
+    assert audit["actor"] == "chair"
+    assert audit["reason"] == "Reviewed protected changes"
+    assert audit["held_nonce"] == state["nonce"]
+    assert audit["verified_tip"] == git(lane, "rev-parse", "HEAD").strip()
+
+
+def test_landing_retains_quarantine_when_landing_equals_the_checked_tip(tmp_path):
+    repo, lane = instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, f"open({SKILL!r}, 'w').write('authored\\n')\n")
+    assert record["status"] == "quarantined", record
+    checked = record["instruction_protection"]["verified_tip"]
+    git(repo, "update-ref", "refs/heads/main", checked)
+    result = gate(repo, "--landing-tip", checked)
+    assert result.returncode == 1
+    assert "quarantine" in result.stderr
