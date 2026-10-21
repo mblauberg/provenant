@@ -2653,14 +2653,25 @@ def test_provider_launch_sets_pwd_to_resolved_cwd(tmp_path):
     assert (tmp_path / "result.md").read_text() == str(child)
 
 
-def test_opencode_read_only_declares_fully_denied_bash_tool(tmp_path):
+@pytest.mark.parametrize("confined", [False, True])
+def test_opencode_read_only_allows_bash_only_inside_os_sandbox(tmp_path, monkeypatch, confined):
     code = "import json, os; print(json.dumps({'type':'result','result':os.environ['OPENCODE_CONFIG_CONTENT']}))"
-    record = supervisor().execute(
-        fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md"
-    )
+    mod = supervisor()
+    plan = fixture_plan(tmp_path, code, "opencode")
+    if confined:
+        launcher = tmp_path / "sandbox-exec"
+        launcher.write_text('#!/bin/sh\nshift 2\nexec "$@"\n')
+        launcher.chmod(0o755)
+        monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: str(launcher))
+        plan["applied"]["confinement"] = "sandbox-exec"
+        assert '(deny file-write*)' in mod.os_confinement_profile(plan)
+    record = mod.execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
     permission = json.loads((tmp_path / "result.md").read_text())["permission"]
-    assert permission["bash"]["*"] == "deny"
-    assert permission["bash"]["provenant-no-shell"] == "allow"
+    assert permission["bash"] == ({"*": "allow"} if confined else {
+        "*": "deny", "provenant-no-shell": "allow",
+    })
+    assert permission["edit"] == {"*": "deny"}
 
 
 def test_opencode_run_disables_foreign_instruction_discovery(tmp_path):
