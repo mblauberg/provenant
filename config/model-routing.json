@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "catalog_date": "2026-10-16",
+  "catalog_date": "2026-10-21",
   "context": {
     "ceiling_tokens": 300000
   },
@@ -41,14 +41,6 @@
         ]
       },
       {
-        "model": "cursor/grok-4.7",
-        "weight": "normal",
-        "effort": [
-          "high",
-          "xhigh"
-        ]
-      },
-      {
         "model": "agy/claude-opus-4-6-thinking",
         "weight": "sparing"
       }
@@ -60,6 +52,10 @@
       },
       {
         "model": "opencode/opencode/glm-5.3-flash-free",
+        "weight": "high"
+      },
+      {
+        "model": "opencode/opencode/mimo-v2.6-flash-free",
         "weight": "high"
       },
       {
@@ -92,18 +88,6 @@
       },
       {
         "model": "opencode/opencode-go/glm-5.3-flash",
-        "weight": "sparing"
-      },
-      {
-        "model": "opencode/opencode/space-bunny-free",
-        "weight": "sparing"
-      },
-      {
-        "model": "opencode/opencode/mimo-v2.6-flash-free",
-        "weight": "sparing"
-      },
-      {
-        "model": "opencode/opencode/muse-spark-1.3-contributor-free",
         "weight": "sparing"
       }
     ],
@@ -777,7 +761,8 @@
           ],
           "plan_cap_usd": 0,
           "trains_on_prompts": false,
-          "default": true
+          "default": true,
+          "source_note": "User-approved operating model, 2026-10-21: this free tier does not train on prompts."
         },
         {
           "id": "opencode/glm-5.3-flash-free",
@@ -787,7 +772,8 @@
             "glm-5.3-flash-free"
           ],
           "plan_cap_usd": 0,
-          "trains_on_prompts": false
+          "trains_on_prompts": false,
+          "source_note": "User-approved operating model, 2026-10-21: this free tier does not train on prompts."
         },
         {
           "id": "opencode-go/deepseek-v4.1-flash",
@@ -819,13 +805,6 @@
           "warning": "Contributor tier: prompts are used for training and not zero-retention. Do not send sensitive, private or client data."
         },
         {
-          "id": "opencode/space-bunny-free",
-          "names": [
-            "space-bunny"
-          ],
-          "trains_on_prompts": false
-        },
-        {
           "id": "opencode/longcat-2.5-preview-free",
           "names": [
             "longcat"
@@ -836,12 +815,6 @@
           "id": "opencode/mimo-v2.6-flash-free",
           "names": [
             "mimo-free"
-          ]
-        },
-        {
-          "id": "opencode/muse-spark-1.3-contributor-free",
-          "names": [
-            "muse"
           ]
         }
       ],

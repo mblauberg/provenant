@@ -1,12 +1,6 @@
 {
   "schema_version": 1,
   "task_classes": {
-    "mechanical": {
-      "family_affinity": ["openai"]
-    },
-    "legwork": {
-      "family_affinity": ["openai"]
-    },
     "orchestration": {
       "family_affinity": ["anthropic"]
     }

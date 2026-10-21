@@ -88,10 +88,13 @@ def test_top_is_the_highest_weight_available_and_deterministic(tmp_path):
     bulk = {entry["model"]: entry["weight"] for entry in SEED["routes"]["junior"]}
     assert {bulk[model] for model in ("opencode/opencode/glm-5.3-flash-free", "claude/claude-haiku-5-5",
                                        "codex/gpt-6-luna")} == {"high"}
-    # Rotating free tiers stay in bulk at the lowest weight; no mid or top model sits in bulk.
-    assert all(weight == "sparing" for model, weight in bulk.items()
-               if model.startswith("opencode/opencode/")
-               and not model.endswith(("deepseek-v4.1-flash-free", "glm-5.3-flash-free")))
+    cooling = []
+    for _ in bulk:
+        cooling.extend(models(pick({"route": "junior"}, tmp_path, catalog=SEED, cooling=cooling)))
+    free = [model for model in bulk if model.endswith("-free")]
+    subscription = [model for model in bulk if not model.startswith("opencode/")]
+    paid = [model for model in bulk if model.startswith("opencode/opencode-go/")]
+    assert cooling == free + subscription + paid
     assert not set(bulk) & {"claude/claude-sonnet-5-5", "codex/gpt-6.1-sol", "claude/claude-opus-5-5"}
 
 
