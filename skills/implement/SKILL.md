@@ -33,22 +33,28 @@ reconciliation run.
    before changing code. Invoke `tdd` for every new or changed observable
    behaviour, and use `refactor`
    for behaviour-preserving structure and `diagnose` for unknown causes.
+   Writer tier follows task size; a failed gate gets one repair at the same
+   tier, then escalates one tier. A downward handoff carries an executable
+   contract: a failing test, types or a check command.
    Migrations may need behaviour tests and equivalence evidence. Use
    `orchestrate` when decomposition helps; adapt topology inside authority.
    For a version-sensitive external interface or migration, apply
    [source grounding](references/source-grounding.md) and
    [migration compatibility](references/migration-compatibility.md).
-3. Run deterministic checks; map each criterion to evidence. When project
+3. Run fast checks (lint, types, targeted tests) and pass them before review.
+   Slow checks (full suites, CI) run in parallel with review. Map each criterion to evidence. When project
    instructions defer test execution to a later gate, report those tests as
    deferred and unverified; that gate runs them before merge. When required,
    run `evaluate` and attach its passing receipt.
 4. Invoke read-only `code-review` under the current `HARNESS.md` risk ladder.
    Record each `adapter/model@effort` route from its attempt receipt and derive
-   family. Record omissions and substitutions. Native subagents use the Agent
+   family. A change that affects UI produces screenshots at set viewports and
+   attaches them to the review brief; reviewers with vision get them. Record omissions and substitutions. Native subagents use the Agent
    tool model parameter and mark the route resolved.
-5. Repair blockers, then repeat verification and review under the `deliver`
-   receipt contract's scaled budget. Return evidence to user or `scope` on
-   drift.
+5. Feed findings from review and the slow checks into one repair round, then
+   repeat verification and re-review only the repair delta, under the `deliver`
+   receipt contract's scaled budget. Every gate still passes before merge.
+   Return evidence to user or `scope` on drift.
 6. Update owned docs for behavioural, architectural, operational or decision
    change. For substantial+ apply `session`: refresh recovery checkpoint,
    audit context, graduate durable findings and classify retained/ephemeral
