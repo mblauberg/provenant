@@ -445,6 +445,61 @@ def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
     assert args.capabilities == ["browser", "postgres"]
 
 
+def test_prepare_resume_drops_missing_add_dir_with_warning(tmp_path: Path):
+    module = load_dispatch_module()
+    run_dir = make_run(tmp_path, "resume-add-dirs")
+    attempt_dir = run_dir / "tasks/task-1/attempt-001"
+    attempt_dir.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    existing_dir = workspace / "existing"
+    existing_dir.mkdir()
+    removed_dir = workspace / "removed"
+    previous = {
+        "run_id": "resume-me", "task_id": "task-1", "attempt": 1, "state": "terminal",
+        "status": "ok", "mode": "read_only", "cwd": str(workspace), "worktree": None,
+        "workspace": {"root": str(workspace)}, "session_id": "saved-session",
+        "read_roots": [],
+        "provenance": {"requested": {"adapter": "codex"}, "resolved_model": "fixture", "effort_applied": ""},
+        "applied": {"sandbox": "read-only", "network": None, "add_dirs": [str(existing_dir), str(removed_dir)],
+                    "capabilities": []},
+        "paths": {"events": None}, "requested_route": {},
+    }
+    (attempt_dir / "attempt.json").write_text(json.dumps(previous), encoding="utf-8")
+    args = SimpleNamespace(
+        run_dir=run_dir, resume="resume-me", task_id=None, tool=None, model=None, effort=None,
+        access_mode=None, worktree=None, provider_cwd=None, sandbox=None, network=None,
+        add_dirs=[], resume_session=None, fallback=None, context_ceiling=None,
+        intent="ordinary", orchestrator_family="", role="worker", risk_tier="",
+        model_override_tier="", reviewer_id="", preface=True,
+    )
+
+    module.prepare_resume(args)
+
+    assert args.add_dirs == [str(existing_dir)]
+    assert any("removed" in w for w in getattr(args, "_resume_warnings", []))
+
+
+def test_secret_scan_unavailable_fix_includes_failing_path_and_reason(tmp_path: Path):
+    module = load_dispatch_module()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    unreadable_dir = workspace / "unreadable"
+    unreadable_dir.mkdir()
+    unreadable_dir.chmod(0)
+    try:
+        tasks = [{
+            "id": "task-1", "adapter": "codex", "model": "fixture",
+            "prompt": "hello", "add_dirs": [str(unreadable_dir)],
+        }]
+        res = module.preflight_tasks(tasks, workspace_root=workspace)
+        assert res["status"] == "rejected"
+        assert res["error"] == "secret_scan_unavailable"
+        assert str(unreadable_dir) in res["fix"]
+    finally:
+        unreadable_dir.chmod(0o755)
+
+
 def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_path: Path) -> None:
     run_dir = make_run(tmp_path, "one")
     receipt_before = (run_dir / "RUN_RECEIPT.json").read_bytes()

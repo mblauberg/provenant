@@ -2207,6 +2207,40 @@ it('resumes a cross-project run with its saved read roots, and refuses one whose
  expect(existsSync(log)).toBe(false);
 });
 
+it("resumes a terminal batch task whose recorded add-dir was removed", async () => {
+ const dir = join(workspace, ".agent-run/runs/20260801-1200-batch-resume-test-abcdef");
+ const taskDir = join(dir, "tasks/batch-task/attempt-001");
+ mkdirSync(taskDir, { recursive: true });
+ mkdirSync(join(dir, "_owner"), { recursive: true });
+ const missingDir = join(temporaryDirectory, "removed-add-dir");
+ const row = JSON.parse(readFileSync(join(testDirectory, "fixtures/attempt.json"), "utf8"));
+ Object.assign(row, {
+  run_id: "mcp-batchres",
+  task_id: "batch-task",
+  state: "terminal",
+  status: "ok",
+  applied: { sandbox: "read-only", network: null, add_dirs: [missingDir], capabilities: [] },
+ });
+ writeFileSync(join(taskDir, "attempt.json"), JSON.stringify(row));
+ writeFileSync(join(dir, "dispatch-status.json"), JSON.stringify({
+  kind: "batch",
+  batch_id: "batch-1",
+  task_id: "batch-task",
+  task_ids: ["batch-task"],
+  routes: [{ adapter: "codex", model: "fixture" }],
+  status: "completed",
+  finished_at: new Date().toISOString(),
+ }));
+ const resumed = await resumeConfiguredProvider(
+  { resume: row.run_id, task_id: "batch-task", prompt: "continue prompt", wait_seconds: 0 },
+  identity,
+  new AbortController().signal,
+  ownerEnvironment,
+ );
+ expect(resumed.state, JSON.stringify(resumed)).toBe("queued");
+ spawnedPids.push(listRecordedRuns(workspace).find((run) => run.run_id === row.run_id)?.owner_pid);
+});
+
 it("fills unset dispatch fields from the project policy's dispatch_defaults", async () => {
   mkdirSync(join(workspace, ".agents"));
   // Written as text so the inherited names arrive as own keys, as they would from a project file.

@@ -839,8 +839,8 @@ def batch(args: argparse.Namespace) -> int:
                 error, fix = "secret_detected", scan.fix()
             else:
                 continue
-        except OSError:
-            error, fix = "secret_scan_unavailable", "Make task inputs readable for the secret scan."
+        except (OSError, subprocess.SubprocessError) as exc:
+            error, fix = "secret_scan_unavailable", f"Make task inputs readable for the secret scan: {exc}"
         if error:
             rejected[task["id"]] = {
                 "task_id": task["id"], "status": "rejected", "outcome": "preflight_rejected",
