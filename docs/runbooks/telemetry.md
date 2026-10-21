@@ -278,3 +278,93 @@ changed. Ownership and indexes account for much of the footprint. Daily rollups
 could reduce older detail, but would remove per-session evidence needed for
 reconciliation and outcomes. This slice preserves that evidence; it makes no
 size-reduction claim. No live database was opened for this measurement.
+
+## Optional OTLP collector
+
+Transcript and receipt ingestion above remains the baseline. When the
+collector is absent nothing changes. The collector is an opt-in, on-demand
+macOS receiver for OTLP/HTTP JSON that Claude Code and Codex can export to.
+Its first slice only stores what it receives; ledger ingestion is a separate
+change.
+
+Source: [tools/otlp-collector](../../tools/otlp-collector/otlp-collector.swift),
+Swift with no packages. It listens on `127.0.0.1:4318` only, through launchd
+socket activation, so it costs nothing while idle. It exits after
+`PROVENANT_OTEL_IDLE_MINUTES` (default 10) without a connection and launchd
+starts it again on the next one. Foreground mode for hosts without launchd and
+for tests: `otlp-collector --listen 127.0.0.1:PORT [--idle-seconds N]`.
+
+Enable and disable:
+
+```sh
+scripts/install-harness --platform claude --otel-collector   # builds with swiftc, installs
+scripts/install-harness --uninstall-otel-collector           # removes agent and binary
+```
+
+The installer writes `~/Library/LaunchAgents/com.provenant.otlp-collector.plist`,
+installs `provenant-otlp-collector` beside the `provenant` command and loads the
+agent with `launchctl bootstrap`. `PROVENANT_OTEL_NO_LAUNCHCTL=1` writes the
+files without touching launchd. Uninstall keeps stored data. The installer never
+edits `~/.claude/settings.json` or `~/.codex/config.toml`; add the exports
+yourself.
+
+Stored data: `POST /v1/{logs,metrics,traces}` with `Content-Type:
+application/json` is validated as JSON and appended, untransformed, as one line
+`{"received_at","signal","body"}` to
+`$AGENT_FABRIC_STATE_ROOT/otel/<signal>-YYYYMMDD.ndjson` (UTC day, mode 0600,
+directory 0700; state root as in `scripts/telemetry.py`). Replies are `200 {}`,
+`415` for protobuf or compressed bodies, `400` for invalid JSON, `413` above
+`PROVENANT_OTEL_MAX_BODY_BYTES` (default 4 MiB) and `411` for chunked bodies.
+Files older than `PROVENANT_OTEL_RETENTION_DAYS` (default 30) are pruned at
+start and when the day changes.
+
+Claude Code (environment, for example in a shell profile):
+
+```sh
+export CLAUDE_CODE_ENABLE_TELEMETRY=1
+export OTEL_METRICS_EXPORTER=otlp
+export OTEL_LOGS_EXPORTER=otlp
+export OTEL_EXPORTER_OTLP_PROTOCOL=http/json
+export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4318
+```
+
+Codex (`~/.codex/config.toml`):
+
+```toml
+[otel]
+log_user_prompt = false
+exporter = { otlp-http = { endpoint = "http://127.0.0.1:4318/v1/logs", protocol = "json" } }
+trace_exporter = "none"
+metrics_exporter = "none"
+```
+
+Privacy defaults: leave `OTEL_LOG_USER_PROMPTS` and `OTEL_LOG_TOOL_DETAILS`
+unset or `0`, and keep Codex `log_user_prompt = false`. Do not enable either.
+
+Verification status: codex-cli 0.159.0 binary strings confirm the `[otel]` keys
+`environment`, `exporter`, `trace_exporter`, `metrics_exporter` and
+`log_user_prompt`, the exporter kinds `none`, `statsig`, `otlp-http` and
+`otlp-grpc`, and the `endpoint`, `protocol` (`binary` or `json`), `headers` and
+`tls` fields. The exact TOML shape above (inline table keyed by exporter kind)
+and whether Codex appends signal paths to `endpoint` were not verified against
+a running Codex; the Codex endpoint is therefore given as the full `/v1/logs`
+URL, and Codex metrics and traces stay off.
+
+Verified on 2026-10-22 (laptop, Claude Code 2.1.306): a throwaway agent under
+the real launchd had no process before the first request, started on it (0.56 s
+for the first load, 72 ms on a later wake, 15 ms warm), exited when idle and
+woke again on the next request, at about 7 MB RSS. The source also compiles with
+Swift 6.1 (workshop). A `claude -p` run with the Claude Code exports above wrote
+logs (`user_prompt`, `api_request`, `assistant_response`, hook and MCP events)
+and metrics (`active_time.total`, `cost.usage`, `session.count`,
+`token.usage`). `api_request` carries model, effort, input, output and cache
+tokens (5-minute and 1-hour writes separately), cost, duration, time to first
+token and request id. Prompt and response text arrived as `<REDACTED>`, with
+lengths only. Every record carries account and user identity attributes,
+including the account email, so the files stay local and private.
+
+Lane linkage (follow-up, not implemented): the dispatcher should set
+`OTEL_RESOURCE_ATTRIBUTES=provenant.run_id=<run>,provenant.lane=<lane>,provenant.account=<account>`
+in each lane's environment so exported events join to Fabric runs. It touches
+the lane process environment in `scripts/fabric_lanes.py` and the adapters, so
+it is left for its own change.
