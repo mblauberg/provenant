@@ -36,14 +36,33 @@ import context_usage
 import process_info
 
 
-# Home-relative paths a confined provider needs for its own state and sign-in,
-# found by probing each CLI under a deny-home profile (2026-09-24). A "*" suffix
-# also covers siblings sharing the prefix, such as an atomic-rewrite temp file.
+# Home-relative paths a confined provider needs for its own state and sign-in.
+# Initial probes (2026-09-24) were narrowed using name-only layouts for #927:
+# executable/configuration trees stay read-only even alongside mutable state.
+# A "*" suffix covers atomic-rewrite siblings, without granting their children.
+# npm/uv/Corepack caches are redirected into each attempt; never let a lane
+# poison ~/.npm's reusable packages (_cacache, _npx, _prebuilds or _tuf).
+NPM_STATE_WRITES = (".npm/_logs",)
+NPM_STATE_FILES = (".npm/_update-notifier-last-checked",)
 CONFINED_STATE = {
     "agy": {
-        "read_write": (".gemini/antigravity-cli", ".gemini/config", ".gemini/oauth_creds.json*"),
+        "read_write": tuple(f".gemini/antigravity-cli/{name}" for name in (
+            "annotations", "brain", "conversations", "crashes", "implicit", "knowledge", "log",
+            "plugin_data", "presence", "scratch", "antigravity-oauth-token*", "mcp_oauth_tokens.json*",
+            "history.jsonl*")) + (".gemini/config/sidecars", ".gemini/oauth_creds.json*"),
+        "write_literal": tuple(f".gemini/antigravity-cli/{name}" for name in (
+            "conversation_summaries.db", "conversation_summaries.db-wal", "conversation_summaries.db-shm",
+            "conversation_summaries.db-journal", "jetbox_summaries_proto.pb", "jetski_state.pbtxt",
+            "last_check.timestamp", "installation_id", "updater/update.lock", "updater/update_status.json",
+            "cache/CHANGELOG.md", "cache/conversation_metadata.json", "cache/default_project_id.txt",
+            "cache/last_conversations.json", "cache/onboarding.json", "cache/projects.json")),
+        # config/projects holds project permission overrides and must also stay read-only.
+        # sidecars, plugin_data and the protobuf/knowledge state still need live write evidence.
+        # In particular bin/, builtin/, mcp/, plugins/, skills/ and cache/marketplaces/ are not state grants.
+        "no_symlinks": (".gemini",),
         # Without the keychain file agy falls back to an interactive sign-in and times out.
-        "read": ("Library/Keychains/login.keychain-db",),
+        "read": (".gemini/antigravity-cli", ".gemini/config", ".gemini/oauth_creds.json*",
+                 "Library/Keychains/login.keychain-db"),
     },
     "opencode": {
         "read_write": (".local/share/opencode", ".local/state/opencode", ".cache/opencode"),
@@ -52,29 +71,56 @@ CONFINED_STATE = {
         "read": (".config/opencode", ".opencode"),
     },
     "claude": {
-        "read_write": (".claude", ".claude.json*", ".cache/claude", ".npm"),
+        "read_write": tuple(f".claude/{name}" for name in (
+            ".credentials.json*", "cache", "debug", "feedback", "file-history", "ide", "jobs",
+            "paste-cache", "sessions", "state", "teams", "telemetry", "uploads",
+            "history.jsonl*", "stats-cache.json*", "mcp-needs-auth-cache.json*", "gh-pr-status-cache.json*",
+            "statusline-lanes.json*")) + (".cache/claude", *NPM_STATE_WRITES),
+        "write_literal": NPM_STATE_FILES,
+        # Project roots also contain auto-loaded memory. Only UUID transcripts/session trees are state;
+        # no root creation/rename grant that could transplant a crafted directory containing memory.
+        "write_regex": (r"\.claude/projects/[^/]+/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+                        r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(\.jsonl[^/]*|(/.*)?)",),
+        "prepare_dirs": lambda home, plan: (_claude_project_dir(home, plan["cwd"]),),
+        # ~/.claude.json contains MCP configuration, not just sign-in state. Shell snapshots and
+        # session-env can be sourced by later shells, so they too must remain read-only.
+        # The absent ~/.cache/claude and jobs/ide/state/teams need smoke evidence when quota returns.
+        "no_symlinks": (".claude", ".cache/claude", ".npm"),
+        "read": (".claude", ".claude.json*", ".cache/claude", ".npm"),
         # Claude Code keeps its OAuth sign-in in the login keychain; a read-only lane is signed out
         # without it. Only OAuth lanes get it: bare and endpoint lanes sign in with a key.
         "oauth_read": ("Library/Keychains/login.keychain-db",),
     },
     "cursor": {
-        "read_write": (".cursor", ".cache/cursor", ".npm"),
+        "read_write": tuple(f".cursor/{name}" for name in (
+            "chats", "ai-tracking", "plans", "agent-cli-state.json*", "ide_state.json*",
+            "prompt_history.json*", "statsig-cache.json*")) + (".cache/cursor", *NPM_STATE_WRITES),
+        "write_literal": NPM_STATE_FILES,
+        # A project also holds workspace trust, MCP approvals and rules. Its root stays read-only.
+        "write_regex": (r"\.cursor/projects/[^/]+/(agent-transcripts|canvases|terminals)(/.*)?",
+                        r"\.cursor/projects/[^/]+/(worker\.log|worker\.sock|mcp-auth\.json[^/]*|mcp-cache\.json[^/]*)"),
+        "prepare_dirs": lambda home, plan: (home / ".cursor/projects" /
+                                           re.sub(r"[^A-Za-z0-9]+", "-", str(plan["cwd"])).strip("-"),),
+        # cli-config.json, argv.json, mcp.json, hooks and extensions are configuration. The absent
+        # ~/.cache/cursor and projects/plans/ai-tracking need smoke evidence when quota returns.
+        "no_symlinks": (".cursor", ".cache/cursor", ".npm"),
         # cursor-agent keeps its sign-in in the login keychain; a read-only lane is signed out without it.
-        "read": ("Library/Keychains/login.keychain-db",),
+        "read": (".cursor", ".cache/cursor", ".npm", "Library/Keychains/login.keychain-db"),
     },
     "kiro": {
         # kiro-cli keeps its sign-in and refreshed tokens in data.sqlite3, guarded by .refresh.lock,
         # which it opens for writing before reading the token. The rest of its support directory holds
         # shell hooks the user's shell sources and binaries it runs, so stays read-only.
-        "read_write": (".kiro", ".cache/kiro", ".npm"),
+        "read_write": (".kiro", ".cache/kiro", *NPM_STATE_WRITES),
         # SQLite creates and removes these sidecars; each is one file at its own name.
         "write_literal": tuple(f"Library/Application Support/kiro-cli/data.sqlite3-{suffix}"
-                               for suffix in ("wal", "shm", "journal")),
+                               for suffix in ("wal", "shm", "journal")) + NPM_STATE_FILES,
         # Rewritten in place only: a lane cannot swap either for a link its unconfined CLI would follow.
         "write_in_place": ("Library/Application Support/kiro-cli/data.sqlite3",
                            "Library/Application Support/kiro-cli/.refresh.lock"),
         "no_links": ("Library/Application Support/kiro-cli",),
-        "read": ("Library/Application Support/kiro-cli",),
+        "no_symlinks": (".npm",),
+        "read": ("Library/Application Support/kiro-cli", ".npm"),
         # Its prompt history spans every project.
         "read_denied": ("Library/Application Support/kiro-cli/history",),
         # Its engine finds its app bundle through the launcher links in ~/.local/bin.
@@ -348,10 +394,14 @@ def _sbpl_filter(path, *, keep_leaf=False, canonical=False):
     text = str(path)
     if text.endswith("*"):
         pattern = text[:-1]
-        regex_metacharacters = set(r'.^$*+?()[]{}|\\"')
-        pattern = "".join("\\" + char if char in regex_metacharacters else char for char in pattern)
+        pattern = _sbpl_regex_escape(pattern)
         return '(regex #"^' + pattern + '[^/]*$")'
     return "(subpath " + _sbpl_string(path, keep_leaf=keep_leaf, canonical=canonical) + ")"
+
+
+def _sbpl_regex_escape(value):
+    regex_metacharacters = set(r'.^$*+?()[]{}|\\"')
+    return "".join("\\" + char if char in regex_metacharacters else char for char in value)
 
 
 def _sbpl_rule(action, operations, paths, *, literal=False, keep_leaf=False, canonical=False):
@@ -647,11 +697,16 @@ def _state_write_guards(home, state):
     rules = _sbpl_rule("allow", "file-write*", _state_paths(home, state.get("write_literal", ())),
                        literal=True, canonical=True)
     rules += _sbpl_rule("allow", "file-write*", in_place, literal=True, canonical=True)
+    for pattern in state.get("write_regex", ()):
+        rules += f'(allow file-write* (regex #"^{_sbpl_regex_escape(str(home))}/{pattern}$"))\n'
     rules += _sbpl_rule("deny", "file-write-create file-write-unlink", in_place, literal=True, canonical=True)
     for path in state.get("no_links", ()):
         # Nor a directory or FIFO at a file grant, which would hold or block what the CLI opens.
         rules += (f"(deny file-write-create (require-all {_sbpl_filter(home / path)} (require-any "
                   "(vnode-type SYMLINK) (vnode-type DIRECTORY) (vnode-type FIFO))))\n")
+    for path in state.get("no_symlinks", ()):
+        # Session/cache trees need new directories, unlike the fixed-file Kiro support grants.
+        rules += f"(deny file-write-create (require-all {_sbpl_filter(home / path)} (vnode-type SYMLINK)))\n"
     return rules
 
 
@@ -957,12 +1012,33 @@ def _adapter_binary_reads(plan, search_path=None):
     return links, [install]
 
 
+def _prepare_state_directories(plan):
+    """Bootstrap only the actual project's root before confinement. Granting root creation to a lane
+    would also let it rename an arbitrary tree of hooks or trust/MCP settings into that location.
+    Walk without following links; an existing project, its configuration and memory are untouched.
+    """
+    home = Path.home().resolve()
+    prepare = CONFINED_STATE.get(plan.get("adapter"), {}).get("prepare_dirs")
+    for directory in prepare(home, plan) if prepare else ():
+        current = home
+        for part in directory.relative_to(home).parts:
+            current = current / part
+            try:
+                current.mkdir()
+            except FileExistsError:
+                pass
+            if not stat.S_ISDIR(current.lstat().st_mode):
+                raise PermissionError(f"provider state directory must be a real directory: {current}; "
+                                      "fix: replace the link or file with a directory")
+
+
 def confinement_command(plan, command, search_path=None):
     if plan.get("applied", {}).get("confinement") != "sandbox-exec":
         return list(command)
     sandbox_exec = _sandbox_exec_path()
     if not sandbox_exec:
         raise RuntimeError("sandbox-exec is unavailable for a confined provider launch")
+    _prepare_state_directories(plan)
     return [sandbox_exec, "-p", os_confinement_profile(plan, search_path), *command]
 
 

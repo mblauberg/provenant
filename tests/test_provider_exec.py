@@ -883,6 +883,170 @@ def test_adapter_binary_in_a_plain_bin_directory_grants_the_file_alone(monkeypat
     assert directories == []
 
 
+PROVIDER_STATE_CASES = (
+    ("claude", (".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/attack.sh",
+                ".claude/skills/attack/SKILL.md", ".claude/agents/attack.md", ".claude/plugins/attack.js",
+                ".claude/CLAUDE.md", ".claude.json", ".claude.json.tmp", ".claude/shell-snapshots/attack.sh",
+                ".claude/projects/probe/memory/MEMORY.md", ".claude/projects/probe/settings.json"),
+     (".claude/projects/probe/12345678-1234-1234-1234-123456789abc.jsonl",
+      ".claude/projects/probe/12345678-1234-1234-1234-123456789abc/subagents/agent.jsonl",
+      ".claude/sessions/probe.json", ".claude/history.jsonl",
+      ".claude/.credentials.json", ".claude/.credentials.json.tmp", ".claude/debug/probe.log")),
+    ("agy", (".gemini/config/mcp_config.json", ".gemini/config/plugins/attack.js",
+             ".gemini/config/skills/attack/SKILL.md", ".gemini/antigravity-cli/settings.json",
+             ".gemini/antigravity-cli/plugins/attack.js", ".gemini/antigravity-cli/skills/attack/SKILL.md",
+             ".gemini/antigravity-cli/bin/attack", ".gemini/antigravity-cli/builtin/skills/attack.md",
+             ".gemini/antigravity-cli/mcp/server/instructions.md",
+             ".gemini/antigravity-cli/cache/marketplaces/attack.js", ".gemini/config/projects/probe.json"),
+     (".gemini/oauth_creds.json", ".gemini/oauth_creds.json.tmp",
+      ".gemini/antigravity-cli/antigravity-oauth-token", ".gemini/antigravity-cli/mcp_oauth_tokens.json",
+      ".gemini/antigravity-cli/conversations/probe.pb", ".gemini/antigravity-cli/presence/probe.lock",
+      ".gemini/antigravity-cli/conversation_summaries.db-wal")),
+    ("cursor", (".cursor/hooks.json", ".cursor/extensions/attack.js", ".cursor/settings.json",
+                ".cursor/cli-config.json", ".cursor/argv.json", ".cursor/mcp.json",
+                ".cursor/agents/attack.md", ".cursor/plugins/attack.js", ".cursor/skills/attack/SKILL.md",
+                ".cursor/projects/probe/.workspace-trusted", ".cursor/projects/probe/repo.json",
+                ".cursor/projects/probe/mcp-approvals.json", ".cursor/projects/probe/mcp-disabled.json",
+                ".cursor/projects/probe/mcps/server/instructions.md", ".cursor/projects/probe/rules/attack.md"),
+     (".cursor/chats/probe/session.db", ".cursor/agent-cli-state.json", ".cursor/prompt_history.json",
+      ".cursor/ai-tracking/ai-code-tracking.db-wal", ".cursor/projects/probe/agent-transcripts/probe.txt",
+      ".cursor/projects/probe/worker.log", ".cursor/projects/probe/mcp-auth.json")),
+)
+
+
+@pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
+@pytest.mark.parametrize("adapter,protected,writable", PROVIDER_STATE_CASES)
+def test_provider_state_keeps_config_read_only_and_runtime_state_writable(monkeypatch, tmp_path, mode,
+                                                                        adapter, protected, writable):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    workspace = home / "repo"
+    workspace.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    for relative in (*protected, *writable):
+        path = home / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("original\n", encoding="utf-8")
+    profile = mod.os_confinement_profile({
+        "adapter": adapter, "mode": mode, "workspace_root": str(workspace), "cwd": str(workspace),
+        "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    })
+    assert "(deny file-write*)" in profile
+    writes = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-write* "))
+    # Check every allow, including ancestor grants and atomic-rewrite regexes, not just exact names.
+    def granted(relative):
+        path = str(home / relative)
+        for kind, value in re.findall(r'\((subpath|literal|regex) #?"([^"]*)"\)', writes):
+            if kind == "regex" and re.search(value, path):
+                return True
+            if kind == "literal" and path == value:
+                return True
+            if kind == "subpath" and (path == value or path.startswith(value + "/")):
+                return True
+        return False
+
+    for relative in protected:
+        assert not granted(relative), relative
+    for relative in writable:
+        assert granted(relative), relative
+    if adapter in {"claude", "cursor"}:
+        assert not granted(f".{adapter}/projects/absent-project")
+    root = {"agy": ".gemini", "claude": ".claude", "cursor": ".cursor"}[adapter]
+    link_guard = f'(deny file-write-create (require-all (subpath "{home / root}")'
+    assert any(line.startswith(link_guard) and "(vnode-type SYMLINK)" in line for line in profile.splitlines())
+
+    sandbox_exec = mod._sandbox_exec_path()
+    if sys.platform != "darwin" or not sandbox_exec:
+        return
+
+    def run(script):
+        return subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script],
+                              capture_output=True, text=True)
+
+    for relative in protected:
+        path = shlex.quote(str(home / relative))
+        assert run(f"printf hijack > {path}").returncode != 0, relative
+        assert run(f"rm -f {path}").returncode != 0, relative
+        assert (home / relative).read_text() == "original\n"
+    for relative in writable:
+        path = shlex.quote(str(home / relative))
+        assert run(f"printf refreshed > {path}").returncode == 0, relative
+        link = shlex.quote(str(home / (relative + ".link")))
+        assert run(f"ln -s {shlex.quote(str(home / protected[0]))} {link}").returncode != 0, relative
+    # New session directories must still be creatable; the file-only Kiro guard would forbid these.
+    sessions = {"claude": ".claude/projects/probe/12345678-1234-1234-1234-123456789abc",
+                "agy": ".gemini/antigravity-cli/conversations", "cursor": ".cursor/chats/probe"}
+    directory = home / sessions[adapter] / "new-session"
+    assert run(f"mkdir {shlex.quote(str(directory))}").returncode == 0
+    link = directory / "link"
+    assert run(f"ln -s {shlex.quote(str(home / protected[0]))} {shlex.quote(str(link))}").returncode != 0
+    if adapter in {"claude", "cursor"}:
+        destination = home / f".{adapter}/projects/absent-project"
+        assert run(f"mv {shlex.quote(str(directory))} {shlex.quote(str(destination))}").returncode != 0
+
+
+@pytest.mark.parametrize("adapter,project", [
+    ("claude", "-srv-new-workspace"), ("cursor", "srv-new-workspace"),
+])
+def test_confined_launch_prepares_only_the_actual_project_root(monkeypatch, tmp_path, adapter, project):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    home.mkdir()
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = {"adapter": adapter, "mode": "read_only", "workspace_root": "/srv/new-workspace",
+            "cwd": "/srv/new-workspace", "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    project_root = home / f".{adapter}/projects" / project
+    assert not project_root.exists()
+    command = mod.confinement_command(plan, ["provider"])
+    assert command[:2] == ["/usr/bin/sandbox-exec", "-p"]
+    assert project_root.is_dir()
+    assert list(project_root.iterdir()) == []
+    assert f'(subpath "{project_root}")' not in command[2]
+    assert [p.name for p in project_root.parent.iterdir()] == [project]
+
+
+@pytest.mark.parametrize("adapter", ["claude", "cursor"])
+def test_project_root_preparation_refuses_symlink_ancestors(monkeypatch, tmp_path, adapter):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    provider = home / f".{adapter}"
+    provider.mkdir(parents=True)
+    target = tmp_path / "config"
+    target.mkdir()
+    (provider / "projects").symlink_to(target, target_is_directory=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: "/usr/bin/sandbox-exec")
+    plan = {"adapter": adapter, "cwd": "/srv/new-workspace", "applied": {"confinement": "sandbox-exec"}}
+    with pytest.raises(PermissionError, match="provider state directory must be a real directory"):
+        mod.confinement_command(plan, ["provider"])
+    assert list(target.iterdir()) == []
+
+
+@pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
+@pytest.mark.parametrize("adapter", ["claude", "cursor", "kiro"])
+def test_shared_npm_state_cannot_poison_reused_packages(monkeypatch, tmp_path, adapter, mode):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    workspace = home / "repo"
+    workspace.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    profile = mod.os_confinement_profile({
+        "adapter": adapter, "mode": mode, "workspace_root": str(workspace), "cwd": str(workspace),
+        "applied": {"confinement": "sandbox-exec", "add_dirs": []},
+    })
+    writes = "\n".join(line for line in profile.splitlines() if line.startswith("(allow file-write* "))
+    assert f'(subpath "{home / ".npm"}")' not in writes
+    for name in ("_cacache", "_npx", "_prebuilds", "_tuf"):
+        assert f'(subpath "{home / ".npm" / name}")' not in writes
+    assert f'(subpath "{home / ".npm/_logs"}")' in writes
+    assert f'(literal "{home / ".npm/_update-notifier-last-checked"}")' in writes
+    assert any(line.startswith(f'(deny file-write-create (require-all (subpath "{home / ".npm"}")')
+               and "(vnode-type SYMLINK)" in line for line in profile.splitlines())
+
+
 KIRO_SUPPORT = "Library/Application Support/kiro-cli"
 # Files in Kiro's support directory that the user's shell sources or that Kiro executes.
 KIRO_EXECUTABLES = ("shell/zshrc.pre.zsh", "shell/bashrc.post.bash", "node", "bun", "tui.js",
@@ -6723,4 +6887,3 @@ def test_codex_toml_overrides_spell_non_bmp_names_as_toml():
     assert tomllib.loads("mcp_servers = " + table)["mcp_servers"] == {
         "\U0001F600": {"enabled": False}, "dot.name": {"enabled": False},
     }
-
