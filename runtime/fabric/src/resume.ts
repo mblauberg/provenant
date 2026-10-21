@@ -215,6 +215,7 @@ export async function resumeConfiguredProvider(
         kind: "dispatch",
         identifier: taskId,
         taskIds,
+        taskAlias: saved.task_alias,
         cwdProjects: { ...saved.cwd_projects,
           ...(previous.mode === "read_only" ? { [taskId]: projectRoot(executionIdentity.cwd, env) } : {}) },
         resume: true,

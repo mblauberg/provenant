@@ -312,6 +312,7 @@ export interface OwnerIdentification {
   identifier: string;
   routes?: unknown;
   taskIds?: string[];
+  taskAlias?: string;
   timeout?: number;
   resume?: boolean;
   batchId?: string;
@@ -392,6 +393,7 @@ export function startOwner(
     started_at: new Date().toISOString(),
     routes: identification.routes,
     task_ids: identification.taskIds,
+    task_alias: identification.taskAlias,
     cwd_projects: cwdProjects,
     timeout_seconds: identification.timeout,
     status: "running",
@@ -720,12 +722,16 @@ async function dispatchConfiguredProviderUnchecked(
   const workspaceIdentity = identity;
   const root = productRoot(env);
   const ownSeatGuard = !launch.continuation && namesExplicitRoute(withoutEmptySelectors(input));
+  // Routing may replace an alias with a pool selector or a concrete model.
+  const callerAlias = input.task_id === undefined ? withoutEmptySelectors(input).alias : undefined;
+  const namedTaskId = input.task_id ?? (callerAlias === undefined ? undefined
+    : callerAlias.replace(/[^A-Za-z0-9._-]+/gu, "-").replace(/^[^A-Za-z0-9]+/u, "").slice(0, 64) || "task");
   const preferred = nativeFirst(input, identity);
   input = preferred.task;
   let poolWarnings: string[] = preferred.warnings;
   if (usesPool(input)) {
     // A route pick keeps this a single dispatch; a council runs as a batch of its members.
-    const taskId = input.task_id ?? input.alias ?? (input.council === undefined && input.models === undefined ? undefined : "council");
+    const taskId = namedTaskId ?? (input.council === undefined && input.models === undefined ? undefined : "council");
     const expanded = await expandPools([{ ...input, ...(taskId === undefined ? {} : { id: taskId }) }],
       await pythonOwner(root, identity, env), root, identity, env, signal);
     if (expanded.errors.length) {
@@ -745,7 +751,7 @@ async function dispatchConfiguredProviderUnchecked(
     }
     // A single pick, or a selector that won precedence, replaces the request's own selectors.
     const { id: _id, ...picked } = expanded.tasks[0]!;
-    input = { ...(picked as DispatchInput), ...(input.task_id === undefined ? (input.alias === undefined ? {} : { task_id: input.alias }) : { task_id: input.task_id }) };
+    input = picked as DispatchInput;
     poolWarnings = [...preferred.warnings, ...expanded.warnings];
   }
   const snapshotStarted = performance.now(), catalogue = catalogueSnapshot(root, env);
@@ -770,7 +776,7 @@ async function dispatchConfiguredProviderUnchecked(
   const callStarted = Date.now(), validateStarted = performance.now();
   const snapshotMs = performance.now() - snapshotStarted;
   const timeout = timeoutSeconds(input.timeout_seconds ?? policy.defaults.timeout_seconds, input.mode);
-  const taskId = input.task_id ?? input.alias ?? `task-${randomUUID().slice(0, 8)}`;
+  const taskId = namedTaskId ?? `task-${randomUUID().slice(0, 8)}`;
   const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
   const python = await pythonOwner(root, identity, env);
@@ -846,6 +852,7 @@ async function dispatchConfiguredProviderUnchecked(
       identifier: taskId,
       routes: checked.routes,
       taskIds: [taskId],
+      taskAlias: callerAlias,
       cwdProjects: input.cwd === undefined ? undefined : { [taskId]: projectRoot(providerIdentity.cwd, env) },
       timeout,
     },
