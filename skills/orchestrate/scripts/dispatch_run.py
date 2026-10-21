@@ -62,7 +62,7 @@ import secret_scan
 import exec_routing
 import context_usage
 import attempt_storage
-from fabric_records import render_digest, write_cooldown, write_route_health, append_index, TERMINAL_STATUSES
+from fabric_records import identity_resolver, render_digest, write_cooldown, write_route_health, append_index, TERMINAL_STATUSES
 from _shared.custody import (
     OwnedFileError, OwnedLinkError, atomic_write_contained, contained_regular_path,
     ensure_contained_directory, create_contained_directory, open_contained_regular, read_bound_bytes,
@@ -511,6 +511,91 @@ def acquire_run_custody(run_dir: Path):
     return stream
 
 
+@contextmanager
+def attempt_custody(run_dir: Path, path: Path, *, blocking: bool = True):
+    """Serialise short publications, including children without run custody."""
+    fd, _relative, _target = open_contained_regular(
+        run_dir, path.with_suffix(".lock").relative_to(run_dir),
+        os.O_RDWR | os.O_CREAT, label="attempt custody"
+    )
+    with os.fdopen(fd, "a+") as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        yield
+
+
+def reap_run_evidence(run_dir: Path):
+    """Read current closure evidence, refusing a live or unobservable owner."""
+    receipt = json.loads(read_bound_bytes(run_dir, "RUN_RECEIPT.json", label="run receipt"))
+    if not isinstance(receipt, dict) or receipt.get("status") != "active":
+        return None
+    # Older writers may not hold custody. A live or unobservable owner
+    # still owns its attempts, even if its provider has already exited.
+    owners = [receipt]
+    for name in ("dispatch-owner.json", "dispatch-status.json"):
+        try:
+            (run_dir / name).lstat()
+        except FileNotFoundError:
+            continue
+        owners.append(json.loads(read_bound_bytes(run_dir, name, label="run owner")))
+    terminal_status = "lost"
+    run_token = None
+    for owner in owners:
+        if not isinstance(owner, dict):
+            return None
+        if owner.get("run_token"):
+            run_token = owner["run_token"]
+        if owner.get("finished_at") and owner.get("status") in {"interrupted", "cancelled"}:
+            terminal_status = owner["status"]
+        pid = owner.get("owner_pid", owner.get("pid"))
+        if not isinstance(pid, int) or pid <= 0:
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        started = owner.get("owner_started_at")
+        observed = process_info.start_time(pid) if started else None
+        if not started or observed is None or observed == started:
+            return None
+    return terminal_status, run_token
+
+
+def reap_stop_status(run_dir: Path, path: Path, row: dict[str, Any]):
+    evidence = reap_run_evidence(run_dir)
+    if evidence is None:
+        return None
+    status, run_token = evidence
+    # A recorded closure takes precedence over leftover cancellation markers.
+    if status != "lost":
+        return status
+    try:
+        (run_dir / "termination-request.json").lstat()
+        request = json.loads(read_bound_bytes(run_dir, "termination-request.json", label="termination request"))
+    except FileNotFoundError:
+        request = {}
+    # Controller intent is run-scoped; batch children have distinct provider PIDs.
+    if provider_exec.termination_request_matches(
+        request, run_token=run_token, provider_pid=None,
+        started_at=row.get("started_at"), signals={"SIGTERM", "SIGKILL"},
+    ):
+        return "cancelled" if request["source"] == "cancel_requested" else "interrupted"
+    cancel_dir = run_dir / "dispatch/tasks" / path.parent.parent.name / path.parent.name
+    if cancellation_marker_present(run_dir, cancel_dir):
+        return "cancelled"
+    batch_id = row.get("batch_id")
+    if isinstance(batch_id, str) and BATCH_ID_RE.fullmatch(batch_id):
+        batch_dir = run_dir / "dispatch/batches" / batch_id
+        if cancellation_marker_present(run_dir, batch_dir):
+            try:
+                (batch_dir / "summary.json").lstat()
+                summary = json.loads(read_bound_bytes(run_dir, batch_dir.relative_to(run_dir) / "summary.json", label="batch summary"))
+            except FileNotFoundError:
+                summary = {}
+            if not isinstance(summary, dict) or summary.get("status") not in {"completed", "failed", "cancelled"}:
+                return "cancelled"
+    return "lost"
+
+
 def reap_attempts(run_dir: Path) -> list[str]:
     """Finalise dead attempts under custody, preserving deliberate termination."""
     run_dir = Path(run_dir)
@@ -521,50 +606,8 @@ def reap_attempts(run_dir: Path) -> list[str]:
         return reaped
     with custody:
         try:
-            receipt = json.loads(read_bound_bytes(run_dir, "RUN_RECEIPT.json", label="run receipt"))
-            if not isinstance(receipt, dict) or receipt.get("status") != "active":
+            if reap_run_evidence(run_dir) is None:
                 return reaped
-            # Older writers may not hold custody. A live or unobservable owner
-            # still owns its attempts, even if its provider has already exited.
-            owners = [receipt]
-            for name in ("dispatch-owner.json", "dispatch-status.json"):
-                try:
-                    (run_dir / name).lstat()
-                except FileNotFoundError:
-                    continue
-                owners.append(json.loads(read_bound_bytes(run_dir, name, label="run owner")))
-            terminal_status = "lost"
-            run_token = None
-            for owner in owners:
-                if not isinstance(owner, dict):
-                    return reaped
-                if owner.get("run_token"):
-                    run_token = owner["run_token"]
-                if owner.get("finished_at") and owner.get("status") in {"interrupted", "cancelled"}:
-                    terminal_status = owner["status"]
-                pid = owner.get("owner_pid", owner.get("pid"))
-                if not isinstance(pid, int) or pid <= 0:
-                    continue
-                try:
-                    os.kill(pid, 0)
-                except ProcessLookupError:
-                    continue
-                started = owner.get("owner_started_at")
-                observed = process_info.start_time(pid) if started else None
-                if not started or observed is None or observed == started:
-                    return reaped
-            # A controller publishes intent before signalling. It may die before
-            # closeStoppedRun writes dispatch-status, so honour this run's request too.
-            try:
-                (run_dir / "termination-request.json").lstat()
-                request = json.loads(read_bound_bytes(run_dir, "termination-request.json", label="termination request"))
-            except FileNotFoundError:
-                request = {}
-            if (terminal_status == "lost" and isinstance(request, dict) and run_token
-                    and request.get("run_token") == run_token
-                    and request.get("signal") in {"SIGTERM", "SIGKILL"}
-                    and request.get("source") in {"run_control", "orphan_reaper", "cancel_requested"}):
-                terminal_status = "cancelled" if request["source"] == "cancel_requested" else "interrupted"
         except (OSError, ValueError, TypeError, OwnedFileError):
             return reaped
         for tree in ("tasks", "dispatch/tasks"):
@@ -592,21 +635,23 @@ def reap_attempts(run_dir: Path) -> list[str]:
                         if not started or observed is None or observed == started:
                             continue
                         reason = "pgid_reused"
-                    # Cooperative cancellation is scoped to this exact attempt;
-                    # its marker survives until the writer publishes terminal evidence.
-                    cancel_dir = run_dir / "dispatch/tasks" / path.parent.parent.name / path.parent.name
-                    batch_id = row.get("batch_id")
-                    batch_cancelled = (isinstance(batch_id, str) and BATCH_ID_RE.fullmatch(batch_id)
-                                       and cancellation_marker_present(run_dir, run_dir / "dispatch/batches" / batch_id))
-                    status = "cancelled" if batch_cancelled or cancellation_marker_present(run_dir, cancel_dir) else terminal_status
-                    row.update(state="terminal", status=status, ended_at=now(), retryable=True,
-                               error_class=provider_exec.error_class(status))
-                    row["evidence"] = {**(row.get("evidence") or {}), "signature": reason,
-                                       "excerpt": "Attempt process group is gone" if reason == "pgid_gone"
-                                       else "Attempt process group start time no longer matches"}
-                    row["digest"] = render_digest(row)
-                    write_owned(run_dir, path, json.dumps(row, indent=2) + "\n")
-                    reaped.append(str(path))
+                    # A wedged publisher must not hold run custody through us.
+                    with attempt_custody(run_dir, path, blocking=False):
+                        current = json.loads(read_bound_bytes(run_dir, path.relative_to(run_dir), label="attempt receipt"))
+                        # A child may have published after its provider exited.
+                        if current != row or current.get("state") != "running":
+                            continue
+                        status = reap_stop_status(run_dir, path, row)
+                        if status is None:
+                            continue
+                        row.update(state="terminal", status=status, ended_at=now(), retryable=status == "lost",
+                                   error_class=provider_exec.error_class(status))
+                        row["evidence"] = {**(row.get("evidence") or {}), "signature": reason,
+                                           "excerpt": "Attempt process group is gone" if reason == "pgid_gone"
+                                           else "Attempt process group start time no longer matches"}
+                        row["digest"] = render_digest(row)
+                        write_owned(run_dir, path, json.dumps(row, indent=2) + "\n")
+                        reaped.append(str(path))
                 except (OSError, ValueError, TypeError, KeyError, AttributeError, OwnedFileError):
                     continue
         if reaped:
@@ -1630,6 +1675,17 @@ def with_pick_reason(line, reason):
     return line[:-1] + "; " + reason + ")"
 
 
+def attempt_scope(args, number):
+    # Terminal construction reuses the scope captured before provider startup.
+    scopes = getattr(args, '_attempt_scopes', None)
+    if scopes is None:
+        scopes = args._attempt_scopes = {}
+    key = (number, args.tool)
+    if key not in scopes:
+        scopes[key] = identity_resolver().scope(args.tool)
+    return scopes[key]
+
+
 def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     route=plan.get("route",{})
     model=plan.get("model") or route.get("resolved_model") or args.model or ""
@@ -1652,7 +1708,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         note = f'local fallback from {placement["from_host"]}: {placement["reason"]}' + (f': {placement["detail"]}' if placement.get('detail') else '')
         if note not in plan.setdefault('warnings', []):
             plan['warnings'].append(note)
-    return {"schema":"fabric.attempt.v1", **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
+    return {"schema":"fabric.attempt.v1", **attempt_scope(args,number), **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
         **({"batch_id":args.batch_id} if getattr(args,"batch_id",None) else {}),
         "attempt":number,"state":"running","status":None,"usage_source":"missing","mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
         "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
@@ -1674,7 +1730,8 @@ def publish_contract(run_dir,row):
     row["digest"]=render_digest(row)
     path=run_dir/row["paths"]["receipt"]
     ensure_owned_directory(run_dir,path.parent)
-    write_owned(run_dir,path,json.dumps(row,indent=2)+"\n")
+    with attempt_custody(run_dir, path):
+        write_owned(run_dir,path,json.dumps(row,indent=2)+"\n")
 
 
 def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
@@ -1856,6 +1913,7 @@ def prepare_resume(args):
 def _dispatch(args: argparse.Namespace, custody=None) -> int:
     args._last_plan={}
     args._last_row=None
+    args._attempt_scopes={}
     owner_started_ms = None
     try:
         incoming = ({} if getattr(args, "retry_of", None) or getattr(args, "fallback_from", None)
@@ -2614,6 +2672,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     record: dict[str, Any] = {
         "schema_version": 1,
         "record_type": "dispatch-attempt",
+        **attempt_scope(args, attempt_number),
         "usage_source": adapter.get("usage_source") or provider_exec.context_usage.usage_source(adapter.get("context") or {}),
         "error_class": provider_exec.error_class(status, (adapter.get("evidence") or {}).get("signature")),
         **({"landable": False, "quarantine": adapter.get("quarantine")} if adapter_status == "quarantined" else {}),

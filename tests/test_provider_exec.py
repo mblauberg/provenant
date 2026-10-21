@@ -2059,7 +2059,7 @@ def test_receipt_usage_source_tracks_token_evidence_not_context_estimates(tmp_pa
     ("failed", "model_unavailable", "model_unavailable"), ("failed", "wall_clock", "timeout"),
     ("failed", "permission_blocked", "sandbox_denied"), ("failed", None, "provider_error"),
     ("rejected", "invalid_input", "provider_error"), ("tool_missing", None, "provider_error"),
-    ("cancelled", "cancel_requested", "unknown"), ("interrupted", "provider_signal", "unknown"),
+    ("cancelled", "cancel_requested", "cancelled"), ("interrupted", "provider_signal", "unknown"),
     ("partial", "output_truncated", "unknown"), ("quarantined", None, "unknown"),
     ("future_status", "future_signature", "unknown"),
 ])
@@ -3886,7 +3886,7 @@ def test_external_provider_sigterm_reports_interrupted_even_after_terminal_event
     assert "error" not in record
 
 
-@pytest.mark.parametrize("invalid", ["run_token", "provider_pid", "signal", "requested_at", "symlink"])
+@pytest.mark.parametrize("invalid", ["run_token", "provider_pid", "null_pid", "signal", "requested_at", "symlink"])
 def test_signal_receipt_does_not_attribute_mismatching_or_linked_control_telemetry(tmp_path, invalid):
     module = supervisor()
     provider = []
@@ -3895,8 +3895,9 @@ def test_signal_receipt_does_not_attribute_mismatching_or_linked_control_telemet
         request = {"run_token": "current", "signal": "SIGTERM", "source": "orphan_reaper",
                    "sender_pid": os.getpid(), "provider_pid": provider[0].pid, "requested_at": module.now()}
         if invalid != "symlink":
-            request[invalid] = {"run_token": "earlier", "provider_pid": -1, "signal": "SIGKILL",
-                                "requested_at": "2000-01-01T00:00:00Z"}[invalid]
+            request["provider_pid" if invalid == "null_pid" else invalid] = {
+                "run_token": "earlier", "provider_pid": -1, "null_pid": None, "signal": "SIGKILL",
+                "requested_at": "2000-01-01T00:00:00Z"}[invalid]
         path = tmp_path / "termination-request.json"
         if invalid == "symlink":
             target = tmp_path / "outside-request.json"
@@ -4744,7 +4745,11 @@ sys.exit(1 if 'TARGET_MODEL' in model else 0)
     assert rows[1]["provenance"]["fallback_from"]["status"] == "usage_limited"
     assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "ok"
     cooldowns = json.loads((tmp_path / "cooldowns.json").read_text())["cooldowns"]
-    assert cooldowns["claude/*"]["source_run"] == rows[0]["run_id"]
+    (key, cooldown), = cooldowns.items()
+    assert json.loads(key) == ["claude", rows[0]["account"], rows[0]["host"], "*"]
+    assert (cooldown["account"], cooldown["host"]) == (rows[0]["account"], rows[0]["host"])
+    assert cooldown["status"] == "usage_limited"
+    assert cooldown["source_run"] == rows[0]["run_id"]
 
 
 def test_codex_observed_model_comes_from_rollout_turn_context(tmp_path):

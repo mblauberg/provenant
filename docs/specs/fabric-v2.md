@@ -80,7 +80,7 @@ An owner writes `fabric.attempt.v1` at `tasks/<id>/attempt-NNN/attempt.json` and
 
 Every attempt has `usage_source`: `observed` when token counters were read from the provider stream, `estimated` when usage was estimated, or `missing` when no token counters were reported. Current adapters do not estimate token usage; `estimated` is reserved for an estimator and preserved when supplied by an adapter. A context percentage alone is `missing` usage. This field is independent of `context.source`: Codex/Cursor turn totals are observed usage even when their context size is estimated. The meter result is retained on unsuccessful attempts, including non-zero provider exits.
 
-Terminal adapter, dispatch and Fabric attempt receipts also record `error_class`, derived only from that receipt's final status and existing evidence signature. The fixed vocabulary is `none`, `rate_limited`, `usage_limited`, `auth`, `model_unavailable`, `timeout`, `empty_output`, `sandbox_denied`, `provider_error`, and `unknown`. Successful and input-required statuses map to `none`; named failure statuses take precedence over signatures. Signatures refine generic outcomes (for example `failed` + `empty_output`). Stalls and startup deadlines map to `timeout`; permission blocks map to `sandbox_denied`. Generic failures, rejected requests and missing tools map to `provider_error`; cancellation, interruption, quarantine and unrecognised outcomes default to `unknown`. This telemetry field does not affect routing, retries or health.
+Terminal adapter, dispatch and Fabric attempt receipts also record `error_class`, derived only from that receipt's final status and existing evidence signature. The fixed vocabulary is `none`, `rate_limited`, `usage_limited`, `auth`, `model_unavailable`, `timeout`, `empty_output`, `sandbox_denied`, `provider_error`, `cancelled`, and `unknown`. Successful and input-required statuses map to `none`; named failure statuses take precedence over signatures. Signatures refine generic outcomes (for example `failed` + `empty_output`). Stalls and startup deadlines map to `timeout`; permission blocks map to `sandbox_denied`. Generic failures, rejected requests and missing tools map to `provider_error`; cancellations map to `cancelled`; interruption, quarantine and unrecognised outcomes default to `unknown`. This telemetry field does not affect routing, retries or health.
 
 `timing.phases` records milliseconds for available dispatch phases: TypeScript validation and catalogue snapshot, run directory setup, owner startup and attempt setup, route planning, provider spawn, provider execution and finalisation. A direct Python owner has no TypeScript phase measurements. The writer watchdog scans at most 2,000 entries per probe, checks a 25 ms budget between entries and retains its scan position; a full cycle on a large tree may take several one-second probes. Stall detection waits for a complete scan covering the idle interval so a late file is not missed.
 
@@ -260,8 +260,43 @@ covers `.git-credentials`, `.pypirc`, `.pgpass`, `.vault-token`,
 `.password-store`, `.boto`, `.s3cfg`, `.terraform.d`, Cargo and Gem credentials,
 `.config/git/credentials`, `.config/hub` and `.config/op`.
 
-An `ok` attempt clears the cooldown for the model that answered, using the
-resolved model when the provider reports no model. It also clears the adapter's
+Every attempt records top-level `account` and `host` before provider startup;
+terminal records retain that scope. Quota and cooldown routing share
+`scripts/provider_identity.py`. Account identity comes from paths, without
+reading credential contents:
+
+| Adapter | Selected identity source |
+|---|---|
+| claude | `CLAUDE_CONFIG_DIR`, else `~/.claude` |
+| codex | `CODEX_HOME`, else `~/.codex` |
+| agy | OS user's `~/Library/Keychains/login.keychain-db`, independent of HOME and `AGY_CONFIG_DIR`; a second account requires a second host |
+| cursor | `~/Library/Application Support/Cursor/User/globalStorage` on macOS, else `~/.config/Cursor/User/globalStorage` |
+| opencode | `$XDG_DATA_HOME/opencode`, else `~/.local/share/opencode` (the authentication store, not `OPENCODE_CONFIG_DIR`) |
+| kiro | `~/.kiro` |
+| copilot | `~/.copilot` |
+
+A selected path matching an enabled configured
+`telemetry.accounts.<provider>.<label>.identity_dir` resolves to `<label>`.
+Otherwise the provider's default directory resolves to `default`, and another
+resolved path to `path-<sha256 prefix>`. Paths, emails and tokens are never used
+as account keys. An unresolved identity is `null` and matches only `null`.
+For inspection and reset commands, see [model routing](../runbooks/model-routing.md).
+Host is the telemetry host id (`local_host` in `.agent-fabric/hosts.json`, else
+hostname). Neither account nor host acts as a wildcard.
+
+`fabric.cooldowns.v1` entries carry `adapter`, `model`, `account` and `host`.
+Storage keys are JSON-encoded `[adapter, account, host, model]` tuples, allowing
+live scopes to coexist; readers expose only the active scope as `adapter/model`
+keys. Exact model entries precede `*` within that scope. Reads prune expired
+entries and retain other accounts and hosts. Under `cooldowns.lock`, a legacy
+entry without `host` and with a null account migrates once to the provider's
+default identity on this host, even if an alternate identity is selected.
+A new explicit null scope is never migrated. Cached quota adds and reconciles
+cooldowns only for its matching account and host.
+
+An `ok` attempt clears the cooldown for the model that answered in that
+attempt's account and host, using the resolved model when the provider reports
+no model. It also clears the adapter's
 account-wide `*` cooldown when the attempt started after that entry was recorded
 (never for per-model adapters `agy` and `opencode`). Other model cooldowns remain
 intact; `provenant route reset` clears them explicitly. OpenCode runs with error logs on stderr so a quota

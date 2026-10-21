@@ -591,16 +591,7 @@ def _quota_states() -> dict[str, Any]:
 
 
 def _cooldowns(catalog: dict[str, Any]) -> dict[str, Any]:
-    path = _state_root() / "cooldowns.json"
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
-    records = data.get("cooldowns", data)
-    if not isinstance(records, dict):
-        records = {}
+    records = _fabric_records().read_cooldowns()
     records = _with_quota(records)
     normalised: dict[str, Any] = {}
     for key, record in records.items():
@@ -2241,8 +2232,11 @@ def parser() -> argparse.ArgumentParser:
     routes.add_argument("--json", action="store_true", help="print one fabric.routes.v1 JSON document")
     routes.add_argument("--health", action="store_true",
                         help="also print task-class routes and recent route health (the `route health` view)")
+    cooldowns = commands.add_parser("cooldowns", help="show cooldowns for the selected accounts on this host")
+    cooldowns.add_argument("--json", action="store_true")
     reset = commands.add_parser("reset", help="clear cooldowns: all, one adapter, or adapter/model")
     reset.add_argument("selector", nargs="?", help="adapter or adapter/model; omit to clear every cooldown")
+    reset.add_argument("--account", help="clear only this account on this host")
     reset.add_argument("--json", action="store_true")
     pick = commands.add_parser("pick", help="pick models from route pools; JSON requests on stdin")
     pick.add_argument("--seed", type=int, help=argparse.SUPPRESS)
@@ -2257,7 +2251,8 @@ def _router() -> Any:
 
 
 def _fabric_records() -> Any:
-    path = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts" / "fabric_records.py"
+    # Load code beside this router, even when its catalogue comes from an overlay.
+    path = Path(__file__).resolve().parents[1] / "skills" / "orchestrate" / "scripts" / "fabric_records.py"
     spec = importlib.util.spec_from_file_location(
         "provenant_fabric_records", path, submodule_search_locations=[str(path.parent)]
     )
@@ -2324,9 +2319,13 @@ def main(argv: list[str] | None = None) -> int:
                 print("\ntask-class routes and recent health (route health --json):")
                 print(json.dumps(document["health"], indent=2, sort_keys=True))
         return 0
+    if args.command == "cooldowns":
+        record = {"schema": "fabric.cooldowns.active.v1", "cooldowns": _fabric_records().read_cooldowns()}
+        print(json.dumps(record, sort_keys=True) if args.json else json.dumps(record, indent=2, sort_keys=True))
+        return 0
     if args.command == "reset":
         try:
-            removed = _fabric_records().clear_cooldowns(args.selector)
+            removed = _fabric_records().clear_cooldowns(args.selector, account=args.account)
         except ValueError as exc:
             print(f"model-route reset: {exc}", file=sys.stderr)
             return 2

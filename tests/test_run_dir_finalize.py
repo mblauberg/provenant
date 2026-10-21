@@ -961,7 +961,9 @@ def test_paired_receipt_must_preserve_compaction_and_lease_state(tmp_path):
     assert any("empty in_flight" in error for error in errors)
 
 
-def test_successful_terminalisation_closes_a_complete_run(tmp_path):
+@pytest.mark.parametrize("lock_path", [None, "tasks/lane/attempt-001/attempt.lock",
+                                      "dispatch/tasks/lane/attempt-001/attempt.lock"])
+def test_successful_terminalisation_closes_a_complete_run(tmp_path, lock_path):
     run = init_run(tmp_path)
     receipt = run / "RUN_RECEIPT.json"
     data = json.loads(receipt.read_text())
@@ -978,8 +980,40 @@ def test_successful_terminalisation_closes_a_complete_run(tmp_path):
             line = "| " + " | ".join(cells) + " |"
         rewritten.append(line)
     gate.write_text("\n".join(rewritten) + "\n")
+    if lock_path:
+        lock = run / lock_path
+        lock.parent.mkdir(parents=True)
+        lock.touch()
     assert run_dir_finalize.main([str(run), "--status", "ok"]) == 0
     assert json.loads(receipt.read_text())["status"] == "ok"
+    assert json.loads(receipt.read_text())["unclassified_paths"] == []
+    if lock_path:
+        assert lock.exists()
+
+
+@pytest.mark.parametrize("linked", [False, True])
+def test_attempt_lock_name_does_not_hide_payload_or_link(tmp_path, linked):
+    run = init_run(tmp_path)
+    lock = run / "tasks/lane/attempt-001/attempt.lock"
+    lock.parent.mkdir(parents=True)
+    if linked:
+        target = tmp_path / "external.lock"
+        target.touch()
+        lock.symlink_to(target)
+    else:
+        lock.write_text("retained evidence")
+    errors, _ = run_dir_finalize.validate(run, "ok", "")
+    assert "unmanifested payload: tasks/lane/attempt-001/attempt.lock" in errors
+
+
+def test_failed_terminalisation_classifies_attempt_lock_as_infrastructure(tmp_path):
+    run = init_run(tmp_path)
+    lock = run / "tasks/lane/attempt-001/attempt.lock"
+    lock.parent.mkdir(parents=True)
+    lock.touch()
+    assert run_dir_finalize.main([str(run), "--status", "failed", "--reason", "provider died"]) == 0
+    assert json.loads((run / "RUN_RECEIPT.json").read_text())["unclassified_paths"] == []
+    assert lock.exists()
 
 
 def test_success_rejects_incomplete_gate_schema(tmp_path):

@@ -75,6 +75,27 @@ REQUIRED_GATES = {
 }
 
 
+def _is_scaffold(run_dir: Path, path: Path) -> bool:
+    relative = path.relative_to(run_dir).as_posix()
+    if relative in SCAFFOLD:
+        return True
+    # Keep empty custody files on their original inode, like MANIFEST.md's
+    # flock. Unlinking them could split publishers across different locks.
+    if not re.fullmatch(r"(?:dispatch/)?tasks/[A-Za-z0-9][A-Za-z0-9._-]{0,63}/"
+                        r"attempt-(?:\d{3}|[1-9]\d{3,})/attempt\.lock", relative):
+        return False
+    try:
+        fd, _relative, _target = open_contained_regular(
+            run_dir, relative, os.O_RDONLY | os.O_NONBLOCK, label="attempt custody"
+        )
+        try:
+            return os.fstat(fd).st_size == 0
+        finally:
+            os.close(fd)
+    except (OSError, OwnedFileError):
+        return False
+
+
 def _inside(root: Path, candidate: Path) -> bool:
     try:
         candidate.resolve().relative_to(root.resolve())
@@ -823,7 +844,7 @@ def validate(run_dir: Path, terminal_status: str, reason: str | None,
     payloads = {
         path.relative_to(run_dir).as_posix()
         for path in run_dir.rglob("*")
-        if path.is_file() and path.relative_to(run_dir).as_posix() not in SCAFFOLD
+        if path.is_file() and not _is_scaffold(run_dir, path)
     }
     if terminal_status == "ok":
         errors.extend(_validate_dispatch_evidence(run_dir))
@@ -1002,7 +1023,7 @@ def main(argv: list[str] | None = None) -> int:
             path.relative_to(args.run_dir).as_posix()
             for path in args.run_dir.rglob("*")
             if path.is_file()
-            and path.relative_to(args.run_dir).as_posix() not in SCAFFOLD
+            and not _is_scaffold(args.run_dir, path)
             and path.relative_to(args.run_dir).as_posix() not in listed
         )
         for rel in unclassified:

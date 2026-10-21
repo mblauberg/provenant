@@ -17,6 +17,14 @@ SCRIPT = ROOT / "scripts" / "model-route"
 CATALOG = json.loads((ROOT / "config" / "model-routing.json").read_text())
 
 
+@pytest.fixture(autouse=True)
+def default_test_identity(tmp_path, monkeypatch):
+    monkeypatch.setenv('FABRIC_COOLDOWNS_PATH', str(tmp_path / 'cooldowns.json'))
+    # Legacy cooldown fixtures belong to the default identity, not the caller's lane.
+    for name in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_DATA_HOME'):
+        monkeypatch.delenv(name, raising=False)
+
+
 def test_free_opencode_models_are_derived_from_the_free_pattern():
     router = load_router()
     adapter = router.catalogue_snapshot()["adapters"]["opencode"]
@@ -4269,6 +4277,8 @@ def test_split_root_defaults_use_instance_routing_and_product_compatibility(tmp_
     # in the shared skill library so the installed skills catalogue stays
     # self-sufficient (#754). A product tree carrying model_route.py carries it.
     shutil.copytree(ROOT / "skills" / "_shared", product_root / "skills" / "_shared")
+    # Routing and reset share the locked cooldown reader with dispatch.
+    shutil.copytree(ROOT / "skills" / "orchestrate", product_root / "skills" / "orchestrate")
     (product_root / "config").mkdir()
     shutil.copy2(
         ROOT / "config/adapter-compatibility.yaml",

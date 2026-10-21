@@ -6,13 +6,13 @@
   exit is a human setting STATUS: STOP below.
 
   This template is domain-agnostic. Every domain fact lives in the CONFIG
-  KNOBS block — fill it ONCE, then run scripts/bootstrap-autopilot.sh to
+  KNOBS block — fill it ONCE, then run scripts/bootstrap-autopilot.py to
   validate. GOAL.md is intentionally the only file you hand-edit.
 -->
 
 ```config-knobs
 # ============================================================================
-# CONFIG KNOBS — fill these ONCE, then re-run scripts/bootstrap-autopilot.sh
+# CONFIG KNOBS — fill these ONCE, then re-run scripts/bootstrap-autopilot.py
 # to validate. This fenced block is the SINGLE domain-injection point for the
 # whole mission. A thin fill produces thin output — write a substantive
 # MISSION + constraint set. Each knob: replace the {{...}} value; keep the

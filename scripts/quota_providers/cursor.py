@@ -11,7 +11,6 @@ import json
 from pathlib import Path
 import re
 import sqlite3
-import sys
 
 
 ADAPTER = 'cursor'
@@ -19,10 +18,8 @@ SUMMARY_URL = 'https://cursor.com/api/usage-summary'
 
 
 def default_identity():
-    home = Path.home()
-    if sys.platform == 'darwin':
-        return home / 'Library/Application Support/Cursor/User/globalStorage'
-    return home / '.config/Cursor/User/globalStorage'
+    from provider_identity import selected_identity
+    return selected_identity('cursor')
 
 
 def session(database, now, io=None):

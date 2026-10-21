@@ -123,7 +123,7 @@ COMMAND_DETAILS: dict[str, str] = {
         "Delegates to scripts/model-route ...\n"
         "Low-level resolver; capability-bound aliases need a fresh snapshot,\n"
         "normally supplied by dispatch.\n"
-        "`route reset [adapter[/model]]` clears cooldowns."
+        "`route reset [adapter[/model]] [--account LABEL]` clears cooldowns."
     ),
     "routes": (
         "usage: provenant routes [--all] [--json] [--health]\n\n"
