@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Plan or perform authority-gated removal of expired delivery-run scratch.
-
-Accept canonical `.agent-run/runs/<run-dir>/RUN.json` and one-release legacy
-`.agent-run/<id>/RUN.json` receipts.
-"""
+"""Plan or perform authority-gated removal of expired delivery-run scratch."""
 
 from __future__ import annotations
 
@@ -72,8 +68,6 @@ def _utc(value: Any, field: str) -> datetime:
 def infer_workspace_root(run_dir: Path) -> Path:
     if run_dir.parent.name == "runs" and run_dir.parent.parent.name == ".agent-run":
         return run_dir.parents[2].resolve()
-    if run_dir.parent.name == ".agent-run":
-        return run_dir.parent.parent.resolve()
     return run_dir.resolve()
 
 
@@ -90,6 +84,8 @@ def cleanup(
 ) -> dict[str, Any]:
     receipt_path = receipt_path.resolve()
     run_dir = receipt_path.parent
+    if run_dir.parent.name != "runs" or run_dir.parent.parent.name != ".agent-run":
+        raise CleanupError("delivery receipt must be under .agent-run/runs/<run-dir>")
     workspace_root = (workspace_root or infer_workspace_root(run_dir)).resolve()
     try:
         run = json.loads(receipt_path.read_text())

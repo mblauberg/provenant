@@ -64,7 +64,7 @@ def old(path: Path, days: int = 20):
     os.utime(path, (timestamp, timestamp))
 
 
-def test_classifies_new_legacy_and_unknown_without_deleting(tmp_path):
+def test_classifies_canonical_and_unknown_without_deleting(tmp_path):
     root = repo(tmp_path)
     runs = root / ".agent-run" / "runs"
     completed = runs / "20260801-1200-dispatch-task-a1b2c3"
@@ -90,8 +90,8 @@ def test_classifies_new_legacy_and_unknown_without_deleting(tmp_path):
     rows = {row["path"]: row for row in plan["rows"]}
     assert rows[".agent-run/runs/20260801-1200-dispatch-task-a1b2c3"]["verdict"] == "delete"
     assert rows[".agent-run/runs/20260801-1200-dispatch-current-b2c3d4"]["verdict"] == "delete"
-    assert rows[".agent-run/mcp-abc123"]["verdict"] == "delete"
-    assert rows[".agent-run/mcp-abc123-owner.stderr.log"]["verdict"] == "delete"
+    assert rows[".agent-run/mcp-abc123"]["verdict"] == "triage:hand-named"
+    assert rows[".agent-run/mcp-abc123-owner.stderr.log"]["verdict"] == "triage:hand-named"
     assert rows[".agent-run/someone-notes"]["verdict"].startswith("triage:")
     assert completed.exists() and legacy.exists() and sibling.exists() and unknown.exists()
 

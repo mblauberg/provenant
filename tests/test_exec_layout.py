@@ -60,14 +60,16 @@ def test_orphan_reaping_uses_shared_root_and_leaves_live_receipts(tmp_path):
 
     old = tmp_path / ".agent-run/runs/20260920-0000-dispatch-orphan-abcdef"
     old.mkdir(parents=True)
-    live = tmp_path / ".agent-run/mcp-live"
+    live = tmp_path / ".agent-run/runs/20260920-0000-dispatch-live-abcdef"
     live.mkdir()
+    retired = tmp_path / ".agent-run/mcp-retired"
+    retired.mkdir()
     fixture = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
     fixture.update(state="running", status=None, pgid=None)
     attempt = old / "tasks/task-1/attempt-001/attempt.json"
     attempt.parent.mkdir(parents=True)
     attempt.write_text(json.dumps(fixture))
-    for directory, pid in [(old, 99999999), (live, os.getpid())]:
+    for directory, pid in [(old, 99999999), (live, os.getpid()), (retired, 99999998)]:
         receipt = directory / "RUN_RECEIPT.json"
         receipt.write_text(json.dumps({"status": "active", "owner_pid": pid}))
         os.utime(receipt, (time.time() - 49 * 3600,) * 2)
@@ -75,6 +77,7 @@ def test_orphan_reaping_uses_shared_root_and_leaves_live_receipts(tmp_path):
     assert json.loads(attempt.read_text())["status"] == "interrupted"
     assert json.loads((old / "RUN_RECEIPT.json").read_text())["status"] == "interrupted"
     assert json.loads((live / "RUN_RECEIPT.json").read_text())["status"] == "active"
+    assert json.loads((retired / "RUN_RECEIPT.json").read_text())["status"] == "active"
 
 
 def test_shared_layout_vectors_and_symlinked_cwd(tmp_path, monkeypatch):
@@ -121,7 +124,8 @@ def test_nested_non_git_cwd_accepts_explicit_workspace_run(tmp_path):
     nested.mkdir(parents=True)
     assert layout.run_root(nested) == nested
     assert layout.contains_run(tmp_path / '.agent-run/runs/one', nested)
-    assert not layout.contains_run(tmp_path.parent / 'other', nested)
+    outside = Path("/private/tmp") if Path("/private/tmp").is_dir() else Path("/tmp")
+    assert not layout.contains_run(outside / f'{tmp_path.name}-other', nested)
 
 
 def test_stale_batch_with_provider_record_still_checks_every_attempt(tmp_path):
