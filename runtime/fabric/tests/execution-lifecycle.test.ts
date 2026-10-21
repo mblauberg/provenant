@@ -146,6 +146,26 @@ describe("Fabric input corrections", () => {
       .toThrow(expect.objectContaining({ code: "adapter_required" }));
   });
 
+  it("resolves documented model aliases without correction warnings", () => {
+    const snapshot = catalogueSnapshot(repositoryRoot);
+    for (const alias of ["glm-free", "deepseek-free", "sol", "luna"]) {
+      const route = normaliseRoute({ alias }, identity, snapshot);
+      expect(route.model, alias).toBeDefined();
+      expect((route.warnings ?? []).filter((warning) => !warning.startsWith("NATIVE:")), alias).toEqual([]);
+    }
+    const typo = normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, snapshot);
+    expect(typo.model).toBe("gpt-6-luna");
+    expect(typo.warnings).toContain("corrected model gpt-6-lunx to gpt-6-luna");
+  });
+
+  it("recognises agy effort-suffixed catalogue names by their base model", () => {
+    const snapshot = { adapters: [{ name: "agy", models: ["gemini-3.8-flash"], aliases: {},
+      model_details: [{ id: "gemini-3.8-flash", efforts: ["high"] }] }] } as any;
+    const route = normaliseRoute({ adapter: "agy", model: "gemini-3.8-flash-high", effort: "high" }, identity, snapshot);
+    expect(route).toMatchObject({ model: "gemini-3.8-flash", effort: "high" });
+    expect(route.warnings ?? []).toEqual([]);
+  });
+
   it("passes version-free family names through for model_route.py to resolve to the latest model", () => {
     const entry = (latest: boolean) => ({ name: "codex", latest_aliases: latest, aliases: {},
       models: ["gpt-6.1-sol", "gpt-6-luna"],

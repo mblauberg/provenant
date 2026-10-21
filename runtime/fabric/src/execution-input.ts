@@ -206,6 +206,9 @@ function correctSelector(selector: string | undefined, catalogue: CatalogueSnaps
     ...Object.values(entry.aliases ?? {}).flat(),
     ...(entry.model_details ?? []).flatMap((model) => [model.id, ...(Array.isArray(model.names) ? model.names : [])]),
   ]).filter((item): item is string => typeof item === "string"))];
+  const effortSuffixed = adapter === "agy" ? selector.match(/^(.+)-(low|medium|high)$/u) : null;
+  if (effortSuffixed && choices.some((item) => routeKey(item) === routeKey(effortSuffixed[1]!)))
+    selector = effortSuffixed[1]!;
   const key = routeKey(selector);
   // model_route.py resolves these to the newest model (catalogue or live listing) and applies every gate.
   if (entries.some((entry) => isFamilySelector(entry, key))) return { value: selector };
@@ -238,7 +241,7 @@ function correctSelector(selector: string | undefined, catalogue: CatalogueSnaps
   }
   if (matches.size === 1) {
     const value = [...matches.values()][0]!;
-    return value === selector ? {} : { value, warning: `corrected ${field} ${selector} to ${value}` };
+    return { value };
   }
   if (matches.size > 1) throw new InputError(`${field}_ambiguous`, `Choose one of: ${[...matches.values()].join(", ")}.`);
   const ranked = choices.map((item) => ({ item, score: editDistance(key, routeKey(item)) }))
