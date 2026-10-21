@@ -61,6 +61,9 @@ def connect():
             cache_write_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER,
             usage_source TEXT, reported_cost REAL, status TEXT, error_class TEXT,
             PRIMARY KEY(source,event_id,host));
+        CREATE TABLE IF NOT EXISTS usage_files (
+            source TEXT NOT NULL, event_id TEXT NOT NULL, host TEXT NOT NULL, path TEXT NOT NULL,
+            PRIMARY KEY(source,event_id,host,path));
         CREATE INDEX IF NOT EXISTS usage_time ON usage(timestamp);
         CREATE TABLE IF NOT EXISTS cursors (
             source TEXT NOT NULL, path TEXT NOT NULL, size INTEGER NOT NULL,
@@ -69,7 +72,7 @@ def connect():
         CREATE TABLE IF NOT EXISTS observations (
             event_id TEXT PRIMARY KEY, source TEXT NOT NULL, host TEXT NOT NULL,
             provider TEXT, adapter TEXT, model TEXT, account TEXT, session TEXT,
-            lane TEXT, run_id TEXT, timestamp TEXT, window TEXT, used_percent REAL,
+            origin_path TEXT, lane TEXT, run_id TEXT, timestamp TEXT, window TEXT, used_percent REAL,
             window_minutes REAL, reset_at TEXT, status TEXT);
         PRAGMA user_version = 1;
     ''')
@@ -85,12 +88,14 @@ def number(value):
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0 else None
 
 
-def put_usage(db, source, event_id, **values):
+def put_usage(db, source, event_id, origin_path, **values):
     values = {'source': source, 'event_id': event_id, 'host': socket.gethostname(), **values}
     columns = list(values)
     update = ','.join(f'{key}=excluded.{key}' for key in columns if key not in {'source', 'event_id', 'host'})
     db.execute(f"INSERT INTO usage({','.join(columns)}) VALUES ({','.join('?' for _ in columns)}) "
                f'ON CONFLICT(source,event_id,host) DO UPDATE SET {update}', list(values.values()))
+    db.execute('INSERT OR IGNORE INTO usage_files VALUES (?,?,?,?)',
+               (source, event_id, values['host'], str(origin_path)))
 
 
 def claude_record(db, row, state, path, offset):
@@ -100,7 +105,7 @@ def claude_record(db, row, state, path, offset):
         return
     reasoning = number((usage.get('output_tokens_details') or {}).get('thinking_tokens'))
     output = number(usage.get('output_tokens'))
-    put_usage(db, 'claude', message['id'], session=row.get('sessionId'),
+    put_usage(db, 'claude', message['id'], origin_path=path, session=row.get('sessionId'),
               adapter='claude', provider='anthropic', model=message.get('model'),
               effort=row.get('perTurnEffort'), account=row.get('account'),
               repository=row.get('cwd'), revision=row.get('gitRevision'), timestamp=row.get('timestamp'),
@@ -151,7 +156,7 @@ def codex_record(db, row, state, path, offset):
             written = delta.get('cache_write_input_tokens')
             reasoning = delta.get('reasoning_output_tokens')
             input_count, output = delta.get('input_tokens'), delta.get('output_tokens')
-            put_usage(db, 'codex', event_id, **meta, adapter='codex', provider='openai',
+            put_usage(db, 'codex', event_id, origin_path=path, **meta, adapter='codex', provider='openai',
                       timestamp=timestamp,
                       input_tokens=max(0, input_count - (cached or 0) - (written or 0)) if input_count is not None else None,
                       cache_read_tokens=cached, cache_write_tokens=written,
@@ -163,22 +168,40 @@ def codex_record(db, row, state, path, offset):
                 reset_at = value.get('resets_at')
                 if isinstance(reset_at, (int, float)):
                     reset_at = datetime.fromtimestamp(reset_at, UTC).isoformat().replace('+00:00', 'Z')
-                observation(db, 'codex', provider='openai', adapter='codex', model=state.get('model'),
+                observation(db, 'codex', origin_path=str(path), provider='openai', adapter='codex', model=state.get('model'),
                             account=state.get('account'), session=state.get('session'),
                             timestamp=timestamp, window=window, used_percent=value['used_percent'],
                             window_minutes=number(value.get('window_minutes')), reset_at=reset_at)
 
 
+def clear_file(db, source, path):
+    db.execute('DELETE FROM usage_files WHERE source=? AND path=?', (source, str(path)))
+    db.execute('DELETE FROM usage WHERE source=? AND NOT EXISTS '
+               '(SELECT 1 FROM usage_files f WHERE f.source=usage.source '
+               'AND f.event_id=usage.event_id AND f.host=usage.host)', (source,))
+    db.execute('DELETE FROM observations WHERE source=? AND origin_path=?', (source, str(path)))
+
+
+def file_identity(path, length):
+    stat = path.stat()
+    with path.open('rb') as stream:
+        prefix = hashlib.sha256(stream.read(length)).hexdigest()
+    return [stat.st_dev, stat.st_ino, length, prefix]
+
+
 def ingest_jsonl(db, source, path, parse):
     stat = path.stat()
     old = db.execute('SELECT * FROM cursors WHERE source=? AND path=?', (source, str(path))).fetchone()
-    if old and old['size'] == stat.st_size and old['mtime'] == stat.st_mtime_ns:
+    state = json.loads(old['state']) if old else {}
+    previous_file = state.get('_file')
+    rewritten = bool(old and (stat.st_size < old['size'] or
+                     (previous_file and file_identity(path, previous_file[2]) != previous_file)))
+    if old and not rewritten and old['size'] == stat.st_size and old['mtime'] == stat.st_mtime_ns:
         return
-    offset = old['offset'] if old and stat.st_size >= old['size'] else 0
-    # A same-size rewrite must be reparsed; append-only sources retain their context.
-    if old and stat.st_size == old['size']:
-        offset = 0
-    state = json.loads(old['state']) if old and offset else {}
+    if rewritten:
+        clear_file(db, source, path)
+        state = {}
+    offset = old['offset'] if old and not rewritten else 0
     with path.open('rb') as stream:
         stream.seek(offset)
         while line := stream.readline():
@@ -187,6 +210,7 @@ def ingest_jsonl(db, source, path, parse):
             row = json.loads(line)
             parse(db, row, state, path, offset)
             offset = stream.tell()
+    state['_file'] = file_identity(path, min(stat.st_size, 4096))
     db.execute('INSERT OR REPLACE INTO cursors VALUES (?,?,?,?,?,?)',
                (source, str(path), stat.st_size, stat.st_mtime_ns, offset, json.dumps(state)))
 
@@ -242,7 +266,7 @@ def ingest_document(db, source, path):
         requested = provenance.get('requested') or {}
         adapter = requested.get('adapter')
         usage = row.get('usage') or row.get('context') or {}
-        put_usage(db, source, identity(row.get('run_id'), row.get('task_id'), row.get('attempt')),
+        put_usage(db, source, identity(str(path.resolve())), origin_path=path,
                   session=row.get('session_id'), lane='/'.join(str(row.get(k, '')) for k in ('run_id','task_id','attempt')),
                   graph_node=row.get('graph_node'), adapter=adapter,
                   provider=provenance.get('provider') or PROVIDERS.get(adapter, adapter),
@@ -263,7 +287,7 @@ def ingest_document(db, source, path):
         for entry in entries.values():
             for item in entry.get('recent', []) if source == 'route_health' else [entry]:
                 adapter = entry.get('adapter')
-                observation(db, source, adapter=adapter, provider=PROVIDERS.get(adapter, adapter),
+                observation(db, source, origin_path=str(path), adapter=adapter, provider=PROVIDERS.get(adapter, adapter),
                             model=entry.get('model'), account=entry.get('account'),
                             timestamp=item.get('at') or item.get('recorded_at'),
                             run_id=item.get('run_id') or item.get('source_run'),
@@ -274,8 +298,15 @@ def ingest_document(db, source, path):
 
 def ingest_opencode(db, path):
     old = db.execute('SELECT state FROM cursors WHERE source=? AND path=?', ('opencode', str(path))).fetchone()
-    watermark = json.loads(old['state']).get('max_updated', 0) if old else 0
+    saved = json.loads(old['state']) if old else {}
+    watermark = saved.get('max_updated', 0)
+    stat = path.stat()
+    file_id = [stat.st_dev, stat.st_ino]
     with readonly(path) as source:
+        latest = source.execute('SELECT MAX(time_updated) FROM message').fetchone()[0] or 0
+        if old and (saved.get('file_id') != file_id or latest < watermark):
+            clear_file(db, 'opencode', path)
+            watermark = 0
         # Inclusive watermark covers messages updated during an earlier ingest.
         for message_id, session, created, updated, data in source.execute(
                 'SELECT id,session_id,time_created,time_updated,data FROM message '
@@ -288,7 +319,7 @@ def ingest_opencode(db, path):
             cache = usage.get('cache') or {}
             stamp = (row.get('time') or {}).get('created') or created
             timestamp = datetime.fromtimestamp(stamp / 1000, UTC).isoformat().replace('+00:00', 'Z')
-            put_usage(db, 'opencode', message_id, session=session, adapter='opencode',
+            put_usage(db, 'opencode', message_id, origin_path=path, session=session, adapter='opencode',
                       provider=row.get('providerID'), model=row.get('modelID'),
                       timestamp=timestamp, repository=(row.get('path') or {}).get('cwd'),
                       account=row.get('account'), input_tokens=number(usage.get('input')),
@@ -297,7 +328,7 @@ def ingest_opencode(db, path):
                       reported_cost=number(row.get('cost')), usage_source='message.tokens')
     stat = path.stat()
     db.execute('INSERT OR REPLACE INTO cursors VALUES (?,?,?,?,?,?)',
-               ('opencode', str(path), stat.st_size, stat.st_mtime_ns, 0, json.dumps({'max_updated': watermark})))
+               ('opencode', str(path), stat.st_size, stat.st_mtime_ns, 0, json.dumps({'max_updated': watermark, 'file_id': file_id})))
 
 
 def ingest(db):
@@ -321,6 +352,7 @@ def ingest(db):
                    (now(), status, count, source))
         db.commit()
     return [dict(row) for row in db.execute('SELECT * FROM sources ORDER BY source')]
+
 
 
 def main(argv=None):

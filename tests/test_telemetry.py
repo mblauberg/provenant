@@ -180,3 +180,50 @@ def test_partial_jsonl_line_resumes_and_malformed_source_is_visible(tmp_path):
     assert next(row for row in sources if row['source'] == 'claude')['status'] == 'error'
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         assert db.execute('SELECT SUM(input_tokens) FROM usage').fetchone()[0] == 7
+
+
+def test_rewritten_jsonl_reconciles_removed_ids(tmp_path):
+    path = tmp_path / 'home/.claude/projects/repo/s.jsonl'
+    row = {'type':'assistant','sessionId':'s','message':{
+        'id':'a','model':'test','usage':{'input_tokens':7}}}
+    jsonl(path, row)
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    path.write_text(json.dumps({**row, 'message':{**row['message'], 'id':'b'}}) + '\n')
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute('SELECT event_id,input_tokens FROM usage').fetchall() == [('b',7)]
+
+
+def test_fabric_same_run_ids_across_projects_do_not_overwrite(tmp_path):
+    state = tmp_path / 'state'
+    state.mkdir()
+    with sqlite3.connect(state / 'fabric.sqlite3') as db:
+        db.execute('CREATE TABLE agents(project TEXT)')
+        for name in ('one','two'):
+            project = tmp_path / name
+            db.execute('INSERT INTO agents VALUES (?)', (str(project),))
+            write_json(project / '.agent-run/runs/run/tasks/lane/attempt-001/attempt.json', {
+                'run_id':'run','task_id':'lane','attempt':1,'status':'ok','cwd':str(project),
+                'provenance':{'requested':{'adapter':'codex'},'resolved_model':'test'},
+                'context':{'input_tokens':7}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(state / 'telemetry.sqlite3') as db:
+        assert db.execute('SELECT SUM(input_tokens),COUNT(*) FROM usage').fetchone() == (14,2)
+
+
+def test_opencode_replacement_resets_cursor(tmp_path):
+    path = tmp_path / 'home/.local/share/opencode/opencode.db'
+    path.parent.mkdir(parents=True)
+    def database(target, mid, stamp):
+        with sqlite3.connect(target) as db:
+            db.execute('CREATE TABLE message(id TEXT,session_id TEXT,time_created INTEGER,time_updated INTEGER,data TEXT)')
+            db.execute('INSERT INTO message VALUES (?,?,?,?,?)', (mid,'s',stamp,stamp,
+                json.dumps({'role':'assistant','tokens':{'input':7}})))
+    database(path, 'old', 2000)
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    replacement = path.with_suffix('.new')
+    database(replacement, 'new', 1000)
+    replacement.replace(path)
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute('SELECT event_id,input_tokens FROM usage').fetchall() == [('new',7)]
