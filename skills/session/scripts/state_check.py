@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import os
 from pathlib import Path
@@ -201,25 +203,8 @@ def check_file(path: Path, relative: str, *, max_age_minutes: float, now: float)
     return findings
 
 
-class PreCompactArgumentParser(argparse.ArgumentParser):
-    """An ArgumentParser that exits 0 with a warning in hook mode instead of exiting 2."""
-
-    def __init__(self, *args, hook_mode: bool = False, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.hook_mode = hook_mode
-
-    def error(self, message: str) -> None:
-        if self.hook_mode:
-            print(f"Checkpoint check: warning: {message}")
-            sys.exit(0)
-        super().error(message)
-
-
 def main(argv: list[str] | None = None) -> int:
-    raw_args = sys.argv[1:] if argv is None else argv
-    hook_mode = "--hook" in raw_args
-
-    parser = PreCompactArgumentParser(description=__doc__, hook_mode=hook_mode)
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="*", type=Path, help="state files to check")
     parser.add_argument("--max-age-minutes", type=float, default=30)
     parser.add_argument("--hook", action="store_true", help="run as a non-blocking PreCompact hook")
@@ -228,65 +213,70 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--install-hook", nargs="?", const=Path.home() / ".claude" / "settings.json",
                         type=Path, metavar="SETTINGS",
                         help="add the PreCompact check and SessionStart(compact) re-inject to a Claude Code settings file (default ~/.claude/settings.json)")
+    args = parser.parse_args(argv)
+    if args.hook_config:
+        print(hook_config())
+        return 0
+    if args.install_hook:
+        try:
+            print(install_hook(args.install_hook.expanduser()))
+        except (OSError, ValueError) as exc:
+            print(f"state_check: cannot install hook: {exc}", file=sys.stderr)
+            return 1
+        return 0
 
-    try:
-        args = parser.parse_args(raw_args)
-        if args.hook_config:
-            print(hook_config())
-            return 0
-        if args.install_hook:
-            try:
-                print(install_hook(args.install_hook.expanduser()))
-            except (OSError, ValueError) as exc:
-                print(f"state_check: cannot install hook: {exc}", file=sys.stderr)
-                return 1
-            return 0
+    cwd = Path.cwd().resolve()
+    session_id = ""
+    if args.hook:
+        cwd, session_id = hook_input(cwd)
+    root = project_root(cwd)
+    now = time.time()
+    # Several chairs can share a project, so check only a state file this session
+    # identifies: explicit paths, then the environment, then the host session id.
+    paths = [path if path.is_absolute() else cwd / path for path in args.paths]
+    if not paths and os.environ.get(STATE_ENV):
+        named = Path(os.environ[STATE_ENV]).expanduser()
+        paths = [named if named.is_absolute() else cwd / named]
+    if not paths and session_id:
+        # A session untouched for a day is finished, not a live chair to warn about.
+        paths = [
+            path
+            for path in sorted((root / ".agent-run" / "sessions").glob("*/STATE.md"))
+            if recently_modified(path, now) and names_session(path, session_id)
+        ]
 
-        cwd = Path.cwd().resolve()
-        session_id = ""
-        if args.hook:
-            cwd, session_id = hook_input(cwd)
-        root = project_root(cwd)
-        now = time.time()
-        # Several chairs can share a project, so check only a state file this session
-        # identifies: explicit paths, then the environment, then the host session id.
-        paths = [path if path.is_absolute() else cwd / path for path in args.paths]
-        if not paths and os.environ.get(STATE_ENV):
-            named = Path(os.environ[STATE_ENV]).expanduser()
-            paths = [named if named.is_absolute() else cwd / named]
-        if not paths and session_id:
-            # A session untouched for a day is finished, not a live chair to warn about.
-            paths = [
-                path
-                for path in sorted((root / ".agent-run" / "sessions").glob("*/STATE.md"))
-                if recently_modified(path, now) and names_session(path, session_id)
-            ]
-
-        findings = []
-        for path in paths:
-            findings.extend(
-                check_file(
-                    path,
-                    display_path(path, root, cwd),
-                    max_age_minutes=args.max_age_minutes,
-                    now=now,
-                )
+    findings = []
+    for path in paths:
+        findings.extend(
+            check_file(
+                path,
+                display_path(path, root, cwd),
+                max_age_minutes=args.max_age_minutes,
+                now=now,
             )
-        prefix = "Checkpoint check: " if args.hook else ""
-        for finding in findings:
-            print(prefix + finding)
-        return 0 if args.hook or not findings else 1
+        )
+    prefix = "Checkpoint check: " if args.hook else ""
+    for finding in findings:
+        print(prefix + finding)
+    return 0 if args.hook or not findings else 1
+
+
+def hook_main(argv: list[str] | None = None) -> int:
+    """Run main, but never block compaction: PreCompact treats exit 2 as a block."""
+    args = sys.argv[1:] if argv is None else argv
+    if "--hook" not in args:
+        return main(args)
+    stderr = io.StringIO()
+    try:
+        with contextlib.redirect_stderr(stderr):
+            return main(args)
     except SystemExit as exc:
-        if hook_mode and exc.code == 2:
-            print("Checkpoint check: warning: command exited with status 2")
-            return 0
-        raise
+        detail = stderr.getvalue().strip().splitlines()[-1:] or [f"exit status {exc.code}"]
+        print(f"Checkpoint check: warning: {detail[0]}")
     except Exception as exc:
-        if hook_mode:
-            print(f"Checkpoint check: warning: {exc}")
-            return 0
-        raise
+        print(f"Checkpoint check: warning: {exc}")
+    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    raise SystemExit(hook_main())
