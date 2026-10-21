@@ -439,7 +439,7 @@ def test_model_quota_adapter_success_keeps_its_wildcard(tmp_path):
     at = datetime(2026, 9, 23, 10, 0, tzinfo=UTC)
     path = tmp_path / "cooldowns.json"
     limited("agy", "*", at, path, "rate_limited", "429")
-    later = at + timedelta(minutes=5)
+    later = at + timedelta(seconds=5)
     assert "agy/*" in succeed("agy", "gemini-3.5-flash", timestamp(later), path, later)
 
 
@@ -605,3 +605,97 @@ def test_reset_account_cli_keeps_other_accounts_and_hosts(tmp_path, monkeypatch)
         ('b', 'host-a'), ('a', 'host-b')}
     assert records().clear_cooldowns('codex', path) == ['codex/gpt-6.1-sol']
     assert not json.loads(path.read_text())['cooldowns']
+
+
+def test_rate_limit_backoff_survives_expiry_is_scoped_and_resets_on_success(tmp_path, monkeypatch):
+    path = tmp_path / "cooldowns.json"
+    at = datetime.now(UTC)
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status="rate_limited", reset_at=None, retry_after=None, account="a", host="host-a")
+    row["provenance"]["requested"]["adapter"] = "codex"
+    row["provenance"]["resolved_model"] = "gpt-6.1-sol"
+    row["provenance"]["observed_model"] = None
+    for delay in (30, 60, 120, 240, 480, 900, 900):
+        records().write_cooldown(row, path=path, at=at)
+        entries = list(json.loads(path.read_text())["cooldowns"].values())
+        entry = next(entry for entry in entries if entry["account"] == "a" and entry["host"] == "host-a")
+        assert (records().parse_time(entry["cooling_until"]) - at).total_seconds() == delay
+        at += timedelta(seconds=delay + 1)
+        assert not records().read_cooldowns(path, at)
+    for account, host, model in (("b", "host-a", "gpt-6.1-sol"), ("a", "host-b", "gpt-6.1-sol"),
+                                 ("a", "host-a", "gpt-6-astra")):
+        other = {**row, "account": account, "host": host,
+                 "provenance": {**row["provenance"], "resolved_model": model}}
+        records().write_cooldown(other, path=path, at=at)
+        entry = next(entry for entry in json.loads(path.read_text())["cooldowns"].values()
+                     if (entry["account"], entry["host"], entry["model"]) == (account, host, model))
+        assert (records().parse_time(entry["cooling_until"]) - at).total_seconds() == 30
+    records().write_cooldown({**row, "status": "ok"}, path=path, at=at)
+    records().write_cooldown(row, path=path, at=at)
+    entry = next(entry for entry in json.loads(path.read_text())["cooldowns"].values()
+                 if (entry["account"], entry["host"], entry["model"]) == ("a", "host-a", "gpt-6.1-sol"))
+    assert (records().parse_time(entry["cooling_until"]) - at).total_seconds() == 30
+
+
+def test_cooldown_read_without_lock_preserves_file_and_live_limit(tmp_path, monkeypatch):
+    path = tmp_path / "cooldowns.json"
+    at = datetime.now(UTC)
+    entry = {"adapter": "codex", "model": "gpt-6.1-sol", "status": "usage_limited",
+             "cooling_until": records().timestamp(at + timedelta(hours=1))}
+    path.write_text(json.dumps({"cooldowns": {"codex/gpt-6.1-sol": entry}}))
+    before = path.read_bytes()
+    original = records().store_open
+    def read_only(path, flags, create_parents=False):
+        if flags & os.O_CREAT:
+            raise PermissionError("read-only state")
+        return original(path, flags, create_parents)
+    monkeypatch.setattr(records(), "store_open", read_only)
+    assert "codex/gpt-6.1-sol" in records().read_cooldowns(path, at)
+    assert path.read_bytes() == before
+    assert not path.with_name("cooldowns.lock").exists()
+
+
+def test_invalid_account_config_warns_once(tmp_path, monkeypatch, capsys):
+    resolver = records().identity_resolver()
+    monkeypatch.setattr(resolver, "_ACCOUNT_WARNING_EMITTED", False, raising=False)
+    config = tmp_path / "instance/config/telemetry.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"accounts": {"codex": []}}))
+    assert resolver.scope("codex")["account"] is None
+    assert resolver.scope("claude")["account"] is None
+    lines = capsys.readouterr().err.splitlines()
+    assert len(lines) == 1
+    assert "telemetry accounts must map provider" in lines[0]
+
+
+def test_concurrent_rate_limits_double_under_the_cooldown_lock(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    path = tmp_path / "cooldowns.json"
+    at = datetime.now(UTC)
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status="rate_limited", reset_at=None, retry_after=None)
+    with records().locked(path.with_name("cooldowns.lock")):
+        pass
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(lambda _: records().write_cooldown(row, path=path, at=at), range(4)))
+    entry, = json.loads(path.read_text())["cooldowns"].values()
+    assert entry["backoff_seconds"] == 240
+    assert (records().parse_time(entry["cooling_until"]) - at).total_seconds() == 240
+
+
+def test_rate_limit_config_and_provider_window_are_both_honoured(tmp_path):
+    config = tmp_path / "instance/config/model-routing.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"rate_limit_pacing": {"base_delay_seconds": 2, "cap_seconds": 3}}))
+    path = tmp_path / "cooldowns.json"
+    at = datetime.now(UTC)
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status="rate_limited", reset_at=None, retry_after=0.1)
+    records().write_cooldown(row, path=path, at=at)
+    entry, = records().read_cooldowns(path, at).values()
+    assert (records().parse_time(entry["cooling_until"]) - at).total_seconds() == 2
+    row["reset_at"] = records().timestamp(at + timedelta(seconds=20))
+    records().write_cooldown(row, path=path, at=at)
+    entry, = records().read_cooldowns(path, at).values()
+    assert entry["backoff_seconds"] == 3
+    assert (records().parse_time(entry["cooling_until"]) - at).total_seconds() == 20

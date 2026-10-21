@@ -1519,13 +1519,13 @@ SIGNATURES = (
     ),
     (
         "usage_limited",
-        r"you.ve hit your (?:usage|session|weekly) limit|usage limit|session limit|weekly limit|individual quota reached|insufficient_quota|quota exceeded|RESOURCE_EXHAUSTED|exhausted your capacity",
+        r"you.ve hit your (?:usage|session|weekly) limit|usage limit|session limit|weekly limit|individual quota reached|insufficient_quota|FreeUsageLimitError|exhausted your capacity",
     ),
     (
         "auth_required",
         r"authentication required|please sign in|please(?: run)? login|not logged in|not authenticated|unauthenticated|unauthorized|login expired|\b401\b",
     ),
-    ("rate_limited", r"rate.?limit|too many requests|overloaded|\b(?:429|529)\b"),
+    ("rate_limited", r"rate.?limit|too many requests|overloaded|\b(?:429|529)\b|per[ -](?:minute|second)"),
     (
         "model_unavailable",
         r"model[^\n]*(?:unavailable|not available|not found|unsupported|does not exist)|unknown model",
@@ -1665,6 +1665,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         return value
 
     terminal_text = None
+    provider_message = None
     partial = False
     try:
         whole = json.loads(stdout, object_pairs_hook=no_duplicates)
@@ -1752,6 +1753,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
             "error",
             "turn.failed",
             "api_retry",
+            "provider.quota",
             "AGY_ERROR",
         } or bool(event.get("is_error"))
         if kind == "rate_limit_event":
@@ -1763,6 +1765,18 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
             if error_event:
                 errors.append("usage limit " + json.dumps(event))
         if error_event:
+            # v2 may encode the response body as a JSON string. Keep its message,
+            # rather than a truncated envelope, as the actionable failure reason.
+            for item in _objects(event):
+                body = item.get("body")
+                if isinstance(body, str):
+                    try:
+                        body = json.loads(body)
+                    except ValueError:
+                        body = None
+                for detail in _objects(body if isinstance(body, dict) else item):
+                    if isinstance(detail.get("message"), str):
+                        provider_message = detail["message"]
             error_text = json.dumps(event, ensure_ascii=False)
             if not (adapter == "codex" and "reconnecting" in error_text.lower()):
                 (retry_errors if kind == "api_retry" else errors).append(error_text)
@@ -1877,6 +1891,10 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
     status = None
     if errors or exit_code != 0 or denial:
         signatures = (SIGNATURES[0], *config.SIGNATURES, *SIGNATURES[1:])
+        if re.search(r"RESOURCE_EXHAUSTED|quota exceeded", failure_text, re.I):
+            window = re.search(r"per[ -](?:minute|second)\b|/\s*(?:min(?:ute)?|sec(?:ond)?)\b", failure_text, re.I)
+            quota = "rate_limited" if window else "usage_limited"
+            signatures = (signatures[0], (quota, r"RESOURCE_EXHAUSTED|quota exceeded"), *signatures[1:])
         for name, pattern in signatures:
             if re.search(pattern, failure_text, re.I):
                 status = "rejected" if name == "invalid_input" else name
@@ -1885,7 +1903,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         status = status or (
             "timed_out" if "print-timeout" in failure_text else "failed"
         )
-        result["excerpt"] = ("\n".join(errors).strip() or warning_line or failure_text.strip() or (
+        result["excerpt"] = (provider_message or "\n".join(errors).strip() or warning_line or failure_text.strip() or (
             getattr(config, "EMPTY_FAILURE", "").format(exit_code=exit_code)))[:200]
     elif partial:
         status = "partial"
