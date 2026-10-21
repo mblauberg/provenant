@@ -1496,6 +1496,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         "terminal": False,
         "question": None,
     }
+    continues_turn = getattr(config, "continues_turn", lambda event: False)
     events, plain, parts, errors = [], [], [], []
     retry_errors = []
     duplicate_json = False
@@ -1536,7 +1537,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         errors.append("invalid agy envelope")
     for event in events:
         kind = event.get("type") or ""
-        if adapter == "opencode" and config.continues_turn(event):
+        if continues_turn(event):
             parts.clear()
             result["terminal"] = False
         if not kind and isinstance(event.get("event"), str):
@@ -1710,21 +1711,9 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         else "".join(plain)
     )
     errors.extend(retry_errors)
-    diagnostics = stderr
-    warning_line = ""
-    if adapter == "opencode":
-        diagnostic_lines = []
-        for line in stderr.splitlines():
-            level = re.search(config.LOG_LEVEL, line, re.I)
-            if level and level[1].upper() in {"INFO", "DEBUG"}:
-                continue
-            diagnostic_lines.append(line)
-            if not warning_line and level and level[1].upper() in {"WARN", "ERROR"}:
-                warning_line = line.strip()
-        diagnostics = "\n".join(diagnostic_lines)
+    diagnostic_hook = getattr(config, "diagnostics", None)
+    diagnostics, warning_line = diagnostic_hook(stderr) if diagnostic_hook else (stderr, "")
     failure_text = "\n".join(errors) if errors else diagnostics
-    if adapter == "opencode" and errors and diagnostics:
-        failure_text += "\n" + diagnostics
     result["failure_text"] = failure_text
     # Permission denials in diagnostics invalidate a claimed success (Agy does this).
     denial = adapter == "agy" and re.search(PERMISSION_DENIAL_PATTERN, stderr, re.I)
@@ -1742,8 +1731,8 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         status = status or (
             "timed_out" if "print-timeout" in failure_text else "failed"
         )
-        result["excerpt"] = (warning_line or failure_text.strip() or (
-            f"provider exited {exit_code} without final assistant output" if adapter == "opencode" else ""))[:200]
+        result["excerpt"] = ("\n".join(errors).strip() or warning_line or failure_text.strip() or (
+            getattr(config, "EMPTY_FAILURE", "").format(exit_code=exit_code)))[:200]
     elif partial:
         status = "partial"
         result["signature"] = "print_timeout"
@@ -1753,7 +1742,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         status = "failed"
         result["signature"] = "empty_output"
         result["excerpt"] = ("no assistant text: " + stdout.strip())[:200]
-    if (adapter == "opencode" and status in {"failed", "permission_blocked"} and exit_code > 0
+    if (getattr(config, "EXIT_AFTER_OUTPUT", False) and status == "failed" and result["signature"] is None and exit_code > 0
             and parts and result["text"].strip() and not errors):
         status = "ok"
         result["signature"] = "exit_after_output"
@@ -2944,6 +2933,8 @@ def execute(
     import selectors
     import threading
 
+    adapter_config = profile(plan["adapter"])
+    continues_turn = getattr(adapter_config, "continues_turn", lambda event: False)
     output_path = Path(output_path)
     events_path = Path(events_path or output_path.parent / "events.jsonl")
     stderr_path = Path(stderr_path or output_path.parent / "stderr.log")
@@ -3035,31 +3026,9 @@ def execute(
             ANTHROPIC_AUTH_TOKEN=environment.get(route["endpoint_token_env"], ""),
             ANTHROPIC_API_KEY="",
         )
-    if plan["adapter"] == "opencode":
-        bash_permission = {"*": "allow"} if plan["mode"] == "worktree_write" else {
-            "*": "deny",
-            "provenant-no-shell": "allow",
-        }
-        permission = {
-            "edit": {"*": "allow" if plan["mode"] == "worktree_write" else "deny"},
-            "bash": bash_permission,
-            "question": "deny",
-            "external_directory": {"*": "deny"},
-            "webfetch": "deny" if plan.get("network_requested") is False else "allow",
-        }
-        # The sentinel matches no real command and exists only so Zen declares bash.
-        opencode_config = {"permission": permission}
-        if plan["applied"].get("confinement") == "sandbox-exec":
-            # V2 replaces the whole server definition; a disabled entry still needs type and command.
-            opencode_config["mcp"] = {"servers": {
-                "fabric": {"type": "local", "command": ["provenant"], "disabled": True},
-            }}
-        environment["OPENCODE_CONFIG_CONTENT"] = json.dumps(opencode_config)
-        # v2 scans ~/.claude for Claude Code skills and CLAUDE.md, which the confinement profile
-        # denies (startup fails with EPERM) and which holds the owner's private instructions.
-        # Autoupdate and the filewatcher have no place in a supervised, sandboxed run.
-        environment.update(OPENCODE_DISABLE_CLAUDE_CODE="1", OPENCODE_DISABLE_CLAUDE_CODE_SKILLS="1",
-                           OPENCODE_DISABLE_AUTOUPDATE="1", OPENCODE_DISABLE_FILEWATCHER="1")
+    adapter_environment = getattr(adapter_config, "environment", None)
+    if adapter_environment:
+        environment.update(adapter_environment(plan))
     warning_text = "\n".join(plan["warnings"])
     if warning_text:
         print(warning_text, file=sys.stderr, flush=True)
@@ -3135,7 +3104,7 @@ def execute(
             if not isinstance(event, dict):
                 continue
             meter.observe(event)
-            if plan["adapter"] == "opencode" and profile("opencode").continues_turn(event):
+            if continues_turn(event):
                 text_chunks.clear()
                 text_size = 0
                 terminal_at = None
@@ -3436,8 +3405,8 @@ def execute(
         # state observed before the diagnostic tail rolled over.
         if terminal_text is not None or text_chunks:
             text = terminal_text if terminal_text is not None else b"\n".join(text_chunks).decode(errors="replace")
-            recovered_event = ({"type": "text", "part": {"text": text}} if plan["adapter"] == "opencode"
-                               else {"type": "result", "result": text})
+            text_event = getattr(adapter_config, "text_event", lambda text: {"type": "result", "result": text})
+            recovered_event = text_event(text)
             recovered = parse_output(plan["adapter"], json.dumps(recovered_event), stderr,
                                      0 if terminal_grace_break and terminal_at is not None and exit_code is not None and exit_code < 0 else (exit_code or 0))
             for key in ("text", "status", "question", "signature", "excerpt"):

@@ -1582,11 +1582,11 @@ def test_opencode_usage_survives_provider_exit(tmp_path, exit_code):
 
 
 @pytest.mark.parametrize("logs,reason", [
-    (["INFO starting", "WARN fabric MCP unavailable", "ERROR shutting down"], "WARN fabric MCP unavailable"),
+    (["INFO starting", "WARN fabric MCP unavailable", "ERROR shutting down", "ERROR later"], "ERROR shutting down"),
+    (["WARN first", "WARN later"], "WARN first"),
     (["timestamp=x level=INFO starting", "timestamp=x level=ERROR message=shutdown"],
      "timestamp=x level=ERROR message=shutdown"),
     (["INFO rate limit configuration loaded"], "provider exited 1 after final assistant output"),
-    (["INFO starting", "ERROR fabric MCP: Operation not permitted"], "ERROR fabric MCP: Operation not permitted"),
 ])
 def test_opencode_exit_after_output_reason_skips_info(tmp_path, logs, reason):
     event = {"type": "text", "part": {"text": "Final answer"}}
@@ -1597,6 +1597,22 @@ def test_opencode_exit_after_output_reason_skips_info(tmp_path, logs, reason):
     assert record["evidence"]["signature"] == "exit_after_output"
     assert record["reason"] == reason
     assert (tmp_path / "result.md").read_text() == "Final answer"
+
+
+@pytest.mark.parametrize("rollover", [False, True])
+def test_opencode_sandbox_denial_after_text_remains_a_failure(tmp_path, monkeypatch, rollover):
+    monkeypatch.setattr(supervisor(), "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    events = [
+        *[{"type": "telemetry", "data": "x" * 100} for _ in range(100)],
+        {"type": "text", "part": {"text": "Working narration"}},
+    ]
+    denial = "ERROR ConfigDiscovery.discover: EPERM: operation not permitted"
+    code = ("import sys; print(" + repr("\n".join(map(json.dumps, events)))
+            + "); print(" + repr(denial) + ", file=sys.stderr); sys.exit(1)")
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == "permission_blocked"
+    assert record["error_class"] == "sandbox_denied"
+    assert record["reason"] == denial
 
 
 @pytest.mark.parametrize("rollover", [False, True])
@@ -1668,9 +1684,30 @@ def test_opencode_discovery_eperm_is_sandbox_denied(tmp_path, structured_error):
         code += "print(" + repr(json.dumps(event)) + "); "
     code += "sys.exit(1)"
     record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
-    assert record["status"] == "permission_blocked"
-    assert record["error_class"] == "sandbox_denied"
-    assert record["reason"] == denial
+    assert record["status"] == ("failed" if structured_error else "permission_blocked")
+    assert record["error_class"] == ("provider_error" if structured_error else "sandbox_denied")
+    assert record["reason"] == (json.dumps(event) if structured_error else denial)
+
+
+@pytest.mark.parametrize("message,status", [
+    ("429 too many requests", "rate_limited"),
+    ("Individual quota reached", "usage_limited"),
+    ("401 unauthorized", "auth_required"),
+])
+@pytest.mark.parametrize("rollover", [False, True])
+def test_opencode_structured_failure_wins_over_incidental_eperm(tmp_path, monkeypatch, message, status, rollover):
+    monkeypatch.setattr(supervisor(), "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    events = [
+        {"type": "error", "error": {"message": message}},
+        *[{"type": "telemetry", "data": "x" * 100} for _ in range(100)],
+        {"type": "text", "part": {"text": "Conversation before shutdown"}},
+    ]
+    code = ("import sys; print(" + repr("\n".join(map(json.dumps, events)))
+            + "); print(" + repr("WARN MCP offline\nERROR discovery EPERM") + ", file=sys.stderr); sys.exit(1)")
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == status
+    assert record["error_class"] == ("auth" if status == "auth_required" else status)
+    assert record["reason"] == json.dumps(events[0])
 
 
 @pytest.mark.parametrize("adapter,events,expected", [
