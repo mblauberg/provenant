@@ -32,8 +32,9 @@ without Herdr, record `HERDR-NOT-USED: <reason>`.
 When Herdr is absent or not in use, record `HERDR-NOT-USED: <reason>` (existing
 rule). Dispatch through Fabric, observe with
 `provenant lanes --wait --all --timeout N` and `provenant events --follow`, read
-bounded slices with `fabric_output`, and steer with `fabric_send` or `resume`
-(`resume` also answers `input_required` lanes).
+bounded slices with `fabric_output`, and steer with `fabric_send` or
+`fabric_dispatch` with `resume: "<run id>"` and a prompt (`resume` also answers
+`input_required` lanes).
 
 Long-running watchable processes go to a background shell with output to a run
 file.
