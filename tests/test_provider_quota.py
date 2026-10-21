@@ -507,8 +507,12 @@ def test_budget_windows_show_amounts_under_a_configurable_label(quota, tmp_path,
               'currency': 'USD'}
     monkeypatch.setattr(quota, 'fetch', lambda account, now: {'windows': [budget, window(3, WEEK, timedelta(days=6))]})
     value = quota.refresh(quota.Account('claude', 'max-a', Path('/nowhere'), True), NOW, force=True)
-    rows = {row['name']: row for row in quota.report([value], NOW)['accounts'][0]['windows']}
+    account = quota.report([value], NOW)['accounts'][0]
+    rows = {row['name']: row for row in account['windows']}
     assert rows['iguana_necktie']['label'] == 'Cloud session credits' and 'label' not in rows['seven_day']
+    # The budget's pace is unknown, but only the timed window sets the account's state.
+    assert rows['iguana_necktie']['pace']['state'] == 'unknown'
+    assert account['state'] == 'reserve' and account['summary'].startswith('seven_day:')
     quota.render(quota.report([value], NOW))
     out = capsys.readouterr().out
     assert 'Cloud session credits' in out and '$136 of $250' in out and '3%' in out

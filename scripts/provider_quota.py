@@ -620,8 +620,10 @@ def pace(window, now):
 
 
 def governing(rows):
-    """The window that constrains the account most."""
-    return min(rows, key=lambda row: (SEVERITY.index(row['pace']['state']), -row['used_percent']), default=None)
+    """The window that constrains the account most. An untimed budget, such as cloud session credits, is shown
+    but never sets the account's state: its pace is always unknown."""
+    timed = [row for row in rows if not (row.get('limit_amount') and not row.get('window_minutes'))]
+    return min(timed, key=lambda row: (SEVERITY.index(row['pace']['state']), -row['used_percent']), default=None)
 
 
 def credits(*, raw=False):
