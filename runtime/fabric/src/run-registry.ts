@@ -175,24 +175,16 @@ export function removeOwnerRecord(runDir: string): void {
 
 function runDirectoryNames(workspace: string): string[] {
   const root = runRoot(workspace);
-  let local = resolve(workspace, ".agent-run");
-  try { local = join(realpathSync.native(workspace), ".agent-run"); } catch { /* Missing workspace. */ }
-  const locations = [{ path: root, modern: true }, ...(local === root ? [] : [{ path: local, modern: false }])];
   const names: string[] = [];
-  for (const location of locations) {
-    try { if (lstatSync(location.path).isSymbolicLink()) continue; } catch { continue; }
-    for (const sub of location.modern ? ["", "runs"] : [""]) {
-      const directory = join(location.path, sub);
-      try {
-        if (lstatSync(directory).isSymbolicLink()) continue;
-        for (const entry of readdirSync(directory, { withFileTypes: true })) {
-          if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-          if (sub === "" ? entry.name.startsWith("mcp-") : /^\d{8}-\d{4}-(dispatch|batch)-/u.test(entry.name))
-            names.push(relative(root, join(directory, entry.name)));
-        }
-      } catch { /* Root may not exist yet. */ }
+  try { if (lstatSync(root).isSymbolicLink()) return names; } catch { return names; }
+  const directory = join(root, "runs");
+  try {
+    if (lstatSync(directory).isSymbolicLink()) return names;
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      if (entry.isDirectory() && !entry.isSymbolicLink() && /^\d{8}-\d{4}-(dispatch|batch)-/u.test(entry.name))
+        names.push(relative(root, join(directory, entry.name)));
     }
-  }
+  } catch { /* Root may not exist yet. */ }
   return names.sort();
 }
 
@@ -427,10 +419,10 @@ function newestMtimeMs(paths: string[]): number {
 }
 
 /**
- * Age out MCP dispatch run directories and the owner logs beside them.
+ * Age out current dispatch run directories and the owner logs beside them.
  *
- * Only `mcp-` directories are touched: run directories from other
- * orchestration paths share this root and are not this front door's to delete.
+ * Only timestamped dispatch directories are touched: other run kinds share
+ * this root and are not this front door's to delete.
  * Liveness decides before age does, so a run still in flight is never pruned
  * however old its directory looks. That liveness comes from the owner record
  * and its provider record, not a second mechanism invented here.
@@ -1036,7 +1028,7 @@ export async function statusRows(
         const runDir = pointer.run_dir;
         const modern = /^\d{8}-\d{4}-(dispatch|batch)-/u.test(basename(runDir)) && basename(dirname(runDir)) === "runs";
         const sourceRoot = modern ? dirname(dirname(runDir)) : dirname(runDir);
-        if (basename(sourceRoot) !== ".agent-run" || (!modern && !basename(runDir).startsWith("mcp-"))) continue;
+        if (!modern || basename(sourceRoot) !== ".agent-run") continue;
         let info;
         try { info = lstatSync(runDir); }
         catch (error) {

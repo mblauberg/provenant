@@ -156,7 +156,7 @@ def queue_entry(workspace_root: Path, mode: str) -> dict:
 
 def queued_receipts(queue_root: Path) -> list[Path]:
     """Attempt receipts of this project's runs, where queued waiters publish."""
-    run_dirs = list((queue_root / "runs").glob("*")) + list(queue_root.glob("mcp-*"))
+    run_dirs = list((queue_root / "runs").glob("*"))
     return [receipt for run_dir in run_dirs if not run_dir.is_symlink() and run_dir.is_dir()
             for receipt in run_dir.glob("tasks/*/attempt-*/attempt.json")]
 

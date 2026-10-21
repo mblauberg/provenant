@@ -96,11 +96,6 @@ Eighteen tools are registered by default:
 | `fabric_work_claim` | Advisory issue or path claim |
 | `fabric_landing_lease` | Repository landing lease |
 
-`FABRIC_LEGACY_TOOLS=1` additionally registers `fabric_batch`,
-`fabric_team_create`, `fabric_task_create`, `fabric_task_claim`,
-`fabric_task_update` and `fabric_tasks`. Teams remain available through those
-legacy tools; the default task interface is `fabric_task`.
-
 Dispatch accepts exactly one of `prompt` and `prompt_file`. Route controls are
 `adapter`, `alias`, `model`, `effort`, `mode`, `worktree`, `cwd`, `network`,
 `sandbox`, `capabilities`, `add_dirs`, `fallback` and `allow_secrets`. Pool
@@ -459,7 +454,7 @@ the default test run.
 An invalid floor records a failed attempt with a fix. The parent keeps a
 watchdog for child owners and excludes their published queued time.
 
-The wave-1 `id` argument and retained `mcp-*` directories remain readable.
+Run and task IDs keep the `mcp-rand6` form.
 Without IDs it returns active and last-24-hour runs, capped at 20 rows. Rows
 include the latest attempt and count. Full detail adds history and the worktree
 ledger: branch tip, dirty state and ahead count; unavailable Git facts are null.
@@ -634,11 +629,10 @@ workspace directory's `.agent-run` otherwise. New runs are stored under
 `runs/YYYYMMDD-HHMM-dispatch|batch-slug-rand6/`; IDs stay `mcp-rand6`.
 Owner stdout, stderr and staging inputs live inside `_owner/`. New run creation
 adds `/.agent-run/`, `/.worktrees/` and `/.work/` to Git's local exclude file when
-writable. Existing `mcp-*` paths remain readable in both the shared root and
-the caller worktree’s former local `.agent-run` root.
+writable. Readers discover only current timestamped runs in the shared
+`.agent-run/runs` directory.
 
-Dispatch-time maintenance scans the shared root and retained local legacy runs.
-It closes active receipts
+Dispatch-time maintenance scans the shared run directory. It closes active receipts
 older than 48 hours with no observed live owner as `interrupted`. Retention is
 seven days for successful/cancelled runs and fourteen days for failures
 (`AGENT_FABRIC_RUN_RETENTION_HOURS` overrides). Live runs,

@@ -87,7 +87,7 @@ it("advances the cursor only after the report is written", async () => {
 
 it("keys a legacy lane without a task id the same way as fabric_status", async () => {
   const opened = store();
-  opened.acknowledgeTerminal(who, { run_id: "mcp-legacy", attempt: 1, run_dir: "/project/.agent-run/mcp-legacy" });
+  opened.acknowledgeTerminal(who, { run_id: "mcp-legacy", attempt: 1, run_dir: "/project/.agent-run/runs/20260801-1200-dispatch-legacy-abcdef" });
   const waiter = run(opened, [[lane("legacy-display-id", "terminal", "ok", null)].map((row) => ({ ...row, run_id: "mcp-legacy" }))]);
   expect(await waiter.code).toBe(0);
   expect(waiter.output.join("")).toBe("no lanes are running\n");

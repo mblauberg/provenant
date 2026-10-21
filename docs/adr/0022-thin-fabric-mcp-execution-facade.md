@@ -80,3 +80,11 @@ that no longer has the session, reports `continuation_unsupported` rather than
 falling back to a new session.
 `fabric_session` inspects, lists and forgets names; forgetting deletes only the
 alias once no turn is active.
+
+## Amendment: dispatch batches
+
+**Accepted 2026-10-21.**
+
+The dedicated `fabric_batch` MCP registration and its `FABRIC_LEGACY_TOOLS`
+opt-in are retired. Callers use `fabric_dispatch` with `tasks[]` for finite
+batches; the existing batch owner still executes those tasks.
