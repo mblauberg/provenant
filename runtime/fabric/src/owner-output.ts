@@ -27,7 +27,7 @@ export interface OwnerCompletion {
   error?: string;
 }
 
-const DISPATCH_TERMINAL_STATUSES = new Set(["ok", "succeeded", "quarantined", "failed", "blocked", "timed_out", "cancelled"]);
+const DISPATCH_TERMINAL_STATUSES = new Set(["ok", "succeeded", "quarantined", "failed", "blocked", "timed_out", "cancelled", "lost"]);
 const BATCH_TERMINAL_STATUSES = new Set(["completed", "failed", "cancelled"]);
 const RESERVED_UNTYPED_STATUSES = new Set([...DISPATCH_TERMINAL_STATUSES, ...BATCH_TERMINAL_STATUSES, "running"]);
 

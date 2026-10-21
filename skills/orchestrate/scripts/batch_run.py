@@ -23,7 +23,7 @@ import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 # Two import roots, both derived from this file so the repo and an installed
 # instance behave the same: the shared library one level above this skill, and
@@ -34,7 +34,7 @@ from typing import Any
 SCRIPT_ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPT_ROOT.parents[1]))
 sys.path.insert(0, str(SCRIPT_ROOT))
-from _shared.bounded_process import stop_process_group
+from _shared.bounded_process import BudgetArgumentParser, stop_process_group
 from layout import contains_run
 from dispatch_run import (
     close_mcp_run,
@@ -839,8 +839,8 @@ def batch(args: argparse.Namespace) -> int:
                 error, fix = "secret_detected", scan.fix()
             else:
                 continue
-        except OSError:
-            error, fix = "secret_scan_unavailable", "Make task inputs readable for the secret scan."
+        except (OSError, subprocess.SubprocessError) as exc:
+            error, fix = "secret_scan_unavailable", f"Make task inputs readable for the secret scan: {exc}"
         if error:
             rejected[task["id"]] = {
                 "task_id": task["id"], "status": "rejected", "outcome": "preflight_rejected",
@@ -889,7 +889,8 @@ def batch(args: argparse.Namespace) -> int:
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(
+    root = BudgetArgumentParser(
+        command_name="batch",
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Manifest schema v1: {\"schema_version\":1,\"tasks\":[{\"id\":\"task-1\",\"prompt_file\":\"prompt.md\",\"adapter\":\"codex\",\"alias\":\"scout\",\"role\":\"worker\"}]}.
 Each task uses ordinary intent and exactly one of prompt_file/prompt plus one

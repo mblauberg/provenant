@@ -197,7 +197,7 @@ function isFamilySelector(entry: CatalogueSnapshot["adapters"][number], key: str
 }
 
 function correctSelector(selector: string | undefined, catalogue: CatalogueSnapshot, adapter?: string, field = "model"):
-  { value?: string; warning?: string; unknown?: true } {
+  { value?: string; effort?: string; warning?: string; unknown?: true } {
   if (!selector) return {};
   const entries = catalogue.adapters.filter((entry) => adapter === undefined || entry.name === adapter);
   const choices = [...new Set(entries.flatMap((entry) => [
@@ -206,9 +206,27 @@ function correctSelector(selector: string | undefined, catalogue: CatalogueSnaps
     ...Object.values(entry.aliases ?? {}).flat(),
     ...(entry.model_details ?? []).flatMap((model) => [model.id, ...(Array.isArray(model.names) ? model.names : [])]),
   ]).filter((item): item is string => typeof item === "string"))];
+  let impliedEffort: string | undefined;
+  const requested = selector.toLowerCase();
+  for (const entry of entries) {
+    for (const model of entry.model_details ?? []) {
+      if (typeof model.id !== "string" || model.effort_transport !== "model-suffix" ||
+          typeof model.suffix !== "object" || model.suffix === null || Array.isArray(model.suffix)) continue;
+      const suffix = Object.entries(model.suffix as Record<string, unknown>)
+        .find(([, value]) => typeof value === "string" &&
+          requested === `${model.id}${value}`.toLowerCase());
+      if (suffix) {
+        selector = model.id;
+        impliedEffort = suffix[0];
+        break;
+      }
+    }
+    if (impliedEffort !== undefined) break;
+  }
   const key = routeKey(selector);
   // model_route.py resolves these to the newest model (catalogue or live listing) and applies every gate.
-  if (entries.some((entry) => isFamilySelector(entry, key))) return { value: selector };
+  if (entries.some((entry) => isFamilySelector(entry, key)))
+    return { value: selector, ...(impliedEffort === undefined ? {} : { effort: impliedEffort }) };
   const matches = new Map<string, string>();
   for (const entry of entries) {
     const modelId = (value: string) => (entry.model_details ?? []).find((item) =>
@@ -238,7 +256,7 @@ function correctSelector(selector: string | undefined, catalogue: CatalogueSnaps
   }
   if (matches.size === 1) {
     const value = [...matches.values()][0]!;
-    return value === selector ? {} : { value, warning: `corrected ${field} ${selector} to ${value}` };
+    return { value, ...(impliedEffort === undefined ? {} : { effort: impliedEffort }) };
   }
   if (matches.size > 1) throw new InputError(`${field}_ambiguous`, `Choose one of: ${[...matches.values()].join(", ")}.`);
   const ranked = choices.map((item) => ({ item, score: editDistance(key, routeKey(item)) }))
@@ -301,6 +319,11 @@ export function normaliseRoute(input: RouteInput, identity: Identity, catalogue:
   }
   const corrected = isRoleAlias ? {} : correctSelector(selector, catalogue, input.adapter, input.model === undefined ? "alias" : "model");
   if (corrected.warning) warnings.push(corrected.warning);
+  if (corrected.effort !== undefined) {
+    if (input.effort === undefined) input = { ...input, effort: corrected.effort };
+    else if (input.effort !== corrected.effort)
+      warnings.push(`effort ${corrected.effort} in model ignored: effort ${input.effort} was named`);
+  }
   selector = corrected.value ?? selector;
   if (corrected.value !== undefined) {
     if (input.model !== undefined) input.model = corrected.value;

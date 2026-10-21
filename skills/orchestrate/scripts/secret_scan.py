@@ -92,10 +92,15 @@ def scan_bytes(content: bytes, path: str) -> list[Finding]:
     return sorted(findings, key=lambda item: item.line)
 
 
-def _files(directory: Path, excluded: set[Path], skipped: set[Path]):
+def _files(directory: Path, excluded: set[Path], skipped: set[Path], workspace_root: Path | None = None):
     if not directory.is_dir():
         raise OSError(f"additional directory unavailable: {directory}")
-    if SKIP_DIRS.intersection(directory.parts):
+    root_for_parts = Path(workspace_root).resolve() if workspace_root is not None else None
+    try:
+        parts = directory.resolve().relative_to(root_for_parts).parts if root_for_parts else (directory.name,)
+    except ValueError:
+        parts = (directory.name,)
+    if SKIP_DIRS.intersection(parts):
         return
     covering = [path for path in excluded if directory == path or path in directory.parents]
     if covering:
@@ -186,7 +191,7 @@ def scan_inputs(prompt: bytes, prompt_path: str, add_dirs: list[str] | None = No
     for raw_dir in add_dirs or []:
         base = Path(raw_dir).expanduser().resolve()
         tally: dict[tuple[str, ...], list[int]] = {}
-        for path in _files(base, excluded, skipped):
+        for path in _files(base, excluded, skipped, workspace_root=workspace_root):
             try:
                 metadata = path.lstat()
                 if not stat.S_ISREG(metadata.st_mode):
@@ -214,5 +219,5 @@ def scan_inputs(prompt: bytes, prompt_path: str, add_dirs: list[str] | None = No
             except FileNotFoundError:
                 continue
             except OSError as exc:
-                raise OSError(f"cannot scan additional file: {path}") from exc
+                raise OSError(f"cannot scan additional file: {path}: {exc}") from exc
     return finish()

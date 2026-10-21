@@ -5,7 +5,7 @@ import { z } from "zod";
 
 import { federatedLane, fabricHosts, releaseHostChecks } from "./hosts.js";
 import { CommitShaError, databasePath, identify, resolveCommitSha } from "./identity.js";
-import { federatedStatusRows as statusRows, fabricOutput, resultTail } from "./run-registry.js";
+import { federatedStatusRows as statusRows, fabricOutput, resultTail, reapAttemptRuns } from "./run-registry.js";
 import { reply, digest, serverBuild, mailboxView, adapterView, runView, fullView, lanesDigest, cancelDigest } from "./surface.js";
 import { catalogueSnapshot, liveModels, resetCooldowns } from "./catalogue.js";
 import { handoffDispatch, resumeConfiguredProvider } from "./resume.js";
@@ -463,7 +463,7 @@ register(
     if (result.host) return runView(withWarnings(result, waitResult.warnings), input.detail);
     const runId = result.id ?? (input.session ? result.run_id : undefined);
     if (!runId) return withWarnings(result, waitResult.warnings);
-    const observed = await statusRows(who.project, [String(runId)], 0, "all", signal, input.detail);
+    const observed = await statusRows(who.project, [String(runId)], 0, "all", signal, input.detail, true, 20, false, true);
     if ((input.resume || input.session) && result.task_id) observed.runs = observed.runs?.filter((row) => row.task_id === result.task_id);
     acknowledgeRuns(observed);
     if (observed.runs?.length === 1) {
@@ -504,7 +504,7 @@ register(
   async ({ ids, id, wait_seconds, until, detail, tail_chars, fields }, { signal }) => {
     const waitResult = boundedWait(wait_seconds);
     if (waitResult.error) return waitResult.error;
-    const result = await statusRows(who.project, ids ?? (id ? [id] : undefined), waitResult.value, until, signal, detail);
+    const result = await statusRows(who.project, ids ?? (id ? [id] : undefined), waitResult.value, until, signal, detail, true, 20, false, true);
     acknowledgeRuns(result);
     const view = detail === "full"
       ? fullView(runView(withWarnings(result, waitResult.warnings), detail), fields)
@@ -744,4 +744,5 @@ transport.send = async (message) => {
 process.stdin.once("end", () => {
   void transport.close();
 });
+await reapAttemptRuns(who.cwd);
 await server.connect(transport);

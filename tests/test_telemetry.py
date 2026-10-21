@@ -12,6 +12,7 @@ def environment(tmp_path):
     home = tmp_path / 'home'
     home.mkdir(exist_ok=True)
     return {**os.environ, 'HOME': str(home),
+            'AGENT_FABRIC_INSTANCE_ROOT': str(home / '.agents'),
             'AGENT_FABRIC_STATE_ROOT': str(tmp_path / 'state'),
             'AGENT_FABRIC_PRODUCT_ROOT': str(ROOT),
             'AGENT_FABRIC_STATE_DIRECTORY': str(tmp_path / 'state'),
@@ -48,7 +49,7 @@ def test_missing_sources_are_manifested_not_errors(tmp_path):
     assert all(row['status'] == 'absent' and row['row_count'] == 0 for row in rows)
     assert all(row['parser_version'] == 2 and row['path_pattern'] for row in rows)
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_claude_incremental_dedup_subagents_and_content_exclusion(tmp_path):
@@ -335,7 +336,7 @@ def test_schema_migrates_existing_v1_observations(tmp_path):
     result = cli(tmp_path, 'telemetry', 'ingest')
     assert result.returncode == 0, result.stdout + result.stderr
     with sqlite3.connect(path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
         assert db.execute('SELECT source,origin_path FROM observations').fetchone() == ('cooldowns', str(path.parent / 'cooldowns.json'))
 
 
@@ -386,6 +387,17 @@ def test_lanes_report_latest_attempt_and_preserve_attempt_outcomes(tmp_path):
     assert report['lanes'] == [{'status':'ok','error_class':None,'lanes':1}]
     assert report['attempts'] == [{'status':'failed','error_class':'test_failure','attempts':1},
                                   {'status':'ok','error_class':None,'attempts':1}]
+
+
+def test_lost_attempt_is_reported_as_a_provider_error(tmp_path):
+    write_json(tmp_path / '.agent-run/runs/run/tasks/lane/attempt-001/attempt.json', {
+        'run_id':'r','task_id':'lane','attempt':1,'state':'terminal','status':'lost',
+        'error_class':'provider_error','ended_at':'2026-10-21T01:00:00Z','cwd':'/repo',
+        'provenance':{'requested':{'adapter':'codex'},'resolved_model':'test'}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    assert report['lanes'] == [{'status':'lost','error_class':'provider_error','lanes':1}]
+    assert report['attempts'] == [{'status':'lost','error_class':'provider_error','attempts':1}]
 
 
 def test_unknown_token_fields_are_not_reported_as_zero(tmp_path):
@@ -478,3 +490,369 @@ def test_legacy_rebuild_replaces_stale_usage_for_unchanged_message_id(tmp_path):
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         assert db.execute('SELECT output_tokens FROM usage').fetchall() == [(3,)]
+
+
+def receipt(project, name, attempt=1, **values):
+    path = project / f'.agent-run/runs/{name}/tasks/lane/attempt-{attempt:03d}/attempt.json'
+    write_json(path, {'run_id': name, 'task_id': 'lane', 'attempt': attempt, 'cwd': '/repo',
+                      'ended_at': '2026-10-21T01:00:00Z', **values})
+    return path
+
+
+def route(adapter, model, effort=None):
+    return {'requested': {'adapter': adapter, 'model': model, 'effort': effort or ''},
+            'resolved_model': model, 'effort_applied': effort or ''}
+
+
+def test_stats_normalise_models_against_the_catalogue_and_keep_raw_values(tmp_path):
+    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl', {
+        'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+        'message': {'id': 'm', 'model': 'claude-haiku-4-5-20251001', 'usage': {'input_tokens': 7}}})
+    receipt(tmp_path, 'agy', status='ok', provenance=route('agy', 'gemini-3.8-flash-high', 'high'))
+    receipt(tmp_path, 'cursor', status='ok', provenance=route('cursor', 'Grok 4.7 256K High'))
+    receipt(tmp_path, 'claude', status='ok', provenance=route('claude', 'opus'))
+    receipt(tmp_path, 'sonnet5', status='ok', provenance=route('claude', 'claude-sonnet-5'))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    models = {(row['adapter'], row['model']): row['model_raw'] for row in report['usage']}
+    assert models == {('claude', 'claude-haiku-4-5'): ['claude-haiku-4-5-20251001'],
+                      ('agy', 'gemini-3.8-flash'): ['gemini-3.8-flash-high'],
+                      ('cursor', 'grok-4.7'): ['Grok 4.7 256K High'],
+                      ('claude', 'claude-opus-5-5'): ['opus'],
+                      # A versioned spelling is a distinct model, never folded onto a newer id.
+                      ('claude', 'claude-sonnet-5'): ['claude-sonnet-5']}
+
+
+def test_opencode_native_and_receipt_spellings_share_one_model_key(tmp_path):
+    from scripts import telemetry
+    catalogue = telemetry.catalogue()
+    assert telemetry.normalise_model('opencode', 'opencode-go', 'deepseek-v4.1-flash', catalogue) == 'opencode-go/deepseek-v4.1-flash'
+    assert telemetry.normalise_model('opencode', 'opencode', 'opencode-go/deepseek-v4.1-flash', catalogue) == 'opencode-go/deepseek-v4.1-flash'
+    assert telemetry.normalise_model('opencode', 'openrouter', 'z-ai/glm-5.2:free', catalogue) == 'openrouter/z-ai/glm-5.2:free'
+    assert telemetry.normalise_model('codex', 'openai', 'gpt-6-sol', catalogue) == 'gpt-6-sol'
+    assert telemetry.normalise_model('codex', 'openai', None, catalogue) is None
+
+
+def test_fixture_rows_are_excluded_and_unattributed_rows_reported_separately(tmp_path):
+    receipt(tmp_path, 'fixture', status='ok', provenance=route('codex', 'fixture'), context={'input_tokens': 5})
+    receipt(tmp_path, 'missing', status='model_unavailable', provenance=route('opencode', 'opencode/nonexistent-model'))
+    receipt(tmp_path, 'bare', status='cancelled', context={'input_tokens': 3})
+    receipt(tmp_path, 'real', status='ok', provenance=route('codex', 'gpt-6-luna'), context={'input_tokens': 9})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    assert [(row['adapter'], row['model']) for row in report['usage']] == [('codex', 'gpt-6-luna')]
+    assert report['excluded_rows'] == {'test_fixture': 2}
+    assert report['unattributed'] == [{'source': 'fabric', 'adapter': None, 'rows': 1,
+                                       'input_tokens': 3, 'statuses': {'cancelled': 1}}]
+    assert all(row['model'] not in {'fixture', 'opencode/nonexistent-model'} for row in report['outcomes'])
+    assert sum(row['attempts'] for row in report['attempts']) == 2
+
+
+def test_cache_read_share_counts_only_rows_with_every_input_field(tmp_path):
+    path = tmp_path / 'home/.claude/projects/repo/s.jsonl'
+    jsonl(path, {'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+                 'message': {'id': 'a', 'model': 'claude-opus-5-5', 'usage': {
+                     'input_tokens': 10, 'cache_read_input_tokens': 30, 'cache_creation_input_tokens': 10}}},
+          {'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+           'message': {'id': 'b', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 100}}})
+    jsonl(tmp_path / 'home/.codex/sessions/day/rollout-x.jsonl',
+          {'type': 'session_meta', 'payload': {'id': 'cx'}},
+          {'type': 'turn_context', 'payload': {'model': 'gpt-6-luna'}},
+          {'type': 'event_msg', 'timestamp': '2026-10-21T01:00:00Z', 'payload': {
+              'type': 'token_count', 'info': {'total_token_usage': {
+                  'input_tokens': 100, 'cached_input_tokens': 40, 'cache_write_input_tokens': 0,
+                  'output_tokens': 1}}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    shares = {row['adapter']: row['cache_read_share'] for row in report['usage']}
+    # Codex input already includes cached tokens; the ledger stores the uncached remainder.
+    assert shares == {'claude': 0.6, 'codex': 0.4}
+    claude = next(row for row in report['usage'] if row['adapter'] == 'claude')
+    assert claude['cache_share_rows'] == 1 and claude['rows'] == 2
+
+
+def test_outcomes_group_route_quality_with_retries_errors_latency_and_throughput(tmp_path):
+    common = {'task_class': 'review', 'requested_route': {'alias': 'workhorse', 'task_class': 'review'},
+              'provenance': route('codex', 'gpt-6.1-sol', 'high'), 'started_at': '2026-10-21T01:00:00Z'}
+    receipt(tmp_path, 'one', 1, **common, status='failed', error_class='provider_timeout',
+            ended_at='2026-10-21T01:00:30Z', timing={'phases': {'provider': 30000}})
+    receipt(tmp_path, 'one', 2, **common, status='ok', ended_at='2026-10-21T01:00:10Z',
+            timing={'phases': {'provider': 10000}}, context={'output_tokens': 100})
+    receipt(tmp_path, 'two', 1, **common, status='ok', ended_at='2026-10-21T01:00:20Z',
+            timing={'phases': {'provider': 20000}}, context={'output_tokens': 100})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    assert report['outcomes'] == [{
+        'adapter': 'codex', 'model': 'gpt-6.1-sol', 'effort': 'high', 'task_class': 'review',
+        'route': 'workhorse', 'lanes': 2, 'succeeded': 2, 'success_rate': 1.0, 'attempts': 3,
+        'retries': 1, 'error_classes': {'provider_timeout': 1},
+        'latency_p50_s': 20.0, 'latency_p90_s': 30.0, 'output_tokens_per_s': 7.5}]
+    table = cli(tmp_path, 'stats').stdout
+    assert 'codex/gpt-6.1-sol@high' in table and '100%' in table
+
+
+def test_price_table_is_dated_sourced_and_marks_free_and_subscription_routes(tmp_path):
+    table = json.loads((ROOT / 'config/telemetry-prices.json').read_text())
+    assert table['schema_version'] == 2
+    for key, entry in table['models'].items():
+        assert entry['source'] in table['sources'], key
+        assert entry['date'] and entry['price_status'] in {'verified', 'unverified', 'free'}, key
+        assert entry['billing'] in {'api', 'subscription', 'free'}, key
+        if entry['price_status'] == 'verified':
+            assert all(isinstance(entry['usd_per_million'][field], (int, float))
+                       for field in ('input', 'cached_input', 'output')), key
+    assert table['models']['claude/claude-opus-5-5']['usd_per_million'] == {
+        'input': 4, 'cached_input': 0.2, 'cache_write': 5, 'output': 20}
+    receipt(tmp_path, 'free', status='ok', provenance=route('opencode', 'opencode/mimo-v2.6-flash-free'),
+            context={'input_tokens': 1000, 'output_tokens': 10, 'cached_input_tokens': 0})
+    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl', {
+        'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+        'message': {'id': 'm', 'model': 'claude-opus-5-5', 'usage': {
+            'input_tokens': 1_000_000, 'cache_read_input_tokens': 0,
+            'cache_creation_input_tokens': 0, 'output_tokens': 0}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    usage = {row['adapter']: row for row in json.loads(cli(tmp_path, 'stats', '--json').stdout)['usage']}
+    assert (usage['opencode']['billing'], usage['opencode']['estimated_cost_usd']) == ('free', 0)
+    assert (usage['claude']['billing'], usage['claude']['estimated_cost_usd']) == ('subscription', 4)
+
+
+def test_stats_default_output_is_a_compact_table(tmp_path):
+    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl', {
+        'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+        'message': {'id': 'm', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 1234567}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    lines = cli(tmp_path, 'stats').stdout.splitlines()
+    header = next(line for line in lines if line.split()[:3] == ['provider', 'adapter', 'model'])
+    row = lines[lines.index(header) + 1].split()
+    assert row[:4] == ['anthropic', 'claude', 'claude-opus-5-5', '1']
+    assert '1.23M' in row and row[-2:] == ['-', 'subscription']
+    assert not any(line.lstrip().startswith('{') for line in lines)
+
+
+def test_fabric_discovery_ignores_legacy_mcp_run_roots(tmp_path):
+    write_json(tmp_path / '.agent-run/mcp-old/tasks/lane/attempt-001/attempt.json', {
+        'run_id': 'old', 'task_id': 'lane', 'attempt': 1, 'status': 'ok',
+        'provenance': route('codex', 'gpt-6-luna')})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    sources = {row['source']: row for row in json.loads(cli(tmp_path, 'telemetry', 'sources', '--json').stdout)}
+    assert sources['fabric']['row_count'] == 0 and 'mcp-' not in sources['fabric']['path_pattern']
+
+
+def test_ledger_rows_carry_the_configured_host_id_without_duplicates(tmp_path):
+    hosts = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
+    write_json(hosts, {'schema_version': 1, 'local_host': 'runner-ci'})
+    path = tmp_path / 'home/.claude/projects/repo/s.jsonl'
+    jsonl(path, {'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+                 'message': {'id': 'one', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 7}}})
+    receipt(tmp_path, 'run', status='ok', provenance=route('codex', 'gpt-6-luna'))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        original_host = db.execute('SELECT host FROM usage LIMIT 1').fetchone()[0]
+        assert original_host == 'runner-ci'
+        db.execute('INSERT INTO quota_events(provider,account,host,window,kind,observed_at) VALUES (?,?,?,?,?,?)',
+                   ('codex', 'work', original_host, 'custom', 'natural', '2026-10-21T12:00:00Z'))
+    write_json(hosts, {'schema_version': 1, 'local_host': 'studio'})
+    jsonl(path, {'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+                 'message': {'id': 'two', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 7}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute('SELECT DISTINCT host FROM usage').fetchall() == [('studio',)]
+        assert db.execute('SELECT COUNT(*) FROM usage').fetchone()[0] == 3
+        assert db.execute('SELECT DISTINCT host FROM usage_files').fetchall() == [('studio',)]
+        assert db.execute('SELECT DISTINCT host FROM quota_events').fetchall() == [('studio',)]
+
+
+def test_host_id_prefers_the_instance_config_over_home_and_hostname(tmp_path, monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('telemetry_host_precedence', ROOT / 'scripts/telemetry.py')
+    telemetry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(telemetry)
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / 'instance'))
+    monkeypatch.setattr(telemetry.socket, 'gethostname', lambda: 'runner-ci')
+    write_json(tmp_path / 'home/.agents/.agent-fabric/hosts.json',
+               {'schema_version': 1, 'local_host': 'home-host'})
+    write_json(tmp_path / 'instance/.agent-fabric/hosts.json',
+               {'schema_version': 1, 'local_host': 'studio'})
+    assert telemetry.host_id() == 'studio'
+
+
+def test_peer_stats_are_versioned_aggregates_and_read_only(tmp_path):
+    path = tmp_path / 'home/.claude/projects/repo/session.jsonl'
+    for index in range(2):
+        jsonl(path, {'type': 'assistant', 'sessionId': 'same-session', 'timestamp': '2026-10-21T01:00:00Z',
+                     'message': {'id': f'm{index}', 'model': 'claude-test', 'content': 'PRIVATE_CONTENT',
+                                 'usage': {'input_tokens': 10, 'output_tokens': 20}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    database = tmp_path / 'state/telemetry.sqlite3'
+    before = database.read_bytes()
+    write_json(tmp_path / 'state/quota/fake--work.json', {
+        'schema': 'provenant.quota.v1', 'provider': 'fake', 'account': 'work',
+        'host': __import__('socket').gethostname(), 'access_token': 'PRIVATE_TOKEN',
+        'credits': {'reset_credits': 1, 'credential': 'PRIVATE_TOKEN', 'source': {'token': 'PRIVATE_TOKEN'}},
+        'windows': [{'name': 'custom', 'used_percent': 20, 'credential': 'PRIVATE_TOKEN'}]})
+    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'peer'],
+                            input=json.dumps({'protocol_version': 1, 'verb': 'telemetry.stats',
+                                              'params': {'schema_version': 1, 'since': '2026-10-21'}}),
+                            env=environment(tmp_path), capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads(result.stdout)['result']
+    assert summary['schema'] == 'provenant.telemetry.summary.v1'
+    groups = summary['session_usage']
+    assert len(groups) == 1 and groups[0]['session'] == 'same-session'
+    assert groups[0]['rows'] == 2 and groups[0]['input_tokens'] == 20
+    assert 'PRIVATE_CONTENT' not in result.stdout and 'event_id' not in result.stdout and 'origin_path' not in result.stdout
+    assert 'PRIVATE_TOKEN' not in result.stdout
+    assert summary['quota_snapshots'][0]['windows'][0] == {'name': 'custom', 'used_percent': 20}
+    assert database.read_bytes() == before
+
+
+def test_stats_hosts_all_merges_peer_usage_and_survives_old_and_offline_peers(tmp_path):
+    local = tmp_path / 'home/.claude/projects/repo/local.jsonl'
+    jsonl(local, {'type': 'assistant', 'sessionId': 'shared-session', 'timestamp': '2026-10-21T01:00:00Z',
+                  'message': {'id': 'local', 'model': 'claude-test', 'usage': {'input_tokens': 10, 'output_tokens': 20}}})
+    config = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
+    write_json(config, {'schema_version': 1, 'local_host': 'studio', 'peers': {
+        'peer': {'ssh_destination': 'peer'}, 'offline': {'ssh_destination': 'offline'},
+        'old': {'ssh_destination': 'old'}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    # The transport is a fixture; it never reaches SSH or a provider.
+    shim = tmp_path / 'ssh-fixture'
+    shim.write_text('''#!/usr/bin/env python3
+import json, sys
+request = json.load(sys.stdin)
+name = sys.argv[-2]
+if name == 'offline':
+    sys.exit(255)
+if request['verb'] == 'hello':
+    print(json.dumps({'protocol_version': 1, 'ok': True, 'result': {'protocol_version': 1, 'host': name}}))
+elif name == 'old':
+    print(json.dumps({'protocol_version': 1, 'ok': False, 'error': {'code': 'unknown_verb', 'message': 'old peer'}}))
+    sys.exit(1)
+else:
+    print(json.dumps({'protocol_version': 1, 'ok': True, 'result': json.load(open(__file__ + '.json'))}))
+''')
+    shim.chmod(0o755)
+    # Use the real aggregate encoder, then represent another host with the same session ID.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('telemetry_host_test', ROOT / 'scripts/telemetry.py')
+    telemetry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(telemetry)
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        db.row_factory = sqlite3.Row
+        summary = telemetry.peer_summary(db, host='peer')
+    Path(str(shim) + '.json').write_text(json.dumps(summary))
+    env = {**environment(tmp_path), 'AGENT_FABRIC_SSH_PROGRAM': str(shim),
+           'AGENT_FABRIC_INSTANCE_ROOT': str(tmp_path / 'home/.agents')}
+    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'stats', '--hosts', 'all', '--json'],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(result.stdout)
+    assert report['partial'] is True
+    assert report['usage'][0]['input_tokens'] == 20
+    statuses = {row['host']: row for row in report['hosts']}
+    assert statuses['peer']['status'] == 'ok'
+    assert statuses['offline']['status'] == 'partial' and statuses['offline']['reason'] == 'unreachable'
+    assert statuses['old']['status'] == 'partial' and statuses['old']['reason'] == 'unknown_verb'
+    # Repeated selectors must not count one (host, source, session) twice.
+    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'stats', '--hosts', 'peer', 'peer', '--json'],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['usage'][0]['input_tokens'] == 10
+
+
+def test_peer_merge_deduplicates_sessions_and_uses_freshest_account_quota(tmp_path, monkeypatch):
+    import importlib.util
+    def load(name, filename):
+        spec = importlib.util.spec_from_file_location(name, ROOT / 'scripts' / filename)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    telemetry = load('merge_telemetry_test', 'telemetry.py')
+    federation = load('merge_federation_test', 'telemetry_hosts.py')
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    with telemetry.connect() as db:
+        first = telemetry.peer_summary(db, host='studio')
+    second = {**first, 'host': 'peer'}
+    def quota(host, observed, used):
+        return {'schema': 'provenant.quota.v1', 'provider': 'claude', 'account': 'work', 'host': host,
+                'observed_at': observed, 'windows': [{'name': 'custom', 'used_percent': used,
+                'window_minutes': 300, 'reset_at': None}]}
+    first['quota_snapshots'] = [quota('studio', '2026-10-21T12:00:00Z', 40)]
+    second['quota_snapshots'] = [quota('peer', '2026-10-21T13:00:00Z', 60)]
+    merged = federation.merge(telemetry, [first, second, second], [], None)
+    assert [(row['host'], row['windows'][0]['used_percent']) for row in merged['quota']['accounts']] == [('peer', 60)]
+
+
+def test_malformed_peer_is_partial_instead_of_breaking_local_stats(tmp_path, monkeypatch):
+    import importlib.util
+    def load(name, filename):
+        spec = importlib.util.spec_from_file_location(name, ROOT / 'scripts' / filename)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    telemetry = load('bad_peer_telemetry', 'telemetry.py')
+    federation = load('bad_peer_federation', 'telemetry_hosts.py')
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    with telemetry.connect() as db:
+        good = telemetry.peer_summary(db, host='peer')
+        hosts = federation.hosts_owner()
+        monkeypatch.setattr(hosts, 'load_config', lambda: hosts.HostsConfig(telemetry.host_id(), {'peer': object()}))
+        response = {**good, 'excluded_rows': []}
+        monkeypatch.setattr(hosts.PeerClient, 'call', lambda *args, **kwargs: {'ok': True, 'result': response})
+        report = federation.collect(telemetry, db, None, ['all'])
+        assert report['partial'] and report['hosts'][-1]['reason'] == 'bad_response'
+        # A malformed aggregate must not become a string token count.
+        response = {**good, 'session_usage': [{'host': 'peer', 'source': 'claude', 'session': 's',
+                    'day': None, 'provider': 'anthropic', 'adapter': 'claude', 'account': None,
+                    'model': 'test', 'rows': '1'}]}
+        report = federation.collect(telemetry, db, None, ['all'])
+        assert report['partial'] and report['hosts'][-1]['reason'] == 'bad_response'
+        response = {**good, 'quota_observations': [{'used_percent': 'bad'}]}
+        report = federation.collect(telemetry, db, None, ['all'])
+        assert report['partial'] and report['hosts'][-1]['reason'] == 'bad_response'
+        local_quota = {'schema': 'provenant.quota.v1', 'provider': 'codex', 'account': 'default',
+                       'host': telemetry.host_id(), 'observed_at': '2026-10-21T12:00:00Z', 'windows': []}
+        write_json(tmp_path / 'state/quota/codex--default.json', local_quota)
+        response = {**good, 'quota_snapshots': [{**local_quota, 'host': 'peer', 'observed_at': 5}]}
+        report = federation.collect(telemetry, db, None, ['all'])
+        assert report['partial'] and report['hosts'][-1]['reason'] == 'bad_response'
+        response = {**good, 'quota_snapshots': [{**local_quota, 'host': 'peer',
+                    'observed_at': '2026-10-21T13:00:00Z', 'windows': [{'name': 'custom', 'used_percent': 30, 'window_minutes': 300,
+                                 'reset_at': None, 'credential': 'PRIVATE_TOKEN'}],
+                    'credits': {'reset_credits': 1, 'source': 'provider', 'credential': 'PRIVATE_TOKEN'}}]}
+        report = federation.collect(telemetry, db, None, ['all'])
+        assert 'PRIVATE_TOKEN' not in json.dumps(report)
+
+
+def test_unreadable_peer_ledger_returns_a_typed_error(tmp_path):
+    state = tmp_path / 'state'
+    state.mkdir()
+    with sqlite3.connect(state / 'telemetry.sqlite3') as db:
+        db.execute('PRAGMA user_version=4')
+    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'peer'],
+                            input=json.dumps({'protocol_version': 1, 'verb': 'telemetry.stats',
+                                              'params': {'schema_version': 1}}),
+                            env=environment(tmp_path), capture_output=True, text=True)
+    assert result.returncode == 1 and result.stderr == ''
+    assert json.loads(result.stdout)['error']['code'] == 'telemetry_unavailable'
+
+
+def test_stats_reports_time_since_last_limit_per_account_and_host(tmp_path):
+    receipt(tmp_path, 'limit-old', status='usage_limited', account='work',
+            ended_at='2026-10-20T01:00:00Z', provenance=route('codex', 'gpt-6-luna'))
+    receipt(tmp_path, 'limit-new', status='rate_limited', account='work',
+            ended_at='2026-10-21T02:00:00Z', provenance=route('codex', 'gpt-6-luna'))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    limit = report['last_limit_events'][0]
+    assert (limit['provider'], limit['account'], limit['timestamp']) == ('openai', 'work', '2026-10-21T02:00:00Z')
+    assert limit['host'] == report['host'] and limit['age_seconds'] >= 0
+    assert 'Last limit events' in cli(tmp_path, 'stats').stdout
+
+
+def test_telemetry_reuses_loaded_quota_and_host_owners():
+    from scripts import telemetry
+
+    assert telemetry.quota_owner() is telemetry.quota_owner()
+    assert telemetry.host_owner() is telemetry.host_owner()

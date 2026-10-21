@@ -67,7 +67,7 @@ input-required lane of the registered project, finished within the last day,
 once per seat, including lanes that finished between waits; named ids narrow it
 to those lanes, and a batch id to its tasks. `lanes --wait --all` holds the report
 until every listed lane is terminal or needs input, and `--timeout N` ends the
-wait with exit 124 naming the lanes still running (`--timeout 0` polls once; contention on the seen-cursor is bounded by it too, and unmarked lanes are reported again next wait). An unknown id fails the wait at once with the read error (exit 1) rather than being skipped. `lanes --project P` reads
+wait with exit 124 naming the lanes still running (`--timeout 0` polls once; contention on the seen-cursor is bounded by it too, and unmarked lanes are reported again next wait). An unknown id fails the wait at once with the read error (exit 1) rather than being skipped. `lanes` default output shows active lanes, lanes needing attention (such as quarantined or input-required), and the 5 most recent terminal ones, then `N more; use --all`; `lanes --json` without `--all` caps at 20 rows with `omitted`/`omitted_hint`; `--all` lists all lanes. `lanes --project P` reads
 another project; an empty listing says which project the cwd resolved to.
 The next dispatch reaps a run only when its host is gone and its owner or
 provider still runs: an owner that exited and left its provider behind, or a
@@ -633,7 +633,14 @@ writable. Readers discover only current timestamped runs in the shared
 `.agent-run/runs` directory.
 
 Dispatch-time maintenance scans the shared run directory. It closes active receipts
-older than 48 hours with no observed live owner as `interrupted`. Retention is
+older than 48 hours with no observed live owner as `interrupted`.
+Fabric startup and status reads also finalise running attempts as `lost` when
+their process group is gone or its recorded OS start time (`pgid_started_at`)
+differs. Legacy attempts without that identity need both a dead group and
+`last_progress_at` older than 48 hours. The finaliser takes the writer's custody
+lock and leaves live owners alone; status checks only the runs selected for
+the response. Lost attempts retain their end time and liveness evidence and
+count as provider errors in telemetry. Retention is
 seven days for successful/cancelled runs and fourteen days for failures
 (`AGENT_FABRIC_RUN_RETENTION_HOURS` overrides). Live runs,
 `KEEP`, active receipts and delivery `RUN.json` files are preserved; unknown new

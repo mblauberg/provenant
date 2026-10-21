@@ -554,12 +554,16 @@ def describe(router: Any, catalog: dict[str, Any], availability: Availability,
              effort_order: dict[str, int]) -> dict[str, Any]:
     """Every pool with live availability, for `provenant routes`."""
     routes = {}
+    # Provider pace is report-only here; only an exhausted window changes availability (as a cooldown).
+    quota = getattr(router, "_quota_states", dict)()
     for name in catalog.get("routes", {}):
         routes[name] = [{
             "model": entry["key"], "weight": entry["weight_label"], "family": entry["family"],
             **({"effort": "-".join(entry["effort"])} if entry["effort"] else {}),
             **({"traits": entry["traits"]} if entry["traits"] else {}),
             "availability": availability.reason(entry["adapter"], entry["model"], entry["weight"]) or "available",
+            **({"quota": {key: quota[entry["adapter"]][key] for key in ("account", "state", "summary", "observed_at")}}
+               if entry["adapter"] in quota else {}),
         } for entry in pool(router, catalog, name, effort_order)]
     return {"schema": "fabric.routes.v1", "routes": routes,
             "synonyms": dict(sorted(catalog.get("route_synonyms", {}).items()))}
@@ -572,6 +576,8 @@ def render(document: dict[str, Any]) -> str:
         for entry in entries:
             model = entry["model"] + (f"@{entry['effort']}" if "effort" in entry else "")
             caveat = f"  [{', '.join(entry['traits'])}]" if "traits" in entry else ""
+            if entry.get("quota", {}).get("state") == "deficit":
+                caveat += f"  [quota {entry['quota']['summary']}]"
             lines.append(f"  {model:<52} {str(entry['weight']):<8} {entry['availability']}{caveat}")
     synonyms: dict[str, list[str]] = {}
     for alias, target in document["synonyms"].items():

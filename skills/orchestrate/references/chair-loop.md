@@ -75,7 +75,8 @@ Without `--all` it exits at the first finisher, so the chair acts on each lane
 as it lands and re-arms; the next wait reports any lane that finished in
 between. Add `--all --timeout N` only to hold the report until a whole fan-out
 is terminal. Do not start one wait per lane. `provenant lanes` is
-the source of truth after compaction or restart. Use `provenant events --follow`
+the source of truth after compaction or restart (by default showing active
+lanes plus the 5 most recent terminal ones, with `--all` listing all lanes). Use `provenant events --follow`
 only for foreground streaming; it replays retained events without a cursor and
 does not exit on its own.
 
