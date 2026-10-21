@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -898,8 +899,118 @@ def test_help_is_concise_and_names_existing_command_owners(tmp_path):
 
     assert result.returncode == 0
     assert result.stderr == ""
+    assert len(result.stdout.encode("utf-8")) <= 1024
     assert "route" in result.stdout and "scripts/model-route" in result.stdout
     assert "fabric ...     runtime/fabric/bin/fabric ..." in result.stdout
     assert "batch ...      skills/orchestrate/scripts/batch_run.py ..." in result.stdout
     assert "project ..." not in result.stdout
-    assert "Fabric derives who you are from the working directory" in result.stdout
+    # One line per command: each line starting with 2 spaces has no internal newlines
+    command_lines = [line for line in result.stdout.splitlines() if line.startswith("  ")]
+    assert len(command_lines) >= 15
+
+
+def test_help_command_gives_detail_for_specific_command(tmp_path):
+    _, command = make_checkout(tmp_path)
+
+    fabric_help = invoke(command, "help", "fabric", cwd=tmp_path)
+    assert fabric_help.returncode == 0
+    assert "Fabric derives who you are from the working directory" in fabric_help.stdout
+
+    dispatch_help = invoke(command, "help", "dispatch", cwd=tmp_path)
+    assert dispatch_help.returncode == 0
+    assert "skills/orchestrate/scripts/dispatch_run.py" in dispatch_help.stdout
+
+    lanes_help = invoke(command, "help", "lanes", cwd=tmp_path)
+    assert lanes_help.returncode == 0
+    assert "--all" in lanes_help.stdout
+    assert "--wait" in lanes_help.stdout
+
+    unknown_help = invoke(command, "help", "nonexistent", cwd=tmp_path)
+    assert unknown_help.returncode == 2
+    assert "usage: provenant " in unknown_help.stderr
+
+
+def test_output_budget_defaults_stay_under_limits_on_fixture_state(tmp_path: Path):
+    provenant_script = ROOT / "scripts" / "provenant"
+    env = os.environ.copy()
+    env["AGENT_FABRIC_PRODUCT_ROOT"] = str(ROOT)
+    loader = ROOT / "runtime/fabric/node_modules/tsx/dist/loader.mjs"
+    if not loader.exists():
+        loader = ROOT / "node_modules/tsx/dist/loader.mjs"
+    env["AGENT_FABRIC_TSX_LOADER"] = str(loader)
+    env["AGENT_FABRIC_STATE_DIRECTORY"] = str(tmp_path / "fabric-state")
+
+    # 1. Budget: provenant help <= 1024 bytes (1 KB)
+    help_res = subprocess.run([sys.executable, str(provenant_script), "help"], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert help_res.returncode == 0
+    assert len(help_res.stdout.encode("utf-8")) <= 1024
+
+    # 2. Budget: provenant dispatch bad arg usage error <= 4096 bytes and 1 line
+    dispatch_res = subprocess.run([sys.executable, str(provenant_script), "dispatch"], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert dispatch_res.returncode == 2
+    assert len(dispatch_res.stderr.encode("utf-8")) <= 4096
+    assert dispatch_res.stderr.startswith("error: ")
+    assert "; fix: " in dispatch_res.stderr
+    assert len(dispatch_res.stderr.splitlines()) == 1
+
+    # 3. Budget: provenant batch bad arg usage error <= 4096 bytes and 1 line
+    batch_res = subprocess.run([sys.executable, str(provenant_script), "batch"], cwd=tmp_path, env=env, capture_output=True, text=True)
+    assert batch_res.returncode == 2
+    assert len(batch_res.stderr.encode("utf-8")) <= 4096
+    assert batch_res.stderr.startswith("error: ")
+    assert "; fix: " in batch_res.stderr
+    assert len(batch_res.stderr.splitlines()) == 1
+
+    # 4. Budget: provenant lanes on fixture state with >5 terminal lanes <= 4096 bytes
+    fixture_repo = tmp_path / "fixture-repo"
+    fixture_repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(fixture_repo)], check=True)
+
+    fixture_attempt_tmpl = ROOT / "runtime/fabric/tests/fixtures/attempt.json"
+    template_data = json.loads(fixture_attempt_tmpl.read_text()) if fixture_attempt_tmpl.exists() else {}
+
+    for i in range(1, 16):
+        task_id = f"term-{i:02d}"
+        run_name = f"20261022-1000-dispatch-fixture-{task_id}"
+        attempt_dir = fixture_repo / ".agent-run" / "runs" / run_name / "tasks" / task_id / "attempt-001"
+        attempt_dir.mkdir(parents=True)
+        data = dict(template_data)
+        data.update({
+            "run_id": f"mcp-{task_id}",
+            "task_id": task_id,
+            "state": "terminal",
+            "status": "ok",
+            "started_at": f"2026-10-22T00:10:{i:02d}.000Z",
+            "ended_at": f"2026-10-22T00:10:{i:02d}.000Z",
+            "paths": {"result": f"tasks/{task_id}/attempt-001/result.md"},
+        })
+        (attempt_dir / "attempt.json").write_text(json.dumps(data))
+        (attempt_dir / "result.md").write_text("result")
+
+    for i in (1, 2):
+        task_id = f"active-{i:02d}"
+        run_name = f"20261022-1000-dispatch-fixture-{task_id}"
+        attempt_dir = fixture_repo / ".agent-run" / "runs" / run_name / "tasks" / task_id / "attempt-001"
+        attempt_dir.mkdir(parents=True)
+        data = dict(template_data)
+        data.update({
+            "run_id": f"mcp-{task_id}",
+            "task_id": task_id,
+            "state": "running",
+            "status": "running",
+            "started_at": f"2026-10-22T00:01:{i:02d}.000Z",
+            "ended_at": None,
+            "paths": {"result": f"tasks/{task_id}/attempt-001/result.md"},
+        })
+        (attempt_dir / "attempt.json").write_text(json.dumps(data))
+        (attempt_dir / "result.md").write_text("result")
+
+    lanes_res = subprocess.run([sys.executable, str(provenant_script), "lanes"], cwd=fixture_repo, env=env, capture_output=True, text=True)
+    assert lanes_res.returncode == 0
+    assert len(lanes_res.stdout.encode("utf-8")) <= 4096
+    lines = lanes_res.stdout.strip().splitlines()
+    assert len(lines) == 8  # 2 active + 5 terminal + "10 more; use --all"
+    assert "active-01" in lanes_res.stdout
+    assert "active-02" in lanes_res.stdout
+    assert lines[-1] == "10 more; use --all"
+

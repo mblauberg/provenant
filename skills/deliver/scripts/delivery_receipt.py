@@ -438,6 +438,8 @@ def command_init(args: argparse.Namespace) -> dict[str, Any]:
         # exists, so init cannot self-certify its own intent.
         "approval": {"status": "pending", "approver": "", "evidence": ""},
     }
+    if args.requires_user_acceptance:
+        run["intent"]["requires_user_acceptance"] = True
     run["design"]["artifact_id"] = "intent"
     run["design"]["digest"] = intent_digest
     run["checkpoint"] = {
@@ -789,7 +791,34 @@ def command_evidence_human(args: argparse.Namespace) -> dict[str, Any]:
                 "approver": args.approver,
                 "evidence": evidence_id,
             }
+        if args.gate == "human-acceptance" and "delivery_acceptance" not in run:
+            run["delivery_acceptance"] = {
+                "basis": "user",
+                "evidence_ids": [item["id"] for item in run["evidence"]
+                                 if item.get("kind") in {"deterministic", "judgement"}
+                                 and item.get("status") == "pass"] + [evidence_id],
+            }
         return {"evidence_id": evidence_id, "status": "pass"}
+
+    return mutate_run(args.run_dir, apply)
+
+
+def command_accept(args: argparse.Namespace) -> dict[str, Any]:
+    acceptance = {"basis": args.basis, "evidence_ids": list(dict.fromkeys(args.evidence))}
+
+    def apply(run: dict[str, Any], run_dir: Path, workspace: Path) -> dict[str, Any]:
+        if shape.acceptance_approved(run) and run.get("delivery_acceptance") != acceptance:
+            raise ReceiptError("acceptance gate is already closed")
+        run["delivery_acceptance"] = acceptance
+        import validate_delivery
+        try:
+            validate_delivery.validate(
+                run, PRODUCT_ROOT, receipt_dir=run_dir,
+                workspace_root=workspace, verify_hashes=True,
+            )
+        except validate_delivery.Invalid as exc:
+            raise ReceiptError(str(exc)) from exc
+        return {"acceptance": acceptance}
 
     return mutate_run(args.run_dir, apply)
 
