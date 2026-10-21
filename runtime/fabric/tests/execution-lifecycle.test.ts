@@ -158,12 +158,24 @@ describe("Fabric input corrections", () => {
     expect(typo.warnings).toContain("corrected model gpt-6-lunx to gpt-6-luna");
   });
 
-  it("recognises agy effort-suffixed catalogue names by their base model", () => {
-    const snapshot = { adapters: [{ name: "agy", models: ["gemini-3.8-flash"], aliases: {},
-      model_details: [{ id: "gemini-3.8-flash", efforts: ["high"] }] }] } as any;
-    const route = normaliseRoute({ adapter: "agy", model: "gemini-3.8-flash-high", effort: "high" }, identity, snapshot);
-    expect(route).toMatchObject({ model: "gemini-3.8-flash", effort: "high" });
-    expect(route.warnings ?? []).toEqual([]);
+  it("resolves catalogue model suffixes and carries or defers their effort", () => {
+    const snapshot = { adapters: [{ name: "agy", models: ["gemini-3.8-flash", "plain-model"], aliases: {},
+      model_details: [
+        { id: "gemini-3.8-flash", efforts: ["low", "medium", "high"], effort_transport: "model-suffix",
+          suffix: { low: "-low", medium: "-medium", high: "-high" } },
+        { id: "plain-model", efforts: ["high"], effort_transport: "flag" },
+      ] }] } as any;
+    const implied = normaliseRoute({ adapter: "agy", model: "gemini-3.8-flash-high" }, identity, snapshot);
+    expect(implied).toMatchObject({ model: "gemini-3.8-flash", effort: "high" });
+    expect(implied.warnings ?? []).toEqual([]);
+
+    const explicit = normaliseRoute({ adapter: "agy", model: "gemini-3.8-flash-high", effort: "medium" }, identity, snapshot);
+    expect(explicit).toMatchObject({ model: "gemini-3.8-flash", effort: "medium" });
+    expect(explicit.warnings).toContain("effort high in model ignored: effort medium was named");
+
+    const unsupported = normaliseRoute({ adapter: "agy", model: "plain-model-high" }, identity, snapshot);
+    expect(unsupported.model).toBe("plain-model-high");
+    expect(unsupported.effort).toBeUndefined();
   });
 
   it("passes version-free family names through for model_route.py to resolve to the latest model", () => {
