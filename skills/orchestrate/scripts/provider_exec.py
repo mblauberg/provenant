@@ -1389,7 +1389,7 @@ def error_class(status, signature=None):
         "auth_required": "auth", "model_unavailable": "model_unavailable",
         "timed_out": "timeout", "startup_timeout": "timeout", "stalled": "timeout",
         "permission_blocked": "sandbox_denied",
-        "lost": "provider_error",
+        "lost": "provider_error", "cancelled": "cancelled",
     }
     signatures = {
         **classes, "quota_exhausted": "usage_limited", "auth_expired": "auth",
@@ -1953,6 +1953,17 @@ def _signal_name(signum):
         return f"SIG{signum}"  # Intermediate realtime signals have no enum member.
 
 
+def termination_request_matches(request, *, run_token, provider_pid, started_at, signals):
+    """Bind controller intent to this provider attempt and its time window."""
+    return (isinstance(request, dict) and bool(run_token) and request.get("run_token") == run_token
+            and request.get("provider_pid") == provider_pid
+            and request.get("signal") in signals
+            and request.get("source") in {"run_control", "orphan_reaper", "cancel_requested"}
+            and isinstance(started_at, str) and isinstance(request.get("requested_at"), str)
+            and started_at <= request["requested_at"] <= now()
+            and type(request.get("sender_pid")) is int and request["sender_pid"] > 1)
+
+
 def _termination_request(environment, process, exit_code, started_at, supervisor_signal=None):
     """Optional controller telemetry; waitpid itself never exposes the sender."""
     directory, token = environment.get("PROVENANT_RUN_DIR"), environment.get("PROVENANT_RUN_TOKEN")
@@ -1966,13 +1977,8 @@ def _termination_request(environment, process, exit_code, started_at, supervisor
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 return {}
             request = json.loads(stream.read(65537))
-        if (isinstance(request, dict) and request.get("run_token") == token
-                and request.get("provider_pid") == process.pid
-                and request.get("signal") == _signal_name(signum)
-                and request.get("source") in {"run_control", "orphan_reaper", "cancel_requested"}
-                and isinstance(request.get("requested_at"), str)
-                and started_at <= request["requested_at"] <= now()
-                and type(request.get("sender_pid")) is int and request["sender_pid"] > 1):
+        if termination_request_matches(request, run_token=token, provider_pid=process.pid,
+                                       started_at=started_at, signals={_signal_name(signum)}):
             return {"termination_source": request["source"], "signal_requester_pid": request["sender_pid"],
                     "signal_requested_at": request["requested_at"]}
     except (OSError, ValueError):

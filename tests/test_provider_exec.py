@@ -1737,7 +1737,7 @@ def test_receipt_usage_source_tracks_token_evidence_not_context_estimates(tmp_pa
     ("failed", "model_unavailable", "model_unavailable"), ("failed", "wall_clock", "timeout"),
     ("failed", "permission_blocked", "sandbox_denied"), ("failed", None, "provider_error"),
     ("rejected", "invalid_input", "provider_error"), ("tool_missing", None, "provider_error"),
-    ("cancelled", "cancel_requested", "unknown"), ("interrupted", "provider_signal", "unknown"),
+    ("cancelled", "cancel_requested", "cancelled"), ("interrupted", "provider_signal", "unknown"),
     ("partial", "output_truncated", "unknown"), ("quarantined", None, "unknown"),
     ("future_status", "future_signature", "unknown"),
 ])
