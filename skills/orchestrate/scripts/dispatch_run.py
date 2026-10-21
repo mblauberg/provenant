@@ -512,14 +512,14 @@ def acquire_run_custody(run_dir: Path):
 
 
 @contextmanager
-def attempt_custody(run_dir: Path, path: Path):
+def attempt_custody(run_dir: Path, path: Path, *, blocking: bool = True):
     """Serialise short publications, including children without run custody."""
     fd, _relative, _target = open_contained_regular(
         run_dir, path.with_suffix(".lock").relative_to(run_dir),
         os.O_RDWR | os.O_CREAT, label="attempt custody"
     )
     with os.fdopen(fd, "a+") as stream:
-        fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
         yield
 
 
@@ -573,8 +573,9 @@ def reap_stop_status(run_dir: Path, path: Path, row: dict[str, Any]):
         request = json.loads(read_bound_bytes(run_dir, "termination-request.json", label="termination request"))
     except FileNotFoundError:
         request = {}
+    # Controller intent is run-scoped; batch children have distinct provider PIDs.
     if provider_exec.termination_request_matches(
-        request, run_token=run_token, provider_pid=row["pgid"],
+        request, run_token=run_token, provider_pid=None,
         started_at=row.get("started_at"), signals={"SIGTERM", "SIGKILL"},
     ):
         return "cancelled" if request["source"] == "cancel_requested" else "interrupted"
@@ -634,7 +635,8 @@ def reap_attempts(run_dir: Path) -> list[str]:
                         if not started or observed is None or observed == started:
                             continue
                         reason = "pgid_reused"
-                    with attempt_custody(run_dir, path):
+                    # A wedged publisher must not hold run custody through us.
+                    with attempt_custody(run_dir, path, blocking=False):
                         current = json.loads(read_bound_bytes(run_dir, path.relative_to(run_dir), label="attempt receipt"))
                         # A child may have published after its provider exited.
                         if current != row or current.get("state") != "running":

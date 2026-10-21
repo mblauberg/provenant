@@ -270,12 +270,43 @@ mod.publish_contract(pathlib.Path(sys.argv[2]), json.loads(sys.argv[3]))
             child.communicate(timeout=5)
 
 
+def test_reap_attempt_skips_busy_publisher_and_releases_run_custody(tmp_path):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "busy-publisher")
+    paths = []
+    for task in ("busy", "free"):
+        path = run / f"tasks/{task}/attempt-001/attempt.json"
+        path.parent.mkdir(parents=True)
+        row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+        row.update(state="running", status=None, task_id=task, pgid=99999999, pgid_started_at="gone")
+        path.write_text(json.dumps(row))
+        paths.append(path)
+    busy, free = paths
+    code = """
+import importlib.util, json, pathlib, sys
+spec = importlib.util.spec_from_file_location("dispatch_reaper", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print(json.dumps(mod.reap_attempts(pathlib.Path(sys.argv[2]))))
+"""
+    with mod.attempt_custody(run, busy):
+        result = subprocess.run([sys.executable, "-c", code, str(SCRIPT), str(run)],
+                                capture_output=True, text=True, timeout=3)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == [str(free)]
+        assert json.loads(busy.read_text())["state"] == "running"
+        assert json.loads(free.read_text())["status"] == "lost"
+        with mod.acquire_run_custody(run):
+            pass
+    assert mod.reap_attempts(run) == [str(busy)]
+
+
 @pytest.mark.parametrize("evidence,expected", [
     ("closure", "interrupted"), ("cancelled-closure", "cancelled"),
     ("marker", "cancelled"), ("batch-marker", "cancelled"),
     ("batch-closure", "interrupted"), ("completed-batch", "lost"),
     ("request", "interrupted"), ("cancel-request", "cancelled"),
-    ("stale-pid", "lost"), ("stale-time", "lost"), ("future-time", "lost"),
+    ("other-pid", "interrupted"), ("stale-time", "lost"), ("future-time", "lost"),
     ("stale-token", "lost"), ("no-token", "lost"),
 ])
 def test_reap_attempt_stop_evidence(tmp_path, evidence, expected):
@@ -302,11 +333,11 @@ def test_reap_attempt_stop_evidence(tmp_path, evidence, expected):
         (directory / "cancel.request").touch()
         if evidence == "completed-batch":
             (directory / "summary.json").write_text(json.dumps({"status": "completed"}))
-    if evidence in {"request", "cancel-request", "stale-pid", "stale-time", "future-time", "stale-token", "no-token"}:
+    if evidence in {"request", "cancel-request", "other-pid", "stale-time", "future-time", "stale-token", "no-token"}:
         request = {"run_token": "current", "provider_pid": row["pgid"], "signal": "SIGTERM",
                    "source": "cancel_requested" if evidence == "cancel-request" else "orphan_reaper",
                    "sender_pid": os.getpid(), "requested_at": mod.now()}
-        if evidence == "stale-pid": request["provider_pid"] = 99999998
+        if evidence == "other-pid": request["provider_pid"] = 99999998
         if evidence == "stale-time": request["requested_at"] = "2000-01-01T00:00:00Z"
         if evidence == "future-time": request["requested_at"] = "2999-01-01T00:00:00Z"
         if evidence == "stale-token": request["run_token"] = "previous"
@@ -318,6 +349,36 @@ def test_reap_attempt_stop_evidence(tmp_path, evidence, expected):
     assert result["retryable"] is (expected == "lost")
     if expected == "cancelled":
         assert result["error_class"] == "cancelled"
+
+
+@pytest.mark.parametrize("provider_pid", [None, 99999000])
+@pytest.mark.parametrize("stale", [False, True])
+def test_reap_attempt_run_cancel_applies_to_every_batch_child(tmp_path, provider_pid, stale):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "batch-run-cancel")
+    (run / "dispatch-status.json").write_text(json.dumps({
+        "owner_pid": 99999999, "run_token": "current", "status": "running",
+    }))
+    paths = []
+    for index in range(8):
+        path = run / f"tasks/task-{index}/attempt-001/attempt.json"
+        path.parent.mkdir(parents=True)
+        row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+        row.update(state="running", status=None, pgid=99999000 + index, pgid_started_at="gone",
+                   started_at="2001-01-01T00:00:00Z", task_id=f"task-{index}", batch_id="batch-001")
+        path.write_text(json.dumps(row))
+        paths.append(path)
+    (run / "termination-request.json").write_text(json.dumps({
+        "run_token": "current", "provider_pid": provider_pid, "signal": "SIGTERM",
+        "source": "cancel_requested", "sender_pid": os.getpid(),
+        "requested_at": "2000-01-01T00:00:00Z" if stale else mod.now(),
+    }))
+    assert set(mod.reap_attempts(run)) == {str(path) for path in paths}
+    for path in paths:
+        result = json.loads(path.read_text())
+        assert result["status"] == ("lost" if stale else "cancelled")
+        assert result["retryable"] is stale
+        assert result["error_class"] == ("provider_error" if stale else "cancelled")
 
 
 @pytest.mark.parametrize("evidence", ["closure", "marker", "request"])

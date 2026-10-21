@@ -3564,7 +3564,7 @@ def test_external_provider_sigterm_reports_interrupted_even_after_terminal_event
     assert "error" not in record
 
 
-@pytest.mark.parametrize("invalid", ["run_token", "provider_pid", "signal", "requested_at", "symlink"])
+@pytest.mark.parametrize("invalid", ["run_token", "provider_pid", "null_pid", "signal", "requested_at", "symlink"])
 def test_signal_receipt_does_not_attribute_mismatching_or_linked_control_telemetry(tmp_path, invalid):
     module = supervisor()
     provider = []
@@ -3573,8 +3573,9 @@ def test_signal_receipt_does_not_attribute_mismatching_or_linked_control_telemet
         request = {"run_token": "current", "signal": "SIGTERM", "source": "orphan_reaper",
                    "sender_pid": os.getpid(), "provider_pid": provider[0].pid, "requested_at": module.now()}
         if invalid != "symlink":
-            request[invalid] = {"run_token": "earlier", "provider_pid": -1, "signal": "SIGKILL",
-                                "requested_at": "2000-01-01T00:00:00Z"}[invalid]
+            request["provider_pid" if invalid == "null_pid" else invalid] = {
+                "run_token": "earlier", "provider_pid": -1, "null_pid": None, "signal": "SIGKILL",
+                "requested_at": "2000-01-01T00:00:00Z"}[invalid]
         path = tmp_path / "termination-request.json"
         if invalid == "symlink":
             target = tmp_path / "outside-request.json"

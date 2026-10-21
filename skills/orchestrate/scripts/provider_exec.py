@@ -1954,9 +1954,9 @@ def _signal_name(signum):
 
 
 def termination_request_matches(request, *, run_token, provider_pid, started_at, signals):
-    """Bind controller intent to this provider attempt and its time window."""
+    """Bind controller intent and time; None opts out of provider PID binding."""
     return (isinstance(request, dict) and bool(run_token) and request.get("run_token") == run_token
-            and request.get("provider_pid") == provider_pid
+            and (provider_pid is None or request.get("provider_pid") == provider_pid)
             and request.get("signal") in signals
             and request.get("source") in {"run_control", "orphan_reaper", "cancel_requested"}
             and isinstance(started_at, str) and isinstance(request.get("requested_at"), str)

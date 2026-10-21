@@ -43,7 +43,7 @@ it.each([
     writeFileSync(join(runDir, "termination-request.json"), JSON.stringify({
       run_token: evidence === "stale-request" ? "previous" : "current", signal: "SIGKILL",
       source: status === "cancelled" ? "cancel_requested" : "orphan_reaper",
-      sender_pid: process.pid, requested_at: new Date().toISOString(), provider_pid: row.pgid,
+      sender_pid: process.pid, requested_at: new Date().toISOString(), provider_pid: null,
     }));
   }
   if (evidence === "marker" || evidence === "other-marker") {
