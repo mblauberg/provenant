@@ -1070,6 +1070,41 @@ def test_accepts_claude_instruction_symlink_to_canonical_agents_file(tmp_path):
     assert "add this line" not in result.stderr
 
 
+def test_claude_install_retires_duplicate_agents_symlink(tmp_path):
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    instance_agents = tmp_path / ".agents/AGENTS.md"
+    instance_agents.parent.mkdir(parents=True)
+    instance_agents.write_text("# Instance instructions\n")
+    duplicate_agents = config / "AGENTS.md"
+    duplicate_agents.symlink_to(instance_agents)
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert (config / "CLAUDE.md").exists()
+    assert not duplicate_agents.exists()
+    assert not duplicate_agents.is_symlink()
+    assert "duplicate instructions retired" in result.stdout
+
+
+def test_claude_install_retires_duplicate_agents_file(tmp_path):
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    instance_agents = tmp_path / ".agents/AGENTS.md"
+    instance_agents.parent.mkdir(parents=True)
+    instance_agents.write_text("# Instance instructions\n")
+    duplicate_agents = config / "AGENTS.md"
+    duplicate_agents.write_text("# Instance instructions\n")
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert (config / "CLAUDE.md").exists()
+    assert not duplicate_agents.exists()
+    assert "duplicate instructions retired" in result.stdout
+
+
 def test_accepts_codex_instruction_symlink_to_canonical_agents_file(tmp_path):
     config = tmp_path / "codex-home"
     config.mkdir()

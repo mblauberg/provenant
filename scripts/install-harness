@@ -469,6 +469,19 @@ install_primary() {
   fi
   rebind_harness_link || return $?
 
+  # Claude Code reads CLAUDE.md and also injects AGENTS.md if present;
+  # ensure only CLAUDE.md exists to prevent duplicate instruction injection.
+  if [[ "$PLATFORM" == "claude" ]]; then
+    local duplicate_agents="$platform_home/AGENTS.md"
+    if [[ -L "$duplicate_agents" && ( "$duplicate_agents" -ef "$instance_doctrine" || "$duplicate_agents" -ef "$PRODUCT_ROOT/AGENTS.md" ) ]]; then
+      rm -f "$duplicate_agents"
+      echo "duplicate instructions retired=$duplicate_agents"
+    elif [[ -f "$duplicate_agents" ]] && cmp -s "$duplicate_agents" "$instance_doctrine"; then
+      rm -f "$duplicate_agents"
+      echo "duplicate instructions retired=$duplicate_agents"
+    fi
+  fi
+
   # AGENTS.md is instance-owned once seeded and HARNESS.md stays product-shipped
   # (ADR 0019), so the client reads doctrine from the instance and the harness
   # constitution from the product. In a fused layout both roots are one directory,
