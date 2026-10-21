@@ -4,6 +4,12 @@
   "context": {
     "ceiling_tokens": 300000
   },
+  "rate_limit_pacing": {
+    "base_delay_seconds": 30,
+    "cap_seconds": 900,
+    "jitter_fraction": 0.2,
+    "minimum_budget_seconds": 30
+  },
   "routes": {
     "principal": [
       {
