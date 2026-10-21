@@ -28,7 +28,7 @@ import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 # The shared library sits one level above this skill. Resolving it from the
 # skill rather than from a repository root two levels further up keeps the
@@ -52,7 +52,7 @@ CANCEL_MARKER_NAME = "cancel.request"
 BRANCH_TYPES = "feat|fix|refactor|perf|test|docs|chore|ci|build"
 BRANCH_PATTERN = re.compile(rf"^(?:(?:{BRANCH_TYPES}|proto)/[a-z][a-z0-9]*-[a-z0-9]+(?:-[a-z0-9]+){{1,4}}|land/[0-9]{{8}}-[a-z0-9]+(?:-[a-z0-9]+)*)$")
 
-from _shared.bounded_process import stop_process_group
+from _shared.bounded_process import BudgetArgumentParser, stop_process_group
 from layout import run_workspace, run_root, contains_run
 import provider_exec
 import memory_admission
@@ -2779,7 +2779,7 @@ def _fabric_hosts_owner():
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description=__doc__)
+    root = BudgetArgumentParser(command_name="dispatch", description=__doc__)
     root.add_argument("--run-dir", type=Path, required=True)
     root.add_argument("--task-id")
     root.add_argument("--host")

@@ -12,13 +12,15 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
+import argparse
 import os
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import BinaryIO
+from typing import Any, BinaryIO, NoReturn
 
 
 _TRUNCATION_MARKER = b"\n...[output truncated]...\n"
@@ -199,3 +201,30 @@ def run_bounded(
         stdout_truncated=stdout_truncated,
         stderr_truncated=stderr_truncated,
     )
+
+
+class BudgetArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser emitting one-line usage errors instead of usage dumps."""
+
+    def __init__(
+        self,
+        command_name: str | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
+        self.command_name = command_name
+        super().__init__(*args, **kwargs)
+
+    def error(self, message: str) -> NoReturn:
+        clean = message.replace("\n", " ").strip()
+        cmd = self.command_name or self.prog
+        fix = f"provenant help {cmd}"
+        if clean.startswith("the following arguments are required:"):
+            args = clean.split(":", 1)[1].strip()
+            fix = f"pass {args}"
+        elif "one of the arguments" in clean and "is required" in clean:
+            args = clean.split("arguments", 1)[1].split("is required", 1)[0].strip()
+            fix = f"pass {args}"
+        sys.stderr.write(f"error: {clean}; fix: {fix}\n")
+        sys.exit(2)
+
