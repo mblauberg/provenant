@@ -1,14 +1,15 @@
 import subprocess
 from pathlib import Path
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
-BOOTSTRAP = ROOT / "skills" / "autopilot" / "scripts" / "bootstrap-autopilot.sh"
+BOOTSTRAP = ROOT / "skills" / "autopilot" / "scripts" / "bootstrap-autopilot.py"
 
 
 def run_bootstrap(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        ["sh", str(BOOTSTRAP), *args],
+        [sys.executable, str(BOOTSTRAP), *args],
         cwd=ROOT,
         check=False,
         capture_output=True,
@@ -107,3 +108,78 @@ def test_colliding_normalized_ids_remain_separate_missions(tmp_path):
     matches = list((tmp_path / ".agent-run" / "runs").glob("*-mission-a-b-??????"))
     assert len(matches) == 2
     assert {path.joinpath(".mission-id").read_text().strip() for path in matches} == {"A_B", "a.b"}
+
+
+def test_bootstrap_argument_errors_and_help_text(tmp_path):
+    missing_value = run_bootstrap("--repo-root")
+    assert (missing_value.returncode, missing_value.stderr) == (
+        2,
+        "bootstrap-autopilot.py: missing value for --repo-root\n",
+    )
+
+    invalid_slug = run_bootstrap("--repo-root", str(tmp_path), "bad slug")
+    assert invalid_slug.returncode == 2
+    assert invalid_slug.stderr == (
+        "bootstrap-autopilot.py: mission id must be a path-safe slug "
+        "(letters, digits, '.', '_', '-' only): bad slug\n"
+    )
+
+    help_result = run_bootstrap("--help")
+    assert help_result.returncode == 0
+    assert "USAGE:" in help_result.stdout
+    assert "EXIT CODES:" in help_result.stdout
+
+
+def test_bootstrap_force_overwrites_templates_and_quiet_suppresses_receipt(tmp_path):
+    run_bootstrap("--repo-root", str(tmp_path), "mission-id", "Example domain")
+    mission = mission_path(tmp_path)
+    (mission / "STATE.md").write_text("user-owned state\n")
+
+    result = run_bootstrap("--force", "--quiet", "--repo-root", str(tmp_path), "mission-id")
+
+    assert result.returncode == 3
+    assert result.stdout == ""
+    assert "STATUS: SCAFFOLDED" not in result.stdout
+    assert (mission / "STATE.md").read_text() != "user-owned state\n"
+
+
+def test_bootstrap_scaffold_file_modes_match_shell_creation(tmp_path):
+    result = run_bootstrap("--repo-root", str(tmp_path), "mission-id", "Example domain")
+    assert result.returncode == 3
+    mission = mission_path(tmp_path)
+    for name in (".mission-id", "GOAL.md", "STATE.md", "QUEUE.md", "HANDOFF.md", "README.md"):
+        assert (mission / name).stat().st_mode & 0o777 == 0o644
+
+
+def test_bootstrap_reports_unsubstituted_placeholders_with_exit_four(tmp_path):
+    run_bootstrap("--repo-root", str(tmp_path), "mission-id", "Example domain")
+    mission = mission_path(tmp_path)
+    goal = mission / "GOAL.md"
+    contents = goal.read_text()
+    for placeholder, value in (
+        ("{{DOMAIN}}", "Example domain"),
+        ("{{MISSION}}", "Example mission"),
+        ("{{LOCKED_CONSTRAINTS}}", "Stay in scope"),
+        ("{{BUILD_CEILING}}", "No build"),
+        ("{{ESCALATION_GATES}}", "Ask the user"),
+        ("{{RUNAWAY_CAPS}}", "bounded"),
+    ):
+        contents = contents.replace(placeholder, value)
+    goal.write_text(contents)
+    (mission / "README.md").write_text("leftover {{TYPO}}\n")
+
+    result = run_bootstrap("--repo-root", str(tmp_path), "mission-id")
+
+    assert result.returncode == 4
+    assert "UNSUBSTITUTED placeholders remain (1)" in result.stderr
+    assert "{{TYPO}}   in   README.md" in result.stderr
+
+
+def test_bootstrap_seeds_domain_metacharacters_literally(tmp_path):
+    domain = r"Example & tools | scripts\paths"
+    result = run_bootstrap("--repo-root", str(tmp_path), "mission-id", domain)
+
+    assert result.returncode == 3
+    mission = mission_path(tmp_path)
+    assert f"DOMAIN            = {domain}" in (mission / "GOAL.md").read_text()
+    assert f"# Autopilot mission: {domain} — start here" in (mission / "README.md").read_text()
