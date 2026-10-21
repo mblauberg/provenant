@@ -96,10 +96,10 @@ Thin front door delegating to owners:
   worktree ...   scripts/worktree ...
   clean ...      scripts/clean.py ...
   check ...      scripts/check-harness ...
-  gate           scripts/gate (MAINTAINING checklist)
+  gate           scripts/gate
   fabric ...     runtime/fabric/bin/fabric ...
   hosts ...      scripts/fabric-hosts ...
-  peer           scripts/fabric-hosts (SSH entrypoint)
+  peer           scripts/fabric-hosts (SSH)
   lanes ...      runtime/fabric/bin/fabric lanes
   events ...     runtime/fabric/bin/fabric events
   telemetry ...  scripts/provenant-telemetry
@@ -200,6 +200,11 @@ COMMAND_DETAILS: dict[str, str] = {
         "usage: provenant stats [--since ISO-DATE] [--json]\n\n"
         "Delegates to scripts/provenant-telemetry.\n"
         "Usage, costs and outcomes."
+    ),
+    "quota": (
+        "usage: provenant quota [--refresh] [--json] | credit list | credit <provider> [--account L] add|use\n\n"
+        "Delegates to scripts/provenant-quota.\n"
+        "Provider-reported quota windows and pace per account; PROVENANT_QUOTA=0 disables fetching."
     ),
     "dispatch": (
         "usage: provenant dispatch ...\n\n"
