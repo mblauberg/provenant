@@ -2669,8 +2669,7 @@ def make_worktree(root: Path) -> Path:
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     subprocess.run(["git", "-C", str(repo), "-c", "user.name=Test", "-c",
                     "user.email=test@example.invalid", "commit", "-q", "--allow-empty", "-m", "initial"], check=True)
-    disable_memory_admission_floor(root)
-    worktree = repo / ".worktrees/writer-worktree"
+    worktree = root / "writer-worktree"
     subprocess.run(["git", "-C", str(repo), "worktree", "add", "-q", "-b", "writer", str(worktree)], check=True)
     return worktree.resolve()
 
@@ -4605,45 +4604,3 @@ def test_dispatch_usage_error_is_one_line_and_exits_2():
     assert missing.stderr.startswith("error: the following arguments are required: ")
     assert "; fix: pass " in missing.stderr
     assert len(missing.stderr.splitlines()) == 1
-
-
-def test_writer_dispatch_binds_protection_to_its_attempt_scope(tmp_path, monkeypatch):
-    code = '''import json, sys
-sys.stdin.read()
-print(json.dumps({"type": "result", "result": "done", "is_error": False}))
-'''
-    run, _prompt, command = real_owner_fixture(tmp_path, monkeypatch, code)
-    monkeypatch.setenv("PROVENANT_NO_OS_CONFINEMENT", "1")
-    worktree = make_worktree(tmp_path)
-    command += ["--task-id", "scope-check", "--access-mode", "worktree_write", "--worktree", str(worktree)]
-    result = subprocess.run(command, cwd=tmp_path, capture_output=True, text=True, timeout=20)
-    assert result.returncode == 0, result.stdout + result.stderr
-    attempt = run / "dispatch/tasks/scope-check/attempt-001/attempt.json"
-    record = json.loads(attempt.read_text())
-    protection = dict(record["instruction_protection"])
-    assert {key: protection[key] for key in ("run_id", "task_id", "attempt")} == {
-        "run_id": record["run_id"], "task_id": record["task_id"], "attempt": record["attempt"],
-    }
-    assert protection["nonce"]
-    gate = ROOT / "skills/orchestrate/scripts/lane_protection.py"
-    checked = subprocess.run([sys.executable, str(gate), "--cwd", str(worktree)],
-                             capture_output=True, text=True, timeout=10)
-    assert checked.returncode == 0, checked.stderr
-    record["instruction_protection"]["nonce"] = "stale"
-    attempt.write_text(json.dumps(record))
-    rejected = subprocess.run([sys.executable, str(gate), "--cwd", str(worktree)],
-                              capture_output=True, text=True, timeout=10)
-    assert rejected.returncode == 1
-    assert "dispatch attempt evidence" in rejected.stderr
-    record["instruction_protection"] = protection
-    attempt.write_text(json.dumps(record))
-    chair_env = os.environ.copy()
-    chair_env.pop("PROVENANT_ATTEMPT_MARKER", None)
-    released = subprocess.run([sys.executable, str(gate), "--cwd", str(worktree),
-                               "--release-quarantine", "--evidence", str(attempt),
-                               "--actor", "chair", "--reason", "Reviewed mismatched receipt"],
-                              capture_output=True, text=True, timeout=10, env=chair_env)
-    assert released.returncode == 0, released.stderr
-    after_release = subprocess.run([sys.executable, str(gate), "--cwd", str(worktree)],
-                                    capture_output=True, text=True, timeout=10)
-    assert after_release.returncode == 0, after_release.stderr

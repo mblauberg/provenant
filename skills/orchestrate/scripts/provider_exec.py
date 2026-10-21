@@ -35,7 +35,7 @@ import fabric_policy
 import layout
 import context_usage
 import process_info
-from trusted_git import GitLocation, owner_location, writer_read_only
+from trusted_git import owner_location, writer_git_writes, writer_read_only
 
 
 # Home-relative paths a confined provider needs for its own state and sign-in.
@@ -171,12 +171,10 @@ CODEX_BROWSER_MACH_PORT_PREFIXES = (
 CODEX_POSTGRES_IPC_OPERATIONS = ("ipc-sysv-shm", "ipc-sysv-sem")
 CAPABILITY_VALUES = frozenset({"postgres", "browser"})
 EXTRA_DENIED_READS = (".claude/projects", ".codex/sessions")
-# Every writer's Git write boundary: its private worktree Git directory plus these common paths.
-# The rest of the common directory (hooks, config, info, other worktrees) runs code or holds state
-# for every checkout, so it stays read-only.
-GIT_COMMON_WRITE_DIRS = ("objects", "refs", "logs")
-# Git rewrites packed-refs through the lock and a .new file renamed over it.
-GIT_COMMON_WRITE_FILES = ("packed-refs", "packed-refs.lock", "packed-refs.new")
+# Every writer's Git write boundary is trusted_git.writer_git_writes: its private worktree Git
+# directory, the object store and its own branch ref. The rest of the common directory (hooks,
+# config, info, other refs and worktrees) runs code or holds state for every checkout, so it
+# stays read-only.
 # Automatic gc and rerere write gc.pid, gc.log and rr-cache in the read-only common directory.
 WRITER_GIT_CONFIG = (("gc.auto", "0"), ("maintenance.auto", "false"), ("rerere.enabled", "false"))
 # Repository agent instructions and skills. Codex protects them inside a writable root.
@@ -573,36 +571,34 @@ def os_confinement_profile(plan, search_path=None):
     metadata_grant = _sbpl_rule("allow", "file-read-metadata", discovery_metadata, literal=True, keep_leaf=True)
     if plan.get("mode") == "worktree_write":
         cwd = Path(plan["cwd"])
-        location = owner_location(cwd, common=(plan.get("trusted_git") or {}).get("common"),
-                                  owner=plan.get("workspace_root"))
-        location.validate()
-        private, common = location.private, location.common
+        # Only an owner-recorded linked worktree gets Git grants; any other Git directory in cwd
+        # is already writable as part of it.
+        git_denied, git_allowed, literal_files, read_only = [], [], [], []
+        if plan.get("trusted_git"):
+            location = owner_location(cwd, common=plan["trusted_git"]["common"])
+            location.validate()
+            git_denied = [location.common]
+            git_allowed, literal_files = writer_git_writes(location.private, location.common, plan.get("lane_ref"))
+            read_only = writer_read_only(cwd, location.private, location.common)
         allowed = [cwd, *add_dirs, *([run_dir] if run_dir else []), Path("/dev")]
         shared_paths = plan["applied"].get("shared_write_paths", {})
         locks_dir = plan.get("applied", {}).get("locks_dir")
         if locks_dir and _real_dir_chain(Path(locks_dir)):
             allowed.append(Path(locks_dir))
-        git_allowed = []
-        if private is not None and private != common:
-            git_allowed.append(private)
-        if common is not None:
-            git_allowed.extend(common / path for path in GIT_COMMON_WRITE_DIRS)
-        literal_files = ([common / path for path in GIT_COMMON_WRITE_FILES]
-                         if common is not None else [])
         capabilities = plan.get("applied", {}).get("capabilities", [])
         profile = (
             "(version 1)\n(allow default)\n(deny file-write*)\n"
             + _sbpl_rule("allow", "file-write*", allowed)
             + "".join(rule for rule, _ in _state_write_grants(home, state, ("read_write",)))
-            + _sbpl_rule("deny", "file-write*", [common] if common is not None else [])
+            + _sbpl_rule("deny", "file-write*", git_denied)
             + _sbpl_rule("allow", "file-write*", git_allowed, keep_leaf=True)
-            + _sbpl_rule("allow", "file-write*", literal_files, literal=True, keep_leaf=True)
+            # Owner-resolved lexical paths: a link planted in logs/ or refs/ cannot move these grants.
+            + _sbpl_rule("allow", "file-write*", literal_files, literal=True, canonical=True)
         )
         for path, literal in shared_paths.items():
             profile += _sbpl_rule("allow", "file-write*", [Path(path)], literal=literal, keep_leaf=True)
         profile += _state_write_guards(home, {"no_links": [path for path, literal in shared_paths.items() if literal]})
-        if private is not None and common is not None:
-            profile += _sbpl_rule("deny", "file-write*", writer_read_only(cwd, private, common), keep_leaf=True)
+        profile += _sbpl_rule("deny", "file-write*", read_only, keep_leaf=True)
         if plan.get("adapter") == "codex" and capabilities:
             codex_home = Path(plan["codex_home"])
             auth_path = Path(plan["codex_auth_path"])
@@ -1198,14 +1194,17 @@ def build_plan(
     cwd = str(selected_cwd)
     git_common = None
     git_private = None
+    git_writes = []
     if mode == "worktree_write" and worktree is not None:
-        location = owner_location(cwd, common=metadata.pop("common_git_dir", None), owner=workspace_root)
+        location = owner_location(cwd, common=metadata.pop("common_git_dir", None))
         location.validate()
         if location.private == location.common:
             raise ValueError("worktree_write requires a linked worktree; fix: create a linked worktree")
         git_private, git_common = location.private, location.common
         metadata["trusted_git"] = location.record()
-        metadata["lane_ref"] = _git_output(location, "rev-parse", "--symbolic-full-name", "HEAD").strip()
+        metadata["lane_ref"] = location.writer_ref()
+        git_dirs, git_files = writer_git_writes(git_private, git_common, metadata["lane_ref"])
+        git_writes = [str(path) for path in (*git_dirs, *git_files)]
     guarded = check_protected_inputs(route, workspace_root, cwd, worktree=worktree,
                                      prompt_file=original_prompt_file, add_dirs=add_dirs,
                                      read_roots=read_roots)
@@ -1369,10 +1368,7 @@ def build_plan(
     if confinement == "sandbox-exec":
         writable_paths = [str(attempt_dir), "/dev"]
         if mode == "worktree_write":
-            git_paths = ([str(git_private), *(str(git_common / path) for path in
-                           GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)]
-                         if git_private is not None else [])
-            writable_paths = [cwd, *directories, *shared_write_paths, *([locks_dir] if locks_dir else []), *writable_paths, *git_paths]
+            writable_paths = [cwd, *directories, *shared_write_paths, *([locks_dir] if locks_dir else []), *writable_paths, *git_writes]
         if codex_home is not None:
             writable_paths.extend((str(codex_home), str(codex_auth_path)))
         write_boundary = {"kind": "sandbox-exec", "writable_paths": writable_paths}
@@ -1388,9 +1384,7 @@ def build_plan(
                           **({locks_dir: "write"} if locks_dir else {})}
             if git_private is not None:
                 filesystem[str(git_common)] = "read"
-                for path in (git_private, *(git_common / name for name in
-                                            GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)):
-                    filesystem[str(path)] = "write"
+                filesystem.update(dict.fromkeys(git_writes, "write"))
                 for path in writer_read_only(cwd, git_private, git_common):
                     filesystem[str(path)] = "read"
             write_boundary["filesystem"] = filesystem
@@ -2695,11 +2689,8 @@ def _git_output(cwd, *args):
     # configured transport command must not fire.
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     result = subprocess.run(
-        [*(cwd.command() if isinstance(cwd, GitLocation) else ["git", "-C", str(cwd)]),
-         "-c", "core.fsmonitor=false", "-c", "core.commitGraph=false", "-c", "protocol.allow=never", *args],
-        capture_output=True, text=True, timeout=30,
-        env={**environment, "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1",
-             **(cwd.environment() if isinstance(cwd, GitLocation) else {})},
+        ["git", "-C", str(cwd), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", *args],
+        capture_output=True, text=True, timeout=30, env={**environment, "GIT_NO_LAZY_FETCH": "1"},
     )
     if result.returncode != 0:
         raise ValueError(result.stderr.strip() or f"git {args[0]} failed")
@@ -2792,11 +2783,10 @@ def instruction_disk_state(cwd, object_format):
     return entries
 
 
-def instruction_snapshot(cwd, *, integration_tips=None):
+def instruction_snapshot(cwd):
     head = _git_output(cwd, "rev-parse", "--verify", "HEAD^{commit}").strip()
     object_format = _git_output(cwd, "rev-parse", "--show-object-format").strip()
     snapshot = {"head": head, "object_format": object_format,
-                "integration_tips": _integration_commits(cwd) if integration_tips is None else integration_tips,
                 "tree": _instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", head))[0],
                 "disk": instruction_disk_state(cwd, object_format),
                 "index": _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)[0]}
@@ -2816,32 +2806,23 @@ def _integration_refs(cwd):
     return [ref for ref in (branch, upstream) if ref]
 
 
-def _integration_commits(cwd):
-    tips = []
-    for ref in _integration_refs(cwd):
-        try:
-            tips.append(_git_output(cwd, "rev-parse", "--verify", ref + "^{commit}").strip())
-        except ValueError:
-            pass  # An unfetched upstream cannot vouch for instructions.
-    return tips
-
-
-def authored_instruction_changes(cwd, start, *, head="HEAD"):
+def authored_instruction_changes(cwd, start):
     """.agents paths the lane changed to content from neither its start nor the integration branch.
 
-    HEAD, the index and files must match the verified starting tree or an integration commit
-    pinned by the owner before launch. A merge or rebase from those commits passes; moving a
-    primary or upstream ref during execution cannot supply a new baseline.
+    HEAD, the index and the files on disk must each match, path by path, the attempt's starting
+    state or the primary checkout's branch or its upstream, so a rebase or merge from that branch
+    passes and changes the branch already carried are not re-reported. A lane can move local refs,
+    so this catches an ordinary edit, not a forged integration branch.
     """
     trees = [_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", start["head"]))[0]]
-    for ref in start["integration_tips"]:
+    for ref in _integration_refs(cwd):
         try:
             trees.append(_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", ref))[0])
         except ValueError:
             pass  # An unset or unfetched ref cannot vouch for anything.
-    baselines = trees
+    baselines = [start["disk"], start["index"], *trees]
     index, conflicts = _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)
-    views = [_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", head))[0], index,
+    views = [_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", "HEAD"))[0], index,
              instruction_disk_state(cwd, start["object_format"])]
     changed = set()
     for view in views:
@@ -2853,7 +2834,7 @@ def authored_instruction_changes(cwd, start, *, head="HEAD"):
                    if key not in views[2])
     # A path the lane took in from an integration branch must keep that branch's version, so a
     # merge that discards it (git merge -s ours) is caught too.
-    restore = _restore_views(cwd, start, head=head)
+    restore = _restore_views(cwd, start)
     for name, view in zip(("head", "index", "disk"), views):
         changed.update(key for key in restore["integrated"] if view.get(key) != restore[name].get(key))
     return sorted(key + (" (unresolved conflict)" if key in conflicts else "") for key in changed | conflicts)
@@ -2867,12 +2848,10 @@ def _git_bytes(cwd, *args, input=None, env=None):
     """_git_output for object writes: raw bytes in and out, and no hook or signing command either."""
     environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     result = subprocess.run(
-        [*(cwd.command() if isinstance(cwd, GitLocation) else ["git", "-C", str(cwd)]),
-         "-c", "core.fsmonitor=false", "-c", "core.commitGraph=false", "-c", "protocol.allow=never",
+        ["git", "-C", str(cwd), "-c", "core.fsmonitor=false", "-c", "protocol.allow=never",
          "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgSign=false", *args],
         input=input, capture_output=True, timeout=30,
-        env={**environment, "GIT_NO_LAZY_FETCH": "1", "GIT_NO_REPLACE_OBJECTS": "1",
-             **(cwd.environment() if isinstance(cwd, GitLocation) else {}), **(env or {})},
+        env={**environment, "GIT_NO_LAZY_FETCH": "1", **(env or {})},
     )
     if result.returncode != 0:
         raise ValueError(os.fsdecode(result.stderr).strip() or f"git {args[0]} failed")
@@ -2893,18 +2872,18 @@ def _is_ancestor(cwd, ancestor, descendant):
     return True
 
 
-def _quarantine_target(cwd, start_head, *, integration_tips, head="HEAD"):
+def _quarantine_target(cwd, start_head):
     """The .agents entries a quarantined path returns to.
 
-    That is the start commit's, or an owner-pinned integration commit the lane merged or rebased onto,
+    That is the start commit's, or an integration ref's the lane has since merged or rebased onto,
     taking each path from whichever side changed it since their merge base.
     """
     def tree(rev):
         return _instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", rev))[0]
 
     target = tree(start_head)
-    for ref in integration_tips:
-        if not _is_ancestor(cwd, ref, head) or _is_ancestor(cwd, ref, start_head):
+    for ref in _integration_refs(cwd):
+        if not _is_ancestor(cwd, ref, "HEAD") or _is_ancestor(cwd, ref, start_head):
             continue
         incoming = tree(ref)
         if _is_ancestor(cwd, start_head, ref):
@@ -2916,13 +2895,13 @@ def _quarantine_target(cwd, start_head, *, integration_tips, head="HEAD"):
     return target
 
 
-def _restore_views(cwd, start, *, head="HEAD"):
+def _restore_views(cwd, start):
     """What each view of a quarantined .agents path returns to.
 
     HEAD returns to the quarantine target. The index and files return to their starting content,
     except a path an integration branch the lane took in changed, which takes that branch's version.
     """
-    target = _quarantine_target(cwd, start["head"], head=head, integration_tips=start["integration_tips"])
+    target = _quarantine_target(cwd, start["head"])
     integrated = {path for path in set(target) | set(start["tree"]) if target.get(path) != start["tree"].get(path)}
 
     def view(entries):
@@ -3129,9 +3108,6 @@ def execute(
     attempt_marker = uuid.uuid4().hex
     environment["PROVENANT_ATTEMPT_MARKER"] = attempt_marker
     instruction_start = None
-    instruction_cwd = plan["cwd"]
-    instruction_protection = None
-    protection_error = None
     created_instructions = None
     if instructions_writable(plan):
         try:
@@ -3140,19 +3116,10 @@ def execute(
         except OSError:
             pass  # Present already; the snapshot fails anything but a real directory.
     if plan.get("instruction_policy"):
-        import lane_protection
         try:
-            instruction_cwd = owner_location(plan["cwd"], common=plan["trusted_git"]["common"])
-            instruction_protection = lane_protection.begin(
-                instruction_cwd, plan["run_dir"], run_id=plan.get("run_id", ""),
-                task_id=plan.get("task_id", ""), attempt=plan.get("attempt", 1), ref=plan.get("lane_ref"))
-            instruction_start = instruction_snapshot(
-                instruction_cwd, integration_tips=instruction_protection["integration_tips"])
-            if instruction_start["head"] != instruction_protection["start_tip"]:
-                raise lane_protection.ProtectionError("lane moved before the starting instruction snapshot")
+            instruction_start = instruction_snapshot(plan["cwd"])
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             instruction_start = exc
-            protection_error = exc
         # Running a skill's script must not leave bytecode behind for the check to report.
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
     environment["CLAUDE_CODE_DISABLE_WORKFLOWS"] = "1"
@@ -3363,10 +3330,7 @@ def execute(
                 if plan["stdin_policy"] == "pipe"
                 else subprocess.DEVNULL
             )
-        if protection_error is not None:
-            forced = "failed"
-            diagnostics.write(str(protection_error).encode())
-        elif plan.get("cooldown_blocked"):
+        if plan.get("cooldown_blocked"):
             forced = "usage_limited"
             diagnostics.write(b"all alias candidates cooling\n")
         elif cancelled and cancelled():
@@ -3721,7 +3685,7 @@ def execute(
         try:
             if isinstance(instruction_start, Exception):
                 raise instruction_start
-            instruction_changes = authored_instruction_changes(instruction_cwd, instruction_start)
+            instruction_changes = authored_instruction_changes(plan["cwd"], instruction_start)
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             instruction_changes = [f"{INSTRUCTION_DIR} (unverifiable: {exc})"]
     # A signal death must retain actual instruction edits as failures rather
@@ -3735,8 +3699,7 @@ def execute(
         instruction_changes = []
     if instruction_changes:
         unverifiable = any("(unverifiable:" in change for change in instruction_changes)
-        signature = (getattr(protection_error, "code", None) or
-                     ("protected_instructions_unverifiable" if unverifiable else "protected_instructions_changed"))
+        signature = "protected_instructions_unverifiable" if unverifiable else "protected_instructions_changed"
         quarantine = {"reason": signature + ": " + ", ".join(instruction_changes),
                       "patches": [], "restored": False, "patch_error": None}
         patch = Path(plan["run_dir"], "protected.patch")
@@ -3751,11 +3714,11 @@ def execute(
             if not quarantinable(instruction_changes) or not isinstance(instruction_start, dict):
                 raise ValueError("no safe instruction diff can be captured; inspect the retained worktree")
             patches = quarantine_instruction_changes(
-                instruction_cwd, instruction_start, instruction_changes, Path(plan["run_dir"]),
+                plan["cwd"], instruction_start, instruction_changes, Path(plan["run_dir"]),
                 restore_changes=instruction_policy == "quarantine", published=patches)
             quarantine["patches"] = list(map(str, patches))
             if instruction_policy == "quarantine":
-                remaining = authored_instruction_changes(instruction_cwd, instruction_start)
+                remaining = authored_instruction_changes(plan["cwd"], instruction_start)
                 if remaining:
                     raise ValueError("still changed after restore: " + ", ".join(remaining))
                 quarantine["restored"] = True
@@ -3809,23 +3772,6 @@ def execute(
     except (OSError, CustodyError):
         status = "output_identity_invalid" if digest_value else "output_write_error"
         digest_value = ""
-    if instruction_protection is not None and not instruction_changes:
-        try:
-            # The earlier check may have restored a quarantine. Recheck after cleanup and
-            # output publication, pinning the exact commit this final comparison examined.
-            verified_tip = _git_output(instruction_cwd, "rev-parse", "--verify", "HEAD^{commit}").strip()
-            remaining = authored_instruction_changes(instruction_cwd, instruction_start, head=verified_tip)
-            if remaining and (plan.get("instruction_policy") != "allow" or not quarantinable(remaining)):
-                raise lane_protection.ProtectionError("late instruction changes: " + ", ".join(remaining),
-                                                      "protected_instructions_changed")
-            instruction_protection = lane_protection.finish(
-                instruction_cwd, instruction_protection, verified_tip, quarantined=quarantine is not None)
-        except (OSError, ValueError, subprocess.SubprocessError) as exc:
-            status = "failed"
-            parsed["signature"] = getattr(exc, "code", "protected_instructions_unverifiable")
-            instruction_changes = [str(exc)]
-            quarantine = {"reason": str(exc), "patches": [], "restored": False, "patch_error": None}
-            protection_error = exc if isinstance(exc, lane_protection.ProtectionError) else lane_protection.ProtectionError(str(exc))
     cross = bool(
         not substituted
         and plan.get("orchestrator_family")
@@ -3860,10 +3806,7 @@ def execute(
             "rate_limited": "retry after the recorded cooldown",
         }.get(status)
     )
-    if protection_error is not None and isinstance(protection_error, lane_protection.ProtectionError):
-        fix = (str(protection_error) + "; inspect the retained lane and instruction-check record "
-               "before reuse or landing")
-    elif quarantine and status == "failed" and instruction_changes:
+    if quarantine and status == "failed" and instruction_changes:
         fix = ("instruction edits remain on the lane branch; restore " + INSTRUCTION_DIR
                + "/ to the start commit before landing; patches: "
                + (", ".join(quarantine["patches"]) or "unavailable")
@@ -3900,7 +3843,6 @@ def execute(
         **({"error": "invalid_input"} if status == "rejected" and parsed["signature"] == "invalid_input" else {}),
         **({"error": parsed["signature"]} if instruction_changes else {}),
         **({"landable": False, "quarantine": quarantine} if quarantine else {}),
-        **({"instruction_protection": instruction_protection} if instruction_protection is not None else {}),
         "reason": parsed["excerpt"],
         "exit": 0
         if status in {"ok", "input_required", "quarantined"}

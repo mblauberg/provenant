@@ -290,7 +290,7 @@ describe("work ownership", () => {
     }
   }, 15_000);
 
-  it.each(["none", "benign", "protected"])("checks the leased head despite Git redirects (late commit: %s)", (late) => {
+  it.each(["none", "benign", "protected", "released"])("checks the leased head despite Git redirects (late commit: %s)", (late) => {
     const work = join(temporaryDirectory, "landing-work"), bare = join(temporaryDirectory, "landing-remote.git");
     mkdirSync(work);
     const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -306,20 +306,18 @@ describe("work ownership", () => {
     const base = git(work, "rev-parse", "HEAD");
     writeFileSync(join(work, "claim.txt"), "second\n");
     git(work, "commit", "-am", "second");
-    const checked = git(work, "rev-parse", "HEAD");
-    const owner = join(repositoryRoot, "skills/orchestrate/scripts");
-    execFileSync(process.env.HARNESS_PYTHON ?? "python3", ["-c",
-      "import sys; sys.path.insert(0, sys.argv[1]); import lane_protection as p; " +
-      "state = p.begin(sys.argv[2], sys.argv[2]); p.finish(sys.argv[2], state, sys.argv[3], quarantined=False)",
-      owner, work, checked]);
     if (late !== "none") {
-      const target = late === "protected" ? ".agents/late.md" : "claim.txt";
-      if (late === "protected") mkdirSync(join(work, ".agents"));
+      const target = late === "benign" ? "claim.txt" : ".agents/late.md";
+      if (late !== "benign") mkdirSync(join(work, ".agents"));
       writeFileSync(join(work, target), "late edit\n");
       git(work, "add", target);
       git(work, "commit", "-m", "late commit");
     }
     const head = git(work, "rev-parse", "HEAD");
+    if (late === "released") {
+      execFileSync(process.env.HARNESS_PYTHON ?? "python3", [join(repositoryRoot, "skills/orchestrate/scripts/lane_protection.py"),
+        "--cwd", work, "--release", "--tip", head, "--actor", "chair", "--reason", "reviewed"]);
+    }
     const store = openStore();
     const who = identify({ AGENT_FABRIC_SEAT: "codex", AGENT_FABRIC_LABEL: "cli-reviewer" }, work);
     store.announce(who);

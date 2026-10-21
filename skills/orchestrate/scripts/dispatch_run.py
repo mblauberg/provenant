@@ -2258,7 +2258,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                 plan["original_prompt_file"] = original_prompt
                 provider_cwd = Path(plan.get("cwd") or workspace).resolve()
                 workspace_observation["cwd"] = str(provider_cwd)
-                plan.update(task_id=args.task_id,attempt=attempt_number,timeout_seconds=args.timeout_seconds,run_id=run_identity(run_dir,run_receipt),chair=os.environ.get("PROVENANT_CHAIR") or os.environ.get("AGENT_FABRIC_SEAT", ""),fallback_from=getattr(args,"fallback_from",None))
+                plan.update(timeout_seconds=args.timeout_seconds,run_id=run_identity(run_dir,run_receipt),chair=os.environ.get("PROVENANT_CHAIR") or os.environ.get("AGENT_FABRIC_SEAT", ""),fallback_from=getattr(args,"fallback_from",None))
                 if hasattr(args,"resume_relaunch"):
                     plan["prompt"] += "\n\nPrevious turn and question:\n"+args.resume_relaunch
                     plan["argv"] = provider_exec.profile(args.tool).argv(plan)
@@ -2282,7 +2282,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                                 replacement["applied"]["write_boundary"]["writable_paths"] = [
                                     str(attempt_dir) if path == old_run_dir else path for path in boundary_paths]
                             replacement["original_prompt_file"] = original_prompt
-                            replacement.update(run_id=plan["run_id"],task_id=args.task_id,attempt=attempt_number,chair=plan["chair"])
+                            replacement.update(run_id=plan["run_id"],chair=plan["chair"])
                             replacement["warnings"].append("skipped cooling alias candidate "+args.tool+"/"+plan["model"])
                             plan=replacement;args.tool=candidate["adapter"];break
                         else:
@@ -2675,11 +2675,9 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         **attempt_scope(args, attempt_number),
         "usage_source": adapter.get("usage_source") or provider_exec.context_usage.usage_source(adapter.get("context") or {}),
         "error_class": provider_exec.error_class(status, (adapter.get("evidence") or {}).get("signature")),
-        **({"instruction_protection": adapter["instruction_protection"]} if adapter.get("instruction_protection") else {}),
         **({"landable": False, "quarantine": adapter.get("quarantine")} if adapter_status == "quarantined" else {}),
-        "run_id": plan.get("run_id") or run_dir.name,
+        "run_id": run_dir.name,
         "task_id": args.task_id,
-        "attempt": attempt_number,
         "attempt_id": attempt_id,
         "retry_of": retry_of,
         "intent": args.intent,

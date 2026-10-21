@@ -609,9 +609,9 @@ try {
     execFileSync("git", ["merge-base", "--is-ancestor", remote, head], gitOptions);
     const root = productRoot(process.env);
     execFileSync(await pythonOwner(root, who, process.env),
-      [resolve(root, "skills/orchestrate/scripts/lane_protection.py"), "--cwd", who.cwd,
-        "--common-dir", resolve(who.project, ".git"), "--landing-tip", head],
-      { ...gitOptions, stdio: "inherit", timeout: 30_000 });
+      [resolve(root, "skills/orchestrate/scripts/lane_protection.py"),
+        "--common-dir", resolve(who.project, ".git"), "--tip", head, "--base", lease.expectedSha],
+      { ...gitOptions, stdio: ["ignore", "ignore", "inherit"], timeout: 30_000 });
     const pushed = store.withLandingPush(who, session, generation, remote, () =>
       execFileSync("git", ["push", `--force-with-lease=refs/heads/${branch}:${remote}`,
         "origin", `${head}:refs/heads/${branch}`], { ...gitOptions, stdio: "inherit", timeout: 120_000 }));

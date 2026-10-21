@@ -20,10 +20,6 @@ import subprocess
 import sys
 from typing import Sequence
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "skills/orchestrate/scripts"))
-import lane_protection
-from trusted_git import owner_location
-
 
 SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 COMMIT_SHA = re.compile(r"^[0-9a-fA-F]{40}(?:[0-9a-fA-F]{24})?$")
@@ -92,7 +88,6 @@ def trusted_tool_path() -> str:
 # Scoped by the peer code transport, which handles received history: Git then
 # runs no repository-configured program, follows no replace ref and never
 # fetches lazily or recurses into submodules.
-PINNED_GIT = ContextVar("worktree_owner_git", default=None)
 HARDENED = ContextVar('worktree_hardened_git', default=False)
 HARDENED_SETTINGS = (
     ("core.hooksPath", os.devnull),
@@ -113,14 +108,6 @@ def hardened_git():
         HARDENED.reset(token)
 
 
-def git_command(repo):
-    location = PINNED_GIT.get()
-    if location is not None and Path(repo).resolve() == location.worktree:
-        return [*location.command(), "-c", "core.commitGraph=false", "-c", "core.fsmonitor=false",
-                "-c", "protocol.allow=never"]
-    return ["git", "-C", str(repo)]
-
-
 def git_environment(repo: Path | None = None, *, hardened: bool = False) -> dict[str, str]:
     environment = {
         "PATH": trusted_tool_path(),
@@ -128,9 +115,6 @@ def git_environment(repo: Path | None = None, *, hardened: bool = False) -> dict
         "GIT_CONFIG_GLOBAL": os.devnull,
         "GIT_TERMINAL_PROMPT": "0",
     }
-    location = PINNED_GIT.get()
-    if location is not None and repo is not None and Path(repo).resolve() == location.worktree:
-        environment.update(location.environment())
     if not (hardened or HARDENED.get()):
         return environment
     environment.update(GIT_NO_REPLACE_OBJECTS="1", GIT_NO_LAZY_FETCH="1")
@@ -138,7 +122,7 @@ def git_environment(repo: Path | None = None, *, hardened: bool = False) -> dict
     if repo is not None:
         # Disable required drivers as well as their executable commands.
         listed = subprocess.run(
-            [*git_command(repo), "config", "--null", "--name-only", "--get-regexp",
+            ["git", "-C", str(repo), "config", "--null", "--name-only", "--get-regexp",
              r"^filter\..*\.(clean|smudge|process|required)$"],
             env=environment, stdin=subprocess.DEVNULL, capture_output=True, timeout=30, check=False,
         )
@@ -265,7 +249,7 @@ def _run_git(
     stdout_limit: int | None = MAX_DIAGNOSTIC_BYTES,
     stderr_limit: int | None = MAX_DIAGNOSTIC_BYTES,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, dict[str, object]]]:
-    command = [*git_command(repo), *args]
+    command = ["git", "-C", str(repo), *args]
     try:
         process = subprocess.Popen(
             command,
@@ -546,29 +530,6 @@ def verify_claim(
     *,
     base_revision: str | None = None,
 ) -> dict[str, object]:
-    """Bind claim reads to the owner's primary repository even when no common dir was supplied."""
-    try:
-        location = owner_location(expected_worktree, common=expected_common)
-        location.validate()
-        token = PINNED_GIT.set(location)
-        try:
-            with hardened_git():
-                return _verify_claim(expected_worktree, claimed_worktree, claimed_commit, location.common,
-                                     base_revision=base_revision)
-        finally:
-            PINNED_GIT.reset(token)
-    except (OSError, ValueError, PolicyError, subprocess.SubprocessError) as exc:
-        return {"status": "rejected", "error": "protected_instructions_unverifiable", "reason": str(exc)}
-
-
-def _verify_claim(
-    expected_worktree: Path,
-    claimed_worktree: Path,
-    claimed_commit: str | None,
-    expected_common: Path | None = None,
-    *,
-    base_revision: str | None = None,
-) -> dict[str, object]:
     """Verify one chair-bound, base-descended clean linked-worktree claim."""
     if not claimed_commit:
         return {"status": "rejected", "reason": "missing claimed commit SHA"}
@@ -583,10 +544,6 @@ def _verify_claim(
     claimed_path = claimed_worktree.expanduser().resolve()
     if expected_worktree.is_symlink() or claimed_worktree.is_symlink():
         return {"status": "rejected", "reason": "worktree context must not be a symlink"}
-    if claimed_path != expected_path:
-        if owner_location(claimed_path).common != expected_common:
-            return {"status": "rejected", "reason": "claimed worktree is from a different common Git directory"}
-        return {"status": "rejected", "reason": "claimed worktree context does not match expected worktree"}
 
     expected_common_path = common_git_dir(expected_path)
     if expected_common is not None and expected_common.expanduser().resolve() != expected_common_path:
@@ -616,6 +573,8 @@ def _verify_claim(
     primary_path = Path(str(records[0]["worktree"])).resolve() if records and records[0].get("worktree") else None
     if expected_record is None or expected_path == primary_path:
         return {"status": "rejected", "reason": "expected worktree is not a registered linked worktree"}
+    if claimed_path != expected_path:
+        return {"status": "rejected", "reason": "claimed worktree context does not match expected worktree"}
 
     head_before = git(expected_path, "rev-parse", "--verify", "HEAD", check=False).stdout.strip()
     if not COMMIT_SHA.fullmatch(head_before):
@@ -672,12 +631,14 @@ def _verify_claim(
         return {"status": "rejected", "reason": "claimed commit SHA is not an exact object ID"}
     if str(expected_record.get("HEAD", "")).lower() != resolved_commit.lower():
         return {"status": "rejected", "reason": "claimed commit does not match claimed worktree context"}
-
-    try:
-        lane_protection.verify(expected_path, tip=resolved_commit, common=expected_common_path)
-    except (OSError, ValueError, subprocess.SubprocessError) as exc:
-        return {"status": "rejected", "error": getattr(exc, "code", "protected_instructions_unverifiable"),
-                "reason": str(exc)}
+    # Every commit since the primary HEAD must leave .agents/ alone or carry a chair release.
+    gate = subprocess.run(
+        [sys.executable, str(Path(__file__).resolve().parents[1] / "skills/orchestrate/scripts/lane_protection.py"),
+         "--common-dir", str(expected_common_path), "--tip", resolved_commit],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=120, check=False,
+    )
+    if gate.returncode != 0:
+        return {"status": "rejected", "reason": gate.stderr.strip() or "protected instruction check failed"}
 
     return {
         "status": "accepted",

@@ -249,7 +249,7 @@ linked-worktree Codex writer also gets the worktree's `.agents/` as an
 attempt and removes it afterwards if still empty. Git can then rebase or merge
 the integration branch over tracked skills. For every writer, when an
 `.agents/` path in HEAD, the index or on disk ends up matching neither the
-owner-verified starting tree nor the primary checkout's branch or its upstream, or
+attempt's starting state nor the primary checkout's branch or its upstream, or
 drops that branch's version after taking the branch in (unless the lane's
 branch had changed that path too before the attempt), Fabric by default
 quarantines the change: it archives the lane's files to `<attempt>/protected.patch`
@@ -257,10 +257,11 @@ quarantines the change: it archives the lane's files to `<attempt>/protected.pat
 they differ), commits the start or integration-branch version back to the lane,
 returns the index and files to their starting content. A successful provider
 then finishes `quarantined` only when the restore was verified: its result
-stays visible, `landable: false` and the owner-held instruction record block
-reuse and landing, and status/digest/lanes name the reason and patches for chair
-review. The [audited chair release](../../docs/specs/fabric-v2.md) requires the
-matching dispatch receipt and an attributed decision.
+stays visible, `landable: false` marks it, and status/digest/lanes name the
+reason and patches for chair review. Writers can move only their own branch
+ref, and `landing-push` refuses any commit since the leased remote SHA that
+changes `.agents/` without an [audited chair release](../../docs/specs/fabric-v2.md)
+of the reviewed tip.
 `.agents/fabric-policy.json` `instruction_changes` may instead be `allow` (keep
 an ordinary edit, with a warning) or `deny` (retain the edit for review without
 restoration). Denied edits, failed restoration and unverifiable checks leave

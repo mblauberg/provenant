@@ -159,82 +159,65 @@ retained and listed. A `quarantined` lane retains the result, sets
 `landable: false` and `retryable: false`, and records `quarantine` with the
 reason, patch paths, whether restoration succeeded and any patch capture error.
 `landable: false` is never `ok` for landing, certification or session success.
-The retained instruction-check record enforces that hold at reuse, claim
-verification and Fabric landing. Digests, status and
+Digests, status and
 lanes show the result and a review action; chairs review the quarantine and
 verify the branch diff before landing any application work. Proposed instruction
 edits belong outside `.agents/` for separate chair review, as the default writer
 brief states (omitted when the policy is `allow`).
 
-Writer attempts record `instruction_protection` in the adapter and dispatch
-receipts. The owner plan selects the common Git directory and registered private
-Git directory before launch. The record binds those locations, the worktree
-path, branch or detached state, `run_id`, `task_id`, `attempt`, a scoped `lane_id`
-and a fresh begin nonce. Detached identity uses the owner-recorded worktree path
-and attempt scope, never HEAD or a discovered gitdir. `finish()` compares and
-swaps the nonce under an owner-only lock; stale or repeated finishes fail.
-Consumers require the dispatch receipt's scope, nonce and verified tip to match.
-Missing dispatch evidence fails closed.
+The per-attempt check above is an early warning. Two owner-side controls
+enforce the hold, so neither a surviving provider child committing after
+finalisation nor a moved local ref can land an instruction change:
 
-Records live under the trusted common directory's
-`provenant-instruction-checks/`, outside writer grants. All protection Git calls
-set explicit Git, common and object directories, ignore replace refs, disable
-commit graphs and refuse alternate object stores. A lane gitfile or commondir
-that differs from the owner's locations fails closed. Every writer boundary
-protects `.git`, private `commondir`, `gitdir`, `config.worktree` and common
-`objects/info`; the native and sandbox-exec boundaries share one deny list.
-Non-canonical worktrees require the owner's explicit common directory.
+- **Writer ref grants.** A writer's Git may write its private worktree
+  directory, the object store and only its own branch: `refs/heads/<branch>`,
+  its `.lock` and its reflog. The owner reads the branch from the worktree's
+  HEAD and refuses one that the primary checkout or another worktree holds; a
+  detached writer gets no shared ref. No writer can move the primary branch, its
+  upstream, a tag, `packed-refs` or another checkout's branch. Every boundary,
+  native and sandbox-exec, also keeps `.git`, the private `commondir`, `gitdir`
+  and `config.worktree`, and the common `objects/info` read-only.
+- **Range gate.** `lane_protection.py` walks every commit in `tip ^base` through
+  the owner's common Git directory with `diff-tree --root -m`, so merge
+  resolutions count. A commit may change a protected path only to the version
+  the base already holds, as a merge or rebase from the base does, or be
+  reachable from a tip the chair released. Anything else fails with
+  `protected_instructions_changed` and names the held commits; the branch is
+  left as it is. Fabric `landing-push` passes the landing lease's remote SHA as
+  the base, never a local ref. `scripts/worktree verify-claim` and a manual
+  check use the primary checkout's HEAD, which no writer can move. The gate
+  needs no per-attempt record, so chair, human and never-dispatched worktrees
+  go through the same check.
 
-At begin, protected disk and index entries must equal the previous verified
-tree, or the starting commit on first dispatch. Uncommitted or staged residue
-fails with `protected_instructions_changed` before a provider starts. Only
-the verified starting tree and owner-recorded integration commit trees supply
-instruction baselines. Primary and upstream refs are pinned at begin; moving a
-ref during an attempt cannot vouch for a writer's edit.
+The invariant is: nothing lands on the integration branch unless every commit in
+`<leased remote SHA>..<tip>` leaves protected paths unchanged from the leased
+version or is reachable from an audited chair release of a reviewed tip;
+writers can write only their own branch ref. The gate reads the object store,
+which writers can add packs to, so it trusts object content; it disables
+replace refs, commit graphs, the multi-pack index and lazy fetch, and refuses
+alternate object stores. Path classification normalises to NFC before
+casefolding: casefold covers APFS case folding, but not Unicode normalisation
+by itself.
 
-Before reuse, `worktree verify-claim`, or `fabric landing-push`, the owner checks
-the retained binding. The invariant is: "A lane branch is consumed only at a
-commit whose every lane-contributed commit since the owner-recorded verified
-tip leaves protected paths unchanged, resolved entirely through owner-recorded
-git locations that no writer can write."
-
-The history check includes merge parents and edit/revert histories. Landing
-walks the descendants of each record's verified tip (or its start tip for an
-incomplete attempt) actually contained in the landing tip, independent of the
-current lane ref. A chair merge whose first parent is an owner-recorded primary
-tip is compared to that parent; each lane-side commit is still checked. This
-preserves already trusted primary instructions without allowing a changed merge
-resolution. Reset, deleted and pruned refs cannot erase that history.
-Sibling records whose anchor is absent from the landing are ignored. Linked
-writer worktrees without records fail closed; primary branches that were never
-dispatched retain the chair workflow. Path classification normalises to NFC
-before casefolding. Casefold covers APFS case folding, but by itself does not
-cover Unicode normalisation.
-
-A failed check retains its record in quarantine without deleting or restoring
-the branch. The error says "retained in quarantine" only after that write
-succeeds. After reviewing the exact held attempt and resolving disk/index
-residue, a chair outside a writer may release it:
+A quarantine restores the files in a new commit, so the edit stays in the
+lane's history and the gate holds it. After reviewing the exact commits, a
+chair outside a writer either rewrites the lane without them or releases the
+reviewed tip:
 
 ```sh
 python3 "$(provenant root)/skills/orchestrate/scripts/lane_protection.py" \
-  --cwd <lane-worktree> --common-dir <owner-common-dir> \
-  --release-quarantine --evidence <dispatch-attempt.json> \
+  --cwd <lane-worktree> --release --tip <reviewed-sha> \
   --actor <chair> --reason '<review decision>'
 ```
 
-Release checks the held scope and nonce, records actor, reason, timestamp,
-previous verified tip and the new baseline in an owner-only audit file, then
-publishes the released state. It is an explicit chair decision to accept that
-baseline; writers cannot write either record. New attempts cannot release a
-quarantine implicitly.
-
-The threat is a surviving provider child, including one detached into a new
-session with its environment scrubbed, committing after finalisation. Cleanup
-is not the safety proof. Manual chair integration must run the orchestration
-protection gate and merge/cherry-pick its emitted immutable SHA. The existing
-trust in integration refs still applies; this does not certify arbitrary Git
-commands that bypass the governed integration workflow.
+Release requires the full SHA, refuses when the checkout's HEAD has moved
+past it, and writes an immutable record of the tip, actor, reason, worktree
+and time under the common directory's `provenant-instruction-checks/releases/`.
+It covers the tip and its ancestors, never a later commit. The record is an
+audit trail, not authorisation: anyone who can write the owner's common
+directory could add one. No writer boundary grants that directory, and the
+command refuses to run under a writer attempt's marker, so release stays
+chair-side.
 
 `protected.patch` is retained even for an index-only change (empty disk patch)
 or an unverifiable check (a comment explaining that the diff is unavailable).
@@ -244,8 +227,8 @@ reports `protected_instructions_unverifiable` separately from actual changes.
 A failed or signal-interrupted provider is never promoted to `quarantined`.
 Signal-interrupted attempts retain their changed files without restoration and
 fail for actual instruction edits, preserving the provider exit and signal.
-An unknown value warns and quarantines. The check trusts local refs, which the lane can
-move. It also reports a clean three-way merge into a skill the branch already
+An unknown value warns and quarantines. The per-attempt check reads local refs; only
+the owner can move them. It also reports a clean three-way merge into a skill the branch already
 changed, a refresh overtaken by a newer integration-branch change to the same
 file, a refresh under line-ending conversion, and any refresh in a repository
 that tracks a case variant such as `.Agents/`. A separately authorised review

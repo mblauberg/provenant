@@ -552,10 +552,7 @@ def _implementation_worktree(tmp_path, capsys):
         "create", "implementation", "--repo", str(repo), "--detach", base,
     ]) == 0
     capsys.readouterr()
-    worktree = repo / ".worktrees" / "implementation"
-    state = worktree_policy.lane_protection.begin(worktree, tmp_path / "attempt")
-    worktree_policy.lane_protection.finish(worktree, state, base, quarantined=False)
-    return repo, base, worktree
+    return repo, base, repo / ".worktrees" / "implementation"
 
 
 def test_verify_claim_requires_a_recorded_pre_dispatch_base(tmp_path, capsys):
@@ -689,25 +686,23 @@ def test_verify_claim_accepts_new_descended_clean_head_with_receipt_evidence(tmp
     assert receipt["claimed_commit"] == claimed
 
 
-@pytest.mark.parametrize("late_path", ["tracked.txt", ".agents/late.md"])
-def test_verify_claim_checks_the_instruction_verified_tip(tmp_path, capsys, late_path):
+def test_verify_claim_holds_an_unreleased_instruction_commit_until_the_chair_releases_it(tmp_path, capsys):
     _repo, base, worktree = _implementation_worktree(tmp_path, capsys)
-    state = worktree_policy.lane_protection.begin(worktree, tmp_path / "attempt")
-    worktree_policy.lane_protection.finish(worktree, state, base, quarantined=False)
-    target = worktree / late_path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text("late commit\n")
-    subprocess.run(["git", "-C", str(worktree), "add", late_path], check=True)
-    subprocess.run(["git", "-C", str(worktree), "commit", "-qm", "late commit"], check=True)
+    (worktree / ".agents").mkdir()
+    (worktree / ".agents/late.md").write_text("late instruction\n")
+    subprocess.run(["git", "-C", str(worktree), "add", ".agents/late.md"], check=True)
+    subprocess.run(["git", "-C", str(worktree), "commit", "-qm", "late instruction"], check=True)
     claimed = subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
+
     result = worktree_policy.verify_claim(worktree, worktree, claimed, base_revision=base)
-    if late_path.startswith(".agents/"):
-        assert result["status"] == "rejected", result
-        assert result["error"] == "protected_instructions_changed"
-        assert "quarantine" in result["reason"]
-        assert target.read_text() == "late commit\n"
-    else:
-        assert result["status"] == "accepted", result
+    assert result["status"] == "rejected", result
+    assert result["reason"].startswith("protected_instructions_changed: unreleased commits")
+    assert claimed in result["reason"]
+
+    gate = SCRIPT.parents[1] / "skills/orchestrate/scripts/lane_protection.py"
+    subprocess.run([sys.executable, str(gate), "--cwd", str(worktree), "--release", "--tip", claimed,
+                    "--actor", "chair", "--reason", "reviewed"], check=True, capture_output=True)
+    assert worktree_policy.verify_claim(worktree, worktree, claimed, base_revision=base)["status"] == "accepted"
 
 
 def test_verify_claim_allows_only_documented_generated_ignored_paths(tmp_path, capsys):
@@ -938,23 +933,3 @@ def test_remove_force_overrides_live_writer_lane(tmp_path, capsys):
     assert worktree_policy.main(["remove", "busy", "--repo", str(repo), "--force"]) == 0
     handle.close()
     assert not target.exists()
-
-
-@pytest.mark.parametrize("detached", [False, True])
-def test_verify_claim_uses_owner_common_when_lane_gitfile_is_redirected(tmp_path, capsys, detached):
-    repo, base, worktree = _implementation_worktree(tmp_path, capsys)
-    if not detached:
-        subprocess.run(["git", "-C", str(worktree), "switch", "-qc", "writer"], check=True)
-    (worktree / "tracked.txt").write_text("claimed work\n")
-    subprocess.run(["git", "-C", str(worktree), "commit", "-qam", "work"], check=True)
-    claimed = subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True).strip()
-    private = Path(subprocess.check_output(["git", "-C", str(worktree), "rev-parse", "--absolute-git-dir"], text=True).strip())
-    fake = worktree / "fake.git"
-    subprocess.run(["git", "clone", "--bare", "--shared", "-q", str(repo), str(fake)], check=True)
-    import shutil
-    fake_private = fake / "worktrees" / private.name
-    shutil.copytree(private, fake_private)
-    (worktree / ".git").write_text(f"gitdir: {fake_private}\n")
-    result = worktree_policy.verify_claim(worktree, worktree, claimed, base_revision=base)
-    assert result["status"] == "rejected", result
-    assert result["error"] == "protected_instructions_unverifiable"
