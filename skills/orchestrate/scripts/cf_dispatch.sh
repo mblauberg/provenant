@@ -287,21 +287,34 @@ elif [ -z "$PROMPT" ]; then
   echo "need --prompt or --prompt-file" >&2
   exit 2
 fi
+# make_tmp/make_tmp_dir NAME: assign the path to NAME before creating it, so a
+# signal between creation and assignment cannot leak it past the traps below.
+# The PID keeps names unique among live dispatches; creation is exclusive.
 make_tmp() {
-  local root="${TMPDIR:-/tmp}"
+  local root="${TMPDIR:-/tmp}" path attempt
   [ -d "$root" ] || { echo "temporary directory does not exist: $root" >&2; return 1; }
-  mktemp "$root/cf-dispatch.XXXXXX"
+  for attempt in 1 2 3 4 5 6 7 8; do
+    path="$root/cf-dispatch.$$.$RANDOM$RANDOM"
+    printf -v "$1" '%s' "$path"
+    (umask 077; set -C; : >"$path") 2>/dev/null && return 0
+  done
+  printf -v "$1" '%s' ""
+  echo "could not create a temporary file in $root" >&2
+  return 1
 }
 make_tmp_dir() {
-  local root="${TMPDIR:-/tmp}"
+  local root="${TMPDIR:-/tmp}" path attempt
   [ -d "$root" ] || { echo "temporary directory does not exist: $root" >&2; return 1; }
-  mktemp -d "$root/cf-dispatch-run.XXXXXX"
+  for attempt in 1 2 3 4 5 6 7 8; do
+    path="$root/cf-dispatch-run.$$.$RANDOM$RANDOM"
+    printf -v "$1" '%s' "$path"
+    mkdir -m 700 "$path" 2>/dev/null && return 0
+  done
+  printf -v "$1" '%s' ""
+  echo "could not create a temporary directory in $root" >&2
+  return 1
 }
-if [ -z "$OUT" ]; then
-  OUT="$(make_tmp)"
-  OUT_CREATED=true
-fi
-PROMPT_TMP="$(make_tmp)"
+PROMPT_TMP=""
 PROMPT_STAGED=0
 stage_prompt() {
   [ "$PROMPT_STAGED" = 1 ] && return 0
@@ -320,17 +333,22 @@ PY
   PROMPT_STAGED=1
 }
 cleanup_dispatch() {
-  rm -f "$PROMPT_TMP"
+  [ -n "$PROMPT_TMP" ] && rm -f -- "$PROMPT_TMP"
   [ -n "$ACTIVE_RUN_TMPDIR" ] && rm -rf -- "$ACTIVE_RUN_TMPDIR"
 }
 abort_dispatch() {
   cleanup_dispatch
   [ -n "$OUT" ] && rm -f -- "$OUT.raw.jsonl"
-  [ "$OUT_CREATED" = true ] && rm -f "$OUT"
+  [ "$OUT_CREATED" = true ] && [ -n "$OUT" ] && rm -f -- "$OUT"
   exit 143
 }
 trap cleanup_dispatch EXIT
 trap abort_dispatch INT TERM HUP
+if [ -z "$OUT" ]; then
+  OUT_CREATED=true
+  make_tmp OUT || exit 1
+fi
+make_tmp PROMPT_TMP || exit 1
 json_escape() {
   python3 -c 'import json,sys; print(json.dumps(sys.stdin.read())[1:-1])'
 }
@@ -891,7 +909,7 @@ if [ -n "$CHAIN" ]; then
     e="${rest#*:}"
     [ "$rest" = "$spec" ] && { m=""; e=""; }
     [ "$e" = "$m" ] && e=""
-    ACTIVE_RUN_TMPDIR="$(make_tmp_dir)" || exit 1
+    make_tmp_dir ACTIVE_RUN_TMPDIR || exit 1
     rec="$(run_one "$t" "$m" "$e" "$ACTIVE_RUN_TMPDIR")"; rc=$?
     rm -rf -- "$ACTIVE_RUN_TMPDIR"
     ACTIVE_RUN_TMPDIR=""
@@ -905,7 +923,7 @@ if [ -n "$CHAIN" ]; then
   exit 1
 else
   [ -z "$TOOL" ] && { echo "need --tool or --chain" >&2; exit 2; }
-  ACTIVE_RUN_TMPDIR="$(make_tmp_dir)" || exit 1
+  make_tmp_dir ACTIVE_RUN_TMPDIR || exit 1
   run_one "$TOOL" "$MODEL" "$EFFORT" "$ACTIVE_RUN_TMPDIR"
   exit $?
 fi
