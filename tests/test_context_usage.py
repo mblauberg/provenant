@@ -53,7 +53,62 @@ def measured(adapter, name=None):
 def test_live_samples_yield_context(adapter, expected):
     name = adapter
     adapter = adapter.split("-", 1)[0]
-    assert measured(adapter, name) == {**{"context_percent": None}, **expected}
+    breakdown = {"claude": (3446, 0), "claude-direct-haiku": (827, 36), "codex": (0, 0),
+                 "cursor": (0, None), "opencode": (0, 0), "agy": (None, 10), "kiro": (None, None)}
+    cache_write, reasoning = breakdown[name]
+    assert measured(adapter, name) == {"context_percent": None, "cache_write_tokens": cache_write,
+                                       "reasoning_tokens": reasoning, **expected}
+
+
+@pytest.mark.parametrize("adapter,event,expected", [
+    ("claude", {"type": "result", "usage": {"input_tokens": 10, "output_tokens": 4,
+        "cache_creation_input_tokens": 3, "cache_read_input_tokens": 5,
+        "output_tokens_details": {"thinking_tokens": 2}}}, (18, 4, 5, 3, 2)),
+    ("codex", {"type": "turn.completed", "usage": {"input_tokens": 18, "output_tokens": 4,
+        "cached_input_tokens": 5, "cache_write_input_tokens": 3, "reasoning_output_tokens": 2}}, (18, 4, 5, 3, 2)),
+    ("cursor", {"type": "result", "usage": {"inputTokens": 10, "outputTokens": 4,
+        "cacheReadTokens": 5, "cacheWriteTokens": 3}}, (18, 4, 5, 3, None)),
+    ("opencode", {"type": "step_finish", "part": {"tokens": {"input": 10, "output": 4,
+        "reasoning": 2, "cache": {"read": 5, "write": 3}}}}, (36, 8, 10, 6, 4)),
+    ("agy", {"event": "result", "result": {"usage": {"input_tokens": 18, "output_tokens": 4,
+        "cache_read_tokens": 5, "thinking_tokens": 2}}}, (18, 4, 5, None, 2)),
+    ("agy", {"event": "result", "result": {"usage": {"input_tokens": 0, "output_tokens": 4,
+        "cache_read_tokens": 5, "thinking_tokens": 2}}}, (0, 4, 5, None, 2)),
+])
+def test_reported_usage_breakdown_preserves_existing_totals(adapter, event, expected):
+    meter = context().Meter(adapter)
+    meter.observe(event)
+    if adapter == "opencode":
+        meter.observe(event)  # Step usage accumulates; result usage is already a turn total.
+    result = meter.result()
+    assert tuple(result[key] for key in ("input_tokens", "output_tokens", "cached_input_tokens",
+                                        "cache_write_tokens", "reasoning_tokens")) == expected
+
+
+@pytest.mark.parametrize("adapter", ["claude", "codex", "cursor", "opencode", "agy", "kiro", "copilot"])
+def test_unreported_usage_breakdown_stays_null(adapter):
+    meter = context().Meter(adapter)
+    meter.observe({"type": "result", "usage": {}})
+    assert (meter.result()["cache_write_tokens"], meter.result()["reasoning_tokens"]) == (None, None)
+
+
+@pytest.mark.parametrize("details", [[], "bad", 3, {"thinking_tokens": True}])
+def test_malformed_reasoning_does_not_discard_claude_usage(details):
+    meter = context().Meter("claude")
+    meter.observe({"type": "result", "usage": {"input_tokens": 10, "output_tokens": 4,
+        "cache_creation_input_tokens": 3, "output_tokens_details": details}})
+    result = meter.result()
+    assert (result["input_tokens"], result["cache_write_tokens"], result["reasoning_tokens"]) == (13, 3, None)
+
+
+@pytest.mark.parametrize("input_usage", [{}, {"input_tokens": "bad"}])
+def test_agy_reports_available_usage_when_input_is_missing_or_invalid(input_usage):
+    meter = context().Meter("agy")
+    meter.observe({"event": "result", "result": {"usage": {
+        **input_usage, "output_tokens": 4, "cache_read_tokens": 5, "thinking_tokens": 2}}})
+    result = meter.result()
+    assert (result["input_tokens"], result["output_tokens"], result["cached_input_tokens"],
+            result["reasoning_tokens"]) == (None, 4, 5, 2)
 
 
 def claude_events(*answered, usage=None, init="claude-haiku-4-5-20251001"):
@@ -144,8 +199,8 @@ def test_adapter_without_usage_records_null():
     meter = context().Meter("copilot")
     meter.observe({"type": "result", "result": "OK"})
     assert meter.result() == {"context_tokens": None, "input_tokens": None, "output_tokens": None,
-                              "cached_input_tokens": None, "context_window_tokens": None,
-                              "context_percent": None, "source": None}
+                              "cached_input_tokens": None, "cache_write_tokens": None, "reasoning_tokens": None,
+                              "context_window_tokens": None, "context_percent": None, "source": None}
 
 
 def test_codex_rollout_supplies_observed_context_and_window(tmp_path):
