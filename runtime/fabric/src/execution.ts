@@ -42,7 +42,8 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { basename, dirname, isAbsolute, join, resolve } from "node:path";
+import { tmpdir } from "node:os";
+import { basename, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 
 import { catalogueSnapshot, type CatalogueSnapshot } from "./catalogue.js";
@@ -209,8 +210,34 @@ export async function pythonOwner(root: string, identity: Identity, env: NodeJS.
   }
 }
 
-function createRunDirectory(identity: Identity, kind: "dispatch" | "batch"): string {
+function realPath(path: string): string {
+  try { return realpathSync.native(path); } catch { return resolve(path); }
+}
+
+/**
+ * Fixture attempts are test scaffolding. They may only land in a run root under
+ * the OS temp dir, and never in a .agent-run tree that itself sits in temp (a
+ * lane's TMPDIR; issue #1002).
+ */
+export function assertFixtureRunRoot(
+  agentRun: string,
+  routes: readonly { model?: unknown; cli_version?: unknown }[],
+  temp: string = tmpdir(),
+): void {
+  if (!routes.some((route) => route.model === "fixture" || route.cli_version === "fixture")) return;
+  const root = resolve(agentRun);
+  // The OS temp dir, and the fixed /tmp that test helpers fall back to when TMPDIR sits in a .agent-run tree.
+  const tempRoots = [...new Set([temp, "/tmp"].map(realPath))];
+  const underTemp = tempRoots.some((tempRoot) => root.startsWith(tempRoot + sep) && !tempRoot.split(sep).includes(".agent-run"));
+  if (underTemp) return;
+  throw new Error(
+    `fixture run refused: ${root} is not under the OS temp dir ${tempRoots[0]}; fixture attempts must not write into a project .agent-run (issue #1002)`,
+  );
+}
+
+function createRunDirectory(identity: Identity, kind: "dispatch" | "batch", routes: readonly { model?: unknown; cli_version?: unknown }[]): string {
   const agentRun = runRoot(identity.cwd);
+  assertFixtureRunRoot(agentRun, routes);
   mkdirSync(agentRun, { recursive: true, mode: 0o700 });
   if (lstatSync(agentRun).isSymbolicLink()) throw new Error("run root must not be a symlink");
   const runs = join(agentRun, "runs");
@@ -272,11 +299,12 @@ async function initialiseRun(
   root: string,
   signal: AbortSignal,
   kind: "dispatch" | "batch" = "dispatch",
+  routes: readonly { model?: unknown; cli_version?: unknown }[] = [],
 ): Promise<string> {
   const owner = executableOwner(root, "skills/orchestrate/scripts/run_dir_init.sh");
   await maintainRunRoot(identity, env);
   signal.throwIfAborted();
-  const runDir = createRunDirectory(identity, kind);
+  const runDir = createRunDirectory(identity, kind, routes);
   try {
     await execFileAsync(owner, [runDir, "--owner-logs"], {
       cwd: identity.cwd,
@@ -791,7 +819,7 @@ async function dispatchConfiguredProviderUnchecked(
   signal.throwIfAborted();
   if (checked.status === "rejected") return { status: "rejected", error: checked.error, fix: checked.fix };
   const validateMs = performance.now() - validateStarted - snapshotMs;
-  const initStarted = performance.now(), runDir = await initialiseRun(workspaceIdentity, env, root, signal);
+  const initStarted = performance.now(), runDir = await initialiseRun(workspaceIdentity, env, root, signal, "dispatch", [route]);
   const initMs = performance.now() - initStarted;
   if (signal.aborted) rmSync(runDir, { recursive: true, force: true });
   signal.throwIfAborted();
@@ -999,7 +1027,7 @@ async function dispatchConfiguredBatchUnchecked(
     checked = await preflight(python, executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py"), tasks, identity, env, signal);
     if (checked.status === "rejected") return rejected(new InputError(String(checked.error ?? "preflight_unavailable"), String(checked.fix ?? "Check task preflight inputs.")));
   }
-  const runDir = await initialiseRun(identity, env, root, signal, "batch");
+  const runDir = await initialiseRun(identity, env, root, signal, "batch", tasks);
   if (signal.aborted) rmSync(runDir, { recursive: true, force: true });
   signal.throwIfAborted();
   const manifestPath = stagingPath(runDir, "task-manifest.json");
