@@ -40,7 +40,7 @@ rates rather than raw counts.
 | Subagent first-call context | p50 36k (main 11k) | Claude transcripts |
 | User routing reminders | about 13% of 3,518 user messages | user-message classifier |
 | User autonomy nudges | about 17% of user messages | user-message classifier |
-| Manual `/compact continue` re-primes | 349 of 1,011 compactions | user messages |
+| Manual `/compact continue` re-primes | 349, against 662 automatic compactions | user messages |
 | User `/usage` checks | 146 | user messages |
 | Free OpenCode attempts ending `rate_limited` | most non-ok outcomes on DeepSeek and GLM free | 3,756 Fabric attempt receipts |
 | Cooldown scope | adapter and model; `account` always null (`fabric_records.py:404-429`) | code |
@@ -238,7 +238,7 @@ figure; a known run's figures reconcile with its receipts.
    lane's session rather than starting fresh. Sibling graph nodes share one
    context pack. This matters most where cached reads are far cheaper than
    input: DeepSeek V4.1 Flash and MiMo on OpenCode Go (about 50 times), GLM
-   (about 5 times), Claude (10 times), Codex (automatic prefix caching).
+   (about 5 times), Claude Opus (about 20 times), Codex (automatic prefix caching).
 4. Startup: HARNESS.md loads on trigger, not by `@` import; duplicate global
    instruction injection is removed; long skill descriptions are trimmed or
    unused vendor skills disabled; the hard-coded model catalogue in
