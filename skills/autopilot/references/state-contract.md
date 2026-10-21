@@ -8,7 +8,7 @@
 > able to resume from the files alone.
 
 *Implemented by `templates/GOAL.template.md`, `templates/STATE.template.md`,
-`templates/HANDOFF.template.md`, and `scripts/bootstrap-autopilot.sh` (which
+`templates/HANDOFF.template.md`, and `scripts/bootstrap-autopilot.py` (which
 scaffolds the file set and substitutes the knobs below).*
 
 ## Where mission state lives
@@ -16,7 +16,7 @@ scaffolds the file set and substitutes the knobs below).*
 The skill directory ships templates and scripts only — it is never written
 to at runtime. Every run's state lives under **`.agent-run/runs/<mission-run-dir>/`**,
 the same session-owned run location `deliver`, `implement` and `orchestrate`
-use for their receipts (`RUN.json`) and run directories. `bootstrap-autopilot.sh
+use for their receipts (`RUN.json`) and run directories. `bootstrap-autopilot.py
 <mission-id>` creates and fills it. This keeps a mission's durable memory
 outside the skill, alongside any `RUN.json` a delegated `deliver`/`implement`
 stage writes into the same mission directory.
