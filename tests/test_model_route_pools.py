@@ -385,16 +385,19 @@ def test_routes_prints_each_pool_with_live_availability(tmp_path):
     assert run.returncode == 0, run.stderr
     for name in ("principal", "senior", "junior", "design", "writing"):
         assert f"\n{name}\n" in f"\n{run.stdout}"
-    assert "not installed" in run.stdout
+    assert "unavailable or cooling" in run.stdout
+    assert "use --all" in run.stdout
+    all_run = model_route(env, "routes", "--all")
+    assert "not installed" in all_run.stdout
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "codex").write_text("#!/bin/sh\n")
     (bin_dir / "codex").chmod(0o755)
     env["PATH"] = str(bin_dir)
-    lines = model_route(env, "routes").stdout.splitlines()
+    lines = model_route(env, "routes", "--all").stdout.splitlines()
     assert any("codex/gpt-6-luna" in line and "cooling until" in line for line in lines)
     assert any("codex/gpt-6-astra" in line and line.rstrip().endswith("available") for line in lines)
-    assert "[free, trains-on-prompts]" in run.stdout
+    assert "[free, trains-on-prompts]" in all_run.stdout
     provenant = subprocess.run([sys.executable, str(ROOT / "scripts" / "provenant"), "routes", "--json"],
                                text=True, capture_output=True, check=False,
                                env={**env, "PATH": os.environ["PATH"]})
