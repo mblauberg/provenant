@@ -923,6 +923,8 @@ def render_stats(report, detail=False):
             lines += ['', f'{title}:', *('  ' + '  '.join(str(cell) for cell in row) for row in rows)]
     if not detail and len(last_limits) > ROW_LIMIT:
         lines.append(f"{len(last_limits) - ROW_LIMIT} more limit events; use --detail/--json")
+    if not detail and report['quota_observations']:
+        lines.append(f"{len(report['quota_observations'])} quota observations; use --detail/--json")
     if report['unattributed'] or report['excluded_rows']:
         lines += ['', 'Not attributed to a model: ' + '; '.join(
             f"{row['source']}/{row['adapter'] or '-'} rows={row['rows']}" for row in report['unattributed']) +

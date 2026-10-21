@@ -575,15 +575,13 @@ def render(document: dict[str, Any], full: bool = False) -> str:
     for name, entries in document["routes"].items():
         lines.append(name)
         hidden = 0
-        soonest = None
+        cooling = []
         for entry in entries:
             if not full and entry["availability"] != "available":
-                # Keep the soonest recovery time and the pointer to the full list.
+                # Cooling models stay named, since they recover; the rest collapse to a count.
                 hidden += 1
                 if "cooling until " in entry["availability"]:
-                    until = entry["availability"].split("cooling until ", 1)[1]
-                    if soonest is None or until < soonest:
-                        soonest = until
+                    cooling.append((entry["availability"].split("cooling until ", 1)[1], entry["model"]))
                 continue
             model = entry["model"] + (f"@{entry['effort']}" if "effort" in entry else "")
             caveat = f"  [{', '.join(entry['traits'])}]" if "traits" in entry else ""
@@ -592,8 +590,10 @@ def render(document: dict[str, Any], full: bool = False) -> str:
             lines.append(f"  {model:<52} {str(entry['weight']):<8} {entry['availability']}{caveat}")
         if hidden:
             lines.append(f"  {hidden} unavailable or cooling"
-                         + (f"; soonest cooling until {soonest}" if soonest else "")
+                         + (f"; soonest cooling until {min(cooling)[0]}" if cooling else "")
                          + "; use --all")
+            if cooling:
+                lines.append("  cooling: " + ", ".join(model for _, model in sorted(cooling)))
     synonyms: dict[str, list[str]] = {}
     for alias, target in document["synonyms"].items():
         synonyms.setdefault(target, []).append(alias)

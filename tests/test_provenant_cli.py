@@ -1,4 +1,5 @@
 from pathlib import Path
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import shutil
@@ -1061,10 +1062,13 @@ def test_output_budget_defaults_stay_under_limits_on_fixture_state(tmp_path: Pat
     route_env = {**env, "AGENT_FABRIC_INSTANCE_ROOT": str(instance),
                  "PATH": os.pathsep.join((str(bin_dir), "/bin", "/usr/bin")),
                  "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "route-state"),
-                 "AGENT_FABRIC_STATE_DIRECTORY": str(tmp_path / "route-state")}
+                 "AGENT_FABRIC_STATE_DIRECTORY": str(tmp_path / "route-state"),
+                 "FABRIC_COOLDOWNS_PATH": str(tmp_path / "route-state" / "cooldowns.json")}
+    # A legacy unscoped cooldown belongs to the default Codex identity, not conftest's CODEX_HOME.
+    route_env.pop("CODEX_HOME", None)
     route_state = tmp_path / "route-state"
     route_state.mkdir()
-    cooling_until = "2026-10-22T03:00:00+00:00"
+    cooling_until = (datetime.now(timezone.utc) + timedelta(hours=2)).replace(microsecond=0).isoformat()
     (route_state / "cooldowns.json").write_text(json.dumps({"cooldowns": {
         "codex/gpt-6-luna": {"cooling_until": cooling_until}}}))
     routes_res = subprocess.run([sys.executable, str(provenant_script), "routes"], cwd=tmp_path,
@@ -1075,7 +1079,7 @@ def test_output_budget_defaults_stay_under_limits_on_fixture_state(tmp_path: Pat
     assert cooling_until in routes_res.stdout
     assert "use --all" in routes_res.stdout
     assert "codex/gpt-6-astra" in routes_res.stdout and "available" in routes_res.stdout
-    assert "codex/gpt-6-luna" not in routes_res.stdout
+    assert "cooling: codex/gpt-6-luna" in routes_res.stdout
     all_routes = subprocess.run([sys.executable, str(provenant_script), "routes", "--all"], cwd=tmp_path,
                                 env=route_env, capture_output=True, text=True)
     assert all_routes.returncode == 0, all_routes.stderr
