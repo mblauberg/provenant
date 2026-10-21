@@ -57,6 +57,17 @@ in `skills/orchestrate`; this page records the traps.
 
 ## Claude CLI
 
+- Sandboxed lanes run with `~/.claude.json` read-only, including atomic rewrite
+  and backup siblings. Reads follow a user-managed symlink normally. A live
+  Claude smoke is pending. If Claude Code cannot start with it read-only, the
+  fallback is writable with a detect-only warning, tracked on #927.
+- Hardlinks remain blanket-denied in sandboxed lanes pending an empirical
+  Seatbelt `file-link` source/destination filter probe outside an outer sandbox
+  (#927). The repair lane could not apply even `(allow default)`:
+  `sandbox-exec: sandbox_apply: Operation not permitted` (exit 71 for baseline,
+  source-path deny and destination-path deny). Hardlinks within writable roots,
+  including local clones and `cp -al`, therefore remain unavailable.
+
 - The in-session Agent tool picks a model tier but has no per-call effort knob;
   headless `claude -p --model <m> --effort <e>` does. `--bare` gives a clean
   minimal context for an independent verifier.

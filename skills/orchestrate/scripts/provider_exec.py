@@ -42,6 +42,9 @@ import process_info
 # A "*" suffix covers atomic-rewrite siblings, without granting their children.
 # npm/uv/Corepack caches are redirected into each attempt; never let a lane
 # poison ~/.npm's reusable packages (_cacache, _npx, _prebuilds or _tuf).
+# Keep the Claude startup/config file and all rewrite siblings read-only in every lane.
+READ_ONLY_PROVIDER_CONFIG = (".claude.json",)
+
 NPM_STATE_WRITES = (".npm/_logs",)
 NPM_STATE_FILES = (".npm/_update-notifier-last-checked",)
 AGY_STATE_DIRS = ("annotations", "brain", "conversations", "crashes", "implicit", "knowledge", "log",
@@ -78,24 +81,21 @@ CONFINED_STATE = {
     },
     "claude": {
         "home": ".claude",
-        "integrity_file": ".claude.json",
-        "integrity_keys": ("mcpServers", "hooks", "allowedTools"),
         "read_write": tuple(f".claude/{name}" for name in (
             ".credentials.json*", "cache", "debug", "feedback", "file-history", "ide", "jobs",
             "paste-cache", "sessions", "state", "teams", "telemetry", "uploads",
             "history.jsonl*", "stats-cache.json*", "mcp-needs-auth-cache.json*", "gh-pr-status-cache.json*",
-            "statusline-lanes.json*")) + (".claude.json*", ".cache/claude", *NPM_STATE_WRITES),
+            "statusline-lanes.json*")) + (".cache/claude", *NPM_STATE_WRITES),
         "write_literal": NPM_STATE_FILES,
         # Project roots also contain auto-loaded memory. Only UUID transcripts/session trees are state;
         # no root creation/rename grant that could transplant a crafted directory containing memory.
         "write_regex": (r"projects/[^/]+/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
                         r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(\.jsonl[^/]*|(/.*)?)",),
         "prepare_dirs": lambda root, plan: (root / "projects" / _claude_project_dir(root, plan["cwd"]).name,),
-        # ~/.claude.json mixes mutable startup/project state with configuration guarded after exit.
         # Shell snapshots and session-env can be sourced by later shells and stay read-only.
         # The absent ~/.cache/claude and jobs/ide/state/teams need smoke evidence when quota returns.
-        "no_symlinks": (".claude", ".claude.json*", ".cache/claude", ".npm"),
-        "read": (".claude", ".claude.json*", ".cache/claude", ".npm"),
+        "no_symlinks": (".claude", ".cache/claude", ".npm"),
+        "read": (".claude", ".claude.json", ".cache/claude", ".npm"),
         # Claude Code keeps its OAuth sign-in in the login keychain; a read-only lane is signed out
         # without it. Only OAuth lanes get it: bare and endpoint lanes sign in with a key.
         "oauth_read": ("Library/Keychains/login.keychain-db",),
@@ -554,6 +554,7 @@ def codex_writer_shared_paths(cwd, safe_path):
 def os_confinement_profile(plan, search_path=None):
     """Apply the provider's read and write boundary to this attempt.
 
+    Hardlinks stay denied until a source/destination filter probe can run outside an outer sandbox.
     SBPL applies the last matching rule, so each later rule narrows or widens the one before.
     """
     root = Path(plan.get("workspace_root") or plan["cwd"]).expanduser().resolve()
@@ -588,7 +589,7 @@ def os_confinement_profile(plan, search_path=None):
         profile = (
             "(version 1)\n(allow default)\n(deny file-write*)\n(deny file-link)\n"
             + _sbpl_rule("allow", "file-write*", allowed)
-            + _sbpl_rule("allow", "file-write*", state_writes, canonical=True)
+            + "".join(rule for rule, _ in _state_write_grants(home, state, ("read_write",)))
             + _sbpl_rule("deny", "file-write*", [common] if common is not None else [])
             + _sbpl_rule("allow", "file-write*", git_allowed, keep_leaf=True)
             + _sbpl_rule("allow", "file-write*", literal_files, literal=True, keep_leaf=True)
@@ -628,6 +629,7 @@ def os_confinement_profile(plan, search_path=None):
         profile += _state_write_guards(home, state)
         profile += _sbpl_rule("deny", "file-write*", plan.get("protected_paths", []))
         profile += _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
+        profile += _provider_config_write_denies(home)
         return profile
     configured_xdg = Path(os.environ.get("XDG_CONFIG_HOME", "")).expanduser()
     xdg_config_home = configured_xdg if configured_xdg.is_absolute() else home / ".config"
@@ -654,7 +656,7 @@ def os_confinement_profile(plan, search_path=None):
     return (
         "(version 1)\n(allow default)\n(deny file-write*)\n(deny file-link)\n"
         + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), Path("/dev")])
-        + _sbpl_rule("allow", "file-write*", state_writes, canonical=True)
+        + "".join(rule for rule, _ in _state_write_grants(home, state, ("read_write",)))
         + _state_write_guards(home, state)
         + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
         + _sbpl_rule("deny", "file-read-data", [root, *add_dirs])
@@ -681,6 +683,7 @@ def os_confinement_profile(plan, search_path=None):
                                                 (*EXTRA_DENIED_READS, *state.get("read_denied", ()))])
         + (_claude_session_reads(home, plan) if plan.get("adapter") == "claude" else "")
         + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
+        + _provider_config_write_denies(home)
     )
 
 
@@ -694,6 +697,8 @@ def _provider_state(plan):
     relative = state.get("home")
     if relative:
         root = Path(plan.setdefault("provider_home", str((Path.home() / relative).resolve())))
+        if root != Path.home().resolve() / relative and credential_path(root):
+            raise PermissionError(f"provider home resolves into a credential store: {root}")
         state["resolved_home"] = root
         for key in ("read_write", "write_literal", "write_in_place", "read", "oauth_read",
                     "read_literal", "read_denied", "no_links", "no_symlinks"):
@@ -726,17 +731,47 @@ def _state_read_paths(home, entries):
     return [path for path in paths if not (path.is_symlink() and credential_path(path.resolve()))]
 
 
+def _provider_config_write_denies(home):
+    paths = []
+    for relative in READ_ONLY_PROVIDER_CONFIG:
+        path = home / relative
+        # Deny both the link name (including replacement siblings) and its normal read target.
+        paths.extend((str(path) + "*", str(path.resolve()) + "*"))
+    return _sbpl_rule("deny", "file-write*", dict.fromkeys(paths))
+
+
+def _state_write_grants(home, state, keys=("read_write", "write_literal", "write_in_place", "write_regex")):
+    """The profile rules and receipt descriptions of the same canonical provider grants."""
+    grants = []
+    for key in keys:
+        if key == "write_regex":
+            root = state.get("resolved_home", home)
+            paths = ["^" + _sbpl_regex_escape(str(root)) + "/" + _sbpl_expand_counts(pattern) + "$"
+                     for pattern in state.get(key, ())]
+        else:
+            paths = _state_paths(home, state.get(key, ()))
+            if key == "write_literal" and state.get("atomic_siblings"):
+                paths = [*paths, *(str(path) + "*" for path in paths)]
+        for path in paths:
+            value = str(path)
+            regex = key == "write_regex" or value.endswith("*")
+            if key != "write_regex" and value.endswith("*"):
+                value = "^" + _sbpl_regex_escape(value[:-1]) + "[^/]*$"
+            if regex:
+                rule = f'(allow file-write* (regex #"{value}"))\n'
+                description = "regex:" + value
+            else:
+                rule = _sbpl_rule("allow", "file-write*", [path], literal=key != "read_write", canonical=True)
+                description = value
+            grants.append((rule, description))
+    return grants
+
+
 def _state_write_guards(home, state):
     """Rewrite-in-place grants, and no links a lane could plant for the provider's unconfined CLI."""
     in_place = _state_paths(home, state.get("write_in_place", ()))
-    literals = _state_paths(home, state.get("write_literal", ()))
-    rules = _sbpl_rule("allow", "file-write*", literals, literal=True, canonical=True)
-    if state.get("atomic_siblings"):
-        rules += _sbpl_rule("allow", "file-write*", [str(path) + "*" for path in literals], canonical=True)
-    rules += _sbpl_rule("allow", "file-write*", in_place, literal=True, canonical=True)
-    for pattern in state.get("write_regex", ()):
-        root = state.get("resolved_home", home)
-        rules += f'(allow file-write* (regex #"^{_sbpl_regex_escape(str(root))}/{_sbpl_expand_counts(pattern)}$"))\n'
+    rules = "".join(rule for rule, _ in _state_write_grants(
+        home, state, ("write_literal", "write_in_place", "write_regex")))
     rules += _sbpl_rule("deny", "file-write-create file-write-unlink", in_place, literal=True, canonical=True)
     for path in state.get("no_links", ()):
         # Nor a directory or FIFO at a file grant, which would hold or block what the CLI opens.
@@ -789,69 +824,6 @@ def _claude_session_reads(home, plan):
 def _uses_api_key(plan):
     """Whether a Claude lane signs in with a key (bare or endpoint route) rather than OAuth."""
     return plan.get("adapter") == "claude" and claude_adapter.uses_api_key(plan.get("route") or {})
-
-
-def _config_integrity_guard(plan, snapshot=None):
-    """Snapshot config keys before launch; after cleanup restore only those keys, with a warning.
-
-    Claude rewrites the same file's project/session counters every run. Its config keys may occur
-    at the top level or inside project dictionaries. No snapshot contents enter the receipt.
-    """
-    state = CONFINED_STATE.get(plan.get("adapter"), {})
-    keys = state.get("integrity_keys", ())
-    if not keys or plan.get("applied", {}).get("confinement") != "sandbox-exec":
-        return None if snapshot is None else []
-    path = Path.home() / state["integrity_file"]
-    unreadable = False
-    try:
-        if path.is_symlink():
-            raise ValueError("config file is a symlink")
-        document = json.loads(path.read_text()) if path.exists() else {}
-        if not isinstance(document, dict):
-            raise ValueError("config must be an object")
-    except (OSError, ValueError) as exc:
-        if snapshot is None:
-            raise ValueError(f"cannot snapshot provider config: {path}") from exc
-        # Malformed/replaced files have no runtime keys we can safely merge; retain the baseline.
-        document = snapshot[2]
-        unreadable = True
-    selected, pending = {}, [((), document)]
-    while pending:
-        prefix, value = pending.pop()
-        for key, child in value.items():
-            location = (*prefix, key)
-            if key in keys:
-                selected[location] = child
-            elif isinstance(child, dict):
-                pending.append((location, child))
-    digest = hashlib.sha256(json.dumps(sorted(selected.items()), sort_keys=True).encode()).hexdigest()
-    if snapshot is None:
-        return digest, selected, document
-    if digest == snapshot[0] and not unreadable:
-        return []
-    for location in selected.keys() | snapshot[1].keys():
-        parent = document
-        for key in location[:-1]:
-            if not isinstance(parent.get(key), dict):
-                parent[key] = {}
-            parent = parent[key]
-        if location in snapshot[1]:
-            parent[location[-1]] = snapshot[1][location]
-        else:
-            parent.pop(location[-1], None)
-    temporary = None
-    try:
-        with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, prefix=path.name + ".", delete=False) as output:
-            temporary = Path(output.name)
-            json.dump(document, output, indent=2)
-            output.write("\n")
-        os.replace(temporary, path)
-    except OSError as exc:
-        return [f"config_tamper: restoration failed for {path.name} ({type(exc).__name__})"]
-    finally:
-        if temporary is not None:
-            temporary.unlink(missing_ok=True)
-    return [f"config_tamper: restored configuration keys in {path.name}"]
 
 
 # Project files and directories a provider loads from each directory above its cwd.
@@ -1397,10 +1369,7 @@ def build_plan(
         source_codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
         codex_auth_path = source_codex_home / "auth.json"
     if confinement == "sandbox-exec":
-        state = CONFINED_STATE.get(adapter, {})
-        writable_paths = [str(attempt_dir), *(str(Path.home() / path) for path in
-                           (*state.get("read_write", ()), *state.get("write_literal", ()),
-                            *state.get("write_in_place", ()))), "/dev"]
+        writable_paths = [str(attempt_dir), "/dev"]
         if mode == "worktree_write":
             git_paths = ([str(git_private), *(str(git_common / path) for path in
                            GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)]
@@ -1512,6 +1481,10 @@ def build_plan(
         or os.environ.get("CF_DISPATCH_AGY_SANDBOX", "0") == "1",
         **metadata,
     }
+    if confinement == "sandbox-exec":
+        state = _provider_state(plan)
+        write_boundary["writable_paths"].extend(
+            description for _, description in _state_write_grants(Path.home().resolve(), state))
     context_usage.apply_ceiling(plan, context_ceiling)
     if hasattr(config, "config_policy"):
         plan["applied"]["config"] = config.config_policy(plan)
@@ -3345,8 +3318,6 @@ def execute(
     input_file = None
     workspace = None
     selector = selectors.DefaultSelector()
-    config_snapshot = None
-    config_warnings = []
     try:
         _prepare_codex_capability_home(plan, environment)
         _prepare_codex_state_dir(plan)
@@ -3380,7 +3351,6 @@ def execute(
                 shutil.which(command[0], path=environment.get("PATH")) or command[0]
             )
             command = confinement_command(plan, command, environment.get("PATH"))
-            config_snapshot = _config_integrity_guard(plan)
             subreaper = _enable_subreaper()
             process = subprocess.Popen(
                 command,
@@ -3542,8 +3512,6 @@ def execute(
         finally:
             if subreaper:
                 _release_subreaper()
-            if config_snapshot is not None:
-                config_warnings = _config_integrity_guard(plan, config_snapshot)
     exit_code = process.returncode if process else None
     if cancel_signal and not forced:
         forced = "interrupted"  # EOF can precede the loop's signal check.
@@ -3627,7 +3595,7 @@ def execute(
     session = parsed["session_id"] or plan["resume_session"] or plan["session_id"]
     parsed["session_id"] = session
     observed, source = _observed_model(plan, parsed, environment)
-    warnings = [*plan["warnings"], *config_warnings]
+    warnings = list(plan["warnings"])
     reported = {}
     if plan["adapter"] == "claude":
         # init.model is the request; Claude may answer with another model.
