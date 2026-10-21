@@ -144,7 +144,7 @@ def test_orchestrate_discipline_cases_cover_the_silent_no_change_wake():
         assert set(case) in ({"prompt", "expected"}, {"id", "prompt", "expected"})
         assert case["prompt"].strip()
         assert case["expected"].strip()
-    assert any(case["id"] == "silent_no_change_wake" for case in data["cases"])
+    assert any(case.get("id") == "silent_no_change_wake" for case in data["cases"])
 
 
 def test_current_portfolio_routing_plan_matches_the_live_catalogue_and_has_no_result():
