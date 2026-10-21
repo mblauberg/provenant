@@ -52,7 +52,7 @@ CANCEL_MARKER_NAME = "cancel.request"
 BRANCH_TYPES = "feat|fix|refactor|perf|test|docs|chore|ci|build"
 BRANCH_PATTERN = re.compile(rf"^(?:(?:{BRANCH_TYPES}|proto)/[a-z][a-z0-9]*-[a-z0-9]+(?:-[a-z0-9]+){{1,4}}|land/[0-9]{{8}}-[a-z0-9]+(?:-[a-z0-9]+)*)$")
 
-from _shared.bounded_process import stop_process_group
+from _shared.bounded_process import BudgetArgumentParser, stop_process_group
 from layout import run_workspace, run_root, contains_run
 import provider_exec
 import memory_admission
@@ -2778,30 +2778,8 @@ def _fabric_hosts_owner():
     return sys.modules[name]
 
 
-class BudgetArgumentParser(argparse.ArgumentParser):
-    """ArgumentParser emitting one-line usage errors instead of usage dumps."""
-
-    def error(self, message: str) -> NoReturn:
-        clean = message.replace("\n", " ").strip()
-        cmd = self.prog
-        if "dispatch" in cmd:
-            fix = "provenant help dispatch"
-        elif "batch" in cmd:
-            fix = "provenant help batch"
-        else:
-            fix = f"provenant help {cmd}"
-        if clean.startswith("the following arguments are required:"):
-            args = clean.split(":", 1)[1].strip()
-            fix = f"pass {args}"
-        elif "one of the arguments" in clean and "is required" in clean:
-            args = clean.split("arguments", 1)[1].split("is required", 1)[0].strip()
-            fix = f"pass {args}"
-        sys.stderr.write(f"error: {clean}; fix: {fix}\n")
-        sys.exit(2)
-
-
 def parser() -> argparse.ArgumentParser:
-    root = BudgetArgumentParser(description=__doc__)
+    root = BudgetArgumentParser(command_name="dispatch", description=__doc__)
     root.add_argument("--run-dir", type=Path, required=True)
     root.add_argument("--task-id")
     root.add_argument("--host")
