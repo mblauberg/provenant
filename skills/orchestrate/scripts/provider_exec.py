@@ -1381,6 +1381,7 @@ def error_class(status, signature=None):
         "auth_required": "auth", "model_unavailable": "model_unavailable",
         "timed_out": "timeout", "startup_timeout": "timeout", "stalled": "timeout",
         "permission_blocked": "sandbox_denied",
+        "lost": "provider_error",
     }
     signatures = {
         **classes, "quota_exhausted": "usage_limited", "auth_expired": "auth",

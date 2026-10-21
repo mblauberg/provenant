@@ -18,6 +18,7 @@ STATUSES = {
     "timed_out",
     "cancelled",
     "interrupted",
+    "lost",
     "rejected",
     "tool_missing",
     "input_required",

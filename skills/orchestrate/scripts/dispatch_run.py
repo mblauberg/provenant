@@ -43,6 +43,8 @@ TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
 BATCH_ID_RE = re.compile(r"^batch-(?:\d{3}|[1-9]\d{3,})$")
 DEFAULT_TIMEOUT_SECONDS = 3600.0
+# Match the existing abandoned-receipt grace period for pre-identity attempts.
+LEGACY_ATTEMPT_STALE_SECONDS = 48 * 3600
 MAX_WORKER_QUESTION_PROMPT = 4096
 MAX_WORKER_TERMINAL_ENVELOPE_BYTES = 64 * 1024
 MAX_GIT_EVIDENCE_HEADER_BYTES = 64 * 1024
@@ -509,6 +511,84 @@ def acquire_run_custody(run_dir: Path):
     return stream
 
 
+def reap_attempts(run_dir: Path) -> list[str]:
+    """Finalise provably lost attempts under the writer's non-blocking custody lock."""
+    run_dir = Path(run_dir)
+    reaped = []
+    try:
+        custody = acquire_run_custody(run_dir)
+    except (OSError, OwnedFileError):
+        return reaped
+    with custody:
+        try:
+            receipt = json.loads(read_bound_bytes(run_dir, "RUN_RECEIPT.json", label="run receipt"))
+            if not isinstance(receipt, dict) or receipt.get("status") != "active":
+                return reaped
+            # Older writers may not hold custody. A live or unobservable owner
+            # still owns its attempts, even if its provider has already exited.
+            owners = [receipt]
+            for name in ("dispatch-owner.json", "dispatch-status.json"):
+                try:
+                    (run_dir / name).lstat()
+                except FileNotFoundError:
+                    continue
+                owners.append(json.loads(read_bound_bytes(run_dir, name, label="run owner")))
+            for owner in owners:
+                if not isinstance(owner, dict):
+                    return reaped
+                pid = owner.get("owner_pid", owner.get("pid"))
+                if not isinstance(pid, int) or pid <= 0:
+                    continue
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    continue
+                started = owner.get("owner_started_at")
+                observed = process_info.start_time(pid) if started else None
+                if not started or observed is None or observed == started:
+                    return reaped
+        except (OSError, ValueError, TypeError, OwnedFileError):
+            return reaped
+        for tree in ("tasks", "dispatch/tasks"):
+            for path in (run_dir / tree).glob("*/attempt-*/attempt.json"):
+                try:
+                    row = json.loads(read_bound_bytes(run_dir, path.relative_to(run_dir), label="attempt receipt"))
+                    if not isinstance(row, dict) or row.get("schema") != "fabric.attempt.v1" or row.get("state") != "running":
+                        continue
+                    pgid = row.get("pgid")
+                    if not isinstance(pgid, int) or pgid <= 0:
+                        continue
+                    started = row.get("pgid_started_at")
+                    try:
+                        os.killpg(pgid, 0)
+                    except ProcessLookupError:
+                        if not started:
+                            if not isinstance(row.get("last_progress_at"), str):
+                                continue
+                            progress = datetime.fromisoformat(row["last_progress_at"].replace("Z", "+00:00"))
+                            if (datetime.now(UTC) - progress).total_seconds() <= LEGACY_ATTEMPT_STALE_SECONDS:
+                                continue
+                        reason = "pgid_gone"
+                    else:
+                        observed = process_info.start_time(pgid) if started else None
+                        if not started or observed is None or observed == started:
+                            continue
+                        reason = "pgid_reused"
+                    row.update(state="terminal", status="lost", ended_at=now(), retryable=True,
+                               error_class=provider_exec.error_class("lost"))
+                    row["evidence"] = {**(row.get("evidence") or {}), "signature": reason,
+                                       "excerpt": "Attempt process group is gone" if reason == "pgid_gone"
+                                       else "Attempt process group start time no longer matches"}
+                    row["digest"] = render_digest(row)
+                    write_owned(run_dir, path, json.dumps(row, indent=2) + "\n")
+                    reaped.append(str(path))
+                except (OSError, ValueError, TypeError, KeyError, AttributeError, OwnedFileError):
+                    continue
+        if reaped:
+            close_mcp_run(run_dir)
+    return reaped
+
+
 def reconcile_manifest(run_dir: Path, custody=None) -> None:
     """Index complete prior attempts whose manifest rows were lost on re-entry."""
     manifest = run_dir / "MANIFEST.md"
@@ -528,7 +608,7 @@ def reconcile_manifest(run_dir: Path, custody=None) -> None:
         try:
             row = json.loads(read_bound_bytes(run_dir, canonical, label="interrupted attempt"))
             if (row.get("schema") == "fabric.attempt.v1" and row.get("state") == "terminal"
-                    and row.get("status") == "interrupted" and row.get("task_id") == directory.parent.name
+                    and row.get("status") in {"interrupted", "lost"} and row.get("task_id") == directory.parent.name
                     and directory.name == f"attempt-{row.get('attempt', 0):03d}"):
                 recoverable.add(directory)
         except (OSError, ValueError, OwnedFileError):
@@ -843,7 +923,7 @@ def build_command(
 
 
 # Statuses whose provider turn ended before a result, so its session may be missing.
-INCOMPLETE_TURN_STATUSES = {"timed_out", "cancelled", "stalled", "startup_timeout", "interrupted"}
+INCOMPLETE_TURN_STATUSES = {"timed_out", "cancelled", "stalled", "startup_timeout", "interrupted", "lost"}
 
 
 FAST_PLAN_SHELL_ENV_READS = {
@@ -1552,7 +1632,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
         **({"read_roots":[str(root) for root in args.read_roots]} if getattr(args,"read_roots",None) else {}),
         "worktree":str(args.worktree) if args.worktree else None,"started_at":started_at,"ended_at":None,"last_progress_at":started_at,
-        "pgid":None,"session_id":plan.get("session_id"),"retryable":False,"reset_at":None,"retry_after":None,"fix":None,
+        "pgid":None,"pgid_started_at":None,"session_id":plan.get("session_id"),"retryable":False,"reset_at":None,"retry_after":None,"fix":None,
         "evidence":{"exit":None,"signal":None,"signature":None,"excerpt":""},"question":None,
         "applied":plan.get("applied",{"sandbox":None,"network":None,"add_dirs":[],"guarantee":"prompt_only"}),
         "warnings":list(plan.get("warnings",[])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", [])) + list(getattr(args, "_branch_warnings", [])),"provenance":provenance,
@@ -1581,7 +1661,7 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     refusal=route_refusal(adapter,args.tool)
     if refusal: status=refusal["status"]
     if status not in TERMINAL_STATUSES: status="failed"
-    for field in ("session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","usage_source","warnings","reaped","spared","provenance","pgid","last_progress_at","landable","quarantine"):
+    for field in ("session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","usage_source","warnings","reaped","spared","provenance","pgid","pgid_started_at","last_progress_at","landable","quarantine"):
         if field in adapter: row[field]=adapter[field]
     # The provider's provenance replaces the recorded one; keep the confidential request so resume and handoff honour it.
     if getattr(args,"confidential",False) and isinstance(row.get("provenance"),dict):
@@ -2127,6 +2207,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     provider_started_at[0] = time.monotonic()
                     args._phase_timings["spawn"] = round((provider_started_at[0] - spawn_started) * 1000, 3)
                     active["pgid"]=child.pid
+                    active["pgid_started_at"]=process_info.start_time(child.pid)
                     _record_provider_process(run_dir,child)
                     write_owned(run_dir,attempt_dir/"pgid",str(child.pid)+"\n")
                     publish_contract(run_dir,active)
@@ -2627,7 +2708,7 @@ def close_mcp_run(run_dir: Path) -> None:
             receipt["resumable"]=any(row.get("status")=="input_required" for row in latest.values())
             statuses_by_task.update({task_id: canonical_success_status(row["status"])
                                      for task_id, row in latest.items()})
-        elif any(canonical_success_status(record.get("status")) not in {"ok", "quarantined", "failed", "blocked", "timed_out", "cancelled"} for record in records):
+        elif any(canonical_success_status(record.get("status")) not in {"ok", "quarantined", "failed", "blocked", "timed_out", "cancelled", "lost"} for record in records):
             return
         statuses = set(statuses_by_task.values())
         if not statuses:
@@ -2635,7 +2716,7 @@ def close_mcp_run(run_dir: Path) -> None:
         receipt.update(status="ok" if statuses == {"ok"} else "quarantined" if statuses <= {"ok", "quarantined"} else "cancelled" if statuses == {"cancelled"} else "input_required" if receipt.get("resumable") else "failed",
                        closed_at=now(), terminal_reason=None if statuses == {"ok"} else "MCP execution attempts are terminal")
         write_owned(run_dir, run_dir / "RUN_RECEIPT.json", json.dumps(receipt, indent=2) + "\n")
-    except (OSError, ValueError, OwnedFileError):
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OwnedFileError):
         pass
 
 
@@ -2848,5 +2929,7 @@ def parser() -> argparse.ArgumentParser:
 if __name__ == "__main__":
     if sys.argv[1:] == ["--preflight-json"]:
         print(json.dumps(preflight_tasks(json.load(sys.stdin)["tasks"])))
+    elif sys.argv[1:] == ["--reap-attempts"]:
+        print(json.dumps([str(run) for run in json.load(sys.stdin) if reap_attempts(Path(run))]))
     else:
         raise SystemExit(dispatch(parser().parse_args()))

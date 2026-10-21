@@ -123,6 +123,102 @@ def load_secret_scan_module():
     return importlib.import_module('secret_scan')
 
 
+def test_reap_attempt_after_group_sigkill_is_terminal_and_idempotent(tmp_path):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "killed")
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    try:
+        started = mod.process_info.start_time(child.pid)
+        assert started
+        path = run / "tasks/task-1/attempt-001/attempt.json"
+        path.parent.mkdir(parents=True)
+        row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+        row.update(state="running", status=None, pgid=child.pid, pgid_started_at=started)
+        path.write_text(json.dumps(row))
+        os.killpg(child.pid, signal.SIGKILL)
+        child.wait(timeout=5)
+        mod.reap_attempts(run)
+        lost = json.loads(path.read_text())
+        assert lost["state"] == "terminal"
+        assert lost["status"] == "lost"
+        assert lost["error_class"] == "provider_error"
+        assert lost["ended_at"]
+        assert lost["evidence"]["signature"] == "pgid_gone"
+        before = path.read_bytes()
+        mod.reap_attempts(run)
+        assert path.read_bytes() == before
+    finally:
+        if child.poll() is None:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=5)
+
+
+@pytest.mark.parametrize("identity,live,stale,expected", [
+    ("matching", True, True, "running"),
+    ("reused", True, False, "terminal"),
+    ("unknown", True, True, "running"),
+    (None, True, True, "running"),
+    (None, False, False, "running"),
+    (None, False, True, "terminal"),
+])
+def test_reap_attempt_identity_and_legacy_progress(tmp_path, monkeypatch, identity, live, stale, expected):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "identity")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row.update(state="running", status=None, pgid=123456,
+               last_progress_at="2000-01-01T00:00:00Z" if stale else mod.now())
+    if identity is not None:
+        row["pgid_started_at"] = "recorded"
+    path.write_text(json.dumps(row))
+    def killpg(pgid, sig):
+        assert (pgid, sig) == (123456, 0)
+        if not live:
+            raise ProcessLookupError()
+    monkeypatch.setattr(mod.os, "killpg", killpg)
+    monkeypatch.setattr(mod.process_info, "start_time", lambda pid: None if identity == "unknown" else "different" if identity == "reused" else "recorded")
+    mod.reap_attempts(run)
+    result = json.loads(path.read_text())
+    assert result["state"] == expected
+    if expected == "terminal":
+        assert result["status"] == "lost"
+        assert result["evidence"]["signature"] == ("pgid_reused" if live else "pgid_gone")
+
+
+def test_reap_attempt_never_touches_live_owner(tmp_path):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "owned")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"state": "running", "pgid": 99999999, "pgid_started_at": "gone"}))
+    before = path.read_bytes()
+    with mod.acquire_run_custody(run):
+        mod.reap_attempts(run)
+    assert path.read_bytes() == before
+
+
+def test_reap_attempt_skips_malformed_records_and_continues(tmp_path):
+    run = make_run(tmp_path, "runs/malformed")
+    valid = make_run(tmp_path, "runs/valid")
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row.update(state="running", status=None, pgid=99999999, pgid_started_at="gone")
+    for task, record in (("a-bad", []), ("b-progress", {**row, "pgid_started_at": None, "last_progress_at": None}),
+                         ("c-valid", row)):
+        path = run / f"tasks/{task}/attempt-001/attempt.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(record))
+    valid_path = valid / "tasks/task-1/attempt-001/attempt.json"
+    valid_path.parent.mkdir(parents=True)
+    valid_path.write_text(json.dumps(row))
+    result = subprocess.run([sys.executable, str(SCRIPT), "--reap-attempts"],
+                            input=json.dumps([str(run), str(valid)]), capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [str(run), str(valid)]
+    assert json.loads((run / "tasks/c-valid/attempt-001/attempt.json").read_text())["status"] == "lost"
+    assert json.loads(valid_path.read_text())["status"] == "lost"
+
+
 @pytest.mark.parametrize('name,positive,placeholder', [
     ('PEM private key', '-' * 5 + 'BEGIN RSA ' + 'PRIVATE KEY-----\n' + 'A' * 64 + '\n' + '-' * 5 + 'END RSA PRIVATE KEY-----',
      '-' * 5 + 'BEGIN RSA PRIVATE KEY-----\nEXAMPLE\n' + '-' * 5 + 'END RSA PRIVATE KEY-----'),
@@ -3450,6 +3546,10 @@ time.sleep(30)
             time.sleep(.02)
         assert (worktree / 'provider-pids').exists()
         mod = load_dispatch_module()
+        if stop != 'timeout':
+            active = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
+            assert active['pgid_started_at']
+            assert active['pgid_started_at'] == mod.process_info.start_time(active['pgid'])
         with pytest.raises(mod.WorktreeLeaseError):
             mod.acquire_worktree_lease(worktree)
         if stop == 'SIGTERM':
@@ -3852,7 +3952,7 @@ def test_fabric_fast_plan_preserves_shell_prompt_rejections(tmp_path, monkeypatc
     assert mod.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
 
 
-@pytest.mark.parametrize('previous_status', ['interrupted', 'timed_out', 'cancelled', 'stalled'])
+@pytest.mark.parametrize('previous_status', ['interrupted', 'timed_out', 'cancelled', 'stalled', 'lost'])
 def test_interrupted_attempt_resumes_from_nested_cwd_with_absolute_caller_prompt(tmp_path, monkeypatch, previous_status):
     code = '''import sys,json,os
 prompt = sys.stdin.read()
@@ -3872,7 +3972,7 @@ print(json.dumps({"type":"result","result":os.getcwd()}))
     # before the owner could publish its legacy terminal evidence.
     row.update(status=previous_status, state='terminal')
     path.write_text(json.dumps(row))
-    if previous_status == 'interrupted':
+    if previous_status in {'interrupted', 'lost'}:
         legacy_path = run / row['legacy_attempt_path']
         legacy_path.unlink()
         legacy_path.with_name('attempt.sha256').unlink()

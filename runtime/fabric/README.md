@@ -633,7 +633,14 @@ writable. Readers discover only current timestamped runs in the shared
 `.agent-run/runs` directory.
 
 Dispatch-time maintenance scans the shared run directory. It closes active receipts
-older than 48 hours with no observed live owner as `interrupted`. Retention is
+older than 48 hours with no observed live owner as `interrupted`.
+Fabric startup and status reads also finalise running attempts as `lost` when
+their process group is gone or its recorded OS start time (`pgid_started_at`)
+differs. Legacy attempts without that identity need both a dead group and
+`last_progress_at` older than 48 hours. The finaliser takes the writer's custody
+lock and leaves live owners alone; status checks only the runs selected for
+the response. Lost attempts retain their end time and liveness evidence and
+count as provider errors in telemetry. Retention is
 seven days for successful/cancelled runs and fourteen days for failures
 (`AGENT_FABRIC_RUN_RETENTION_HOURS` overrides). Live runs,
 `KEEP`, active receipts and delivery `RUN.json` files are preserved; unknown new

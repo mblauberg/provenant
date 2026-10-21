@@ -388,6 +388,17 @@ def test_lanes_report_latest_attempt_and_preserve_attempt_outcomes(tmp_path):
                                   {'status':'ok','error_class':None,'attempts':1}]
 
 
+def test_lost_attempt_is_reported_as_a_provider_error(tmp_path):
+    write_json(tmp_path / '.agent-run/runs/run/tasks/lane/attempt-001/attempt.json', {
+        'run_id':'r','task_id':'lane','attempt':1,'state':'terminal','status':'lost',
+        'error_class':'provider_error','ended_at':'2026-10-21T01:00:00Z','cwd':'/repo',
+        'provenance':{'requested':{'adapter':'codex'},'resolved_model':'test'}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    assert report['lanes'] == [{'status':'lost','error_class':'provider_error','lanes':1}]
+    assert report['attempts'] == [{'status':'lost','error_class':'provider_error','attempts':1}]
+
+
 def test_unknown_token_fields_are_not_reported_as_zero(tmp_path):
     jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl', {
         'type':'assistant','timestamp':'2026-10-21T01:00:00Z',
