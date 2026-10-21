@@ -139,10 +139,10 @@ it("shows an imported lane's paths absolute under its source run", async () => {
   writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ cwd_projects: { located: target } }));
   pointTo(target, source, run, ["located"]);
   const row = (await readRuns(target)).runs[0]!;
-  expect(row.run_path).toBe(fs.realpathSync.native(runDir));
-  for (const path of [row.result_path, row.receipt_path])
-    if (path !== null) expect(path.startsWith(fs.realpathSync.native(runDir) + "/")).toBe(true);
-  expect(row.receipt_path).not.toBeNull();
+  const canonical = fs.realpathSync.native(runDir);
+  expect(row.run_path).toBe(canonical);
+  expect(row.result_path).toBe(join(canonical, "tasks/located/attempt-001/result.md"));
+  expect(row.receipt_path).toBe(join(canonical, "tasks/located/attempt-001/attempt.json"));
 });
 
 it("isolates a corrupt foreign run and still lists and waits for local lanes", async () => {
