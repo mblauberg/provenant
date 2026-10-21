@@ -9,17 +9,18 @@ final class QuotaModel {
     private(set) var updatedAt: Date?
     private(set) var isRefreshing = false
     @ObservationIgnored private var timer: Timer?
+    @ObservationIgnored private var launcher: CLI.Launcher?   // resolved once, forgotten if it stops working
     @ObservationIgnored private let interval = max(
         ProcessInfo.processInfo.environment["QUOTA_INTERVAL_SECONDS"].flatMap(Double.init) ?? 120, 5)
 
     init() {
-        // No timer while asleep; refresh once on wake.
+        // No timer while asleep. On wake, give the network a few seconds before fetching.
         let center = NSWorkspace.shared.notificationCenter
         center.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.timer?.invalidate() }
         }
         center.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.start() }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) { MainActor.assumeIsolated { self?.start() } }
         }
         start()
     }
@@ -35,10 +36,12 @@ final class QuotaModel {
     func refresh() {
         guard !isRefreshing else { return }
         isRefreshing = true
+        let cached = launcher
         Task {
-            let result = await withCheckedContinuation { done in
-                DispatchQueue.global(qos: .utility).async { done.resume(returning: Self.run()) }
+            let (resolved, result) = await withCheckedContinuation { done in
+                DispatchQueue.global(qos: .utility).async { done.resume(returning: CLI.quota(cached)) }
             }
+            launcher = resolved
             isRefreshing = false
             switch result {
             case .success(let report): (self.report, error, updatedAt) = (report, nil, .now)
@@ -52,40 +55,76 @@ final class QuotaModel {
         if let updatedAt, Date.now.timeIntervalSince(updatedAt) < interval / 2 { return }
         refresh()
     }
+}
 
+/// Runs `provenant quota --json` off the main thread. The app never reads credentials itself.
+enum CLI {
     struct Failure: Error { let message: String }
+    struct Launcher: Sendable { let url: URL, path: String?, custom: Bool }
+    struct Output { let status: Int32, signalled: Bool, timedOut: Bool, out: Data, err: String }
 
-    /// Runs `provenant quota --json` off the main thread. The app never reads credentials itself.
-    nonisolated private static func run() -> Result<QuotaReport, Failure> {
-        let process = Process(), out = Pipe(), err = Pipe()
-        if let bin = ProcessInfo.processInfo.environment["PROVENANT_BIN"], !bin.isEmpty {
-            process.executableURL = URL(fileURLWithPath: bin)
-            process.arguments = ["quota", "--json"]
-        } else {   // a login shell supplies the user's PATH; exec so the watchdog kills provenant itself
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            process.arguments = ["-lc", "exec provenant quota --json"]
+    /// State shared by the reader, watchdog and calling threads.
+    final class Shared: @unchecked Sendable {
+        private let lock = NSLock()
+        private var err = Data(), timedOut = false
+        func set(err data: Data) { lock.withLock { err = data } }
+        func markTimedOut() { lock.withLock { timedOut = true } }
+        var snapshot: (Data, Bool) { lock.withLock { (err, timedOut) } }
+    }
+
+    static func quota(_ cached: Launcher?) -> (Launcher?, Result<QuotaReport, Failure>) {
+        guard let launcher = cached ?? resolve() else {
+            return (nil, .failure(Failure(message: "provenant is not on the login shell's PATH. Set PROVENANT_BIN.")))
         }
-        (process.standardOutput, process.standardError, process.standardInput) = (out, err, FileHandle.nullDevice)
-        do { try process.run() } catch { return .failure(Failure(message: "Could not start provenant: \(error.localizedDescription)")) }
+        let name = launcher.custom ? "PROVENANT_BIN (\(launcher.url.path))" : "provenant"
+        let run: Output
+        do { run = try exec(launcher.url, ["quota", "--json"], path: launcher.path, limit: 60) } catch {
+            return (nil, .failure(Failure(message: "Could not start \(name): \(error.localizedDescription)")))
+        }
+        let detail = run.err.split(separator: "\n").last.map(String.init) ?? "no error output"
+        if run.timedOut { return (launcher, .failure(Failure(message: "provenant quota timed out after 60 seconds."))) }
+        if run.signalled { return (launcher, .failure(Failure(message: "provenant quota was killed by signal \(run.status)."))) }
+        if run.status != 0 {   // 127 means the launcher no longer works: re-resolve next time
+            return (run.status == 127 ? nil : launcher,
+                    .failure(Failure(message: "\(name) exited with status \(run.status): \(detail)")))
+        }
+        return (launcher, decode(run.out))
+    }
 
-        // Drain both pipes before waiting, so neither can fill and block the child.
-        var errData = Data()
+    /// PROVENANT_BIN, or `provenant` and PATH from a zsh login shell, so its `env python3` shebang resolves.
+    static func resolve() -> Launcher? {
+        if let bin = ProcessInfo.processInfo.environment["PROVENANT_BIN"], !bin.isEmpty {
+            return Launcher(url: URL(fileURLWithPath: bin), path: nil, custom: true)
+        }
+        guard let run = try? exec(URL(fileURLWithPath: "/bin/zsh"), ["-lc", "command -v provenant && print -r -- \"$PATH\""],
+                                  path: nil, limit: 20), run.status == 0, !run.timedOut else { return nil }
+        let lines = String(decoding: run.out, as: UTF8.self).split(separator: "\n").map(String.init)
+        guard lines.count >= 2, lines[0].hasPrefix("/") else { return nil }
+        return Launcher(url: URL(fileURLWithPath: lines[0]), path: lines[1], custom: false)
+    }
+
+    /// Drains both pipes before waiting, so neither can fill and block the child; a watchdog ends overruns.
+    static func exec(_ url: URL, _ arguments: [String], path: String?, limit: Double) throws -> Output {
+        let process = Process(), out = Pipe(), err = Pipe(), shared = Shared()
+        process.executableURL = url
+        process.arguments = arguments
+        if let path { process.environment = ProcessInfo.processInfo.environment.merging(["PATH": path]) { $1 } }
+        (process.standardOutput, process.standardError, process.standardInput) = (out, err, FileHandle.nullDevice)
+        try process.run()
         let drained = DispatchGroup()
-        DispatchQueue.global(qos: .utility).async(group: drained) { errData = err.fileHandleForReading.readDataToEndOfFile() }
-        let watchdog = DispatchWorkItem { if process.isRunning { process.terminate() } }
-        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 60, execute: watchdog)
+        DispatchQueue.global(qos: .utility).async(group: drained) { shared.set(err: err.fileHandleForReading.readDataToEndOfFile()) }
+        let watchdog = DispatchWorkItem { if process.isRunning { shared.markTimedOut(); process.terminate() } }
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + limit, execute: watchdog)
         let data = out.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
         watchdog.cancel()
         drained.wait()
+        let (errData, timedOut) = shared.snapshot
+        return Output(status: process.terminationStatus, signalled: process.terminationReason == .uncaughtSignal,
+                      timedOut: timedOut, out: data, err: String(decoding: errData, as: UTF8.self))
+    }
 
-        let lastLine = String(decoding: errData, as: UTF8.self).split(separator: "\n").last.map(String.init)
-        switch (process.terminationReason, process.terminationStatus) {
-        case (.uncaughtSignal, _): return .failure(Failure(message: "provenant quota timed out after 60 seconds."))
-        case (_, 0): break
-        case (_, 127): return .failure(Failure(message: "provenant is not on the login shell's PATH. Set PROVENANT_BIN."))
-        case (_, let code): return .failure(Failure(message: "provenant quota exited with status \(code): \(lastLine ?? "no error output")"))
-        }
+    static func decode(_ data: Data) -> Result<QuotaReport, Failure> {
         do {
             let report = try QuotaReport.decode(data)
             guard report.schema == QuotaReport.schemaID else { return .failure(Failure(message: "Unsupported report schema \(report.schema).")) }
@@ -100,7 +139,7 @@ final class QuotaModel {
         }
     }
 
-    nonisolated private static func path(_ keys: [CodingKey]) -> String {
+    private static func path(_ keys: [CodingKey]) -> String {
         keys.isEmpty ? "document" : keys.map { $0.intValue.map { "[\($0)]" } ?? ".\($0.stringValue)" }.joined()
             .trimmingCharacters(in: ["."])
     }

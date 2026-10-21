@@ -13,12 +13,16 @@ struct QuotaReport: Decodable {
         let provider, account: String
         let plan, error: String?
         let active: Bool?
-        let status: String          // ok | stale | unavailable | unreported
+        let status: String          // ok | stale | unavailable | unreported | disabled
         let state: String           // worst window pace state, or "unreported"
         let observedAt: Date?
         let windows: [Window]
         let unreported: [String]?
         var hasReading: Bool { status == "ok" || status == "stale" }
+        /// Exhausted only while an exhausted window's reset is still ahead (or unknown).
+        func isExhausted(now: Date) -> Bool {
+            windows.contains { $0.pace.state == "exhausted" && ($0.resetAt.map { $0 > now } ?? true) }
+        }
     }
 
     struct Window: Decodable, Identifiable {
@@ -43,19 +47,17 @@ struct QuotaReport: Decodable {
         return try decoder.decode(QuotaReport.self, from: data)
     }
 
-    /// Accounts the router can still spend: active, with a reading, and not exhausted.
-    private var live: [Account] { accounts.filter { $0.active != false && $0.hasReading } }
-    var exhausted: [Account] { live.filter { $0.state == "exhausted" } }
+    func exhausted(now: Date) -> [Account] { accounts.filter { $0.hasReading && $0.isExhausted(now: now) } }
     var unavailable: [Account] { accounts.filter { !$0.hasReading } }
 
-    /// Highest used % across spendable windows. Unavailable accounts have no reading, a passed reset
-    /// makes a reading obsolete, and exhausted accounts are left out so a month-long exhaustion does not
-    /// pin the headline at 100% and hide the provider you can still use. It reads 100% only when every
-    /// live account is exhausted.
+    /// Highest used % across every enabled account (the report lists only those) that has a current
+    /// reading. Exhausted accounts are left out, so a month-long exhaustion does not pin the headline at
+    /// 100% and hide the accounts you can still use, and a window whose reset has passed no longer counts.
+    /// It reads 100% only when no account outside exhaustion has a current reading.
     func headline(now: Date) -> Double? {
-        let used = live.filter { $0.state != "exhausted" }.flatMap(\.windows)
+        let used = accounts.filter { $0.hasReading && !$0.isExhausted(now: now) }.flatMap(\.windows)
             .filter { ($0.resetAt ?? .distantFuture) > now }.compactMap(\.usedPercent)
-        return used.max() ?? (exhausted.isEmpty ? nil : 100)
+        return used.max() ?? (exhausted(now: now).isEmpty ? nil : 100)
     }
 
     var byProvider: [(provider: String, accounts: [Account])] {
@@ -90,13 +92,14 @@ enum Fmt {
     static func percent(_ value: Double) -> String { "\(Int(max(value, 0).rounded(.down)))%" }
 
     static func human(_ raw: String) -> String {
-        let text = raw.replacingOccurrences(of: "_", with: " ")
+        let text = raw.replacingOccurrences(of: "_", with: " ").replacingOccurrences(of: ":", with: " ")
         return text.prefix(1).uppercased() + text.dropFirst()
     }
 
     static func windowTitle(_ window: QuotaReport.Window) -> String {
-        guard let minutes = window.windowMinutes, minutes > 0, let span = length.string(from: minutes * 60)
-        else { return human(window.name) }
+        // Skip the length when the name already states it ("five_hour").
+        guard let minutes = window.windowMinutes, minutes > 0, let span = length.string(from: minutes * 60),
+              !["hour", "day", "week", "month"].contains(where: window.name.contains) else { return human(window.name) }
         return "\(human(window.name)) · \(span)"
     }
 

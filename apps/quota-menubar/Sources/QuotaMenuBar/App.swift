@@ -24,7 +24,7 @@ struct MenuBarLabel: View {
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(["Provider quota", used.map { "highest use \(Int($0.rounded(.down))) percent" },
-                             report.flatMap { $0.exhausted.isEmpty ? nil : "\($0.exhausted.count) exhausted" },
+                             report.map { $0.exhausted(now: .now).count }.flatMap { $0 > 0 ? "\($0) exhausted" : nil },
                              report.flatMap { $0.unavailable.isEmpty ? nil : "\($0.unavailable.count) unavailable" },
                              model.error.map { _ in "last refresh failed" }].compactMap { $0 }.joined(separator: ", "))
     }
@@ -43,7 +43,8 @@ struct QuotaPanel: View {
                         .padding(8).frame(maxWidth: .infinity, alignment: .leading)
                         .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
                 }
-                content(now: context.date)
+                ScrollView { content(now: context.date) }   // tall reports scroll instead of overrunning the screen
+                    .frame(maxHeight: 560).fixedSize(horizontal: false, vertical: true).scrollBounceBehavior(.basedOnSize)
                 Divider()
                 HStack {
                     Text(model.report?.host ?? "").foregroundStyle(.tertiary)
@@ -61,7 +62,7 @@ struct QuotaPanel: View {
     private func header(now: Date) -> some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 1) {
-                Text("Provider Quota").font(.headline)
+                Text("Provider Quota").font(.title3.weight(.semibold))
                 Text(model.updatedAt.map { "Updated \(Fmt.ago($0, now: now))" } ?? (model.error == nil ? "Loading…" : "Not updated")).note()
             }
             Spacer()
@@ -73,7 +74,11 @@ struct QuotaPanel: View {
         }
     }
 
-    @ViewBuilder private func content(now: Date) -> some View {
+    private func content(now: Date) -> some View {
+        VStack(alignment: .leading, spacing: 12) { groups(now: now) }
+    }
+
+    @ViewBuilder private func groups(now: Date) -> some View {
         if let report = model.report {
             if !report.enabled {
                 Text("Quota fetching is turned off in Provenant's quota settings.").note()
@@ -89,7 +94,7 @@ struct QuotaPanel: View {
                     HStack(alignment: .firstTextBaseline) {   // one account: its metadata shares the heading line
                         Text(Fmt.human(group.provider)).font(.headline)
                         Spacer()
-                        if single { Text(group.accounts[0].meta(named: false, now: now)).note() }
+                        if single { Text(group.accounts[0].meta(several: false, now: now)).note() }
                     }
                     if let shared { Label(shared, systemImage: "exclamationmark.circle").note() }
                     ForEach(group.accounts) { AccountView(account: $0, named: !single, showError: shared == nil, now: now) }
@@ -106,12 +111,22 @@ struct AccountView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if named { Text(account.meta(named: true, now: now)).note() }
+            if named {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(account.account).font(.callout.weight(.semibold))
+                    Spacer()
+                    Text(account.meta(several: true, now: now)).note()
+                }
+                .padding(.top, 2)
+            }
             if account.status == "stale" { Label("The latest fetch failed; this reading is older.", systemImage: "clock").note() }
             if !account.hasReading && showError { Label(account.error ?? "Not reported", systemImage: "exclamationmark.circle").note() }
-            ForEach(account.windows) { WindowRow(window: $0, now: now) }
-            if let missing = account.unreported, !missing.isEmpty {
-                Text("\(missing.map(Fmt.human).joined(separator: ", ")) not reported").note()
+            ForEach(account.windows.filter { $0.usedPercent != nil }) { WindowRow(window: $0, now: now) }
+            // Windows the provider did not report fold into one quiet line; missing never means 0%.
+            let missing = (account.unreported ?? []) + account.windows.filter { $0.usedPercent == nil }.map(\.name)
+            if !missing.isEmpty {
+                Text("\(missing.count) more \(missing.count == 1 ? "window" : "windows") not reported").note()
+                    .help(missing.map(Fmt.human).joined(separator: ", "))
             }
         }
         .accessibilityElement(children: .contain)
@@ -125,7 +140,7 @@ struct WindowRow: View {
     var body: some View {
         let used = window.usedPercent, expired = window.resetAt.map { $0 <= now } ?? false
         let state = expired ? "unknown" : window.pace.state
-        let runsOut = state == "deficit" ? Fmt.until(window.pace.runsOutAt, now: now) : nil
+        let runsOut = state == "exhausted" ? nil : Fmt.until(window.pace.runsOutAt, now: now)
         let left = expired ? "Reset passed; awaiting a new reading" : runsOut.map { "Runs out in \($0)" } ?? Fmt.paceLabel(state)
         let right = expired ? nil : Fmt.until(window.resetAt, now: now).map { "Resets in \($0)" }
         VStack(alignment: .leading, spacing: 5) {
@@ -158,10 +173,10 @@ struct WindowRow: View {
 }
 
 extension QuotaReport.Account {
-    /// Account name (when a provider has several), plan, inactivity, and the reading's age once over 30 minutes.
-    func meta(named: Bool, now: Date) -> String {
+    /// Plan, which account is in use (when a provider has several), and the reading's age once over 30 minutes.
+    func meta(several: Bool, now: Date) -> String {
         let observed = observedAt.flatMap { now.timeIntervalSince($0) > 1800 ? "Observed \(Fmt.ago($0, now: now))" : nil }
-        return [named ? account : nil, plan.map(Fmt.human), active == false ? "Inactive" : nil, observed]
+        return [plan.map(Fmt.human), several && active == true ? "In use" : nil, observed]
             .compactMap { $0 }.joined(separator: " · ")
     }
 }

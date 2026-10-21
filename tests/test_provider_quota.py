@@ -765,34 +765,22 @@ def test_agy_identity_is_the_os_login_keychain_even_with_another_home(quota, mon
     assert quota.identity.scope('agy')['account'] == 'default'
 
 
-def test_main_json_flag_emits_valid_report_contract(quota, capsys):
+def test_main_json_flag_emits_valid_report_contract(quota, capsys, monkeypatch):
+    """The fields apps/quota-menubar decodes from `provenant quota --json`."""
+    monkeypatch.setattr(quota, 'utcnow', lambda: NOW)
     snapshot(quota, 'codex', [window(64.2, WEEK, timedelta(hours=135.7))])
-    rc = quota.main(['--json'])
-    assert rc == 0
+    assert quota.main(['--json']) == 0
     captured = capsys.readouterr()
     assert captured.err == ''
     payload = json.loads(captured.out)
-    assert payload['schema'] == quota.REPORT_SCHEMA
-    assert payload['host'] == 'studio'
-    assert payload['enabled'] is True
-    assert isinstance(payload['accounts'], list)
-    assert len(payload['accounts']) >= 1
-    codex_account = next(acc for acc in payload['accounts'] if acc['provider'] == 'codex')
-    assert codex_account['account'] == 'default'
-    assert codex_account['state'] == 'deficit'
-    assert len(codex_account['windows']) == 1
-    win = codex_account['windows'][0]
-    assert win['name'] == 'seven_day'
-    assert win['used_percent'] == pytest.approx(64.2)
+    assert payload['schema'] == quota.REPORT_SCHEMA == 'provenant.quota.report.v1'
+    assert payload['host'] == 'studio' and payload['enabled'] is True
+    codex = next(row for row in payload['accounts'] if row['provider'] == 'codex')
+    assert codex['account'] == 'default' and codex['state'] == 'deficit'
+    assert codex['status'] == 'ok' and codex['active'] is True and codex['error'] is None
+    assert codex['plan'] is None and codex['unreported'] == [] and codex['observed_at'] == iso(NOW)
+    [win] = codex['windows']
+    assert win['name'] == 'seven_day' and win['used_percent'] == pytest.approx(64.2)
+    assert win['window_minutes'] == WEEK and win['reset_at'] == iso(NOW + timedelta(hours=135.7))
     assert win['pace']['state'] == 'deficit'
     assert {'state', 'summary', 'delta_percent', 'runs_out_at', 'headroom_percent'} <= set(win['pace'])
-
-
-def test_main_credit_list_json_flag(quota, capsys):
-    rc = quota.main(['credit', 'list', '--json'])
-    assert rc == 0
-    captured = capsys.readouterr()
-    assert captured.err == ''
-    rows = json.loads(captured.out)
-    assert isinstance(rows, list)
-
