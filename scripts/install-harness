@@ -454,6 +454,21 @@ else
   echo "routing refresh skipped: no product snapshot; run install-harness --platform all --refresh-routing"
 fi
 
+# True when following the symlink chain from $1 visits the directory entry $2.
+# Entries compare by canonical parent directory, so aliases and ./ forms match.
+link_chain_passes_through() {
+  local current="$1" target entry hops=0
+  entry="$(CDPATH= cd -- "$(dirname "$2")" 2>/dev/null && pwd -P)/$(basename "$2")" || return 1
+  while [[ -L "$current" && $hops -lt 40 ]]; do
+    target="$(readlink "$current")"
+    [[ "$target" == /* ]] || target="$(dirname "$current")/$target"
+    current="$(CDPATH= cd -- "$(dirname "$target")" 2>/dev/null && pwd -P)/$(basename "$target")" || return 1
+    [[ "$current" == "$entry" ]] && return 0
+    hops=$((hops + 1))
+  done
+  return 1
+}
+
 install_primary() {
   select_primary "$1"
   mkdir -p "$platform_home" || return $?
@@ -475,7 +490,7 @@ install_primary() {
   # product root) or an AGENTS.md that CLAUDE.md links through.
   if [[ "$PLATFORM" == "claude" ]] \
     && ! [[ "$platform_home" -ef "$instance_root" || "$platform_home" -ef "$PRODUCT_ROOT" ]] \
-    && ! [[ -L "$instructions" && "$(readlink "$instructions")" =~ ^(\./)?AGENTS\.md$|^"$platform_home"/AGENTS\.md$ ]]; then
+    && ! link_chain_passes_through "$instructions" "$platform_home/AGENTS.md"; then
     local duplicate_agents="$platform_home/AGENTS.md"
     if [[ -L "$duplicate_agents" && ( "$duplicate_agents" -ef "$instance_doctrine" || "$duplicate_agents" -ef "$PRODUCT_ROOT/AGENTS.md" ) ]]; then
       rm -f "$duplicate_agents"
