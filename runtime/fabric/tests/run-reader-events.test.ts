@@ -8,13 +8,14 @@ import { afterEach, expect, it, vi } from "vitest";
 import { Store } from "../src/store.js";
 import { databasePath } from "../src/identity.js";
 import { readRuns, readEvents } from "../src/run-reader.js";
+import { scratchRoot } from "./helpers/temp-root.js";
 
 const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 function fixture() {
   // Canonical, as dispatch writes projects: macOS tmpdir is a /var -> /private/var symlink.
-  const root = realpathSync(mkdtempSync(join(tmpdir(), "fabric-reader-")));
+  const root = realpathSync(scratchRoot("fabric-reader-"));
   roots.push(root);
   return root;
 }

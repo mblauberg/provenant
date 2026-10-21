@@ -2,14 +2,14 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createRequire } from "node:module";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { expect, it } from "vitest";
+import { scratchRoot } from "./helpers/temp-root.js";
 
 function tempRoot(prefix: string) {
   // Project fixtures own their Git roots, so scratch may live in a worktree.
-  return resolve(mkdtempSync(join(tmpdir(), prefix)));
+  return resolve(scratchRoot(prefix));
 }
 
 it.each(["codex", "agy", "claude"])("exposes host list and peer doctor through the %s MCP seat", async (seat) => {

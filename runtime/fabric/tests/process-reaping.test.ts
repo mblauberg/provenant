@@ -1,10 +1,10 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { once } from "node:events";
 import * as ps from "../src/ps.mjs";
 import { afterEach, expect, it, vi } from "vitest";
+import { scratchRoot } from "./helpers/temp-root.js";
 import { listRecordedRuns, processStartedAt, reapAttemptRuns, reapOrphanedRuns, signalRecordedProcess, statusRows,
   signalRecordedRun, terminateRecordedRun, writeOwnerRecord } from "../src/run-registry.js";
 
@@ -12,7 +12,7 @@ const directories: string[] = [];
 const children: ChildProcess[] = [];
 
 it.each(["status", "startup"])("%s persists a SIGKILL'd attempt as lost", async (hook) => {
-  const workspace = mkdtempSync(join(tmpdir(), "fabric-attempt-reaping-"));
+  const workspace = scratchRoot("fabric-attempt-reaping-");
   directories.push(workspace);
   const runDir = join(workspace, ".agent-run/runs/20261021-1200-dispatch-killed-abcdef");
   const attemptDir = join(runDir, "tasks/killed/attempt-001");
@@ -61,7 +61,7 @@ afterEach(async () => {
 
 it.each(["EPERM", "EACCES", "unknown_start"])(
   "does not reap a live lane when its host probe is %s", async (restriction) => {
-    const workspace = mkdtempSync(join(tmpdir(), "fabric-reaping-"));
+    const workspace = scratchRoot("fabric-reaping-");
     directories.push(workspace);
     const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-live-lane-abcdef");
     mkdirSync(runDir, { recursive: true });
@@ -136,7 +136,7 @@ it.each(["shared-host", "unavailable-census", "partial-census", "host-omitted"])
 
 it.each(["cancel_requested", "orphan_reaper"])(
   "%s signals the verified provider individually despite its own process group", async (source) => {
-    const workspace = mkdtempSync(join(tmpdir(), "fabric-reaping-"));
+    const workspace = scratchRoot("fabric-reaping-");
     directories.push(workspace);
     const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-controller-abcdef");
     mkdirSync(runDir, { recursive: true });
@@ -167,7 +167,7 @@ it.each(["cancel_requested", "orphan_reaper"])(
 );
 
 it("records the orphan reaper source before terminating an owned process", async () => {
-  const workspace = mkdtempSync(join(tmpdir(), "fabric-reaping-"));
+  const workspace = scratchRoot("fabric-reaping-");
   directories.push(workspace);
   const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-owned-abcdef");
   mkdirSync(runDir, { recursive: true });
