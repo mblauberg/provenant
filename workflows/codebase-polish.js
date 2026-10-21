@@ -62,8 +62,10 @@ export const meta = {
 const RECON_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['runDir', 'sliceRoot', 'isGitRepo', 'gitCwd', 'lintCmd', 'testCmd', 'formatCmd', 'designSystem', 'protectedPaths', 'notes', 'modelRoutes'],
+  required: ['effectiveRisk', 'requiresUserAcceptance', 'runDir', 'sliceRoot', 'isGitRepo', 'gitCwd', 'lintCmd', 'testCmd', 'formatCmd', 'designSystem', 'protectedPaths', 'notes', 'modelRoutes'],
   properties: {
+    effectiveRisk: { type: 'string', enum: ['routine', 'substantial', 'crucial', 'terminal'] },
+    requiresUserAcceptance: { type: 'boolean' },
     runDir: { type: 'string', description: 'Absolute path to the created run dir' },
     sliceRoot: { type: 'string', description: 'Absolute path to the slice being polished (from args.path|package)' },
     isGitRepo: { type: 'boolean', description: 'Whether sliceRoot sits inside a git repo' },
@@ -286,6 +288,7 @@ const recon = await agent(
     '   - design system: look for a design-system/ dir, design tokens, or a *-design skill. If present, capture its tokens path + one-line rules to honour.',
     '   - whether the slice is inside a git repo (for cross-family dispatch cwd). codex refuses non-git dirs and cf_dispatch does NOT forward a git-skip flag, so if a nearby git dir exists set gitCwd to it (the cf reviewer will cd there); only if NO git dir is reachable set gitCwd=null (codex then fails closed and the chain fails over to cursor).',
     '   - expand the protected-paths list with CONCRETE globs for this repo (these become recon.protectedPaths, the load-bearing per-repo protected list).',
+    `Read the approved scope and risk policy; return effectiveRisk and requiresUserAcceptance. Explicit input: risk=${__args.risk || 'unspecified'}, requiresUserAcceptance=${__args.requiresUserAcceptance === true}. If unavailable, do not claim verified acceptance metadata.`,
     '3. Resolve concrete Claude models with `provenant route resolve` for flagship/lead, flagship/critical-review, workhorse/worker, and scout/scout. Return resolved_model values in modelRoutes.',
     '',
     NEVER_AUTOEDIT,
@@ -301,6 +304,10 @@ if (!recon || !recon.runDir) {
 }
 const runDir = recon.runDir
 const models = recon.modelRoutes
+const acceptanceMetadataVerified = ['routine', 'substantial', 'crucial', 'terminal'].includes(recon.effectiveRisk) &&
+  typeof recon.requiresUserAcceptance === 'boolean'
+const requiresExplicitAcceptance = __args.risk === 'terminal' || recon.effectiveRisk === 'terminal' ||
+  __args.requiresUserAcceptance === true || recon.requiresUserAcceptance === true
 const designLine = recon.designSystem && recon.designSystem.present
   ? `Honour the design system at ${recon.designSystem.tokensPath || '(tokens path unknown)'}: ${recon.designSystem.rules || 'use tokens, no raw values'}.`
   : 'No design system detected; skip design-token nits.'
@@ -442,12 +449,13 @@ for (let w = 0; w < candidates.length; w += REVIEW_WAVE) {
   for (const wr of waveResults) reviewed.push(wr)
 }
 
-// Pair each candidate with its [claudeReview, cfReview] (drop dead items).
+// Keep candidates without the required primary review pending.
 const pairs = []
+const missingReview = []
 for (let i = 0; i < candidates.length; i++) {
-  const r = reviewed[i]
-  if (!r) continue
+  const r = reviewed[i] || []
   const [claudeReview, cfReview] = r
+  if (!claudeReview) missingReview.push(candidates[i].id)
   if (!claudeReview && !cfReview) continue
   pairs.push({ candidate: candidates[i], claudeReview, cfReview })
 }
@@ -546,9 +554,15 @@ const out = {
   slice: recon.sliceRoot,
   applied: (applyResult && applyResult.applied) || [],
   reverted: (applyResult && applyResult.reverted) || [],
-  escalated: (applyResult && applyResult.escalated) || escalate.map((d) => d.id),
+  escalated: [...new Set([...missingReview, ...escalate.map((d) => d.id), ...((applyResult && applyResult.escalated) || [])])],
   readiness: (applyResult && applyResult.redAmberGreen) || 'amber',
   report: (applyResult && applyResult.reportPath) || `${runDir}/POLISH_REPORT.md`,
+}
+if (acceptanceMetadataVerified && !requiresExplicitAcceptance && out.escalated.length === 0 && out.reverted.length === 0 &&
+    out.readiness === 'green' && out.applied.length === autoApply.length &&
+    new Set(out.applied).size === out.applied.length && autoApply.every(d => out.applied.includes(d.id))) {
+  out.status = 'complete'
+  out.acceptanceBasis = 'checks-and-review'
 }
 log(`codebase-polish done: applied=${out.applied.length} reverted=${out.reverted.length} escalated=${out.escalated.length} readiness=${out.readiness}. Report: ${out.report}`)
 return out

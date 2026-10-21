@@ -388,7 +388,8 @@ def test_git_artifact_shape_rejects_extra_digest_fields_by_presence(tmp_path, va
 
     with pytest.raises(DELIVERY.Invalid, match="must use commit and tree without digest fields"):
         DELIVERY.validate(run, ROOT, workspace_root=tmp_path, verify_hashes=True)
-def test_binder_materialises_the_post_merge_chain_without_advancing_acceptance(tmp_path):
+@pytest.mark.parametrize("acceptance_mode", ["bind-only", "project-landing", "scope"])
+def test_binder_binds_merged_evidence_before_project_landing_acceptance(tmp_path, acceptance_mode):
     run = merged_software_delivery(tmp_path)
     pr = json.loads((tmp_path / "evidence/github-pr.json").read_text())
     ci = json.loads((tmp_path / "evidence/github-ci.json").read_text())
@@ -406,6 +407,8 @@ def test_binder_materialises_the_post_merge_chain_without_advancing_acceptance(t
     ]
     del run["software_delivery"]
     before_acceptance(run)
+    if acceptance_mode == "scope":
+        run["intent"]["requires_user_acceptance"] = True
     for artifact_id in generated - {"merged-source"}:
         (tmp_path / "evidence" / f"{artifact_id}.json").unlink()
     receipt = tmp_path / "RUN.json"
@@ -447,6 +450,8 @@ def test_binder_materialises_the_post_merge_chain_without_advancing_acceptance(t
         "--pr-number", str(pr["number"]),
         *[argument for source in review_sources for argument in ("--review-artifact", str(source))],
     ]
+    if acceptance_mode != "bind-only":
+        command.append("--accept-as-project-landing")
     denied_receipt = receipt.read_bytes()
     denied = subprocess.run(command, env=environment, capture_output=True, text=True)
     assert denied.returncode == 1
@@ -493,6 +498,11 @@ def test_binder_materialises_the_post_merge_chain_without_advancing_acceptance(t
     assert sorted((first.returncode, second.returncode)) == [0, 1], results
     bound = json.loads(receipt.read_text())
     assert bound["human_gates"]["acceptance"]["status"] == "pending"
+    if acceptance_mode == "project-landing":
+        assert bound["delivery_acceptance"]["basis"] == "project-landing"
+        assert bound["checkpoint"]["current_slice"] == "accepted"
+    else:
+        assert "delivery_acceptance" not in bound
     merged_source = next(item for item in bound["artifacts"] if item["id"] == "merged-source")
     assert merged_source["media_type"] == "application/x-git-revision"
     assert "digest" not in merged_source
