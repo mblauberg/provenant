@@ -605,9 +605,34 @@ class LaneFederation:
                 'digest': 'local fallback: hosts.json invalid_config: ' + self.config_error}
         return result
 
+    def lift_task_hosts(self, request):
+        """A batch runs on one host: lift a uniform per-task host, refuse a mixed one."""
+        tasks = request.get('tasks')
+        if not isinstance(tasks, list) or not any(isinstance(task, dict) and task.get('host') for task in tasks):
+            return request
+        hosts = {task.get('host') or request.get('host') if isinstance(task, dict) else None for task in tasks}
+        if len(hosts) != 1 or None in hosts:
+            raise self.h.HostError('host_conflict', 'A batch runs on one host: pass one host at the top level, '
+                'or the same host on every task (saw ' + ', '.join(sorted(str(host) for host in hosts)) + ')')
+        return {**request, 'host': hosts.pop(), 'tasks': [{k: v for k, v in task.items() if k != 'host'} for task in tasks]}
+
+    def request_project(self, cwd, request):
+        """The project a request names by its own cwd (a linked worktree maps to its primary), else the chair's."""
+        chair = self.h.project_identity(cwd)
+        if isinstance(request.get('cwd'), str) and request['cwd']:
+            path = Path(request['cwd']).expanduser()
+            try:
+                named = self.h.project_identity(path if path.is_absolute() else Path(cwd or Path.cwd()) / path)
+            except self.h.HostError:
+                return chair
+            if named in self.config.projects:
+                return named
+        return chair
+
     def placed_call(self, action, cwd, request):
         if os.environ.get('PROVENANT_HOST_LOCAL_ONLY') == '1':
             return {'local': True}
+        request = self.lift_task_hosts(request)
         def local_result(value):
             if action == 'fetch':
                 raise self.h.HostError('remote_host_required', 'Fetch requires a remote writer identifier qualified with its host')
@@ -641,7 +666,7 @@ class LaneFederation:
                 normalized['ids'] = ids
             return local_result({'local': True, 'input': {key: value for key, value in normalized.items() if key not in {'host', 'operation_id'}}})
         try:
-            project = self.h.project_identity(cwd)
+            project = self.request_project(cwd, request)
         except self.h.HostError as exc:
             selectors = [request.get(key) for key in ('id', 'resume', 'handoff', 'session', 'task_id')] + (request.get('ids') or [])
             if (exc.code != 'invalid_project_path' or request.get('host') not in {None, self.config.local_host}
