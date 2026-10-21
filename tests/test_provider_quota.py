@@ -270,6 +270,47 @@ def test_claude_dollar_windows_and_usage_credit_balance(quota):
         'expires_at': None, 'source': 'provider'}
 
 
+def claude_limit(kind, group, percent, resets_at, active=True, scope=None):
+    return {'kind': kind, 'group': group, 'percent': percent, 'severity': 'normal', 'resets_at': resets_at,
+            'scope': scope, 'is_active': active}
+
+
+def test_claude_limits_take_the_length_of_the_named_window_they_repeat(quota, monkeypatch):
+    # The live anese and pro shapes from 2026-10-22: `limits` repeat named windows without a length.
+    budget = {'utilization': 54.51754, 'resets_at': '2026-11-05T07:59:00+00:00', 'limit_dollars': 250,
+              'used_dollars': 136.29385, 'remaining_dollars': 113.70615}
+    anese = {'five_hour': {'utilization': 10.0, 'resets_at': '2026-10-22T15:00:00.280268+00:00'},
+             'seven_day': {'utilization': 3.0, 'resets_at': '2026-10-28T10:00:00.280288+00:00'},
+             'iguana_necktie': budget, 'seven_day_opus': None,
+             'limits': [claude_limit('session', 'session', 10, '2026-10-22T15:00:00.280268+00:00'),
+                        claude_limit('weekly_all', 'weekly', 3, '2026-10-28T10:00:00.280288+00:00', active=False),
+                        claude_limit('weekly_scoped', 'weekly', 0, '2026-10-28T10:00:00+00:00', active=False,
+                                     scope={'model': {'id': 'fable', 'display_name': 'Fable'}, 'surface': None})]}
+    pro = {'five_hour': {'utilization': 0.0, 'resets_at': None},
+           'seven_day': {'utilization': 48.0, 'resets_at': '2026-10-25T19:59:59.866880+00:00'},
+           'limits': [claude_limit('session', 'session', 0, None, active=False),
+                      claude_limit('weekly_all', 'weekly', 48, '2026-10-25T19:59:59.866880+00:00')]}
+    claude = quota.provider('claude')
+    lengths = {name: {row['name']: row['window_minutes'] for row in claude.parse(payload)['windows']}
+               for name, payload in (('anese', anese), ('pro', pro))}
+    assert lengths['anese'] == {'five_hour': 300, 'seven_day': WEEK, 'iguana_necktie': None, 'session:1': 300}
+    assert lengths['pro'] == {'five_hour': 300, 'seven_day': WEEK, 'weekly_all:2': WEEK}
+    replies = {'anese': anese, 'pro': pro}
+    monkeypatch.setattr(quota, 'fetch', lambda account, now: claude.parse(replies[account.label]))
+    values = [quota.refresh(quota.Account('claude', label, Path('/nowhere') / label, False), NOW, force=True)
+              for label in replies]
+    states = {row['account']: row['state'] for row in quota.report(values, NOW)['accounts']}
+    assert states == {'anese': 'reserve', 'pro': 'reserve'}
+    # An entry that repeats no named window keeps no length, is shown, and never sets state.
+    unmatched = {**pro, 'limits': [claude_limit('weekly_all', 'weekly', 90, '2026-10-26T00:00:00+00:00')]}
+    row = next(row for row in claude.parse(unmatched)['windows'] if row['name'] == 'weekly_all:1')
+    assert row['window_minutes'] is None and row['advisory'] is True
+    replies['pro'] = unmatched
+    value = quota.refresh(quota.Account('claude', 'pro', Path('/nowhere/pro'), False), NOW, force=True)
+    account = quota.report([value], NOW)['accounts'][0]
+    assert 'weekly_all:1' in {window['name'] for window in account['windows']} and account['state'] == 'reserve'
+
+
 def test_claude_refuses_expiring_credentials_without_calling_the_endpoint(quota, monkeypatch, tmp_path):
     identity = tmp_path / 'claude-c'
     identity.mkdir()

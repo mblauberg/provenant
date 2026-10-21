@@ -341,7 +341,8 @@ def normalise_window(raw):
         minutes = int(minutes)
     return {'name': name, 'raw_kind': str(raw['raw_kind']) if raw.get('raw_kind') is not None else None,
             'used_percent': round(max(0.0, min(100.0, used)), 2), 'window_minutes': minutes,
-            'reset_at': iso(reset), 'window_start': iso(start), **window_amounts(raw)}
+            'reset_at': iso(reset), 'window_start': iso(start), **window_amounts(raw),
+            **({'advisory': True} if raw.get('advisory') is True else {})}
 
 
 def _code(value, pattern):
@@ -619,11 +620,16 @@ def pace(window, now):
     return {**result, 'state': state, 'summary': f'{lead}; {tail}'}
 
 
+def sets_state(row):
+    """An untimed budget, such as cloud session credits, or a window its provider marks advisory is shown but
+    never sets the account's state: its pace is always unknown."""
+    return not row.get('advisory') and not (row.get('limit_amount') and not row.get('window_minutes'))
+
+
 def governing(rows):
-    """The window that constrains the account most. An untimed budget, such as cloud session credits, is shown
-    but never sets the account's state: its pace is always unknown."""
-    timed = [row for row in rows if not (row.get('limit_amount') and not row.get('window_minutes'))]
-    return min(timed, key=lambda row: (SEVERITY.index(row['pace']['state']), -row['used_percent']), default=None)
+    """The window that constrains the account most."""
+    return min(filter(sets_state, rows), key=lambda row: (SEVERITY.index(row['pace']['state']), -row['used_percent']),
+               default=None)
 
 
 def credits(*, raw=False):
@@ -772,7 +778,8 @@ def route_states(now=None):
             continue
         module = provider(name)
         row = describe(value, None, now)
-        exhausted = [window['reset_at'] for window in row['windows'] if window['pace']['state'] == 'exhausted']
+        exhausted = [window['reset_at'] for window in row['windows']
+                     if window['pace']['state'] == 'exhausted' and sets_state(window)]
         states[name] = {'adapter': getattr(module, 'ADAPTER', None), 'account': label, 'host': telemetry_host(), 'state': row['state'],
                         'summary': row['summary'], 'observed_at': value.get('observed_at'),
                         'cooling_until': max(exhausted) if exhausted and all(exhausted) else None}

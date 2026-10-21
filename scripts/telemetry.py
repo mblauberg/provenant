@@ -818,7 +818,7 @@ def public_snapshot(value):
     quota = quota_owner()
     result['windows'] = [{**{key: row[key] for key in ('name', 'used_percent', 'window_minutes', 'reset_at',
                                                      'raw_kind', 'window_start') if key in row},
-                          **quota.window_amounts(row)}
+                          **quota.window_amounts(row), **({'advisory': True} if row.get('advisory') is True else {})}
                          for row in value.get('windows', []) if isinstance(row, dict)]
     for key, extra in (('usage_credits', quota.normalise_usage_credits(value.get('usage_credits'))),
                        ('resets', quota.normalise_resets(value.get('resets')))):
