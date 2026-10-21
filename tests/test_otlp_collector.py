@@ -7,6 +7,7 @@ import signal
 import socket
 import stat
 import subprocess
+import sys
 import time
 from contextlib import ExitStack
 from datetime import datetime, timezone
@@ -17,7 +18,10 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / 'tools/otlp-collector/otlp-collector.swift'
 
-pytestmark = pytest.mark.skipif(shutil.which('swiftc') is None, reason='swiftc not available')
+pytestmark = pytest.mark.skipif(
+    sys.platform != 'darwin' or shutil.which('swiftc') is None,
+    reason='collector uses launchd and Darwin APIs; needs macOS swiftc',
+)
 
 
 @pytest.fixture(scope='module')
