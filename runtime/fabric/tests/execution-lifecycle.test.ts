@@ -28,6 +28,7 @@ import { Store } from "../src/store.js";
 import {
   listRecordedRuns,
   fabricStatus,
+  fabricOutput,
   OWNER_RECORD_NAME,
   processMatches,
   processStartedAt,
@@ -2139,6 +2140,47 @@ it('runs a read-only dispatch in another registered project and records it for t
  expect(realpathSync(path)).toContain(realpathSync(join(workspace,'.agent-run/runs')));
  expect(await fabricStatus(workspace,String(result.id))).toMatchObject({status:'ok'});
  expect(JSON.parse(fabricCli(['lanes','--json',String(result.id)])).runs).toEqual([expect.objectContaining({run_id:result.id,task_id:'cross-project',status:'ok'})]);
+});
+
+it('dispatches from project A with cwd in B and finds pointed lane via fabric_status and fabric_output in B while ignoring forged pointers', async () => {
+ const project = join(temporaryDirectory, 'target-project-b');
+ execFileSync('git', ['init', '-q', project]);
+ execFileSync('git', ['-C', project, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
+  'commit', '-q', '--allow-empty', '-m', 'fixture']);
+ const cwd = join(project, 'src');
+ mkdirSync(cwd, { recursive: true });
+ const store = new Store(databasePath(ownerEnvironment));
+ store.announce(identity);
+ store.announce({ ...identity, project, cwd });
+ store.close();
+ const caller = { ...identity, registeredProjects: [workspace, project] };
+ const result = await dispatchConfiguredProvider(
+  { adapter: 'codex', mode: 'read_only', cwd, prompt: 'fixture', task_id: 'pointed-lane', wait_seconds: 5 },
+  caller, new AbortController().signal, ownerEnvironment,
+ );
+ expect(result.status, JSON.stringify(result)).toBe('ok');
+
+ // In B, fabric_status with and without id finds the lane
+ const statusWithoutId = await fabricStatus(project);
+ expect(statusWithoutId.runs).toEqual([expect.objectContaining({ task_id: 'pointed-lane', status: 'ok' })]);
+ const statusWithId = await fabricStatus(project, 'pointed-lane');
+ expect(statusWithId).toMatchObject({ task_id: 'pointed-lane', status: 'ok' });
+
+ // In B, fabric_output reads its result
+ const output = await fabricOutput(project, { id: 'pointed-lane' });
+ expect(output).toMatchObject({ id: 'pointed-lane', digest: expect.any(String) });
+
+ // A forged pointer imports nothing
+ const pointersDir = join(project, '.agent-run/runs/pointers');
+ writeFileSync(join(pointersDir, 'forged.json'), JSON.stringify({
+  source_project: '/foreign/proj',
+  run_dir: join(workspace, '.agent-run/runs/20261021-1200-dispatch-forged-abcdef'),
+  task_ids: ['forged-lane'],
+ }));
+ const forgedStatus = await fabricStatus(project, 'forged-lane');
+ expect(forgedStatus).toMatchObject({ status: 'rejected' });
+ const runsAfterForged = (await fabricStatus(project)).runs;
+ expect(runsAfterForged.some((r: any) => r.task_id === 'forged-lane')).toBe(false);
 });
 
 it('resumes a cross-project run with its saved read roots, and refuses one whose root has moved', async () => {
