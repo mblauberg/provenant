@@ -51,12 +51,13 @@ FIELD_TYPES: dict[str, tuple[type | None, ...]] = {
     "degradation": (dict, None),
     "project_policy": (dict,),
     "software_delivery": (dict,),
+    "delivery_acceptance": (dict,),
 }
 
 # `fabric_relationships` predates the flat receipt; `project_policy` and
 # `software_delivery` appear only for the runs that bind them.
 OPTIONAL_FIELDS = frozenset({
-    "fabric_relationships", "project_policy", "software_delivery",
+    "fabric_relationships", "project_policy", "software_delivery", "delivery_acceptance",
 })
 REQUIRED_FIELDS = frozenset(FIELD_TYPES) - OPTIONAL_FIELDS
 KNOWN_FIELDS = frozenset(FIELD_TYPES)
@@ -150,7 +151,9 @@ def intent_approved(run: dict[str, Any]) -> bool:
 
 
 def acceptance_approved(run: dict[str, Any]) -> bool:
-    return gate_approved(run, "human_gates", "acceptance")
+    """Activate assurance for every claimed acceptance; validation proves its basis."""
+    return (gate_approved(run, "human_gates", "acceptance")
+            or "delivery_acceptance" in run)
 
 
 # Timestamp fields a receipt records. The newest of them is the run's clock:

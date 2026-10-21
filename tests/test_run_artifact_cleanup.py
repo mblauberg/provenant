@@ -35,7 +35,7 @@ def test_cleanup_rejects_a_root_level_legacy_delivery_receipt(tmp_path):
         module.cleanup(receipt, workspace_root=tmp_path)
 
 
-def make_run(tmp_path):
+def make_run(tmp_path, acceptance_basis=None):
     run = tmp_path / ".agent-run" / "runs" / "20260923-1000-delivery-clean-a1b2c3"
     run.mkdir(parents=True)
     ref_path = ROOT / "skills" / "deliver" / "scripts" / "reference_runs.py"
@@ -43,7 +43,7 @@ def make_run(tmp_path):
     reference = importlib.util.module_from_spec(spec)
     assert spec.loader
     spec.loader.exec_module(reference)
-    receipt = reference.make_reference_run("research", ROOT)
+    receipt = reference.make_reference_run("research", ROOT, acceptance_basis=acceptance_basis)
     assert not any(key.startswith("cost:") for key in receipt["authority"]["budget"])
     receipt["run_id"] = "CLEAN-1"
     receipt["fabric_relationships"]["delivery_run_id"] = "CLEAN-1"
@@ -66,6 +66,8 @@ def make_run(tmp_path):
                     evidence["source_paths"].append(route_path)
     receipt["checkpoint"].update({"current_slice": "closed", "next_action": "authorised cleanup", "in_flight": []})
     receipt["human_gates"]["acceptance"] = {"status": "approved", "approver": "human", "evidence": "acceptance-approval"}
+    if acceptance_basis in {"checks-and-review", "project-landing"}:
+        receipt["human_gates"]["acceptance"] = {"status": "pending", "approver": "", "evidence": ""}
     receipt["human_gates"]["release"] = {"status": "approved", "approver": "human", "evidence": "release-approval"}
     receipt["evidence"].append({"id": "observation-result", "kind": "observation", "gate": "citation-audit", "status": "pass", "method": "observed comparable use", "artifact_id": "evidence-bundle", "source_paths": ["input"], "observed_at": "2026-07-10T12:00:00Z", "measured_value": 1})
     receipt["observation"].update({"status": "pass", "started_at": "2026-07-10T00:11:00Z", "ended_at": "2026-07-11T00:11:00Z", "observed_events": 1, "evidence_ids": ["observation-result"]})
@@ -78,9 +80,10 @@ def make_run(tmp_path):
     return run
 
 
-def test_plan_is_read_only_and_names_only_expired_manifest_owned_scratch(tmp_path):
+@pytest.mark.parametrize("acceptance_basis", [None, "checks-and-review", "project-landing", "user"])
+def test_plan_is_read_only_and_names_only_expired_manifest_owned_scratch(tmp_path, acceptance_basis):
     module = load_module()
-    run = make_run(tmp_path)
+    run = make_run(tmp_path, acceptance_basis)
     receipt = module.cleanup(run / "RUN.json", workspace_root=run.parent, now=datetime(2026, 7, 10, tzinfo=timezone.utc))
     assert receipt["mode"] == "plan"
     assert receipt["eligible"] == [f"{run.name}/scratch.tmp"]
@@ -187,3 +190,16 @@ def test_execute_reports_partial_failure_instead_of_raising_traceback(tmp_path, 
     assert receipt["removed"] == []
     assert "simulated race" in receipt["error"]
     assert (run / "scratch.tmp").exists()
+
+
+def test_evidence_acceptance_keeps_release_and_cleanup_authority_guards(tmp_path):
+    module = load_module()
+    run = make_run(tmp_path, "checks-and-review")
+    with pytest.raises(module.CleanupError, match="explicit cleanup authority"):
+        module.cleanup(run / "RUN.json", workspace_root=run.parent, execute=True)
+    receipt = json.loads((run / "RUN.json").read_text())
+    receipt["human_gates"]["release"] = {"status": "pending", "approver": "", "evidence": ""}
+    receipt["observation"]["status"] = "planned"
+    (run / "RUN.json").write_text(json.dumps(receipt))
+    with pytest.raises(module.CleanupError, match="approved release gate"):
+        module.cleanup(run / "RUN.json", workspace_root=run.parent)
