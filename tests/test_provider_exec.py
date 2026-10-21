@@ -3892,6 +3892,8 @@ def test_signal_receipt_does_not_attribute_mismatching_or_linked_control_telemet
     provider = []
 
     def interrupt(_timestamp):
+        if provider[0].poll() is not None or (tmp_path / "termination-request.json").is_symlink():
+            return  # on_progress fires per output chunk or CPU change; symlink_to would raise on a repeat.
         request = {"run_token": "current", "signal": "SIGTERM", "source": "orphan_reaper",
                    "sender_pid": os.getpid(), "provider_pid": provider[0].pid, "requested_at": module.now()}
         if invalid != "symlink":

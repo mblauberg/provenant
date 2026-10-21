@@ -406,6 +406,35 @@ def test_cancel_waits_through_attempt_sidecar_gap(tmp_path: Path) -> None:
     assert record["status"] == "failed"
 
 
+def test_attempt_terminal_tolerates_receipt_renamed_before_its_digest_sidecar(tmp_path: Path) -> None:
+    run_dir = make_run(tmp_path)
+    attempt = write_attempt(run_dir, status="failed", result=None)
+    sidecar = attempt.with_name("attempt.sha256")
+    fresh = sidecar.read_bytes()
+    sidecar.write_bytes(b"sha256:" + b"0" * 64 + b"  attempt.json\n")  # previous receipt's digest
+    module_spec = importlib.util.spec_from_file_location("run_controls_stale_sidecar", SCRIPT)
+    assert module_spec and module_spec.loader
+    module = importlib.util.module_from_spec(module_spec)
+    module_spec.loader.exec_module(module)
+
+    def publish_sidecar() -> None:
+        time.sleep(0.1)
+        sidecar.write_bytes(fresh)
+
+    publisher = threading.Thread(target=publish_sidecar)
+    publisher.start()
+    try:
+        record = module._attempt_terminal(run_dir, "task-1", "attempt-001")
+    finally:
+        publisher.join()
+    assert record is not None and record["status"] == "failed"
+
+    sidecar.write_bytes(b"sha256:" + b"0" * 64 + b"  attempt.json\n")
+    module.DIGEST_SETTLE_SECONDS = 0.1
+    with pytest.raises(module.ControlError, match="attempt evidence is invalid"):
+        module._attempt_terminal(run_dir, "task-1", "attempt-001")
+
+
 def test_cancel_waits_through_late_summary_bundle_completion(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     run_dir = make_run(tmp_path)
     attempt = write_attempt(run_dir, status="failed", result=None)
