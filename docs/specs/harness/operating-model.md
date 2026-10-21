@@ -1,7 +1,7 @@
 # Spec: harness operating model for routing, cache, quota and telemetry
 
-Status: **draft r2** for user acceptance (grilled 2026-10-21; revised after a
-`codex/gpt-6.1-sol@high` review). GitHub owns delivery state; this file owns
+Status: **accepted** by the user on 2026-10-21 (r2, after a
+`codex/gpt-6.1-sol@high` review); r3 folds in the user's review answers. GitHub owns delivery state; this file owns
 the durable requirements. It grants no authority beyond what the user approves
 by accepting it, and it does not relax any gate in `HARNESS.md`.
 
@@ -56,11 +56,16 @@ User decisions, 2026-10-21:
 | D3 | Routing is enforced by injection plus a soft gate, with role-typed agents as the easy path. |
 | D4 | Large work decomposes down contract-driven trees with review on the way up, and decomposition can adapt mid-run. |
 | D5 | Claude nodes are hybrid: native when the user wants to watch or the node is short; headless through Fabric when it is long or waiting. |
-| D6 | Account switching is automatic for the user's own paid Claude accounts, within R3.7's terms boundary. |
+| D6 | Account switching is automatic through one provider-neutral account pattern, enabled for every provider the user holds several accounts with (R3.7). |
 | D7 | Telemetry is local-first: record everything now, optimise later. |
 | D8 | Jev (TypeSafe AI) is not adopted now; revisit as a shadow classifier once telemetry yields labelled routing decisions. |
-| D9 | Monthly-reset pools are paced, not retired: Cursor Grok is used sparingly; OpenCode free models go first and OpenCode Go paid is conserved. |
-| D10 | DeepSeek V4.1 Flash sits between junior and senior and is the default first writer for bounded work. |
+| D9 | Monthly-reset pools are paced, not retired. OpenCode free models go first and Go paid is conserved. Cursor is depleted until its monthly reset (2026-10-21); its seats go to Sonnet or Sol meanwhile, and Grok is used sparingly afterwards. |
+| D10 | DeepSeek V4.1 Flash sits between junior and senior and is the default first writer for bounded work on its free tier. On a free rate limit, work moves to other free non-training models, then to subscription juniors; Go paid comes last and is paced, so free rate limits do not drain it. |
+| D11 | Confidentiality keys on whether a model trains on prompts, not on price. DeepSeek V4.1 Flash and GLM-5.3 Flash free on OpenCode do not train and are eligible for confidential work. |
+| D12 | Astra is a blind-spot challenger on crucial and terminal calls only: about five times Sol's cost for a marginal gain, but good at finding what others miss. |
+| D13 | Harness changes proposed by retrospect are merged by agents when routine, because the user scoped them first; the user reviews the rest. |
+| D14 | Research is under-used. Research lanes get network access and the chair dispatches them proactively whenever a decision rests on external facts. |
+| D15 | R9 rolls out without a separate probe phase; the box's own deny tests ship in the same change. |
 
 Principal-settled from evidence (the user may overrule any): keep
 `autoCompactWindow` at 250k; no blanket one-hour subagent cache; agy gets no
@@ -77,10 +82,11 @@ web research until R9 gives it a working network path.
 
    | Work | First writer | Escalates to |
    |---|---|---|
-   | Bounded, objective gate, about 3 files or fewer, no new interface, routine risk | DeepSeek V4.1 Flash (free, then Go paid), or another junior | senior |
+   | Bounded, objective gate, about 3 files or fewer, no new interface, routine risk | DeepSeek V4.1 Flash free; on rate limit another free non-training model, then Luna, Haiku or Gemini Flash; Go paid last | senior |
    | Multi-file, ambiguous, new interface, or judgement | senior | principal |
    | Cross-cutting, crucial or terminal risk, UI direction or taste | principal | user |
    | Scouting, mining, lens review, mechanical edits, test scaffolds | junior | senior |
+   | Research on external facts (docs, papers, prices, prior art) | several juniors with network, fanned out | senior synthesis |
    | Decisions, risky review, synthesis | principal | user |
 
    A failed gate escalates one tier after at most one repair attempt at the
@@ -102,8 +108,12 @@ web research until R9 gives it a working network path.
    the receipt. The override waives routing preference only, never
    authority, confinement, confidentiality or assurance gates.
 5. Role-typed agents ship for `scout`, `implementer`, `reviewer`, `lander`
-   and `lead`, with model, effort and cache TTL in frontmatter. Leads and
-   landers default to a one-hour cache.
+   and `lead`, with model, effort, cache TTL and a tool allowlist in
+   frontmatter. Leads and landers default to a one-hour cache.
+6. Confidential routing checks each model's training flag in the catalogue,
+   citing the provider's statement. Free and non-training models (D11) are
+   eligible. Sealle's tracked controls (`opencode.json`, fabric policy,
+   `pnpm check:confidential-content`) change through a Sealle PR to match.
 
 Acceptance (two consecutive weeks of ordinary Sealle work, against the R4
 baseline): Opus share of implementer subagent tokens below 15%; routing
@@ -148,8 +158,39 @@ it); the runner adds enforcement.
    dispatched into it. (Observed twice on 2026-10-21: a chair started in `~`
    filed worktree lanes under `~`, and `lanes --wait` reported none.)
 
+8. **Templates with overrides.** Graphs are built from named templates, so
+   the common case is one line and anything is customisable:
+
+   | Template | Shape | Default from |
+   |---|---|---|
+   | `single` | one writer, gates, review | routine work |
+   | `fanout` | N parallel juniors, one senior merge | wide mechanical or research work |
+   | `council` | N lenses across families, principal synthesis | decisions, risky review |
+   | `tree` | lead emits sub-graphs from any template | large or unclear work |
+   | `pipeline` | each item flows through stages without waiting for the batch | per-item work at scale |
+
+   The size class and risk tier pick the template and its defaults (width,
+   tiers, routes, gates, review lenses, `on_fail`). Any field can be
+   overridden per graph or per node, templates nest, and a graph can be
+   saved as a named template. Width scales to the ledger's live capacity
+   per provider and account, within a per-graph cap.
+9. **Review and gate ordering.** Gates split into fast checks (lint, types,
+   targeted tests), which block before review, and slow checks (full suites,
+   CI), which run in parallel with review. Findings from both feed one
+   repair round, and re-review covers only the repair delta. Every gate still passes before merge, as
+   `HARNESS.md` allows for owner-set test cadence. A node whose
+   change affects UI also produces screenshots (Playwright captures at set
+   viewports) and attaches them to its review brief; reviewers with vision
+   get them.
+10. **Context budget per lane.** Lanes are sized by context, not minutes: one
+    logical unit, one commit. A lane checkpoints its progress to a notes file
+    as it goes; when it nears its context budget it ends, and the runner
+    restarts it fresh from the brief, contract and notes, so it never works
+    from a rotted context.
+
 Acceptance: a three-tier mixed-provider graph runs end to end with no idle
-model coordinator; every node writes a receipt; a mid-run revision takes
+model coordinator; a template graph runs from a one-line request and from a
+node-level override; every node writes a receipt; a mid-run revision takes
 effect with no stale result accepted; a failing leaf repairs once then
 escalates; a cancelled writer exits before its replacement starts.
 
@@ -188,23 +229,22 @@ escalates; a cancelled writer exits before its replacement starts.
    checkpoints, takes a single-writer lock on its session, exits, and a
    wrapper relaunches it on the other account, then reports in one line.
    The old process must have exited before the new one starts.
-7. **Terms boundary for R3.6** (terms re-read 2026-10-21). Switching is
-   enabled for the user's own paid Claude accounts (user decision,
-   2026-10-21): Anthropic's consumer terms have no clause on holding several
-   accounts, each account's own limit is always respected, and Claude Code is
-   run unmodified with each account's own login. The design stays inside
-   that reading:
-   - each account is signed in by the user through Anthropic's own flow;
-     credentials are never copied between config directories or handed to
+7. **Account pattern and terms boundary.** Each provider adapter declares
+   how an account is isolated (Claude `CLAUDE_CONFIG_DIR`, Codex
+   `CODEX_HOME`, and the verified equivalent for agy and OpenCode), where its
+   quota is read, and how a lane or chair moves to another account. Switching
+   is enabled per provider by configuration; the user enabled it for all
+   providers on 2026-10-21. Every switch stays inside these rules:
+   - each account is signed in by the user through the provider's own flow;
+     credentials are never copied between identity directories or handed to
      another tool;
    - a switch moves work to an account with its own headroom; no account is
      pushed past its limit and no limit signal is suppressed;
    - accounts are the user's own and used only by the user's agents.
 
-   OpenCode's terms name "multiple accounts to circumvent usage limits"
-   explicitly, so a second OpenCode account is never a switch target.
-   Rotating between agy accounts stays off until the user confirms it.
-   Switching ships behind a per-provider configuration flag.
+   OpenCode's terms name "multiple accounts to circumvent usage limits" as
+   grounds for termination; the user accepted that risk on 2026-10-21, and
+   the adapter documents the clause beside its flag.
 8. Accounts are added or retired by configuration only.
 
 Acceptance: `provenant routes` shows availability per account; with one
@@ -249,16 +289,27 @@ figure; a known run's figures reconcile with its receipts.
    context pack. This matters most where cached reads are far cheaper than
    input: DeepSeek V4.1 Flash and MiMo on OpenCode Go (about 50 times), GLM
    (about 5 times), Claude Opus (about 20 times), Codex (automatic prefix caching).
-4. Startup: HARNESS.md loads on trigger, not by `@` import; duplicate global
-   instruction injection is removed; long skill descriptions are trimmed or
-   unused vendor skills disabled; the hard-coded model catalogue in
-   `orchestrate/references/routing-and-tiers.md` becomes a pointer to
-   `provenant routes`.
+4. Startup (variable part about 12k tokens today, on a 52k first call):
+   - HARNESS.md loads on trigger, not by `@` import (about 2k);
+   - the global instructions are injected once, not through two symlinks
+     (about 0.5k);
+   - rarely used skills are listed by name only and unused ones are
+     disabled; long descriptions are cut to about 200 characters (the skill
+     listing is the largest part, about 6.5k);
+   - MCP servers are scoped to the projects that use them (AWS tools only
+     where AWS work happens);
+   - repeated policy in `AGENTS.md` files moves to docs behind a pointer;
+   - the hard-coded model catalogue in
+     `orchestrate/references/routing-and-tiers.md` becomes a pointer to
+     `provenant routes`;
+   - role agents (R1.5) carry tool allowlists, so subagents load fewer tool
+     schemas than a general-purpose agent.
 5. The PreCompact hook never blocks idle compaction.
 
 These ship immediately. Acceptance is measured once R4 exists: cold
 rewrites below 15% of cache writes; subagent first-call context p50 down;
-startup context in Provenant and Sealle sessions down at least 5k tokens.
+variable startup context in Provenant and Sealle sessions below 6k tokens;
+role-agent first-call context below the general-purpose p50.
 
 ### R6 Stance and continuity
 
@@ -293,13 +344,14 @@ Acceptance: manual re-primes below 5% of compactions; autonomy nudges below
 
 | Skill or file | Change |
 |---|---|
-| `orchestrate` | Replace the model catalogue with pointers to `provenant routes` and the policy file (R1.1); add the size table, contract handoffs and escalation (R1.2); cache-shaped briefs and session reuse (R5.3); no foreground waits over four minutes (R5.1); graph runner usage (R2); shrink per-provider prompt boilerplate once R9 boxes exist. |
+| `orchestrate` | Graph templates and overrides (R2.8); context budgets and lane notes (R2.10); research fan-out with network (D14). Replace the model catalogue with pointers to `provenant routes` and the policy file (R1.1); add the size table, contract handoffs and escalation (R1.2); cache-shaped briefs and session reuse (R5.3); no foreground waits over four minutes (R5.1); graph runner usage (R2); shrink per-provider prompt boilerplate once R9 boxes exist. |
 | `session` | Stance in chair state; post-compaction re-injection; PreCompact never blocks (R5.5, R6). |
-| `implement` | Writer tier by size; one repair, then escalate; contracts on every downward handoff. |
+| `implement` | Writer tier by size; one repair, then escalate; contracts on every downward handoff; fast gates before review, slow gates in parallel with it; screenshots for UI changes (R2.9). |
 | `scope` | Emit a size class alongside the risk tier, so routing has an input. |
 | Role agents | New `scout`, `implementer`, `reviewer`, `lander`, `lead` definitions (R1.5); Sealle's existing `sealle-lander` becomes the template. |
 | Sealle `sealle-coordinate` | Absorbs promoted routing, landing and roster memories (R7.1). |
-| Vendor skills | Not edited; long-description ones the user does not use are disabled. |
+| Vendor skills | Not edited; listed by name only or disabled when unused. |
+| Sealle confidentiality controls | Sealle PR marks the non-training free models eligible (D11). |
 
 ### R9 Contained freedom for external lanes
 
@@ -320,16 +372,18 @@ wrote a file. Writer agy lanes already run with
 2. Inside the box the CLI runs with its permissive mode (agy
    `--dangerously-skip-permissions`, OpenCode allow-all, Cursor agent mode),
    with shell, git and test commands available. Network is on for research
-   lanes and off by default for writers.
+   and review lanes, and on for writers that need package or documentation
+   access.
 3. "Read-only" for an external lane means its box is discarded and only its
    result file is collected, not that the CLI is forbidden to act.
 4. What stays fixed: confidentiality routing (free and training models never
    see barred content), external actions (push to shared branches, posting,
    publishing) and secrets. These are authority, not guardrails, and the box
    does not change them.
-5. Before rollout, a probe per CLI demonstrates the box: a scripted attempt
-   to read a denied path, write outside the box and reach the network in a
-   non-network lane all fail, and a normal task succeeds.
+5. No separate probe phase (D15). The change that introduces the box
+   carries its own deny tests: reading a denied path and writing outside the
+   box fail, and a normal task succeeds. A box that fails its tests falls
+   back to today's restrictions for that adapter instead of running open.
 
 Acceptance: agy research lanes return sourced answers that pass citation
 spot checks; the per-provider confinement paragraphs leave the briefs; the
@@ -354,8 +408,6 @@ probe suite runs in CI against each adapter's argv.
 
 - Jev shadow evaluation (D8).
 - Hosted observability for Sealle (D7).
-- Autonomous merging of retrospect-proposed harness changes; until decided,
-  those changes are PRs for user review.
 - A junior-versus-senior implementer bake-off (D2).
 
 ## Non-goals
