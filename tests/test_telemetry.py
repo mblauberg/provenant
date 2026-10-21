@@ -1540,3 +1540,33 @@ def test_concurrent_upgrades_re_key_events_once_without_losing_rows(tmp_path):
         assert worker.returncode == 0, stderr
     with sqlite3.connect(database) as db:
         assert sorted(db.execute('SELECT kind, COUNT(*) FROM events GROUP BY kind')) == truth
+
+
+def test_ledger_from_main_format_replays_collector_lines_with_their_record_positions(tmp_path):
+    """A ledger written by main (no events table, no collector source) upgrades and replays
+    [A, A, B] on one line as three events, keyed by each record's own position."""
+    a = {'asDouble': 5.0, 'timeUnixNano': '1792544400000000000',
+         'attributes': otlp_attributes(type='user', session__id='chair')}
+    b = {**a, 'asDouble': 7.0}
+    jsonl(tmp_path / 'state/otel/metrics-20261021.ndjson', otlp_line('metrics', {'resourceMetrics': [{
+        'resource': {'attributes': []}, 'scopeMetrics': [{'metrics': [{
+            'name': 'claude_code.active_time.total',
+            'sum': {'aggregationTemporality': 1, 'dataPoints': [a, a, b]}}]}]}]}))
+    jsonl(tmp_path / 'home/.claude/projects/repo/session.jsonl', {
+        'type': 'assistant', 'sessionId': 'chair', 'timestamp': '2026-10-21T01:00:00Z',
+        'message': {'id': 'm1', 'model': 'claude-test', 'usage': {'input_tokens': 1, 'output_tokens': 1}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    database = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(database) as db:  # reduce the ledger to what main writes
+        for table in ('events', 'changes'):
+            db.execute(f'DROP TABLE {table}')
+        db.execute("DELETE FROM meta WHERE key IN ('event_ids', 'events_backfill', 'session_events_backfill')")
+        db.execute("DELETE FROM cursors WHERE source='otel'")
+        db.execute("DELETE FROM sources WHERE source='otel'")
+    for _ in range(2):
+        assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(database) as db:
+        rows = db.execute("SELECT source_ref, attrs FROM events WHERE kind='otel.metric' ORDER BY source_ref").fetchall()
+        assert [ref.rsplit('#', 1)[1] for ref, _ in rows] == ['1', '2', '3']
+        assert [json.loads(attrs)['value'] for _, attrs in rows] == [5.0, 5.0, 7.0]
+        assert db.execute("SELECT COUNT(*) FROM events WHERE kind='session.start'").fetchone()[0] == 1
