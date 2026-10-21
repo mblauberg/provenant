@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: "Use when bounded fan-out, multi-agent research, cross-family review, parallel audits, Herdr control, or autonomous ready-issue implementation helps. Not for tiny work, coupled debugging, or run-until-STOP jobs; use diagnose or autopilot."
+description: "Use for bounded fan-out, multi-agent research, cross-family reviews, audits, Herdr control and ready-issue automation. Not for tiny work; coupled defects: diagnose; run-until-STOP: autopilot."
 ---
 
 # Multi-agent orchestration
@@ -36,9 +36,10 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
   - Give a native Claude subagent its [tier pool's Claude member](references/routing-and-tiers.md#native-tiers): `haiku` junior, `sonnet` senior, `opus` only for principal work.
   - Brief native subagents with paths, not pasted content. End one once its deliverable lands; continue it only for follow-up on that deliverable.
   - Brief in five fields: goal, scope/paths, constraints, output shape and length, verification.
+  - agy lanes are OS-confined to their `cwd` and `add_dirs`; pass briefs through `prompt` or `prompt_file` (read by Fabric), rather than paths for the lane to open.
   - Keep tool output bounded: output over a bound goes to a file, and the command returns a pointer and a short tail. Avoid unbounded `gh ... --limit 1000` and `rg --files` over run directories. A polling loop prints one line.
   - Wait once: run one `provenant lanes --wait` in the background, or one status wait. Never sleep or poll loops.
-  - No subagent or lane blocks in a foreground wait longer than about four minutes. Long waits run in the background (the harness notifies on completion) or belong to the chair. A gap over five minutes turns the next call into a full cache rewrite.
+  - No subagent or lane blocks in a foreground wait longer than about four minutes. Long waits run in the background (the harness notifies on completion) or belong to the chair. Cache lifetimes vary by provider (Anthropic's default is five minutes; others differ), so keep waits short and let receipts record cache reads.
   - Shape briefs for the cache: stable shared preamble and context pack first, task-specific content last. Resume the lane's session for follow-ups rather than dispatching fresh, and let sibling lanes share one context pack. Cached reads cost roughly 5 to 50 times less than fresh input, depending on provider.
   - Size lanes by context, not minutes: one logical unit and one commit per lane. The lane keeps a short progress notes file; near its context budget it stops, and the chair restarts it fresh from the brief, contract and notes rather than letting it work from a rotted context.
   - Research: when a decision rests on external facts (docs, papers, prices, prior art), dispatch research lanes with network access proactively, fanned out across juniors with a senior synthesis.

@@ -1,6 +1,6 @@
 ---
 name: natural-writing
-description: "Use for making general, mixed, academic, or correspondence prose natural and direct while preserving facts, citations, numbers, and intent. Covers thesis and paper prose. Not for engineering or Australian legal prose; use its specialist."
+description: "Use for general, mixed, academic/thesis or correspondence prose; preserve facts, citations, numbers and intent. Not for engineering (engineering-writing) or Australian legal prose (legal-writing)."
 ---
 
 # Natural writing
