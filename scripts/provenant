@@ -113,9 +113,11 @@ Thin front door; each command delegates to its existing owner:
   lanes --wait [id…]    wait for a lane to finish or need input
   events --follow       foreground/streaming Fabric task and inbox event stream
   telemetry ingest|sources [--json]  local metadata-only usage ledger
-  stats [--since ISO-DATE] [--json]  usage, costs and outcomes
+  stats [--since ISO-DATE] [--hosts all|<host…>] [--json]
+                 usage, costs and outcomes; offline peers give partial results
   quota [--refresh] [--json]  provider-reported quota windows and pace per
                  account (cached 5 min; PROVENANT_QUOTA=0 disables fetching)
+  quota credit list [--json]  list local banked reset credits
   quota credit <provider> [--account L] add|use   record a banked reset
   dispatch ...   skills/orchestrate/scripts/dispatch_run.py ...
   batch ...      skills/orchestrate/scripts/batch_run.py ...

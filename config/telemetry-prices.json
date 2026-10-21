@@ -3,26 +3,26 @@
   "currency": "USD",
   "units": "per_million_tokens",
   "reviewed": "2026-10-22",
-  "note": "Rates are API-equivalent list prices per million tokens. `billing` says how this instance pays for the route: subscription routes report an API-equivalent estimate, not spend. Null rates are unverified; a row needing one keeps a missing estimate. cache_write is the 5-minute write where a provider prices it separately.",
+  "note": "Rates are API-equivalent list prices per million tokens. `billing` says how this instance pays for the route: subscription routes report an API-equivalent estimate, not spend. Null rates are unverified; a row needing one keeps a missing estimate. cache_write is the 5-minute write where a provider prices it separately. Standard rates only: long-context, peak-hour and cache-TTL adjustments are not modelled; these estimates may understate those cases.",
   "sources": {
     "anthropic": {
-      "reference": "claude-api skill reference: shared/models.md and shared/prompt-caching.md (cache writes 1.25x input for the 5-minute TTL; cache reads per model)",
-      "retrieved": "2026-10-06",
-      "cross_check": "splunk/token-meter model_pricing, reviewed 2026-09-30: matching"
+      "reference": "claude-api skill reference, anthropic-agent-skills/document-skills/9d630808e4ad: shared/models.md (model prices) and shared/prompt-caching.md (5-minute writes 1.25x input, model-specific read ratios)",
+      "retrieved": "2026-10-22",
+      "cross_check": "splunk/token-meter src/token_meter/models/catalog.py, BUILTIN_PRICE_REVIEWED_ON=2026-09-30: all eight priced Anthropic routes match (including two agy equivalents); checked 2026-10-22"
     },
     "openai": {
       "reference": "https://developers.openai.com/api/docs/models/compare",
-      "retrieved": "2026-10-21",
-      "cross_check": "splunk/token-meter model_pricing, reviewed 2026-09-30: matching"
+      "retrieved": "2026-10-22",
+      "cross_check": "splunk/token-meter src/token_meter/models/catalog.py, BUILTIN_PRICE_REVIEWED_ON=2026-09-30: all three priced Codex routes match; checked official model comparison 2026-10-22"
     },
     "cursor": {
       "reference": "https://cursor.com/docs/models-and-pricing",
-      "retrieved": "2026-10-21",
+      "retrieved": "2026-10-22",
       "plans": "Cursor plans include a usage pool (Plus $8, Premium $30, Super $100, Ultra $200 a month)"
     },
     "opencode-go": {
       "reference": "https://opencode.ai/docs/go/",
-      "retrieved": "2026-10-21",
+      "retrieved": "2026-10-22",
       "plans": "Go $10 and Go Plus $40 a month; limits are 20% of the monthly limit per 5 hours and 50% per week"
     },
     "opencode-zen": {
