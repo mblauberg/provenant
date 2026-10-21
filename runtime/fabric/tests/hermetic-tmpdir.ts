@@ -16,6 +16,9 @@ function insideGitWorkTree(dir: string): boolean {
 
 const scratchRoots: string[] = [];
 
+// Ordinary fixtures must never consult the developer's host federation config.
+process.env.PROVENANT_HOST_LOCAL_ONLY = "1";
+
 if (insideGitWorkTree(tmpdir())) {
   process.env.TMPDIR = realpathSync(mkdtempSync(join("/tmp", "fabric-test-tmp-")));
   scratchRoots.push(process.env.TMPDIR);

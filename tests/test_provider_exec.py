@@ -1556,6 +1556,59 @@ def fixture_plan(tmp_path, code, adapter="codex", **controls):
     return plan
 
 
+@pytest.mark.parametrize("exit_code", [0, 1])
+def test_opencode_usage_survives_provider_exit(tmp_path, exit_code):
+    events = [
+        {"type": "text", "part": {"text": "Full answer"}},
+        {"type": "step_finish", "part": {"tokens": {"input": 71074, "output": 5493,
+            "reasoning": 7838, "cache": {"read": 1009536, "write": 0}}}},
+    ]
+    code = "import sys; print(" + repr("\n".join(json.dumps(event) for event in events)) + "); sys.exit(" + str(exit_code) + ")"
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == ("ok" if exit_code == 0 else "failed")
+    assert record["evidence"]["exit"] == exit_code
+    assert record["error_class"] == ("none" if exit_code == 0 else "provider_error")
+    assert {key: record["context"][key] for key in ("input_tokens", "output_tokens", "cached_input_tokens",
+                                                  "cache_write_tokens", "reasoning_tokens")} == {
+        "input_tokens": 1080610, "output_tokens": 5493, "cached_input_tokens": 1009536,
+        "cache_write_tokens": 0, "reasoning_tokens": 7838}
+
+
+@pytest.mark.parametrize("adapter,events,expected", [
+    ("codex", [{"type": "item.completed", "item": {"type": "agent_message", "text": "OK"}},
+               {"type": "turn.completed", "usage": {"input_tokens": 12, "output_tokens": 3}}], "observed"),
+    ("codex", [{"type": "turn.completed", "usage": {"input_tokens": 0, "output_tokens": 0}}], "observed"),
+    ("codex", [{"type": "turn.completed", "usage": {}}], "missing"),
+    ("kiro", [{"type": "metadata", "data": {"contextUsagePercentage": 7.7}}], "missing"),
+    ("copilot", [], "missing"),
+])
+def test_receipt_usage_source_tracks_token_evidence_not_context_estimates(tmp_path, adapter, events, expected):
+    code = "print(" + repr("\n".join(json.dumps(event) for event in events)) + ")"
+    record = supervisor().execute(fixture_plan(tmp_path, code, adapter), tmp_path / "result.md")
+    assert record["usage_source"] == expected
+
+
+@pytest.mark.parametrize("status,signature,expected", [
+    ("ok", None, "none"), ("succeeded", None, "none"), ("input_required", None, "none"),
+    ("ok", "rate_limited", "none"),
+    ("rate_limited", None, "rate_limited"), ("usage_limited", "quota_exhausted", "usage_limited"),
+    ("auth_required", "auth_expired", "auth"), ("model_unavailable", None, "model_unavailable"),
+    ("timed_out", None, "timeout"), ("startup_timeout", "startup_watchdog", "timeout"),
+    ("stalled", "idle_watchdog", "timeout"), ("partial", "print_timeout", "timeout"),
+    ("permission_blocked", None, "sandbox_denied"),
+    ("failed", "empty_output", "empty_output"), ("failed", "rate_limited", "rate_limited"),
+    ("failed", "quota_exhausted", "usage_limited"), ("failed", "auth_expired", "auth"),
+    ("failed", "model_unavailable", "model_unavailable"), ("failed", "wall_clock", "timeout"),
+    ("failed", "permission_blocked", "sandbox_denied"), ("failed", None, "provider_error"),
+    ("rejected", "invalid_input", "provider_error"), ("tool_missing", None, "provider_error"),
+    ("cancelled", "cancel_requested", "unknown"), ("interrupted", "provider_signal", "unknown"),
+    ("partial", "output_truncated", "unknown"), ("quarantined", None, "unknown"),
+    ("future_status", "future_signature", "unknown"),
+])
+def test_terminal_error_class_is_derived_from_status_and_signature(status, signature, expected):
+    assert supervisor().error_class(status, signature) == expected
+
+
 def test_attempt_private_temp_and_cache_environment(tmp_path):
     code = """import json, os
 print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':json.dumps({key: os.environ.get(key) for key in ('TMPDIR','TMP','TEMP','TMPPREFIX','XDG_CACHE_HOME')})}}))

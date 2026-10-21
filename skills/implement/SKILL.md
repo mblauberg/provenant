@@ -1,6 +1,6 @@
 ---
 name: implement
-description: "Use for an approved software change through verified implementation, independent review, bounded repair, and user acceptance. Not for unsettled scope, diagnosis-only, read-only review, or release."
+description: "Use for an approved software change through verified implementation, independent review, bounded repair, and acceptance. Not for unsettled scope, diagnosis-only, read-only review, or release."
 ---
 
 # Implement
@@ -66,8 +66,11 @@ reconciliation run.
    `"$(provenant root)/skills/deliver/scripts/validate_delivery.py" \
    .agent-run/runs/<YYYYMMDD-HHMM>-delivery-<slug>-<rand6>/RUN.json --workspace-root "$PWD" --verify-hashes`.
    Hand off only after this machine gate.
-8. User final acceptance is mandatory; promotion needs separate `release`
-   authority. Terminalise any run directory as
+8. Objective checks and the review required by the tier meet final acceptance;
+   the chair reports the outcome and the user may still reject it. Require
+   explicit user acceptance only for `terminal` work or when the approved
+   scope asks for it. A project may name its landing gate as acceptance.
+   Promotion needs separate `release` authority. Terminalise any run directory as
    [run-contract.md](references/run-contract.md) sets out.
 
 ## Authority and completion
@@ -79,8 +82,11 @@ reconciliation run.
 - Objective evidence outranks reviewer confidence; adjudicate conclusions,
   never vote.
 - Substantial+ starts a fresh implementation session bound to approved digests.
-- Clearing every machine gate is not acceptance. Record the receipt's
-  `human_gates.acceptance` approval only after explicit user acceptance.
+- Do not infer a user approval from passing checks. The current receipt
+  format still records explicit approval in `human_gates.acceptance`; leave
+  that field truthful while code alignment is pending. See the
+  [issue #1025](https://github.com/mblauberg/provenant/issues/1025) for retained
+  code gates.
 
 ## Portable artifact
 

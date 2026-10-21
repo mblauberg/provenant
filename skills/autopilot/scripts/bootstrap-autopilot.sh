@@ -231,20 +231,15 @@ RUNS_ROOT="$AGENT_RUN_ROOT/runs"
 [ -e "$RUNS_ROOT" ] && [ ! -d "$RUNS_ROOT" ] && die "refusing: $RUNS_ROOT exists and is not a directory"
 MISSION_SLUG="$(printf '%s' "$MISSION_ID" | tr '[:upper:]' '[:lower:]' | tr '._' '--' | cut -c1-32)"
 MISSION_DIR=""
-# One-release legacy fallback: an existing mission stays at its original path.
-if [ -f "$AGENT_RUN_ROOT/$MISSION_ID/GOAL.md" ]; then
-  MISSION_DIR="$AGENT_RUN_ROOT/$MISSION_ID"
-else
-  for candidate in "$RUNS_ROOT"/*-mission-"$MISSION_SLUG"-??????; do
-    [ -f "$candidate/GOAL.md" ] || continue
-    [ -f "$candidate/.mission-id" ] || continue
-    candidate_id=""
-    IFS= read -r candidate_id < "$candidate/.mission-id" || true
-    [ "$candidate_id" = "$MISSION_ID" ] || continue
-    [ -z "$MISSION_DIR" ] || die "multiple missions match $MISSION_ID; select one by path"
-    MISSION_DIR="$candidate"
-  done
-fi
+for candidate in "$RUNS_ROOT"/*-mission-"$MISSION_SLUG"-??????; do
+  [ -f "$candidate/GOAL.md" ] || continue
+  [ -f "$candidate/.mission-id" ] || continue
+  candidate_id=""
+  IFS= read -r candidate_id < "$candidate/.mission-id" || true
+  [ "$candidate_id" = "$MISSION_ID" ] || continue
+  [ -z "$MISSION_DIR" ] || die "multiple missions match $MISSION_ID; select one by path"
+  MISSION_DIR="$candidate"
+done
 if [ -z "$MISSION_DIR" ]; then
   MISSION_SUFFIX="$(od -An -N3 -tx1 /dev/urandom | tr -d ' \n')"
   MISSION_DIR="$RUNS_ROOT/$(date -u +%Y%m%d-%H%M)-mission-$MISSION_SLUG-$MISSION_SUFFIX"
@@ -311,10 +306,9 @@ if [ ! -d "$MISSION_DIR" ]; then
 fi
 if [ -d "$MISSION_DIR" ]; then
   MISSION="$(cd "$MISSION_DIR" && pwd -P)"
-  # Accept the one-release legacy path or a canonical run under the resolved
-  # runs root; a substituted symlink must not escape either boundary.
+  # A substituted symlink must not escape the resolved runs root.
   case "$MISSION" in
-    "$AGENT_RUN_ROOT/$MISSION_ID"|"$RUNS_ROOT"/*) ;;
+    "$RUNS_ROOT"/*) ;;
     *) die "refusing: resolved mission path escaped the .agent-run/ boundary: $MISSION" ;;
   esac
 else

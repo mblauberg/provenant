@@ -175,16 +175,21 @@ describe("run directory pruning", () => {
   });
   function ageRun(name: string, hoursOld: number): { runDir: string; stdout: string; stderr: string } {
     const runRoot = join(workspace, ".agent-run");
-    mkdirSync(runRoot, { recursive: true });
-    const runDir = join(runRoot, name);
+    const runs = join(runRoot, "runs");
+    mkdirSync(runs, { recursive: true });
+    const runDir = join(runs, `20260801-1200-dispatch-${name}-abcdef`);
     mkdirSync(runDir, { recursive: true });
     writeFileSync(join(runDir, "MANIFEST.md"), "# aged fixture\n");
-    const stdout = `${runDir}-owner.stdout.jsonl`;
-    const stderr = `${runDir}-owner.stderr.log`;
+    writeFileSync(join(runDir, "RUN_RECEIPT.json"), JSON.stringify({ status: "ok" }));
+    const owner = join(runDir, "_owner");
+    mkdirSync(owner);
+    const stdout = join(owner, "stdout.jsonl");
+    const stderr = join(owner, "stderr.log");
     writeFileSync(stdout, "{}\n");
     writeFileSync(stderr, "");
     const when = new Date(Date.now() - hoursOld * 3_600_000);
-    for (const path of [join(runDir, "MANIFEST.md"), runDir, stdout, stderr]) utimesSync(path, when, when);
+    for (const path of [join(runDir, "MANIFEST.md"), join(runDir, "RUN_RECEIPT.json"), runDir, stdout, stderr])
+      utimesSync(path, when, when);
     return { runDir, stdout, stderr };
   }
 
@@ -198,8 +203,8 @@ describe("run directory pruning", () => {
     expect(done.status).toBe("ok");
   }
 
-  it("ages out mcp-* run directories and their sibling owner logs", async () => {
-    const aged = ageRun("mcp-aged01", 24 * 30);
+  it("ages out timestamped dispatch run directories and their sibling owner logs", async () => {
+    const aged = ageRun("aged01", 24 * 30);
     await ordinaryDispatch();
     expect(existsSync(aged.runDir), "an aged run directory survived the dispatch path").toBe(false);
     expect(existsSync(aged.stdout), "an aged sibling owner stdout log survived").toBe(false);
@@ -207,22 +212,22 @@ describe("run directory pruning", () => {
   });
 
   it("keeps a run inside the retention window", async () => {
-    const fresh = ageRun("mcp-fresh01", 1);
+    const fresh = ageRun("fresh01", 1);
     pruneDispatchRuns(workspace, ownerEnvironment);
     expect(existsSync(fresh.runDir)).toBe(true);
     expect(existsSync(fresh.stdout)).toBe(true);
   });
 
   it("takes the retention from configuration", async () => {
-    const aged = ageRun("mcp-aged02", 3);
+    const aged = ageRun("aged02", 3);
     pruneDispatchRuns(workspace, { ...ownerEnvironment, AGENT_FABRIC_RUN_RETENTION_HOURS: "2" });
     expect(existsSync(aged.runDir), "a configured two-hour retention did not apply").toBe(false);
   });
 
-  it("leaves everything that is not an mcp- run directory alone", async () => {
-    const runRoot = join(workspace, ".agent-run");
+  it("leaves other timestamped run kinds alone", async () => {
+    const runRoot = join(workspace, ".agent-run", "runs");
     mkdirSync(runRoot, { recursive: true });
-    const foreign = join(runRoot, "20200101T000000Z");
+    const foreign = join(runRoot, "20200101-0000-orch-other-abcdef");
     mkdirSync(foreign, { recursive: true });
     const when = new Date(Date.now() - 24 * 3_600_000 * 400);
     utimesSync(foreign, when, when);
@@ -255,7 +260,7 @@ describe("run directory pruning", () => {
   });
 
   it("keeps an aged run while its recorded provider session is live", () => {
-    const aged = ageRun("mcp-live-provider", 24 * 30);
+    const aged = ageRun("live-provider", 24 * 30);
     const provider = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
       detached: true,
       stdio: "ignore",

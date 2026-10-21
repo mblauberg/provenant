@@ -21,8 +21,7 @@ author as the only reviewer. Provenant puts structure around that:
 - it runs **deterministic checks** before any result surfaces for review;
 - substantial work adds **one independent review** from another provider
   family when available, with review depth increasing at higher risk tiers; and
-- it keeps **acceptance and release separate**, with explicit user acceptance
-  for terminal work or when scope requires it.
+- it meets **acceptance through checks and required review**, with separate user authority for release.
 
 A change therefore arrives already scoped, verified and read by a context that
 did not write it, so user attention goes to judgement rather than to catching an
@@ -51,7 +50,7 @@ flowchart TB
 - **Harness:** [`HARNESS.md`](HARNESS.md) is the constitution. It sets
   authority, the delivery lifecycle, and how much review pressure each risk tier
   owes, and stays small so it can be read every session.
-- **Skills:** the <!--skills-->26<!--/skills--> Agent Skills are task-specific
+- **Skills:** the <!--skills-->25<!--/skills--> Agent Skills are task-specific
   procedures, one folder with a `SKILL.md` each. Only the one-line descriptions
   sit in permanent context; a full body loads only when the task matches it.
 - **Fabric:** messages, shared tasks and activity between agents working on one
@@ -120,6 +119,14 @@ other files and links as user-owned. If the installer exits
 non-zero, follow the message it prints: exit `3` flags a command collision,
 incompatible instruction target, or managed skill-link conflict, and
 instruction conflicts include the bootstrap line to add.
+
+For global instructions, Claude uses `~/.claude/CLAUDE.md` and Codex uses
+`~/.codex/AGENTS.md`. A fresh install writes a short bootstrap in the selected
+entrypoint; an existing symlink from that entrypoint to the instance
+`AGENTS.md` is preserved. The installer does not create `~/.claude/AGENTS.md`.
+On reinstall, it removes that extra path only when it is a symlink resolving to
+the instance doctrine. A regular `~/.claude/AGENTS.md` is preserved and
+reported for review.
 
 Exit `3` also covers a missing harness interpreter, which is what a machine
 without `uv` meets first:
@@ -222,37 +229,39 @@ Each task has a front-door skill; the agent loads it when a request matches.
 
 ## Lifecycle
 
-The full delivery loop reserves specification approval and release authority to
-the user. Objective checks and the tier's review meet acceptance; the chair
-reports the outcome and the user may reject it. Explicit user acceptance is
-required for terminal work or when scope asks. A project may name its landing
-gate as acceptance; receipts declare approval rather than authenticating it.
+Every change runs the delivery loop. Users approve scope and one-way doors;
+objective checks and tier-required review meet delivery acceptance. The chair
+reports the outcome and the user may still reject it. Explicit user acceptance
+is required only for `terminal` work or when the approved scope asks for it.
+A project may name its landing gate as acceptance. Release keeps its separate
+user authority; receipts declare approval rather than authenticating it.
 
 ```mermaid
 flowchart TB
-    accTitle: The delivery loop and user gates
-    accDescr: After a session sets up clean context, the deliver kernel runs the loop top to bottom: scope writes the specification and risk tier, a user gate approves it, implement writes the test first whenever observable behaviour changes, verify runs deterministic checks, and review reads the work in a fresh context that never wrote it, using the risk-scaled HARNESS.md Review ladder. Two dotted edges return: the approval gate sends the plan back to scope, and a blocking review finding sends the work back to implement for a bounded repair. Acceptance follows objective checks and the required review, with explicit user acceptance for terminal work or when scope requires it, leading to retrospect and the next cycle. Release and observe sit outside the loop, behind a separate user gate that authorises the external action.
+    accTitle: The delivery loop and its user gates
+    accDescr: After a session sets up clean context, the deliver kernel runs the loop top to bottom: scope writes the specification and risk tier, a user gate approves it, implement writes the test first whenever observable behaviour changes, verify runs deterministic checks, and review reads the work in a fresh context that never wrote it, using the risk-scaled HARNESS.md Review ladder. Two dotted edges return: the approval gate sends the plan back to scope, and a blocking review finding sends the work back to implement for a bounded repair. Checks and required review meet acceptance; terminal work and approved scope may require explicit user acceptance. The chair reports the outcome and the user may reject it. Release and observe sit outside the loop, behind a separate user gate that authorises the external action.
     SC["scope · spec, risk tier, acceptance criteria"] --> G1{{"USER · approve the spec"}}
     G1 -. "send back" .-> SC
     G1 --> IM["implement · test first when behaviour changes"]
     IM --> VF["verify · deterministic checks"]
     VF --> RV["review · fresh context<br/>risk-scaled HARNESS.md ladder"]
     RV -. "blocking finding" .-> IM
-    RV --> G2{{"acceptance · checks + review<br/>user for terminal or when scoped"}}
-    G2 --> RT["retrospect"]
-    G2 -. "only if it ships" .-> G3{{"USER · authorise the action"}}
+    RV --> AC["acceptance · checks + required review<br/>or project landing gate"]
+    AC --> Q{"terminal or explicit acceptance<br/>required by approved scope?"}
+    Q -- "yes" --> G2{{"USER · accept"}}
+    Q -- "no" --> OUT["chair reports outcome"]
+    G2 --> OUT
+    OUT --> RT["retrospect"]
+    OUT -. "only if it ships" .-> G3{{"USER · authorise the action"}}
     G3 --> RL["release · observe"]
 
     classDef gate fill:#8a6d1f,stroke:#f0c674,color:#ffffff,stroke-width:2px
-    classDef acceptance fill:#2c6e49,stroke:#8fd0aa,color:#ffffff,stroke-width:2px
-    class G1,G3 gate
-    class G2 acceptance
+    class G1,G2,G3 gate
 ```
 
-Gold hexagons are user gates; the green acceptance gate requires explicit user
-acceptance only for terminal work or when scoped. Specification approval and
-acceptance can also return work for revision. Scoping is usually a conversation: a decision packet
-with choices and a recommendation, owner calls parked as named questions rather
+Gold hexagons are user gates. Specification approval and any required explicit
+acceptance can return work for revision. Scoping is usually a conversation:
+a decision packet with choices and a recommendation, owner calls parked as named questions rather
 than guesses, and the [`grill-me`](skills/grill-me/SKILL.md) interview, one
 question per round, while material decisions stay unresolved.
 
@@ -281,8 +290,8 @@ corroboration, not model votes, make a finding blocking.
   post-merge pruning, force-removal and unauthorised shared-branch pushes stay
   gated;
 - no two agents write one source surface at once; and
-- specification approval, acceptance and release stay separate; explicit user
-  acceptance applies to terminal work or when scoped ([`HARNESS.md`](HARNESS.md)).
+- specification approval and release remain user decisions; final acceptance needs a user only for `terminal` work or approved scope
+  ([`HARNESS.md`](HARNESS.md)).
 
 Provider workers can be dispatched through Fabric MCP or the direct command
 line; both paths use the same orchestration owners and retain full output in run
@@ -292,11 +301,11 @@ steering; it does not provide wake, callback or completion delivery.
 
 ## Skill library
 
-The full <!--skills-->26<!--/skills-->-skill catalogue, grouped by area:
+The full <!--skills-->25<!--/skills-->-skill catalogue, grouped by area:
 
 <!-- skill-catalogue:start -->
 <details>
-<summary>All 26 skills</summary>
+<summary>All 25 skills</summary>
 
 | Area | Skills |
 |---|---|
@@ -305,7 +314,6 @@ The full <!--skills-->26<!--/skills-->-skill catalogue, grouped by area:
 | Writing and documentation | [`engineering-docs`](skills/engineering-docs/SKILL.md), [`engineering-writing`](skills/engineering-writing/SKILL.md), [`legal-writing`](skills/legal-writing/SKILL.md), [`natural-writing`](skills/natural-writing/SKILL.md) |
 | Design and diagrams | [`ui-ux-design`](skills/ui-ux-design/SKILL.md), [`prototype`](skills/prototype/SKILL.md), [`d2-diagrams`](skills/d2-diagrams/SKILL.md) |
 | Harness development | [`skill-craft`](skills/skill-craft/SKILL.md) |
-| Presentation | [`caveman`](skills/caveman/SKILL.md) |
 
 </details>
 <!-- skill-catalogue:end -->
@@ -315,6 +323,7 @@ The full <!--skills-->26<!--/skills-->-skill catalogue, grouped by area:
 - [`Architecture`](docs/ARCHITECTURE.md): system structure and design rationale.
 - [`Specifications`](docs/specs/README.md): the component contracts.
 - [Fabric hosts](docs/runbooks/fabric-hosts.md): SSH peer configuration and diagnostics.
+- [Local telemetry](docs/runbooks/telemetry.md): usage ingestion, source manifest and stats.
 - [`Research`](docs/research/README.md): evidence and owners.
 - [`Skill portfolio evaluation`](docs/evals/skill-portfolio-2026/README.md): the retained routing evidence.
 - [`Maintenance`](MAINTAINING.md): how the repository is changed and governed.

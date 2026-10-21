@@ -51,6 +51,6 @@ lies within granted authority and is not a `HARNESS.md` user gate, the chair
 may decide by council (`orchestrate`) for the owner to confirm later.
 
 Label evidence as `verified` or `judgement`, and each selected lane as `tested`,
-`failed`, `not tested`, or `not applicable`. Deterministic checks and user
+`failed`, `not tested`, or `not applicable`. Deterministic checks and delivery
 acceptance remain with the enclosing implementation lifecycle; design does not
 certify itself.

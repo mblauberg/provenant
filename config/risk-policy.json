@@ -46,5 +46,24 @@
       "build-release-gate": "crucial",
       "life-safety": "terminal"
     }
+  },
+  "acceptance_policy": {
+    "default": "objective-checks-and-tier-required-review",
+    "explicit_user_acceptance": {
+      "risk_tiers": ["terminal"],
+      "when_approved_scope_requires": true
+    },
+    "project_may_name_landing_gate": true,
+    "chair_reports_outcome": true,
+    "user_may_reject": true,
+    "user_approval_required_for": [
+      "specs-and-scope",
+      "one-way-doors",
+      "risk-tier-downgrades",
+      "unresolved-acceptance-criteria",
+      "destructive-or-irreversible-actions",
+      "external-communications",
+      "production-promotion"
+    ]
   }
 }

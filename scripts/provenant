@@ -81,7 +81,7 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|check|gate|fabric|hosts|peer|lanes|events|dispatch|batch|run> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|check|gate|telemetry|stats|fabric|hosts|peer|lanes|events|dispatch|batch|run> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
@@ -112,6 +112,8 @@ Thin front door; each command delegates to its existing owner:
   lanes [--json] [id…]  lane state; use an id to see rows past the 20-row cap
   lanes --wait [id…]    wait for a lane to finish or need input
   events --follow       foreground/streaming Fabric task and inbox event stream
+  telemetry ingest|sources [--json]  local metadata-only usage ledger
+  stats [--since ISO-DATE] [--json]  usage, costs and outcomes
   dispatch ...   skills/orchestrate/scripts/dispatch_run.py ...
   batch ...      skills/orchestrate/scripts/batch_run.py ...
   run ...        skills/orchestrate/scripts/run_controls.py ...
@@ -330,10 +332,15 @@ def main(arguments: list[str]) -> int:
             return 3
         return 0
 
+    if command == "stats":
+        command_arguments = ["stats", *command_arguments]
+
     if command in {"peer", "hosts"}:
         command_arguments = [command, *command_arguments]
 
     owners = {
+        "telemetry": "scripts/provenant-telemetry",
+        "stats": "scripts/provenant-telemetry",
         "peer": "scripts/fabric-hosts",
         "hosts": "scripts/fabric-hosts",
         "route": "scripts/model-route",

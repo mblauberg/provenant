@@ -1548,7 +1548,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         if note not in plan.setdefault('warnings', []):
             plan['warnings'].append(note)
     return {"schema":"fabric.attempt.v1", **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
-        "attempt":number,"state":"running","status":None,"mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
+        "attempt":number,"state":"running","status":None,"usage_source":"missing","mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
         "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
         **({"read_roots":[str(root) for root in args.read_roots]} if getattr(args,"read_roots",None) else {}),
         "worktree":str(args.worktree) if args.worktree else None,"started_at":started_at,"ended_at":None,"last_progress_at":started_at,
@@ -1581,7 +1581,7 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     refusal=route_refusal(adapter,args.tool)
     if refusal: status=refusal["status"]
     if status not in TERMINAL_STATUSES: status="failed"
-    for field in ("session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","warnings","reaped","spared","provenance","pgid","last_progress_at","landable","quarantine"):
+    for field in ("session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","usage_source","warnings","reaped","spared","provenance","pgid","last_progress_at","landable","quarantine"):
         if field in adapter: row[field]=adapter[field]
     # The provider's provenance replaces the recorded one; keep the confidential request so resume and handoff honour it.
     if getattr(args,"confidential",False) and isinstance(row.get("provenance"),dict):
@@ -1602,6 +1602,8 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     if refusal:
         row["fix"]=adapter.get("fix") or adapter.get("reason") or refusal["fix"];row["evidence"]=refusal["evidence"];row["error"]=refusal["error"]
     row.update(state="terminal",status=status,ended_at=legacy["finished_at"],question=adapter.get("question") or (legacy.get("question") or {}).get("prompt"))
+    row["usage_source"] = adapter.get("usage_source") or provider_exec.context_usage.usage_source(row.get("context") or {})
+    row["error_class"] = provider_exec.error_class(status, row["evidence"].get("signature"))
     if not legacy.get("result"): row["paths"]["result"]=None
     row["legacy_attempt_path"]=legacy["attempt_path"]
     row["requested_route"]=legacy["requested_route"]
@@ -2489,6 +2491,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     record: dict[str, Any] = {
         "schema_version": 1,
         "record_type": "dispatch-attempt",
+        "usage_source": adapter.get("usage_source") or provider_exec.context_usage.usage_source(adapter.get("context") or {}),
+        "error_class": provider_exec.error_class(status, (adapter.get("evidence") or {}).get("signature")),
         **({"landable": False, "quarantine": adapter.get("quarantine")} if adapter_status == "quarantined" else {}),
         "run_id": run_dir.name,
         "task_id": args.task_id,
@@ -2564,6 +2568,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     except OSError as exc:
         manifest_error = True
         record["status"] = "failed"
+        record["error_class"] = provider_exec.error_class(record["status"], (adapter.get("evidence") or {}).get("signature"))
         record["outcome"] = "manifest_write_error"
         record["failure_code"] = "manifest_write_error"
         record["manifest_error"] = str(exc)

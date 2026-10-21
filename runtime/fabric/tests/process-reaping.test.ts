@@ -27,7 +27,7 @@ it.each(["EPERM", "EACCES", "unknown_start"])(
   "does not reap a live lane when its host probe is %s", async (restriction) => {
     const workspace = mkdtempSync(join(tmpdir(), "fabric-reaping-"));
     directories.push(workspace);
-    const runDir = join(workspace, ".agent-run", "mcp-live-lane");
+    const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-live-lane-abcdef");
     mkdirSync(runDir, { recursive: true });
     const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"],
       { detached: true, stdio: "ignore" });
@@ -102,7 +102,7 @@ it.each(["cancel_requested", "orphan_reaper"])(
   "%s signals the verified provider individually despite its own process group", async (source) => {
     const workspace = mkdtempSync(join(tmpdir(), "fabric-reaping-"));
     directories.push(workspace);
-    const runDir = join(workspace, ".agent-run", "mcp-controller");
+    const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-controller-abcdef");
     mkdirSync(runDir, { recursive: true });
     const provider = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"],
       { detached: true, stdio: "ignore" });
@@ -133,7 +133,7 @@ it.each(["cancel_requested", "orphan_reaper"])(
 it("records the orphan reaper source before terminating an owned process", async () => {
   const workspace = mkdtempSync(join(tmpdir(), "fabric-reaping-"));
   directories.push(workspace);
-  const runDir = join(workspace, ".agent-run", "mcp-owned");
+  const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-owned-abcdef");
   mkdirSync(runDir, { recursive: true });
   const owner = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"],
     { detached: true, stdio: "ignore" });

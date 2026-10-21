@@ -5,7 +5,7 @@ description: "Use for user-authorised promotion of an accepted artifact: deploy,
 
 # Release
 
-Promote one pinned, user-accepted artifact to an authorised target. This skill
+Promote one pinned, accepted artifact to an authorised target. This skill
 owns the authority gate and evidence; runbooks and tools own mechanics.
 
 ## Entry gate
@@ -14,6 +14,9 @@ Require accepted delivery receipt, exact accepted-artifact
 `digest|git_revision`, typed action (`deploy`, `publish`, `share`, `send` or
 `activate`), target-bound release authority, owner, disclosure/data policy and
 project instructions. Implementation acceptance is not promotion authority.
+Delivery acceptance comes from objective checks and tier-required review, or
+the project's named landing gate. Explicit user acceptance is required for
+`terminal` work or when the approved scope asks for it.
 Broad project/session authority cannot release or deploy; the promotion grant
 must bind this artifact, action, target, expiry and applicable constraints.
 

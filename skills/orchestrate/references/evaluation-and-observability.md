@@ -13,7 +13,12 @@ different workers, tools, and intermediate steps. Evaluate outcomes, safety gate
    unresolved disagreements, and whether final claims trace to artifacts.
 4. **Outcome checks.** Tests pass, citations exist and support claims, arithmetic reconciles, files changed
    only where authorised, final state matches the request.
-5. **User review.** Required for high-stakes, irreversible, or low-oracle domains.
+5. **Required review and user gates.** Apply tier-required and qualified-domain
+   review to high-stakes or low-oracle work. User approval remains at scope,
+   one-way doors, risk downgrades, unresolved acceptance criteria, destructive
+   or irreversible actions, external communications and production promotion.
+   Explicit final user acceptance applies only to `terminal` work or when the
+   approved scope asks for it; otherwise checks and required review meet it.
 
 ## Trace fields to record
 

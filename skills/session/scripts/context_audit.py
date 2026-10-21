@@ -171,8 +171,6 @@ def audit(
                     continue
                 if path.name == "runs":
                     run_dirs.update(child for child in path.iterdir() if contained(child, root, kind="dir"))
-                elif path.name not in {"sessions", "scratch"}:
-                    run_dirs.add(path)  # one-release legacy fallback
     for work_root in walked_dirs(root, ".work"):
         wf_root = work_root / "wf"
         if not contained(wf_root, root, kind="dir") or skipped(work_root, root):
@@ -190,14 +188,9 @@ def audit(
             match = re.match(r"^\d{8}-\d{4}-(dispatch|batch|orch|delivery|mission|review|wf)-", run_dir.name)
             if match:
                 new_kind = match.group(1)
-        direct_delivery = (
-            run_dir.parent.name in {".agent-run", "runs"}
-            and contained(run_dir / "RUN.json", root, kind="file")
-            and not any(contained(run_dir / name, root, kind="file") for name in scaffold)
-        )
-        if new_kind in {"dispatch", "batch"} or (run_dir.name.startswith("mcp-") and contained(run_dir / "RUN_RECEIPT.json", root, kind="file")):
+        if new_kind in {"dispatch", "batch"}:
             required = ["RUN_RECEIPT.json"]
-        elif new_kind == "delivery" or direct_delivery:
+        elif new_kind == "delivery":
             required = ["RUN.json"]
         elif new_kind == "mission":
             required = ["GOAL.md"]

@@ -62,7 +62,7 @@ description: "Use for bounded fan-out, multi-agent research, cross-family review
 
 ## Adaptive loop
 
-Preflight authority, isolation, disclosure and receipts. Dispatch independent waves, reduce their claims against objective evidence, and add only informative repair, verification or review waves. Parallel lanes stop ready to merge; the chair merges serially and reruns checks after the tree changes. Record missing review legs and substitutions. For accepted ready issues, use [autonomous-implementation.md](references/autonomous-implementation.md); run-until-STOP missions use `autopilot`.
+Preflight authority, isolation, disclosure and receipts. Dispatch independent waves, reduce their claims against objective evidence, and add only informative repair, verification or review waves. Parallel lanes stop ready to merge; the chair merges serially and reruns checks after the tree changes. Record missing review legs and substitutions. Objective checks and tier-required review meet delivery acceptance; the chair reports the outcome and the user may reject it. Explicit user acceptance is required only for `terminal` work or when the approved scope asks for it; a project may name its landing gate as acceptance. External actions retain their separate authority gates. For accepted ready issues, use [autonomous-implementation.md](references/autonomous-implementation.md); run-until-STOP missions use `autopilot`.
 
 ## Depth on demand
 

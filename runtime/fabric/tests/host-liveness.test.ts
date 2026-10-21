@@ -33,7 +33,7 @@ function recordRun(hostStartedAt: string | null, selfHosted = false, hostPid = p
   ownerPid = process.ppid) {
   const workspace = realpathSync(mkdtempSync(join(tmpdir(), "fabric-host-")));
   roots.push(workspace);
-  const runDir = join(workspace, ".agent-run", "mcp-host");
+  const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-host-abcdef");
   mkdirSync(runDir, { recursive: true });
   writeFileSync(join(runDir, "dispatch-owner.json"), JSON.stringify({
     schema_version: 1, kind: "dispatch", run_dir: runDir, workspace, run_token: "host",

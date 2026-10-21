@@ -35,9 +35,6 @@ _storage_spec.loader.exec_module(attempt_storage)
 
 
 RUN_NAME = re.compile(r"^\d{8}-\d{4}-(dispatch|batch|orch|delivery|mission|review|wf)-[A-Za-z0-9-]+-[A-Za-z0-9]{6}$")
-LEGACY_ORCH = re.compile(r"^\d{8}(?:[-T]\d{4,6})?(?:[-_].*)?$")
-MCP_NAME = re.compile(r"^mcp-[A-Za-z0-9_-]+$")
-LEGACY_SIBLING = re.compile(r"^(mcp-[A-Za-z0-9_-]+)-(?:owner\.(?:stdout\.jsonl|stderr\.log)|task-manifest\.json)$")
 DEFAULT_INCLUDE = frozenset({"runs", "scratch", "worktrees"})
 KINDS = frozenset({"runs", "scratch", "worktrees", "sessions"})
 DAY = 86400
@@ -209,14 +206,6 @@ def _run_kind(path: Path, canonical: bool) -> str | None:
     if canonical:
         match = RUN_NAME.fullmatch(path.name)
         return match.group(1) if match else None
-    if MCP_NAME.fullmatch(path.name) and (path / "RUN_RECEIPT.json").is_file():
-        return "dispatch"
-    if (path / "RUN.json").is_file():
-        return "delivery"
-    if (path / "GOAL.md").is_file():
-        return "mission"
-    if LEGACY_ORCH.fullmatch(path.name) and (path / "RUN_RECEIPT.json").is_file():
-        return "orch"
     return None
 
 
@@ -471,7 +460,6 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
     rows: list[dict[str, Any]] = []
     agent = root / ".agent-run"
     indexed_ids = _indexed_run_ids(agent / "runs" / "index.jsonl")
-    run_verdicts: dict[str, str] = {}
     for parent, canonical in ((agent / "runs", True), (agent, False)):
         if not parent.is_dir() or parent.is_symlink():
             continue
@@ -490,12 +478,7 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
                 continue
             if path.is_file():
                 if parent == agent:
-                    sibling = LEGACY_SIBLING.fullmatch(path.name)
-                    if sibling:
-                        # Linked to the run below after every run has been classified.
-                        rows.append(_row(root, path, "owner-log", "triage:orphan-sibling", now))
-                    else:
-                        rows.append(_row(root, path, "unknown", "triage:hand-named", now))
+                    rows.append(_row(root, path, "unknown", "triage:hand-named", now))
                 else:
                     rows.append(_row(root, path, "unknown", "triage:unexpected-file", now))
                 continue
@@ -514,21 +497,12 @@ def plan(repo: Path, *, include: frozenset[str] = DEFAULT_INCLUDE, older_than: f
                 receipt = _json(path / "RUN_RECEIPT.json") or {}
                 status = str(receipt.get("status") or receipt.get("state") or "").lower()
                 rows.extend(_bulk_rows(root, path, status in OK_STATUSES, older_than, now))
-            if not canonical:
-                run_verdicts[path.name] = verdict
             owner = path / "_owner"
             if owner.is_dir() and not owner.is_symlink() and verdict != "delete":
                 for child in sorted(owner.iterdir()):
                     is_log = child.is_file() and not child.is_symlink() and child.suffix in {".log", ".jsonl"}
                     log_verdict = "delete" if is_log and verdict.startswith("keep:retention") and _age(child, now) >= max(7.0, older_than or 0) and "runs" in include else "keep:run-record"
                     rows.append(_row(root, child, "owner-log" if is_log else "owner-record", log_verdict, now))
-    for row in rows:
-        if row["kind"] == "owner-log" and row["verdict"] == "triage:orphan-sibling":
-            match = LEGACY_SIBLING.fullmatch(Path(row["path"]).name)
-            if match and match.group(1) in run_verdicts:
-                verdict = run_verdicts[match.group(1)]
-                is_log = Path(row["path"]).suffix in {".log", ".jsonl"}
-                row["verdict"] = "delete" if verdict == "delete" or (is_log and verdict.startswith("keep:retention") and row["age_days"] >= max(7.0, older_than or 0) and "runs" in include) else "keep:run-record"
     scratch = agent / "scratch"
     if scratch.is_dir() and not scratch.is_symlink():
         for path in sorted(scratch.iterdir()):
