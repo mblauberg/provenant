@@ -194,12 +194,11 @@ not read an absent `Watch out for` as an endorsement.
   Both paid models draw on the small Go monthly quota, so use them sparingly.
 - **Watch out for:** free models rotate often, and their data terms differ per
   model (Zen docs). Zero-retention, no training: `deepseek-v4.1-flash-free`,
-  `glm-5.3-flash-free`, `space-bunny-free`, `longcat-2.5-preview-free`.
+  `glm-5.3-flash-free`, `longcat-2.5-preview-free`.
   `cat-jam-free` does not train but keeps data for 30 days. Use or log data:
-  `mimo-v2.6-flash-free`, `muse-spark-*-free`, `big-pickle`, `ll-alpha-free`,
-  `nemotron-*-free`. Space Bunny is an unidentified stealth model with no
-  published benchmarks, so it stays `sparing` in `junior` until local runs
-  justify more; LongCat 2.5 Preview (`longcat`) is catalogued by name only.
+  `mimo-v2.6-flash-free`, `big-pickle`, `ll-alpha-free`, `nemotron-*-free`.
+  MiMo stays outside the default pools; LongCat 2.5 Preview (`longcat`) is
+  catalogued by name only.
   Gemini 4 Argon Contributor (`argon`, paid Go) is a rare `principal` pick that
   trains on prompts and is not zero-retention.
   Keep sensitive, private or client data off the second group

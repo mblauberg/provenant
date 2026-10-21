@@ -1070,6 +1070,96 @@ def test_accepts_claude_instruction_symlink_to_canonical_agents_file(tmp_path):
     assert "add this line" not in result.stderr
 
 
+def test_claude_install_retires_duplicate_agents_symlink(tmp_path):
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    instance_agents = tmp_path / ".agents/AGENTS.md"
+    instance_agents.parent.mkdir(parents=True)
+    instance_agents.write_text("# Instance instructions\n")
+    duplicate_agents = config / "AGENTS.md"
+    duplicate_agents.symlink_to(instance_agents)
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert (config / "CLAUDE.md").exists()
+    assert not duplicate_agents.exists()
+    assert not duplicate_agents.is_symlink()
+    assert "duplicate instructions retired" in result.stdout
+
+
+def test_claude_install_retires_duplicate_agents_file(tmp_path):
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    instance_agents = tmp_path / ".agents/AGENTS.md"
+    instance_agents.parent.mkdir(parents=True)
+    instance_agents.write_text("# Instance instructions\n")
+    duplicate_agents = config / "AGENTS.md"
+    duplicate_agents.write_text("# Instance instructions\n")
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert (config / "CLAUDE.md").exists()
+    assert not duplicate_agents.exists()
+    assert "duplicate instructions retired" in result.stdout
+
+
+def test_claude_install_keeps_doctrine_when_config_is_instance_root(tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    doctrine = shared / "AGENTS.md"
+    doctrine.write_text("# Edited instance instructions\n")
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(shared),
+                 AGENT_FABRIC_INSTANCE_ROOT=str(shared))
+
+    assert doctrine.read_text() == "# Edited instance instructions\n"
+    assert "duplicate instructions retired" not in result.stdout
+
+
+def test_claude_install_keeps_agents_link_that_claude_md_chains_through(tmp_path):
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    instance_agents = tmp_path / ".agents/AGENTS.md"
+    instance_agents.parent.mkdir(parents=True)
+    instance_agents.write_text("# Instance instructions\n")
+    (config / "AGENTS.md").symlink_to(instance_agents)
+    (config / "CLAUDE.md").symlink_to("AGENTS.md")
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert (config / "CLAUDE.md").resolve() == instance_agents
+    assert "duplicate instructions retired" not in result.stdout
+
+
+@pytest.mark.parametrize("shape", ["hop", "dot_dot", "absolute_alias"])
+def test_claude_install_keeps_agents_link_on_indirect_chain(tmp_path, shape):
+    real_config = tmp_path / "claude-config"
+    real_config.mkdir()
+    config = real_config
+    instance_agents = tmp_path / ".agents/AGENTS.md"
+    instance_agents.parent.mkdir(parents=True)
+    instance_agents.write_text("# Instance instructions\n")
+    (real_config / "AGENTS.md").symlink_to(instance_agents)
+    if shape == "hop":
+        (real_config / "hop.md").symlink_to("AGENTS.md")
+        (real_config / "CLAUDE.md").symlink_to("hop.md")
+    elif shape == "dot_dot":
+        (real_config / "CLAUDE.md").symlink_to("././AGENTS.md")
+    else:
+        config = tmp_path / "claude-alias"
+        config.symlink_to(real_config)
+        (real_config / "CLAUDE.md").symlink_to(real_config / "AGENTS.md")
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert (real_config / "CLAUDE.md").resolve() == instance_agents
+    assert "duplicate instructions retired" not in result.stdout
+
+
 def test_accepts_codex_instruction_symlink_to_canonical_agents_file(tmp_path):
     config = tmp_path / "codex-home"
     config.mkdir()

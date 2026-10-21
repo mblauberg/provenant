@@ -275,7 +275,7 @@ def write_route_health(row, *, path=None, at=None):
     model = registered_model(adapter, provenance.get("resolved_model") or "*")
     task_class = row.get("task_class") or provenance.get("requested", {}).get("task_class") or "ordinary"
     status = row.get("status", "failed")
-    if row.get("evidence", {}).get("signature") == "empty_output":
+    if status == "failed" and row.get("evidence", {}).get("signature") == "empty_output":
         status = "empty_output"
     if status not in {"ok", "quarantined", "failed", "empty_output", "cancelled", "rate_limited", "usage_limited"}:
         status = "failed"

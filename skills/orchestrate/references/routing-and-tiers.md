@@ -40,7 +40,7 @@ Task class selects an adapter's `principal`, `senior` or `junior` model (aliases
 
 Prefer a direct model name (`sonnet`, `sol`, `luna`, `deepseek-free`, `glm-free`, `flash`) when you know what the work needs; recorded dispatches use explicit names about three times as often as aliases, and a name is the most predictable selector. Reach for a pool when you want spread, rotation or a council.
 
-The three tier pools form a hierarchy ([tiered-council.md](tiered-council.md)): `junior` is tier 1, laid-out work and cheap lenses that need little judgement (the zero-retention DeepSeek and GLM free models, Haiku and Luna lead at `high`, DeepSeek free first, then agy Flash, with paid OpenCode and the other rotating free models at `sparing`); `senior` is tier 2, review, judgement and hard implementation (Sonnet and Sol, then agy Flash at high effort and Cursor Grok 4.7, with agy Opus 4.6 at `sparing`); `principal` is tier 3, critical decisions and consensus (Opus, then Astra, with Argon at `sparing`). `design` and `writing` serve those crafts.
+The three tier pools form a hierarchy ([tiered-council.md](tiered-council.md)): `junior` is tier 1, laid-out work and cheap lenses that need little judgement (the zero-retention DeepSeek and GLM free models, Haiku and Luna lead at `high`, then agy Flash, with paid OpenCode Go at `sparing`; free models that train on prompts stay out of default pools); `senior` is tier 2, review, judgement and hard implementation (Sonnet and Sol, then agy Flash at high effort, with agy Opus 4.6 at `sparing`; Cursor is selectable by name only); `principal` is tier 3, critical decisions and consensus (Opus, then Astra, with Argon at `sparing`). `design` and `writing` serve those crafts.
 
 `route: "junior" | "senior" | "principal" | "design" | "writing"` picks from a weighted pool that spans adapters (`config/model-routing.json` `routes`; the user overlay may reorder or reweight). Weights are `high` (8), `normal` (4), `sparing` (1) or `off` (0), or any non-negative number on the same scale. An entry's `effort` band clamps the caller's effort in either direction, raising a low request or lowering a high one, and a warning names each move. Every mode skips a model that is not installed, is cooling down, whose adapter is disabled, or whose adapter cannot run it (the adapter-compatibility family and model gates), and names the skip in the warnings:
 
@@ -80,11 +80,10 @@ The first configured candidate is the default and later candidates remain
 admissible. `docs/model-dossier.md` records advisory preferences, so prose
 alone does not move a default.
 
-Sonnet 5.5 (`claude-sonnet-5-5`, through `sonnet`) is Claude's default: it leads
-the workhorse, implementation, research, screenshots, second-opinion and
-ui-taste candidates. Opus 5.5 (`claude-opus-5-5`, through `opus`) leads
-critical-review, orchestration and crucial or terminal work, and stays a review
-candidate. Each catalogue-configured risk tier has one bounded
+The live roster is `provenant routes`; pools and tiers live in
+`config/model-routing.json`.
+
+Each catalogue-configured risk tier has one bounded
 override occupant. Validation prevents it from being an alias or alias
 candidate. Lifecycle `risk_tier` remains delivery metadata and never selects
 that occupant. Callers must use the separate `--model-override-tier` input,
@@ -101,23 +100,14 @@ string silently degrades an eligibility gate into a substring test. A task-class
 route whose effort differs from its probe policy's `minimum_effort` fails as
 `task_class_config_invalid`: the probe evidences exactly one effort, so a
 divergence is a configuration error and must not surface as the provider fault
-`effort_capability_unverified`. Claude Fable 5.1 (`claude-fable-5-1`) currently
-occupies both configured tiers. The override is opt-in and is not the default
-for crucial or terminal work: prefer Opus 5.5 at `high` or `xhigh`, and select
-Fable only when a deliberately different Anthropic mind is wanted or the owner
-asks for it.
-Astra leads for Codex and is the only OpenAI flagship candidate, so a worker
-model is never a silent flagship fallback. The standing policy runs Astra between `low`
-and `xhigh` for critical review and for legwork that needs judgement. The
-native Codex CLI reports `max` and `ultra` for Astra and the Responses API
-stops at `max`; those are separate surfaces, only the runtime capability probe
-decides what the adapter can dispatch, and the catalogue defaults to neither.
-Every substitution is recorded. The workhorse alias lists GPT-6.1 Sol
-(`gpt-6.1-sol`) first, with GPT-6 Luna (`gpt-6-luna`) as its admissible
-fallback; scout is Luna. Both run at `high` by default and are raised to
-`xhigh` or `max` when a slice warrants it. GPT-5.6 models and Terra are no
-longer catalogue routes. Claude and
-Codex are equal primary families.
+`effort_capability_unverified`. The override is opt-in and is not the default
+for crucial or terminal work: select the override only when a deliberately
+different mind is wanted or the owner asks for it.
+
+Worker models are never a silent flagship fallback. Only the runtime capability
+probe decides what the adapter can dispatch, and the catalogue defaults to
+neither. Every substitution is recorded. Claude and Codex are equal primary
+families.
 
 Effort rule: **medium by default**; **high for verification, adversarial, and high-stakes** calls
 (that's where subtle errors hide); reserve the very highest effort for isolated single-shot calls —
