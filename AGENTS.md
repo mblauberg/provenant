@@ -30,8 +30,7 @@ changing memory policy.
 - **CLI.** Run `provenant help` to discover commands. Route answer-bearing
   external work through the `orchestrate` skill and Fabric.
 - **Style.** Keep traffic between agents, and mechanical and status messages,
-  terse. Write prose for the user in the register its domain expects. Load
-  the `caveman` skill only when the user asks for it.
+  terse. Write prose for the user in the register its domain expects.
 - **Shell.** The interactive shell is usually zsh, whose quoting and
   word-splitting differ from a script's. Read
   [`docs/runbooks/shell-pitfalls.md`](docs/runbooks/shell-pitfalls.md) before

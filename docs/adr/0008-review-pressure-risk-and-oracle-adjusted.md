@@ -55,6 +55,8 @@ are superseded. No replacement skill or specification is created.
 Style policy: terse output stays default for inter-agent/mechanical/status
 traffic; human-facing explanatory output is domain-appropriate. The `caveman`
 overlay loads only on explicit request, avoiding a duplicate skill load.
+The `caveman` skill was removed on 2026-10-21 at the owner's request; the terse
+inter-agent default stands without it.
 
 Current implementation identifiers name their owners directly: certifying
 review owns the four-slot profile, Console acceptance owns the requirement and
