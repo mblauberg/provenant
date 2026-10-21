@@ -16,6 +16,7 @@ import sys
 LABEL = re.compile(r'[a-z0-9][a-z0-9._-]{0,63}')
 _TELEMETRY = None
 _TELEMETRY_ROOT = None
+_ACCOUNT_WARNING_EMITTED = False
 
 
 def config():
@@ -97,10 +98,16 @@ def host_id():
 
 
 def scope(provider, *, default=False):
+    global _ACCOUNT_WARNING_EMITTED
     try:
         identity = default_identity(provider) if default else selected_identity(provider)
         account = account_key(provider, identity)
-    except (OSError, RuntimeError, ValueError, KeyError):
+    except ValueError as exc:
+        if not _ACCOUNT_WARNING_EMITTED:
+            _ACCOUNT_WARNING_EMITTED = True
+            print(f"provider identity: telemetry.accounts config error: {exc}", file=sys.stderr)
+        account = None
+    except (OSError, RuntimeError, KeyError):
         account = None
     return {'account': account, 'host': host_id()}
 

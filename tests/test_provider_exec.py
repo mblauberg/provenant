@@ -2010,7 +2010,7 @@ def test_opencode_discovery_eperm_is_sandbox_denied(tmp_path, structured_error):
     record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
     assert record["status"] == ("failed" if structured_error else "permission_blocked")
     assert record["error_class"] == ("provider_error" if structured_error else "sandbox_denied")
-    assert record["reason"] == (json.dumps(event) if structured_error else denial)
+    assert record["reason"] == ("provider failed" if structured_error else denial)
 
 
 @pytest.mark.parametrize("message,status", [
@@ -2031,7 +2031,7 @@ def test_opencode_structured_failure_wins_over_incidental_eperm(tmp_path, monkey
     record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
     assert record["status"] == status
     assert record["error_class"] == ("auth" if status == "auth_required" else status)
-    assert record["reason"] == json.dumps(events[0])
+    assert record["reason"] == message
 
 
 @pytest.mark.parametrize("adapter,events,expected", [
@@ -4695,6 +4695,10 @@ def test_fallback_training_requires_explicit_opt_in(tmp_path):
 
 @pytest.mark.parametrize("explicit", [False, True])
 def test_usage_limit_falls_back_as_attempt_two(tmp_path, explicit):
+    # This checks routing, independently of the host's memory probe.
+    policy = tmp_path / ".agents/fabric-policy.json"
+    policy.parent.mkdir(parents=True, exist_ok=True)
+    policy.write_text(json.dumps({"memory_floor_percent": {"read_only": 0}}))
     bindir = tmp_path / "bin"
     bindir.mkdir()
     cli = bindir / "claude"
@@ -4755,6 +4759,7 @@ sys.exit(1 if 'TARGET_MODEL' in model else 0)
     assert [row["status"] for row in rows] == ["usage_limited", "ok"]
     assert len({row["run_id"] for row in rows}) == 1
     assert rows[1]["provenance"]["fallback_from"]["status"] == "usage_limited"
+    assert rows[0]["provenance"]["resolved_model"] != rows[1]["provenance"]["resolved_model"]
     assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "ok"
     cooldowns = json.loads((tmp_path / "cooldowns.json").read_text())["cooldowns"]
     (key, cooldown), = cooldowns.items()
@@ -7251,12 +7256,12 @@ def test_opencode_v2_structured_error_log_lines_are_fatal_and_info_is_not():
     assert re.match(quiet, "timestamp=x level=WARN message=y")
 
 
-def test_opencode_v2_free_quota_event_is_rate_limited():
+def test_opencode_v2_free_quota_event_is_usage_limited():
     event = {"type": "error", "sessionID": "ses_1", "error": {
         "type": "provider.quota", "message": "Rate limit exceeded. Please try again later.", "status": 429,
         "response": {"body": json.dumps({"type": "error", "error": {"type": "FreeUsageLimitError"}})}}}
     parsed = supervisor().parse_output("opencode", json.dumps(event) + "\n", "", 1)
-    assert parsed["status"] == "rate_limited"
+    assert parsed["status"] == "usage_limited"
 
 
 def test_opencode_v1_cli_is_a_typed_refusal_on_the_provider_exec_cli(tmp_path, monkeypatch, capsys):
@@ -7573,3 +7578,42 @@ def test_a_sandboxed_writer_moves_only_its_own_branch(monkeypatch, tmp_path):
                  private / "config.worktree", common / "objects/info/alternates", common / "HEAD",
                  common / "provenant-instruction-checks"):
         assert run(f"printf x >> {shlex.quote(str(path))}").returncode != 0, path
+
+
+@pytest.mark.parametrize("adapter", ["agy", "codex", "opencode", "claude"])
+@pytest.mark.parametrize(("window", "status"), [("day", "usage_limited"), ("minute", "rate_limited"), ("second", "rate_limited")])
+def test_resource_exhausted_classifies_the_quota_window(adapter, window, status):
+    message = f"429 RESOURCE_EXHAUSTED: Quota exceeded for requests per {window}"
+    parsed = supervisor().parse_output(adapter, "", message, 1)
+    assert parsed["status"] == status
+    assert message in parsed["excerpt"]
+
+
+@pytest.mark.parametrize(("message", "status"), [
+    ("Quota exceeded: requests per day. retry in 2 per minute docs", "usage_limited"),
+    ("Quota exceeded: requests per hour. See per minute docs", "usage_limited"),
+    ("Quota exceeded for GenerateRequestsPerMinutePerProjectPerModel", "rate_limited"),
+    ("Quota exceeded for GenerateRequestsPerDayPerProjectPerModel", "usage_limited"),
+    ("Quota exceeded for RequestsPerHour and RequestsPerMinute", "usage_limited"),
+    ('{"error":{"message":"Quota exceeded for requests per minute"},"docs":"limits per day"}', "rate_limited"),
+    ("RESOURCE_EXHAUSTED: limit: 60 per minute", "rate_limited"),
+    ('RESOURCE_EXHAUSTED: Quota metric "generativelanguage.googleapis.com/generate_requests" per minute', "rate_limited"),
+    ("RESOURCE_EXHAUSTED: limit: 60 per day", "usage_limited"),
+])
+def test_quota_window_comes_from_the_quota_phrase_not_the_whole_event(message, status):
+    parsed = supervisor().parse_output("agy", "", (message if "RESOURCE_EXHAUSTED" in message else "429 RESOURCE_EXHAUSTED: " + message), 1)
+    assert parsed["status"] == status
+
+
+@pytest.mark.parametrize("body_string", [False, True])
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_opencode_spent_free_allowance_records_provider_reason(tmp_path, body_string, wrapped):
+    message = "Rate limit exceeded. Please try again later."
+    body = {"error": {"type": "FreeUsageLimitError", "message": message}}
+    error = {"type": "provider.quota", "status": 429,
+             "response": {"body": json.dumps(body) if body_string else body}}
+    event = {"type": "error", "error": error} if wrapped else error
+    code = "import json,sys; print(json.dumps(" + repr(event) + ")); sys.exit(1)"
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == "usage_limited"
+    assert record["reason"] == message
