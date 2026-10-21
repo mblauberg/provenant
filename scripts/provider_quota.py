@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import argparse
 from collections import namedtuple
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 import importlib.util
+import fcntl
 import json
 import math
 import os
@@ -24,6 +26,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from time import monotonic
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -142,8 +145,9 @@ def _telemetry():
     global _TELEMETRY
     if _TELEMETRY is None:
         spec = importlib.util.spec_from_file_location('provenant_telemetry_for_quota', HERE / 'telemetry.py')
-        _TELEMETRY = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(_TELEMETRY)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _TELEMETRY = module
     return _TELEMETRY
 
 
@@ -230,7 +234,9 @@ def accounts():
             entry = entry if isinstance(entry, dict) else {}
             if entry.get('enabled') is False:
                 continue
-            identity = Path(entry.get('identity_dir') or default or '.').expanduser()
+            if not entry.get('identity_dir') and default is None:
+                raise ValueError(f'{name}/{label} requires identity_dir')
+            identity = Path(entry.get('identity_dir') or default).expanduser()
             priority = number(entry.get('priority'))
             found.append(Account(name, label, identity, default is not None and same_path(identity, default),
                                  str(entry['plan']) if entry.get('plan') else None,
@@ -324,12 +330,32 @@ def load_snapshot(provider_name, label):
     return value if isinstance(value, dict) and value.get('schema') == SCHEMA and value.get('host') == telemetry_host() else None
 
 
-def save_snapshot(value):
-    path = cache_path(value['provider'], value['account'], value['host'])
+@contextmanager
+def locked(path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix('.tmp')
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + '\n')
-    temporary.replace(path)
+    with path.open('a') as stream:
+        fcntl.flock(stream, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def atomic_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, prefix=path.name + '.', delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(json.dumps(value, indent=2, sort_keys=True) + '\n')
+        temporary.replace(path)
+    finally:
+        if temporary:
+            temporary.unlink(missing_ok=True)
+
+
+def save_snapshot(value):
+    atomic_json(cache_path(value['provider'], value['account'], value['host']), value)
 
 
 def snapshots():
@@ -414,6 +440,13 @@ def fetch(account, now):
 
 def refresh(account, now=None, force=False):
     """The account's snapshot, fetched at most once per cache period unless forced."""
+    if not enabled():
+        return _refresh(account, now, force)
+    with locked(cache_path(account.provider, account.label).with_suffix('.lock')):
+        return _refresh(account, now, force)
+
+
+def _refresh(account, now=None, force=False):
     now = now or utcnow()
     if not enabled():
         return load_snapshot(account.provider, account.label) or blank(account, 'disabled')
@@ -422,7 +455,8 @@ def refresh(account, now=None, force=False):
     previous = load_snapshot(account.provider, account.label)
     attempted = parse_time((previous or {}).get('attempted_at'))
     if previous and not force and attempted and (now - attempted).total_seconds() < cache_seconds():
-        return previous
+        return {**previous, 'active': account.active, 'priority': account.priority,
+                'plan': account.plan or previous.get('plan')}
     try:
         result = fetch(account, now)
     except Unavailable as exc:
@@ -472,7 +506,7 @@ def pace(window, now):
     if reset is not None and remaining <= 0:
         return {**result, 'state': 'not_started', 'headroom_percent': 100,
                 'summary': f'reset passed at {iso(reset)}; awaiting a fresh reading'}
-    if reset is None:
+    if reset is None or minutes and remaining > minutes * 60:
         return {**result, 'state': 'not_started', 'headroom_percent': 100, 'summary': 'window starts on first use'}
     if actual >= 100:
         return {**result, 'state': 'exhausted', 'will_last_to_reset': False, 'runs_out_at': iso(now),
@@ -516,18 +550,18 @@ def credits():
 
 
 def change_credits(provider_name, label, delta):
-    path = state_root() / 'quota/credits.json'
     if not LABEL.fullmatch(provider_name) or not LABEL.fullmatch(label):
         raise ValueError('provider and account must be short lowercase labels')
-    current = {'/'.join(key): entry for key, entry in credits().items()}
-    key = f'{provider_name}/{label}/{telemetry_host()}'
-    count = int((current.get(key) or {}).get('reset_credits') or 0) + delta
-    if count < 0:
-        raise ValueError(f'{key} has no banked reset credit to use')
-    current[key] = {'reset_credits': count, 'updated_at': iso(utcnow())}
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(current, indent=2, sort_keys=True) + '\n')
-    return count
+    path = state_root() / 'quota/credits.json'
+    with locked(path.with_suffix('.lock')):
+        current = {'/'.join(key): entry for key, entry in credits().items()}
+        key = f'{provider_name}/{label}/{telemetry_host()}'
+        count = int((current.get(key) or {}).get('reset_credits') or 0) + delta
+        if count < 0:
+            raise ValueError(f'{key} has no banked reset credit to use')
+        current[key] = {'reset_credits': count, 'updated_at': iso(utcnow())}
+        atomic_json(path, current)
+        return count
 
 
 def credit_advice(rows, banked, now):
@@ -564,8 +598,8 @@ def describe(value, banked, now):
     rows = [{**row, 'pace': pace(row, now)} for row in value.get('windows') or []]
     worst = governing(rows)
     unreported = list(value.get('unreported') or [])
-    lasting = [row for row in rows if row['pace'].get('will_last_to_reset') and row['window_minutes']]
-    longest = max(lasting, key=lambda row: row['window_minutes'], default=None)
+    dated = [row for row in rows if row.get('reset_at') and row.get('window_minutes')]
+    longest = max(dated, key=lambda row: row['window_minutes'], default=None)
     return {key: value.get(key) for key in ('provider', 'account', 'plan', 'host', 'active', 'priority',
                                             'observed_at', 'attempted_at', 'status', 'error', 'source')} | {
         'state': worst['pace']['state'] if worst else 'unreported',
@@ -575,6 +609,7 @@ def describe(value, banked, now):
                          if unreported else '',
         'credits': value.get('credits') or banked, 'credit_advice': credit_advice(rows, value.get('credits') or banked, now),
         'use_it_or_lose_it': {'window': longest['name'], 'reset_at': longest['reset_at'],
+                              'unused_percent': longest['pace']['headroom_percent'],
                               'expiring_headroom_percent': longest['pace']['expiring_headroom_percent']}
                              if longest else None}
 

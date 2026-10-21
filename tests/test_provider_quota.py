@@ -224,15 +224,24 @@ def test_claude_refuses_expiring_credentials_without_calling_the_endpoint(quota,
     assert value['status'] == 'unavailable' and 'refresh' in value['error'] and TOKEN not in json.dumps(value)
 
 
-def test_cursor_session_cookie_comes_from_the_local_jwt_and_cycle_dates(quota, tmp_path):
+def test_cursor_session_cookie_comes_from_the_local_jwt_and_cycle_dates(quota, tmp_path, monkeypatch):
     claims = base64.urlsafe_b64encode(json.dumps({'sub': 'auth0|user_42', 'exp': int((NOW + timedelta(days=1)).timestamp())}).encode()).decode().rstrip('=')
     jwt = f'header.{claims}.signature'
-    database = tmp_path / 'state.vscdb'
+    database = tmp_path / 'state ? fixture.vscdb'
     with sqlite3.connect(database) as db:
         db.execute('CREATE TABLE ItemTable(key TEXT, value TEXT)')
         db.execute('INSERT INTO ItemTable VALUES (?,?)', ('cursorAuth/accessToken', jwt))
     cursor = quota.provider('cursor')
+    connect = sqlite3.connect
+    opened = []
+    def track(*args, **kwargs):
+        connection = connect(*args, **kwargs)
+        opened.append(connection)
+        return connection
+    monkeypatch.setattr(cursor.sqlite3, 'connect', track)
     assert cursor.session(database, NOW) == (jwt, 'user_42')
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened[0].execute('SELECT 1')
     parsed = cursor.parse({'membershipType': 'pro', 'individualUsage': {'plan': {'used': 250, 'limit': 1000}},
                            'billingCycleStart': iso(NOW - timedelta(days=10)),
                            'billingCycleEnd': iso(NOW + timedelta(days=20))}, NOW)
@@ -474,6 +483,7 @@ def test_provider_reset_overrides_later_usage_cooldown_and_identity_switch_reche
     assert quota.apply_to_cooldowns(cooldown, NOW + timedelta(days=2, minutes=1)) == {}
     monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'home/.claude-b'))
     assert quota.route_states(NOW)['claude']['account'] == 'b'
+    assert {row['account']: row['active'] for row in quota.gather(NOW)} == {'a': False, 'b': True}
     assert quota.route_states(NOW)['claude']['state'] == 'reserve'
     assert quota.apply_to_cooldowns(cooldown, NOW) == {}
 
@@ -548,3 +558,43 @@ def test_codex_quota_has_one_deadline_and_reaps_a_stubborn_child(quota, monkeypa
         quota.provider('codex').app_server(quota.Account('codex', 'default', Path('/fake'), True), quota.IO, timeout=2)
     assert stopped == ['terminate', 'kill', 'reaped']
     assert Process.stdin.closed and Process.stdout.closed
+
+
+def test_future_window_is_full_and_use_it_or_lose_it_includes_unused_fraction(quota):
+    future = window(100, 300, timedelta(hours=8))
+    assert quota.pace(future, NOW)['state'] == 'not_started'
+    assert quota.pace(future, NOW)['headroom_percent'] == 100
+    value = quota.report([snapshot(quota, windows=[window(64.2, WEEK, timedelta(hours=135.7))])], NOW)
+    expiring = value['accounts'][0]['use_it_or_lose_it']
+    assert expiring['unused_percent'] == pytest.approx(35.8)
+    assert expiring['expiring_headroom_percent'] == 0
+
+
+def test_concurrent_reads_share_one_cached_fetch_and_credit_updates_are_not_lost(quota):
+    from concurrent.futures import ThreadPoolExecutor
+    import threading
+    import time
+    calls = []
+    barrier = threading.Barrier(4)
+    def fetch(account, io, now):
+        calls.append(account.label)
+        time.sleep(0.02)
+        return {'windows': [window(25, 300, timedelta(hours=2))]}
+    quota.register('fake', SimpleNamespace(ADAPTER='fake', default_identity=lambda: None, fetch=fetch))
+    account = quota.Account('fake', 'work', Path('/fixture'), True)
+    def read(_):
+        barrier.wait()
+        return quota.refresh(account, NOW)
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        assert all(row['status'] == 'ok' for row in pool.map(read, range(4)))
+        list(pool.map(lambda _: quota.change_credits('fake', 'work', 1), range(20)))
+    assert calls == ['work']
+    assert quota.credits()[('fake', 'work', 'studio')]['reset_credits'] == 20
+    assert quota.cache_path('fake', 'work').stat().st_mode & 0o777 == 0o600
+
+
+def test_configured_provider_without_a_default_requires_an_identity_directory(quota, tmp_path):
+    quota.register('fake', SimpleNamespace(ADAPTER='fake', default_identity=lambda: None))
+    configure(tmp_path, {'accounts': {'fake': {'work': {}}}})
+    with pytest.raises(ValueError, match='identity_dir'):
+        quota.accounts()

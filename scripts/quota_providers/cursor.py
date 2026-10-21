@@ -6,6 +6,7 @@ Adapted from token-meter (MIT, Galileo Agent Labs); see THIRD_PARTY_NOTICES.md.
 from __future__ import annotations
 
 import base64
+from contextlib import closing
 import json
 from pathlib import Path
 import re
@@ -28,7 +29,7 @@ def session(database, now, io=None):
     """The access token and user id from Cursor's state database, opened read-only."""
     unavailable = io.Unavailable if io else ValueError
     try:
-        with sqlite3.connect(f'file:{database}?mode=ro', uri=True) as db:
+        with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as db:
             row = db.execute("SELECT value FROM ItemTable WHERE key='cursorAuth/accessToken' LIMIT 1").fetchone()
     except sqlite3.Error:
         raise unavailable('Cursor is not signed in locally') from None
