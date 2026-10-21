@@ -95,10 +95,11 @@ is checked once per process.
   line, or an exit diagnostic when none exists; INFO/DEBUG logs are excluded. Sandbox EPERM
   without a final answer is `permission_blocked` (`sandbox_denied`), neutral for route health.
 - **Output before exit.** Final assistant-step text goes to `result.md`, without earlier working
-  narration or stderr. A positive exit after that text, without a structured provider failure,
+  narration or stderr. Exit 1 after that text, without a structured provider failure,
   is `ok` with signature `exit_after_output` and a warning. The adapter exit is normalised to
   zero for dispatch; `evidence.exit` keeps the real process exit. Route health records the
-  successful outcome and warning. A later tool call or new step invalidates intermediate
+  successful outcome and warning. Other exits, such as 2 (usage) and 124 (timeout), stay failures
+  that keep their output. A later tool call or new step invalidates intermediate
   text as completion evidence. Stream `step_finish` usage, including cache and reasoning
   tokens, remains in receipt `context` fields with `usage_source: observed`.
 - **Read-only sandbox.** The macOS profile keeps the blanket read deny on HOME for OpenCode and

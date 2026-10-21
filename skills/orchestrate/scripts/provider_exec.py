@@ -1741,7 +1741,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         status = "failed"
         result["signature"] = "empty_output"
         result["excerpt"] = ("no assistant text: " + stdout.strip())[:200]
-    if (getattr(config, "EXIT_AFTER_OUTPUT", False) and status == "failed" and result["signature"] is None and exit_code > 0
+    if (getattr(config, "EXIT_AFTER_OUTPUT", False) and status == "failed" and result["signature"] is None and exit_code == 1
             and parts and result["text"].strip() and not errors):
         status = "ok"
         result["signature"] = "exit_after_output"
