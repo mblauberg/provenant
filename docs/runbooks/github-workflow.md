@@ -337,7 +337,7 @@ Afterwards:
    to record `human_gates.acceptance` on this receipt. Release
    records its separate gate against the same exact artifact identity and never
    reconstructs it. This code constraint is listed in the
-   [acceptance sweep](../acceptance-sweep-2026-10-21.md); do not fabricate approval.
+   [issue #1025](https://github.com/mblauberg/provenant/issues/1025); do not fabricate approval.
 2. Confirm the issue closed (`Closes #N`) or close it with its terminal reason
    recorded, and confirm Status is `Done`.
 3. Prune the merged branch's artefacts. This is the last step of the merge, not

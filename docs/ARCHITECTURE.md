@@ -179,7 +179,7 @@ Ordering is not certified, because a receipt cannot certify its own history:
 the agent that writes the transitions writes the receipt in the same turn. What
 is checked is what each recorded gate demands. The current schema still uses
 `human_gates.acceptance` for explicit user approval; this retained code contract
-is catalogued in the [acceptance sweep](acceptance-sweep-2026-10-21.md) and
+is catalogued in [issue #1025](https://github.com/mblauberg/provenant/issues/1025) and
 must not be auto-approved from checks. Human acceptance recorded as
 approved requires the profile's deterministic and judgement evidence, the
 review ladder, the security surfaces and the measures to be present and

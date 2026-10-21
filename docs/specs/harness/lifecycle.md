@@ -104,7 +104,7 @@ agent that performed the run cannot certify its own ordering.
 
 The gates the current schema records, each an independent flat fact. Its
 explicit human acceptance requirement remains a code-alignment follow-up;
-see the [acceptance sweep](../../acceptance-sweep-2026-10-21.md). Do not record
+see [issue #1025](https://github.com/mblauberg/provenant/issues/1025). Do not record
 a user approval that did not occur.
 
 Recorded gates:

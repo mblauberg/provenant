@@ -85,7 +85,7 @@ reconciliation run.
 - Do not infer a user approval from passing checks. The current receipt
   format still records explicit approval in `human_gates.acceptance`; leave
   that field truthful while code alignment is pending. See the
-  [acceptance sweep](../../docs/acceptance-sweep-2026-10-21.md) for retained
+  [issue #1025](https://github.com/mblauberg/provenant/issues/1025) for retained
   code gates.
 
 ## Portable artifact

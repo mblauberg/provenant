@@ -7,7 +7,7 @@ asks for it. A project may name its landing gate as acceptance. The current
 receipt code still enforces explicit human approval; the field descriptions
 below document that compatibility constraint, not a universal user gate.
 Do not fabricate approval. See the
-[acceptance sweep](../../../docs/acceptance-sweep-2026-10-21.md) for code sites.
+[issue #1025](https://github.com/mblauberg/provenant/issues/1025) for code sites.
 
 `implement` executes the `software` profile inside the single canonical
 `delivery-run` receipt. Use the complete `init` command in `deliver` with
