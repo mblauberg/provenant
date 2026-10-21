@@ -1,4 +1,0 @@
-interface:
-  display_name: Caveman
-  short_description: Governed adaptive chat compression with clarity gates
-  default_prompt: Use $caveman for this chat response, preserving exact technical meaning and suspending compression where clarity or safety requires it.

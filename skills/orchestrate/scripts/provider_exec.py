@@ -1372,6 +1372,28 @@ SIGNATURES = (
 )
 
 
+def error_class(status, signature=None):
+    """Stable telemetry only; routing and health continue to use status/signature."""
+    if status in {"ok", "succeeded", "input_required"}:
+        return "none"
+    classes = {
+        "rate_limited": "rate_limited", "usage_limited": "usage_limited",
+        "auth_required": "auth", "model_unavailable": "model_unavailable",
+        "timed_out": "timeout", "startup_timeout": "timeout", "stalled": "timeout",
+        "permission_blocked": "sandbox_denied",
+    }
+    signatures = {
+        **classes, "quota_exhausted": "usage_limited", "auth_expired": "auth",
+        "pinned_model_substitution": "model_unavailable", "empty_output": "empty_output",
+        "print_timeout": "timeout", "idle_watchdog": "timeout", "startup_watchdog": "timeout",
+        "wall_clock": "timeout",
+    }
+    return classes.get(status) or signatures.get(signature) or (
+        "provider_error" if status in {"failed", "rejected", "tool_missing", "output_identity_invalid", "output_write_error"}
+        else "unknown"
+    )
+
+
 def _variant_fix(failure_text):
     """The fix for a rejected input; OpenCode's bad variant names the model and the variant to drop."""
     found = re.search(r"Variant unavailable for ([^\s:\"]+): ([^\s\"}]+)", failure_text)
@@ -3700,6 +3722,8 @@ def execute(
         "context": context_usage.with_codex_rollout(meter.result(), session, environment)
         if plan["adapter"] == "codex"
         else meter.result(),
+        "usage_source": context_usage.usage_source(meter.result()),
+        "error_class": error_class(status, parsed["signature"]),
         "warnings": warnings,
         "reaped": reaped,
         **({"spared": len(descendants.spared_at_stop)} if descendants and descendants.spared_at_stop else {}),
