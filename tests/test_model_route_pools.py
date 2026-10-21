@@ -75,11 +75,9 @@ def test_seed_routes_name_registered_models_with_the_tiny_weight_vocabulary():
     assert set(CATALOG["task_class_routes"]) <= set(CATALOG["route_synonyms"]) | set(CATALOG["routes"])
 
 
-def test_default_pools_only_promote_free_models_with_explicit_no_training():
+def test_default_pools_hold_only_free_models_with_explicit_no_training():
     for name, entries in SEED["routes"].items():
         for entry in entries:
-            if entry["weight"] == "sparing":
-                continue
             adapter, model = pools.split_model(router, SEED, entry["model"])
             if "free" in pools.model_traits(router, SEED, adapter, model):
                 registered, _ = router._registered_match(adapter, model, SEED)
