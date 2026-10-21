@@ -353,7 +353,7 @@ provenant_preflight="$(
 )" || exit 3
 
 state_directory="${AGENT_FABRIC_STATE_DIRECTORY:-$HOME/.local/state/agent-harness/fabric}"
-claude_mcp_config="${CLAUDE_MCP_CONFIG:-$HOME/.claude.json}"
+claude_mcp_config="${CLAUDE_MCP_CONFIG:-${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json}"
 codex_mcp_config="${CODEX_MCP_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
 mcp_args=(
   --agents-home "$PRODUCT_ROOT"
@@ -477,6 +477,19 @@ install_primary() {
     --custom-source "$instance_root/custom-skills" || return $?
   if [[ "$PLATFORM" == "claude" ]]; then
     run_stdlib "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows" || return $?
+    if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]] && run_stdlib -c '
+from pathlib import Path
+import sys
+default = (Path(sys.argv[1]) / ".claude").resolve(strict=False)
+custom = Path(sys.argv[2]).resolve(strict=False)
+sys.exit(0 if default != custom else 1)
+' "$HOME" "$platform_home"; then
+      local settings_link="$platform_home/settings.json"
+      local default_settings="$HOME/.claude/settings.json"
+      if [[ ! -e "$settings_link" && ! -L "$settings_link" ]]; then
+        ln -s "$default_settings" "$settings_link" || return $?
+      fi
+    fi
   fi
   if [[ "$PLATFORM" == "codex" ]]; then
     run_stdlib "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" \
