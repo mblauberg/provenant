@@ -721,7 +721,10 @@ def test_peer_stats_are_versioned_aggregates_and_read_only(tmp_path):
     assert database.read_bytes() == before
 
 
-def test_stats_hosts_all_merges_peer_usage_and_survives_old_and_offline_peers(tmp_path):
+def test_stats_hosts_all_merges_peer_usage_and_survives_old_and_offline_peers(tmp_path, monkeypatch):
+    # The peer summary is built in-process: isolate it from this machine's quota snapshots.
+    for key, value in environment(tmp_path).items():
+        monkeypatch.setenv(key, value)
     local = tmp_path / 'home/.claude/projects/repo/local.jsonl'
     jsonl(local, {'type': 'assistant', 'sessionId': 'shared-session', 'timestamp': '2026-10-21T01:00:00Z',
                   'message': {'id': 'local', 'model': 'claude-test', 'usage': {'input_tokens': 10, 'output_tokens': 20}}})
@@ -938,7 +941,7 @@ def test_events_ledger_is_append_only_metadata_with_harness_revision(tmp_path):
     # An older ledger without events re-reads receipts and snapshots once to backfill them.
     with sqlite3.connect(state / 'telemetry.sqlite3') as db:
         db.execute('DELETE FROM events')
-        db.execute("DELETE FROM meta WHERE key='events_backfill'")
+        db.execute("DELETE FROM meta WHERE key IN ('events_backfill', 'session_events_backfill')")
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(state / 'telemetry.sqlite3') as db:
         assert {row[0] for row in db.execute('SELECT kind FROM events')} >= {
@@ -1248,7 +1251,7 @@ def test_capped_changes_sync_resumes_its_pending_ranges(tmp_path, monkeypatch):
     bin_dir = filtering_gh(tmp_path, hourly_pulls(12))
     monkeypatch.setenv('PATH', os.pathsep.join((str(bin_dir), os.environ['PATH'])))
     with telemetry.connect() as db:
-        added, pending = owner.sync(telemetry, db)
+        added, pending, _ = owner.sync(telemetry, db)
         assert pending > 0 and added < 12
         (bin_dir / 'gh').rename(bin_dir / 'gh-real')
         (bin_dir / 'gh').write_text('#!/bin/sh\nexit 3\n')
@@ -1264,7 +1267,7 @@ def test_capped_changes_sync_resumes_its_pending_ranges(tmp_path, monkeypatch):
         assert len(state['pending']) == pending and state['through'] is None
         runs = 1
         while pending:
-            added, pending = owner.sync(telemetry, db)
+            added, pending, _ = owner.sync(telemetry, db)
             runs += 1
             assert runs < 20
         assert db.execute("SELECT COUNT(*) FROM changes WHERE kind='pr'").fetchone()[0] == 12
@@ -1302,3 +1305,136 @@ def test_fit_keeps_whole_lines_within_the_byte_budget():
     text = owner.fit([f'{index} ' + '🚀' * 200 for index in range(10)])
     assert len(text.encode()) <= owner.BUDGET and text.endswith('lines omitted to fit 4 KB; use --json')
     assert all(line.startswith(str(index)) for index, line in enumerate(text.splitlines()[:-1]))
+
+
+def load_script(name, filename):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(name, ROOT / 'scripts' / filename)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def use_environment(tmp_path, monkeypatch):
+    for key, value in environment(tmp_path).items():
+        if key != 'PATH':
+            monkeypatch.setenv(key, value)
+    monkeypatch.chdir(tmp_path)  # fabric receipts are discovered from the working directory
+
+
+def test_peer_outcomes_carry_latency_samples_and_old_peers_still_validate(tmp_path, monkeypatch):
+    """Regression: the per-metric latency n must cross the peer boundary without rejecting summaries."""
+    use_environment(tmp_path, monkeypatch)
+    receipt(tmp_path, 'timed', 1, status='ok', started_at='2026-10-21T00:59:00Z',
+            provenance=route('codex', 'gpt-6.1-sol'))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    telemetry = load_script('peer_outcome_telemetry', 'telemetry.py')
+    hosts = load_script('peer_outcome_hosts', 'telemetry_hosts.py')
+    with telemetry.connect() as db:
+        summary = telemetry.peer_summary(db, host='peer')
+    assert summary['outcomes'] and summary['outcomes'][0]['latency_samples'] == 1
+    hosts.validate(telemetry, json.loads(json.dumps(summary)), 'peer')
+    old = json.loads(json.dumps(summary))
+    for row in old['outcomes']:
+        del row['latency_samples']
+    hosts.validate(telemetry, old, 'peer')
+    bad = json.loads(json.dumps(summary))
+    bad['outcomes'][0]['latency_samples'] = 'many'
+    try:
+        hosts.validate(telemetry, bad, 'peer')
+    except ValueError:
+        pass
+    else:
+        raise AssertionError('a non-count latency_samples must be rejected')
+
+
+def test_upgraded_ledger_keeps_its_host_keyed_event_ids(tmp_path, monkeypatch):
+    """Regression: events written under the host-keyed namespace must not duplicate on re-ingest."""
+    use_environment(tmp_path, monkeypatch)
+    write_json(tmp_path / 'home/.agents/.agent-fabric/hosts.json', {'schema_version': 1, 'local_host': 'studio'})
+    receipt(tmp_path, 'run-l', 1, status='ok', provenance=route('codex', 'gpt-6.1-sol'))
+    jsonl(tmp_path / 'home/.claude/projects/repo/session.jsonl', {
+        'type': 'assistant', 'sessionId': 'chair', 'timestamp': '2026-10-21T01:00:00Z',
+        'message': {'id': 'm1', 'model': 'claude-test', 'usage': {'input_tokens': 1, 'output_tokens': 1}}})
+    legacy = load_script('legacy_namespace_telemetry', 'telemetry.py')
+    legacy.ledger_id = lambda db: legacy.host_id()  # the earlier namespace hashed the host label
+    with legacy.connect() as db:
+        legacy.ingest(db)
+        db.execute("DELETE FROM meta WHERE key='ledger_id'")
+        db.commit()
+        before = sorted(tuple(row) for row in db.execute('SELECT kind, COUNT(*) FROM events GROUP BY kind'))
+    assert dict(before)['lane.attempt'] == 1 and dict(before)['session.start'] == 1
+    database = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(database) as db:
+        db.execute('DELETE FROM cursors')  # force every source to be read again
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(database) as db:
+        assert sorted(db.execute('SELECT kind, COUNT(*) FROM events GROUP BY kind')) == before
+
+
+def test_ledgers_backfilled_before_session_events_get_them_once(tmp_path):
+    """Regression: an existing `events_backfill` marker must not skip the session.start repair."""
+    jsonl(tmp_path / 'home/.claude/projects/repo/session.jsonl', {
+        'type': 'assistant', 'sessionId': 'missed', 'timestamp': '2026-10-21T01:00:00Z',
+        'message': {'id': 'm1', 'model': 'claude-test', 'usage': {'input_tokens': 1, 'output_tokens': 1}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    database = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(database) as db:  # the shape an earlier build left: marker set, session event missing
+        db.execute("DELETE FROM events WHERE kind='session.start'")
+        db.execute("DELETE FROM meta WHERE key='session_events_backfill'")
+        assert db.execute("SELECT 1 FROM meta WHERE key='events_backfill'").fetchone()
+    for _ in range(2):
+        assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(database) as db:
+        assert db.execute("SELECT session FROM events WHERE kind='session.start'").fetchall() == [('missed',)]
+
+
+def test_ledger_id_creation_tolerates_a_concurrent_first_writer(tmp_path, monkeypatch):
+    """Regression: a ledger id inserted between our read and our write wins without an error."""
+    use_environment(tmp_path, monkeypatch)
+    telemetry = load_script('ledger_race_telemetry', 'telemetry.py')
+    with telemetry.connect() as real:
+        real.execute("DELETE FROM meta WHERE key='ledger_id'")
+        class Racing:
+            raced = False
+            def execute(self, sql, *args):
+                if "key='ledger_id'" in sql and sql.lstrip().startswith('SELECT') and not self.raced:
+                    self.raced = True  # another process inserts after this read
+                    real.execute("INSERT INTO meta VALUES ('ledger_id', 'other-process')")
+                    return real.execute('SELECT 1 WHERE 0')
+                return real.execute(sql, *args)
+        assert telemetry.ledger_id(Racing()) == 'other-process'
+
+
+def test_saturated_one_second_ranges_page_further_and_stay_marked_incomplete(tmp_path, monkeypatch):
+    """Regression: more merges in one second than a page holds must not be silently dropped."""
+    use_environment(tmp_path, monkeypatch)
+    telemetry = load_script('saturated_telemetry', 'telemetry.py')
+    owner = load_script('saturated_changes', 'telemetry_changes.py')
+    monkeypatch.setattr(owner, 'SYNC_LIMIT', 5)
+    same = [pull(700 + index, '2026-10-05T12:00:00Z', f'Batch {index}') for index in range(7)]
+    bin_dir = filtering_gh(tmp_path, [*same, *hourly_pulls(3)])
+    monkeypatch.setenv('PATH', os.pathsep.join((str(bin_dir), os.environ['PATH'])))
+    monkeypatch.setattr(owner, 'SEARCH_LIMIT', 10)
+    with telemetry.connect() as db:
+        added, pending, incomplete = owner.sync(telemetry, db)
+        assert (added, pending, incomplete) == (10, 0, 0)
+    # When even the search cap is full, the range is kept and reported as incomplete.
+    (tmp_path / 'state/telemetry.sqlite3').unlink()
+    monkeypatch.setattr(owner, 'SEARCH_LIMIT', 6)
+    with telemetry.connect() as db:
+        added, pending, incomplete = owner.sync(telemetry, db)
+        assert (pending, incomplete) == (0, 1)
+        state = json.loads(db.execute("SELECT value FROM meta WHERE key='changes_sync'").fetchone()[0])
+        low, high = state['incomplete'][0]
+        assert low <= '2026-10-05T12:00:00Z' <= high
+        assert owner.sync(telemetry, db)[2] == 1  # it stays marked on later syncs
+
+
+def test_fit_keeps_whole_long_lines_that_fit():
+    """Regression: a line that fits is never clipped; lines that do not are counted, not cut."""
+    owner = load_script('fit_whole_changes', 'telemetry_changes.py')
+    long = 'x' * 1500
+    assert owner.fit(['head', long, 'tail']) == f'head\n{long}\ntail'
+    text = owner.fit(['head', 'y' * 5000, 'tail'])
+    assert text == 'head\ntail\n1 lines omitted to fit 4 KB; use --json'

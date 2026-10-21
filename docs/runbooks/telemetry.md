@@ -120,9 +120,10 @@ ts, session, run_id, lane, task_id, pr, provider, account, model, harness_rev,
 attrs, source_ref)`. `kind` is a free string, so a new kind needs no migration;
 `EVENT_KINDS` in `scripts/telemetry.py` names the known ones. `source_ref`
 points back to the receipt, snapshot, transcript or collector line
-(`path@offset`). Event IDs hash the content key with a random ledger id kept
-in `meta`, never the host name, so re-ingest adds nothing even after a
-`local_host` rename.
+(`path@offset`). Event IDs hash the content key with a ledger id kept in
+`meta`, never the current host name, so re-ingest adds nothing even after a
+`local_host` rename. A new ledger's id is random; a ledger that already held
+events keeps the host label they were keyed with.
 
 | Kind | From |
 |---|---|
@@ -156,7 +157,9 @@ provenant retro [--since DATE] [--window 7d] [--json]
 a merge-time range: the first sweep from 2008, later sweeps from a day before
 the last completed sweep. Search results are not ordered by merge time, so a
 page that reaches the 200-row limit splits its range at the median merge time
-and reads both halves. Pending ranges persist in the ledger, so a sweep capped
+and reads both halves. A full range of one second is re-read up to GitHub
+search's 1,000-result cap; if that is full too, the range stays listed as
+incomplete and every `--sync` warns about it. Pending ranges persist in the ledger, so a sweep capped
 at 25 queries, or stopped by a `gh` failure, resumes on the next `--sync`. It
 stores PR number, merge commit, merge time, title and labels; a re-sync
 updates a renamed PR in place. Manual markers record a label and time.

@@ -18,6 +18,7 @@ import subprocess
 MIN_SAMPLE = 10  # a metric with fewer observations than this on either side is inconclusive, never a win
 NOISE_SHARE = 0.10  # relative change at or below this is within noise (non-proportion metrics)
 SYNC_LIMIT = 200  # merged PRs per `gh pr list` page; a full page splits its time range
+SEARCH_LIMIT = 1000  # GitHub search's result cap: a full one-second range is re-read up to this
 SYNC_PAGES = 25  # `gh` queries per `changes --sync`; the next run resumes the pending ranges
 SYNC_FLOOR = '2008-01-01T00:00:00Z'  # first sweep starts before any GitHub merge
 SYNC_OVERLAP = timedelta(days=1)  # each sweep re-reads a day to absorb clock skew
@@ -37,18 +38,16 @@ class ChangeError(ValueError):
 
 
 def fit(lines, budget=BUDGET):
-    """Keep whole lines in order within a UTF-8 byte budget, ending with what was cut."""
-    lines = [line.encode()[:budget // 4].decode(errors='ignore') for line in lines]  # one line never fills the page
+    """Keep whole lines in order within a UTF-8 byte budget, skipping any that do not fit, and say how many."""
     if sum(len(line.encode()) + 1 for line in lines) <= budget:
         return '\n'.join(lines)
     reserve = len(f'{len(lines)} lines omitted to fit 4 KB; use --json'.encode())
     kept, used = [], 0
     for line in lines:
         size = len(line.encode()) + 1
-        if used + size + reserve > budget:
-            break
-        kept.append(line)
-        used += size
+        if used + size + reserve <= budget:
+            kept.append(line)
+            used += size
     return '\n'.join([*kept, f'{len(lines) - len(kept)} lines omitted to fit 4 KB; use --json'])
 
 
@@ -67,10 +66,10 @@ def git_environment():
     return {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
 
 
-def merged_between(telemetry, low, high):
-    """One `gh` page of PRs merged in [low, high]; search results are not ordered by merge time."""
+def merged_between(telemetry, low, high, limit=None):
+    """Up to `limit` PRs merged in [low, high]; search results are not ordered by merge time."""
     bound = lambda stamp: stamp.replace('Z', '+00:00')
-    command = ['gh', 'pr', 'list', '--state', 'merged', '--limit', str(SYNC_LIMIT),
+    command = ['gh', 'pr', 'list', '--state', 'merged', '--limit', str(limit or SYNC_LIMIT),
                '--json', 'number,mergeCommit,mergedAt,title,labels',
                '--search', f'merged:>={bound(low)} merged:<={bound(high)}']
     try:
@@ -88,12 +87,14 @@ def merged_between(telemetry, low, high):
 
 
 def sync(telemetry, db):
-    """Upsert merged PRs from `gh`; returns (new markers, time ranges left for the next run).
+    """Upsert merged PRs from `gh`; returns (new markers, ranges left, incomplete ranges).
 
     A sweep covers [last completed sweep minus a day, sweep start]. A page that
-    reaches SYNC_LIMIT may have dropped PRs, so its range splits in half and both
-    halves are read again. Pending ranges are durable, so a sweep capped at
-    SYNC_PAGES queries, or interrupted by a `gh` failure, resumes where it stopped.
+    reaches its limit may have dropped PRs, so its range splits in half and both
+    halves are read again; a full range of a second or less is re-read up to
+    SEARCH_LIMIT, and if that is full too it stays listed as incomplete. Pending
+    ranges are durable, so a sweep capped at SYNC_PAGES queries, or interrupted
+    by a `gh` failure, resumes where it stopped.
     """
     row = db.execute("SELECT value FROM meta WHERE key='changes_sync'").fetchone()
     state = json.loads(row[0]) if row else {}
@@ -101,31 +102,41 @@ def sync(telemetry, db):
         through = state.get('through')
         low = iso(telemetry.since_time(through) - SYNC_OVERLAP) if through else SYNC_FLOOR
         high = iso(telemetry.since_time(telemetry.now()).replace(microsecond=0))
-        state = {'through': through, 'sweep': high, 'pending': [[low, high]]}
+        state = {**state, 'through': through, 'sweep': high, 'pending': [[low, high]]}
+    state.setdefault('incomplete', [])
     added = queries = 0
     while state['pending'] and queries < SYNC_PAGES:
-        low, high = state['pending'][-1]
-        rows = merged_between(telemetry, low, high)
+        low, high, *size = state['pending'][-1]
+        limit = size[0] if size else SYNC_LIMIT
+        rows = merged_between(telemetry, low, high, limit)
         queries += 1
         state['pending'].pop()
         added += upsert(telemetry, db, rows)
         first, last = telemetry.since_time(low), telemetry.since_time(high)
-        if len(rows) >= SYNC_LIMIT and last - first > timedelta(seconds=1):
+        if len(rows) < limit:
+            pass
+        elif last - first > timedelta(seconds=1):
             middle = split(telemetry, rows, first, last)
-            state['pending'] += [[low, iso(middle)], [iso(middle), high]]  # newer half is read first
+            # Merge times have one-second precision, so the halves need not share a second.
+            state['pending'] += [[low, iso(middle - timedelta(seconds=1))], [iso(middle), high]]  # newer first
+        elif limit < SEARCH_LIMIT:
+            state['pending'].append([low, high, SEARCH_LIMIT])  # cannot narrow further; read deeper
+        elif [low, high] not in state['incomplete']:
+            state['incomplete'].append([low, high])
         save_sync(db, state)
     if not state['pending']:
-        state = {'through': state['sweep'], 'pending': []}
+        state = {'through': state['sweep'], 'pending': [], 'incomplete': state['incomplete']}
         save_sync(db, state)
-    return added, len(state['pending'])
+    return added, len(state['pending']), len(state['incomplete'])
 
 
 def split(telemetry, rows, first, last):
-    """Median merge time of a full page, so both halves shrink; the time midpoint if that is a bound."""
+    """Median merge time of a full page, kept a second inside the range so both halves shrink."""
     stamps = sorted(telemetry.since_time(row['mergedAt']).replace(microsecond=0) for row in rows
                     if isinstance(row, dict) and isinstance(row.get('mergedAt'), str))
-    middle = stamps[len(stamps) // 2] if stamps else first
-    return middle if first < middle < last else (first + (last - first) // 2).replace(microsecond=0)
+    middle = stamps[len(stamps) // 2] if stamps else first + (last - first) // 2
+    # A median on a bound means one second is crowded: cut it off so it can be read deeper.
+    return min(max(middle.replace(microsecond=0), first + timedelta(seconds=1)), last - timedelta(seconds=1))
 
 
 def save_sync(db, state):

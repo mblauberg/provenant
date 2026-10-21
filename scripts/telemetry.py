@@ -138,13 +138,18 @@ def connect():
         # Version 4 reads route, task class and timing from receipts; re-read them in place.
         db.execute("DELETE FROM cursors WHERE source='fabric'")
     db.execute('PRAGMA user_version = 4')
+    ledger_id(db)  # fixed before any event is written, and before a relabel moves the host label
     if db.execute("SELECT 1 FROM meta WHERE key='events_backfill'").fetchone() is None:
         # Events are additive tables (no version bump, so peers still read this ledger).
         # Re-read the small receipt and snapshot documents once so they backfill events.
         db.execute("DELETE FROM cursors WHERE source IN ('fabric','route_health','cooldowns')")
-        # Transcripts are not re-read: sessions already in usage rows get their event here.
-        backfill_session_events(db)
         db.execute("INSERT INTO meta VALUES ('events_backfill', ?)", (now(),))
+    if db.execute("SELECT 1 FROM meta WHERE key='session_events_backfill'").fetchone() is None:
+        # A separate marker: ledgers backfilled by an earlier build may lack session events.
+        # Transcripts are not re-read; sessions already in usage rows get their event here.
+        backfill_session_events(db)
+        db.execute("DELETE FROM meta WHERE key='events_usage_rowid'")  # the earlier, lossy watermark
+        db.execute("INSERT OR IGNORE INTO meta VALUES ('session_events_backfill', ?)", (now(),))
     relabel_host(db)
     for source, pattern in patterns().items():
         db.execute('INSERT INTO sources(source,path_pattern,parser_version,status) VALUES (?,?,2,?) '
@@ -234,13 +239,22 @@ EVENT_FIELDS = ('session', 'run_id', 'lane', 'task_id', 'pr', 'provider', 'accou
 
 
 def ledger_id(db):
-    """Stable identity of this ledger; unlike the host label, a relabel never changes it."""
-    row = db.execute("SELECT value FROM meta WHERE key='ledger_id'").fetchone()
+    """Stable event-ID namespace; unlike the host label, a relabel never changes it.
+
+    A new ledger gets a random id. A ledger that already holds events was keyed by
+    its host label, so it keeps that label as its id and re-ingest matches them.
+    """
+    query = "SELECT value FROM meta WHERE key='ledger_id'"
+    row = db.execute(query).fetchone()
     if row:
         return row[0]
     value = os.urandom(16).hex()
-    db.execute("INSERT INTO meta VALUES ('ledger_id', ?)", (value,))
-    return value
+    if db.execute('SELECT 1 FROM events LIMIT 1').fetchone():
+        label = db.execute("SELECT value FROM meta WHERE key='host_id'").fetchone()
+        value = label[0] if label else socket.gethostname()
+    # Insert-if-absent, then read: a concurrent first writer's id wins without an error.
+    db.execute("INSERT OR IGNORE INTO meta VALUES ('ledger_id', ?)", (value,))
+    return db.execute(query).fetchone()[0]
 
 
 def put_event(db, kind, key, ts, source_ref, attrs=None, **fields):
@@ -1117,10 +1131,13 @@ def report_changes(db, args):
             text = lambda: owner.render_retro(sys.modules[__name__], report, ROW_LIMIT)
         else:
             if args.sync:
-                _, pending = owner.sync(sys.modules[__name__], db)
+                _, pending, incomplete = owner.sync(sys.modules[__name__], db)
                 if pending:
                     print(f'telemetry: sync paused with {pending} time ranges left; run --sync again',
                           file=sys.stderr)
+                if incomplete:
+                    print(f'telemetry: {incomplete} one-second ranges exceed {owner.SEARCH_LIMIT} merges; '
+                          'their change markers are incomplete', file=sys.stderr)
             elif args.add:
                 owner.add(sys.modules[__name__], db, args.add, args.at)
             report = owner.changes(db, args.since)
