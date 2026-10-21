@@ -81,7 +81,8 @@ def test_attempt_records_observed_context_and_enforced_ceiling(tmp_path, monkeyp
     assert first.returncode == 0, first.stdout + first.stderr
     row = attempt(run, 1)
     assert row["context"] == {"context_tokens": 8039, "input_tokens": 8035, "output_tokens": 4,
-                              "cached_input_tokens": 4587, "context_window_tokens": 1000000,
+                              "cached_input_tokens": 4587, "cache_write_tokens": 3446, "reasoning_tokens": 0,
+                              "context_window_tokens": 1000000,
                               "context_percent": None, "source": "observed"}
     assert row["applied"]["context_ceiling"] == "enforced"
     assert row["applied"]["context_ceiling_tokens"] == 150000

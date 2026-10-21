@@ -43,7 +43,6 @@ def object_body(source: str, start: int) -> str:
 
 
 def server_schema(source: str) -> dict[str, set[str]]:
-    source = source.split('if (process.env.FABRIC_LEGACY_TOOLS === "1")', 1)[0]
     shared = {}
     for name in ("route", "task", "batch"):
         match = re.search(rf"const {name} =\s*{{", source)
@@ -115,7 +114,7 @@ def test_documented_fabric_call_parameters_fit_server_schema():
 
 def test_checker_reads_registered_tools_and_all_doc_surfaces():
     assert {"fabric_dispatch", "fabric_status", "fabric_cancel", "fabric_output", "fabric_adapters", "fabric_whoami"} <= set(SCHEMA)
-    assert {"fabric_batch", "fabric_team_create", "fabric_task_create", "fabric_task_claim", "fabric_task_update", "fabric_tasks"}.isdisjoint(SCHEMA)
+    assert {"fabric_dispatch", "fabric_task"} <= set(SCHEMA)
     assert {"tasks", "concurrency", "resume"} <= SCHEMA["fabric_dispatch"]
     assert {"ids", "wait_seconds", "until"} <= SCHEMA["fabric_status"]
     assert {"id", "reason"} <= SCHEMA["fabric_cancel"]
@@ -135,5 +134,5 @@ def test_checker_rejects_unknown_field_and_removed_tool():
 
 
 def test_checker_rejects_removed_tool_even_without_fields():
-    tool, fields = next(documented_calls("fabric_batch()"))
+    tool, fields = next(documented_calls("fabric_retired_tool()"))
     assert not call_fits_schema(tool, fields)

@@ -241,7 +241,7 @@ function normaliseInputKeys(name: string, input: Record<string, any>, fields: st
     result[target] = target === "mode" && typeof value === "string" ? canonicalMode(value) : value;
     if (target !== key) warnings.push(`corrected ${key} to ${target}`);
   }
-  if ((name === "fabric_dispatch" || name === "fabric_batch") && Array.isArray(result.tasks))
+  if (name === "fabric_dispatch" && Array.isArray(result.tasks))
     result.tasks = result.tasks.map((item: unknown, index: number) => {
       if (!item || typeof item !== "object" || Array.isArray(item))
         return { id: `task-${index + 1}`, prompt: "", prompt_file: "" };
@@ -275,13 +275,13 @@ function register(
     if (Object.hasOwn(accepted, key)) accepted[key] = z.unknown().optional().meta({ type: "number" }) as unknown as z.ZodRawShape[string];
   if (Object.hasOwn(accepted, "until")) accepted.until = z.unknown().optional().meta({ enum: ["any", "all"] }) as unknown as z.ZodRawShape[string];
   if (["fabric_cancel", "fabric_output"].includes(name)) accepted.id = z.string().optional();
-  if (name === "fabric_dispatch" || name === "fabric_batch") {
+  if (name === "fabric_dispatch") {
     const acceptedTask = { id: str, ...task, mode: z.string().optional().meta({ enum: ACCESS_MODES }) };
     acceptedTask.capabilities = z.unknown().optional()
       .meta({ description: "Array of distinct postgres or browser values.", type: "array", items: { type: "string", enum: ["postgres", "browser"] } }) as unknown as typeof acceptedTask.capabilities;
     const acceptedTasks = z.array(z.object(acceptedTask).catchall(z.unknown()).meta({ additionalProperties: false }))
       .min(1).max(64);
-    accepted.tasks = name === "fabric_batch" ? acceptedTasks : acceptedTasks.optional();
+    accepted.tasks = acceptedTasks.optional();
   }
   const inputSchema = z.object(accepted).catchall(z.unknown()).meta({ additionalProperties: false });
   server.registerTool(name, { description, inputSchema }, async (rawInput, extra) => {
@@ -294,7 +294,6 @@ function register(
       corrected.value = coerceInput(corrected.value, corrected.warnings);
       const strictFields = { ...schema };
       if (name === "fabric_dispatch") strictFields.tasks = z.array(z.strictObject(taskFields)).min(1).max(64).optional();
-      if (name === "fabric_batch") strictFields.tasks = z.array(z.strictObject(taskFields)).min(1).max(64);
       const parsed = z.strictObject(strictFields).safeParse(corrected.value);
       if (!parsed.success) {
         if (parsed.error.issues.some((issue) => issue.path.includes("capabilities")))
@@ -714,34 +713,6 @@ register("fabric_adapters", "List routes and guarantees; full includes profiles;
   }
   return models === undefined ? adapterView(catalogueSnapshot(), detail) : liveModels(models, { match });
 });
-if (process.env.FABRIC_LEGACY_TOOLS === "1") {
-  register("fabric_batch", "Run a task batch.", batch, (input, { signal }) =>
-    dispatchConfiguredBatch(input, executionIdentity(), signal),
-  );
-  register(
-    "fabric_team_create",
-    "Create a team.",
-    { team_id: z.string(), members: z.array(z.string()) },
-    ({ team_id, members }) => readyStore().createTeam(who, team_id, members),
-  );
-  register(
-    "fabric_task_create",
-    "Create a task.",
-    { objective: z.string(), task_id: str, owner: str, depends_on: z.array(z.string()).optional() },
-    ({ objective, task_id, owner, depends_on }) =>
-      readyStore().createTask(who, objective, { taskId: task_id, owner, dependsOn: depends_on }),
-  );
-  register("fabric_task_claim", "Claim a task.", { task_id: z.string() }, ({ task_id }) =>
-    readyStore().claimTask(who, task_id),
-  );
-  register(
-    "fabric_task_update",
-    "Update a task.",
-    { task_id: z.string(), state: z.string(), note: str },
-    ({ task_id, state, note }) => readyStore().updateTask(who, task_id, state, note),
-  );
-  register("fabric_tasks", "List tasks.", { state: str }, ({ state }) => readyStore().tasks(who.project, state));
-}
 try {
   initialiseStore(1);
 } catch (error) {

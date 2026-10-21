@@ -50,7 +50,7 @@ flowchart TB
 - **Harness:** [`HARNESS.md`](HARNESS.md) is the constitution. It sets
   authority, the delivery lifecycle, and how much review pressure each risk tier
   owes, and stays small so it can be read every session.
-- **Skills:** the <!--skills-->26<!--/skills--> Agent Skills are task-specific
+- **Skills:** the <!--skills-->25<!--/skills--> Agent Skills are task-specific
   procedures, one folder with a `SKILL.md` each. Only the one-line descriptions
   sit in permanent context; a full body loads only when the task matches it.
 - **Fabric:** messages, shared tasks and activity between agents working on one
@@ -289,11 +289,11 @@ steering; it does not provide wake, callback or completion delivery.
 
 ## Skill library
 
-The full <!--skills-->26<!--/skills-->-skill catalogue, grouped by area:
+The full <!--skills-->25<!--/skills-->-skill catalogue, grouped by area:
 
 <!-- skill-catalogue:start -->
 <details>
-<summary>All 26 skills</summary>
+<summary>All 25 skills</summary>
 
 | Area | Skills |
 |---|---|
@@ -302,7 +302,6 @@ The full <!--skills-->26<!--/skills-->-skill catalogue, grouped by area:
 | Writing and documentation | [`engineering-docs`](skills/engineering-docs/SKILL.md), [`engineering-writing`](skills/engineering-writing/SKILL.md), [`legal-writing`](skills/legal-writing/SKILL.md), [`natural-writing`](skills/natural-writing/SKILL.md) |
 | Design and diagrams | [`ui-ux-design`](skills/ui-ux-design/SKILL.md), [`prototype`](skills/prototype/SKILL.md), [`d2-diagrams`](skills/d2-diagrams/SKILL.md) |
 | Harness development | [`skill-craft`](skills/skill-craft/SKILL.md) |
-| Presentation | [`caveman`](skills/caveman/SKILL.md) |
 
 </details>
 <!-- skill-catalogue:end -->
@@ -312,6 +311,7 @@ The full <!--skills-->26<!--/skills-->-skill catalogue, grouped by area:
 - [`Architecture`](docs/ARCHITECTURE.md): system structure and design rationale.
 - [`Specifications`](docs/specs/README.md): the component contracts.
 - [Fabric hosts](docs/runbooks/fabric-hosts.md): SSH peer configuration and diagnostics.
+- [Local telemetry](docs/runbooks/telemetry.md): usage ingestion, source manifest and stats.
 - [`Research`](docs/research/README.md): evidence and owners.
 - [`Skill portfolio evaluation`](docs/evals/skill-portfolio-2026/README.md): the retained routing evidence.
 - [`Maintenance`](MAINTAINING.md): how the repository is changed and governed.
