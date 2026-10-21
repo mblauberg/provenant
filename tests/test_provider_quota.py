@@ -2,6 +2,7 @@
 
 import base64
 from datetime import UTC, datetime, timedelta
+import hashlib
 import importlib.util
 import io
 import json
@@ -224,6 +225,25 @@ def test_claude_refuses_expiring_credentials_without_calling_the_endpoint(quota,
     monkeypatch.setattr(quota.provider('claude'), 'status', lambda account, io: {'loggedIn': True})
     value = quota.refresh(quota.Account('claude', 'c', identity, False), NOW, force=True)
     assert value['status'] == 'unavailable' and 'refresh' in value['error'] and TOKEN not in json.dumps(value)
+
+
+@pytest.mark.parametrize('name, suffixed', [('.claude', False), ('.claude-b', True)])
+def test_claude_keychain_item_follows_the_config_directory(quota, monkeypatch, tmp_path, name, suffixed):
+    identity = tmp_path / 'home' / name
+    identity.mkdir()
+    claude = quota.provider('claude')
+    monkeypatch.setattr(claude, 'status', lambda account, io: {'loggedIn': True})
+    seen = []
+
+    def security(argv, **kwargs):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 44, b'', b'')
+    monkeypatch.setattr(quota, 'run_process', security)
+    value = quota.refresh(quota.Account('claude', 'x', identity, False), NOW, force=True)
+    digest = hashlib.sha256(str(identity).encode()).hexdigest()[:8]
+    expected = 'Claude Code-credentials' + (f'-{digest}' if suffixed else '')
+    assert [argv[argv.index('-s') + 1] for argv in seen] == [expected]
+    assert value['status'] == 'unavailable'
 
 
 def test_cursor_session_cookie_comes_from_the_local_jwt_and_cycle_dates(quota, tmp_path, monkeypatch):

@@ -5,6 +5,7 @@ Adapted from token-meter (MIT, Galileo Agent Labs); see THIRD_PARTY_NOTICES.md.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -13,6 +14,13 @@ from pathlib import Path
 ADAPTER = 'claude'
 USAGE_URL = 'https://api.anthropic.com/api/oauth/usage'
 KEYCHAIN_SERVICE = 'Claude Code-credentials'
+
+
+def keychain_service(identity_dir):
+    """Claude Code suffixes the item with a path hash for any non-default config directory."""
+    if identity_dir == Path.home() / '.claude':
+        return KEYCHAIN_SERVICE
+    return f"{KEYCHAIN_SERVICE}-{hashlib.sha256(str(identity_dir).encode()).hexdigest()[:8]}"
 
 
 def default_identity():
@@ -43,10 +51,10 @@ def credentials(account, state, io, now):
             raw = stream.read(io.MAX_RESPONSE_BYTES + 1)
     except OSError:
         pass
-    # Claude Code names its Keychain item only for the default config directory.
-    if raw is None and account.identity_dir == Path.home() / '.claude' and state.get('loggedIn'):
+    if raw is None and state.get('loggedIn'):
         try:
-            result = io.run_process(['/usr/bin/security', 'find-generic-password', '-s', KEYCHAIN_SERVICE, '-w'],
+            result = io.run_process(['/usr/bin/security', 'find-generic-password', '-s',
+                                     keychain_service(account.identity_dir), '-w'],
                                     capture_output=True, timeout=io.PROCESS_TIMEOUT, check=False)
         except (OSError, io.TimeoutExpired):
             raise io.Unavailable('Claude credentials are not available') from None
