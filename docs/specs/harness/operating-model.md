@@ -219,7 +219,10 @@ escalates; a cancelled writer exits before its replacement starts.
 4. Each Claude account has its own `CLAUDE_CONFIG_DIR` with subscription
    login. `ANTHROPIC_API_KEY` is unset for these launches, because the adapter
    otherwise prefers it (`adapters/claude.py:15-24`). Skills, settings, hooks
-   and agents are shared from one source.
+   and agents are shared from one source. The shared `settings.json` link means
+   settings changed in one account apply to all linked accounts, and if Claude
+   replaces the link with a regular file the accounts stop sharing; rerunning the
+   installer does not overwrite it.
 5. Cross-account resume needs proof before any store migration: a
    demonstration that a session started under one config directory resumes
    under the other, with a backup and rollback of both `projects/` stores.
