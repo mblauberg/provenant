@@ -28,6 +28,7 @@ import { Store } from "../src/store.js";
 import {
   listRecordedRuns,
   fabricStatus,
+  fabricOutput,
   OWNER_RECORD_NAME,
   processMatches,
   processStartedAt,
@@ -268,8 +269,8 @@ function hostInstance(): string {
   return instance;
 }
 
-/** A product root whose dispatch owners are the lifecycle fixture. */
-function buildProduct(root: string): string {
+/** A product root whose dispatch owners use the selected local fixture. */
+function buildProduct(root: string, ownerFixture = fixture): string {
   const fake = join(root, "product");
   const owners = join(fake, "skills/orchestrate/scripts");
   const helpers = join(fake, "scripts/lib");
@@ -285,8 +286,8 @@ function buildProduct(root: string): string {
   for (const name of ["run_dir_init.sh", "dispatch_run.py", "batch_run.py", "run_controls.py"]) {
     const owner = join(owners, name);
     writeFileSync(owner, name === "run_dir_init.sh"
-      ? `#!/bin/sh\nPROVENANT_FIXTURE_OWNER=${shellQuote(name)} exec ${shellQuote(process.execPath)} ${shellQuote(fixture)} "$@"\n`
-      : `#!/usr/bin/env python3\nimport os, sys\nos.environ["PROVENANT_FIXTURE_OWNER"] = ${JSON.stringify(name)}\nos.execv(${JSON.stringify(process.execPath)}, [${JSON.stringify(process.execPath)}, ${JSON.stringify(fixture)}, *sys.argv[1:]])\n`);
+      ? `#!/bin/sh\nPROVENANT_FIXTURE_OWNER=${shellQuote(name)} exec ${shellQuote(process.execPath)} ${shellQuote(ownerFixture)} "$@"\n`
+      : `#!/usr/bin/env python3\nimport os, sys\nos.environ["PROVENANT_FIXTURE_OWNER"] = ${JSON.stringify(name)}\nos.execv(${JSON.stringify(process.execPath)}, [${JSON.stringify(process.execPath)}, ${JSON.stringify(ownerFixture)}, *sys.argv[1:]])\n`);
     chmodSync(owner, 0o755);
   }
   return fake;
@@ -1504,6 +1505,30 @@ describe("front door model selection", () => {
     const done = await dispatchConfiguredProvider({adapter:"codex",alias:"scout",model:"",prompt:"ordinary run",wait_seconds:5}, identity, new AbortController().signal, ownerEnvironment);
     expect(done).toMatchObject({status:"ok",route:{resolved_model:"scout"}});
   });
+  it("uses the alias as the task id and lane label when given without an explicit task_id", async () => {
+    const done = await dispatchConfiguredProvider({ adapter: "codex", alias: "scout", model: "", prompt: "ordinary run", wait_seconds: 5 },
+      identity, new AbortController().signal, ownerEnvironment);
+    expect(done).toMatchObject({ status: "ok", task_id: "scout" });
+  });
+  it.each([["legacy", fixture], ["v1", join(testDirectory, "v2-owner-fixture.mjs")]])(
+    "slugs a qualified alias and keeps status and resume lookups by its original name (%s)", async (format, ownerFixture) => {
+      product = buildProduct(temporaryDirectory, ownerFixture);
+      const done = await dispatchConfiguredProvider({ alias: "codex/scout", prompt: "ordinary run", wait_seconds: 5 },
+        identity, new AbortController().signal, poolEnvironment());
+      expect(done).toMatchObject({ status: "ok", task_id: "codex-scout" });
+      expect(await fabricStatus(workspace, "codex/scout")).toMatchObject({ task_id: "codex-scout", status: "ok" });
+      if (format === "v1") {
+        expect(await resumeConfiguredProvider({ resume: "codex/scout", prompt: "continue", wait_seconds: 5 },
+          identity, new AbortController().signal, ownerEnvironment)).toMatchObject({ status: "ok", task_id: "codex-scout", attempt: 2 });
+        expect(await fabricStatus(workspace, "codex/scout")).toMatchObject({ task_id: "codex-scout", attempt: 2 });
+      } else {
+        const log = join(temporaryDirectory, "qualified-resume.json");
+        expect(await resumeConfiguredProvider({ resume: "codex/scout", prompt: "continue", wait_seconds: 5 },
+          identity, new AbortController().signal, { ...ownerEnvironment, FIXTURE_PREFLIGHT_LOG: log }))
+          .toMatchObject({ status: "rejected", error: "fixture_logged" });
+        expect(JSON.parse(readFileSync(log, "utf8"))[0]).toMatchObject({ id: "codex-scout" });
+      }
+  });
   it("passes an explicit model and effort without an alias", async () => {
     const done = await dispatchConfiguredProvider({ adapter: "codex", model: "gpt-6-luna", effort: "medium", prompt: "ordinary run", wait_seconds: 5 },
       identity, new AbortController().signal, ownerEnvironment);
@@ -1693,6 +1718,19 @@ describe("native-first routing", () => {
     expect(done.status, JSON.stringify(done)).toBe("ok");
     expect((done.route as Record<string, unknown>).adapter).not.toBe("claude");
     expect(JSON.stringify(done.warnings)).toContain("workhorse taken from the route pool: claude models run as native subagents");
+  });
+
+  it("keeps a native seat's caller alias for task naming, status and resume", async () => {
+    const seat = claudeSeat();
+    const done = await dispatchConfiguredProvider({ alias: "scout", prompt: "ordinary run", wait_seconds: 5 },
+      seat, new AbortController().signal, poolEnvironment());
+    expect(done).toMatchObject({ status: "ok", task_id: "scout" });
+    expect(await fabricStatus(workspace, "scout")).toMatchObject({ task_id: "scout", status: "ok" });
+    const log = join(temporaryDirectory, "native-resume.json");
+    expect(await resumeConfiguredProvider({ resume: "scout", prompt: "continue", wait_seconds: 5 },
+      seat, new AbortController().signal, { ...ownerEnvironment, FIXTURE_PREFLIGHT_LOG: log }))
+      .toMatchObject({ status: "rejected", error: "fixture_logged" });
+    expect(JSON.parse(readFileSync(log, "utf8"))[0]).toMatchObject({ id: "scout" });
   });
 
   it("settles empty selectors and precedence before choosing native-first", async () => {
@@ -2171,6 +2209,52 @@ it('runs a read-only dispatch in another registered project and records it for t
  expect(JSON.parse(fabricCli(['lanes','--json',String(result.id)])).runs).toEqual([expect.objectContaining({run_id:result.id,task_id:'cross-project',status:'ok'})]);
 });
 
+it.each([0, 2 * 86400000])('finds a cross-project pointed lane aged %i ms by explicit id while ignoring forged pointers', async (age) => {
+ const project = join(temporaryDirectory, 'target-project-b');
+ execFileSync('git', ['init', '-q', project]);
+ execFileSync('git', ['-C', project, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.test',
+  'commit', '-q', '--allow-empty', '-m', 'fixture']);
+ const cwd = join(project, 'src');
+ mkdirSync(cwd, { recursive: true });
+ const store = new Store(databasePath(ownerEnvironment));
+ store.announce(identity);
+ store.announce({ ...identity, project, cwd });
+ store.close();
+ const caller = { ...identity, registeredProjects: [workspace, project] };
+ const result = await dispatchConfiguredProvider(
+  { adapter: 'codex', mode: 'read_only', cwd, prompt: 'fixture', task_id: 'pointed-lane', wait_seconds: 5 },
+  caller, new AbortController().signal, ownerEnvironment,
+ );
+ expect(result.status, JSON.stringify(result)).toBe('ok');
+
+ // The default listing window excludes older retained runs; explicit ids reach them.
+ const runDir = String((await fabricStatus(workspace, String(result.id))).run_dir);
+ if (age) {
+  const metadataPath = join(runDir, 'dispatch-status.json');
+  const metadata = JSON.parse(readFileSync(metadataPath, 'utf8'));
+  metadata.finished_at = new Date(Date.now() - age).toISOString();
+  writeFileSync(metadataPath, JSON.stringify(metadata));
+ }
+ const statusWithoutId = await fabricStatus(project);
+ expect(statusWithoutId.runs).toEqual(age ? [] : [expect.objectContaining({ task_id: 'pointed-lane', status: 'ok' })]);
+ for (const id of ['pointed-lane', String(result.id)]) {
+  expect(await fabricStatus(project, id)).toMatchObject({ task_id: 'pointed-lane', status: 'ok' });
+  expect(await fabricOutput(project, { id })).toMatchObject({ id, digest: expect.stringContaining('fixture') });
+ }
+
+ // A forged pointer imports nothing
+ const pointersDir = join(project, '.agent-run/runs/pointers');
+ writeFileSync(join(pointersDir, 'forged.json'), JSON.stringify({
+  source_project: '/foreign/proj',
+  run_dir: join(workspace, '.agent-run/runs/20261021-1200-dispatch-forged-abcdef'),
+  task_ids: ['forged-lane'],
+ }));
+ const forgedStatus = await fabricStatus(project, 'forged-lane');
+ expect(forgedStatus).toMatchObject({ status: 'rejected' });
+ const runsAfterForged = (await fabricStatus(project)).runs;
+ expect(runsAfterForged.some((r: any) => r.task_id === 'forged-lane')).toBe(false);
+});
+
 it('resumes a cross-project run with its saved read roots, and refuses one whose root has moved', async () => {
  const other=realpathSync(mkdtempSync(join(temporaryDirectory,'resume-other-')));mkdirSync(join(other,'src'));
  const brief=join(other,'brief.md');writeFileSync(brief,'continue');
@@ -2193,6 +2277,41 @@ it('resumes a cross-project run with its saved read roots, and refuses one whose
  const moved=await resumeConfiguredProvider({resume:row.run_id,prompt:'continue',wait_seconds:0},caller,new AbortController().signal,env);
  expect(moved).toMatchObject({status:'rejected',error:'resume_read_root_changed'});
  expect(existsSync(log)).toBe(false);
+});
+
+it("resumes a terminal batch task whose recorded add-dir was removed", async () => {
+ const dir = join(workspace, ".agent-run/runs/20260801-1200-batch-resume-test-abcdef");
+ const taskDir = join(dir, "tasks/batch-task/attempt-001");
+ mkdirSync(taskDir, { recursive: true });
+ mkdirSync(join(dir, "_owner"), { recursive: true });
+ const missingDir = join(temporaryDirectory, "removed-add-dir");
+ const row = JSON.parse(readFileSync(join(testDirectory, "fixtures/attempt.json"), "utf8"));
+ Object.assign(row, {
+  run_id: "mcp-batchres",
+  task_id: "batch-task",
+  state: "terminal",
+  status: "ok",
+  applied: { sandbox: "read-only", network: null, add_dirs: [missingDir], capabilities: [] },
+ });
+ writeFileSync(join(taskDir, "attempt.json"), JSON.stringify(row));
+ writeFileSync(join(dir, "dispatch-status.json"), JSON.stringify({
+  kind: "batch",
+  batch_id: "batch-1",
+  task_id: "batch-task",
+  task_ids: ["batch-task"],
+  routes: [{ adapter: "codex", model: "fixture" }],
+  status: "completed",
+  finished_at: new Date().toISOString(),
+ }));
+ const resumed = await resumeConfiguredProvider(
+  { resume: row.run_id, task_id: "batch-task", prompt: "continue prompt", wait_seconds: 0 },
+  identity,
+  new AbortController().signal,
+  ownerEnvironment,
+ );
+ expect(resumed.state, JSON.stringify(resumed)).toBe("queued");
+ await waitForFile(join(dir, OWNER_RECORD_NAME));
+ spawnedPids.push(Number(JSON.parse(readFileSync(join(dir, OWNER_RECORD_NAME), "utf8")).owner_pid));
 });
 
 it("fills unset dispatch fields from the project policy's dispatch_defaults", async () => {

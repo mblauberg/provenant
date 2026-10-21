@@ -58,7 +58,7 @@ try {
     case "output": result = await fabricOutput(identity.project, { ...input, max_bytes: Math.min(input.max_bytes ?? 20000, 20000) }); break;
     case "lanes": result = await readRuns(identity.project, input.ids ?? undefined, 0, signal, input.limit ?? null, input.state, input.include_history === true); break;
     case "status": {
-      const value = await statusRows(identity.project, input.ids ?? undefined, 0, "all", signal, input.detail, false, input.limit ?? null, input.include_history === true);
+      const value = await statusRows(identity.project, input.ids ?? undefined, 0, "all", signal, input.detail, false, input.limit ?? null, input.include_history === true, input.include_pointers === true);
       result = value.runs ? { ...value, status: "ok" } : value;
       break;
     }
