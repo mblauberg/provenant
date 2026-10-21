@@ -42,15 +42,16 @@ reconciliation run.
    [source grounding](references/source-grounding.md) and
    [migration compatibility](references/migration-compatibility.md).
 3. Run fast checks (lint, types, targeted tests) and pass them before review.
-   Slow checks (full suites, CI) run in parallel with review. Map each criterion to evidence. When project
-   instructions defer test execution to a later gate, report those tests as
+   Slow checks (full suites, CI) run in parallel with review. Map each
+   criterion to evidence. When project instructions defer test execution to a later gate, report those tests as
    deferred and unverified; that gate runs them before merge. When required,
    run `evaluate` and attach its passing receipt.
 4. Invoke read-only `code-review` under the current `HARNESS.md` risk ladder.
    Record each `adapter/model@effort` route from its attempt receipt and derive
    family. A change that affects UI produces screenshots at set viewports and
-   attaches them to the review brief; reviewers with vision get them. Record omissions and substitutions. Native subagents use the Agent
-   tool model parameter and mark the route resolved.
+   attaches them to the review brief; reviewers with vision get them. Record
+   omissions and substitutions. Native subagents use the Agent tool model
+   parameter and mark the route resolved.
 5. Feed findings from review and the slow checks into one repair round, then
    repeat verification and re-review only the repair delta, under the `deliver`
    receipt contract's scaled budget. Every gate still passes before merge.
