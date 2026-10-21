@@ -40,15 +40,15 @@ def test_audit_reports_context_growth_without_deleting(tmp_path):
 
 
 def test_audit_reports_incomplete_run_index(tmp_path):
-    run = tmp_path / ".agent-run" / "one"
+    run = tmp_path / ".agent-run" / "runs" / "20260923-1000-dispatch-one-a1b2c3"
     run.mkdir(parents=True)
     (run / "MANIFEST.md").write_text("manifest")
     findings = context_audit.audit(tmp_path)
     assert "incomplete-run-index" in codes(findings)
 
 
-def test_direct_delivery_run_with_run_receipt_does_not_require_orchestration_scaffold(tmp_path):
-    run = tmp_path / ".agent-run" / "direct"
+def test_delivery_run_with_run_receipt_does_not_require_orchestration_scaffold(tmp_path):
+    run = tmp_path / ".agent-run" / "runs" / "20260923-1000-delivery-direct-a1b2c3"
     run.mkdir(parents=True)
     (run / "RUN.json").write_text('{"schema_version": 1, "contract": "delivery-run"}')
     assert "incomplete-run-index" not in codes(context_audit.audit(tmp_path))
@@ -61,6 +61,13 @@ def test_new_layout_reads_runs_and_skips_sessions_and_scratch(tmp_path):
     (tmp_path / ".agent-run" / "runs" / "index.jsonl").write_text("{}\n")
     (tmp_path / ".agent-run" / "sessions" / "20260923-chair").mkdir(parents=True)
     (tmp_path / ".agent-run" / "scratch" / "temp").mkdir(parents=True)
+    assert "incomplete-run-index" not in codes(context_audit.audit(tmp_path))
+
+
+def test_audit_ignores_retired_root_level_run_directories(tmp_path):
+    retired = tmp_path / ".agent-run" / "mcp-retired"
+    retired.mkdir(parents=True)
+    (retired / "MANIFEST.md").write_text("old layout")
     assert "incomplete-run-index" not in codes(context_audit.audit(tmp_path))
 
 
@@ -80,7 +87,7 @@ def test_cli_is_advisory_unless_strict(tmp_path):
 
 
 def test_structural_errors_fail_without_an_extra_flag(tmp_path):
-    (tmp_path / ".agent-run" / "broken").mkdir(parents=True)
+    (tmp_path / ".agent-run" / "runs" / "20260923-1000-dispatch-broken-a1b2c3").mkdir(parents=True)
     assert context_audit.main([str(tmp_path)]) == 1
 
 
@@ -189,7 +196,7 @@ def test_audit_does_not_read_symlinked_run_receipt_outside_root(tmp_path, monkey
     outside.mkdir()
     private_receipt = outside / "RUN.json"
     private_receipt.write_text('{"schema_version": 1, "contract": "delivery-run"}')
-    run = tmp_path / ".agent-run" / "linked-receipt"
+    run = tmp_path / ".agent-run" / "runs" / "20260923-1000-delivery-linked-receipt-a1b2c3"
     run.mkdir(parents=True)
     (run / "RUN.json").symlink_to(private_receipt)
 
@@ -206,7 +213,7 @@ def test_audit_does_not_read_symlinked_run_receipt_outside_root(tmp_path, monkey
 
 
 def test_delivery_run_manifest_reports_orphan_and_expired_scratch(tmp_path):
-    run = tmp_path / ".agent-run" / "DEL-1"
+    run = tmp_path / ".agent-run" / "runs" / "20260923-1000-delivery-DEL-1-a1b2c3"
     run.mkdir(parents=True)
     for name in ("MANIFEST.md", "RUN_RECEIPT.json", "SYNTHESIS.md", "FINAL_GATE.md"):
         (run / name).write_text(name)

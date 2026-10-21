@@ -50,7 +50,7 @@ flowchart TB
 - **Harness:** [`HARNESS.md`](HARNESS.md) is the constitution. It sets
   authority, the delivery lifecycle, and how much review pressure each risk tier
   owes, and stays small so it can be read every session.
-- **Skills:** the <!--skills-->26<!--/skills--> Agent Skills are task-specific
+- **Skills:** the <!--skills-->25<!--/skills--> Agent Skills are task-specific
   procedures, one folder with a `SKILL.md` each. Only the one-line descriptions
   sit in permanent context; a full body loads only when the task matches it.
 - **Fabric:** messages, shared tasks and activity between agents working on one
@@ -119,6 +119,14 @@ other files and links as user-owned. If the installer exits
 non-zero, follow the message it prints: exit `3` flags a command collision,
 incompatible instruction target, or managed skill-link conflict, and
 instruction conflicts include the bootstrap line to add.
+
+For global instructions, Claude uses `~/.claude/CLAUDE.md` and Codex uses
+`~/.codex/AGENTS.md`. A fresh install writes a short bootstrap in the selected
+entrypoint; an existing symlink from that entrypoint to the instance
+`AGENTS.md` is preserved. The installer does not create `~/.claude/AGENTS.md`.
+On reinstall, it removes that extra path only when it is a symlink resolving to
+the instance doctrine. A regular `~/.claude/AGENTS.md` is preserved and
+reported for review.
 
 Exit `3` also covers a missing harness interpreter, which is what a machine
 without `uv` meets first:
@@ -297,11 +305,11 @@ steering; it does not provide wake, callback or completion delivery.
 
 ## Skill library
 
-The full <!--skills-->26<!--/skills-->-skill catalogue, grouped by area:
+The full <!--skills-->25<!--/skills-->-skill catalogue, grouped by area:
 
 <!-- skill-catalogue:start -->
 <details>
-<summary>All 26 skills</summary>
+<summary>All 25 skills</summary>
 
 | Area | Skills |
 |---|---|
@@ -310,7 +318,6 @@ The full <!--skills-->26<!--/skills-->-skill catalogue, grouped by area:
 | Writing and documentation | [`engineering-docs`](skills/engineering-docs/SKILL.md), [`engineering-writing`](skills/engineering-writing/SKILL.md), [`legal-writing`](skills/legal-writing/SKILL.md), [`natural-writing`](skills/natural-writing/SKILL.md) |
 | Design and diagrams | [`ui-ux-design`](skills/ui-ux-design/SKILL.md), [`prototype`](skills/prototype/SKILL.md), [`d2-diagrams`](skills/d2-diagrams/SKILL.md) |
 | Harness development | [`skill-craft`](skills/skill-craft/SKILL.md) |
-| Presentation | [`caveman`](skills/caveman/SKILL.md) |
 
 </details>
 <!-- skill-catalogue:end -->
@@ -320,6 +327,7 @@ The full <!--skills-->26<!--/skills-->-skill catalogue, grouped by area:
 - [`Architecture`](docs/ARCHITECTURE.md): system structure and design rationale.
 - [`Specifications`](docs/specs/README.md): the component contracts.
 - [Fabric hosts](docs/runbooks/fabric-hosts.md): SSH peer configuration and diagnostics.
+- [Local telemetry](docs/runbooks/telemetry.md): usage ingestion, source manifest and stats.
 - [`Research`](docs/research/README.md): evidence and owners.
 - [`Skill portfolio evaluation`](docs/evals/skill-portfolio-2026/README.md): the retained routing evidence.
 - [`Maintenance`](MAINTAINING.md): how the repository is changed and governed.

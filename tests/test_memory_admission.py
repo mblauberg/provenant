@@ -257,6 +257,16 @@ class _Clock:
         self.now += max(duration, 1)
 
 
+def test_queued_receipts_ignore_root_level_legacy_runs(tmp_path):
+    queue_root = tmp_path / ".agent-run"
+    current = queue_root / "runs" / "20260923-1000-dispatch-current-a1b2c3" / "tasks/one/attempt-001/attempt.json"
+    retired = queue_root / "mcp-retired" / "tasks/two/attempt-001/attempt.json"
+    for path in (current, retired):
+        path.parent.mkdir(parents=True)
+        path.write_text("{}")
+    assert memory_admission.queued_receipts(queue_root) == [current]
+
+
 def test_queued_memory_admissions_follow_queue_entry_order(tmp_path, monkeypatch, live_owner):
     queue_root = tmp_path / ".agent-run"
     pid, started = live_owner

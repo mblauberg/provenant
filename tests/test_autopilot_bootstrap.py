@@ -73,6 +73,15 @@ def test_new_mission_uses_canonical_runs_layout(tmp_path):
     assert not (tmp_path / ".agent-run" / "fresh-mission").exists()
 
 
+def test_bootstrap_does_not_resume_a_root_level_legacy_mission(tmp_path):
+    legacy = tmp_path / ".agent-run" / "retired-mission"
+    legacy.mkdir(parents=True)
+    (legacy / "GOAL.md").write_text("STATUS: STOP\n")
+    result = run_bootstrap("--repo-root", str(tmp_path), "retired-mission", "Example domain")
+    assert result.returncode == 3, result.stderr
+    assert mission_path(tmp_path, "retired-mission") != legacy
+
+
 def test_linked_worktree_bootstrap_anchors_at_primary_checkout(tmp_path):
     primary = tmp_path / "primary"
     primary.mkdir()

@@ -1,7 +1,7 @@
 schema_version: 1
 dataset_id: skill-portfolio-routing-holdout-20260719-v6
 split: current-catalogue-holdout
-catalogue_owner_count: 26
+catalogue_owner_count: 25
 cases:
   - id: m01
     category: requirements-before-build
@@ -75,14 +75,6 @@ cases:
       primary_skill: skill-craft
       required_companion_skills: []
       allowed_companion_skills: [code-review, evaluate, orchestrate]
-  - id: m10
-    category: explicit-chat-compression
-    critical: false
-    prompt: Answer this low-risk progress note in caveman adaptive mode. Be extremely compact while preserving the exact pass count, pending state, command, and uncertainty.
-    expected:
-      primary_skill: caveman
-      required_companion_skills: []
-      allowed_companion_skills: []
   - id: m11
     category: finite-agent-coordination
     critical: false

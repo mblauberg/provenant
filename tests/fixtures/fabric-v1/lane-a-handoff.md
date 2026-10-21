@@ -12,7 +12,7 @@ programs run in `tests/test_provider_exec.py` without model prompts.
   (the canonical row) and `digest`.
 - `layout.run_root(cwd)` returns the primary checkout, or the resolved cwd outside
   Git. Runs live beneath `<root>/.agent-run/runs/`. `_owner/` is opt-in when creating
-  the directory. Explicit legacy `mcp-*` directories remain accepted.
+  the directory. Run discovery uses timestamped directories under `runs/`.
 - Cooldowns use `{schema: "fabric.cooldowns.v1", cooldowns: {"adapter/model": record}}`.
   `FABRIC_COOLDOWNS_PATH` permits isolated fixtures. The run index is JSONL under
   `.agent-run/runs/index.jsonl`; terminal receipt closure follows publication.

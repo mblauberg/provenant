@@ -97,9 +97,7 @@ def reap_orphans(cwd=None, at=None):
     root = run_root(cwd) / ".agent-run"
     at = time.time() if at is None else at
     closed = []
-    paths = list((root / "runs").glob("*/RUN_RECEIPT.json")) + list(
-        root.glob("mcp-*/RUN_RECEIPT.json")
-    )
+    paths = list((root / "runs").glob("*/RUN_RECEIPT.json"))
     for path in paths:
         directory = path.parent
         try:

@@ -117,7 +117,6 @@ describe("project identity", () => {
     const chair = identify({
       AGENT_FABRIC_SEAT: "codex",
       AGENT_FABRIC_LABEL: "chair",
-        FABRIC_LEGACY_TOOLS: "1",
     }, primary);
     const worker = identify({
       AGENT_FABRIC_SEAT: "codex",
@@ -149,7 +148,6 @@ describe("project identity", () => {
         AGENT_FABRIC_STATE_DIRECTORY: state,
         AGENT_FABRIC_SEAT: "codex",
         AGENT_FABRIC_LABEL: "chair",
-        FABRIC_LEGACY_TOOLS: "1",
         NODE_NO_WARNINGS: "1",
       },
     });
@@ -160,13 +158,9 @@ describe("project identity", () => {
         name: "fabric_task",
         arguments: { action:"create", objective: "review the linked-worktree change", task_id: "worktree-review" },
       });
-      await client.callTool({
-        name: "fabric_team_create",
-        arguments: { team_id: "reviewers", members: ["worker"] },
-      });
       const sent = await client.callTool({
         name: "fabric_send",
-        arguments: { to: "reviewers", body: "continue in the linked worktree" },
+        arguments: { to: "worker", body: "continue in the linked worktree" },
       });
       const sentMessage = toolPayload(sent) as { messageId: string };
 
@@ -311,18 +305,6 @@ it('stores linked and symlinked cwd runs in the primary run root', async () => {
    expect(runRoot(substitute(item.cwd)),item.name).toBe(join(realpathSync(dirname(expected)),'.agent-run'));
   }
  });
-
-it('finds and cancels retained cwd-local legacy runs from a linked worktree', async () => {
- const {statusRows,findRecordedRun}=await import('../src/run-registry.js');
- const {cancelConfiguredRun}=await import('../src/execution.js');
- const dir=join(realpathSync(linked),'.agent-run/mcp-legacy');mkdirSync(dir,{recursive:true});
- writeFileSync(join(dir,'dispatch-status.json'),JSON.stringify({id:'mcp-legacy',status:'running',started_at:new Date().toISOString()}));
- writeFileSync(join(dir,'dispatch-owner.json'),JSON.stringify({schema_version:1,kind:'dispatch',run_dir:dir,workspace:linked,run_token:'gone',owner_pid:999991,owner_pgid:999991,owner_started_at:null,host_pid:999992,host_started_at:null,started_at:new Date().toISOString(),owner_stdout:'',owner_stderr:''}));
- expect(findRecordedRun(linked,'mcp-legacy')?.run_dir).toBe(dir);
- expect((await statusRows(linked,['mcp-legacy'])).runs?.[0]).toMatchObject({run_dir:dir,status:'interrupted'});
- const who={project:primary,cwd:linked,provider:'codex',agentId:'worker'};
- expect((await cancelConfiguredRun('mcp-legacy',who)).runs).toBeDefined();
-});
 
 it('computes the ledger once per selected worktree and skips terminal brief rows', async () => {
  const {statusRows}=await import('../src/run-registry.js');
