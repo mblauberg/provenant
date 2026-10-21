@@ -12,14 +12,23 @@ IDLE_WRITE = 1800
 EFFORT_FLAG = "#variant"
 SESSION_KEYS = ("sessionID", "session_id")
 MODEL_SOURCE = "opencode:session-export.info.model"
+LOG_LEVEL = r"(?:^|\s|\[)(?:level=)?(DEBUG|INFO|WARN|ERROR)\b"
 UPGRADE_FIX = "upgrade OpenCode to v2 (`opencode upgrade`); Fabric no longer drives v1"
 SIGNATURES = (
+    ("permission_blocked", r"\bEPERM\b|operation not permitted|sandbox[^\n]*denied"),
     # A bad `#variant` is the caller's input, not a missing model: keep it ahead of no-route.
     ("invalid_input", r"Variant unavailable for [^\n]+"),
     ("model_unavailable", r"FreeTierError|free tier can only be used from within OpenCode"
                           r"|Model unavailable:|Invalid model reference|provider\.no-route"),
     ("usage_limited", r"Individual quota reached|exhausted your capacity|(?:monthly|weekly|5.hour) usage limit reached"),
 )
+
+
+def continues_turn(event):
+    kind, part = event.get("type"), event.get("part")
+    return kind in {"step_start", "tool_use"} or (
+        kind == "step_finish" and isinstance(part, dict) and part.get("reason") == "tool-calls"
+    )
 
 
 def version_error(text):

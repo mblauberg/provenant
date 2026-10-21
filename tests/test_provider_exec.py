@@ -1044,7 +1044,8 @@ def test_read_only_transcript_denies_follow_every_state_allow(monkeypatch, tmp_p
     denied = [f'(subpath "{home / path}")' for path in mod.EXTRA_DENIED_READS]
     last_deny = max(index for index, line in enumerate(lines)
                     if line.startswith("(deny file-read-data ") and all(rule in line for rule in denied))
-    later = [line for line in lines[last_deny + 1:] if line.startswith("(allow file-read")]
+    later = [line for line in lines[last_deny + 1:]
+             if line.startswith("(allow file-read") and not line.startswith("(allow file-read-metadata ")]
     # Only a Claude lane's own session transcript reopens, so that it can resume.
     own = home / ".claude/projects" / re.sub(r"[^A-Za-z0-9]", "-", str(workspace.resolve()))
     session = own / plan["session_id"]
@@ -1565,13 +1566,111 @@ def test_opencode_usage_survives_provider_exit(tmp_path, exit_code):
     ]
     code = "import sys; print(" + repr("\n".join(json.dumps(event) for event in events)) + "); sys.exit(" + str(exit_code) + ")"
     record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
-    assert record["status"] == ("ok" if exit_code == 0 else "failed")
+    assert record["status"] == "ok"
     assert record["evidence"]["exit"] == exit_code
-    assert record["error_class"] == ("none" if exit_code == 0 else "provider_error")
+    assert record["error_class"] == "none"
+    assert (tmp_path / "result.md").read_text() == "Full answer"
+    assert record["usage_source"] == "observed"
+    if exit_code:
+        assert record["evidence"]["signature"] == "exit_after_output"
+        assert record["reason"] == "provider exited 1 after final assistant output"
+        assert record["reason"] in record["warnings"]
     assert {key: record["context"][key] for key in ("input_tokens", "output_tokens", "cached_input_tokens",
                                                   "cache_write_tokens", "reasoning_tokens")} == {
         "input_tokens": 1080610, "output_tokens": 5493, "cached_input_tokens": 1009536,
         "cache_write_tokens": 0, "reasoning_tokens": 7838}
+
+
+@pytest.mark.parametrize("logs,reason", [
+    (["INFO starting", "WARN fabric MCP unavailable", "ERROR shutting down"], "WARN fabric MCP unavailable"),
+    (["timestamp=x level=INFO starting", "timestamp=x level=ERROR message=shutdown"],
+     "timestamp=x level=ERROR message=shutdown"),
+    (["INFO rate limit configuration loaded"], "provider exited 1 after final assistant output"),
+    (["INFO starting", "ERROR fabric MCP: Operation not permitted"], "ERROR fabric MCP: Operation not permitted"),
+])
+def test_opencode_exit_after_output_reason_skips_info(tmp_path, logs, reason):
+    event = {"type": "text", "part": {"text": "Final answer"}}
+    code = ("import json, sys\nprint(" + repr(json.dumps(event)) + ")\n"
+            + "print(" + repr("\n".join(logs)) + ", file=sys.stderr)\nsys.exit(1)\n")
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["evidence"]["signature"] == "exit_after_output"
+    assert record["reason"] == reason
+    assert (tmp_path / "result.md").read_text() == "Final answer"
+
+
+@pytest.mark.parametrize("rollover", [False, True])
+def test_opencode_exit_after_output_keeps_final_step_text(tmp_path, monkeypatch, rollover):
+    mod = supervisor()
+    monkeypatch.setattr(mod, "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    events = [
+        {"type": "step_start", "part": {}},
+        {"type": "text", "part": {"text": "Working narration"}},
+        {"type": "tool_use", "part": {"tool": "read"}},
+        *[{"type": "telemetry", "data": "x" * 100} for _ in range(100)],
+        {"type": "step_start", "part": {}},
+        {"type": "text", "part": {"text": "Final answer"}},
+        {"type": "step_finish", "part": {"reason": "stop"}},
+    ]
+    code = "import sys; print(" + repr("\n".join(map(json.dumps, events))) + "); sys.exit(1)"
+    record = mod.execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == "ok"
+    assert record["evidence"]["signature"] == "exit_after_output"
+    assert record["evidence"]["exit"] == 1
+    assert (tmp_path / "result.md").read_text() == "Final answer"
+
+
+@pytest.mark.parametrize("later_event", [
+    {"type": "tool_use", "part": {"tool": "read"}},
+    {"type": "step_start", "part": {}},
+    {"type": "error", "error": {"message": "backend failed"}},
+    {"type": "step_finish", "part": {"reason": "tool-calls"}},
+])
+def test_opencode_intermediate_output_does_not_mask_a_failure(tmp_path, later_event):
+    events = [{"type": "text", "part": {"text": "Working narration"}}, later_event]
+    code = "import sys; print(" + repr("\n".join(map(json.dumps, events))) + "); sys.exit(1)"
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == "failed"
+    assert record["evidence"]["signature"] != "exit_after_output"
+
+
+@pytest.mark.parametrize("log", ["INFO cli starting", "[INFO] cli starting", "2026-10-21T14:00:00Z INFO cli starting"])
+def test_opencode_failure_reason_skips_info_only_stderr(tmp_path, log):
+    code = "import sys; print(" + repr(log) + ", file=sys.stderr); sys.exit(1)"
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == "failed"
+    assert record["reason"] == "provider exited 1 without final assistant output"
+
+
+@pytest.mark.parametrize("rollover", [False, True])
+def test_opencode_final_text_is_preserved_beside_a_structured_failure(tmp_path, monkeypatch, rollover):
+    monkeypatch.setattr(supervisor(), "MAX_EVENTS_BYTES", 2048 if rollover else 20 * 1024 * 1024)
+    events = [
+        {"type": "error", "error": {"message": "shutdown failed"}},
+        *[{"type": "telemetry", "data": "x" * 100} for _ in range(100)],
+        {"type": "text", "part": {"text": "Final answer"}},
+        {"type": "step_finish", "part": {"reason": "stop"}},
+        *[{"type": "telemetry", "data": "x" * 100} for _ in range(100)],
+    ]
+    code = ("import sys; print(" + repr("\n".join(map(json.dumps, events)))
+            + "); print('ERROR shutdown failed', file=sys.stderr); sys.exit(1)")
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == "failed"
+    assert (tmp_path / "result.md").read_text() == "Final answer"
+
+
+@pytest.mark.parametrize("structured_error", [False, True])
+def test_opencode_discovery_eperm_is_sandbox_denied(tmp_path, structured_error):
+    denial = "ERROR ConfigDiscovery.discover: EPERM: operation not permitted, lstat '/repo/.claude'"
+    event = {"type": "error", "error": {"message": "provider failed"}}
+    code = "import sys; print(" + repr(denial) + ", file=sys.stderr); "
+    if structured_error:
+        code += "print(" + repr(json.dumps(event)) + "); "
+    code += "sys.exit(1)"
+    record = supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
+    assert record["status"] == "permission_blocked"
+    assert record["error_class"] == "sandbox_denied"
+    assert record["reason"] == denial
 
 
 @pytest.mark.parametrize("adapter,events,expected", [
@@ -2531,6 +2630,24 @@ def test_opencode_run_disables_foreign_instruction_discovery(tmp_path):
     code = "import json, os; print(json.dumps({'type':'result','result':os.environ.get('OPENCODE_DISABLE_CLAUDE_CODE','') + os.environ.get('OPENCODE_DISABLE_AUTOUPDATE','')}))"
     supervisor().execute(fixture_plan(tmp_path, code, "opencode"), tmp_path / "result.md")
     assert (tmp_path / "result.md").read_text() == "11"
+
+
+@pytest.mark.parametrize("confined", [False, True])
+def test_opencode_disables_fabric_mcp_only_in_sandboxed_lanes(tmp_path, monkeypatch, confined):
+    code = "import os, json; print(json.dumps({'type':'result','result':os.environ['OPENCODE_CONFIG_CONTENT']}))"
+    plan = fixture_plan(tmp_path, code, "opencode")
+    if confined:
+        launcher = tmp_path / "sandbox-exec"
+        launcher.write_text('#!/bin/sh\nshift 2\nexec "$@"\n')
+        launcher.chmod(0o755)
+        monkeypatch.setattr(supervisor(), "_sandbox_exec_path", lambda: str(launcher))
+        plan["applied"]["confinement"] = "sandbox-exec"
+    record = supervisor().execute(plan, tmp_path / "result.md")
+    assert record["status"] == "ok"
+    config = json.loads((tmp_path / "result.md").read_text())
+    assert config.get("mcp") == ({"servers": {"fabric": {"type": "local", "command": ["provenant"], "disabled": True}}}
+                                 if confined else None)
+    assert config["permission"]["edit"]["*"] == "deny"
 
 
 def test_opencode_free_tier_refusal_is_model_unavailable(tmp_path):
@@ -5102,7 +5219,8 @@ def test_opencode_v2_single_text_event_without_step_events_is_ok():
     assert supervisor().parse_output("opencode", json.dumps(event) + "\n", "", 0)["status"] == "ok"
 
 
-@pytest.mark.parametrize("stdout", ["", json.dumps({"type": "step_start", "sessionID": "s", "part": {}}) + "\n"])
+@pytest.mark.parametrize("stdout", ["", json.dumps({"type": "step_start", "sessionID": "s", "part": {}}) + "\n",
+                                    json.dumps({"type": "step_finish", "part": None}) + "\n"])
 def test_opencode_exit_zero_without_assistant_text_is_empty_output(stdout):
     parsed = supervisor().parse_output("opencode", stdout, "", 0)
     assert (parsed["status"], parsed["signature"]) == ("failed", "empty_output")
@@ -5927,6 +6045,63 @@ def test_opencode_read_only_profile_reads_project_config_above_its_cwd(tmp_path)
     assert cat(repo / "secret.txt").returncode != 0
     # A link under a config name cannot carry the grant to another file.
     assert cat(repo / "opencode.jsonc").returncode != 0
+
+
+@pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
+def test_opencode_discovery_grants_only_ancestor_directory_metadata(tmp_path, mode):
+    repo, cwd = linked_worktree(tmp_path)
+    plan = {"adapter": "opencode", "mode": mode, "workspace_root": str(cwd), "cwd": str(cwd),
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    plan["protected_paths"] = [str(repo / name) for name in (".claude", ".codex")]
+    profile = supervisor().os_confinement_profile(plan)
+    deny_at = profile.rindex('(deny file-read*')
+    for ancestor in (cwd, *cwd.parents):
+        for name in (".claude", ".codex"):
+            grant = f'(literal "{ancestor / name}")'
+            assert any(line.startswith("(allow file-read-metadata ") and grant in line
+                       for line in profile[deny_at:].splitlines())
+    assert not any(line.startswith("(allow file-read-metadata ") and '(subpath ' in line
+                   for line in profile[deny_at:].splitlines())
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="sandbox-exec is macOS-only")
+@pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
+@pytest.mark.parametrize("symlink", [False, True])
+def test_opencode_discovery_lstats_denied_ancestor_without_reading_contents(tmp_path, mode, symlink):
+    mod = supervisor()
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    repo, cwd = linked_worktree(tmp_path)
+    plan = {"adapter": "opencode", "mode": mode, "workspace_root": str(cwd), "cwd": str(cwd),
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    protected = [repo / name for name in (".claude", ".codex")]
+    targets = [repo / ("private-" + path.name) for path in protected] if symlink else protected
+    for directory, target in zip(protected, targets):
+        target.mkdir()
+        (target / "secret.txt").write_text("private")
+        if symlink:
+            directory.symlink_to(target, target_is_directory=True)
+    plan["protected_paths"] = list(map(str, targets))
+    script = """import os, sys
+for path in sys.argv[1:]:
+    os.lstat(path)
+    for operation in (lambda: os.listdir(path), lambda: open(path + '/secret.txt').read(),
+                      lambda: os.stat(path + '/secret.txt')):
+        try:
+            operation()
+        except PermissionError:
+            continue
+        raise AssertionError('protected content or descendant metadata became readable')
+print('metadata only')
+"""
+    result = subprocess.run([sandbox_exec, "-p", mod.os_confinement_profile(plan), sys.executable,
+                             "-c", script, *map(str, protected)], cwd=cwd,
+                            capture_output=True, text=True, timeout=10)
+    if result.returncode and "sandbox_apply" in result.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "metadata only"
 
 
 @pytest.mark.live_provider
