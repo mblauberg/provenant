@@ -1088,21 +1088,42 @@ def test_claude_install_retires_duplicate_agents_symlink(tmp_path):
     assert "duplicate instructions retired" in result.stdout
 
 
-def test_claude_install_retires_duplicate_agents_file(tmp_path):
+@pytest.mark.parametrize(
+    "user_content",
+    ["# Instance instructions\n", "# User instructions\nKeep this custom rule.\n"],
+)
+def test_claude_install_preserves_and_reports_regular_agents_file(tmp_path, user_content):
     config = tmp_path / "claude-config"
     config.mkdir()
     instance_agents = tmp_path / ".agents/AGENTS.md"
     instance_agents.parent.mkdir(parents=True)
     instance_agents.write_text("# Instance instructions\n")
     duplicate_agents = config / "AGENTS.md"
-    duplicate_agents.write_text("# Instance instructions\n")
+    duplicate_agents.write_text(user_content)
 
     result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
 
     assert result.returncode == 0, result.stderr
     assert (config / "CLAUDE.md").exists()
-    assert not duplicate_agents.exists()
-    assert "duplicate instructions retired" in result.stdout
+    assert duplicate_agents.read_text() == user_content
+    assert "duplicate instructions preserved" in result.stderr
+
+
+def test_claude_install_preserves_symlink_to_product_doctrine(tmp_path):
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    instance_agents = tmp_path / ".agents/AGENTS.md"
+    instance_agents.parent.mkdir(parents=True)
+    instance_agents.write_text("# Instance instructions\n")
+    duplicate_agents = config / "AGENTS.md"
+    duplicate_agents.symlink_to(ROOT / "AGENTS.md")
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert duplicate_agents.is_symlink()
+    assert duplicate_agents.resolve() == (ROOT / "AGENTS.md").resolve()
+    assert "duplicate instructions retired" not in result.stdout
 
 
 def test_claude_install_keeps_doctrine_when_config_is_instance_root(tmp_path):

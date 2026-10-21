@@ -120,6 +120,14 @@ non-zero, follow the message it prints: exit `3` flags a command collision,
 incompatible instruction target, or managed skill-link conflict, and
 instruction conflicts include the bootstrap line to add.
 
+For global instructions, Claude uses `~/.claude/CLAUDE.md` and Codex uses
+`~/.codex/AGENTS.md`. A fresh install writes a short bootstrap in the selected
+entrypoint; an existing symlink from that entrypoint to the instance
+`AGENTS.md` is preserved. The installer does not create `~/.claude/AGENTS.md`.
+On reinstall, it removes that extra path only when it is a symlink resolving to
+the instance doctrine. A regular `~/.claude/AGENTS.md` is preserved and
+reported for review.
+
 Exit `3` also covers a missing harness interpreter, which is what a machine
 without `uv` meets first:
 
