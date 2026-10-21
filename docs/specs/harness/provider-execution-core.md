@@ -61,6 +61,7 @@ lightweight advisory dispatch.
 ## Non-goals
 
 - No scheduler, daemon, recursive swarm manager or second lifecycle engine.
+- Operating-model R2 amends the scheduler exclusion above with a contract-driven graph runner.
 - No universal hashes, environment fingerprints, version locks or catalogue
   registry.
 - No routine redaction, per-provider confirmation or family restriction for

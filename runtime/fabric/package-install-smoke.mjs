@@ -98,7 +98,6 @@ Object.defineProperty(process.versions, "node", { value: "26.0.0" });
   assert.ok(tools.tools.some((tool) => tool.name === "fabric_adapters"));
   assert.ok(tools.tools.some((tool) => tool.name === "fabric_dispatch"));
   assert.ok(tools.tools.some((tool) => tool.name === "fabric_status"));
-  // Legacy tools appear only with FABRIC_LEGACY_TOOLS=1.
   assert.ok(!tools.tools.some((tool) => tool.name === "fabric_batch"));
   const identity = await client.callTool({ name: "fabric_whoami", arguments: {} });
   assert.equal(identity.isError, undefined, JSON.stringify(identity));

@@ -271,7 +271,7 @@ it("budgets the whole injected handoff text, not only the result tail", async ()
   }
 });
 
-it.each([false, true])("exposes the default tools within budget (legacy=%s)", async (legacy) => {
+it("exposes only the current tools", async () => {
   const state = mkdtempSync(join(tmpdir(), "fabric-surface-"));
   const client = new Client({ name: "surface", version: "1" });
   try {
@@ -288,7 +288,6 @@ it.each([false, true])("exposes the default tools within budget (legacy=%s)", as
           ...(process.env as Record<string, string>),
           AGENT_FABRIC_STATE_DIRECTORY: state,
           AGENT_FABRIC_LABEL: "surface",
-          FABRIC_LEGACY_TOOLS: legacy ? "1" : "0",
         },
         stderr: "pipe",
       }),
@@ -329,7 +328,7 @@ it.each([false, true])("exposes the default tools within budget (legacy=%s)", as
         "work_claim",
       ]) expect(names.has(`fabric_${name}`)).toBe(true);
     for (const name of ["batch", "team_create", "task_create", "task_claim", "task_update", "tasks"])
-      expect(names.has(`fabric_${name}`)).toBe(legacy);
+      expect(names.has(`fabric_${name}`)).toBe(false);
     const invalid = await client.callTool({
       name: "fabric_inbox",
       arguments: { ids: Array.from({ length: 101 }, (_, i) => String(i)) },
