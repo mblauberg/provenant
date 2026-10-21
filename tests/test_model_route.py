@@ -616,7 +616,7 @@ def test_opencode_training_warning_and_paid_fallback_excludes_free():
         assert free_route["trains_on_prompts"] is (not zero_retention)
         assert bool(free_route["warnings"]) is (not zero_retention)
     result, route = resolve("--adapter", "opencode", "--model",
-                            "opencode/muse-spark-1.3-contributor-free", "--role", "worker")
+                            "opencode/mimo-v2.6-flash-free", "--role", "worker")
     assert result.returncode == 0, route
     assert route["warnings"]
     result, route = resolve("--adapter", "opencode", "--alias", "workhorse", "--role", "worker")
@@ -625,7 +625,7 @@ def test_opencode_training_warning_and_paid_fallback_excludes_free():
         "opencode/glm-5.3-flash-free", "opencode-go/deepseek-v4.1-flash"]
     assert all(candidate["trains_on_prompts"] is False for candidate in route["fallback_candidates"])
     result, unregistered = resolve("--adapter", "opencode", "--model",
-                                   "opencode/muse-spark-2-contributor-free", "--role", "worker")
+                                   "opencode/unregistered-contributor-free", "--role", "worker")
     assert result.returncode == 0, unregistered
     assert unregistered["trains_on_prompts"] is None
     assert unregistered["warnings"]
