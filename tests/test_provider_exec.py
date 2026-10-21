@@ -886,9 +886,9 @@ def test_adapter_binary_in_a_plain_bin_directory_grants_the_file_alone(monkeypat
 PROVIDER_STATE_CASES = (
     ("claude", (".claude/settings.json", ".claude/settings.local.json", ".claude/hooks/attack.sh",
                 ".claude/skills/attack/SKILL.md", ".claude/agents/attack.md", ".claude/plugins/attack.js",
-                ".claude/CLAUDE.md", ".claude.json", ".claude.json.tmp", ".claude/shell-snapshots/attack.sh",
+                ".claude/CLAUDE.md", ".claude/shell-snapshots/attack.sh",
                 ".claude/projects/probe/memory/MEMORY.md", ".claude/projects/probe/settings.json"),
-     (".claude/projects/probe/12345678-1234-1234-1234-123456789abc.jsonl",
+     (".claude.json", ".claude.json.tmp", ".claude/projects/probe/12345678-1234-1234-1234-123456789abc.jsonl",
       ".claude/projects/probe/12345678-1234-1234-1234-123456789abc/subagents/agent.jsonl",
       ".claude/sessions/probe.json", ".claude/history.jsonl",
       ".claude/.credentials.json", ".claude/.credentials.json.tmp", ".claude/debug/probe.log")),
@@ -897,7 +897,8 @@ PROVIDER_STATE_CASES = (
              ".gemini/antigravity-cli/plugins/attack.js", ".gemini/antigravity-cli/skills/attack/SKILL.md",
              ".gemini/antigravity-cli/bin/attack", ".gemini/antigravity-cli/builtin/skills/attack.md",
              ".gemini/antigravity-cli/mcp/server/instructions.md",
-             ".gemini/antigravity-cli/cache/marketplaces/attack.js", ".gemini/config/projects/probe.json"),
+             ".gemini/antigravity-cli/cache/marketplaces/attack.js", ".gemini/config/projects/probe.json",
+             ".gemini/config/sidecars/attack.json"),
      (".gemini/oauth_creds.json", ".gemini/oauth_creds.json.tmp",
       ".gemini/antigravity-cli/antigravity-oauth-token", ".gemini/antigravity-cli/mcp_oauth_tokens.json",
       ".gemini/antigravity-cli/conversations/probe.pb", ".gemini/antigravity-cli/presence/probe.lock",
@@ -911,13 +912,17 @@ PROVIDER_STATE_CASES = (
      (".cursor/chats/probe/session.db", ".cursor/agent-cli-state.json", ".cursor/prompt_history.json",
       ".cursor/ai-tracking/ai-code-tracking.db-wal", ".cursor/projects/probe/agent-transcripts/probe.txt",
       ".cursor/projects/probe/worker.log", ".cursor/projects/probe/mcp-auth.json")),
+    ("kiro", (".kiro/settings/mcp.json", ".kiro/settings/cli.json", ".kiro/agents/attack.json",
+              ".kiro/steering/attack.md"),
+     (".cache/kiro/probe.log",)),
 )
 
 
 @pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
 @pytest.mark.parametrize("adapter,protected,writable", PROVIDER_STATE_CASES)
+@pytest.mark.parametrize("sandboxed", [False, True], ids=["profile", "sandbox-exec"])
 def test_provider_state_keeps_config_read_only_and_runtime_state_writable(monkeypatch, tmp_path, mode,
-                                                                        adapter, protected, writable):
+                                                                        adapter, protected, writable, sandboxed):
     mod = supervisor()
     home = (tmp_path / "home").resolve()
     workspace = home / "repo"
@@ -952,18 +957,24 @@ def test_provider_state_keeps_config_read_only_and_runtime_state_writable(monkey
         assert granted(relative), relative
     if adapter in {"claude", "cursor"}:
         assert not granted(f".{adapter}/projects/absent-project")
-    root = {"agy": ".gemini", "claude": ".claude", "cursor": ".cursor"}[adapter]
+    root = {"agy": ".gemini", "claude": ".claude", "cursor": ".cursor", "kiro": ".kiro"}[adapter]
     link_guard = f'(deny file-write-create (require-all (subpath "{home / root}")'
     assert any(line.startswith(link_guard) and "(vnode-type SYMLINK)" in line for line in profile.splitlines())
 
-    sandbox_exec = mod._sandbox_exec_path()
-    if sys.platform != "darwin" or not sandbox_exec:
+    if not sandboxed:
         return
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
 
     def run(script):
         return subprocess.run([sandbox_exec, "-p", profile, "/bin/sh", "-c", script],
                               capture_output=True, text=True)
 
+    probe = run("true")
+    if probe.returncode and "sandbox_apply" in probe.stderr:
+        pytest.skip("sandbox_apply is refused in this test environment")
+    assert probe.returncode == 0, probe.stderr
     for relative in protected:
         path = shlex.quote(str(home / relative))
         assert run(f"printf hijack > {path}").returncode != 0, relative
@@ -976,7 +987,8 @@ def test_provider_state_keeps_config_read_only_and_runtime_state_writable(monkey
         assert run(f"ln -s {shlex.quote(str(home / protected[0]))} {link}").returncode != 0, relative
     # New session directories must still be creatable; the file-only Kiro guard would forbid these.
     sessions = {"claude": ".claude/projects/probe/12345678-1234-1234-1234-123456789abc",
-                "agy": ".gemini/antigravity-cli/conversations", "cursor": ".cursor/chats/probe"}
+                "agy": ".gemini/antigravity-cli/conversations", "cursor": ".cursor/chats/probe",
+                "kiro": ".cache/kiro"}
     directory = home / sessions[adapter] / "new-session"
     assert run(f"mkdir {shlex.quote(str(directory))}").returncode == 0
     link = directory / "link"
@@ -984,6 +996,185 @@ def test_provider_state_keeps_config_read_only_and_runtime_state_writable(monkey
     if adapter in {"claude", "cursor"}:
         destination = home / f".{adapter}/projects/absent-project"
         assert run(f"mv {shlex.quote(str(directory))} {shlex.quote(str(destination))}").returncode != 0
+
+
+@pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
+@pytest.mark.parametrize("adapter,config", [
+    ("claude", ".claude/settings.json"), ("agy", ".gemini/config/mcp_config.json"),
+    ("cursor", ".cursor/cli-config.json"), ("kiro", ".kiro/settings/mcp.json"),
+    ("opencode", ".config/opencode/opencode.json"),
+])
+def test_sandbox_provider_config_cannot_be_hardlinked_into_writable_state(monkeypatch, tmp_path,
+                                                                         adapter, config, mode):
+    mod = supervisor()
+    sandbox_exec = mod._sandbox_exec_path()
+    if not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    home = (tmp_path / "home").resolve()
+    workspace = home / "repo"
+    workspace.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    protected = home / config
+    protected.parent.mkdir(parents=True, exist_ok=True)
+    protected.write_text("original\n")
+    attempt = home / "attempt"
+    attempt.mkdir()
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    plan = {"adapter": adapter, "mode": mode, "cwd": str(workspace), "workspace_root": str(workspace),
+            "run_dir": str(attempt), "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    command = mod.confinement_command(plan, ["/bin/sh", "-c"])
+    probe = subprocess.run([*command, f"printf ok > {shlex.quote(str(attempt / 'probe'))} && cat {shlex.quote(str(protected))}"],
+                           capture_output=True, text=True)
+    assert probe.returncode == 0, probe.stderr
+    link = attempt / "x"
+    result = subprocess.run([*command, f"ln {shlex.quote(str(protected))} {shlex.quote(str(link))}"],
+                            capture_output=True, text=True)
+    assert result.returncode != 0, result.stderr
+    assert not link.exists()
+    assert protected.read_text() == "original\n"
+
+
+@pytest.mark.parametrize("sandboxed", [False, True], ids=["preparation", "sandbox-exec"])
+@pytest.mark.parametrize("adapter", ["claude", "cursor", "agy"])
+def test_provider_home_symlink_and_cwd_alias_use_canonical_paths(monkeypatch, tmp_path, adapter, sandboxed):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    home.mkdir()
+    target = (tmp_path / "dotfiles" / adapter).resolve()
+    target.mkdir(parents=True)
+    relative_home = ".gemini" if adapter == "agy" else f".{adapter}"
+    (home / relative_home).symlink_to(target, target_is_directory=True)
+    workspace = (tmp_path / "real-project").resolve()
+    workspace.mkdir()
+    alias = tmp_path / "project-alias"
+    alias.symlink_to(workspace, target_is_directory=True)
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    sandbox_exec = mod._sandbox_exec_path() if sandboxed else None
+    if sandboxed and not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    # Preparation and canonical paths can be checked even in a nested sandbox.
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: sandbox_exec or "/usr/bin/sandbox-exec")
+    plan = {"adapter": adapter, "mode": "read_only", "cwd": str(alias), "workspace_root": str(workspace),
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    command = mod.confinement_command(plan, ["/bin/sh", "-c"])
+    slug = (mod._claude_project_dir(home, workspace).name if adapter == "claude" else
+            re.sub(r"[^A-Za-z0-9]+", "-", str(workspace)).strip("-"))
+    project = target / "projects" / slug if adapter != "agy" else target / "antigravity-cli/scratch"
+    assert project.is_dir()
+    # The exact same canonical root anchors the regex, not just directory preparation.
+    patterns = re.findall(r'\(allow file-write\* \(regex #"([^"]+)"\)\)', command[2])
+    state = (project / "12345678-1234-1234-1234-123456789abc.jsonl" if adapter == "claude" else
+             project / "worker.log")
+    if adapter == "agy":
+        assert f'(allow file-write* (subpath "{target / "antigravity-cli/annotations"}")' in command[2]
+    else:
+        assert any(re.fullmatch(pattern, str(state)) for pattern in patterns)
+    if not sandbox_exec:
+        return
+    result = subprocess.run([*command, f"printf ok > {shlex.quote(str(state))}"], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert state.read_text() == "ok"
+    denied = target / {"claude": "settings.json", "cursor": "cli-config.json", "agy": "config/mcp_config.json"}[adapter]
+    denied.parent.mkdir(parents=True, exist_ok=True)
+    assert subprocess.run([*command, f"printf bad > {shlex.quote(str(denied))}"],
+                          capture_output=True, text=True).returncode != 0
+
+
+@pytest.mark.parametrize("sandboxed", [False, True], ids=["preparation", "sandbox-exec"])
+@pytest.mark.parametrize("relative", ["cache/projects.json", "updater/update_status.json"])
+def test_agy_prepares_fresh_state_and_allows_atomic_runtime_rewrites(monkeypatch, tmp_path, relative, sandboxed):
+    mod = supervisor()
+    home = (tmp_path / "home").resolve()
+    home.mkdir()
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    sandbox_exec = mod._sandbox_exec_path() if sandboxed else None
+    if sandboxed and not sandbox_exec:
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    monkeypatch.setattr(mod, "_sandbox_exec_path", lambda: sandbox_exec or "/usr/bin/sandbox-exec")
+    plan = {"adapter": "agy", "mode": "read_only", "cwd": str(workspace), "workspace_root": str(workspace),
+            "applied": {"confinement": "sandbox-exec", "add_dirs": []}}
+    command = mod.confinement_command(plan, ["/bin/sh", "-c"])
+    root = home / ".gemini/antigravity-cli"
+    for name in ("updater", "scratch", "cache", "conversations", "presence"):
+        assert (root / name).is_dir(), name
+    path = root / relative
+    siblings = re.findall(r'\(allow file-write\* .*', command[2])
+    assert any(re.search(pattern, str(path) + ".tmp") for rule in siblings
+               for pattern in re.findall(r'\(regex #"([^"]+)"\)', rule))
+    if not sandbox_exec:
+        return
+    result = subprocess.run([*command, f"printf new > {shlex.quote(str(path) + '.tmp')} && "
+                                      f"mv {shlex.quote(str(path) + '.tmp')} {shlex.quote(str(path))}"],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert path.read_text() == "new"
+    result = subprocess.run([*command, f"mkdir {shlex.quote(str(root / 'scratch/new-session'))}"],
+                            capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    for denied in (root / "cache/marketplaces/attack.json", home / ".gemini/config/sidecars/attack.json"):
+        denied.parent.mkdir(parents=True, exist_ok=True)
+        assert subprocess.run([*command, f"printf bad > {shlex.quote(str(denied))}"],
+                              capture_output=True, text=True).returncode != 0
+
+
+@pytest.mark.parametrize("sandboxed", [False, True], ids=["supervisor", "sandbox-exec"])
+@pytest.mark.parametrize("mode", ["read_only", "worktree_write"])
+@pytest.mark.parametrize("change", ["runtime", "tamper", "deleted", "malformed", "new-file"])
+@pytest.mark.parametrize("provider_exit", [0, 1])
+def test_claude_config_integrity_guard_restores_only_config_keys(monkeypatch, tmp_path, sandboxed,
+                                                               change, provider_exit, mode):
+    mod = supervisor()
+    if sandboxed and not mod._sandbox_exec_path():
+        pytest.skip("sandbox-exec is unavailable or disabled")
+    home = (tmp_path / "home").resolve()
+    home.mkdir()
+    monkeypatch.setattr(mod.Path, "home", lambda: home)
+    config = home / ".claude.json"
+    original = {"mcpServers": {"safe": {"command": "safe"}}, "hooks": {"startup": ["safe"]},
+                "allowedTools": ["Read"], "numStartups": 1, "lastSessionId": "old",
+                "projects": {"existing": {"mcpServers": {"local": {}}, "hooks": {"safe": []},
+                                           "lastSessionId": "old"}}}
+    if change != "new-file":
+        config.write_text(json.dumps(original))
+    changed = json.loads(json.dumps(original))
+    changed.update(numStartups=2, lastSessionId="new")
+    changed["projects"]["existing"]["lastSessionId"] = "new"
+    expected = json.loads(json.dumps(changed))
+    if change in {"tamper", "new-file"}:
+        changed.update(mcpServers={"evil": {"command": "bad"}}, hooks={}, allowedTools=["Bash"])
+        changed["projects"]["existing"].update(mcpServers={}, allowedTools=["Bash"])
+        del changed["projects"]["existing"]["hooks"]
+        changed["projects"]["fresh"] = {"mcpServers": {"evil": {}}, "hooks": {}, "allowedTools": [],
+                                        "lastSessionId": "fresh"}
+        expected["projects"]["fresh"] = {"lastSessionId": "fresh"}
+        if change == "new-file":
+            for key in ("mcpServers", "hooks", "allowedTools"):
+                expected.pop(key)
+                expected["projects"]["existing"].pop(key, None)
+    temporary = shlex.quote(str(config) + ".tmp")
+    if change == "deleted":
+        script = f"rm {shlex.quote(str(config))}"
+        # There are no surviving runtime keys when the provider deletes or corrupts the file.
+        expected = {key: value for key, value in original.items() if key in {"mcpServers", "hooks", "allowedTools"}}
+        expected["projects"] = {"existing": {"mcpServers": {"local": {}}, "hooks": {"safe": []}}}
+    else:
+        content = "{bad json" if change == "malformed" else json.dumps(changed)
+        script = f"printf '%s' {shlex.quote(content)} > {temporary} && mv {temporary} {shlex.quote(str(config))}"
+        if change == "malformed":
+            expected = original
+    script += f"; printf '%s\\n' '{{\"type\":\"result\",\"result\":\"done\",\"is_error\":false}}'; exit {provider_exit}"
+    plan = fixture_plan(tmp_path, "", "claude", mode=mode)
+    plan["argv"] = ["/bin/sh", "-c", script]
+    plan["applied"]["confinement"] = "sandbox-exec"
+    if not sandboxed:
+        # Unit coverage runs the real supervisor with only the OS wrapper omitted.
+        monkeypatch.setattr(mod, "confinement_command", lambda plan, command, search_path=None: command)
+    record = mod.execute(plan, tmp_path / "result.md")
+    assert json.loads(config.read_text()) == expected
+    tamper = [warning for warning in record["warnings"] if "config_tamper" in warning]
+    assert bool(tamper) is (change != "runtime")
 
 
 @pytest.mark.parametrize("adapter,project", [
