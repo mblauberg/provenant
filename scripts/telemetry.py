@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.util
 from collections import Counter
 from datetime import UTC, datetime
 import json
@@ -684,7 +685,7 @@ def since_time(value):
     return stamp.replace(tzinfo=UTC) if stamp.tzinfo is None else stamp.astimezone(UTC)
 
 
-def stats(db, since=None, prices=None):
+def stats(db, since=None, prices=None, *, summary=False):
     free_patterns = {}
     if prices is None:
         prices, free_patterns = load_prices()
@@ -754,7 +755,7 @@ def stats(db, since=None, prices=None):
         group['input_tokens'] += row['input_tokens'] or 0
         if row['status']:
             group['statuses'][row['status']] += 1
-    return {'schema_version': 2, 'since': since, 'host': host_id(),
+    report = {'schema_version': 2, 'since': since, 'host': host_id(),
             'usage': aggregate(usage, ('provider', 'adapter', 'model'), prices, free_patterns),
             'usage_per_day': aggregate(usage, ('day', 'provider', 'adapter', 'account'), prices, free_patterns),
             'outcomes': outcomes([row for row in attributed if row['source'] == 'fabric']),
@@ -771,7 +772,41 @@ def stats(db, since=None, prices=None):
                              for (source, adapter), group in sorted(missing.items(), key=lambda item: str(item[0]))],
             'receipt_usage_rows_excluded': len(attributed) - len(usage),
             'pending_source_rebuilds': [row[0] for row in db.execute('SELECT source FROM rebuilds ORDER BY source')]}
+    if summary:
+        keys = ('host', 'source', 'session', 'day', 'provider', 'adapter', 'account', 'model')
+        report['session_usage'] = combine((unit(row, keys, prices, free_patterns) for row in usage), keys)
+    return report
 
+
+
+def peer_summary(db, since=None, host=None):
+    """Versioned aggregate payload. No event rows, paths, prompts or credential material."""
+    report = stats(db, since, summary=True)
+    if host:
+        report['host'] = host
+        for row in report['session_usage']:
+            row['host'] = host
+    report['schema'] = 'provenant.telemetry.summary.v1'
+    report['quota_snapshots'] = [value for value in quota_owner().snapshots() if value.get('host') == host_id()]
+    report['quota_observations'] = [
+        {key: row.get(key) for key in ('host', 'provider', 'account', 'window', 'used_percent',
+                                     'window_minutes', 'reset_at', 'timestamp')}
+        for row in report['quota_observations']]
+    return report
+
+
+
+def quota_owner():
+    spec = importlib.util.spec_from_file_location('provenant_telemetry_quota', Path(__file__).with_name('provider_quota.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+def host_owner():
+    spec = importlib.util.spec_from_file_location('provenant_telemetry_hosts', Path(__file__).with_name('telemetry_hosts.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 def compact(value):
     if value is None:
@@ -833,15 +868,18 @@ def main(argv=None):
     parser.add_argument('command', choices=('ingest', 'sources', 'stats'))
     parser.add_argument('--json', action='store_true')
     parser.add_argument('--since', type=str)
+    parser.add_argument('--hosts', nargs='+', help='all or configured host names (stats only)')
     args = parser.parse_args(argv)
     try:
         if args.since:
             since_time(args.since)
         if args.since and args.command != 'stats':
             parser.error('--since applies only to stats')
+        if args.hosts and args.command != 'stats':
+            parser.error('--hosts applies only to stats')
         with connect() as db:
             if args.command == 'stats':
-                report = stats(db, args.since)
+                report = host_owner().collect(sys.modules[__name__], db, args.since, args.hosts) if args.hosts else stats(db, args.since)
                 if args.json:
                     print(json.dumps(report, indent=2))
                 else:

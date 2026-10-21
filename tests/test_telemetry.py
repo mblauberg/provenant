@@ -640,3 +640,129 @@ def test_ledger_rows_carry_the_configured_host_id_without_duplicates(tmp_path):
         assert db.execute('SELECT DISTINCT host FROM usage').fetchall() == [('studio',)]
         assert db.execute('SELECT COUNT(*) FROM usage').fetchone()[0] == 3
         assert db.execute('SELECT DISTINCT host FROM usage_files').fetchall() == [('studio',)]
+
+
+def test_peer_stats_are_versioned_aggregates_and_read_only(tmp_path):
+    path = tmp_path / 'home/.claude/projects/repo/session.jsonl'
+    for index in range(2):
+        jsonl(path, {'type': 'assistant', 'sessionId': 'same-session', 'timestamp': '2026-10-21T01:00:00Z',
+                     'message': {'id': f'm{index}', 'model': 'claude-test', 'content': 'PRIVATE_CONTENT',
+                                 'usage': {'input_tokens': 10, 'output_tokens': 20}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    database = tmp_path / 'state/telemetry.sqlite3'
+    before = database.read_bytes()
+    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'peer'],
+                            input=json.dumps({'protocol_version': 1, 'verb': 'telemetry.stats',
+                                              'params': {'schema_version': 1, 'since': '2026-10-21'}}),
+                            env=environment(tmp_path), capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    summary = json.loads(result.stdout)['result']
+    assert summary['schema'] == 'provenant.telemetry.summary.v1'
+    groups = summary['session_usage']
+    assert len(groups) == 1 and groups[0]['session'] == 'same-session'
+    assert groups[0]['rows'] == 2 and groups[0]['input_tokens'] == 20
+    assert 'PRIVATE_CONTENT' not in result.stdout and 'event_id' not in result.stdout and 'origin_path' not in result.stdout
+    assert database.read_bytes() == before
+
+
+def test_stats_hosts_all_merges_peer_usage_and_survives_old_and_offline_peers(tmp_path):
+    local = tmp_path / 'home/.claude/projects/repo/local.jsonl'
+    jsonl(local, {'type': 'assistant', 'sessionId': 'shared-session', 'timestamp': '2026-10-21T01:00:00Z',
+                  'message': {'id': 'local', 'model': 'claude-test', 'usage': {'input_tokens': 10, 'output_tokens': 20}}})
+    config = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
+    write_json(config, {'schema_version': 1, 'local_host': 'studio', 'peers': {
+        'peer': {'ssh_destination': 'peer'}, 'offline': {'ssh_destination': 'offline'},
+        'old': {'ssh_destination': 'old'}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    # The transport is a fixture; it never reaches SSH or a provider.
+    shim = tmp_path / 'ssh-fixture'
+    shim.write_text('''#!/usr/bin/env python3
+import json, sys
+request = json.load(sys.stdin)
+name = sys.argv[-2]
+if name == 'offline':
+    sys.exit(255)
+if request['verb'] == 'hello':
+    print(json.dumps({'protocol_version': 1, 'ok': True, 'result': {'protocol_version': 1, 'host': name}}))
+elif name == 'old':
+    print(json.dumps({'protocol_version': 1, 'ok': False, 'error': {'code': 'unknown_verb', 'message': 'old peer'}}))
+    sys.exit(1)
+else:
+    print(json.dumps({'protocol_version': 1, 'ok': True, 'result': json.load(open(__file__ + '.json'))}))
+''')
+    shim.chmod(0o755)
+    # Use the real aggregate encoder, then represent another host with the same session ID.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('telemetry_host_test', ROOT / 'scripts/telemetry.py')
+    telemetry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(telemetry)
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        db.row_factory = sqlite3.Row
+        summary = telemetry.peer_summary(db, host='peer')
+    Path(str(shim) + '.json').write_text(json.dumps(summary))
+    env = {**environment(tmp_path), 'AGENT_FABRIC_SSH_PROGRAM': str(shim),
+           'AGENT_FABRIC_INSTANCE_ROOT': str(tmp_path / 'home/.agents')}
+    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'stats', '--hosts', 'all', '--json'],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads(result.stdout)
+    assert report['partial'] is True
+    assert report['usage'][0]['input_tokens'] == 20
+    statuses = {row['host']: row for row in report['hosts']}
+    assert statuses['peer']['status'] == 'ok'
+    assert statuses['offline']['status'] == 'partial' and statuses['offline']['reason'] == 'unreachable'
+    assert statuses['old']['status'] == 'partial' and statuses['old']['reason'] == 'unknown_verb'
+    # Repeated selectors must not count one (host, source, session) twice.
+    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'stats', '--hosts', 'peer', 'peer', '--json'],
+                            env=env, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['usage'][0]['input_tokens'] == 10
+
+
+def test_peer_merge_deduplicates_sessions_and_uses_freshest_account_quota(tmp_path, monkeypatch):
+    import importlib.util
+    def load(name, filename):
+        spec = importlib.util.spec_from_file_location(name, ROOT / 'scripts' / filename)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    telemetry = load('merge_telemetry_test', 'telemetry.py')
+    federation = load('merge_federation_test', 'telemetry_hosts.py')
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    with telemetry.connect() as db:
+        first = telemetry.peer_summary(db, host='studio')
+    second = {**first, 'host': 'peer'}
+    def quota(host, observed, used):
+        return {'schema': 'provenant.quota.v1', 'provider': 'claude', 'account': 'work', 'host': host,
+                'observed_at': observed, 'windows': [{'name': 'custom', 'used_percent': used,
+                'window_minutes': 300, 'reset_at': None}]}
+    first['quota_snapshots'] = [quota('studio', '2026-10-21T12:00:00Z', 40)]
+    second['quota_snapshots'] = [quota('peer', '2026-10-21T13:00:00Z', 60)]
+    merged = federation.merge(telemetry, [first, second, second], [], None)
+    assert [(row['host'], row['windows'][0]['used_percent']) for row in merged['quota']['accounts']] == [('peer', 60)]
+
+
+def test_malformed_peer_is_partial_instead_of_breaking_local_stats(tmp_path, monkeypatch):
+    import importlib.util
+    def load(name, filename):
+        spec = importlib.util.spec_from_file_location(name, ROOT / 'scripts' / filename)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    telemetry = load('bad_peer_telemetry', 'telemetry.py')
+    federation = load('bad_peer_federation', 'telemetry_hosts.py')
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    with telemetry.connect() as db:
+        good = telemetry.peer_summary(db, host='peer')
+        hosts = federation.hosts_owner()
+        monkeypatch.setattr(hosts, 'load_config', lambda: hosts.HostsConfig(telemetry.host_id(), {'peer': object()}))
+        response = {**good, 'excluded_rows': []}
+        monkeypatch.setattr(hosts.PeerClient, 'call', lambda *args, **kwargs: {'ok': True, 'result': response})
+        report = federation.collect(telemetry, db, None, ['all'])
+        assert report['partial'] and report['hosts'][-1]['reason'] == 'bad_response'
+        # A malformed aggregate must not become a string token count.
+        response = {**good, 'session_usage': [{'host': 'peer', 'source': 'claude', 'session': 's',
+                    'day': None, 'provider': 'anthropic', 'adapter': 'claude', 'account': None,
+                    'model': 'test', 'rows': '1'}]}
+        report = federation.collect(telemetry, db, None, ['all'])
+        assert report['partial'] and report['hosts'][-1]['reason'] == 'bad_response'
