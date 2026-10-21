@@ -88,8 +88,8 @@ orchestrate:
     verdict: keep
     notes: "read-only worker liveness guidance and threshold owner"
   - file: cli-headless.md
-    verdict: keep
-    notes: "routing section becomes a pointer; load-bearing for cross-verify"
+    verdict: delete
+    notes: "pointer-only; historical resolver statuses remain in codex-capabilities.md"
   - file: autonomous-implementation.md
     verdict: keep
     notes: "consumed by autopilot"

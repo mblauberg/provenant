@@ -1,6 +1,6 @@
 ---
 name: autopilot
-description: "Use for a large, open-ended mission that must survive sessions/crashes and run user-out-of-loop until STOP; delegates lifecycle work to other skills. Not for pre-scoped delivery that stops at a PR gate; use orchestrate's autonomous mode or deliver."
+description: "Use for large, open-ended missions across sessions/crashes until STOP; delegate lifecycle work. Not for bounded PR-gate delivery; use orchestrate autonomous mode or deliver."
 ---
 
 # Autopilot

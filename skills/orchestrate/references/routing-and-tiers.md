@@ -83,6 +83,13 @@ alone does not move a default.
 The live roster is `provenant routes`; pools and tiers live in
 `config/model-routing.json`.
 
+Task-class order, minimum effort and role policy also live in
+`config/model-routing.json`. Resolution can advance to the next configured
+route after a failed or empty outcome; it does not silently retry the same
+model. Fabric retains up to 20 outcomes per adapter, model and task class for
+seven days, and avoids a route whose latest outcome in that window failed or
+returned empty output.
+
 Each catalogue-configured risk tier has one bounded
 override occupant. Validation prevents it from being an alias or alias
 candidate. Lifecycle `risk_tier` remains delivery metadata and never selects
