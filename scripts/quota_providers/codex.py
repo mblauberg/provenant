@@ -18,7 +18,8 @@ CREDIT_KEYS = ('resetCredits', 'reset_credits', 'availableResets', 'available_re
 
 
 def default_identity():
-    return Path(os.environ.get('CODEX_HOME') or Path.home() / '.codex').expanduser()
+    from provider_identity import selected_identity
+    return selected_identity('codex')
 
 
 def app_server(account, io, timeout=None):

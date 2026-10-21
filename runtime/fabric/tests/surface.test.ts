@@ -1,7 +1,7 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { resolve, join } from "node:path";
 import { createRequire } from "node:module";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -114,6 +114,7 @@ it("reads adapter cooldowns from the configured state root and explicit override
   const root = mkdtempSync(join(tmpdir(), "fabric-cooldowns-"));
   const oldRoot = process.env.AGENT_FABRIC_STATE_ROOT;
   const oldPath = process.env.FABRIC_COOLDOWNS_PATH;
+  const oldInstance = process.env.AGENT_FABRIC_INSTANCE_ROOT;
   const snapshot = { adapters: [{ name: "codex", models: ["gpt-6.1-sol"], aliases: { workhorse: ["gpt-6.1-sol"] } }], endpoints: {} } as any;
   try {
     writeFileSync(join(root, "cooldowns.json"), JSON.stringify({ cooldowns: { one: {
@@ -128,11 +129,39 @@ it("reads adapter cooldowns from the configured state root and explicit override
     } } }));
     process.env.FABRIC_COOLDOWNS_PATH = override;
     expect(adapterView(snapshot).digest).toContain("cooling:");
+    const instance = join(root, "instance");
+    mkdirSync(join(instance, "config"), { recursive: true });
+    mkdirSync(join(instance, ".agent-fabric"));
+    const config = join(instance, "config", "telemetry.json");
+    const account = (label: string) => writeFileSync(config, JSON.stringify({ accounts: { codex: {
+      [label]: { identity_dir: process.env.CODEX_HOME || join(homedir(), ".codex") },
+    } } }));
+    account("a");
+    writeFileSync(join(instance, ".agent-fabric", "hosts.json"), JSON.stringify({ local_host: "host-a" }));
+    process.env.AGENT_FABRIC_INSTANCE_ROOT = instance;
+    writeFileSync(override, JSON.stringify({ schema: "fabric.cooldowns.v1", cooldowns: {
+      active: { adapter: "codex", model: "active-model", account: "a", host: "host-a", cooling_until: "2999-01-01T00:00:00Z" },
+      account: { adapter: "codex", model: "other-account", account: "b", host: "host-a", cooling_until: "2999-01-01T00:00:00Z" },
+      host: { adapter: "codex", model: "other-host", account: "a", host: "host-b", cooling_until: "2999-01-01T00:00:00Z" },
+      unknown: { adapter: "codex", model: "unknown-account", account: null, host: "host-a", cooling_until: "2999-01-01T00:00:00Z" },
+    } }));
+    const active = adapterView(snapshot).digest;
+    expect(active).toContain("cooling: active-model until");
+    expect(active).not.toContain("other-account");
+    expect(active).not.toContain("other-host");
+    expect(active).not.toContain("unknown-account");
+    account("b");
+    expect(adapterView(snapshot).digest).toContain("cooling: other-account until");
+    expect(adapterView(snapshot).digest).not.toContain("active-model");
+    account("a");
+    expect(adapterView(snapshot).digest).toContain("cooling: active-model until");
   } finally {
     if (oldRoot === undefined) delete process.env.AGENT_FABRIC_STATE_ROOT;
     else process.env.AGENT_FABRIC_STATE_ROOT = oldRoot;
     if (oldPath === undefined) delete process.env.FABRIC_COOLDOWNS_PATH;
     else process.env.FABRIC_COOLDOWNS_PATH = oldPath;
+    if (oldInstance === undefined) delete process.env.AGENT_FABRIC_INSTANCE_ROOT;
+    else process.env.AGENT_FABRIC_INSTANCE_ROOT = oldInstance;
     rmSync(root, { recursive: true, force: true });
   }
 });

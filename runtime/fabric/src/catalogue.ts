@@ -147,6 +147,29 @@ export function catalogueSnapshot(root?: string, env: NodeJS.ProcessEnv = proces
   return value;
 }
 
+interface Cooldown { adapter: string; model: string; cooling_until: string }
+
+/** Active account/host projection, including locked legacy migration, from the Python owner. */
+export function activeCooldowns(env: NodeJS.ProcessEnv = process.env): Cooldown[] {
+  const configuredRoot = env.AGENT_FABRIC_PRODUCT_ROOT;
+  const productRoot = configuredRoot && isAbsolute(configuredRoot) ? configuredRoot : findProductRoot();
+  const python = env.HARNESS_PYTHON && isAbsolute(env.HARNESS_PYTHON) ? env.HARNESS_PYTHON : "python3";
+  const run = spawnSync(python, [join(productRoot, "scripts", "model_route.py"), "cooldowns", "--json"],
+    { cwd: productRoot, env: { ...process.env, ...env }, encoding: "utf8", timeout: 10_000 });
+  if (run.status !== 0) return [];
+  try {
+    const value: unknown = JSON.parse(run.stdout);
+    if (value === null || typeof value !== "object" || !("cooldowns" in value)
+        || value.cooldowns === null || typeof value.cooldowns !== "object") return [];
+    return Object.values(value.cooldowns).filter((entry): entry is Cooldown =>
+      entry !== null && typeof entry === "object" && "adapter" in entry && typeof entry.adapter === "string"
+      && "model" in entry && typeof entry.model === "string"
+      && "cooling_until" in entry && typeof entry.cooling_until === "string");
+  } catch {
+    return []; // Optional routing input; an unavailable reader must not hide the catalogue.
+  }
+}
+
 /** Clear cooldowns through the Python owner (same lock and atomic write); returns its removed keys. */
 export function resetCooldowns(selector?: string, env: NodeJS.ProcessEnv = process.env): string[] {
   const configuredRoot = env.AGENT_FABRIC_PRODUCT_ROOT;

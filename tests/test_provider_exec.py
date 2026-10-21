@@ -4744,7 +4744,11 @@ sys.exit(1 if 'TARGET_MODEL' in model else 0)
     assert rows[1]["provenance"]["fallback_from"]["status"] == "usage_limited"
     assert json.loads((run / "RUN_RECEIPT.json").read_text())["status"] == "ok"
     cooldowns = json.loads((tmp_path / "cooldowns.json").read_text())["cooldowns"]
-    assert cooldowns["claude/*"]["source_run"] == rows[0]["run_id"]
+    (key, cooldown), = cooldowns.items()
+    assert json.loads(key) == ["claude", rows[0]["account"], rows[0]["host"], "*"]
+    assert (cooldown["account"], cooldown["host"]) == (rows[0]["account"], rows[0]["host"])
+    assert cooldown["status"] == "usage_limited"
+    assert cooldown["source_run"] == rows[0]["run_id"]
 
 
 def test_codex_observed_model_comes_from_rollout_turn_context(tmp_path):

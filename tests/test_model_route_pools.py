@@ -276,7 +276,9 @@ def overlay_environment(tmp_path, overlay):
     (instance / "config").mkdir(parents=True)
     (instance / "config" / "model-routing.json").write_text(json.dumps(overlay))
     return {**os.environ, "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(instance),
-            "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
+            "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state"),
+            "CODEX_HOME": str(Path.home() / ".codex"),
+            "FABRIC_COOLDOWNS_PATH": str(tmp_path / "state/cooldowns.json")}
 
 
 def model_route(env, *args, stdin=None):
@@ -855,3 +857,21 @@ def test_routes_follow_provider_quota_over_stale_cooldowns_and_report_deficit(tm
     assert blocked["status"] == "quota_exhausted"
     assert blocked["cooling_until"] == reset.isoformat().replace("+00:00", "Z")
     assert exec_routing.cooling("claude", "claude-opus-5-5") is None
+
+
+@pytest.mark.parametrize('adapter', ['claude', 'codex', 'agy', 'cursor', 'opencode', 'kiro'])
+def test_attempt_scope_is_frozen_before_identity_environment_changes(tmp_path, monkeypatch, adapter):
+    from types import SimpleNamespace
+    mod = load("scope_dispatch_run_under_test", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'a'))
+    args = SimpleNamespace(tool=adapter, alias='workhorse', model='sonnet', alias_supplied=True,
+                           effort=None, task_id='scope-test', access_mode='read_only', worktree=None,
+                           _phase_timings={})
+    running = mod.contract_row(args, tmp_path, 1, tmp_path / 'attempt', {}, 'now')
+    assert running['account'] is not None and running['host']
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'b'))
+    terminal = mod.contract_row(args, tmp_path, 1, tmp_path / 'attempt', {}, 'now')
+    assert (terminal['account'], terminal['host']) == (running['account'], running['host'])
+    if adapter == 'claude':
+        following = mod.contract_row(args, tmp_path, 2, tmp_path / 'attempt-2', {}, 'now')
+        assert following['account'] != running['account']
