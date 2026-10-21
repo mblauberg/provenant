@@ -2275,7 +2275,8 @@ it("resumes a terminal batch task whose recorded add-dir was removed", async () 
   ownerEnvironment,
  );
  expect(resumed.state, JSON.stringify(resumed)).toBe("queued");
- spawnedPids.push(listRecordedRuns(workspace).find((run) => run.run_id === row.run_id)?.owner_pid);
+ await waitForFile(join(dir, OWNER_RECORD_NAME));
+ spawnedPids.push(Number(JSON.parse(readFileSync(join(dir, OWNER_RECORD_NAME), "utf8")).owner_pid));
 });
 
 it("fills unset dispatch fields from the project policy's dispatch_defaults", async () => {
