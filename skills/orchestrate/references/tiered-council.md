@@ -3,14 +3,15 @@
 When several model families are available, work as a hierarchy, like an
 engineering team. Juniors from many families do the laid-out work and the
 fine-grained passes. Seniors judge that work, make the medium decisions and
-delegate to juniors. Principals make the critical calls. Each tier is a route
-pool, so a dispatch names its tier directly:
+delegate to juniors. Principals make the critical calls. Each tier is a route pool, so a dispatch
+names its tier directly. The live roster is `provenant routes`; pools and tiers
+live in `config/model-routing.json`.
 
-| Tier | Route | Members (seed) | Job |
-|---|---|---|---|
-| Junior | `junior` | DeepSeek and GLM free, Haiku and Luna at `high`; Gemini Flash (low/medium); paid OpenCode and rotating free models at `sparing` | laid-out work and lens passes that need little judgement; overlap freely |
-| Senior | `senior` | Sonnet and Sol at `high`; Gemini Flash (high effort) and Grok 4.7; agy Opus 4.6 at `sparing` | judge the work and the junior claims; medium decisions; delegate to juniors |
-| Principal | `principal` | Opus at `high`; Astra; Argon at `sparing` | critical decisions, high-level judgement, consensus |
+| Tier | Route | Job |
+|---|---|---|
+| Junior | `junior` | laid-out work and lens passes that need little judgement; overlap freely |
+| Senior | `senior` | judge the work and the junior claims; medium decisions; delegate to juniors |
+| Principal | `principal` | critical decisions, high-level judgement, consensus |
 
 The same three names work as an adapter alias (`alias: "senior"`) for that
 adapter's own model of the tier. Old names still resolve: `bulk`, `scout`,
