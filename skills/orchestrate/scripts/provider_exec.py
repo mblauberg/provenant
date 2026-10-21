@@ -1635,6 +1635,18 @@ def reset_time(text, events, at=None):
     return None
 
 
+def quota_window_is_short(failure_text):
+    """True when the quota phrase names a minute or second window and no longer one."""
+    start = (re.search(r"quota exceeded", failure_text, re.I)
+             or re.search(r"RESOURCE_EXHAUSTED", failure_text))
+    phrase = re.split(r'\.\s|\n|"', failure_text[start.start():], maxsplit=1)[0] if start else ""
+    long_window = (re.search(r"per[ -](?:day|hour)\b|/\s*(?:day|hr|hour)\b", phrase, re.I)
+                   or re.search(r"Per(?:Day|Hour)(?![a-z])", failure_text))
+    short_window = (re.search(r"per[ -](?:minute|second)\b|/\s*(?:min(?:ute)?|sec(?:ond)?)\b", phrase, re.I)
+                    or re.search(r"Per(?:Minute|Second)(?![a-z])", failure_text))
+    return bool(short_window and not long_window)
+
+
 def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
     """Interpret structured failures before diagnostic signatures; never classify answer prose."""
     config = profile(adapter)
@@ -1892,8 +1904,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
     if errors or exit_code != 0 or denial:
         signatures = (SIGNATURES[0], *config.SIGNATURES, *SIGNATURES[1:])
         if re.search(r"RESOURCE_EXHAUSTED|quota exceeded", failure_text, re.I):
-            window = re.search(r"per[ -](?:minute|second)\b|/\s*(?:min(?:ute)?|sec(?:ond)?)\b", failure_text, re.I)
-            quota = "rate_limited" if window else "usage_limited"
+            quota = "rate_limited" if quota_window_is_short(failure_text) else "usage_limited"
             signatures = (signatures[0], (quota, r"RESOURCE_EXHAUSTED|quota exceeded"), *signatures[1:])
         for name, pattern in signatures:
             if re.search(pattern, failure_text, re.I):

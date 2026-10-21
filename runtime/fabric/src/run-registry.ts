@@ -476,6 +476,7 @@ export function pruneDispatchRuns(workspace: string, env: NodeJS.ProcessEnv): st
         "permission_blocked",
         "stalled",
         "startup_timeout",
+        "writer_changed",
         "timed_out",
         "interrupted",
         "lost",

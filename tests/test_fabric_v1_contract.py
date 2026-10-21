@@ -15,6 +15,7 @@ STATUSES = {
     "permission_blocked",
     "stalled",
     "startup_timeout",
+    "writer_changed",
     "timed_out",
     "cancelled",
     "interrupted",

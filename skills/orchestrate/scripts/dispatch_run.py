@@ -2883,24 +2883,24 @@ def execute_attempt_sequence(args,custody=None):
     if plan and previous and previous["retryable"] and not args.resume:
         alternatives = iter(exec_routing.candidates(plan,args.fallback,confidential=getattr(args,"confidential",False)))
         retried = set()
-        attempted = {(plan["adapter"], plan["model"])}
+        attempted = {(plan["adapter"], exec_routing.registered_model(plan["adapter"], plan["model"]))}
         while previous and previous["retryable"]:
             deadline = sequence_start + sequence_budget + getattr(args,"_queued_seconds",0.0)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             current = getattr(args, "_last_plan", plan)
-            key = (current["adapter"], current["model"])
+            key = (current["adapter"], exec_routing.registered_model(current["adapter"], current["model"]))
             cooling = exec_routing.cooling(*key)
             policy = pacing_policy()
             delay = rate_limit_delay(previous, cooling, policy)
             pace = (previous["status"] == "rate_limited" and key not in retried
-                    and previous.get("evidence", {}).get("signature") != "cooldown_active"
+                    and (previous.get("evidence") or {}).get("signature") != "cooldown_active"
                     and delay + policy["minimum_budget_seconds"] <= remaining)
             if pace:
                 args._rate_limit_task_class = previous.get("task_class", "")
                 retried.add(key)
-                candidate = {"adapter": key[0], "model": key[1], "effort": current.get("effort")}
+                candidate = {"adapter": current["adapter"], "model": current["model"], "effort": current.get("effort")}
                 args._rate_limit_retry = {"until": (datetime.now(UTC) + timedelta(seconds=delay)).isoformat(),
                                           "deadline": deadline, "row": previous,
                                           "writer_start": getattr(args, "_writer_start", None)}

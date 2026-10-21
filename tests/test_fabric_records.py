@@ -699,3 +699,31 @@ def test_rate_limit_config_and_provider_window_are_both_honoured(tmp_path):
     entry, = records().read_cooldowns(path, at).values()
     assert entry["backoff_seconds"] == 3
     assert (records().parse_time(entry["cooling_until"]) - at).total_seconds() == 20
+
+
+def test_read_cooldowns_falls_back_when_the_lock_is_hard_linked(tmp_path):
+    path = tmp_path / "cooldowns.json"
+    at = datetime.now(UTC)
+    row = json.loads((FIX / "attempt.json").read_text())
+    row.update(status="usage_limited", reset_at=records().timestamp(at + timedelta(hours=1)))
+    records().write_cooldown(row, path=path, at=at)
+    lock = tmp_path / "cooldowns.lock"
+    lock.touch()
+    os.link(lock, tmp_path / "cooldowns.lock.twin")
+    assert records().read_cooldowns(path, at)
+
+
+def test_pacing_policy_is_cached_until_the_catalogue_changes(tmp_path, monkeypatch):
+    config = tmp_path / "instance/config/model-routing.json"
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({"rate_limit_pacing": {"base_delay_seconds": 2}}))
+    module = records()
+    reads = []
+    original = module._read_pacing_policy
+    monkeypatch.setattr(module, "_read_pacing_policy", lambda: reads.append(1) or original())
+    assert module.pacing_policy()["base_delay_seconds"] == 2
+    assert module.pacing_policy()["base_delay_seconds"] == 2
+    assert len(reads) == 1
+    config.write_text(json.dumps({"rate_limit_pacing": {"base_delay_seconds": 5, "cap_seconds": 900}}))
+    assert module.pacing_policy()["base_delay_seconds"] == 5
+    assert len(reads) == 2

@@ -7393,6 +7393,19 @@ def test_resource_exhausted_classifies_the_quota_window(adapter, window, status)
     assert message in parsed["excerpt"]
 
 
+@pytest.mark.parametrize(("message", "status"), [
+    ("Quota exceeded: requests per day. retry in 2 per minute docs", "usage_limited"),
+    ("Quota exceeded: requests per hour. See per minute docs", "usage_limited"),
+    ("Quota exceeded for GenerateRequestsPerMinutePerProjectPerModel", "rate_limited"),
+    ("Quota exceeded for GenerateRequestsPerDayPerProjectPerModel", "usage_limited"),
+    ("Quota exceeded for RequestsPerHour and RequestsPerMinute", "usage_limited"),
+    ('{"error":{"message":"Quota exceeded for requests per minute"},"docs":"limits per day"}', "rate_limited"),
+])
+def test_quota_window_comes_from_the_quota_phrase_not_the_whole_event(message, status):
+    parsed = supervisor().parse_output("agy", "", "429 RESOURCE_EXHAUSTED: " + message, 1)
+    assert parsed["status"] == status
+
+
 @pytest.mark.parametrize("body_string", [False, True])
 @pytest.mark.parametrize("wrapped", [False, True])
 def test_opencode_spent_free_allowance_records_provider_reason(tmp_path, body_string, wrapped):

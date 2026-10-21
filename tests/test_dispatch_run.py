@@ -4900,3 +4900,43 @@ print(json.dumps({{"status":"SUCCESS", "response":"DONE"}}))
     assert mod.dispatch(args) == 0
     first, second = [int(value.removesuffix("s")) for value in launches.read_text().splitlines()]
     assert second < first
+
+
+def _sequence_fixture(monkeypatch, plan, rows, alternatives):
+    mod = load_dispatch_module()
+    args = SimpleNamespace(fallback=False, resume=False, timeout_seconds=1000, confidential=False)
+    launches = []
+
+    def fake_dispatch(args, custody=None):
+        launches.append((getattr(args, "tool", None), getattr(args, "model", None)))
+        args._last_row = rows[len(launches) - 1] if len(launches) <= len(rows) else {**rows[-1], "retryable": False}
+        args._last_plan = plan
+        return 0
+
+    row = {"retryable": True, "attempt": 1, "task_class": "",
+           "provenance": {"line": "Route: claude/claude-opus-5-5 (x)"}}
+    rows[:] = [{**row, **item} for item in rows]
+    monkeypatch.setattr(mod, "_dispatch", fake_dispatch)
+    monkeypatch.setattr(mod.exec_routing, "candidates", lambda *a, **k: alternatives)
+    monkeypatch.setattr(mod.exec_routing, "cooling", lambda *a: None)
+    monkeypatch.setattr(mod, "pacing_policy", lambda: {"base_delay_seconds": 30, "cap_seconds": 900,
+                                                       "jitter_fraction": 0, "minimum_budget_seconds": 30})
+    return mod, args, launches
+
+
+def test_fallback_skips_the_route_of_an_effort_suffixed_plan_model(monkeypatch):
+    plan = {"adapter": "claude", "model": "claude-opus-5-5@high"}
+    rows = [{"status": "usage_limited"}]
+    alternatives = [{"adapter": "claude", "model": "claude-opus-5-5"}]
+    mod, args, launches = _sequence_fixture(monkeypatch, plan, rows, alternatives)
+    mod.execute_attempt_sequence(args)
+    assert len(launches) == 1
+
+
+def test_paced_retry_tolerates_a_row_with_null_evidence(monkeypatch):
+    plan = {"adapter": "claude", "model": "claude-opus-5-5"}
+    rows = [{"status": "rate_limited", "evidence": None, "retry_after": 1}]
+    mod, args, launches = _sequence_fixture(monkeypatch, plan, rows, [])
+    mod.execute_attempt_sequence(args)
+    assert len(launches) == 2
+    assert launches[1][1] == "claude-opus-5-5"

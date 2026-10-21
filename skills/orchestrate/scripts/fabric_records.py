@@ -208,8 +208,38 @@ def identity_resolver():
     return module
 
 
+_PACING_CACHE = {}
+
+
+def _catalogue_stamp():
+    """Identify the catalogue files pacing_policy reads: path, mtime and size of each."""
+    product = Path(os.environ.get("AGENT_FABRIC_PRODUCT_ROOT") or Path(__file__).resolve().parents[3])
+    instance = Path(os.environ.get("AGENT_FABRIC_INSTANCE_ROOT") or Path.home() / ".agents").expanduser()
+    stamp = []
+    for path in (product / "config/model-routing.json", instance / "config/model-routing.json"):
+        try:
+            info = path.stat()
+            stamp.append((str(path), info.st_mtime_ns, info.st_size))
+        except OSError:
+            stamp.append((str(path), None, None))
+    return tuple(stamp)
+
+
 def pacing_policy():
-    """Read pacing knobs through the existing routing catalogue and its overlay."""
+    """Read pacing knobs through the existing routing catalogue and its overlay.
+
+    Cached per process until either catalogue file changes, so hot paths and the
+    cooldowns lock do not re-execute the routing module on every call.
+    """
+    stamp = _catalogue_stamp()
+    cached = _PACING_CACHE.get(stamp)
+    if cached is None:
+        _PACING_CACHE.clear()
+        cached = _PACING_CACHE[stamp] = _read_pacing_policy()
+    return dict(cached)
+
+
+def _read_pacing_policy():
     try:
         from .exec_routing import _model_route_module
     except ImportError:
@@ -299,7 +329,7 @@ def read_cooldowns(path=None, at=None):
         try:
             with locked(path.with_name('cooldowns.lock')):
                 return active_cooldowns(_load_cooldowns(path, at), at)
-        except OSError:
+        except (OSError, ValueError):
             return active_cooldowns(_load_cooldowns(path, at, persist=False), at)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return {}
