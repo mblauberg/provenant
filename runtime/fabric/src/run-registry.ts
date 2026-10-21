@@ -1059,17 +1059,18 @@ export async function statusRows(
           if (value === project) return true;
           try { return realpathSync.native(value) === project; } catch { return false; }
         };
-        // A resume that moved every pointed task elsewhere leaves this index stale.
-        if (!pointer.task_ids.some(named)) { unlinkSync(pointerPath); continue; }
+        // A resume that moved every pointed task elsewhere leaves this index
+        // stale. It is skipped, not unlinked: a later resume may move the task
+        // back and atomically replace this pointer after this read, and only
+        // the source reaper decides when a run's index may go (ENOENT above).
+        if (!pointer.task_ids.some(named)) continue;
         const finished = metadata.status !== "running" && typeof metadata.finished_at === "string"
           ? Date.parse(metadata.finished_at) : Number.NaN;
-        if (Number.isFinite(finished)) {
-          // Same retention that reaps the source run, so a source project that
-          // is never reaped cannot grow this index without bound.
-          if (finished < Date.now() - retentionHours(process.env) * 3_600_000) { unlinkSync(pointerPath); continue; }
-          // Outside the lanes window: skip before reading any receipt.
-          if (!includeHistory && finished <= Date.now() - 86400000) continue;
-        }
+        // Outside the lanes window: skip before reading any receipt. Age never
+        // prunes a pointer; the source reaper's eligibility (resumable runs,
+        // failed-run retention, liveness) governs, and its removal of the run
+        // directory is what retires the pointer.
+        if (Number.isFinite(finished) && !includeHistory && finished <= Date.now() - 86400000) continue;
         const taskIds = Array.isArray(metadata.task_ids) ? metadata.task_ids : [];
         const routes = Array.isArray(metadata.routes) ? metadata.routes : [];
         const recorded = v1Rows(runDir);

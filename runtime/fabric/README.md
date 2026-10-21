@@ -145,9 +145,10 @@ routes against the source owner record or receipts. The pointer is
 best effort: when the target run root cannot be written, dispatch still
 starts, records a `lane_pointer_failed` warning in the run's
 `dispatch-status.json`, and the lane is listed only from its source project. A
-pointer is pruned when its source run is missing, when the source no longer
-maps any pointed task to this project (for example after a resume moved it), or
-when the run finished longer ago than the run retention window. A run that
+pointer is pruned only when its source run directory is gone, so the source
+reaper's retention rules decide its lifetime; a pointer whose source no longer
+maps any pointed task to this project (for example after a resume moved it) is
+skipped but kept, since a later resume may move the task back. A run that
 finished outside the 24-hour lanes window is skipped before its receipts are
 read unless history is requested. Recorded cwd projects are compared after
 resolving symlinks. Other tasks in a mixed-project batch stay private to

@@ -247,14 +247,16 @@ it("canonicalises a symlinked cwd_projects spelling from a hand-made status", as
   expect(existsSync(pointer)).toBe(true);
 });
 
-it("prunes a pointer once its source maps the task to another project", async () => {
+it("skips but keeps a pointer once its source maps the task to another project", async () => {
   const target = fixture(), moved = fixture(), source = fixture();
   const { run } = attempt(source, "tasks", "moved", "terminal", "ok");
   writeFileSync(join(source, ".agent-run/runs", run, "dispatch-status.json"),
     JSON.stringify({ cwd_projects: { moved } }));
   const pointer = pointTo(target, source, run, ["moved"]);
   expect((await readRuns(target)).runs).toEqual([]);
-  expect(existsSync(pointer)).toBe(false);
+  // A later resume may move the task back and replace this pointer; only the
+  // source reaper's removal of the run retires it.
+  expect(existsSync(pointer)).toBe(true);
 });
 
 it("skips a terminal pointer outside the lanes window before reading its receipts", async () => {
@@ -273,14 +275,17 @@ it("skips a terminal pointer outside the lanes window before reading its receipt
     .toEqual(["aged"]);
 });
 
-it("prunes a terminal pointer older than run retention", async () => {
+it("keeps an old pointer while the source still retains its run", async () => {
+  // The source reaper keeps resumable and recently failed runs past the
+  // ordinary window, so age alone must not drop them from target history.
   const target = fixture(), source = fixture();
-  const { run } = attempt(source, "tasks", "expired", "terminal", "ok");
+  const { run } = attempt(source, "tasks", "retained", "terminal", "ok");
   writeFileSync(join(source, ".agent-run/runs", run, "dispatch-status.json"), JSON.stringify({ status: "ok",
-    finished_at: new Date(Date.now() - 30 * 86400000).toISOString(), cwd_projects: { expired: target } }));
-  const pointer = pointTo(target, source, run, ["expired"]);
-  expect((await readRuns(target, undefined, 0, undefined, null, undefined, true)).runs).toEqual([]);
-  expect(existsSync(pointer)).toBe(false);
+    finished_at: new Date(Date.now() - 30 * 86400000).toISOString(), cwd_projects: { retained: target } }));
+  const pointer = pointTo(target, source, run, ["retained"]);
+  expect((await readRuns(target, undefined, 0, undefined, null, undefined, true)).runs.map((row) => row.task_id))
+    .toEqual(["retained"]);
+  expect(existsSync(pointer)).toBe(true);
 });
 
 it("keeps a run without a cwd mapping under the chair's project", async () => {
