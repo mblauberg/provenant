@@ -3,7 +3,7 @@
 ## Status
 
 Accepted (wording user-approved 2026-07-20). Lands with PR 4 of the
-[archived disclosure-refactor spec](../archive/specs/disclosure-refactor.md), which
+[disclosure-refactor spec](../specs/harness/disclosure-refactor.md), which
 also amends `MAINTAINING.md`.
 
 Amended 2026-09-02 (issue #761): the contract-test half of the first Decision

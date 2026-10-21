@@ -358,7 +358,7 @@ with that task's route and result tail, the cheap alternative to resuming a larg
 session. `context_ceiling` (default 300,000 tokens, clamped to 100k–1M) lowers
 auto-compaction where the provider supports it; it never raises it. Each attempt records `context`,
 and the terminal Route line shows it as `ctx 212k/1M`. See
-the [chair-state guidance](../../skills/session/references/chair-state.md#shape).
+[`docs/specs/fabric-v2.md`](../../docs/specs/fabric-v2.md#session-context).
 
 `session: "<name>"` names a provider conversation that outlives a run ID. The
 first call starts an ordinary dispatch; later calls, from any agent in the same
