@@ -7761,3 +7761,26 @@ def test_landing_retains_quarantine_when_landing_equals_the_checked_tip(tmp_path
     result = gate(repo, "--landing-tip", checked)
     assert result.returncode == 1
     assert "quarantine" in result.stderr
+
+
+def test_landing_preserves_the_owner_primary_instructions_when_merging_a_benign_lane(tmp_path):
+    repo, lane = instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, "")
+    assert record["status"] == "ok", record
+    (lane / "app.txt").write_text("benign late work\n")
+    git(lane, "commit", "-qam", "late application work")
+    git(repo, "merge", "--no-ff", "-m", "consume lane", "lane")
+    result = gate(repo, "--landing-tip", git(repo, "rev-parse", "HEAD").strip())
+    assert result.returncode == 0, result.stderr
+    assert (repo / SKILL).read_text() == "v2\n"
+
+
+def test_writer_cannot_move_the_primary_ref_to_vouch_for_its_instruction_edit(tmp_path):
+    _, lane = instruction_lane(tmp_path)
+    record = lane_attempt(tmp_path, lane, (
+        f"open({SKILL!r}, 'w').write('poison\\n')\n"
+        "git('commit', '-qam', 'protected edit')\n"
+        "git('update-ref', 'refs/heads/main', 'HEAD')\n"
+    ), policy={"instruction_changes": "deny"})
+    assert record["status"] == "failed", record
+    assert record["error"] == "protected_instructions_changed"

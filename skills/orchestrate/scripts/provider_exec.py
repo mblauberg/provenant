@@ -2792,10 +2792,11 @@ def instruction_disk_state(cwd, object_format):
     return entries
 
 
-def instruction_snapshot(cwd):
+def instruction_snapshot(cwd, *, integration_tips=None):
     head = _git_output(cwd, "rev-parse", "--verify", "HEAD^{commit}").strip()
     object_format = _git_output(cwd, "rev-parse", "--show-object-format").strip()
     snapshot = {"head": head, "object_format": object_format,
+                "integration_tips": _integration_commits(cwd) if integration_tips is None else integration_tips,
                 "tree": _instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", head))[0],
                 "disk": instruction_disk_state(cwd, object_format),
                 "index": _instruction_entries(cwd, ("ls-files", "--stage", "-z"), index=True)[0]}
@@ -2815,16 +2816,25 @@ def _integration_refs(cwd):
     return [ref for ref in (branch, upstream) if ref]
 
 
+def _integration_commits(cwd):
+    tips = []
+    for ref in _integration_refs(cwd):
+        try:
+            tips.append(_git_output(cwd, "rev-parse", "--verify", ref + "^{commit}").strip())
+        except ValueError:
+            pass  # An unfetched upstream cannot vouch for instructions.
+    return tips
+
+
 def authored_instruction_changes(cwd, start, *, head="HEAD"):
     """.agents paths the lane changed to content from neither its start nor the integration branch.
 
-    HEAD, the index and the files on disk must each match, path by path, the attempt's starting
-    state or the primary checkout's branch or its upstream, so a rebase or merge from that branch
-    passes and changes the branch already carried are not re-reported. A lane can move local refs,
-    so this catches an ordinary edit, not a forged integration branch.
+    HEAD, the index and files must match the verified starting tree or an integration commit
+    pinned by the owner before launch. A merge or rebase from those commits passes; moving a
+    primary or upstream ref during execution cannot supply a new baseline.
     """
     trees = [_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", start["head"]))[0]]
-    for ref in _integration_refs(cwd):
+    for ref in start["integration_tips"]:
         try:
             trees.append(_instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", ref))[0])
         except ValueError:
@@ -2883,17 +2893,17 @@ def _is_ancestor(cwd, ancestor, descendant):
     return True
 
 
-def _quarantine_target(cwd, start_head, *, head="HEAD"):
+def _quarantine_target(cwd, start_head, *, integration_tips, head="HEAD"):
     """The .agents entries a quarantined path returns to.
 
-    That is the start commit's, or an integration ref's the lane has since merged or rebased onto,
+    That is the start commit's, or an owner-pinned integration commit the lane merged or rebased onto,
     taking each path from whichever side changed it since their merge base.
     """
     def tree(rev):
         return _instruction_entries(cwd, ("ls-tree", "-r", "-z", "--full-tree", rev))[0]
 
     target = tree(start_head)
-    for ref in _integration_refs(cwd):
+    for ref in integration_tips:
         if not _is_ancestor(cwd, ref, head) or _is_ancestor(cwd, ref, start_head):
             continue
         incoming = tree(ref)
@@ -2912,7 +2922,7 @@ def _restore_views(cwd, start, *, head="HEAD"):
     HEAD returns to the quarantine target. The index and files return to their starting content,
     except a path an integration branch the lane took in changed, which takes that branch's version.
     """
-    target = _quarantine_target(cwd, start["head"], head=head)
+    target = _quarantine_target(cwd, start["head"], head=head, integration_tips=start["integration_tips"])
     integrated = {path for path in set(target) | set(start["tree"]) if target.get(path) != start["tree"].get(path)}
 
     def view(entries):
@@ -3136,7 +3146,8 @@ def execute(
             instruction_protection = lane_protection.begin(
                 instruction_cwd, plan["run_dir"], run_id=plan.get("run_id", ""),
                 task_id=plan.get("task_id", ""), attempt=plan.get("attempt", 1), ref=plan.get("lane_ref"))
-            instruction_start = instruction_snapshot(instruction_cwd)
+            instruction_start = instruction_snapshot(
+                instruction_cwd, integration_tips=instruction_protection["integration_tips"])
             if instruction_start["head"] != instruction_protection["start_tip"]:
                 raise lane_protection.ProtectionError("lane moved before the starting instruction snapshot")
         except (OSError, ValueError, subprocess.SubprocessError) as exc:

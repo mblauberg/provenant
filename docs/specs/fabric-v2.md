@@ -188,7 +188,9 @@ Non-canonical worktrees require the owner's explicit common directory.
 At begin, protected disk and index entries must equal the previous verified
 tree, or the starting commit on first dispatch. Uncommitted or staged residue
 fails with `protected_instructions_changed` before a provider starts. Only
-verified trees and integration trees supply instruction baselines.
+the verified starting tree and owner-recorded integration commit trees supply
+instruction baselines. Primary and upstream refs are pinned at begin; moving a
+ref during an attempt cannot vouch for a writer's edit.
 
 Before reuse, `worktree verify-claim`, or `fabric landing-push`, the owner checks
 the retained binding. The invariant is: "A lane branch is consumed only at a
@@ -199,7 +201,10 @@ git locations that no writer can write."
 The history check includes merge parents and edit/revert histories. Landing
 walks the descendants of each record's verified tip (or its start tip for an
 incomplete attempt) actually contained in the landing tip, independent of the
-current lane ref. Reset, deleted and pruned refs cannot erase that history.
+current lane ref. A chair merge whose first parent is an owner-recorded primary
+tip is compared to that parent; each lane-side commit is still checked. This
+preserves already trusted primary instructions without allowing a changed merge
+resolution. Reset, deleted and pruned refs cannot erase that history.
 Sibling records whose anchor is absent from the landing are ignored. Linked
 writer worktrees without records fail closed; primary branches that were never
 dispatched retain the chair workflow. Path classification normalises to NFC

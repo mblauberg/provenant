@@ -66,6 +66,9 @@ def read(path):
                     or any(not isinstance(value.get(key), str) for key in
                            ("ref", "start_tip", "attempt_dir", "worktree", "common", "private",
                             "run_id", "task_id", "nonce", "lane_id"))
+                    or not isinstance(value.get("integration_tips"), list)
+                    or any(not isinstance(tip, str) or not re.fullmatch(r"[0-9a-f]{40}(?:[0-9a-f]{24})?", tip)
+                           for tip in value["integration_tips"])
                     or type(value.get("attempt")) is not int
                     or not isinstance(value.get("quarantined"), bool)
                     or value.get("verified_tip") is not None and not isinstance(value["verified_tip"], str)):
@@ -215,11 +218,23 @@ def begin(cwd, attempt_dir, *, common=None, run_id="", task_id="", attempt=1, re
                                                sort_keys=True).encode()).hexdigest()
             state = {**location.record(), **scope, "lane_id": lane_id, "nonce": uuid.uuid4().hex,
                      "ref": identity(location), "start_tip": tip, "verified_tip": None,
-                     "attempt_dir": str(Path(attempt_dir).resolve()), "quarantined": True}
+                     "attempt_dir": str(Path(attempt_dir).resolve()), "quarantined": True,
+                     "integration_tips": snapshot["integration_tips"]}
             write(path, state)
             return state
         except (OSError, ValueError, subprocess.SubprocessError) as exc:
             raise retain(path, previous, exc) from exc
+
+
+def landing_names(location, state, commit):
+    parents = _git_output(location, "rev-list", "--parents", "-n", "1", commit).split()[1:]
+    if len(parents) > 1 and parents[0] in state.get("integration_tips", []):
+        # A chair merge into an owner-recorded primary tip contributes only its first-parent
+        # changes. Lane-parent commits are checked separately, including edits later reverted.
+        return _git_output(location, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z",
+                           parents[0], commit).split("\0")
+    return _git_output(location, "diff-tree", "--root", "--no-commit-id", "--name-only",
+                       "-r", "-m", "-z", commit).split("\0")
 
 
 def instruction_tree(location, tip):
@@ -265,8 +280,7 @@ def verify_landing(cwd, tip, *, common=None):
                     raise ProtectionError("landing includes a lane without a usable instruction check",
                                           state.get("error", "protected_instructions_unverifiable"))
                 for commit in commits:
-                    names = _git_output(location, "diff-tree", "--root", "--no-commit-id", "--name-only",
-                                        "-r", "-m", "-z", commit).split("\0")
+                    names = landing_names(location, state, commit)
                     if any(_instruction_path(name) for name in names):
                         raise ProtectionError("landing includes protected lane history",
                                               "protected_instructions_changed")
