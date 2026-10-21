@@ -1469,6 +1469,11 @@ describe("front door model selection", () => {
     const done = await dispatchConfiguredProvider({adapter:"codex",alias:"scout",model:"",prompt:"ordinary run",wait_seconds:5}, identity, new AbortController().signal, ownerEnvironment);
     expect(done).toMatchObject({status:"ok",route:{resolved_model:"scout"}});
   });
+  it("uses the alias as the task id and lane label when given without an explicit task_id", async () => {
+    const done = await dispatchConfiguredProvider({ adapter: "codex", alias: "scout", model: "", prompt: "ordinary run", wait_seconds: 5 },
+      identity, new AbortController().signal, ownerEnvironment);
+    expect(done).toMatchObject({ status: "ok", task_id: "scout" });
+  });
   it("passes an explicit model and effort without an alias", async () => {
     const done = await dispatchConfiguredProvider({ adapter: "codex", model: "gpt-6-luna", effort: "medium", prompt: "ordinary run", wait_seconds: 5 },
       identity, new AbortController().signal, ownerEnvironment);

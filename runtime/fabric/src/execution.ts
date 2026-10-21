@@ -725,7 +725,7 @@ async function dispatchConfiguredProviderUnchecked(
   let poolWarnings: string[] = preferred.warnings;
   if (usesPool(input)) {
     // A route pick keeps this a single dispatch; a council runs as a batch of its members.
-    const taskId = input.task_id ?? (input.council === undefined && input.models === undefined ? undefined : "council");
+    const taskId = input.task_id ?? input.alias ?? (input.council === undefined && input.models === undefined ? undefined : "council");
     const expanded = await expandPools([{ ...input, ...(taskId === undefined ? {} : { id: taskId }) }],
       await pythonOwner(root, identity, env), root, identity, env, signal);
     if (expanded.errors.length) {
@@ -745,7 +745,7 @@ async function dispatchConfiguredProviderUnchecked(
     }
     // A single pick, or a selector that won precedence, replaces the request's own selectors.
     const { id: _id, ...picked } = expanded.tasks[0]!;
-    input = { ...(picked as DispatchInput), ...(input.task_id === undefined ? {} : { task_id: input.task_id }) };
+    input = { ...(picked as DispatchInput), ...(input.task_id === undefined ? (input.alias === undefined ? {} : { task_id: input.alias }) : { task_id: input.task_id }) };
     poolWarnings = [...preferred.warnings, ...expanded.warnings];
   }
   const snapshotStarted = performance.now(), catalogue = catalogueSnapshot(root, env);
@@ -770,7 +770,7 @@ async function dispatchConfiguredProviderUnchecked(
   const callStarted = Date.now(), validateStarted = performance.now();
   const snapshotMs = performance.now() - snapshotStarted;
   const timeout = timeoutSeconds(input.timeout_seconds ?? policy.defaults.timeout_seconds, input.mode);
-  const taskId = input.task_id ?? `task-${randomUUID().slice(0, 8)}`;
+  const taskId = input.task_id ?? input.alias ?? `task-${randomUUID().slice(0, 8)}`;
   const owner = executableOwner(root, "skills/orchestrate/scripts/dispatch_run.py");
   const controls = executableOwner(root, "skills/orchestrate/scripts/run_controls.py");
   const python = await pythonOwner(root, identity, env);
