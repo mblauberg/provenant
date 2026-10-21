@@ -46,8 +46,10 @@ SCHEMA = 'provenant.quota.v1'
 REPORT_SCHEMA = 'provenant.quota.report.v1'
 HERE = Path(__file__).resolve().parent
 # Adding a provider is one module exposing ADAPTER, default_identity() and
-# fetch(account, io, now), plus one line here.
+# fetch(account, io, now), plus one line here. A module whose one credential store
+# serves several accounts may add account_label() to name the signed-in one locally.
 REGISTRY = {
+    'agy': HERE / 'quota_providers/agy.py',
     'claude': HERE / 'quota_providers/claude.py',
     'codex': HERE / 'quota_providers/codex.py',
     'cursor': HERE / 'quota_providers/cursor.py',
@@ -253,7 +255,8 @@ def accounts():
         default = module.default_identity() if module else identity.selected_identity(name)
         if name not in listed:
             if default is not None and Path(default).exists():
-                found.append(Account(name, identity.account_key(name, default, entries={}), Path(default), True))
+                label = getattr(module, 'account_label', lambda: None)() or identity.account_key(name, default, entries={})
+                found.append(Account(name, label, Path(default), True))
             continue
         active_label = identity.account_key(name, default, listed[name])
         configured_default = identity.default_identity(name)

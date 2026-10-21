@@ -125,6 +125,17 @@ provider endpoint. Tokens never enter the ledger, cache, logs, receipts or
 stdout and are never shown to agents. The owner authorised this credential use
 for this feature on 2026-10-21. Development and tests use fixtures only.
 
+agy answers `agy -p /usage --output-format json`, which reads its quota summary
+without an agent turn or quota spend; the CLI keeps its credential. Each model
+pool reports a weekly and a five-hour bucket, shown as `gemini.weekly`,
+`claude.5h` and so on; a bucket agy marks disabled is unreported. One Keychain
+item serves every Google account agy signs in to, so a discovered agy account
+is labelled `google-<hash>`: a hash of the signed-in address from agy's newest
+log under `~/.gemini/antigravity-cli/log`. A reading whose own run reports
+another address is refused rather than filed under the wrong account. agy quota
+is report-only: its pools differ per model family, so it sets no provider-wide
+cooldown (#1062).
+
 `PROVENANT_QUOTA=0` or `quota.enabled=false` in the telemetry config disables
 fetching and quota routing input. Cached quota can still be displayed. Errors
 retain the last successful observation with `status: stale`; failed attempts
@@ -226,7 +237,9 @@ Deficit is shown in `provenant routes` and JSON only; it does not lower weights.
    handled by the core. Options stay out of snapshots and reports. Each window
    has `name`, `used_percent`, `window_minutes`, `reset_at` and `raw_kind`; names
    are free strings. Report unknown lengths or
-   resets as null. Core code normalises, caches and computes pace.
+   resets as null. Core code normalises, caches and computes pace. When one
+   credential store serves several accounts, `account_label()` may name the
+   signed-in one from local, non-secret state; it must never fetch.
 3. Use the bounded `io` HTTP/process functions and fixed, sanitised failures.
    Return only quota metadata. Keep tokens inside the provider call chain.
 4. Register a fake module and mock all process/network boundaries in tests.
@@ -235,8 +248,9 @@ Deficit is shown in `provenant routes` and JSON only; it does not lower weights.
 OpenCode's native SQLite source supplies usage tokens and reported cost, not a
 verified account quota endpoint. Its Go subscription documentation describes
 limits, but Provenant does not turn those descriptions into assumed windows.
-agy has receipt-only usage and no registered quota reader. Configured agy
-accounts therefore appear as unreported. The inspected Cursor reference uses
+agy usage remains receipt-only; its quota comes from `/usage` above. A
+configured agy label names whichever account is signed in, so leave agy
+unconfigured to keep its accounts apart. The inspected Cursor reference uses
 its SQLite store for authentication, then obtains allowance from the endpoint;
 it does not supply a local token-usage ledger. Cursor usage tokens therefore
 remain receipt-only. Neither missing coverage is represented as zero use.

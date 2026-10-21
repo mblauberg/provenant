@@ -122,7 +122,9 @@ def test_registry_names_one_module_per_provider_with_the_common_interface(quota)
     for name in ('claude', 'codex', 'cursor'):
         module = quota.provider(name)
         assert module.ADAPTER == name and callable(module.fetch) and callable(module.default_identity)
-    assert quota.provider('agy') is None
+    agy = quota.provider('agy')
+    # agy pools are per model family, so its quota never sets a provider-wide cooldown.
+    assert agy.ADAPTER is None and callable(agy.fetch) and callable(agy.account_label)
 
 
 def test_codex_payload_windows_carry_provider_names_lengths_and_reset_credits(quota):
@@ -250,6 +252,99 @@ def test_cursor_session_cookie_comes_from_the_local_jwt_and_cycle_dates(quota, t
     row = quota.normalise_window(parsed['windows'][0])
     assert parsed['plan'] == 'pro'
     assert (row['name'], row['used_percent'], row['window_minutes']) == ('billing_cycle', 25, 30 * 24 * 60)
+
+
+# Recorded from `agy -p /usage --output-format json` on 2026-10-22; descriptions shortened and
+# the five-hour reset moved after NOW.
+AGY_USAGE = {'conversation_id': '', 'status': 'SUCCESS', 'response': '...', 'command': {'name': 'usage', 'data': {
+    'description': 'Within each group, models share a weekly limit and a 5-hour limit.',
+    'groups': [{'name': 'Gemini Models', 'description': 'Models within this group: Gemini Flash, Gemini Pro', 'buckets': [
+                   {'id': 'gemini-weekly', 'name': 'Weekly Limit Remaining', 'window': 'weekly',
+                    'remaining_fraction': 0, 'reset_time': '2026-10-24T04:01:07Z'},
+                   {'id': 'gemini-5h', 'name': 'Five Hour Limit Remaining', 'window': '5h', 'disabled': True,
+                    'remaining_fraction': 1}]},
+               {'name': 'Claude and GPT models', 'description': 'Models within this group: Claude Opus, Claude Sonnet, GPT-OSS',
+                'buckets': [
+                   {'id': '3p-weekly', 'name': 'Weekly Limit Remaining', 'window': 'weekly',
+                    'remaining_fraction': 0.9330692291259766, 'reset_time': '2026-10-28T15:50:17Z'},
+                   {'id': '3p-5h', 'name': 'Five Hour Limit Remaining', 'window': '5h',
+                    'remaining_fraction': 0.8661383986473083, 'reset_time': '2026-10-22T13:40:59Z'}]}]}}}
+AGY_EMAIL = 'second.account@example.com'
+
+
+def agy_home(quota, monkeypatch, tmp_path, *emails):
+    """An agy state directory whose logs record these sign-ins, oldest first, on a stand-in Keychain."""
+    keychain = tmp_path / 'login.keychain-db'
+    keychain.write_text('')
+    original = quota.identity.default_identity
+    monkeypatch.setattr(quota.identity, 'default_identity', lambda name: keychain if name == 'agy' else original(name))
+    logs = tmp_path / 'home/.gemini/antigravity-cli/log'
+    logs.mkdir(parents=True)
+    for index, email in enumerate(emails):
+        line = f'I1022 08:39:53.180653 server_oauth.go:229] OAuth: authenticated successfully as {email}\n' if email else ''
+        (logs / f'cli-20261022_08{index:02d}00.log').write_text('I1022 startup\n' + line)
+    return keychain
+
+
+def agy_cli(monkeypatch, quota, email=AGY_EMAIL, payload=AGY_USAGE):
+    seen = []
+
+    def run(argv, **kwargs):
+        seen.append((argv, kwargs))
+        Path(argv[argv.index('--log-file') + 1]).write_text(f'OAuth: authenticated successfully as {email}\n')
+        return subprocess.CompletedProcess(argv, 0, json.dumps(payload), '')
+    monkeypatch.setattr(quota, 'executable', lambda name: '/bin/' + name)
+    monkeypatch.setattr(quota, 'run_process', run)
+    return seen
+
+
+def test_agy_usage_reports_each_pool_window_and_skips_disabled_buckets(quota):
+    parsed = quota.provider('agy').parse(AGY_USAGE, NOW)
+    rows = [quota.normalise_window(row) for row in parsed['windows']]
+    assert [(row['name'], row['raw_kind'], row['used_percent'], row['window_minutes']) for row in rows] == [
+        ('gemini.weekly', 'gemini-weekly', 100, WEEK), ('claude.weekly', '3p-weekly', 6.69, WEEK),
+        ('claude.5h', '3p-5h', 13.39, 300)]
+    assert rows[0]['reset_at'] == '2026-10-24T04:01:07Z'
+    assert parsed['unreported'] == ['gemini.5h']
+
+
+def test_agy_names_the_signed_in_account_by_a_fingerprint_from_its_newest_log(quota, monkeypatch, tmp_path):
+    assert not any(account.provider == 'agy' for account in quota.accounts())
+    agy_home(quota, monkeypatch, tmp_path, 'first.account@example.com', AGY_EMAIL, None)
+    account, = [account for account in quota.accounts() if account.provider == 'agy']
+    agy = quota.provider('agy')
+    assert account.active and account.label == agy.fingerprint(AGY_EMAIL) != agy.fingerprint('first.account@example.com')
+    assert quota.LABEL.fullmatch(account.label) and 'example' not in account.label
+    assert agy.fingerprint(' Second.Account@Example.com ') == account.label
+
+
+def test_agy_quota_comes_from_print_mode_and_never_stores_the_address(quota, monkeypatch, tmp_path, capsys):
+    agy_home(quota, monkeypatch, tmp_path, AGY_EMAIL)
+    seen = agy_cli(monkeypatch, quota)
+    account, = [account for account in quota.accounts() if account.provider == 'agy']
+    value = quota.refresh(account, NOW, force=True)
+    argv, kwargs = seen[0]
+    assert argv[:5] == ['/bin/agy', '-p', '/usage', '--output-format', 'json'] and kwargs['stdin'] == quota.DEVNULL
+    assert not Path(argv[-1]).exists()
+    assert value['status'] == 'ok' and value['source'] == 'agy print-mode /usage'
+    assert [row['name'] for row in value['windows']] == ['gemini.weekly', 'claude.weekly', 'claude.5h']
+    report = quota.report([value], NOW)
+    assert report['accounts'][0]['state'] == 'exhausted' and quota.apply_to_cooldowns({}, NOW) == {}
+    stored = quota.cache_path('agy', account.label, identity_dir=account.identity_dir).read_text()
+    for text in (stored, json.dumps(report), capsys.readouterr().out):
+        assert AGY_EMAIL not in text and 'second.account' not in text
+
+
+@pytest.mark.parametrize('email, payload, error', [
+    ('other.account@example.com', AGY_USAGE, 'different account'),
+    (AGY_EMAIL, {'status': 'ERROR'}, 'sign in'),
+    (AGY_EMAIL, {'status': 'SUCCESS', 'command': {'data': {'groups': []}}}, 'no quota')])
+def test_agy_refuses_a_reading_for_another_account_or_without_quota(quota, monkeypatch, tmp_path, email, payload, error):
+    agy_home(quota, monkeypatch, tmp_path, AGY_EMAIL)
+    agy_cli(monkeypatch, quota, email, payload)
+    account, = [account for account in quota.accounts() if account.provider == 'agy']
+    value = quota.refresh(account, NOW, force=True)
+    assert value['status'] == 'unavailable' and error in value['error'] and value['windows'] == []
 
 
 def test_a_registered_provider_module_extends_quota_and_routing_without_core_changes(quota, tmp_path):
