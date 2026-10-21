@@ -142,7 +142,7 @@ def relabel_host(db):
     row = db.execute("SELECT value FROM meta WHERE key='host_id'").fetchone()
     previous = row[0] if row else socket.gethostname()
     if previous != current:
-        for table in ('usage', 'usage_files', 'observations'):
+        for table in ('usage', 'usage_files', 'observations', 'quota_events'):
             db.execute(f'UPDATE OR REPLACE {table} SET host=? WHERE host=?', (current, previous))
     db.execute("INSERT OR REPLACE INTO meta VALUES ('host_id', ?)", (current,))
 

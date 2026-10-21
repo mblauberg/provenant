@@ -682,11 +682,14 @@ def telemetry_summary(params):
     if not path.is_file():
         raise HostError('telemetry_unavailable', 'Ingest telemetry on this host first')
     # A peer read never creates, migrates or ingests the remote ledger.
-    with telemetry.readonly(path) as db:
-        db.row_factory = telemetry.sqlite3.Row
-        if db.execute('PRAGMA user_version').fetchone()[0] != 4:
-            raise HostError('telemetry_schema_mismatch', 'Upgrade and ingest telemetry on this host')
-        value = telemetry.peer_summary(db, params.get('since'))
+    try:
+        with telemetry.readonly(path) as db:
+            db.row_factory = telemetry.sqlite3.Row
+            if db.execute('PRAGMA user_version').fetchone()[0] != 4:
+                raise HostError('telemetry_schema_mismatch', 'Upgrade and ingest telemetry on this host')
+            value = telemetry.peer_summary(db, params.get('since'))
+    except telemetry.sqlite3.Error:
+        raise HostError('telemetry_unavailable', 'The peer ledger could not be read') from None
     if len(json.dumps(value).encode()) > MAX_RESPONSE_BYTES - 1024:
         raise HostError('telemetry_too_large', 'Narrow the telemetry period with --since')
     return value

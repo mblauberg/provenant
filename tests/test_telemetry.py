@@ -632,6 +632,10 @@ def test_ledger_rows_carry_the_configured_host_id_without_duplicates(tmp_path):
                  'message': {'id': 'one', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 7}}})
     receipt(tmp_path, 'run', status='ok', provenance=route('codex', 'gpt-6-luna'))
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        original_host = db.execute('SELECT host FROM usage LIMIT 1').fetchone()[0]
+        db.execute('INSERT INTO quota_events(provider,account,host,window,kind,observed_at) VALUES (?,?,?,?,?,?)',
+                   ('codex', 'work', original_host, 'custom', 'natural', '2026-10-21T12:00:00Z'))
     write_json(tmp_path / 'home/.agents/.agent-fabric/hosts.json', {'schema_version': 1, 'local_host': 'studio'})
     jsonl(path, {'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
                  'message': {'id': 'two', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 7}}})
@@ -640,6 +644,7 @@ def test_ledger_rows_carry_the_configured_host_id_without_duplicates(tmp_path):
         assert db.execute('SELECT DISTINCT host FROM usage').fetchall() == [('studio',)]
         assert db.execute('SELECT COUNT(*) FROM usage').fetchone()[0] == 3
         assert db.execute('SELECT DISTINCT host FROM usage_files').fetchall() == [('studio',)]
+        assert db.execute('SELECT DISTINCT host FROM quota_events').fetchall() == [('studio',)]
 
 
 def test_peer_stats_are_versioned_aggregates_and_read_only(tmp_path):
@@ -766,3 +771,16 @@ def test_malformed_peer_is_partial_instead_of_breaking_local_stats(tmp_path, mon
                     'model': 'test', 'rows': '1'}]}
         report = federation.collect(telemetry, db, None, ['all'])
         assert report['partial'] and report['hosts'][-1]['reason'] == 'bad_response'
+
+
+def test_unreadable_peer_ledger_returns_a_typed_error(tmp_path):
+    state = tmp_path / 'state'
+    state.mkdir()
+    with sqlite3.connect(state / 'telemetry.sqlite3') as db:
+        db.execute('PRAGMA user_version=4')
+    result = subprocess.run([str(ROOT / 'scripts/provenant'), 'peer'],
+                            input=json.dumps({'protocol_version': 1, 'verb': 'telemetry.stats',
+                                              'params': {'schema_version': 1}}),
+                            env=environment(tmp_path), capture_output=True, text=True)
+    assert result.returncode == 1 and result.stderr == ''
+    assert json.loads(result.stdout)['error']['code'] == 'telemetry_unavailable'
