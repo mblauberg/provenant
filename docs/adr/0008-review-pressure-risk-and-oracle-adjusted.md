@@ -23,6 +23,26 @@ targeted and adversarial pressure and records a skipped distinct-family leg. The
 delivery and orchestration validators share one ladder checker and no longer
 count fixed optional-provider attempts.
 
+### Addendum — 2026-10-21, owner decision
+
+The earlier addenda retain the policy at their dates. The owner has adopted a
+lighter default ladder in `HARNESS.md`: routine work uses the chair and objective
+checks; substantial work adds one passing independent review from another
+provider family when available; crucial work needs two passing independent reviews
+with distinct lenses and two non-chair families when available. Terminal work
+adds an adversarial lens to crucial coverage. Each missing non-chair family needs
+its own unavailable or omitted leg with a non-blank reason and a passing
+same-family replacement. A blocker for the chair's family or an already passing
+family does not cover a missing family. Every passing review needs a non-blank
+lens and a distinct reviewer. Failed reviews supply neither coverage nor blocker
+records. Receipt roles no longer determine ladder coverage.
+
+Projects may set their own ladders in their contributing guides while retaining
+the constitution's minimum independence. Objective checks and the required review
+meet acceptance unless the scope requires explicit user acceptance; terminal work
+still requires the owner's acceptance before merge. A project may name its
+landing gate as acceptance.
+
 ## Decision
 
 Certifying review pressure follows the current `HARNESS.md` risk table.
@@ -37,6 +57,8 @@ are superseded. No replacement skill or specification is created.
 Style policy: terse output stays default for inter-agent/mechanical/status
 traffic; human-facing explanatory output is domain-appropriate. The `caveman`
 overlay loads only on explicit request, avoiding a duplicate skill load.
+The `caveman` skill was removed on 2026-10-21 at the owner's request; the terse
+inter-agent default stands without it.
 
 Current implementation identifiers name their owners directly: certifying
 review owns the four-slot profile, Console acceptance owns the requirement and

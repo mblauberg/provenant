@@ -20,12 +20,24 @@ mutable-branch dependency on it.
 - the worker may run longer than about two minutes;
 - the user benefits from watching or steering it;
 - it may block for input;
-- it is the other primary family or a distinct-family/adversarial review leg
-  worth observing;
+- it is an independent or adversarial review leg worth observing under the
+  [`HARNESS.md` Review ladder](../../../HARNESS.md#review-ladder);
 - the task must survive the lead's context churn.
 
 Keep short mechanical/native fan-out inline. For substantial eligible work done
 without Herdr, record `HERDR-NOT-USED: <reason>`.
+
+## Without Herdr
+
+When Herdr is absent or not in use, record `HERDR-NOT-USED: <reason>` (existing
+rule). Dispatch through Fabric, observe with
+`provenant lanes --wait --all --timeout N` and `provenant events --follow`, read
+bounded slices with `fabric_output`, and steer with `fabric_send` or
+`fabric_dispatch` with `resume: "<run id>"` and a prompt (`resume` also answers
+`input_required` lanes).
+
+Long-running watchable processes go to a background shell with output to a run
+file.
 
 ## Preflight
 

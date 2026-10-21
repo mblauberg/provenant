@@ -4,11 +4,13 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
 from pathlib import Path
 import secrets
+import sys
 
 try:
     from .context_usage import marker as context_marker
@@ -34,6 +36,7 @@ TERMINAL_STATUSES = {
     "timed_out",
     "cancelled",
     "interrupted",
+    "lost",
     "rejected",
     "tool_missing",
     "input_required",
@@ -191,24 +194,84 @@ def locked(path):
         os.close(fd)
 
 
+def identity_resolver():
+    """Load the product's shared non-secret identity owner, including in direct CLI runs."""
+    module = sys.modules.get('provider_identity')
+    if module is None:
+        product = Path(__file__).resolve().parents[3]
+        spec = importlib.util.spec_from_file_location('provider_identity', product / 'scripts/provider_identity.py')
+        module = importlib.util.module_from_spec(spec)
+        sys.modules['provider_identity'] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def cooldown_key(adapter, model, scope):
+    # An opaque, collision-free storage key; callers see adapter/model projections.
+    return json.dumps([adapter, scope.get('account'), scope.get('host'), model], separators=(',', ':'))
+
+
+def _load_cooldowns(path, at):
+    """Read all live scopes and migrate legacy rows. Caller holds cooldowns.lock."""
+    if path.is_symlink():
+        raise ValueError('cooldown store must not be a symlink')
+    try:
+        with os.fdopen(store_open(path, os.O_RDONLY)) as stream:
+            document = json.load(stream)
+        entries = document.get('cooldowns', document)
+        if not isinstance(entries, dict):
+            return {}
+    except (FileNotFoundError, ValueError, TypeError, AttributeError):
+        return {}
+    values = {}
+    resolver = identity_resolver()
+    for key, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        try:
+            if parse_time(entry['cooling_until']) <= at:
+                continue
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+        adapter, _, model = str(key).partition('/')
+        entry = {**entry, 'adapter': entry.get('adapter', adapter), 'model': entry.get('model', model)}
+        if 'host' not in entry:
+            # Only old writers omitted host. New unknown scopes retain explicit nulls.
+            legacy = resolver.scope(entry['adapter'], default=True)
+            entry['host'] = legacy['host']
+            if entry.get('account') is None:
+                entry['account'] = legacy['account']
+        scoped = cooldown_key(entry['adapter'], entry['model'], entry)
+        previous = values.get(scoped)
+        if previous is None or parse_time(entry['cooling_until']) > parse_time(previous['cooling_until']):
+            values[scoped] = entry
+    if values != entries:
+        _store_cooldowns(path, values)
+    return values
+
+
+def active_cooldowns(values):
+    """Project only the current account and host of each adapter to adapter/model."""
+    resolver = identity_resolver()
+    scopes = {}
+    active = {}
+    for entry in values.values():
+        adapter = entry['adapter']
+        if adapter not in scopes:
+            scopes[adapter] = resolver.scope(adapter)
+        if resolver.matches(entry, scopes[adapter]):
+            active[adapter + '/' + entry['model']] = entry
+    return active
+
+
 def read_cooldowns(path=None, at=None):
     at = at or datetime.now(UTC)
     path = Path(path or cooldown_path())
     try:
-        if path.is_symlink():
+        if not path.exists():
             return {}
-        with os.fdopen(store_open(path, os.O_RDONLY)) as stream:
-            document = json.load(stream)
-        entries = (
-            document.get("cooldowns", {})
-            if document.get("schema") == "fabric.cooldowns.v1"
-            else {}
-        )
-        return {
-            key: value
-            for key, value in entries.items()
-            if isinstance(value, dict) and parse_time(value["cooling_until"]) > at
-        }
+        with locked(path.with_name('cooldowns.lock')):
+            return active_cooldowns(_load_cooldowns(path, at))
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return {}
 
@@ -277,10 +340,12 @@ def write_route_health(row, *, path=None, at=None):
     status = row.get("status", "failed")
     if status == "failed" and row.get("evidence", {}).get("signature") == "empty_output":
         status = "empty_output"
-    if status not in {"ok", "quarantined", "failed", "empty_output", "cancelled", "rate_limited", "usage_limited"}:
+    if status not in {"ok", "quarantined", "failed", "empty_output", "cancelled", "rate_limited", "usage_limited", "permission_blocked"}:
         status = "failed"
     key = f"{adapter}|{model}|{task_class}"
     entry = {"status": status, "task_class": task_class, "at": timestamp(at), "run_id": row.get("run_id", "")}
+    if status == "ok" and row.get("evidence", {}).get("signature") == "exit_after_output":
+        entry["warning"] = "exit_after_output"
     with locked(path.with_name("route-health.lock")):
         try:
             if path.is_symlink():
@@ -343,7 +408,7 @@ def _store_cooldowns(path, values):
         os.close(parent)
 
 
-def clear_cooldowns(selector=None, path=None):
+def clear_cooldowns(selector=None, path=None, *, account=None):
     """Remove cooldowns: all, one adapter (`*` and every model key), or one adapter/model."""
     try:
         from .exec_routing import registered_model
@@ -352,16 +417,21 @@ def clear_cooldowns(selector=None, path=None):
     adapter, slash, model = (selector or "").partition("/")
     if selector is not None and (not adapter.strip() or adapter.startswith("-")):
         raise ValueError("selector must be adapter or adapter/model; omit it to clear every cooldown")
+    if account is not None and not identity_resolver().LABEL.fullmatch(account):
+        raise ValueError('account must be a short non-secret label')
     path = Path(path or cooldown_path())
     if slash:
         model = registered_model(adapter, model or "*")
     with locked(path.with_name("cooldowns.lock")):
-        values = read_cooldowns(path)
-        removed = sorted(key for key in values if not selector
-                         or (key == adapter + "/" + model if slash else key.startswith(adapter + "/")))
-        for key in removed:
+        values = _load_cooldowns(path, datetime.now(UTC))
+        host = identity_resolver().host_id()
+        gone = [key for key, entry in values.items()
+                if (account is None or (entry.get('account') == account and entry.get('host') == host))
+                and (not selector or (entry['adapter'] == adapter and (not slash or entry['model'] == model)))]
+        removed = sorted({values[key]['adapter'] + '/' + values[key]['model'] for key in gone})
+        for key in gone:
             del values[key]
-        if removed:
+        if gone:
             _store_cooldowns(path, values)
     return removed
 
@@ -400,15 +470,18 @@ def write_cooldown(row, *, path=None, at=None):
             delay = 900 if row["status"] == "rate_limited" else 3600
         until = at + timedelta(seconds=delay)
     with locked(path.with_name("cooldowns.lock")):
-        values = read_cooldowns(path, at)
-        key = adapter + "/" + model
+        values = _load_cooldowns(path, at)
+        scope = identity_resolver().scope(adapter)
+        scope.update({field: row[field] for field in ('account', 'host') if field in row})
+        key = cooldown_key(adapter, model, scope)
         if row["status"] == "ok":
             # A substitution proves the answering model recovered, not the requested one.
             # An account-wide `*` entry clears only for an attempt that began after it was
             # recorded (a stale in-flight success must not clear a newer limit) and never on
             # model_quota adapters. Accepted risk: a lighter model succeeding while a heavier
             # one is still limited costs one attempt, which re-arms the cooldown.
-            wide = values.get(adapter + "/*")
+            wide_key = cooldown_key(adapter, "*", scope)
+            wide = values.get(wide_key)
             try:
                 clears_wide = (not model_quota and wide is not None
                                and parse_time(row["started_at"]) > parse_time(wide["recorded_at"]))
@@ -416,7 +489,7 @@ def write_cooldown(row, *, path=None, at=None):
                 clears_wide = False
             gone = {key} if model != "*" else set()
             if clears_wide:
-                gone.add(adapter + "/*")
+                gone.add(wide_key)
             gone &= values.keys()
             if not gone:
                 return
@@ -426,7 +499,7 @@ def write_cooldown(row, *, path=None, at=None):
             values[key] = {
                 "adapter": adapter,
                 "model": model,
-                "account": None,
+                **scope,
                 "status": row["status"],
                 "cooling_until": timestamp(until),
                 "source_run": row["run_id"],

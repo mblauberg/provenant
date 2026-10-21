@@ -51,7 +51,9 @@ The three tier pools form a hierarchy ([tiered-council.md](tiered-council.md)): 
 
 Mixed selectors settle by precedence rather than rejection, and a warning names every ignored field: `models` beats `route`, `alias`, `model`, `council` and `rotate`; an explicit `model` beats `route`, `council` and `rotate`; `route` beats `alias`; `council` beats `rotate`; an `alias` without a `route` ignores `council` and `rotate`. `adapter` with `route` narrows the pool to that adapter's entries.
 
-`confidential: true` is a disclosure filter, not a selector: it works with a route, alias, model, adapter alone or task class, and removes every prompt-training model (`model_traits`, or a free model, that is a zero plan cap or `free_pattern` id, unless its own `trains_on_prompts` is `false`) from the resolved candidates, fallbacks included, even under `fallback: "any"`. An alias or task class whose first member is unsafe steps to its first safe member; dispatch refuses, with a fix, only when nothing safe remains. A resume or handoff of a confidential run stays confidential unless the caller passes `confidential: false`. Without it, such models stay in the pool; the warning appears only when one is actually selected. Task classes and the tier aliases map onto routes through `route_synonyms` (`workhorse`, `strong`, `mid`, `review`, `second-opinion` and `implementation` → `senior`; `bulk`, `scout`, `legwork`, `lens`, `mechanical`, `research` and `screenshots` → `junior`; `flagship`, `top`, `decision`, `critical-review` and `orchestration` → `principal`). The route line names the pick, for example `Route: opencode/deepseek-v4.1-flash (deepseek; observed; design council 2/3)`. `provenant routes` prints every pool with live availability; `--health` adds task-class routes and recent health (the same view as `provenant help routes`).
+`confidential: true` is a disclosure filter, not a selector: it works with a route, alias, model, adapter alone or task class, and removes every prompt-training model (`model_traits`, or a free model, that is a zero plan cap or `free_pattern` id, unless its own `trains_on_prompts` is `false`) from the resolved candidates, fallbacks included, even under `fallback: "any"`. An alias or task class whose first member is unsafe steps to its first safe member; dispatch refuses, with a fix, only when nothing safe remains. A resume or handoff of a confidential run stays confidential unless the caller passes `confidential: false`. Without it, such models stay in the pool; the warning appears only when one is actually selected. Task classes and the tier aliases map onto routes through `route_synonyms` (`workhorse`, `strong`, `mid`, `review`, `second-opinion` and `implementation` → `senior`; `bulk`, `scout`, `legwork`, `lens`, `mechanical`, `research` and `screenshots` → `junior`; `flagship`, `top`, `decision`, `critical-review` and `orchestration` → `principal`). The route line names the pick, for example `Route: opencode/deepseek-v4.1-flash (deepseek; observed; design council 2/3)`. `provenant routes` prints available models in full with live availability and
+collapses each pool's unavailable or cooling models to a count line, with
+`--all` for the full list; `--health` adds task-class routes and recent health (the same view as `provenant help routes`).
 
 To add a model, list it in the user overlay (`~/.agents/config/model-routing.json`); unlisted product entries keep their place after the listed ones:
 
@@ -239,20 +241,22 @@ scan/extract stages to the `junior` tier and reserve `principal` for synthesis/a
 
 ## Adaptive review topology
 
-Review pressure follows the current `HARNESS.md` ladder. Substantial work uses
-multiple targeted lenses and one strong other-primary review. Targeted lenses
-may use smaller models; their briefs must differ by failure surface. Crucial work
-uses a distinct family when available. Terminal work adds stronger targeted and
-adversarial pressure, and any skipped distinct-family leg records its reason.
+Review pressure follows the [`HARNESS.md` Review ladder](../../../HARNESS.md#review-ladder).
+Routine work uses the chair and objective checks. Substantial work adds one
+passing independent cross-family review when available. Crucial work needs at least
+two passing reviews with distinct lens sets and two non-chair families when
+available. Terminal work adds an adversarial lens to crucial coverage.
 
-The chair schedules these legs under a per-run configurable concurrency ceiling
+Every passing review needs a non-blank lens and a distinct reviewer. For each
+missing non-chair family, record an unavailable or omitted leg with a non-empty
+reason and a passing same-family replacement. Count each blocked family once,
+excluding the chair's family and families already passing. A failed leg never
+supplies coverage or a blocker record; receipt roles do not determine coverage.
+
+The chair schedules reviews under a per-run configurable concurrency ceiling
 and may sequence them around deterministic checks. It need not wait for a
-particular model. A missing distinct-family leg requires an omitted-leg reason;
-the other-primary leg is expected at substantial and above. A skipped or
-unavailable leg records a reason and is covered by same-family targeted review
-with a distinct lens. Overlap creates
-defect pressure, not votes; objective checks and source evidence remain
-authoritative.
+particular model. Overlap creates defect pressure, not votes; objective checks
+and source evidence remain authoritative.
 
 Express chains by **role → tier/family**, resolving names at runtime:
 

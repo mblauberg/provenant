@@ -155,7 +155,20 @@ def _live(run_dir: Path) -> bool:
     return False
 
 
-def _accepted(delivery: dict[str, Any]) -> bool:
+def _accepted(delivery: dict[str, Any], run_dir: Path) -> bool:
+    if delivery.get("contract") == "delivery-run" or "delivery_acceptance" in delivery:
+        product = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location(
+            "clean_delivery_validator", product / "skills/deliver/scripts/validate_delivery.py",
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        try:
+            module.validate(delivery, product, receipt_dir=run_dir,
+                            workspace_root=run_dir.parents[2], verify_hashes=True)
+        except (OSError, ValueError):
+            return False
+        return module.acceptance_approved(delivery)
     gate = delivery.get("human_gates", {}).get("acceptance") if isinstance(delivery.get("human_gates"), dict) else None
     return isinstance(gate, dict) and (gate.get("status") in {"approved", "accepted"} or gate.get("approved") is True)
 
@@ -230,7 +243,7 @@ def _run_verdict(path: Path, kind: str, age: float, refs: str | None, pr_unknown
         receipt = _json(path / "RUN.json")
         if receipt is None:
             return "triage:invalid-delivery"
-        if not _accepted(receipt):
+        if not _accepted(receipt, path):
             return "keep:unaccepted-delivery"
     if kind == "mission" and not _stopped(path):
         return "keep:mission-active"
@@ -243,7 +256,7 @@ def _run_verdict(path: Path, kind: str, age: float, refs: str | None, pr_unknown
         retention = 30
     elif kind == "mission":
         retention = 7
-    elif status in {"failed", "quarantined", "partial", "stalled", "startup_timeout", "timed_out", "interrupted", "rejected",
+    elif status in {"failed", "quarantined", "partial", "stalled", "startup_timeout", "timed_out", "interrupted", "lost", "rejected",
                     "tool_missing", "usage_limited", "rate_limited", "auth_required", "model_unavailable",
                     "permission_blocked"}:
         retention = 14

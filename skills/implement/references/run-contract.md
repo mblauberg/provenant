@@ -1,5 +1,11 @@
 # Software delivery contract
 
+Delivery acceptance is met by objective checks and tier-required review; the
+chair reports the outcome and the user may still reject it. Explicit user
+acceptance is required only for `terminal` work or when the approved scope
+asks for it. A project may name its landing gate as acceptance. The `deliver`
+contract records each basis separately from human approval.
+
 `implement` executes the `software` profile inside the single canonical
 `delivery-run` receipt. Use the complete `init` command in `deliver` with
 profile `software` to create `.agent-run/runs/<run-dir>/RUN.json`, then use the delivery
@@ -37,8 +43,10 @@ docs, fixtures and the PR evidence index. That curated projection is public
 evidence; it does not replace or weaken validation of the private canonical
 receipt.
 
-A receipt that clears the machine gates is machine-ready, not complete. User
-acceptance and any production promotion remain separate gates.
+Record delivery acceptance when its checks and required review pass, using
+`delivery_receipt.py accept` with passing evidence IDs. Keep
+`human_gates.acceptance` truthful. Production promotion requires separate
+user authority.
 
 ## Terminalisation
 
@@ -59,7 +67,7 @@ worktree-local runs require a deliberate one-time copy before pruning. Run
 `scripts/bind_merged_delivery.py` from the primary checkout with the pre-existing typed exact-head
 review artifacts. The binder reads PR and `ci-status` truth through the
 authenticated GitHub API, holds an exclusive receipt lock, refuses to run once
-human acceptance is recorded, and adds:
+delivery acceptance is recorded, and adds:
 
 - a canonical `git_revision` artifact bound directly to the exact merged commit
   and its resolved tree, with no archive or per-file digest;
@@ -69,9 +77,11 @@ human acceptance is recorded, and adds:
   retained by the receipt.
 
 The merged tree must equal the reviewed PR-head tree, and `ci-status` binds the
-merge commit. Validate the updated receipt with `--verify-hashes` before asking
-for acceptance. Only explicit acceptance records the
-`human_gates.acceptance` approval on that same receipt, and release approval is
+merge commit. Validate the updated receipt with `--verify-hashes` before
+reporting acceptance or requesting any required user decision. When the project
+names landing as acceptance, pass `--accept-as-project-landing`; terminal and
+scope-required cases still await human evidence. Only explicit user acceptance
+records the `human_gates.acceptance` approval on that same receipt, and release approval is
 a separate gate; release validation will not reconstruct missing evidence
 later. Frozen schema-v1 Git-archive receipts remain readable,
 but this binder only emits the digestless commit-and-tree form.

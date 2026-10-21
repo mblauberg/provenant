@@ -80,7 +80,7 @@ An owner writes `fabric.attempt.v1` at `tasks/<id>/attempt-NNN/attempt.json` and
 
 Every attempt has `usage_source`: `observed` when token counters were read from the provider stream, `estimated` when usage was estimated, or `missing` when no token counters were reported. Current adapters do not estimate token usage; `estimated` is reserved for an estimator and preserved when supplied by an adapter. A context percentage alone is `missing` usage. This field is independent of `context.source`: Codex/Cursor turn totals are observed usage even when their context size is estimated. The meter result is retained on unsuccessful attempts, including non-zero provider exits.
 
-Terminal adapter, dispatch and Fabric attempt receipts also record `error_class`, derived only from that receipt's final status and existing evidence signature. The fixed vocabulary is `none`, `rate_limited`, `usage_limited`, `auth`, `model_unavailable`, `timeout`, `empty_output`, `sandbox_denied`, `provider_error`, and `unknown`. Successful and input-required statuses map to `none`; named failure statuses take precedence over signatures. Signatures refine generic outcomes (for example `failed` + `empty_output`). Stalls and startup deadlines map to `timeout`; permission blocks map to `sandbox_denied`. Generic failures, rejected requests and missing tools map to `provider_error`; cancellation, interruption, quarantine and unrecognised outcomes default to `unknown`. This telemetry field does not affect routing, retries or health.
+Terminal adapter, dispatch and Fabric attempt receipts also record `error_class`, derived only from that receipt's final status and existing evidence signature. The fixed vocabulary is `none`, `rate_limited`, `usage_limited`, `auth`, `model_unavailable`, `timeout`, `empty_output`, `sandbox_denied`, `provider_error`, `cancelled`, and `unknown`. Successful and input-required statuses map to `none`; named failure statuses take precedence over signatures. Signatures refine generic outcomes (for example `failed` + `empty_output`). Stalls and startup deadlines map to `timeout`; permission blocks map to `sandbox_denied`. Generic failures, rejected requests and missing tools map to `provider_error`; cancellations map to `cancelled`; interruption, quarantine and unrecognised outcomes default to `unknown`. This telemetry field does not affect routing, retries or health.
 
 `timing.phases` records milliseconds for available dispatch phases: TypeScript validation and catalogue snapshot, run directory setup, owner startup and attempt setup, route planning, provider spawn, provider execution and finalisation. A direct Python owner has no TypeScript phase measurements. The writer watchdog scans at most 2,000 entries per probe, checks a 25 ms budget between entries and retains its scan position; a full cycle on a large tree may take several one-second probes. Stall detection waits for a complete scan covering the idle interval so a late file is not missed.
 
@@ -90,9 +90,9 @@ Provenance records requested route, resolved and observed model, observation sou
 
 Run root is the primary checkout root, including when dispatch starts inside a linked worktree. Runs live at `.agent-run/runs/<YYYYMMDD-HHMM>-<kind>-<slug>-<rand6>/`; owner logs live in `_owner/`. The other top-level entries (`sessions/`, `locks/`, `scratch/`) and what each holds are owned by [chair state](../../skills/session/references/chair-state.md#run-layout); Fabric grants every write-confined lane write access to `locks/` only. `.worktrees/` names derive from branches with `/` replaced by `-`. New repositories exclude `.agent-run/`, `.worktrees/` and legacy `.work/` from Git locally.
 
-`provenant clean` plans by default and prints a digest. the plan is saved beside its digest under `.agent-run/scratch/` (it expires with scratch after one day, after which `--apply` fails and `provenant clean` must be rerun), and `--apply --plan sha256:<digest>` (with the same `--include` and `--older-than`) verifies that file, replans, and deletes only approved rows that are still exactly as approved, each reclassified and identity-checked again immediately before its anchored, no-follow deletion. Rows that vanished or changed are skipped and reported; rows that became eligible after approval are never touched, so lanes may keep running between plan and apply. A changed integration branch or worktree proof still aborts. `runs/index.lock` is kept infrastructure; clean merged worktrees can be removed without extra authority; dirty worktrees and unmerged work are never removed. Live, pinned, cited, unaccepted delivery, resumable and active mission runs are protected. A terminal dispatch attempt prunes its private `tmp/` at once (kept for `input_required`, for a failed attempt under 50 MB, or when `PROVENANT_KEEP_ATTEMPT_TMP=1`); `clean` also removes `tmp/` and `cache/` of retained attempts after one day for successful runs and seven for others, keeping receipts, results and logs for the run's retention. Sizes count allocated blocks once per inode and never follow links. Successful and cancelled runs retain seven days; typed failures retain fourteen; accepted deliveries retain thirty; owner logs retain seven; scratch retains one day. Sessions are durable handoffs and remain triage-only. Unknown paths are triage-only. If GitHub PR state cannot be read, the plan warns and holds run deletion; Git-proven merged worktrees can still expire. Worktrees require clean state and merge proof, then removal through `scripts/worktree remove`. The append-only run index keeps provenance for at least 365 days. Readers use `.agent-run/runs/<timestamped-name>`; root-level `mcp-*`, orchestration, delivery and mission layouts are no longer read.
+`provenant clean` plans by default and prints a digest. the plan is saved beside its digest under `.agent-run/scratch/` (it expires with scratch after one day, after which `--apply` fails and `provenant clean` must be rerun), and `--apply --plan sha256:<digest>` (with the same `--include` and `--older-than`) verifies that file, replans, and deletes only approved rows that are still exactly as approved, each reclassified and identity-checked again immediately before its anchored, no-follow deletion. Rows that vanished or changed are skipped and reported; rows that became eligible after approval are never touched, so lanes may keep running between plan and apply. A changed integration branch or worktree proof still aborts. `runs/index.lock` is kept infrastructure; clean merged worktrees can be removed without extra authority; dirty worktrees and unmerged work are never removed. Live, pinned, cited, unaccepted delivery, resumable and active mission runs are protected. Here `unaccepted` describes the retained receipt-code test, not a universal user-approval requirement; [issue #1025](https://github.com/mblauberg/provenant/issues/1025) records the pending code alignment. A terminal dispatch attempt prunes its private `tmp/` at once (kept for `input_required`, for a failed attempt under 50 MB, or when `PROVENANT_KEEP_ATTEMPT_TMP=1`); `clean` also removes `tmp/` and `cache/` of retained attempts after one day for successful runs and seven for others, keeping receipts, results and logs for the run's retention. Sizes count allocated blocks once per inode and never follow links. Successful and cancelled runs retain seven days; typed failures retain fourteen; accepted deliveries retain thirty; owner logs retain seven; scratch retains one day. Sessions are durable handoffs and remain triage-only. Unknown paths are triage-only. If GitHub PR state cannot be read, the plan warns and holds run deletion; Git-proven merged worktrees can still expire. Worktrees require clean state and merge proof, then removal through `scripts/worktree remove`. The append-only run index keeps provenance for at least 365 days. Readers use `.agent-run/runs/<timestamped-name>`; root-level `mcp-*`, orchestration, delivery and mission layouts are no longer read.
 
-Project `CLAUDE.md` imports `@AGENTS.md` (which names when to read `HARNESS.md`). `scripts/install-harness` writes only a bootstrap pointer to the instance `AGENTS.md` and product `HARNESS.md` in `~/.claude/CLAUDE.md`; it does not copy their contents. Project imports therefore provide the local rules and constitution without relying on a global file containing them.
+Project `CLAUDE.md` imports `@AGENTS.md` (which names when to read `HARNESS.md`). On a fresh install, `scripts/install-harness` writes a bootstrap pointer to the instance `AGENTS.md` and product `HARNESS.md` in `~/.claude/CLAUDE.md`; when that entrypoint already symlinks to the instance doctrine, reinstall preserves the symlink. The Codex entrypoint is `~/.codex/AGENTS.md`. The installer does not create `~/.claude/AGENTS.md`; on reinstall it removes that path only when it is a symlink resolving to the instance doctrine, and reports regular files for review without deleting them. A repository `AGENTS.md` that repeats the instance doctrine still causes duplicate context in Provenant sessions. Recommendation: keep repository `AGENTS.md` to project-specific rules and rely on the provider's global entrypoint for shared instance doctrine. This reduces repeated context but makes the repository less self-contained when opened without the installed instance harness.
 
 ## Routing and authority
 
@@ -260,8 +260,43 @@ covers `.git-credentials`, `.pypirc`, `.pgpass`, `.vault-token`,
 `.password-store`, `.boto`, `.s3cfg`, `.terraform.d`, Cargo and Gem credentials,
 `.config/git/credentials`, `.config/hub` and `.config/op`.
 
-An `ok` attempt clears the cooldown for the model that answered, using the
-resolved model when the provider reports no model. It also clears the adapter's
+Every attempt records top-level `account` and `host` before provider startup;
+terminal records retain that scope. Quota and cooldown routing share
+`scripts/provider_identity.py`. Account identity comes from paths, without
+reading credential contents:
+
+| Adapter | Selected identity source |
+|---|---|
+| claude | `CLAUDE_CONFIG_DIR`, else `~/.claude` |
+| codex | `CODEX_HOME`, else `~/.codex` |
+| agy | OS user's `~/Library/Keychains/login.keychain-db`, independent of HOME and `AGY_CONFIG_DIR`; a second account requires a second host |
+| cursor | `~/Library/Application Support/Cursor/User/globalStorage` on macOS, else `~/.config/Cursor/User/globalStorage` |
+| opencode | `$XDG_DATA_HOME/opencode`, else `~/.local/share/opencode` (the authentication store, not `OPENCODE_CONFIG_DIR`) |
+| kiro | `~/.kiro` |
+| copilot | `~/.copilot` |
+
+A selected path matching an enabled configured
+`telemetry.accounts.<provider>.<label>.identity_dir` resolves to `<label>`.
+Otherwise the provider's default directory resolves to `default`, and another
+resolved path to `path-<sha256 prefix>`. Paths, emails and tokens are never used
+as account keys. An unresolved identity is `null` and matches only `null`.
+For inspection and reset commands, see [model routing](../runbooks/model-routing.md).
+Host is the telemetry host id (`local_host` in `.agent-fabric/hosts.json`, else
+hostname). Neither account nor host acts as a wildcard.
+
+`fabric.cooldowns.v1` entries carry `adapter`, `model`, `account` and `host`.
+Storage keys are JSON-encoded `[adapter, account, host, model]` tuples, allowing
+live scopes to coexist; readers expose only the active scope as `adapter/model`
+keys. Exact model entries precede `*` within that scope. Reads prune expired
+entries and retain other accounts and hosts. Under `cooldowns.lock`, a legacy
+entry without `host` and with a null account migrates once to the provider's
+default identity on this host, even if an alternate identity is selected.
+A new explicit null scope is never migrated. Cached quota adds and reconciles
+cooldowns only for its matching account and host.
+
+An `ok` attempt clears the cooldown for the model that answered in that
+attempt's account and host, using the resolved model when the provider reports
+no model. It also clears the adapter's
 account-wide `*` cooldown when the attempt started after that entry was recorded
 (never for per-model adapters `agy` and `opencode`). Other model cooldowns remain
 intact; `provenant route reset` clears them explicitly. OpenCode runs with error logs on stderr so a quota

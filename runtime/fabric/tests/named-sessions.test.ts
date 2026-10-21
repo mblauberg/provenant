@@ -2,15 +2,15 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import Database from "better-sqlite3";
 import { execFileSync, spawn, spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { writeFileAtomic } from "./atomic-write.mjs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, expect, it } from "vitest";
 
 import { Store } from "../src/store.js";
 import { digest } from "../src/surface.js";
+import { scratchRoot } from "./helpers/temp-root.js";
 
 async function until<T>(probe: () => Promise<T> | T, done: (value: T) => boolean): Promise<T> {
   for (let tries = 0; ; tries++) {
@@ -43,7 +43,7 @@ afterEach(async () => {
 
 /** Two agents of one project: a chair in a linked worktree and a worker in the primary checkout. */
 function fixtureProject() {
-  const root = mkdtempSync(join(tmpdir(), "fabric-sessions-"));
+  const root = scratchRoot("fabric-sessions-");
   roots.add(root);
   const pidLog = join(root, "fixture-pids.jsonl");
   pidLogs.add(pidLog);
@@ -342,7 +342,7 @@ it("keeps a CLI turn whose waiting caller was killed after launch", async () => 
 }, 60_000);
 
 it("refuses a claim planned from a turn another caller has since settled", () => {
-  const root = mkdtempSync(join(tmpdir(), "fabric-session-claim-"));
+  const root = scratchRoot("fabric-session-claim-");
   roots.add(root);
   const store = new Store(join(root, "fabric.db"));
   const who = { project: root, cwd: root, agentId: "a", provider: "codex" };

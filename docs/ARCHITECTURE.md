@@ -19,15 +19,20 @@ harness without rediscovering it from individual skills.
 
 ## Lifecycle and user gates
 
-Every run takes the same shape; what scales with risk is review pressure. At
-`routine`, the chair plus objective and native checks are enough, so routine work
-can complete without the other family. From `substantial` up, the review ladder
-requires multiple targeted lenses and the other primary; `crucial` work adds a
-distinct-family review when available, and terminal work adds stronger targeted
-and adversarial pressure. `HARNESS.md` owns the ladder and
-`skills/deliver/scripts/validate_delivery.py` enforces its load-bearing legs.
-The three gold gates are the only places a user must decide; everything inside
-the `deliver` kernel is agent work bound to one receipt.
+Review pressure follows the [`HARNESS.md` Review ladder](../HARNESS.md#review-ladder).
+Routine work uses the chair and objective checks. Substantial work adds one
+independent cross-family review when available. Crucial work requires two passing
+independent reviews with distinct lenses and two non-chair families when
+available. Terminal work adds an adversarial lens to crucial coverage. The
+shared ladder checker enforces this coverage for delivery and orchestration
+receipts, including the recorded-blocker fallback.
+
+Gold gates reserve scope and one-way doors, any required explicit acceptance,
+and external-action authority for the user. Objective checks and tier-required
+review meet delivery acceptance; the chair reports the outcome and the user
+may still reject it. Explicit user acceptance is required only for `terminal`
+work or when the approved scope asks for it. A project may name its landing
+gate as acceptance (Sealle: landing is acceptance for everything).
 
 The tier is derived rather than declared. `scope` rates every factor in
 `config/risk-policy.json`, the highest tier any rating maps to is the run's
@@ -66,14 +71,15 @@ colour means two things:
 | Red | an interrupt: it suspends a run, and recovery resumes the interrupted state |
 | Grey | inert: stopped, closed, or observing only |
 
-Green covers `verify`, `evaluate`, targeted review evidence and the other-primary
-leg, because each can stop a run. Purple is reserved for distinct-family review,
-which is advisory and recorded when unavailable or skipped.
+Green covers `verify`, `evaluate` and the independent review coverage required
+by the tier, because each can stop a run. Purple marks additional advisory
+pressure beyond the required coverage; a provider family's role depends on the
+run's ladder rather than a fixed colour.
 
 ```mermaid
 flowchart TB
-    accTitle: The full delivery lifecycle and its three user gates
-    accDescr: Session prepares context and scope produces the specification, risk tier and authority. A user gate approves the specification or sends it back to scope. Inside the deliver kernel, execute runs implement, tdd, refactor or diagnose, then deterministic verification runs, then a separate conditional evaluate gate runs only when behaviour is stochastic or judgement bearing, then independent targeted review and other-primary review run in fresh contexts that never authored the work. Review pressure scales with risk according to HARNESS.md, with stronger targeted and adversarial pressure at terminal. A failed check or blocking finding returns to execute under the risk-tier repair budget: routine 2 cycles, substantial 4, and crucial and terminal 5, a guardrail against unbounded loops, not a target. The user acceptance gate accepts, rescopes or stops. Any external action needs a separate user authorisation before release and observation. A failed observation opens diagnose. Every path that returns work to scope, a structural review finding, a rescope at the acceptance gate, diagnostic evidence and the retrospect flywheel, converges on one back-to-scope collector rather than five separate return edges.
+    accTitle: The full delivery lifecycle and its user gates
+    accDescr: Session prepares context and scope produces the specification, risk tier and authority. A user gate approves the specification or sends it back to scope. Inside the deliver kernel, execute runs implement, tdd, refactor or diagnose, then deterministic verification runs, then a separate conditional evaluate gate runs only when behaviour is stochastic or judgement bearing, then independent review runs in fresh contexts that never authored the work. Coverage follows the HARNESS.md Review ladder, with an adversarial lens added at terminal. A failed check or blocking finding returns to execute under the risk-tier repair budget: routine 2 cycles, substantial 4, and crucial and terminal 5, a guardrail against unbounded loops, not a target. Objective checks and tier-required review meet acceptance, or a project may name its landing gate. Explicit user acceptance is required only for terminal work or approved scope. The chair reports the outcome and the user may reject it. Any external action needs a separate user authorisation before release and observation. A failed observation opens diagnose. Every path that returns work to scope, a structural review finding, a rescope at the acceptance gate, diagnostic evidence and the retrospect flywheel, converges on one back-to-scope collector rather than five separate return edges.
     SE(["session"]) --> SC["scope<br/>spec, risk tier, authority"]
     SC --> G1{{"USER GATE<br/>approve spec, risk tier, one-way doors"}}
     G1 -. "send back" .-> SC
@@ -87,14 +93,18 @@ flowchart TB
       Q -- "no" --> RV
       Q == "yes" ==> EV["evaluate<br/>repeatable judgement gate"]
       EV -. "failed" .-> EX
-      EV --> RV["review<br/>independent, fresh context<br/>targeted lenses plus other primary at substantial+"]
+      EV --> RV["review<br/>independent, fresh context<br/>risk-scaled HARNESS.md ladder"]
       RV -. "repair by tier: routine 2, substantial 4, crucial/terminal 5" .-> EX
     end
 
-    RV --> G2{{"USER GATE<br/>acceptance"}}
+    RV --> AC["acceptance<br/>checks + required review or project landing"]
+    AC --> Q2{"terminal or explicit acceptance<br/>required by approved scope?"}
+    Q2 -- "yes" --> G2{{"USER GATE<br/>explicit acceptance"}}
+    Q2 -- "no" --> OUT["chair reports outcome"]
+    G2 -- "accept" --> OUT
     G2 -. "stop" .-> HALT(["stop"])
-    G2 -- "accept" --> RT["retrospect"]
-    G2 == "accept, external action" ==> G3{{"USER GATE<br/>authorise the external action"}}
+    OUT --> RT["retrospect"]
+    OUT == "external action" ==> G3{{"USER GATE<br/>authorise the external action"}}
     G3 --> RL["release and observe"]
     RL -. "observation failed" .-> DG["diagnose"]
     RL --> RT
@@ -108,7 +118,8 @@ flowchart TB
     classDef user fill:#8a6d1f,stroke:#f0c674,color:#ffffff,stroke-width:2px
     classDef blocking fill:#2c6e49,stroke:#8fd0aa,color:#ffffff,stroke-width:2px
     classDef inert fill:#57606a,stroke:#adb5bd,color:#ffffff,stroke-width:2px
-    class G1,G2,G3 user
+    class G1,G3 user
+    class G2 blocking
     class VF,EV,RV blocking
     class HALT inert
     style DEL fill:none,stroke:#6e7781,stroke-width:1px
@@ -123,10 +134,10 @@ Two orderings in that picture are load-bearing. Deterministic verification runs
 first and always. `evaluate` is a separate conditional gate that runs only when
 behaviour is stochastic or judgement bearing, so deterministic checks come
 before judgement and the two are never fused into one box. Review is independent:
-fresh targeted reviewers and the other primary never author the surface they
-certify. From `substantial` up, a receipt reaching acceptance without multiple
-targeted lenses, or without other-primary coverage or a recorded skip covered by
-same-family targeted review, fails the machine gate.
+reviewers never author the surface they certify. A receipt reaching acceptance
+without its tier's passing review coverage, or without a reasoned blocker when
+cross-family coverage is unavailable, fails the machine gate. Failed legs count
+as neither reviews nor blocker records.
 
 The lifecycle loops. A failed check returns to execution; a structural review
 finding may return to scope; production evidence may open a diagnosis and a new
@@ -144,7 +155,7 @@ User approval is required for:
 - one-way-door architecture and risk-tier downgrades;
 - destructive, irreversible or externally visible actions;
 - external communications and production promotion;
-- final acceptance.
+- final acceptance for `terminal` work or when the approved scope asks for it.
 
 Routine reversible implementation inside approved authority does not need a
 stream of micro-approvals.
@@ -169,7 +180,10 @@ rejects.
 
 Ordering is not certified, because a receipt cannot certify its own history:
 the agent that writes the transitions writes the receipt in the same turn. What
-is checked is what each recorded gate demands. Human acceptance recorded as
+is checked is what each recorded gate demands. The current schema still uses
+`human_gates.acceptance` for explicit user approval; this retained code contract
+is catalogued in [issue #1025](https://github.com/mblauberg/provenant/issues/1025) and
+must not be auto-approved from checks. Human acceptance recorded as
 approved requires the profile's deterministic and judgement evidence, the
 review ladder, the security surfaces and the measures to be present and
 passing. Release approval requires acceptance. A closed run, meaning release
@@ -202,10 +216,9 @@ Frontend authority is similarly split: `ui-ux-design`'s design/make branch
 supplies authorised design mutation methods inside `implement`, while its
 review branch owns read-only UX, visual, accessibility and responsive
 evidence. `scope` owns the
-design decision and `engineering-docs` owns canonical placement. `caveman` is a presentation overlay only; it cannot narrow
-evidence, authority, high-stakes clarity or an artifact's domain-writing rules.
+design decision and `engineering-docs` owns canonical placement.
 
-`release` promotes one digest- or Git-revision-bound, user-accepted artifact through a separately
+`release` promotes one digest- or Git-revision-bound, accepted artifact through a separately
 authorised `deploy`, `publish`, `share`, `send` or `activate` action. Targets are
 typed as environments, recipients or audiences; execution may use an approved
 command, connector or named user operation. Completion requires target-visible
@@ -216,21 +229,21 @@ not proof.
 
 Claude Code and Codex are equal primary orchestrators. Whichever harness the
 user starts is the session chair and owns authority, user communication, run
-state and synthesis. On substantial work it combines:
+state and synthesis. It may combine native same-family subagents for parallel
+authoring with fresh independent reviewers for the tier's required coverage.
+The chair and authoring subagents cannot certify their own work. Independent
+reviews count by provider family and lens rather than receipt role.
 
-1. native same-family subagents for parallel depth, which author and so may never
-   certify;
-2. fresh targeted reviewers that authored none of the surface under review;
-3. the other primary family for independent review;
-4. an available distinct family for dissent and blind-spot discovery.
+Every passing review needs a non-blank lens and a distinct reviewer. When required
+cross-family coverage is unavailable, each missing non-chair family records an
+unavailable or omitted leg with a non-empty reason and receives an independent
+same-family replacement. At crucial and terminal risk, fallback still needs two
+passing reviews with distinct lens sets covering at least two lenses. A blocker
+for the chair's family or an already passing family supplies no missing-family
+coverage. A failed leg supplies neither coverage nor a blocker record. Projects
+may set their own ladders while retaining the constitution's minimum independence.
 
-Distinct-family failure never replaces the other-primary leg. The other primary is
-expected from the substantial tier up; when it is skipped or unavailable, the
-skip must record a reason and a passing same-family targeted review with a
-distinct lens covers it. A bare degradation note does not buy past it, and
-`validate_delivery.py` rejects the receipt once it reaches acceptance without
-both. The only additional relief is a user-approved risk downgrade carrying an
-approver, a reason and evidence. Provider-backed external workers, including the other primary and
+Provider-backed external workers, including the other primary and
 distinct families, are dispatched through Fabric MCP or the direct command
 line. Both front doors delegate to the same `orchestrate` owners; Fabric does
 not implement provider mechanics. Dispatching a worker and claiming
@@ -242,32 +255,24 @@ independence claim runs the assurance path in
 0021](adr/0021-configured-workspace-dispatch-boundaries.md), [ADR
 0022](adr/0022-thin-fabric-mcp-execution-facade.md)).
 
-The picture below separates the legs that can block a run from the legs that
-cannot.
+The picture below separates authorship, required review and additional advice.
 
 ```mermaid
 flowchart TB
-    accTitle: Review topology, blocking and non-blocking legs
-    accDescr: The user starts one client, and that client is the session chair. The chair fans out to native authoring subagents in its own family for parallel depth; because they write the work they may never certify it, and neither may the chair, which decides. Review then runs on targeted lenses and the other primary from the substantial tier upwards. Those legs are drawn solid because they can block the run; the delivery validator rejects a receipt that reaches acceptance missing either requirement. A distinct family attaches through the same fabric as advisory pressure, drawn dashed because availability is risk-scaled and any skip is recorded. Herdr observes and sends fire-and-forget steering, drawn dotted, and never decides. Only a participant that neither authored nor decided the surface may sign the certificate.
+    accTitle: Independent review coverage and advisory pressure
+    accDescr: The user starts one client as session chair. Native authoring subagents provide parallel depth but cannot certify their own work. Independent reviewers run in fresh contexts through native tools or cross-provider dispatch coordinated by Fabric. Their passing legs count by family and lens under the HARNESS.md Review ladder. Additional advice and Herdr steering do not decide the outcome. The chair adjudicates against evidence.
     HU(["user"]) ==> CH
-
-    CH["session chair<br/>the client the user started<br/>owns authority, run state, gates, synthesis<br/>it decides, so it never certifies"]
-
-    CH ==> SUB["native authoring subagents<br/>same family, parallel depth<br/>they author, so they never certify"]
+    CH["session chair<br/>owns authority, run state and synthesis<br/>cannot certify its own work"]
+    CH ==> SUB["native authoring subagents<br/>parallel depth<br/>cannot certify their own work"]
     SUB ==> CH
-
-    CH ==> NRV["targeted reviewers<br/>fresh context<br/>authored nothing, so they may certify"]
-    CH ==> AF["cross-provider dispatch<br/>answer-bearing execution<br/>coordinated through Fabric"]
-
-    AF ==> OP["other primary<br/>Claude or Codex, not the chair<br/>independent review, fresh context"]
-    AF -. "advisory" .-> BF["distinct family<br/>available when warranted<br/>dissent and blind-spot pressure"]
-
-    NRV == "substantial+" ==> CERT{{"independent review certificate<br/>targeted lenses and other primary load-bear<br/>only a participant that neither authored<br/>nor decided the surface may certify it<br/>blocking findings need evidence and corroboration"}}
-    OP == "substantial+" ==> CERT
-    BF -. "advisory only, never blocks<br/>every skipped leg is recorded" .-> CERT
-
+    CH ==> NRV["independent reviewers<br/>fresh context, authored nothing"]
+    CH ==> AF["cross-provider dispatch<br/>coordinated through Fabric"]
+    AF ==> NRV
+    NRV ==> CERT{{"required review coverage<br/>HARNESS.md ladder by family and lens<br/>record cross-family blockers"}}
+    AF -. "additional advice" .-> ADV["dissent and blind-spot pressure"]
+    ADV -. "evidence for adjudication" .-> CH
     CERT ==> CH
-    HD["Herdr<br/>panes and advisory steering"] -. "observes and steers, never wakes or decides" .-> CH
+    HD["Herdr<br/>panes and advisory steering"] -. "observes and steers, never decides" .-> CH
 
     classDef user fill:#8a6d1f,stroke:#f0c674,color:#ffffff,stroke-width:2px
     classDef actor fill:#1f5f8b,stroke:#7fb3d5,color:#ffffff,stroke-width:2px
@@ -278,26 +283,18 @@ flowchart TB
     class HU user
     class CH,SUB actor
     class AF transport
-    class NRV,OP,CERT blocking
-    class BF advisory
+    class NRV,CERT blocking
+    class ADV advisory
     class HD inert
 ```
 
-Solid legs can block a run; dashed legs cannot. The targeted and other-primary
-requirements are load-bearing from the substantial tier upwards:
-`validate_delivery.py` rejects a receipt that reaches acceptance without multiple
-targeted lenses *and* either passing other-primary review, on a distinct primary
-family with distinct evidence, or a recorded other-primary skip covered by a
-passing same-family targeted review with a distinct lens. It also requires each
-review row to declare
+Solid legs carry required coverage; dashed legs supply additional advice.
+`validate_delivery.py` also requires each review row to declare
 `independent_of_authorship: true`, but does not bind the certifier's agent
 identity to authorship or decision custody. Validator success therefore proves
 declared topology and family separation, not actor-level independence. Policy
 still disqualifies the chair and authoring subagents from certifying their own
-work. Blue marks exactly those participants, while independent targeted
-reviewers remain eligible. Herdr sits outside the decision path entirely.
-Terminal work adds stronger targeted and adversarial pressure; every skipped or
-unavailable distinct-family leg is recorded.
+work. Herdr sits outside the decision path entirely.
 
 Paired-primary mode lets Claude and Codex rotate stage ownership, coordinated
 through Fabric, which carries the messages, shared tasks and activity log

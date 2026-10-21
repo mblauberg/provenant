@@ -180,28 +180,6 @@ def command_evidence_observation(
     return api["mutate_run"](args.run_dir, apply)
 
 
-def parse_utc(value: Any, field: str, error_type: type[ValueError]):
-    if not isinstance(value, str) or not value.endswith("Z"):
-        raise error_type(f"{field} must be an ISO UTC timestamp")
-    try:
-        return api_datetime().fromisoformat(value[:-1])
-    except ValueError as exc:
-        raise error_type(f"{field} must be an ISO UTC timestamp") from exc
-
-
-def api_datetime():
-    from datetime import datetime
-
-    return datetime
-
-
-def artifact_map(run: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    return {
-        item["id"]: item for item in run.get("artifacts", [])
-        if isinstance(item, dict) and isinstance(item.get("id"), str)
-    }
-
-
 def command_review_add(args: Any, api: dict[str, Any]) -> dict[str, Any]:
     require_identifier = api["require_identifier"]
     receipt_error = api["ReceiptError"]
@@ -210,8 +188,6 @@ def command_review_add(args: Any, api: dict[str, Any]) -> dict[str, Any]:
         raise receipt_error("review requires non-empty --adapter")
     if not args.provider_family:
         raise receipt_error("review requires non-empty --provider-family")
-    if args.role == "distinct-family" and args.provider_family in {"openai", "anthropic"}:
-        raise receipt_error("distinct-family review must use a non-primary family")
     if args.status == "pass":
         missing = [
             option for option in ("artifact", "route_receipt", "reviewer_id", "model")
@@ -233,7 +209,7 @@ def command_review_add(args: Any, api: dict[str, Any]) -> dict[str, Any]:
             for item in [*run.get("reviews", []), *run.get("evidence", [])]
         ):
             raise receipt_error(f"review id already exists: {review_id}")
-        if not args.lenses or any(not lens for lens in args.lenses):
+        if not args.lenses or any(not lens.strip() for lens in args.lenses):
             raise receipt_error("review requires at least one non-empty lens")
         if args.status != "pass":
             run["reviews"].append({
@@ -264,11 +240,21 @@ def command_review_add(args: Any, api: dict[str, Any]) -> dict[str, Any]:
             or route.get("reviewer_id") != args.reviewer_id
             or route.get("resolved_model", route.get("model")) != args.model
             or route.get("model_family") != args.provider_family
-            or route.get("certification_eligible") is not True
+            or not isinstance(route.get("provider_family"), str)
+            or not route.get("provider_family", "").strip()
+            or (
+                route.get("certification_eligible") is not True
+                and not (
+                    route.get("certification_eligible") is False
+                    and run.get("chair_family")
+                    and route.get("provider_family") == run.get("chair_family")
+                )
+            )
         ):
             raise receipt_error("route receipt identity does not match review lineage")
-        if args.role == "other-primary" and route.get("cross_family") is not True:
-            raise receipt_error("other-primary review requires a cross-family route receipt")
+        family = route["provider_family"].strip()
+        if family != run.get("chair_family") and route.get("cross_family") is not True:
+            raise receipt_error("cross-family review requires a cross-family route receipt")
         lineage = {
             "adapter": args.adapter, "provider_family": args.provider_family,
             "model": args.model,
@@ -306,7 +292,14 @@ def build_parser(api: dict[str, Any]) -> argparse.ArgumentParser:
     init.add_argument("--fabric-relationships")
     init.add_argument("--risk-tier", choices=api["RISKS"])
     init.add_argument("--risk-override")
+    init.add_argument("--requires-user-acceptance", action="store_true")
     init.set_defaults(handler=api["command_init"])
+
+    accept = subcommands.add_parser("accept")
+    accept.add_argument("--run-dir", required=True)
+    accept.add_argument("--basis", choices=("checks-and-review", "project-landing"), required=True)
+    accept.add_argument("--evidence", action="append", required=True)
+    accept.set_defaults(handler=api["command_accept"])
 
     bind = subcommands.add_parser("bind")
     bind.add_argument("--run-dir", required=True)

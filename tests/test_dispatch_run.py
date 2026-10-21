@@ -123,6 +123,307 @@ def load_secret_scan_module():
     return importlib.import_module('secret_scan')
 
 
+def test_reap_attempt_after_group_sigkill_is_terminal_and_idempotent(tmp_path):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "killed")
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    try:
+        started = mod.process_info.start_time(child.pid)
+        assert started
+        path = run / "tasks/task-1/attempt-001/attempt.json"
+        path.parent.mkdir(parents=True)
+        row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+        row.update(state="running", status=None, pgid=child.pid, pgid_started_at=started)
+        path.write_text(json.dumps(row))
+        os.killpg(child.pid, signal.SIGKILL)
+        child.wait(timeout=5)
+        mod.reap_attempts(run)
+        lost = json.loads(path.read_text())
+        assert lost["state"] == "terminal"
+        assert lost["status"] == "lost"
+        assert lost["error_class"] == "provider_error"
+        assert lost["ended_at"]
+        assert lost["evidence"]["signature"] == "pgid_gone"
+        before = path.read_bytes()
+        mod.reap_attempts(run)
+        assert path.read_bytes() == before
+    finally:
+        if child.poll() is None:
+            os.killpg(child.pid, signal.SIGKILL)
+            child.wait(timeout=5)
+
+
+@pytest.mark.parametrize("identity,live,stale,expected", [
+    ("matching", True, True, "running"),
+    ("reused", True, False, "terminal"),
+    ("unknown", True, True, "running"),
+    (None, True, True, "running"),
+    (None, False, False, "running"),
+    (None, False, True, "terminal"),
+])
+def test_reap_attempt_identity_and_legacy_progress(tmp_path, monkeypatch, identity, live, stale, expected):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "identity")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row.update(state="running", status=None, pgid=123456,
+               last_progress_at="2000-01-01T00:00:00Z" if stale else mod.now())
+    if identity is not None:
+        row["pgid_started_at"] = "recorded"
+    path.write_text(json.dumps(row))
+    def killpg(pgid, sig):
+        assert (pgid, sig) == (123456, 0)
+        if not live:
+            raise ProcessLookupError()
+    monkeypatch.setattr(mod.os, "killpg", killpg)
+    monkeypatch.setattr(mod.process_info, "start_time", lambda pid: None if identity == "unknown" else "different" if identity == "reused" else "recorded")
+    mod.reap_attempts(run)
+    result = json.loads(path.read_text())
+    assert result["state"] == expected
+    if expected == "terminal":
+        assert result["status"] == "lost"
+        assert result["evidence"]["signature"] == ("pgid_reused" if live else "pgid_gone")
+
+
+def test_reap_attempt_never_touches_live_owner(tmp_path):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "owned")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"state": "running", "pgid": 99999999, "pgid_started_at": "gone"}))
+    before = path.read_bytes()
+    with mod.acquire_run_custody(run):
+        mod.reap_attempts(run)
+    assert path.read_bytes() == before
+
+
+def test_reap_attempt_skips_malformed_records_and_continues(tmp_path):
+    run = make_run(tmp_path, "runs/malformed")
+    valid = make_run(tmp_path, "runs/valid")
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row.update(state="running", status=None, pgid=99999999, pgid_started_at="gone")
+    for task, record in (("a-bad", []), ("b-progress", {**row, "pgid_started_at": None, "last_progress_at": None}),
+                         ("c-valid", row)):
+        path = run / f"tasks/{task}/attempt-001/attempt.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(record))
+    valid_path = valid / "tasks/task-1/attempt-001/attempt.json"
+    valid_path.parent.mkdir(parents=True)
+    valid_path.write_text(json.dumps(row))
+    result = subprocess.run([sys.executable, str(SCRIPT), "--reap-attempts"],
+                            input=json.dumps([str(run), str(valid)]), capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout) == [str(run), str(valid)]
+    assert json.loads((run / "tasks/c-valid/attempt-001/attempt.json").read_text())["status"] == "lost"
+    assert json.loads(valid_path.read_text())["status"] == "lost"
+
+
+def test_reap_attempt_preserves_terminal_publication_after_snapshot(tmp_path, monkeypatch):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "publish-race")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row.update(state="running", status=None, pgid=99999999, pgid_started_at="gone")
+    path.write_text(json.dumps(row))
+    terminal = {**row, "state": "terminal", "status": "ok", "ended_at": mod.now()}
+    def gone(pgid, sig):
+        path.write_text(json.dumps(terminal))
+        raise ProcessLookupError()
+    monkeypatch.setattr(mod.os, "killpg", gone)
+    assert mod.reap_attempts(run) == []
+    assert json.loads(path.read_text()) == terminal
+
+
+def test_attempt_publication_waits_for_custody(tmp_path):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "publication-custody")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row["paths"]["receipt"] = str(path.relative_to(run))
+    payload = json.dumps(row)
+    code = """
+import importlib.util, json, pathlib, sys
+spec = importlib.util.spec_from_file_location("dispatch_publisher", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print("ready", flush=True)
+mod.publish_contract(pathlib.Path(sys.argv[2]), json.loads(sys.argv[3]))
+"""
+    child = None
+    try:
+        with mod.attempt_custody(run, path):
+            child = subprocess.Popen([sys.executable, "-c", code, str(SCRIPT), str(run), payload],
+                                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+            assert child.stdout.readline().strip() == "ready"
+            with pytest.raises(subprocess.TimeoutExpired):
+                child.communicate(timeout=0.1)
+            assert not path.exists()
+        stdout, stderr = child.communicate(timeout=5)
+        assert child.returncode == 0, stderr
+        assert json.loads(path.read_text())["state"] == "terminal"
+    finally:
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.communicate(timeout=5)
+
+
+def test_reap_attempt_skips_busy_publisher_and_releases_run_custody(tmp_path):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "busy-publisher")
+    paths = []
+    for task in ("busy", "free"):
+        path = run / f"tasks/{task}/attempt-001/attempt.json"
+        path.parent.mkdir(parents=True)
+        row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+        row.update(state="running", status=None, task_id=task, pgid=99999999, pgid_started_at="gone")
+        path.write_text(json.dumps(row))
+        paths.append(path)
+    busy, free = paths
+    code = """
+import importlib.util, json, pathlib, sys
+spec = importlib.util.spec_from_file_location("dispatch_reaper", sys.argv[1])
+mod = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(mod)
+print(json.dumps(mod.reap_attempts(pathlib.Path(sys.argv[2]))))
+"""
+    with mod.attempt_custody(run, busy):
+        result = subprocess.run([sys.executable, "-c", code, str(SCRIPT), str(run)],
+                                capture_output=True, text=True, timeout=3)
+        assert result.returncode == 0, result.stderr
+        assert json.loads(result.stdout) == [str(free)]
+        assert json.loads(busy.read_text())["state"] == "running"
+        assert json.loads(free.read_text())["status"] == "lost"
+        with mod.acquire_run_custody(run):
+            pass
+    assert mod.reap_attempts(run) == [str(busy)]
+
+
+@pytest.mark.parametrize("evidence,expected", [
+    ("closure", "interrupted"), ("cancelled-closure", "cancelled"),
+    ("marker", "cancelled"), ("batch-marker", "cancelled"),
+    ("batch-closure", "interrupted"), ("completed-batch", "lost"),
+    ("request", "interrupted"), ("cancel-request", "cancelled"),
+    ("other-pid", "interrupted"), ("stale-time", "lost"), ("future-time", "lost"),
+    ("stale-token", "lost"), ("no-token", "lost"),
+])
+def test_reap_attempt_stop_evidence(tmp_path, evidence, expected):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "stop-evidence")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row.update(state="running", status=None, pgid=99999999, pgid_started_at="gone")
+    owner = {"owner_pid": 99999999, "run_token": "current", "status": "running"}
+    if evidence in {"closure", "cancelled-closure", "batch-closure"}:
+        owner.update(status="cancelled" if evidence == "cancelled-closure" else "interrupted", finished_at=mod.now())
+    if evidence == "no-token":
+        owner.pop("run_token")
+    (run / "dispatch-status.json").write_text(json.dumps(owner))
+    if evidence == "marker":
+        directory = run / "dispatch/tasks/task-1/attempt-001"
+        directory.mkdir(parents=True)
+        (directory / "cancel.request").touch()
+    if evidence in {"batch-marker", "batch-closure", "completed-batch"}:
+        row["batch_id"] = "batch-001"
+        directory = run / "dispatch/batches/batch-001"
+        directory.mkdir(parents=True)
+        (directory / "cancel.request").touch()
+        if evidence == "completed-batch":
+            (directory / "summary.json").write_text(json.dumps({"status": "completed"}))
+    if evidence in {"request", "cancel-request", "other-pid", "stale-time", "future-time", "stale-token", "no-token"}:
+        request = {"run_token": "current", "provider_pid": row["pgid"], "signal": "SIGTERM",
+                   "source": "cancel_requested" if evidence == "cancel-request" else "orphan_reaper",
+                   "sender_pid": os.getpid(), "requested_at": mod.now()}
+        if evidence == "other-pid": request["provider_pid"] = 99999998
+        if evidence == "stale-time": request["requested_at"] = "2000-01-01T00:00:00Z"
+        if evidence == "future-time": request["requested_at"] = "2999-01-01T00:00:00Z"
+        if evidence == "stale-token": request["run_token"] = "previous"
+        (run / "termination-request.json").write_text(json.dumps(request))
+    path.write_text(json.dumps(row))
+    assert mod.reap_attempts(run) == [str(path)]
+    result = json.loads(path.read_text())
+    assert result["status"] == expected
+    assert result["retryable"] is (expected == "lost")
+    if expected == "cancelled":
+        assert result["error_class"] == "cancelled"
+
+
+@pytest.mark.parametrize("provider_pid", [None, 99999000])
+@pytest.mark.parametrize("stale", [False, True])
+def test_reap_attempt_run_cancel_applies_to_every_batch_child(tmp_path, provider_pid, stale):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "batch-run-cancel")
+    (run / "dispatch-status.json").write_text(json.dumps({
+        "owner_pid": 99999999, "run_token": "current", "status": "running",
+    }))
+    paths = []
+    for index in range(8):
+        path = run / f"tasks/task-{index}/attempt-001/attempt.json"
+        path.parent.mkdir(parents=True)
+        row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+        row.update(state="running", status=None, pgid=99999000 + index, pgid_started_at="gone",
+                   started_at="2001-01-01T00:00:00Z", task_id=f"task-{index}", batch_id="batch-001")
+        path.write_text(json.dumps(row))
+        paths.append(path)
+    (run / "termination-request.json").write_text(json.dumps({
+        "run_token": "current", "provider_pid": provider_pid, "signal": "SIGTERM",
+        "source": "cancel_requested", "sender_pid": os.getpid(),
+        "requested_at": "2000-01-01T00:00:00Z" if stale else mod.now(),
+    }))
+    assert set(mod.reap_attempts(run)) == {str(path) for path in paths}
+    for path in paths:
+        result = json.loads(path.read_text())
+        assert result["status"] == ("lost" if stale else "cancelled")
+        assert result["retryable"] is stale
+        assert result["error_class"] == ("provider_error" if stale else "cancelled")
+
+
+@pytest.mark.parametrize("evidence", ["closure", "marker", "request"])
+def test_reap_attempt_refreshes_stop_evidence_after_snapshot(tmp_path, monkeypatch, evidence):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "stop-race")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row.update(state="running", status=None, pgid=99999999, pgid_started_at="gone")
+    path.write_text(json.dumps(row))
+    owner = {"owner_pid": 99999999, "run_token": "current", "status": "running"}
+    (run / "dispatch-status.json").write_text(json.dumps(owner))
+    def gone(pgid, sig):
+        if evidence == "closure":
+            (run / "dispatch-status.json").write_text(json.dumps({**owner, "status": "interrupted", "finished_at": mod.now()}))
+        elif evidence == "request":
+            (run / "termination-request.json").write_text(json.dumps({
+                "run_token": "current", "provider_pid": pgid, "signal": "SIGTERM", "source": "run_control",
+                "sender_pid": os.getpid(), "requested_at": mod.now(),
+            }))
+        else:
+            directory = run / "dispatch/tasks/task-1/attempt-001"
+            directory.mkdir(parents=True)
+            (directory / "cancel.request").touch()
+        raise ProcessLookupError()
+    monkeypatch.setattr(mod.os, "killpg", gone)
+    mod.reap_attempts(run)
+    assert json.loads(path.read_text())["status"] == ("cancelled" if evidence == "marker" else "interrupted")
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_reap_attempt_owners_without_run_token(tmp_path, monkeypatch, live):
+    mod = load_dispatch_module()
+    run = make_run(tmp_path, "legacy-owner")
+    path = run / "tasks/task-1/attempt-001/attempt.json"
+    path.parent.mkdir(parents=True)
+    row = json.loads((ROOT / "tests/fixtures/fabric-v1/attempt.json").read_text())
+    row.update(state="running", status=None, pgid=99999999, pgid_started_at="gone")
+    path.write_text(json.dumps(row))
+    (run / "dispatch-owner.json").write_text(json.dumps({"owner_pid": os.getpid() if live else 99999999}))
+    mod.reap_attempts(run)
+    assert json.loads(path.read_text())["state"] == ("running" if live else "terminal")
+
+
 @pytest.mark.parametrize('name,positive,placeholder', [
     ('PEM private key', '-' * 5 + 'BEGIN RSA ' + 'PRIVATE KEY-----\n' + 'A' * 64 + '\n' + '-' * 5 + 'END RSA PRIVATE KEY-----',
      '-' * 5 + 'BEGIN RSA PRIVATE KEY-----\nEXAMPLE\n' + '-' * 5 + 'END RSA PRIVATE KEY-----'),
@@ -443,6 +744,61 @@ def test_prepare_resume_restores_previous_workspace_root(tmp_path: Path):
     assert args.workspace_root == workspace
     assert args.read_roots == [str(tmp_path / "other-project")]
     assert args.capabilities == ["browser", "postgres"]
+
+
+def test_prepare_resume_drops_missing_add_dir_with_warning(tmp_path: Path):
+    module = load_dispatch_module()
+    run_dir = make_run(tmp_path, "resume-add-dirs")
+    attempt_dir = run_dir / "tasks/task-1/attempt-001"
+    attempt_dir.mkdir(parents=True)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    existing_dir = workspace / "existing"
+    existing_dir.mkdir()
+    removed_dir = workspace / "removed"
+    previous = {
+        "run_id": "resume-me", "task_id": "task-1", "attempt": 1, "state": "terminal",
+        "status": "ok", "mode": "read_only", "cwd": str(workspace), "worktree": None,
+        "workspace": {"root": str(workspace)}, "session_id": "saved-session",
+        "read_roots": [],
+        "provenance": {"requested": {"adapter": "codex"}, "resolved_model": "fixture", "effort_applied": ""},
+        "applied": {"sandbox": "read-only", "network": None, "add_dirs": [str(existing_dir), str(removed_dir)],
+                    "capabilities": []},
+        "paths": {"events": None}, "requested_route": {},
+    }
+    (attempt_dir / "attempt.json").write_text(json.dumps(previous), encoding="utf-8")
+    args = SimpleNamespace(
+        run_dir=run_dir, resume="resume-me", task_id=None, tool=None, model=None, effort=None,
+        access_mode=None, worktree=None, provider_cwd=None, sandbox=None, network=None,
+        add_dirs=[], resume_session=None, fallback=None, context_ceiling=None,
+        intent="ordinary", orchestrator_family="", role="worker", risk_tier="",
+        model_override_tier="", reviewer_id="", preface=True,
+    )
+
+    module.prepare_resume(args)
+
+    assert args.add_dirs == [str(existing_dir)]
+    assert any("removed" in w for w in getattr(args, "_resume_warnings", []))
+
+
+def test_secret_scan_unavailable_fix_includes_failing_path_and_reason(tmp_path: Path):
+    module = load_dispatch_module()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    unreadable_dir = workspace / "unreadable"
+    unreadable_dir.mkdir()
+    unreadable_dir.chmod(0)
+    try:
+        tasks = [{
+            "id": "task-1", "adapter": "codex", "model": "fixture",
+            "prompt": "hello", "add_dirs": [str(unreadable_dir)],
+        }]
+        res = module.preflight_tasks(tasks, workspace_root=workspace)
+        assert res["status"] == "rejected"
+        assert res["error"] == "secret_scan_unavailable"
+        assert str(unreadable_dir) in res["fix"]
+    finally:
+        unreadable_dir.chmod(0o755)
 
 
 def test_ordinary_single_dispatch_records_one_attempt_and_route_identity(tmp_path: Path) -> None:
@@ -3450,6 +3806,10 @@ time.sleep(30)
             time.sleep(.02)
         assert (worktree / 'provider-pids').exists()
         mod = load_dispatch_module()
+        if stop != 'timeout':
+            active = json.loads((run / 'tasks/dispatch-001/attempt-001/attempt.json').read_text())
+            assert active['pgid_started_at']
+            assert active['pgid_started_at'] == mod.process_info.start_time(active['pgid'])
         with pytest.raises(mod.WorktreeLeaseError):
             mod.acquire_worktree_lease(worktree)
         if stop == 'SIGTERM':
@@ -3852,7 +4212,7 @@ def test_fabric_fast_plan_preserves_shell_prompt_rejections(tmp_path, monkeypatc
     assert mod.fast_fabric_plan(args, prompt, run / 'result.md', tmp_path) is None
 
 
-@pytest.mark.parametrize('previous_status', ['interrupted', 'timed_out', 'cancelled', 'stalled'])
+@pytest.mark.parametrize('previous_status', ['interrupted', 'timed_out', 'cancelled', 'stalled', 'lost'])
 def test_interrupted_attempt_resumes_from_nested_cwd_with_absolute_caller_prompt(tmp_path, monkeypatch, previous_status):
     code = '''import sys,json,os
 prompt = sys.stdin.read()
@@ -3872,7 +4232,7 @@ print(json.dumps({"type":"result","result":os.getcwd()}))
     # before the owner could publish its legacy terminal evidence.
     row.update(status=previous_status, state='terminal')
     path.write_text(json.dumps(row))
-    if previous_status == 'interrupted':
+    if previous_status in {'interrupted', 'lost'}:
         legacy_path = run / row['legacy_attempt_path']
         legacy_path.unlink()
         legacy_path.with_name('attempt.sha256').unlink()
@@ -4229,3 +4589,18 @@ def test_preflight_types_an_opencode_below_v2_as_unsupported_cli_version(monkeyp
     assert result["status"] == "rejected"
     assert result["error"] == "unsupported_cli_version"
     assert "upgrade OpenCode to v2" in result["fix"]
+
+
+def test_dispatch_usage_error_is_one_line_and_exits_2():
+    dispatch_script = ROOT / "skills/orchestrate/scripts/dispatch_run.py"
+    result = subprocess.run([sys.executable, str(dispatch_script), "--run-dir", "/tmp", "--prompt-stdin", "--bad-arg"], capture_output=True, text=True)
+    assert result.returncode == 2
+    assert result.stdout == ""
+    assert result.stderr == "error: unrecognized arguments: --bad-arg; fix: provenant help dispatch\n"
+
+    missing = subprocess.run([sys.executable, str(dispatch_script)], capture_output=True, text=True)
+    assert missing.returncode == 2
+    assert missing.stdout == ""
+    assert missing.stderr.startswith("error: the following arguments are required: ")
+    assert "; fix: pass " in missing.stderr
+    assert len(missing.stderr.splitlines()) == 1

@@ -28,7 +28,7 @@ import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 # The shared library sits one level above this skill. Resolving it from the
 # skill rather than from a repository root two levels further up keeps the
@@ -43,6 +43,8 @@ TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 ATTEMPT_ID_RE = re.compile(r"^attempt-(?P<number>\d{3}|[1-9]\d{3,})$")
 BATCH_ID_RE = re.compile(r"^batch-(?:\d{3}|[1-9]\d{3,})$")
 DEFAULT_TIMEOUT_SECONDS = 3600.0
+# Match the existing abandoned-receipt grace period for pre-identity attempts.
+LEGACY_ATTEMPT_STALE_SECONDS = 48 * 3600
 MAX_WORKER_QUESTION_PROMPT = 4096
 MAX_WORKER_TERMINAL_ENVELOPE_BYTES = 64 * 1024
 MAX_GIT_EVIDENCE_HEADER_BYTES = 64 * 1024
@@ -52,7 +54,7 @@ CANCEL_MARKER_NAME = "cancel.request"
 BRANCH_TYPES = "feat|fix|refactor|perf|test|docs|chore|ci|build"
 BRANCH_PATTERN = re.compile(rf"^(?:(?:{BRANCH_TYPES}|proto)/[a-z][a-z0-9]*-[a-z0-9]+(?:-[a-z0-9]+){{1,4}}|land/[0-9]{{8}}-[a-z0-9]+(?:-[a-z0-9]+)*)$")
 
-from _shared.bounded_process import stop_process_group
+from _shared.bounded_process import BudgetArgumentParser, stop_process_group
 from layout import run_workspace, run_root, contains_run
 import provider_exec
 import memory_admission
@@ -60,7 +62,7 @@ import secret_scan
 import exec_routing
 import context_usage
 import attempt_storage
-from fabric_records import render_digest, write_cooldown, write_route_health, append_index, TERMINAL_STATUSES
+from fabric_records import identity_resolver, render_digest, write_cooldown, write_route_health, append_index, TERMINAL_STATUSES
 from _shared.custody import (
     OwnedFileError, OwnedLinkError, atomic_write_contained, contained_regular_path,
     ensure_contained_directory, create_contained_directory, open_contained_regular, read_bound_bytes,
@@ -509,6 +511,154 @@ def acquire_run_custody(run_dir: Path):
     return stream
 
 
+@contextmanager
+def attempt_custody(run_dir: Path, path: Path, *, blocking: bool = True):
+    """Serialise short publications, including children without run custody."""
+    fd, _relative, _target = open_contained_regular(
+        run_dir, path.with_suffix(".lock").relative_to(run_dir),
+        os.O_RDWR | os.O_CREAT, label="attempt custody"
+    )
+    with os.fdopen(fd, "a+") as stream:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        yield
+
+
+def reap_run_evidence(run_dir: Path):
+    """Read current closure evidence, refusing a live or unobservable owner."""
+    receipt = json.loads(read_bound_bytes(run_dir, "RUN_RECEIPT.json", label="run receipt"))
+    if not isinstance(receipt, dict) or receipt.get("status") != "active":
+        return None
+    # Older writers may not hold custody. A live or unobservable owner
+    # still owns its attempts, even if its provider has already exited.
+    owners = [receipt]
+    for name in ("dispatch-owner.json", "dispatch-status.json"):
+        try:
+            (run_dir / name).lstat()
+        except FileNotFoundError:
+            continue
+        owners.append(json.loads(read_bound_bytes(run_dir, name, label="run owner")))
+    terminal_status = "lost"
+    run_token = None
+    for owner in owners:
+        if not isinstance(owner, dict):
+            return None
+        if owner.get("run_token"):
+            run_token = owner["run_token"]
+        if owner.get("finished_at") and owner.get("status") in {"interrupted", "cancelled"}:
+            terminal_status = owner["status"]
+        pid = owner.get("owner_pid", owner.get("pid"))
+        if not isinstance(pid, int) or pid <= 0:
+            continue
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            continue
+        started = owner.get("owner_started_at")
+        observed = process_info.start_time(pid) if started else None
+        if not started or observed is None or observed == started:
+            return None
+    return terminal_status, run_token
+
+
+def reap_stop_status(run_dir: Path, path: Path, row: dict[str, Any]):
+    evidence = reap_run_evidence(run_dir)
+    if evidence is None:
+        return None
+    status, run_token = evidence
+    # A recorded closure takes precedence over leftover cancellation markers.
+    if status != "lost":
+        return status
+    try:
+        (run_dir / "termination-request.json").lstat()
+        request = json.loads(read_bound_bytes(run_dir, "termination-request.json", label="termination request"))
+    except FileNotFoundError:
+        request = {}
+    # Controller intent is run-scoped; batch children have distinct provider PIDs.
+    if provider_exec.termination_request_matches(
+        request, run_token=run_token, provider_pid=None,
+        started_at=row.get("started_at"), signals={"SIGTERM", "SIGKILL"},
+    ):
+        return "cancelled" if request["source"] == "cancel_requested" else "interrupted"
+    cancel_dir = run_dir / "dispatch/tasks" / path.parent.parent.name / path.parent.name
+    if cancellation_marker_present(run_dir, cancel_dir):
+        return "cancelled"
+    batch_id = row.get("batch_id")
+    if isinstance(batch_id, str) and BATCH_ID_RE.fullmatch(batch_id):
+        batch_dir = run_dir / "dispatch/batches" / batch_id
+        if cancellation_marker_present(run_dir, batch_dir):
+            try:
+                (batch_dir / "summary.json").lstat()
+                summary = json.loads(read_bound_bytes(run_dir, batch_dir.relative_to(run_dir) / "summary.json", label="batch summary"))
+            except FileNotFoundError:
+                summary = {}
+            if not isinstance(summary, dict) or summary.get("status") not in {"completed", "failed", "cancelled"}:
+                return "cancelled"
+    return "lost"
+
+
+def reap_attempts(run_dir: Path) -> list[str]:
+    """Finalise dead attempts under custody, preserving deliberate termination."""
+    run_dir = Path(run_dir)
+    reaped = []
+    try:
+        custody = acquire_run_custody(run_dir)
+    except (OSError, OwnedFileError):
+        return reaped
+    with custody:
+        try:
+            if reap_run_evidence(run_dir) is None:
+                return reaped
+        except (OSError, ValueError, TypeError, OwnedFileError):
+            return reaped
+        for tree in ("tasks", "dispatch/tasks"):
+            for path in (run_dir / tree).glob("*/attempt-*/attempt.json"):
+                try:
+                    row = json.loads(read_bound_bytes(run_dir, path.relative_to(run_dir), label="attempt receipt"))
+                    if not isinstance(row, dict) or row.get("schema") != "fabric.attempt.v1" or row.get("state") != "running":
+                        continue
+                    pgid = row.get("pgid")
+                    if not isinstance(pgid, int) or pgid <= 0:
+                        continue
+                    started = row.get("pgid_started_at")
+                    try:
+                        os.killpg(pgid, 0)
+                    except ProcessLookupError:
+                        if not started:
+                            if not isinstance(row.get("last_progress_at"), str):
+                                continue
+                            progress = datetime.fromisoformat(row["last_progress_at"].replace("Z", "+00:00"))
+                            if (datetime.now(UTC) - progress).total_seconds() <= LEGACY_ATTEMPT_STALE_SECONDS:
+                                continue
+                        reason = "pgid_gone"
+                    else:
+                        observed = process_info.start_time(pgid) if started else None
+                        if not started or observed is None or observed == started:
+                            continue
+                        reason = "pgid_reused"
+                    # A wedged publisher must not hold run custody through us.
+                    with attempt_custody(run_dir, path, blocking=False):
+                        current = json.loads(read_bound_bytes(run_dir, path.relative_to(run_dir), label="attempt receipt"))
+                        # A child may have published after its provider exited.
+                        if current != row or current.get("state") != "running":
+                            continue
+                        status = reap_stop_status(run_dir, path, row)
+                        if status is None:
+                            continue
+                        row.update(state="terminal", status=status, ended_at=now(), retryable=status == "lost",
+                                   error_class=provider_exec.error_class(status))
+                        row["evidence"] = {**(row.get("evidence") or {}), "signature": reason,
+                                           "excerpt": "Attempt process group is gone" if reason == "pgid_gone"
+                                           else "Attempt process group start time no longer matches"}
+                        row["digest"] = render_digest(row)
+                        write_owned(run_dir, path, json.dumps(row, indent=2) + "\n")
+                        reaped.append(str(path))
+                except (OSError, ValueError, TypeError, KeyError, AttributeError, OwnedFileError):
+                    continue
+        if reaped:
+            close_mcp_run(run_dir)
+    return reaped
+
+
 def reconcile_manifest(run_dir: Path, custody=None) -> None:
     """Index complete prior attempts whose manifest rows were lost on re-entry."""
     manifest = run_dir / "MANIFEST.md"
@@ -528,7 +678,7 @@ def reconcile_manifest(run_dir: Path, custody=None) -> None:
         try:
             row = json.loads(read_bound_bytes(run_dir, canonical, label="interrupted attempt"))
             if (row.get("schema") == "fabric.attempt.v1" and row.get("state") == "terminal"
-                    and row.get("status") == "interrupted" and row.get("task_id") == directory.parent.name
+                    and row.get("status") in {"interrupted", "lost"} and row.get("task_id") == directory.parent.name
                     and directory.name == f"attempt-{row.get('attempt', 0):03d}"):
                 recoverable.add(directory)
         except (OSError, ValueError, OwnedFileError):
@@ -843,7 +993,7 @@ def build_command(
 
 
 # Statuses whose provider turn ended before a result, so its session may be missing.
-INCOMPLETE_TURN_STATUSES = {"timed_out", "cancelled", "stalled", "startup_timeout", "interrupted"}
+INCOMPLETE_TURN_STATUSES = {"timed_out", "cancelled", "stalled", "startup_timeout", "interrupted", "lost"}
 
 
 FAST_PLAN_SHELL_ENV_READS = {
@@ -1356,7 +1506,7 @@ def preflight_tasks(tasks: list[dict[str, Any]], workspace_root: Path | None = N
                         [str(workspace / Path(item).expanduser()) for item in task.get("add_dirs") or []],
                         workspace_root=workspace)
                 except (OSError, subprocess.SubprocessError) as exc:
-                    raise PreflightError("secret_scan_unavailable", "Make dispatch inputs readable for the secret scan.") from exc
+                    raise PreflightError("secret_scan_unavailable", f"Make dispatch inputs readable for the secret scan: {exc}") from exc
                 if scan.budget_exceeded and not task.get("allow_secrets", False):
                     raise PreflightError("secret_scan_budget_exceeded", scan.fix())
                 if scan.findings and not task.get("allow_secrets", False):
@@ -1525,6 +1675,17 @@ def with_pick_reason(line, reason):
     return line[:-1] + "; " + reason + ")"
 
 
+def attempt_scope(args, number):
+    # Terminal construction reuses the scope captured before provider startup.
+    scopes = getattr(args, '_attempt_scopes', None)
+    if scopes is None:
+        scopes = args._attempt_scopes = {}
+    key = (number, args.tool)
+    if key not in scopes:
+        scopes[key] = identity_resolver().scope(args.tool)
+    return scopes[key]
+
+
 def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     route=plan.get("route",{})
     model=plan.get("model") or route.get("resolved_model") or args.model or ""
@@ -1547,15 +1708,16 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         note = f'local fallback from {placement["from_host"]}: {placement["reason"]}' + (f': {placement["detail"]}' if placement.get('detail') else '')
         if note not in plan.setdefault('warnings', []):
             plan['warnings'].append(note)
-    return {"schema":"fabric.attempt.v1", **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
+    return {"schema":"fabric.attempt.v1", **attempt_scope(args,number), **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
+        **({"batch_id":args.batch_id} if getattr(args,"batch_id",None) else {}),
         "attempt":number,"state":"running","status":None,"usage_source":"missing","mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
         "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
         **({"read_roots":[str(root) for root in args.read_roots]} if getattr(args,"read_roots",None) else {}),
         "worktree":str(args.worktree) if args.worktree else None,"started_at":started_at,"ended_at":None,"last_progress_at":started_at,
-        "pgid":None,"session_id":plan.get("session_id"),"retryable":False,"reset_at":None,"retry_after":None,"fix":None,
+        "pgid":None,"pgid_started_at":None,"session_id":plan.get("session_id"),"retryable":False,"reset_at":None,"retry_after":None,"fix":None,
         "evidence":{"exit":None,"signal":None,"signature":None,"excerpt":""},"question":None,
         "applied":plan.get("applied",{"sandbox":None,"network":None,"add_dirs":[],"guarantee":"prompt_only"}),
-        "warnings":list(plan.get("warnings",[])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", [])) + list(getattr(args, "_branch_warnings", [])),"provenance":provenance,
+        "warnings":list(plan.get("warnings",[])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", [])) + list(getattr(args, "_branch_warnings", [])) + list(getattr(args, "_resume_warnings", [])),"provenance":provenance,
         "secret_scan":{"allow_secrets":getattr(args,"allow_secrets",False),
                        "finding_names":getattr(getattr(args,"_secret_scan",None),"names",lambda:[])()},
         "timing":{"phases":getattr(args,"_phase_timings",{}).copy()},
@@ -1568,7 +1730,8 @@ def publish_contract(run_dir,row):
     row["digest"]=render_digest(row)
     path=run_dir/row["paths"]["receipt"]
     ensure_owned_directory(run_dir,path.parent)
-    write_owned(run_dir,path,json.dumps(row,indent=2)+"\n")
+    with attempt_custody(run_dir, path):
+        write_owned(run_dir,path,json.dumps(row,indent=2)+"\n")
 
 
 def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
@@ -1581,7 +1744,7 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
     refusal=route_refusal(adapter,args.tool)
     if refusal: status=refusal["status"]
     if status not in TERMINAL_STATUSES: status="failed"
-    for field in ("session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","usage_source","warnings","reaped","spared","provenance","pgid","last_progress_at","landable","quarantine"):
+    for field in ("session_id","retryable","reset_at","retry_after","fix","error","evidence","applied","context","usage_source","warnings","reaped","spared","provenance","pgid","pgid_started_at","last_progress_at","landable","quarantine"):
         if field in adapter: row[field]=adapter[field]
     # The provider's provenance replaces the recorded one; keep the confidential request so resume and handoff honour it.
     if getattr(args,"confidential",False) and isinstance(row.get("provenance"),dict):
@@ -1592,7 +1755,8 @@ def terminal_contract(args,run_dir,legacy,adapter,number,attempt_dir):
         row["provenance"]["pick_reason"]=reason
     row["warnings"] = list(dict.fromkeys(
         list(row.get("warnings", [])) + list(getattr(getattr(args, "_secret_scan", None), "warnings", []))
-        + list(getattr(args, "_memory_warnings", [])) + list(getattr(args, "_branch_warnings", []))))
+        + list(getattr(args, "_memory_warnings", [])) + list(getattr(args, "_branch_warnings", []))
+        + list(getattr(args, "_resume_warnings", []))))
     row["timing"]["queued_seconds"] = getattr(args, "_queued_seconds", 0.0)
     if legacy.get("process_error", "").startswith("Set .agents/fabric-policy.json memory_floor_percent"):
         row["fix"] = legacy["process_error"]
@@ -1671,7 +1835,22 @@ def prepare_resume(args):
         args.provider_cwd = supplied_cwd
     args.workspace_root=Path(previous.get("workspace_root") or (previous.get("workspace") or {}).get("root") or Path.cwd()).expanduser().resolve()
     args.sandbox=previous["applied"]["sandbox"];args.network=None if previous["applied"]["network"] is None else str(previous["applied"]["network"]).lower()
-    args.add_dirs=previous["applied"]["add_dirs"];args.resume_session=previous["session_id"]
+    applied_add_dirs = previous["applied"].get("add_dirs") or []
+    valid_add_dirs = []
+    missing_add_dirs = []
+    for item in applied_add_dirs:
+        p = Path(item).expanduser()
+        target = p if p.is_absolute() else (args.workspace_root / p)
+        if target.exists():
+            valid_add_dirs.append(item)
+        else:
+            missing_add_dirs.append(item)
+    args.add_dirs = valid_add_dirs
+    if missing_add_dirs:
+        args._resume_warnings = getattr(args, "_resume_warnings", []) + [
+            f"dropped missing recorded add_dir: {item}" for item in missing_add_dirs
+        ]
+    args.resume_session=previous["session_id"]
     args.read_roots=previous.get("read_roots") or []
     # A read root was canonical when granted; a directory since swapped for a link is not that grant.
     bound=[*args.read_roots,*([args.provider_cwd] if args.read_roots and args.provider_cwd else [])]
@@ -1734,6 +1913,7 @@ def prepare_resume(args):
 def _dispatch(args: argparse.Namespace, custody=None) -> int:
     args._last_plan={}
     args._last_row=None
+    args._attempt_scopes={}
     owner_started_ms = None
     try:
         incoming = ({} if getattr(args, "retry_of", None) or getattr(args, "fallback_from", None)
@@ -1823,8 +2003,8 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
         secret_scan_result = secret_scan.scan_inputs(
             prompt_bytes or b"", str(args.prompt_file) if args.prompt_file else "<prompt>", args.add_dirs,
             workspace_root=workspace)
-    except (OSError, subprocess.SubprocessError):
-        return fail(run_dir, "secret_scan_unavailable", "Make dispatch inputs readable for the secret scan.")
+    except (OSError, subprocess.SubprocessError) as exc:
+        return fail(run_dir, "secret_scan_unavailable", f"Make dispatch inputs readable for the secret scan: {exc}")
     if secret_scan_result.budget_exceeded and not getattr(args, "allow_secrets", False):
         print(json.dumps({"status": "rejected", "error": "secret_scan_budget_exceeded", "fix": secret_scan_result.fix()}))
         return 2
@@ -2127,6 +2307,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
                     provider_started_at[0] = time.monotonic()
                     args._phase_timings["spawn"] = round((provider_started_at[0] - spawn_started) * 1000, 3)
                     active["pgid"]=child.pid
+                    active["pgid_started_at"]=process_info.start_time(child.pid)
                     _record_provider_process(run_dir,child)
                     write_owned(run_dir,attempt_dir/"pgid",str(child.pid)+"\n")
                     publish_contract(run_dir,active)
@@ -2491,6 +2672,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     record: dict[str, Any] = {
         "schema_version": 1,
         "record_type": "dispatch-attempt",
+        **attempt_scope(args, attempt_number),
         "usage_source": adapter.get("usage_source") or provider_exec.context_usage.usage_source(adapter.get("context") or {}),
         "error_class": provider_exec.error_class(status, (adapter.get("evidence") or {}).get("signature")),
         **({"landable": False, "quarantine": adapter.get("quarantine")} if adapter_status == "quarantined" else {}),
@@ -2627,7 +2809,7 @@ def close_mcp_run(run_dir: Path) -> None:
             receipt["resumable"]=any(row.get("status")=="input_required" for row in latest.values())
             statuses_by_task.update({task_id: canonical_success_status(row["status"])
                                      for task_id, row in latest.items()})
-        elif any(canonical_success_status(record.get("status")) not in {"ok", "quarantined", "failed", "blocked", "timed_out", "cancelled"} for record in records):
+        elif any(canonical_success_status(record.get("status")) not in {"ok", "quarantined", "failed", "blocked", "timed_out", "cancelled", "lost"} for record in records):
             return
         statuses = set(statuses_by_task.values())
         if not statuses:
@@ -2635,7 +2817,7 @@ def close_mcp_run(run_dir: Path) -> None:
         receipt.update(status="ok" if statuses == {"ok"} else "quarantined" if statuses <= {"ok", "quarantined"} else "cancelled" if statuses == {"cancelled"} else "input_required" if receipt.get("resumable") else "failed",
                        closed_at=now(), terminal_reason=None if statuses == {"ok"} else "MCP execution attempts are terminal")
         write_owned(run_dir, run_dir / "RUN_RECEIPT.json", json.dumps(receipt, indent=2) + "\n")
-    except (OSError, ValueError, OwnedFileError):
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OwnedFileError):
         pass
 
 
@@ -2779,7 +2961,7 @@ def _fabric_hosts_owner():
 
 
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description=__doc__)
+    root = BudgetArgumentParser(command_name="dispatch", description=__doc__)
     root.add_argument("--run-dir", type=Path, required=True)
     root.add_argument("--task-id")
     root.add_argument("--host")
@@ -2848,5 +3030,7 @@ def parser() -> argparse.ArgumentParser:
 if __name__ == "__main__":
     if sys.argv[1:] == ["--preflight-json"]:
         print(json.dumps(preflight_tasks(json.load(sys.stdin)["tasks"])))
+    elif sys.argv[1:] == ["--reap-attempts"]:
+        print(json.dumps([str(run) for run in json.load(sys.stdin) if reap_attempts(Path(run))]))
     else:
         raise SystemExit(dispatch(parser().parse_args()))

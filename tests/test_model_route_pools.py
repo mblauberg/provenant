@@ -276,7 +276,9 @@ def overlay_environment(tmp_path, overlay):
     (instance / "config").mkdir(parents=True)
     (instance / "config" / "model-routing.json").write_text(json.dumps(overlay))
     return {**os.environ, "AGENT_FABRIC_PRODUCT_ROOT": str(ROOT), "AGENT_FABRIC_INSTANCE_ROOT": str(instance),
-            "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state")}
+            "AGENT_FABRIC_STATE_ROOT": str(tmp_path / "state"),
+            "CODEX_HOME": str(Path.home() / ".codex"),
+            "FABRIC_COOLDOWNS_PATH": str(tmp_path / "state/cooldowns.json")}
 
 
 def model_route(env, *args, stdin=None):
@@ -383,16 +385,19 @@ def test_routes_prints_each_pool_with_live_availability(tmp_path):
     assert run.returncode == 0, run.stderr
     for name in ("principal", "senior", "junior", "design", "writing"):
         assert f"\n{name}\n" in f"\n{run.stdout}"
-    assert "not installed" in run.stdout
+    assert "unavailable or cooling" in run.stdout
+    assert "use --all" in run.stdout
+    all_run = model_route(env, "routes", "--all")
+    assert "not installed" in all_run.stdout
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     (bin_dir / "codex").write_text("#!/bin/sh\n")
     (bin_dir / "codex").chmod(0o755)
     env["PATH"] = str(bin_dir)
-    lines = model_route(env, "routes").stdout.splitlines()
+    lines = model_route(env, "routes", "--all").stdout.splitlines()
     assert any("codex/gpt-6-luna" in line and "cooling until" in line for line in lines)
     assert any("codex/gpt-6-astra" in line and line.rstrip().endswith("available") for line in lines)
-    assert "[free, trains-on-prompts]" in run.stdout
+    assert "[free, trains-on-prompts]" in all_run.stdout
     provenant = subprocess.run([sys.executable, str(ROOT / "scripts" / "provenant"), "routes", "--json"],
                                text=True, capture_output=True, check=False,
                                env={**env, "PATH": os.environ["PATH"]})
@@ -767,3 +772,109 @@ def test_every_free_sign_keeps_an_adapter_wide_false_from_clearing_an_unknown_mo
         assert router.training_flag(adapter, None, model) is None, model
         assert "trains-on-prompts" in pools.model_traits(
             router, {**SEED, "adapters": {**SEED["adapters"], "opencode": adapter}}, "opencode", model), model
+
+
+def _quota_reading(quota, provider, windows, observed, account="default"):
+    """A cached provider quota reading, as `provenant quota` leaves it (#1030)."""
+    stamp = observed.isoformat().replace("+00:00", "Z")
+    quota.save_snapshot({
+        "schema": "provenant.quota.v1", "provider": provider, "account": account, "plan": None, "host": "studio",
+        "active": True, "priority": None, "observed_at": stamp, "attempted_at": stamp, "source": "test",
+        "status": "ok", "error": None, "unreported": [], "credits": None,
+        "windows": [{"name": name, "raw_kind": name, "used_percent": used, "window_minutes": minutes,
+                     "reset_at": (observed + reset_in).isoformat().replace("+00:00", "Z"), "window_start": None}
+                    for name, used, minutes, reset_in in windows]}, quota.provider(provider).default_identity())
+
+
+def test_routes_follow_provider_quota_over_stale_cooldowns_and_report_deficit(tmp_path, monkeypatch, capsys):
+    """Claude at 3% must not stay cooling on a stale usage cooldown; Codex 45% over pace stays available."""
+    env = overlay_environment(tmp_path, {})
+    home, state = tmp_path / "home", tmp_path / "state"
+    env.update(HOME=str(home), CLAUDE_CONFIG_DIR=str(home / ".claude"), CODEX_HOME=str(home / ".codex"),
+               AGENT_FABRIC_STATE_DIRECTORY=str(state), FABRIC_COOLDOWNS_PATH=str(state / "cooldowns.json"),
+               AGENT_FABRIC_ROUTE_HEALTH_PATH=str(state / "route-health.json"), PROVENANT_QUOTA="1")
+    for name in ("CLAUDE_CONFIG_DIR", "CODEX_HOME"):
+        Path(env[name]).mkdir(parents=True)
+    hosts = Path(env['AGENT_FABRIC_INSTANCE_ROOT']) / '.agent-fabric/hosts.json'
+    hosts.parent.mkdir(parents=True, exist_ok=True)
+    hosts.write_text(json.dumps({'schema_version': 1, 'local_host': 'studio'}))
+    state.mkdir()
+    now = datetime(2026, 10, 22, 12, tzinfo=timezone.utc)
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now.astimezone(tz)
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name in ("claude", "codex"):
+        (bin_dir / name).write_text("#!/bin/sh\nexit 97\n")
+        (bin_dir / name).chmod(0o755)
+    env["PATH"] = str(bin_dir)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+
+    # Exercise the CLI entry point in process so every routing clock is fixed.
+    quota_router = load("quota_pools_router_under_test", ROOT / "scripts/model_route.py")
+    exec_routing = exec_routing_module()
+    monkeypatch.setattr(exec_routing, "_QUOTA", None)
+    for quota in (quota_router._provider_quota(), exec_routing._provider_quota()):
+        monkeypatch.setattr(quota, "utcnow", lambda: now)
+    quota = quota_router._provider_quota()
+    monkeypatch.setattr(quota_router, "datetime", FixedDatetime)
+    fabric_records = importlib.import_module(exec_routing.read_cooldowns.__module__)
+    monkeypatch.setattr(fabric_records, "datetime", FixedDatetime)
+
+    def routes(*args):
+        assert quota_router.main(["routes", *args]) == 0
+        return capsys.readouterr().out
+
+    later = (now + timedelta(hours=8)).isoformat()
+    (state / "cooldowns.json").write_text(json.dumps({"schema": "fabric.cooldowns.v1", "cooldowns": {
+        "claude/*": {"adapter": "claude", "model": "*", "status": "usage_limited", "cooling_until": later,
+                     "recorded_at": (now - timedelta(hours=1)).isoformat()}}}))
+    assert exec_routing.cooling("claude", "claude-opus-5-5")["cooling_until"] == later
+    _quota_reading(quota, "claude", [("five_hour", 3, 300, timedelta(hours=2)),
+                                     ("seven_day", 20, 10080, timedelta(days=4))], now - timedelta(minutes=5))
+    _quota_reading(quota, "codex", [("secondary", 64.2, 10080, timedelta(hours=135.7))], now - timedelta(minutes=5))
+    document = json.loads(routes("--json"))
+    entries = [entry for pool_entries in document["routes"].values() for entry in pool_entries]
+    claude = [entry for entry in entries if entry["model"].startswith("claude/")]
+    codex = [entry for entry in entries if entry["model"].startswith("codex/")]
+    assert claude and all(entry["availability"] == "available" for entry in claude)
+    assert claude[0]["quota"]["state"] == "reserve"
+    assert codex and all(entry["availability"] == "available" for entry in codex)
+    assert codex[0]["quota"]["state"] == "deficit" and "runs out in 18h" in codex[0]["quota"]["summary"]
+    text = routes()
+    assert any(line.lstrip().startswith("codex/") and "[quota secondary: 45% in deficit" in line for line in text.splitlines())
+
+    # An exhausted window cools the provider until its reset, in routes and in dispatch's cooldown check.
+    reset = now + timedelta(hours=3)
+    _quota_reading(quota, "codex", [("primary", 100, 300, reset - now)], now)
+    document = json.loads(routes("--json"))
+    codex = [entry for pool_entries in document["routes"].values() for entry in pool_entries
+             if entry["model"].startswith("codex/")]
+    assert all(entry["availability"].startswith("cooling until ") for entry in codex)
+    blocked = exec_routing.cooling("codex", "gpt-6-luna")
+    assert blocked["status"] == "quota_exhausted"
+    assert blocked["cooling_until"] == reset.isoformat().replace("+00:00", "Z")
+    assert exec_routing.cooling("claude", "claude-opus-5-5") is None
+
+
+@pytest.mark.parametrize('adapter', ['claude', 'codex', 'agy', 'cursor', 'opencode', 'kiro'])
+def test_attempt_scope_is_frozen_before_identity_environment_changes(tmp_path, monkeypatch, adapter):
+    from types import SimpleNamespace
+    mod = load("scope_dispatch_run_under_test", ROOT / "skills/orchestrate/scripts/dispatch_run.py")
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'a'))
+    args = SimpleNamespace(tool=adapter, alias='workhorse', model='sonnet', alias_supplied=True,
+                           effort=None, task_id='scope-test', access_mode='read_only', worktree=None,
+                           _phase_timings={})
+    running = mod.contract_row(args, tmp_path, 1, tmp_path / 'attempt', {}, 'now')
+    assert running['account'] is not None and running['host']
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'b'))
+    terminal = mod.contract_row(args, tmp_path, 1, tmp_path / 'attempt', {}, 'now')
+    assert (terminal['account'], terminal['host']) == (running['account'], running['host'])
+    if adapter == 'claude':
+        following = mod.contract_row(args, tmp_path, 2, tmp_path / 'attempt-2', {}, 'now')
+        assert following['account'] != running['account']

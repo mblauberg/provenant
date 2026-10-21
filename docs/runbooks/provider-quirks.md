@@ -57,6 +57,17 @@ in `skills/orchestrate`; this page records the traps.
 
 ## Claude CLI
 
+- Sandboxed lanes run with `~/.claude.json` read-only, including atomic rewrite
+  and backup siblings. Reads follow a user-managed symlink normally. A live
+  read-only lane on 2026-10-22 started and answered with the file read-only
+  and left it unchanged. If a later Claude Code release cannot start that
+  way, reopen #927 rather than making the file writable.
+- Seatbelt checks `file-write*` on both ends of a hard link: a write deny on
+  the existing file or on the new name blocks `ln`. Under the lane profiles'
+  default write deny, a lane can only hard-link files it can already write, so
+  local clones and `cp -al` work inside writable roots while protected provider
+  state cannot be linked out. Keep this in mind before widening a write grant:
+  anything inside the grant becomes linkable.
 - The in-session Agent tool picks a model tier but has no per-call effort knob;
   headless `claude -p --model <m> --effort <e>` does. `--bare` gives a clean
   minimal context for an independent verifier.
@@ -91,7 +102,17 @@ is checked once per process.
 - **Errors** arrive as stdout events `{"type":"error","error":{"type","message"}}`:
   `provider.no-route` (unknown model or variant), `provider.quota` (free-tier throttle, 429,
   `FreeUsageLimitError`; classified `rate_limited`), `unknown` ("Invalid model reference").
-  Stderr carries INFO logs even at `--log-level error`; only `level=ERROR` lines are fatal.
+  Stderr carries INFO logs even at `--log-level error`. Reasons use the first WARN/ERROR
+  line, or an exit diagnostic when none exists; INFO/DEBUG logs are excluded. Sandbox EPERM
+  without a final answer is `permission_blocked` (`sandbox_denied`), neutral for route health.
+- **Output before exit.** Final assistant-step text goes to `result.md`, without earlier working
+  narration or stderr. Exit 1 after that text, without a structured provider failure,
+  is `ok` with signature `exit_after_output` and a warning. The adapter exit is normalised to
+  zero for dispatch; `evidence.exit` keeps the real process exit. Route health records the
+  successful outcome and warning. Other exits, such as 2 (usage) and 124 (timeout), stay failures
+  that keep their output. A later tool call or new step invalidates intermediate
+  text as completion evidence. Stream `step_finish` usage, including cache and reasoning
+  tokens, remains in receipt `context` fields with `usage_source: observed`.
 - **Read-only sandbox.** The macOS profile keeps the blanket read deny on HOME for OpenCode and
   re-allows only what v2 needs to start: listings (not contents) of every ancestor of the cwd, of
   home, `~/.claude` and `~/.agents`, plus the instruction files `AGENTS.md`, `CLAUDE.md` and
@@ -106,8 +127,15 @@ is checked once per process.
   script's home, which v2's config discovery stats), because OpenCode needs them, so credentials are not
   denied to the model at the OS layer there; the config's `external_directory: deny` keeps the
   model's tools to the project. `~/.zshrc`, `~/.ssh` and the rest of HOME stay unreadable (checked
-  with `sandbox-exec`). The fabric MCP server named in the user's OpenCode config cannot start under
-  it, which is intended. The run also sets `OPENCODE_DISABLE_CLAUDE_CODE`, `..._CLAUDE_CODE_SKILLS`,
+  with `sandbox-exec`). Both read-only and writer profiles allow literal `file-read-metadata`
+  on `.claude` and `.codex` directories along the cwd ancestry after protected-path denies.
+  These grants permit discovery's `lstat` without granting content or descendant reads, and
+  do not follow a leaf symlink. The existing Claude-disable switches suppress instruction
+  loading; they do not establish that v2.0.32 skips these metadata probes. Sandboxed lanes
+  disable the `fabric` MCP server through the [v2 per-server switch](https://opencode.ai/v2/docs/mcp-servers):
+  `mcp.servers.fabric = {type: "local", command: ["provenant"], disabled: true}` in the inline
+  config. V2 replaces the whole server definition, so the disabled entry includes its required
+  type and command; other servers keep their configuration. The run also sets `OPENCODE_DISABLE_CLAUDE_CODE`, `..._CLAUDE_CODE_SKILLS`,
   `..._AUTOUPDATE` and `..._FILEWATCHER` so foreign instruction files, auto-update and watchers stay out.
 - **Herdr plugin.** A user plugin `~/.config/opencode/plugins/herdr-agent-state.js` fails to load
   in v2 ("must export default definition with id and effect/setup"). It is logged as a warning

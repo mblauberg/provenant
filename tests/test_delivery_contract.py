@@ -772,16 +772,50 @@ def test_validator_requires_route_receipt_for_passing_review():
         module.validate(candidate, ROOT)
 
 
-def test_substantial_run_requires_design_and_targeted_other_primary_review_lanes():
+def test_substantial_run_requires_design_and_one_passing_review():
     module = load_validator()
     candidate = fixture("research")
     candidate["design"]["status"] = "not-required"
     with pytest.raises(module.Invalid, match="design"):
         module.validate(candidate, ROOT)
     candidate = fixture("research")
-    candidate["reviews"] = [review for review in candidate["reviews"] if review["provider_family"] != "anthropic"]
-    with pytest.raises(module.Invalid, match="other-primary"):
+    candidate["reviews"] = []
+    with pytest.raises(module.Invalid, match="passing independent leg"):
         module.validate(candidate, ROOT)
+
+
+@pytest.mark.parametrize("role", ["targeted", "other-primary", "distinct-family"])
+def test_substantial_accepts_one_cross_family_review_in_existing_roles(role):
+    module = load_validator()
+    candidate = fixture("research")
+    review = candidate["reviews"][1]
+    review["role"] = role
+    candidate["reviews"] = [review]
+    module._validate_reviews(candidate, {item["id"]: item for item in candidate["evidence"]}, required=True)
+
+
+@pytest.mark.parametrize("risk", ["routine", "substantial", "crucial", "terminal"])
+@pytest.mark.parametrize("lenses", [["   "], ["correctness", "   "]])
+def test_review_requires_non_blank_lenses_at_every_tier(risk, lenses):
+    module = load_validator()
+    candidate = fixture("research")
+    candidate["risk_tier"] = risk
+    candidate["reviews"][1]["lenses"] = lenses
+    with pytest.raises(module.Invalid, match="review 1 requires non-blank lenses"):
+        module._validate_reviews(
+            candidate, {item["id"]: item for item in candidate["evidence"]},
+            required=risk != "routine",
+        )
+
+
+def test_repeated_pass_by_same_reviewer_is_not_independent():
+    module = load_validator()
+    candidate = fixture("research")
+    candidate["reviews"][1]["reviewer_id"] = candidate["reviews"][0]["reviewer_id"]
+    with pytest.raises(module.Invalid, match="distinct reviewer_id"):
+        module._validate_reviews(
+            candidate, {item["id"]: item for item in candidate["evidence"]}, required=True,
+        )
 
 
 def test_review_ladder_accepts_targeted_lenses_without_whole_change_leg():
@@ -842,7 +876,7 @@ def test_terminal_review_ladder_requires_adversarial_pressure_not_fixed_provider
         )
 
 
-def test_same_family_other_primary_review_is_blocked():
+def test_same_family_legacy_role_needs_a_recorded_blocker():
     module = load_validator()
     candidate = fixture("research")
     candidate["chair_family"] = "openai"
@@ -852,7 +886,8 @@ def test_same_family_other_primary_review_is_blocked():
     other_primary["adapter"] = targeted["adapter"]
     other_primary["model"] = targeted["model"]
     other_primary["evidence_id"] = targeted["evidence_id"]
-    with pytest.raises(module.Invalid, match="distinct primary family"):
+    candidate["reviews"] = [targeted, other_primary]
+    with pytest.raises(module.Invalid, match="cross-family coverage or a recorded blocker"):
         module.validate(candidate, ROOT)
 
 
@@ -871,7 +906,7 @@ def test_crucial_review_ladder_blocks_with_no_distinct_family_or_recorded_skip()
     candidate["reviews"] = [
         review for review in candidate["reviews"] if review["role"] != "distinct-family"
     ]
-    with pytest.raises(module.Invalid, match="distinct-family review or recorded skip"):
+    with pytest.raises(module.Invalid, match="two non-chair families or a recorded blocker"):
         module._validate_reviews(
             candidate,
             {item["id"]: item for item in candidate["evidence"]},
@@ -887,7 +922,7 @@ def test_terminal_review_ladder_blocks_with_no_distinct_family_or_recorded_skip(
         review for review in candidate["reviews"] if review["role"] != "distinct-family"
     ]
     candidate["reviews"][0]["lenses"] = ["correctness", "reliability", "adversarial"]
-    with pytest.raises(module.Invalid, match="distinct-family review or recorded skip"):
+    with pytest.raises(module.Invalid, match="two non-chair families or a recorded blocker"):
         module._validate_reviews(
             candidate,
             {item["id"]: item for item in candidate["evidence"]},
@@ -1572,3 +1607,165 @@ def test_pass_output_binds_resolved_product_root(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert f"(product_root={product_copy.resolve()})" in result.stdout
+
+
+def evidence_acceptance(candidate, basis="checks-and-review"):
+    candidate["human_gates"]["acceptance"] = {
+        "status": "not-required", "approver": "", "evidence": "",
+    }
+    if basis == "project-landing":
+        landing = copy.deepcopy(next(item for item in candidate["evidence"] if item["kind"] == "deterministic"))
+        landing.update(id="landing", gate="project-landing")
+        candidate["evidence"].append(landing)
+    candidate["delivery_acceptance"] = {
+        "basis": basis,
+        "evidence_ids": [item["id"] for item in candidate["evidence"]
+                         if item["kind"] in {"deterministic", "judgement"}],
+    }
+    return candidate
+
+
+def test_checks_and_review_acceptance_does_not_claim_human_approval():
+    candidate = evidence_acceptance(fixture())
+    load_validator().validate(candidate, ROOT)
+    assert candidate["human_gates"]["acceptance"]["status"] == "not-required"
+
+
+@pytest.mark.parametrize("basis", ["checks-and-review", "project-landing", "user"])
+@pytest.mark.parametrize("gate", [
+    "deterministic", "judgement", "review", "profile", "security", "measures",
+    "assurance", "high-stakes",
+])
+def test_every_acceptance_basis_retains_assurance_checks(basis, gate, tmp_path):
+    module = load_validator()
+    candidate = fixture("agent-product" if gate == "assurance" else "software",
+                        tmp_path if gate == "assurance" else None)
+    if basis != "user":
+        evidence_acceptance(candidate, basis)
+    else:
+        candidate["delivery_acceptance"] = {
+            "basis": "user", "evidence_ids": [item["id"] for item in candidate["evidence"]
+                                                if item["kind"] in {"deterministic", "judgement"}] + ["acceptance-approval"],
+        }
+    if gate == "assurance":
+        load(REFERENCE_EVALUATION_PATH, "acceptance_materialiser").materialise_reference_run(candidate, tmp_path, ROOT)
+    if gate in {"deterministic", "judgement"}:
+        candidate["evidence"] = [item for item in candidate["evidence"] if item["kind"] != gate]
+    elif gate == "review":
+        candidate["reviews"] = []
+    elif gate == "profile":
+        next(item for item in candidate["evidence"] if item["gate"] == "tests")["gate"] = "focused-tests"
+    elif gate == "security":
+        candidate["security"]["status"] = "pending"
+    elif gate == "measures":
+        candidate["measures"]["outcome"] = []
+    elif gate == "assurance":
+        candidate["assurance"]["evaluations"] = []
+    else:
+        candidate["high_stakes"] = True
+        candidate["high_stakes_controls"] = None
+    messages = {
+        "deterministic": "profile gate", "judgement": "profile gate",
+        "review": "review requires", "profile": "profile gate",
+        "security": "passing security", "measures": "requires outcome measures",
+        "assurance": "stochastic assurance requires evaluations", "high-stakes": "high_stakes_controls",
+    }
+    with pytest.raises(module.Invalid, match=messages[gate]):
+        module.validate(candidate, ROOT, workspace_root=tmp_path, verify_hashes=gate == "assurance")
+
+
+@pytest.mark.parametrize("basis", ["checks-and-review", "project-landing"])
+@pytest.mark.parametrize("requirement", ["terminal", "scope"])
+def test_nonhuman_acceptance_cannot_replace_required_user_approval(basis, requirement):
+    candidate = evidence_acceptance(fixture(), basis)
+    if requirement == "terminal":
+        at_risk_tier(candidate, "terminal")
+    else:
+        candidate["intent"]["requires_user_acceptance"] = True
+    module = load_validator()
+    with pytest.raises(module.Invalid, match="explicit human acceptance"):
+        module.validate(candidate, ROOT)
+
+
+@pytest.mark.parametrize("acceptance", [
+    {"basis": "invented", "evidence_ids": ["tests"]},
+    {"basis": "checks-and-review", "evidence_ids": []},
+    {"basis": "checks-and-review", "evidence_ids": ["missing"]},
+    {"basis": "checks-and-review", "evidence_ids": ["intent-approval"]},
+    {"basis": "checks-and-review", "evidence_ids": ["tests"]},
+    {"basis": "user", "evidence_ids": ["tests"]},
+    {"basis": "project-landing", "evidence_ids": ["tests"]},
+])
+def test_acceptance_requires_matching_passing_evidence(acceptance):
+    candidate = evidence_acceptance(fixture())
+    candidate["delivery_acceptance"] = acceptance
+    module = load_validator()
+    with pytest.raises(module.Invalid, match="acceptance"):
+        module.validate(candidate, ROOT)
+
+
+@pytest.mark.parametrize("basis", ["checks-and-review", "project-landing", "user"])
+@pytest.mark.parametrize("profile", ["software", "research", "analysis", "document", "agent-product"])
+def test_reference_acceptance_bases_pass_with_live_bound_evidence(basis, profile, tmp_path):
+    references = load(REFERENCE_RUNS_PATH, "acceptance_references")
+    candidate = references.make_reference_run(profile, ROOT, acceptance_basis=basis)
+    load(REFERENCE_EVALUATION_PATH, "acceptance_reference_materialiser").materialise_reference_run(candidate, tmp_path, ROOT)
+    load_validator().validate(candidate, ROOT, workspace_root=tmp_path, verify_hashes=True)
+    assert candidate["delivery_acceptance"]["basis"] == basis
+    assert candidate["human_gates"]["acceptance"]["status"] == ("approved" if basis == "user" else "pending")
+
+
+def test_scope_acceptance_requirement_cannot_use_a_non_boolean_flag():
+    candidate = evidence_acceptance(fixture())
+    candidate["intent"]["requires_user_acceptance"] = "true"
+    module = load_validator()
+    with pytest.raises(module.Invalid, match="requires_user_acceptance"):
+        module.validate(candidate, ROOT)
+
+
+@pytest.mark.parametrize("basis", ["checks-and-review", "project-landing"])
+def test_nonhuman_acceptance_keeps_separate_release_evidence(basis):
+    candidate = evidence_acceptance(fixture(), basis)
+    candidate["human_gates"]["release"] = {"status": "approved", "approver": "owner", "evidence": "release-approval"}
+    candidate["observation"] = {"status": "not_applicable", "reason": "local-only reference"}
+    module = load_validator()
+    module.validate(candidate, ROOT)
+    candidate["human_gates"]["release"]["evidence"] = "tests"
+    with pytest.raises(module.Invalid, match="human release"):
+        module.validate(candidate, ROOT)
+
+
+@pytest.mark.parametrize("gate", [[], None, "approved"])
+def test_malformed_human_acceptance_is_an_invalid_receipt(gate):
+    candidate = at_risk_tier(evidence_acceptance(fixture()), "terminal")
+    candidate["human_gates"]["acceptance"] = gate
+    module = load_validator()
+    with pytest.raises(module.Invalid, match="human_gates.acceptance"):
+        module.validate(candidate, ROOT)
+
+
+def test_user_acceptance_record_binds_checks_review_and_the_human_decision():
+    candidate = fixture()
+    candidate["delivery_acceptance"] = {"basis": "user", "evidence_ids": ["acceptance-approval"]}
+    module = load_validator()
+    with pytest.raises(module.Invalid, match="acceptance must bind profile"):
+        module.validate(candidate, ROOT)
+
+
+def test_project_landing_basis_cannot_relabel_checks_without_landing_evidence():
+    candidate = evidence_acceptance(fixture())
+    candidate["delivery_acceptance"]["basis"] = "project-landing"
+    module = load_validator()
+    with pytest.raises(module.Invalid, match="project landing acceptance requires bound landing evidence"):
+        module.validate(candidate, ROOT)
+
+
+@pytest.mark.parametrize("requirement", ["terminal", "scope"])
+def test_required_user_acceptance_passes_with_bound_human_evidence(requirement):
+    references = load(REFERENCE_RUNS_PATH, "required_user_reference")
+    candidate = references.make_reference_run("software", ROOT, acceptance_basis="user")
+    if requirement == "terminal":
+        at_risk_tier(candidate, "terminal")
+    else:
+        candidate["intent"]["requires_user_acceptance"] = True
+    load_validator().validate(candidate, ROOT)

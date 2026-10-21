@@ -282,7 +282,33 @@ def candidates(plan, policy=None, catalogue=None, confidential=False):
     return answer
 
 
+_QUOTA = None
+
+
+def _provider_quota():
+    """The product's provider quota module, or None; routing never fails on quota."""
+    global _QUOTA
+    if _QUOTA is None:
+        product = Path(os.environ.get("AGENT_FABRIC_PRODUCT_ROOT") or Path(__file__).resolve().parents[3])
+        try:
+            spec = importlib.util.spec_from_file_location("provenant_provider_quota", product / "scripts/provider_quota.py")
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _QUOTA = module
+        except Exception:  # noqa: BLE001 - quota is advisory input to routing
+            _QUOTA = False
+    return _QUOTA or None
+
+
 def cooling(adapter, model, records=None):
-    records = read_cooldowns() if records is None else records
+    if records is None:
+        records = read_cooldowns()
+        quota = _provider_quota()
+        try:
+            # Cached provider readings only: an exhausted window cools until reset, and
+            # a newer reading with headroom drops a stale usage cooldown.
+            records = quota.apply_to_cooldowns(records) if quota else records
+        except Exception:  # noqa: BLE001 - quota is advisory input to routing
+            pass
     model = registered_model(adapter, model)
     return records.get(adapter + "/" + model) or records.get(adapter + "/*")

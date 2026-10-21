@@ -1,8 +1,7 @@
 /** Small presentation boundary. Python owns execution digests. */
 import { existsSync, readdirSync, statSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
-import { homedir } from "node:os";
-import type { CatalogueSnapshot } from "./catalogue.js";
+import { activeCooldowns, type CatalogueSnapshot } from "./catalogue.js";
 import type { Message } from "./store.js";
 import { databasePath } from "./identity.js";
 
@@ -172,21 +171,13 @@ export function mailboxView(row: Message, peek: boolean) {
   };
 }
 export function adapterView(snapshot: CatalogueSnapshot, detail?: string) {
-  let cooldowns: Record<string, any> = {};
-  try {
-    const path = process.env.FABRIC_COOLDOWNS_PATH ||
-      join(process.env.AGENT_FABRIC_STATE_ROOT || join(homedir(), ".local/state/agent-harness/fabric"), "cooldowns.json");
-    const value = JSON.parse(readFileSync(path, "utf8"));
-    cooldowns = value.cooldowns ?? value.entries ?? value;
-  } catch {
-    /* Optional cache. */
-  }
+  const cooldowns = activeCooldowns();
   const adapters = snapshot.adapters.map((adapter) => {
     const binary: Record<string, string> = { cursor: "cursor-agent", kiro: "kiro-cli", agy: "agy" };
     const installed = (process.env.PATH ?? "")
       .split(":")
       .some((dir) => existsSync(join(dir, binary[adapter.name] ?? adapter.name)));
-    const cooling = Object.values(cooldowns).filter(
+    const cooling = cooldowns.filter(
       (c) => c?.adapter === adapter.name && Date.parse(c.cooling_until) > Date.now(),
     );
     return `${adapter.name} ${installed ? "ok auth?" : "cli missing"} ${adapter.models.join("|")} default=${adapter.aliases.workhorse?.[0] ?? "-"} ro=${adapter.read_only_guarantee ?? "unknown"} write=${adapter.write_modes?.length ? "yes" : "no"}${

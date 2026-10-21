@@ -16,8 +16,14 @@ issues are disabled.
 | Ready | Accepted with bounded scope, authority and acceptance evidence. |
 | In progress | An owner is executing the accepted work. |
 | In review | The pull request, checks or independent review is active. |
-| Awaiting user | Machine work is ready but a user decision or acceptance remains. |
+| Awaiting user | A user decision remains, including explicit acceptance for terminal work or approved scope. |
 | Done | The item is integrated, or closed with its terminal reason recorded. |
+
+Delivery acceptance is met by objective checks and tier-required review. The
+chair reports the outcome and the user may still reject it. Explicit user
+acceptance is required only for `terminal` work or when the approved scope
+asks for it. A project may name its landing gate as acceptance; this does not
+grant merge or promotion authority.
 
 ## Triage
 
@@ -32,7 +38,7 @@ issues are disabled.
      `Backlog`.
    - **Duplicate:** link the canonical item; set `Done` and close as not planned.
 3. Agents may triage only inside their granted authority. A spec, one-way-door
-   choice, final acceptance or release decision moves to `Awaiting user`; an
+   choice, required explicit acceptance or release decision moves to `Awaiting user`; an
    agent never infers it. User-originated items follow the same evidence and
    scope checks.
 
@@ -168,7 +174,7 @@ effort or session document owns it. Ownership of each transition:
 | `Backlog` to `Ready`, `Done` or unchanged | Triage: user, or an agent inside granted authority | The triage result is recorded in an issue comment |
 | `Ready` to `In progress` | Implementing agent | Work on the accepted scope starts |
 | `In progress` to `In review` | Implementing agent | The pull request, exact-head checks or independent review is active |
-| `In review` to `Awaiting user` | Implementing agent | Machine gates pass; a user decision or acceptance remains |
+| `In review` to `Awaiting user` | Implementing agent | Machine gates pass; a required user decision remains |
 | Any later state to `Done` | Merging agent or user; merge auto-closes a `Closes #N` issue | No gate remains; the terminal reason or integrated pull request is recorded |
 
 Move an item with the project CLI. The Status field id is stable for this
@@ -202,11 +208,10 @@ Authority V2 envelope must allowlist `api.github.com` tool egress and grant
 use-without-disclosure of the `github-cli-auth` secret reference; the binder
 never infers those grants from the operator's login.
 
-Merge authority is repo-based. Review pressure follows [`HARNESS.md`](../../HARNESS.md):
-targeted lenses plus the other-primary leg are load-bearing from substantial up;
-crucial work uses a distinct family when available, and terminal work adds
-stronger targeted/adversarial pressure with any skip recorded. This repository is a personal harness, not
-production: by user directive (2026-07-16), repository auto-merge is enabled
+Merge authority is repo-based. Review pressure follows the
+[`HARNESS.md` Review ladder](../../HARNESS.md#review-ladder), including its
+recorded-blocker fallback when cross-family review is unavailable. This
+repository is a personal harness, not production: by user directive (2026-07-16), repository auto-merge is enabled
 and agents merge directly. An agent merges a pull request once it has passed
 its tier's review pressure (routine: chair plus objective checks; substantial+
 uses the canonical ladder on the exact head) and
@@ -326,10 +331,12 @@ Afterwards:
    repository, object and config routing, replacements and grafts, and never
    lazy-fetch missing promisor objects; local PR, CI and review JSON remain
    SHA-256 verified. Do not
-   request acceptance or promotion authority until validation passes. Explicit
-   user acceptance records `human_gates.acceptance` on this receipt. Release
+   request any required user acceptance or promotion authority until validation
+   passes. The current receipt code still requires explicit user acceptance
+   to record `human_gates.acceptance` on this receipt. Release
    records its separate gate against the same exact artifact identity and never
-   reconstructs it.
+   reconstructs it. This code constraint is listed in the
+   [issue #1025](https://github.com/mblauberg/provenant/issues/1025); do not fabricate approval.
 2. Confirm the issue closed (`Closes #N`) or close it with its terminal reason
    recorded, and confirm Status is `Done`.
 3. Prune the merged branch's artefacts. This is the last step of the merge, not

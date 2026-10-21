@@ -2,14 +2,14 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { createRequire } from "node:module";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, rmSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { expect, it } from "vitest";
+import { scratchRoot } from "./helpers/temp-root.js";
 
 function tempRoot(prefix: string) {
   // Project fixtures own their Git roots, so scratch may live in a worktree.
-  return resolve(mkdtempSync(join(tmpdir(), prefix)));
+  return resolve(scratchRoot(prefix));
 }
 
 it.each(["codex", "agy", "claude"])("exposes host list and peer doctor through the %s MCP seat", async (seat) => {
@@ -36,7 +36,7 @@ it.each(["codex", "agy", "claude"])("exposes host list and peer doctor through t
       env: { ...process.env as Record<string, string>, HOME: root,
         AGENT_FABRIC_INSTANCE_ROOT: instance, AGENT_FABRIC_PRODUCT_ROOT: resolve(import.meta.dirname, "../../.."),
         AGENT_FABRIC_STATE_DIRECTORY: join(root, "state"), AGENT_FABRIC_SEAT: seat,
-        AGENT_FABRIC_SSH_PROGRAM: ssh, HARNESS_PYTHON: python },
+        AGENT_FABRIC_SSH_PROGRAM: ssh, HARNESS_PYTHON: python, PROVENANT_HOST_LOCAL_ONLY: "0" },
       stderr: "pipe",
     }));
     expect((await client.listTools()).tools.map((tool) => tool.name)).toContain("fabric_hosts");

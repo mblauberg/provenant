@@ -1,5 +1,11 @@
 # Delivery contract
 
+Delivery acceptance is met by objective checks and tier-required review; the
+chair reports the outcome and the user may still reject it. Explicit user
+acceptance is required only for `terminal` work or when the approved scope
+asks for it. A project may name its landing gate as acceptance. Record the
+acceptance basis separately from human approval.
+
 `RUN.json` with `contract: delivery-run` and `schema_version: 1` is the single
 canonical lifecycle receipt. The profile registry
 declares minimum deterministic and judgement gates; project profiles may add
@@ -8,9 +14,35 @@ in which it did it. `delivery_run_shape.py` declares the field set and its
 types, and both the producer and the validator check it, so an unknown,
 missing or wrong-typed field is refused on write and on read. Progress is read
 from the gates the receipt records: `intent.approval`, `design.status`,
-`authority`, `human_gates.acceptance`, `human_gates.release` and
-`observation.status`. Each gate demands its own evidence; none of them
+`authority`, `delivery_acceptance`, `human_gates.acceptance`,
+`human_gates.release` and `observation.status`. Each gate demands its own evidence; none of them
 certifies an ordering the writer could not prove.
+
+## Acceptance basis
+
+The optional schema-v1 `delivery_acceptance` object has exactly `basis` and
+non-empty, unique `evidence_ids`. Bases are `checks-and-review`,
+`project-landing` and `user`; every linked evidence row must pass. IDs cover
+required profile gates and every passing review; `user` also binds the human
+approval evidence. All bases activate the same profile, review, security, measures, evaluation and
+high-stakes checks and freeze the same bound sections. Legacy receipts with
+approved `human_gates.acceptance` remain valid without the new object.
+
+Use `delivery_receipt.py accept --run-dir <dir> --basis checks-and-review
+--evidence <check-id> --evidence <review-id>` after binding the required evidence.
+The producer validates live hashes before recording acceptance. Project landing
+uses `--basis project-landing` and requires either the verified merged-software
+binding or deterministic `project-landing` evidence. The merge binder's
+`--accept-as-project-landing` option records that basis after binding the exact
+merged evidence when the project names landing as its acceptance gate.
+
+`human_gates.acceptance` still means a human approved, with matching passing
+human evidence. The human evidence producer records basis `user` for new human
+acceptances. Initialise a scope-required user gate with
+`init --requires-user-acceptance`, which records
+`intent.requires_user_acceptance: true`. Terminal and scope-required acceptance
+still demand human approval evidence. Acceptance never supplies release or
+cleanup authority; release, observation and deletion guards remain separate.
 
 ## Repair budget
 
@@ -140,7 +172,7 @@ profile justification.
 ## Merged software binding
 
 After a pull request merges, a software receipt may add the closed
-`software_delivery` binding, but only before human acceptance is recorded. Its
+`software_delivery` binding, but only before delivery acceptance is recorded. Its
 canonical artifact uses new-form `git_revision` (`repository`, `commit`,
 `tree`) with no second archive or per-file digest. Validation applies the exact
 native-object and closed-runner rules above and rejects digest fields on this

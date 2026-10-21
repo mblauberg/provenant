@@ -36,45 +36,104 @@ import context_usage
 import process_info
 
 
-# Home-relative paths a confined provider needs for its own state and sign-in,
-# found by probing each CLI under a deny-home profile (2026-09-24). A "*" suffix
-# also covers siblings sharing the prefix, such as an atomic-rewrite temp file.
+# Home-relative paths a confined provider needs for its own state and sign-in.
+# Initial probes (2026-09-24) were narrowed using name-only layouts for #927:
+# executable/configuration trees stay read-only even alongside mutable state.
+# A "*" suffix covers atomic-rewrite siblings, without granting their children.
+# npm/uv/Corepack caches are redirected into each attempt; never let a lane
+# poison ~/.npm's reusable packages (_cacache, _npx, _prebuilds or _tuf).
+# Keep the Claude startup/config file and all rewrite siblings read-only in every lane.
+READ_ONLY_PROVIDER_CONFIG = (".claude.json",)
+
+NPM_STATE_WRITES = (".npm/_logs",)
+NPM_STATE_FILES = (".npm/_update-notifier-last-checked",)
+AGY_STATE_DIRS = ("annotations", "brain", "conversations", "crashes", "implicit", "knowledge", "log",
+                  "plugin_data", "presence", "scratch")
 CONFINED_STATE = {
     "agy": {
-        "read_write": (".gemini/antigravity-cli", ".gemini/config", ".gemini/oauth_creds.json*"),
+        "home": ".gemini",
+        "read_write": tuple(f".gemini/antigravity-cli/{name}" for name in (*AGY_STATE_DIRS,
+            "antigravity-oauth-token*", "mcp_oauth_tokens.json*",
+            "history.jsonl*")) + (".gemini/oauth_creds.json*",),
+        "write_literal": tuple(f".gemini/antigravity-cli/{name}" for name in (
+            "conversation_summaries.db", "conversation_summaries.db-wal", "conversation_summaries.db-shm",
+            "conversation_summaries.db-journal", "jetbox_summaries_proto.pb", "jetski_state.pbtxt",
+            "last_check.timestamp", "installation_id", "updater/update.lock", "updater/update_status.json",
+            "cache/CHANGELOG.md", "cache/conversation_metadata.json", "cache/default_project_id.txt",
+            "cache/last_conversations.json", "cache/onboarding.json", "cache/projects.json")),
+        "atomic_siblings": True,
+        "prepare_dirs": lambda root, plan: tuple(root / "antigravity-cli" / name
+                                                 for name in (*AGY_STATE_DIRS, "cache", "updater")),
+        # config/projects holds project permission overrides and must also stay read-only.
+        # sidecars schedule unsandboxed commands and are configuration, never runtime state.
+        # plugin_data and the protobuf/knowledge state still need live write evidence.
+        # In particular bin/, builtin/, mcp/, plugins/, skills/ and cache/marketplaces/ are not state grants.
+        "no_symlinks": (".gemini",),
         # Without the keychain file agy falls back to an interactive sign-in and times out.
-        "read": ("Library/Keychains/login.keychain-db",),
+        "read": (".gemini/antigravity-cli", ".gemini/config", ".gemini/oauth_creds.json*",
+                 "Library/Keychains/login.keychain-db"),
     },
     "opencode": {
         "read_write": (".local/share/opencode", ".local/state/opencode", ".cache/opencode"),
         # ~/.opencode is the install script's home and OpenCode v2's legacy global config directory;
         # its config discovery stats it at startup and fails with a 500 when that is denied.
         "read": (".config/opencode", ".opencode"),
+        # Discovery lstats these names in the cwd and every ancestor even with Claude compatibility off.
+        "ancestor_metadata": (".claude", ".codex"),
     },
     "claude": {
-        "read_write": (".claude", ".claude.json*", ".cache/claude", ".npm"),
+        "home": ".claude",
+        "read_write": tuple(f".claude/{name}" for name in (
+            ".credentials.json*", "cache", "debug", "feedback", "file-history", "ide", "jobs",
+            "paste-cache", "sessions", "state", "teams", "telemetry", "uploads",
+            "history.jsonl*", "stats-cache.json*", "mcp-needs-auth-cache.json*", "gh-pr-status-cache.json*",
+            "statusline-lanes.json*")) + (".cache/claude", *NPM_STATE_WRITES),
+        "write_literal": NPM_STATE_FILES,
+        # Project roots also contain auto-loaded memory. Only UUID transcripts/session trees are state;
+        # no root creation/rename grant that could transplant a crafted directory containing memory.
+        "write_regex": (r"projects/[^/]+/[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}"
+                        r"-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}(\.jsonl[^/]*|(/.*)?)",),
+        "prepare_dirs": lambda root, plan: (root / "projects" / _claude_project_dir(root, plan["cwd"]).name,),
+        # Shell snapshots and session-env can be sourced by later shells and stay read-only.
+        # The absent ~/.cache/claude and jobs/ide/state/teams need smoke evidence when quota returns.
+        "no_symlinks": (".claude", ".cache/claude", ".npm"),
+        "read": (".claude", ".claude.json", ".cache/claude", ".npm"),
         # Claude Code keeps its OAuth sign-in in the login keychain; a read-only lane is signed out
         # without it. Only OAuth lanes get it: bare and endpoint lanes sign in with a key.
         "oauth_read": ("Library/Keychains/login.keychain-db",),
     },
     "cursor": {
-        "read_write": (".cursor", ".cache/cursor", ".npm"),
+        "home": ".cursor",
+        "read_write": tuple(f".cursor/{name}" for name in (
+            "chats", "ai-tracking", "plans", "agent-cli-state.json*", "ide_state.json*",
+            "prompt_history.json*", "statsig-cache.json*")) + (".cache/cursor", *NPM_STATE_WRITES),
+        "write_literal": NPM_STATE_FILES,
+        # A project also holds workspace trust, MCP approvals and rules. Its root stays read-only.
+        "write_regex": (r"projects/[^/]+/(agent-transcripts|canvases|terminals)(/.*)?",
+                        r"projects/[^/]+/(worker\.log|worker\.sock|mcp-auth\.json[^/]*|mcp-cache\.json[^/]*)"),
+        "prepare_dirs": lambda root, plan: (root / "projects" /
+                                           re.sub(r"[^A-Za-z0-9]+", "-", str(Path(plan["cwd"]).resolve())).strip("-"),),
+        # cli-config.json, argv.json, mcp.json, hooks and extensions are configuration. The absent
+        # ~/.cache/cursor and projects/plans/ai-tracking need smoke evidence when quota returns.
+        "no_symlinks": (".cursor", ".cache/cursor", ".npm"),
         # cursor-agent keeps its sign-in in the login keychain; a read-only lane is signed out without it.
-        "read": ("Library/Keychains/login.keychain-db",),
+        "read": (".cursor", ".cache/cursor", ".npm", "Library/Keychains/login.keychain-db"),
     },
     "kiro": {
+        "home": ".kiro",
         # kiro-cli keeps its sign-in and refreshed tokens in data.sqlite3, guarded by .refresh.lock,
         # which it opens for writing before reading the token. The rest of its support directory holds
         # shell hooks the user's shell sources and binaries it runs, so stays read-only.
-        "read_write": (".kiro", ".cache/kiro", ".npm"),
+        "read_write": (".cache/kiro", *NPM_STATE_WRITES),
         # SQLite creates and removes these sidecars; each is one file at its own name.
         "write_literal": tuple(f"Library/Application Support/kiro-cli/data.sqlite3-{suffix}"
-                               for suffix in ("wal", "shm", "journal")),
+                               for suffix in ("wal", "shm", "journal")) + NPM_STATE_FILES,
         # Rewritten in place only: a lane cannot swap either for a link its unconfined CLI would follow.
         "write_in_place": ("Library/Application Support/kiro-cli/data.sqlite3",
                            "Library/Application Support/kiro-cli/.refresh.lock"),
         "no_links": ("Library/Application Support/kiro-cli",),
-        "read": ("Library/Application Support/kiro-cli",),
+        "no_symlinks": (".kiro", ".cache/kiro", ".npm"),
+        "read": (".kiro", ".cache/kiro", "Library/Application Support/kiro-cli", ".npm"),
         # Its prompt history spans every project.
         "read_denied": ("Library/Application Support/kiro-cli/history",),
         # Its engine finds its app bundle through the launcher links in ~/.local/bin.
@@ -348,10 +407,19 @@ def _sbpl_filter(path, *, keep_leaf=False, canonical=False):
     text = str(path)
     if text.endswith("*"):
         pattern = text[:-1]
-        regex_metacharacters = set(r'.^$*+?()[]{}|\\"')
-        pattern = "".join("\\" + char if char in regex_metacharacters else char for char in pattern)
+        pattern = _sbpl_regex_escape(pattern)
         return '(regex #"^' + pattern + '[^/]*$")'
     return "(subpath " + _sbpl_string(path, keep_leaf=keep_leaf, canonical=canonical) + ")"
+
+
+def _sbpl_expand_counts(pattern: str) -> str:
+    """Spell out `[class]{n}`: Seatbelt regex has no counted repetition and silently matches nothing."""
+    return re.sub(r"(\[[^\]]+\])\{(\d+)\}", lambda match: match.group(1) * int(match.group(2)), pattern)
+
+
+def _sbpl_regex_escape(value):
+    regex_metacharacters = set(r'.^$*+?()[]{}|\\"')
+    return "".join("\\" + char if char in regex_metacharacters else char for char in value)
 
 
 def _sbpl_rule(action, operations, paths, *, literal=False, keep_leaf=False, canonical=False):
@@ -488,14 +556,20 @@ def codex_writer_shared_paths(cwd, safe_path):
 def os_confinement_profile(plan, search_path=None):
     """Apply the provider's read and write boundary to this attempt.
 
+    Seatbelt checks file-write* on both ends of a hard link, so the write rules also bound `ln`.
     SBPL applies the last matching rule, so each later rule narrows or widens the one before.
     """
     root = Path(plan.get("workspace_root") or plan["cwd"]).expanduser().resolve()
     home = Path.home().resolve()
-    state = CONFINED_STATE.get(plan.get("adapter"), {})
+    state = _provider_state(plan)
     add_dirs = [Path(path) for path in plan.get("applied", {}).get("add_dirs", [])]
     run_dir = Path(plan["run_dir"]) if plan.get("run_dir") else None
     state_writes = _state_paths(home, state.get("read_write", ()))
+    cwd_path = Path(plan["cwd"]).resolve()
+    discovery_metadata = [ancestor / name for ancestor in (cwd_path, *cwd_path.parents)
+                          for name in state.get("ancestor_metadata", ())]
+    # Literal metadata grants must follow protected-path denies, without following a leaf symlink.
+    metadata_grant = _sbpl_rule("allow", "file-read-metadata", discovery_metadata, literal=True, keep_leaf=True)
     if plan.get("mode") == "worktree_write":
         cwd = Path(plan["cwd"])
         git_dirs = {}
@@ -522,7 +596,7 @@ def os_confinement_profile(plan, search_path=None):
         profile = (
             "(version 1)\n(allow default)\n(deny file-write*)\n"
             + _sbpl_rule("allow", "file-write*", allowed)
-            + _sbpl_rule("allow", "file-write*", state_writes, canonical=True)
+            + "".join(rule for rule, _ in _state_write_grants(home, state, ("read_write",)))
             + _sbpl_rule("deny", "file-write*", [common] if common is not None else [])
             + _sbpl_rule("allow", "file-write*", git_allowed, keep_leaf=True)
             + _sbpl_rule("allow", "file-write*", literal_files, literal=True, keep_leaf=True)
@@ -560,9 +634,10 @@ def os_confinement_profile(plan, search_path=None):
                 [cwd, *add_dirs, *([run_dir] if run_dir else []), codex_home]
             )
         profile += _state_write_guards(home, state)
+        profile += _provider_config_write_denies(home)
         profile += _sbpl_rule("deny", "file-write*", plan.get("protected_paths", []))
         profile += _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
-        return profile
+        return profile + metadata_grant
     configured_xdg = Path(os.environ.get("XDG_CONFIG_HOME", "")).expanduser()
     xdg_config_home = configured_xdg if configured_xdg.is_absolute() else home / ".config"
     git_config_files = [home / ".gitconfig", xdg_config_home / "git/config"]
@@ -588,7 +663,7 @@ def os_confinement_profile(plan, search_path=None):
     return (
         "(version 1)\n(allow default)\n(deny file-write*)\n"
         + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), Path("/dev")])
-        + _sbpl_rule("allow", "file-write*", state_writes, canonical=True)
+        + "".join(rule for rule, _ in _state_write_grants(home, state, ("read_write",)))
         + _state_write_guards(home, state)
         + _sbpl_rule("deny", "file-read-data", [home, Path("/private/tmp")])
         + _sbpl_rule("deny", "file-read-data", [root, *add_dirs])
@@ -614,8 +689,31 @@ def os_confinement_profile(plan, search_path=None):
         + _sbpl_rule("deny", "file-read-data", [home / path for path in
                                                 (*EXTRA_DENIED_READS, *state.get("read_denied", ()))])
         + (_claude_session_reads(home, plan) if plan.get("adapter") == "claude" else "")
+        + _provider_config_write_denies(home)
         + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
+        + metadata_grant
     )
+
+
+def _provider_state(plan):
+    """Resolve the provider home once, sharing it between preparation and every state rule.
+
+    A user's home-level dotfiles link is supported; mutable entries below it still cannot move
+    a grant through a link. Keep regexes relative to this same canonical provider home.
+    """
+    state = dict(CONFINED_STATE.get(plan.get("adapter"), {}))
+    relative = state.get("home")
+    if relative:
+        root = Path(plan.setdefault("provider_home", str((Path.home() / relative).resolve())))
+        if root != Path.home().resolve() / relative and credential_path(root):
+            raise PermissionError(f"provider home resolves into a credential store: {root}")
+        state["resolved_home"] = root
+        for key in ("read_write", "write_literal", "write_in_place", "read", "oauth_read",
+                    "read_literal", "read_denied", "no_links", "no_symlinks"):
+            state[key] = tuple(str(root / Path(entry).relative_to(relative))
+                               if Path(entry).is_relative_to(relative) else entry
+                               for entry in state.get(key, ()))
+    return state
 
 
 def _state_paths(home, entries):
@@ -641,17 +739,55 @@ def _state_read_paths(home, entries):
     return [path for path in paths if not (path.is_symlink() and credential_path(path.resolve()))]
 
 
+def _provider_config_write_denies(home):
+    paths = []
+    for relative in READ_ONLY_PROVIDER_CONFIG:
+        path = home / relative
+        # Deny both the link name (including replacement siblings) and its normal read target.
+        paths.extend((str(path) + "*", str(path.resolve()) + "*"))
+    return _sbpl_rule("deny", "file-write*", dict.fromkeys(paths))
+
+
+def _state_write_grants(home, state, keys=("read_write", "write_literal", "write_in_place", "write_regex")):
+    """The profile rules and receipt descriptions of the same canonical provider grants."""
+    grants = []
+    for key in keys:
+        if key == "write_regex":
+            root = state.get("resolved_home", home)
+            paths = ["^" + _sbpl_regex_escape(str(root)) + "/" + _sbpl_expand_counts(pattern) + "$"
+                     for pattern in state.get(key, ())]
+        else:
+            paths = _state_paths(home, state.get(key, ()))
+            if key == "write_literal" and state.get("atomic_siblings"):
+                paths = [*paths, *(str(path) + "*" for path in paths)]
+        for path in paths:
+            value = str(path)
+            regex = key == "write_regex" or value.endswith("*")
+            if key != "write_regex" and value.endswith("*"):
+                value = "^" + _sbpl_regex_escape(value[:-1]) + "[^/]*$"
+            if regex:
+                rule = f'(allow file-write* (regex #"{value}"))\n'
+                description = "regex:" + value
+            else:
+                rule = _sbpl_rule("allow", "file-write*", [path], literal=key != "read_write", canonical=True)
+                description = value
+            grants.append((rule, description))
+    return grants
+
+
 def _state_write_guards(home, state):
     """Rewrite-in-place grants, and no links a lane could plant for the provider's unconfined CLI."""
     in_place = _state_paths(home, state.get("write_in_place", ()))
-    rules = _sbpl_rule("allow", "file-write*", _state_paths(home, state.get("write_literal", ())),
-                       literal=True, canonical=True)
-    rules += _sbpl_rule("allow", "file-write*", in_place, literal=True, canonical=True)
+    rules = "".join(rule for rule, _ in _state_write_grants(
+        home, state, ("write_literal", "write_in_place", "write_regex")))
     rules += _sbpl_rule("deny", "file-write-create file-write-unlink", in_place, literal=True, canonical=True)
     for path in state.get("no_links", ()):
         # Nor a directory or FIFO at a file grant, which would hold or block what the CLI opens.
         rules += (f"(deny file-write-create (require-all {_sbpl_filter(home / path)} (require-any "
                   "(vnode-type SYMLINK) (vnode-type DIRECTORY) (vnode-type FIFO))))\n")
+    for path in state.get("no_symlinks", ()):
+        # Session/cache trees need new directories, unlike the fixed-file Kiro support grants.
+        rules += f"(deny file-write-create (require-all {_sbpl_filter(home / path)} (vnode-type SYMLINK)))\n"
     return rules
 
 
@@ -685,7 +821,8 @@ def _claude_session_reads(home, plan):
                 if session and re.fullmatch(CLAUDE_SESSION_ID, str(session))]
     if not sessions:
         return ""
-    directory = _claude_project_dir(home, plan["cwd"])
+    root = _provider_state(plan).get("resolved_home", home / ".claude")
+    directory = root / "projects" / _claude_project_dir(home, plan["cwd"]).name
     return "(allow file-read-data " + " ".join(
         f"(literal {_sbpl_quote(directory / (session + '.jsonl'))}) (subpath {_sbpl_quote(directory / session)})"
         for session in sessions
@@ -957,12 +1094,36 @@ def _adapter_binary_reads(plan, search_path=None):
     return links, [install]
 
 
+def _prepare_state_directories(plan):
+    """Bootstrap runtime directories and the actual project root before confinement.
+
+    Granting root creation would also permit transplanting hooks or trust/MCP settings there.
+    The provider home is already canonical; refuse links below it and leave existing files alone.
+    """
+    state = _provider_state(plan)
+    root = state.get("resolved_home", Path.home().resolve())
+    prepare = state.get("prepare_dirs")
+    for directory in prepare(root, plan) if prepare else ():
+        root.mkdir(parents=True, exist_ok=True)
+        current = root
+        for part in ("", *directory.relative_to(root).parts):
+            current = current / part
+            try:
+                current.mkdir()
+            except FileExistsError:
+                pass
+            if not stat.S_ISDIR(current.lstat().st_mode):
+                raise PermissionError(f"provider state directory must be a real directory: {current}; "
+                                      "fix: replace the link or file with a directory")
+
+
 def confinement_command(plan, command, search_path=None):
     if plan.get("applied", {}).get("confinement") != "sandbox-exec":
         return list(command)
     sandbox_exec = _sandbox_exec_path()
     if not sandbox_exec:
         raise RuntimeError("sandbox-exec is unavailable for a confined provider launch")
+    _prepare_state_directories(plan)
     return [sandbox_exec, "-p", os_confinement_profile(plan, search_path), *command]
 
 
@@ -1216,10 +1377,7 @@ def build_plan(
         source_codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser().resolve()
         codex_auth_path = source_codex_home / "auth.json"
     if confinement == "sandbox-exec":
-        state = CONFINED_STATE.get(adapter, {})
-        writable_paths = [str(attempt_dir), *(str(Path.home() / path) for path in
-                           (*state.get("read_write", ()), *state.get("write_literal", ()),
-                            *state.get("write_in_place", ()))), "/dev"]
+        writable_paths = [str(attempt_dir), "/dev"]
         if mode == "worktree_write":
             git_paths = ([str(git_private), *(str(git_common / path) for path in
                            GIT_COMMON_WRITE_DIRS + GIT_COMMON_WRITE_FILES)]
@@ -1331,6 +1489,10 @@ def build_plan(
         or os.environ.get("CF_DISPATCH_AGY_SANDBOX", "0") == "1",
         **metadata,
     }
+    if confinement == "sandbox-exec":
+        state = _provider_state(plan)
+        write_boundary["writable_paths"].extend(
+            description for _, description in _state_write_grants(Path.home().resolve(), state))
     context_usage.apply_ceiling(plan, context_ceiling)
     if hasattr(config, "config_policy"):
         plan["applied"]["config"] = config.config_policy(plan)
@@ -1381,6 +1543,7 @@ def error_class(status, signature=None):
         "auth_required": "auth", "model_unavailable": "model_unavailable",
         "timed_out": "timeout", "startup_timeout": "timeout", "stalled": "timeout",
         "permission_blocked": "sandbox_denied",
+        "lost": "provider_error", "cancelled": "cancelled",
     }
     signatures = {
         **classes, "quota_exhausted": "usage_limited", "auth_expired": "auth",
@@ -1487,6 +1650,7 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         "terminal": False,
         "question": None,
     }
+    continues_turn = getattr(config, "continues_turn", lambda event: False)
     events, plain, parts, errors = [], [], [], []
     retry_errors = []
     duplicate_json = False
@@ -1527,6 +1691,9 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         errors.append("invalid agy envelope")
     for event in events:
         kind = event.get("type") or ""
+        if continues_turn(event):
+            parts.clear()
+            result["terminal"] = False
         if not kind and isinstance(event.get("event"), str):
             kind = event["event"]  # agy names the event kind `event`
         if adapter == "kiro" and event.get("jsonrpc") == "2.0":
@@ -1698,11 +1865,9 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         else "".join(plain)
     )
     errors.extend(retry_errors)
-    failure_text = (
-        "\n".join(errors)
-        if errors
-        else stderr
-    )
+    diagnostic_hook = getattr(config, "diagnostics", None)
+    diagnostics, warning_line = diagnostic_hook(stderr) if diagnostic_hook else (stderr, "")
+    failure_text = "\n".join(errors) if errors else diagnostics
     result["failure_text"] = failure_text
     # Permission denials in diagnostics invalidate a claimed success (Agy does this).
     denial = adapter == "agy" and re.search(PERMISSION_DENIAL_PATTERN, stderr, re.I)
@@ -1720,7 +1885,8 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         status = status or (
             "timed_out" if "print-timeout" in failure_text else "failed"
         )
-        result["excerpt"] = failure_text.strip()[:200]
+        result["excerpt"] = ("\n".join(errors).strip() or warning_line or failure_text.strip() or (
+            getattr(config, "EMPTY_FAILURE", "").format(exit_code=exit_code)))[:200]
     elif partial:
         status = "partial"
         result["signature"] = "print_timeout"
@@ -1730,6 +1896,11 @@ def parse_output(adapter, stdout, stderr="", exit_code=0, *, at=None):
         status = "failed"
         result["signature"] = "empty_output"
         result["excerpt"] = ("no assistant text: " + stdout.strip())[:200]
+    if (getattr(config, "EXIT_AFTER_OUTPUT", False) and status == "failed" and result["signature"] is None and exit_code == 1
+            and parts and result["text"].strip() and not errors):
+        status = "ok"
+        result["signature"] = "exit_after_output"
+        result["excerpt"] = (warning_line or f"provider exited {exit_code} after final assistant output")[:200]
     if status == "ok":
         question = re.search(
             r"```(?:[^\n`]*\n)?\s*QUESTION:\s*((?:(?!```).)*?)\s*```\s*\Z", result["text"], re.S
@@ -1936,6 +2107,17 @@ def _signal_name(signum):
         return f"SIG{signum}"  # Intermediate realtime signals have no enum member.
 
 
+def termination_request_matches(request, *, run_token, provider_pid, started_at, signals):
+    """Bind controller intent and time; None opts out of provider PID binding."""
+    return (isinstance(request, dict) and bool(run_token) and request.get("run_token") == run_token
+            and (provider_pid is None or request.get("provider_pid") == provider_pid)
+            and request.get("signal") in signals
+            and request.get("source") in {"run_control", "orphan_reaper", "cancel_requested"}
+            and isinstance(started_at, str) and isinstance(request.get("requested_at"), str)
+            and started_at <= request["requested_at"] <= now()
+            and type(request.get("sender_pid")) is int and request["sender_pid"] > 1)
+
+
 def _termination_request(environment, process, exit_code, started_at, supervisor_signal=None):
     """Optional controller telemetry; waitpid itself never exposes the sender."""
     directory, token = environment.get("PROVENANT_RUN_DIR"), environment.get("PROVENANT_RUN_TOKEN")
@@ -1949,13 +2131,8 @@ def _termination_request(environment, process, exit_code, started_at, supervisor
             if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
                 return {}
             request = json.loads(stream.read(65537))
-        if (isinstance(request, dict) and request.get("run_token") == token
-                and request.get("provider_pid") == process.pid
-                and request.get("signal") == _signal_name(signum)
-                and request.get("source") in {"run_control", "orphan_reaper", "cancel_requested"}
-                and isinstance(request.get("requested_at"), str)
-                and started_at <= request["requested_at"] <= now()
-                and type(request.get("sender_pid")) is int and request["sender_pid"] > 1):
+        if termination_request_matches(request, run_token=token, provider_pid=process.pid,
+                                       started_at=started_at, signals={_signal_name(signum)}):
             return {"termination_source": request["source"], "signal_requester_pid": request["sender_pid"],
                     "signal_requested_at": request["requested_at"]}
     except (OSError, ValueError):
@@ -2916,6 +3093,8 @@ def execute(
     import selectors
     import threading
 
+    adapter_config = profile(plan["adapter"])
+    continues_turn = getattr(adapter_config, "continues_turn", lambda event: False)
     output_path = Path(output_path)
     events_path = Path(events_path or output_path.parent / "events.jsonl")
     stderr_path = Path(stderr_path or output_path.parent / "stderr.log")
@@ -3007,25 +3186,9 @@ def execute(
             ANTHROPIC_AUTH_TOKEN=environment.get(route["endpoint_token_env"], ""),
             ANTHROPIC_API_KEY="",
         )
-    if plan["adapter"] == "opencode":
-        bash_permission = {"*": "allow"} if plan["mode"] == "worktree_write" else {
-            "*": "deny",
-            "provenant-no-shell": "allow",
-        }
-        permission = {
-            "edit": {"*": "allow" if plan["mode"] == "worktree_write" else "deny"},
-            "bash": bash_permission,
-            "question": "deny",
-            "external_directory": {"*": "deny"},
-            "webfetch": "deny" if plan.get("network_requested") is False else "allow",
-        }
-        # The sentinel matches no real command and exists only so Zen declares bash.
-        environment["OPENCODE_CONFIG_CONTENT"] = json.dumps({"permission": permission})
-        # v2 scans ~/.claude for Claude Code skills and CLAUDE.md, which the confinement profile
-        # denies (startup fails with EPERM) and which holds the owner's private instructions.
-        # Autoupdate and the filewatcher have no place in a supervised, sandboxed run.
-        environment.update(OPENCODE_DISABLE_CLAUDE_CODE="1", OPENCODE_DISABLE_CLAUDE_CODE_SKILLS="1",
-                           OPENCODE_DISABLE_AUTOUPDATE="1", OPENCODE_DISABLE_FILEWATCHER="1")
+    adapter_environment = getattr(adapter_config, "environment", None)
+    if adapter_environment:
+        environment.update(adapter_environment(plan))
     warning_text = "\n".join(plan["warnings"])
     if warning_text:
         print(warning_text, file=sys.stderr, flush=True)
@@ -3101,6 +3264,10 @@ def execute(
             if not isinstance(event, dict):
                 continue
             meter.observe(event)
+            if continues_turn(event):
+                text_chunks.clear()
+                text_size = 0
+                terminal_at = None
             parsed_line = parse_output(plan["adapter"], line.decode(errors="replace"))
             for key in ("session_id", "observed_model", "reset_at", "retry_after"):
                 if parsed_line.get(key) is not None:
@@ -3398,7 +3565,9 @@ def execute(
         # state observed before the diagnostic tail rolled over.
         if terminal_text is not None or text_chunks:
             text = terminal_text if terminal_text is not None else b"\n".join(text_chunks).decode(errors="replace")
-            recovered = parse_output(plan["adapter"], json.dumps({"type": "result", "result": text}), stderr,
+            text_event = getattr(adapter_config, "text_event", lambda text: {"type": "result", "result": text})
+            recovered_event = text_event(text)
+            recovered = parse_output(plan["adapter"], json.dumps(recovered_event), stderr,
                                      0 if terminal_grace_break and terminal_at is not None and exit_code is not None and exit_code < 0 else (exit_code or 0))
             for key in ("text", "status", "question", "signature", "excerpt"):
                 parsed[key] = recovered[key]
@@ -3442,6 +3611,8 @@ def execute(
     parsed["session_id"] = session
     observed, source = _observed_model(plan, parsed, environment)
     warnings = list(plan["warnings"])
+    if parsed["signature"] == "exit_after_output":
+        warnings.append(parsed["excerpt"])
     reported = {}
     if plan["adapter"] == "claude":
         # init.model is the request; Claude may answer with another model.
@@ -3599,7 +3770,9 @@ def execute(
             parsed["excerpt"] = "provider error: " + parsed["excerpt"]
     output = (
         parsed["text"]
-        if status in {"ok", "input_required", "partial", "quarantined"} or quarantine and parsed["status"] == "ok"
+        if (status in {"ok", "input_required", "partial", "quarantined"}
+            or quarantine and parsed["status"] == "ok"
+            or plan["adapter"] == "opencode" and terminal_at is not None and parsed["text"].strip())
         else (parsed["text"] + "\n" if parsed["text"] else "")
         + stderr
         + ("\n" + parsed["excerpt"] if parsed["excerpt"] else "")
@@ -3689,7 +3862,8 @@ def execute(
         **({"landable": False, "quarantine": quarantine} if quarantine else {}),
         "reason": parsed["excerpt"],
         "exit": 0
-        if status in {"ok", "input_required", "quarantined"} and terminal_at is not None
+        if status in {"ok", "input_required", "quarantined"}
+        and (terminal_at is not None or parsed["signature"] == "exit_after_output")
         else exit_code,
         "output_path": output_value,
         "output_digest": digest_value,

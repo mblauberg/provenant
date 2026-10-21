@@ -1,5 +1,11 @@
 # Lifecycle routing baseline
 
+Acceptance policy note (21 October 2026): historical references below to a
+mandatory final human gate describe the policy at the recorded revision.
+Current delivery acceptance is met by objective checks and tier-required review;
+explicit user acceptance applies only to `terminal` work or approved scope.
+A project may name its landing gate as acceptance. External-action gates remain.
+
 Date: 10 July 2026
 Dataset: `evals/lifecycle-routing.yaml`
 Base revision: `d864ca3d8c6144cab2e0a632f2cb877b9baa4c50`

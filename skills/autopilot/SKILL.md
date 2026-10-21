@@ -9,10 +9,13 @@ A thin autonomous **conductor** for large missions: autonomous scoping,
 self-drive, durable cross-session state/recovery, and a hard user `STOP`
 gate. It owns no lifecycle machinery itself; it delegates every bounded wave
 to `orchestrate` and every decision/software change to `implement`/`deliver`,
-then records the durable pointers.
+then records the durable pointers. Delivery acceptance follows objective checks
+and tier-required review; explicit user acceptance is required only for
+`terminal` work or when the approved scope asks for it. A project may name
+landing as acceptance. One-way doors and external actions retain their user gates.
 
 It is **higher-authority** than `orchestrate`'s pre-scoped
-autonomous-implementation mode, which stops at a user PR gate; autopilot
+autonomous-implementation mode, which follows the project's landing gate; autopilot
 keeps going until a user writes `STATUS: STOP`.
 
 Claude Code and Codex are equal operators; Codex operators read
@@ -26,7 +29,7 @@ clean exit; otherwise use a lighter-weight skill.
 
 ## Bootstrap
 
-1. Run `scripts/bootstrap-autopilot.sh <mission-id>`, fill every CONFIG KNOB,
+1. Run `scripts/bootstrap-autopilot.py <mission-id>`, fill every CONFIG KNOB,
    then rerun to substitute/validate. See
    [state-contract.md](references/state-contract.md) for the file set and
    `.agent-run/runs/<mission-run-dir>/` location.

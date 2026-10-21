@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tomllib
@@ -25,6 +26,38 @@ UNMANAGED_WORKFLOW_BYTES = (
 def instance_root_for(home: Path) -> Path:
     """Where `install-harness` seeds the instance under a scratch HOME."""
     return home / ".agents"
+
+
+@pytest.mark.parametrize("existing", ["new", "directory", "symlink"])
+def test_otel_installer_restricts_storage_permissions(tmp_path, existing):
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    swiftc = tools / "swiftc"
+    swiftc.write_text('#!/bin/bash\nwhile [[ "$1" != -o ]]; do shift; done\ntouch "$2"\n')
+    swiftc.chmod(0o755)
+    state = tmp_path / "state"
+    directory = state / "otel"
+    if existing == "directory":
+        directory.mkdir(parents=True, mode=0o755)
+    elif existing == "symlink":
+        state.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir(mode=0o755)
+        directory.symlink_to(outside, target_is_directory=True)
+    result = subprocess.run(
+        ["bash", "-c", 'umask 022; exec "$1"', "bash", str(ROOT / "scripts/install-otel-collector")],
+        env={**os.environ, "HOME": str(tmp_path), "AGENT_FABRIC_STATE_ROOT": str(state),
+             "PROVENANT_BIN_DIR": str(tmp_path / "bin"), "PROVENANT_OTEL_NO_LAUNCHCTL": "1",
+             "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"},
+        text=True, capture_output=True, timeout=5,
+    )
+    if existing == "symlink":
+        assert result.returncode != 0
+        assert stat.S_IMODE(outside.stat().st_mode) == 0o755
+        assert list(outside.iterdir()) == []
+        return
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
 
 
 def run(platform: str, home: Path, *arguments: str, bash=None, **extra_env):
@@ -171,7 +204,11 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     # stays product-shipped (ADR 0019).
     assert str(instance_root_for(tmp_path) / "AGENTS.md") in content
     assert str(ROOT / "HARNESS.md") in content
-    registration = json.loads((tmp_path / ".claude.json").read_text())["mcpServers"]["fabric"]
+    registration = json.loads((config / ".claude.json").read_text())["mcpServers"]["fabric"]
+    assert not (tmp_path / ".claude.json").exists()
+    assert not (config / "settings.json").exists()
+    assert not (config / "settings.json").is_symlink()
+    assert not (tmp_path / ".claude/settings.json").exists()
     assert registration["command"] == str(command)
     assert registration["env"] == {
         "AGENT_FABRIC_CLIENT_LABEL": "claude",
@@ -188,6 +225,8 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     )
     assert second.returncode == 0, second.stderr
     assert instructions.exists()
+    assert not (config / "settings.json").exists()
+    assert not (config / "settings.json").is_symlink()
 
 
 def test_installs_codex_skills_and_global_instructions(tmp_path):
@@ -1088,21 +1127,42 @@ def test_claude_install_retires_duplicate_agents_symlink(tmp_path):
     assert "duplicate instructions retired" in result.stdout
 
 
-def test_claude_install_retires_duplicate_agents_file(tmp_path):
+@pytest.mark.parametrize(
+    "user_content",
+    ["# Instance instructions\n", "# User instructions\nKeep this custom rule.\n"],
+)
+def test_claude_install_preserves_and_reports_regular_agents_file(tmp_path, user_content):
     config = tmp_path / "claude-config"
     config.mkdir()
     instance_agents = tmp_path / ".agents/AGENTS.md"
     instance_agents.parent.mkdir(parents=True)
     instance_agents.write_text("# Instance instructions\n")
     duplicate_agents = config / "AGENTS.md"
-    duplicate_agents.write_text("# Instance instructions\n")
+    duplicate_agents.write_text(user_content)
 
     result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
 
     assert result.returncode == 0, result.stderr
     assert (config / "CLAUDE.md").exists()
-    assert not duplicate_agents.exists()
-    assert "duplicate instructions retired" in result.stdout
+    assert duplicate_agents.read_text() == user_content
+    assert "duplicate instructions preserved" in result.stderr
+
+
+def test_claude_install_preserves_symlink_to_product_doctrine(tmp_path):
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    instance_agents = tmp_path / ".agents/AGENTS.md"
+    instance_agents.parent.mkdir(parents=True)
+    instance_agents.write_text("# Instance instructions\n")
+    duplicate_agents = config / "AGENTS.md"
+    duplicate_agents.symlink_to(ROOT / "AGENTS.md")
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert duplicate_agents.is_symlink()
+    assert duplicate_agents.resolve() == (ROOT / "AGENTS.md").resolve()
+    assert "duplicate instructions retired" not in result.stdout
 
 
 def test_claude_install_keeps_doctrine_when_config_is_instance_root(tmp_path):
@@ -1637,7 +1697,10 @@ def test_all_primary_install_configures_both_surfaces_and_publishes_once(tmp_pat
     assert (tmp_path / "claude/CLAUDE.md").read_text().find(str(product / "HARNESS.md")) >= 0
     assert (tmp_path / "codex/AGENTS.md").read_text().find(str(product / "HARNESS.md")) >= 0
 
-    claude_mcp = json.loads((tmp_path / "home/.claude.json").read_text())
+    claude_mcp = json.loads((tmp_path / "claude/.claude.json").read_text())
+    assert not (tmp_path / "home/.claude.json").exists()
+    assert not (tmp_path / "claude/settings.json").exists()
+    assert not (tmp_path / "claude/settings.json").is_symlink()
     codex_config = tomllib.loads((tmp_path / "codex/config.toml").read_text())
     assert claude_mcp["mcpServers"]["fabric"]["command"] == str(tmp_path / "bin/provenant")
     assert codex_config["mcp_servers"]["fabric"]["command"] == str(tmp_path / "bin/provenant")
@@ -1841,3 +1904,103 @@ def test_a_genuinely_foreign_instructions_file_is_still_refused(tmp_path):
 
     assert result.returncode == 3
     assert instructions.read_bytes() == UNMANAGED_BYTES
+
+
+def test_claude_custom_config_dir_targets_mcp_config_and_links_settings(tmp_path):
+    config = tmp_path / "claude-config"
+    default_settings = tmp_path / ".claude/settings.json"
+    default_settings.parent.mkdir(parents=True, exist_ok=True)
+    default_settings.write_text('{"autoCompactWindow": 200000}\n')
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert (config / ".claude.json").is_file()
+    assert not (tmp_path / ".claude.json").exists()
+    assert (config / "settings.json").is_symlink()
+    assert os.readlink(config / "settings.json") == str(default_settings)
+    assert (config / "settings.json").read_text() == '{"autoCompactWindow": 200000}\n'
+
+
+def test_claude_custom_config_dir_skips_settings_link_when_default_does_not_exist(tmp_path):
+    config = tmp_path / "claude-config"
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert not (config / "settings.json").exists()
+    assert not (config / "settings.json").is_symlink()
+    assert "claude settings link skipped: target is not a regular file:" in result.stdout
+
+
+def test_claude_relative_config_dir_is_rejected(tmp_path):
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR="relative/claude")
+
+    assert result.returncode == 3
+    assert "CLAUDE_CONFIG_DIR must be absolute" in result.stderr
+
+
+def test_claude_config_dir_with_trailing_slash_matching_default_does_not_link(tmp_path):
+    default_dir = tmp_path / ".claude"
+    default_settings = default_dir / "settings.json"
+    default_settings.parent.mkdir(parents=True, exist_ok=True)
+    default_settings.write_text('{"env": "default"}\n')
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=f"{default_dir}/")
+
+    assert result.returncode == 0, result.stderr
+    assert not (default_dir / "settings.json").is_symlink()
+
+
+def test_claude_custom_config_dir_with_trailing_slash_links_settings(tmp_path):
+    config = tmp_path / "claude-config"
+    default_settings = tmp_path / ".claude/settings.json"
+    default_settings.parent.mkdir(parents=True, exist_ok=True)
+    default_settings.write_text('{"autoCompactWindow": 200000}\n')
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=f"{config}/")
+
+    assert result.returncode == 0, result.stderr
+    assert (config / "settings.json").is_symlink()
+    assert os.readlink(config / "settings.json") == str(default_settings)
+
+
+def test_claude_custom_config_dir_preserves_existing_settings_and_never_overwrites(tmp_path):
+    config = tmp_path / "claude-config"
+    config.mkdir()
+    settings = config / "settings.json"
+    settings.write_text('{"user": "preserved"}\n')
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert not settings.is_symlink()
+    assert settings.read_text() == '{"user": "preserved"}\n'
+
+
+def test_claude_custom_config_dir_respects_explicit_claude_mcp_config(tmp_path):
+    config = tmp_path / "claude-config"
+    explicit_mcp = tmp_path / "custom-claude-mcp.json"
+
+    result = run(
+        "claude",
+        tmp_path,
+        CLAUDE_CONFIG_DIR=str(config),
+        CLAUDE_MCP_CONFIG=str(explicit_mcp),
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert explicit_mcp.is_file()
+    assert not (config / ".claude.json").exists()
+    assert not (tmp_path / ".claude.json").exists()
+    registration = json.loads(explicit_mcp.read_text())["mcpServers"]["fabric"]
+    assert registration["env"]["AGENT_FABRIC_CLIENT_LABEL"] == "claude"
+
+
+def test_claude_default_config_dir_does_not_link_settings_to_itself(tmp_path):
+    result = run("claude", tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    assert not (tmp_path / ".claude/settings.json").is_symlink()
+    assert not (tmp_path / ".claude/settings.json").exists()
+    assert (tmp_path / ".claude.json").is_file()

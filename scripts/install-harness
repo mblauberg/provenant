@@ -18,9 +18,10 @@ fi
 PLATFORM=""
 MCP_CLIENTS="primary"
 REFRESH_ROUTING=0
+OTEL_COLLECTOR=""
 
 usage() {
-  echo "usage: install-harness --platform <claude|codex|opencode|agy|cursor|kiro|all> [--mcp-clients <primary|all>] [--refresh-routing]" >&2
+  echo "usage: install-harness --platform <claude|codex|opencode|agy|cursor|kiro|all> [--mcp-clients <primary|all>] [--refresh-routing] [--otel-collector|--uninstall-otel-collector]" >&2
 }
 
 while [[ $# -gt 0 ]]; do
@@ -39,6 +40,8 @@ while [[ $# -gt 0 ]]; do
       REFRESH_ROUTING=1
       shift
       ;;
+    --otel-collector) OTEL_COLLECTOR=install; shift ;;
+    --uninstall-otel-collector) OTEL_COLLECTOR=uninstall; shift ;;
     -h|--help)
       usage
       exit 0
@@ -49,6 +52,10 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ "$OTEL_COLLECTOR" == uninstall && -z "$PLATFORM" ]]; then
+  exec "$PRODUCT_ROOT/scripts/install-otel-collector" uninstall
+fi
 
 case "$PLATFORM" in
   claude|codex|opencode|agy|cursor|kiro) primary_platforms=("$PLATFORM") ;;
@@ -88,6 +95,15 @@ case "$instance_root" in
   /*) ;;
   *) echo "Agent Fabric instance root must be absolute" >&2; exit 3 ;;
 esac
+if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+  case "$CLAUDE_CONFIG_DIR" in
+    /*) ;;
+    *) echo "CLAUDE_CONFIG_DIR must be absolute" >&2; exit 3 ;;
+  esac
+  while [[ "$CLAUDE_CONFIG_DIR" != "/" && "$CLAUDE_CONFIG_DIR" == */ ]]; do
+    CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR%/}"
+  done
+fi
 
 # shellcheck source=scripts/lib/harness-python.sh
 source "$PRODUCT_ROOT/scripts/lib/harness-python.sh"
@@ -353,7 +369,7 @@ provenant_preflight="$(
 )" || exit 3
 
 state_directory="${AGENT_FABRIC_STATE_DIRECTORY:-$HOME/.local/state/agent-harness/fabric}"
-claude_mcp_config="${CLAUDE_MCP_CONFIG:-$HOME/.claude.json}"
+claude_mcp_config="${CLAUDE_MCP_CONFIG:-${CLAUDE_CONFIG_DIR:-$HOME}/.claude.json}"
 codex_mcp_config="${CODEX_MCP_CONFIG:-${CODEX_HOME:-$HOME/.codex}/config.toml}"
 mcp_args=(
   --agents-home "$PRODUCT_ROOT"
@@ -477,6 +493,18 @@ install_primary() {
     --custom-source "$instance_root/custom-skills" || return $?
   if [[ "$PLATFORM" == "claude" ]]; then
     run_stdlib "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows" || return $?
+    local default_claude="${HOME%/}/.claude"
+    if [[ -n "${CLAUDE_CONFIG_DIR:-}" && "${CLAUDE_CONFIG_DIR%/}" != "$default_claude" ]]; then
+      local settings_link="$platform_home/settings.json"
+      local default_settings="$default_claude/settings.json"
+      if [[ ! -e "$settings_link" && ! -L "$settings_link" ]]; then
+        if [[ -f "$default_settings" ]]; then
+          ln -s "$default_settings" "$settings_link" || return $?
+        else
+          echo "claude settings link skipped: target is not a regular file: $default_settings"
+        fi
+      fi
+    fi
   fi
   if [[ "$PLATFORM" == "codex" ]]; then
     run_stdlib "$PRODUCT_ROOT/scripts/configure-codex-skill-overrides.py" \
@@ -487,17 +515,17 @@ install_primary() {
   # Claude Code reads CLAUDE.md and also injects AGENTS.md if present;
   # ensure only CLAUDE.md exists to prevent duplicate instruction injection.
   # Never retire the doctrine itself (config dir shared with an instance or
-  # product root) or an AGENTS.md that CLAUDE.md links through.
+  # product root), a user-owned regular file, or an AGENTS.md that CLAUDE.md
+  # links through.
   if [[ "$PLATFORM" == "claude" ]] \
     && ! [[ "$platform_home" -ef "$instance_root" || "$platform_home" -ef "$PRODUCT_ROOT" ]] \
     && ! link_chain_passes_through "$instructions" "$platform_home/AGENTS.md"; then
     local duplicate_agents="$platform_home/AGENTS.md"
-    if [[ -L "$duplicate_agents" && ( "$duplicate_agents" -ef "$instance_doctrine" || "$duplicate_agents" -ef "$PRODUCT_ROOT/AGENTS.md" ) ]]; then
+    if [[ -L "$duplicate_agents" && "$duplicate_agents" -ef "$instance_doctrine" ]]; then
       rm -f "$duplicate_agents"
       echo "duplicate instructions retired=$duplicate_agents"
-    elif [[ -f "$duplicate_agents" ]] && cmp -s "$duplicate_agents" "$instance_doctrine"; then
-      rm -f "$duplicate_agents"
-      echo "duplicate instructions retired=$duplicate_agents"
+    elif [[ -f "$duplicate_agents" ]]; then
+      echo "duplicate instructions preserved=$duplicate_agents; review and remove manually if appropriate" >&2
     fi
   fi
 
@@ -565,3 +593,7 @@ done
 # checked above, so a failed install preserves the previous product selection.
 run_stdlib "$PRODUCT_ROOT/scripts/write-product-root-pointer.py" "$instance_root" "$PRODUCT_ROOT"
 echo "product root pointer updated=$instance_root/.agent-fabric/product-root.json"
+
+if [[ -n "$OTEL_COLLECTOR" ]]; then
+  "$PRODUCT_ROOT/scripts/install-otel-collector" "$OTEL_COLLECTOR"
+fi

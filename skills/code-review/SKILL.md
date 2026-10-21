@@ -24,12 +24,13 @@ resulting system, not the changed lines alone.
    is mandatory; add security/privacy, data/concurrency,
    performance/reliability, tests, architecture, readability, UX/accessibility
    or operations only when activated by the dependency cone.
-5. For substantial+ or wide-surface work, use independent targeted agents with
-   distinct primary lenses and deliberate overlap on the riskiest invariant.
-   `orchestrate` adds the other-primary leg (or its recorded same-family
-   fallback) and distinct-family review pressure from `HARNESS.md`. Then
-   run an anonymised claim challenge and a fresh reduction.
-   Never rank prose or majority-vote findings.
+5. Select independent reviewers under the `HARNESS.md` Review ladder;
+   `orchestrate` owns their families and scheduling. Routine work needs only
+   the chair and objective checks. Substantial work adds one independent
+   review; crucial work needs two with distinct lenses, and terminal adds an
+   adversarial lens. Record blockers when the required cross-family coverage
+   is unavailable. For a council review, challenge anonymised claims before
+   a fresh reduction. Never rank prose or majority-vote findings.
 6. Review the design delta. Look for duplicated ownership, scattered flags,
    nullable modes, casts hiding invariants, thin wrappers, parallel flows, and
    abstractions adding concepts without reducing complexity.

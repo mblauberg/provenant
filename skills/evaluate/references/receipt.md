@@ -2,7 +2,9 @@
 
 `EVALUATION.json` is evidence, not a second delivery lifecycle. It records a
 machine evaluation from frozen plan to result. The enclosing `delivery-run`
-owns final user acceptance and release.
+owns delivery acceptance and separate release authority. Acceptance requires
+objective checks and the review required by the tier; explicit user acceptance
+is required only for `terminal` work or when the approved scope asks for it.
 
 ## Status
 

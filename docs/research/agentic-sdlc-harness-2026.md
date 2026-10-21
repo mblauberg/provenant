@@ -1,5 +1,11 @@
 # Agentic delivery harness: 2026 research synthesis
 
+Acceptance policy note (21 October 2026): historical human-acceptance wording
+below records the research baseline. Current delivery acceptance is met by
+objective checks and tier-required review; explicit user acceptance applies
+only to `terminal` work or approved scope. A project may name its landing gate
+as acceptance. External-action gates remain.
+
 Status: Research baseline
 Evidence cut-off: 10 July 2026
 Review cadence: quarterly, and whenever a primary model, provider interface or

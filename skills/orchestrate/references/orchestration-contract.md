@@ -52,8 +52,11 @@ role names) live only in the adapters.
 - **Escalation boundary** — high-risk, uncertain, or protected-path items
   exit as patches/findings with rationale; they are never auto-applied and
   never silently dropped.
-- **User gate** — the run stops at explicit user approval, acceptance, or
-  merge; a gate-adjacent stage ends there and records `awaiting-user` rather
+- **User gate** — the run stops for scope/spec approval, one-way doors,
+  risk-tier downgrades, unresolved acceptance criteria, destructive or
+  irreversible actions, external communications and production promotion.
+  Final acceptance needs an explicit user only for `terminal` work or when
+  the approved scope asks for it; a project may name landing as acceptance; a gate-adjacent stage ends there and records `awaiting-user` rather
   than blocking on it. How a given substrate enacts that stop-and-record (live
   process pause, script termination, new invocation to resume) is adapter
   mechanics, not part of this contract — see `dynamic-workflows.md` and

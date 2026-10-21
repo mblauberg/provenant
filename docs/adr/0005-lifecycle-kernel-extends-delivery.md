@@ -1,5 +1,11 @@
 # ADR 0005 — Lifecycle kernel extends the delivery kernel
 
+Acceptance policy note (21 October 2026): historical references below to a
+mandatory final human gate describe the policy at the recorded revision.
+Current delivery acceptance is met by objective checks and tier-required review;
+explicit user acceptance applies only to `terminal` work or approved scope.
+A project may name its landing gate as acceptance. External-action gates remain.
+
 **Status:** Accepted 2026-07-13; amended 2026-07-15
 
 > **Current-reader note.** "Project kernel decisions into Fabric" below is

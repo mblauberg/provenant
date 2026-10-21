@@ -63,7 +63,7 @@ User decisions, 2026-10-21:
 | D10 | DeepSeek V4.1 Flash sits between junior and senior and is the default first writer for bounded work on its free tier. On a free rate limit, work moves to other free non-training models, then to subscription juniors; Go paid comes last and is paced, so free rate limits do not drain it. |
 | D11 | Confidentiality keys on whether a model trains on prompts, not on price. DeepSeek V4.1 Flash and GLM-5.3 Flash free on OpenCode do not train and are eligible for confidential work. |
 | D12 | Astra is a blind-spot challenger on crucial and terminal calls only: about five times Sol's cost for a marginal gain, but good at finding what others miss. |
-| D13 | Harness changes proposed by retrospect are merged by agents when routine, because the user scoped them first; the user reviews the rest. |
+| D13 | Harness changes proposed by retrospect are merged by agents when routine, because the user scoped them first; the rest receive tier-required agent review. Explicit user acceptance applies only to `terminal` work or approved scope; one-way doors and external actions remain user gates. |
 | D14 | Research is under-used. Research lanes get network access and the chair dispatches them proactively whenever a decision rests on external facts. |
 | D15 | R9 rolls out without a separate probe phase; the box's own deny tests ship in the same change. |
 
@@ -219,7 +219,10 @@ escalates; a cancelled writer exits before its replacement starts.
 4. Each Claude account has its own `CLAUDE_CONFIG_DIR` with subscription
    login. `ANTHROPIC_API_KEY` is unset for these launches, because the adapter
    otherwise prefers it (`adapters/claude.py:15-24`). Skills, settings, hooks
-   and agents are shared from one source.
+   and agents are shared from one source. The shared `settings.json` link means
+   settings changed in one account apply to all linked accounts, and if Claude
+   replaces the link with a regular file the accounts stop sharing; rerunning the
+   installer does not overwrite it.
 5. Cross-account resume needs proof before any store migration: a
    demonstration that a session started under one config directory resumes
    under the other, with a backup and rollback of both `projects/` stores.
@@ -262,8 +265,10 @@ without user action; `/usage` checks fall below one per active day.
    classifier versions used for user-message categories, so any figure can be
    regenerated.
 3. Cost is allocated per receipt from listed prices (cached and uncached
-   separately). An accepted task is one whose PR merged or whose deliverable
-   the user accepted; Fabric `ok` alone is an execution outcome, not
+   separately). An accepted task is one whose project landing gate passed, or whose
+   objective checks and tier-required review met the approved criteria.
+   Explicit user acceptance is required only for `terminal` work or when
+   the approved scope asks for it; Fabric `ok` alone is an execution outcome, not
    acceptance.
 4. `provenant stats` reports at least: cost per accepted task, cold-cache
    rewrites, tier and role mix, first-pass gate rate, escalations, user
@@ -328,8 +333,13 @@ role-agent first-call context below the general-purpose p50.
    records assumptions and continues between gates, and `drain` posts a
    digest at intervals. In every stance the constitutional user gates hold:
    specs and one-way doors, risk-tier downgrades, unresolved acceptance
-   criteria, final acceptance, production promotion, destructive or
-   irreversible actions and external communications. Merging follows each
+   criteria, production promotion, destructive or
+   irreversible actions and external communications. Final acceptance is met
+   by objective checks and tier-required review; explicit user acceptance is
+   required only for `terminal` work or when the approved scope asks for it.
+   The chair reports the outcome and the user may reject it. A project may
+   name landing as acceptance (Sealle: landing is acceptance for everything).
+   Merging follows each
    repository's own authority and workflow (Sealle: the lander through
    `tools/process/land.mjs`).
 

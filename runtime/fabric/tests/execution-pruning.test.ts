@@ -1,15 +1,11 @@
 import { execFileSync, spawn } from "node:child_process";
-import {
-  chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  rmSync, utimesSync, writeFileSync,
-} from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
 
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { cancelActiveExecutions, dispatchConfiguredProvider } from "../src/execution.js";
 import {
@@ -21,7 +17,9 @@ import {
   retentionHours,
   reapOrphanedRuns,
 } from "../src/run-registry.js";
+import * as runRegistry from "../src/run-registry.js";
 import type { Identity } from "../src/identity.js";
+import { scratchRoot } from "./helpers/temp-root.js";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(testDirectory, "../../..");
@@ -101,7 +99,7 @@ async function startSleepingRun(prompt: string): Promise<Record<string, unknown>
 }
 
 beforeEach(() => {
-  temporaryDirectory = mkdtempSync(join(tmpdir(), "fabric-lifecycle-"));
+  temporaryDirectory = scratchRoot("fabric-lifecycle-");
   workspace = join(temporaryDirectory, "workspace");
   mkdirSync(workspace, { recursive: true });
   product = buildProduct(temporaryDirectory);
@@ -128,6 +126,30 @@ afterEach(async () => {
 });
 
 describe("run directory pruning", () => {
+  it("refuses fixture dispatch before reaping or pruning the run root", async () => {
+    const reap = vi.spyOn(runRegistry, "reapOrphanedRuns");
+    const prune = vi.spyOn(runRegistry, "pruneDispatchRuns");
+    const outsideTempWorkspace = mkdtempSync(join(repositoryRoot, ".fixture-refusal-"));
+    try {
+      execFileSync("git", ["init", "--quiet", outsideTempWorkspace]);
+      const refused = await dispatchConfiguredProvider(
+        { adapter: "codex", model: "fixture", prompt: "must be refused", wait_seconds: 0 },
+        { ...identity, project: outsideTempWorkspace, cwd: outsideTempWorkspace },
+        new AbortController().signal,
+        ownerEnvironment,
+      );
+
+      expect(refused.status).toBe("rejected");
+      expect(refused.fix).toMatch(/fixture run refused/u);
+      expect(reap).not.toHaveBeenCalled();
+      expect(prune).not.toHaveBeenCalled();
+    } finally {
+      reap.mockRestore();
+      prune.mockRestore();
+      rmSync(outsideTempWorkspace, { recursive: true, force: true });
+    }
+  });
+
   it("does not report interrupted while a finalising owner is alive", async () => {
     const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-finalising-abcdef");
     const attemptDir = join(runDir, "tasks", "task-1", "attempt-001");
@@ -329,10 +351,10 @@ it('closes an abandoned active receipt as interrupted and keeps protected runs',
  expect(pruneDispatchRuns(workspace,{AGENT_FABRIC_RUN_RETENTION_HOURS:'0'})).not.toContain(run);
 });
 
-it('prunes a startup_timeout v2 run like other failures after fourteen days', () => {
+it.each(['startup_timeout', 'lost'])('prunes a %s v2 run like other failures after fourteen days', (status) => {
  const dir=join(workspace,'.agent-run/runs/20260915-1010-dispatch-silent-abcdef');mkdirSync(dir,{recursive:true});
  const when=new Date(Date.now()-15*86400000);
- const receipt=join(dir,'RUN_RECEIPT.json');writeFileSync(receipt,JSON.stringify({status:'startup_timeout'}));utimesSync(receipt,when,when);utimesSync(dir,when,when);
+ const receipt=join(dir,'RUN_RECEIPT.json');writeFileSync(receipt,JSON.stringify({status}));utimesSync(receipt,when,when);utimesSync(dir,when,when);
  expect(pruneDispatchRuns(workspace,{})).toHaveLength(1);expect(existsSync(dir)).toBe(false);
 });
 
