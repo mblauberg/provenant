@@ -898,8 +898,33 @@ def test_help_is_concise_and_names_existing_command_owners(tmp_path):
 
     assert result.returncode == 0
     assert result.stderr == ""
+    assert len(result.stdout.encode("utf-8")) <= 1024
     assert "route" in result.stdout and "scripts/model-route" in result.stdout
     assert "fabric ...     runtime/fabric/bin/fabric ..." in result.stdout
     assert "batch ...      skills/orchestrate/scripts/batch_run.py ..." in result.stdout
     assert "project ..." not in result.stdout
-    assert "Fabric derives who you are from the working directory" in result.stdout
+    # One line per command: each line starting with 2 spaces has no internal newlines
+    command_lines = [line for line in result.stdout.splitlines() if line.startswith("  ")]
+    assert len(command_lines) >= 15
+
+
+def test_help_command_gives_detail_for_specific_command(tmp_path):
+    _, command = make_checkout(tmp_path)
+
+    fabric_help = invoke(command, "help", "fabric", cwd=tmp_path)
+    assert fabric_help.returncode == 0
+    assert "Fabric derives who you are from the working directory" in fabric_help.stdout
+
+    dispatch_help = invoke(command, "help", "dispatch", cwd=tmp_path)
+    assert dispatch_help.returncode == 0
+    assert "skills/orchestrate/scripts/dispatch_run.py" in dispatch_help.stdout
+
+    lanes_help = invoke(command, "help", "lanes", cwd=tmp_path)
+    assert lanes_help.returncode == 0
+    assert "--all" in lanes_help.stdout
+    assert "--wait" in lanes_help.stdout
+
+    unknown_help = invoke(command, "help", "nonexistent", cwd=tmp_path)
+    assert unknown_help.returncode == 2
+    assert "usage: provenant " in unknown_help.stderr
+
