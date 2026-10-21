@@ -15,21 +15,41 @@ import re
 import subprocess
 
 
-MIN_SAMPLE = 10  # a side with fewer lanes or usage rows than this is inconclusive, never a win
+MIN_SAMPLE = 10  # a metric with fewer observations than this on either side is inconclusive, never a win
 NOISE_SHARE = 0.10  # relative change at or below this is within noise (non-proportion metrics)
-SYNC_LIMIT = 200  # merged PRs read per `changes --sync`; later runs continue from the newest marker
+SYNC_LIMIT = 200  # merged PRs per `gh pr list` page; a full page splits its time range
+SYNC_PAGES = 25  # `gh` queries per `changes --sync`; the next run resumes the pending ranges
+SYNC_FLOOR = '2008-01-01T00:00:00Z'  # first sweep starts before any GitHub merge
+SYNC_OVERLAP = timedelta(days=1)  # each sweep re-reads a day to absorb clock skew
 DEFAULT_WINDOW = '7d'
-# metric, sample field, higher is better
+# metric, unit of the observations that produce it, higher is better
 METRICS = (('success_rate', 'lanes', True), ('retries_per_lane', 'lanes', False),
-           ('latency_p50_s', 'lanes', False), ('cache_read_share', 'usage_rows', True),
-           ('cost_usd_per_day', 'usage_rows', False), ('limit_events_per_day', 'usage_rows', False))
+           ('latency_p50_s', 'timed attempts', False), ('cache_read_share', 'complete rows', True),
+           ('cost_usd_per_day', 'priced rows', False), ('limit_events_per_day', 'usage rows', False))
 SHORT = {'success_rate': 'ok', 'retries_per_lane': 'retries', 'latency_p50_s': 'p50_s',
          'cache_read_share': 'cache', 'cost_usd_per_day': 'usd/d', 'limit_events_per_day': 'limits/d'}
 MARK = {'improved': '+', 'regressed': '-', 'within_noise': '=', 'inconclusive': '?'}
+BUDGET = 4000  # rendered text stays under 4 KB of UTF-8, notice included
 
 
 class ChangeError(ValueError):
     """A change-marker or comparison failure whose message is safe to print."""
+
+
+def fit(lines, budget=BUDGET):
+    """Keep whole lines in order within a UTF-8 byte budget, ending with what was cut."""
+    lines = [line.encode()[:budget // 4].decode(errors='ignore') for line in lines]  # one line never fills the page
+    if sum(len(line.encode()) + 1 for line in lines) <= budget:
+        return '\n'.join(lines)
+    reserve = len(f'{len(lines)} lines omitted to fit 4 KB; use --json'.encode())
+    kept, used = [], 0
+    for line in lines:
+        size = len(line.encode()) + 1
+        if used + size + reserve > budget:
+            break
+        kept.append(line)
+        used += size
+    return '\n'.join([*kept, f'{len(lines) - len(kept)} lines omitted to fit 4 KB; use --json'])
 
 
 def iso(stamp):
@@ -47,13 +67,12 @@ def git_environment():
     return {key: value for key, value in os.environ.items() if not key.startswith('GIT_')}
 
 
-def sync(telemetry, db):
-    """Upsert merged PRs from `gh`, continuing from the newest synced merge date."""
-    latest = db.execute("SELECT MAX(merged_at) FROM changes WHERE kind='pr'").fetchone()[0]
+def merged_between(telemetry, low, high):
+    """One `gh` page of PRs merged in [low, high]; search results are not ordered by merge time."""
+    bound = lambda stamp: stamp.replace('Z', '+00:00')
     command = ['gh', 'pr', 'list', '--state', 'merged', '--limit', str(SYNC_LIMIT),
-               '--json', 'number,mergeCommit,mergedAt,title,labels']
-    if latest:
-        command += ['--search', f'merged:>={latest[:10]}']
+               '--json', 'number,mergeCommit,mergedAt,title,labels',
+               '--search', f'merged:>={bound(low)} merged:<={bound(high)}']
     try:
         result = subprocess.run(command, cwd=telemetry.PRODUCT_ROOT, capture_output=True, text=True,
                                 timeout=60, env=git_environment())
@@ -61,8 +80,62 @@ def sync(telemetry, db):
         raise ChangeError(f'gh pr list could not run ({type(exc).__name__}); install and authenticate gh') from None
     if result.returncode:
         raise ChangeError(f'gh pr list failed with exit {result.returncode}; run `gh auth status`')
+    try:
+        rows = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        raise ChangeError('gh pr list returned malformed JSON') from None
+    return rows if isinstance(rows, list) else []
+
+
+def sync(telemetry, db):
+    """Upsert merged PRs from `gh`; returns (new markers, time ranges left for the next run).
+
+    A sweep covers [last completed sweep minus a day, sweep start]. A page that
+    reaches SYNC_LIMIT may have dropped PRs, so its range splits in half and both
+    halves are read again. Pending ranges are durable, so a sweep capped at
+    SYNC_PAGES queries, or interrupted by a `gh` failure, resumes where it stopped.
+    """
+    row = db.execute("SELECT value FROM meta WHERE key='changes_sync'").fetchone()
+    state = json.loads(row[0]) if row else {}
+    if not state.get('pending'):
+        through = state.get('through')
+        low = iso(telemetry.since_time(through) - SYNC_OVERLAP) if through else SYNC_FLOOR
+        high = iso(telemetry.since_time(telemetry.now()).replace(microsecond=0))
+        state = {'through': through, 'sweep': high, 'pending': [[low, high]]}
+    added = queries = 0
+    while state['pending'] and queries < SYNC_PAGES:
+        low, high = state['pending'][-1]
+        rows = merged_between(telemetry, low, high)
+        queries += 1
+        state['pending'].pop()
+        added += upsert(telemetry, db, rows)
+        first, last = telemetry.since_time(low), telemetry.since_time(high)
+        if len(rows) >= SYNC_LIMIT and last - first > timedelta(seconds=1):
+            middle = split(telemetry, rows, first, last)
+            state['pending'] += [[low, iso(middle)], [iso(middle), high]]  # newer half is read first
+        save_sync(db, state)
+    if not state['pending']:
+        state = {'through': state['sweep'], 'pending': []}
+        save_sync(db, state)
+    return added, len(state['pending'])
+
+
+def split(telemetry, rows, first, last):
+    """Median merge time of a full page, so both halves shrink; the time midpoint if that is a bound."""
+    stamps = sorted(telemetry.since_time(row['mergedAt']).replace(microsecond=0) for row in rows
+                    if isinstance(row, dict) and isinstance(row.get('mergedAt'), str))
+    middle = stamps[len(stamps) // 2] if stamps else first
+    return middle if first < middle < last else (first + (last - first) // 2).replace(microsecond=0)
+
+
+def save_sync(db, state):
+    db.execute("INSERT OR REPLACE INTO meta VALUES ('changes_sync', ?)", (json.dumps(state),))
+    db.commit()
+
+
+def upsert(telemetry, db, rows):
     added = 0
-    for row in json.loads(result.stdout):
+    for row in rows:
         if not isinstance(row, dict) or not isinstance(row.get('number'), int) or not row.get('mergedAt'):
             continue
         labels = sorted(label.get('name') for label in row.get('labels') or () if isinstance(label, dict))
@@ -73,7 +146,6 @@ def sync(telemetry, db):
                    (f"pr:{row['number']}", 'pr', row['number'], (row.get('mergeCommit') or {}).get('oid'),
                     iso(telemetry.since_time(row['mergedAt'])), row.get('title'), json.dumps(labels),
                     telemetry.now()))
-    db.commit()
     return added
 
 
@@ -137,7 +209,13 @@ def side(telemetry, db, start, end):
     days = max((end - start).total_seconds() / 86400, 1 / 24)
     limits = sum(row['events'] for row in report['limits_per_day'])
     cost = usage.get('known_cost_usd')
-    return {'start': iso(start), 'end': iso(end), 'lanes': lanes, 'usage_rows': rows,
+    priced = rows - usage.get('missing_cost_rows', 0)
+    # Each metric's n counts only the observations that produced it.
+    samples = {'success_rate': lanes, 'retries_per_lane': lanes,
+               'latency_p50_s': lane.get('latency_samples', 0),
+               'cache_read_share': usage.get('cache_share_rows', 0),
+               'cost_usd_per_day': priced, 'limit_events_per_day': rows}
+    return {'start': iso(start), 'end': iso(end), 'lanes': lanes, 'usage_rows': rows, 'samples': samples,
             'inconclusive': lanes < MIN_SAMPLE,
             'success_rate': lane.get('success_rate'),
             'retries_per_lane': round(lane['retries'] / lanes, 3) if lanes else None,
@@ -147,15 +225,18 @@ def side(telemetry, db, start, end):
             'cost_usd': round(cost, 4) if cost is not None else None,
             'cost_usd_per_day': round(cost / days, 4) if rows else None,
             'missing_cost_rows': usage.get('missing_cost_rows', 0),
+            'cost_coverage': round(priced / rows, 3) if rows else None,
             'limit_events': limits, 'limit_events_per_day': round(limits / days, 3),
             'error_classes': lane.get('error_classes', {})}
 
 
-def verdict(name, before, after, sample):
-    nb, na = before[sample], after[sample]
+def verdict(name, before, after):
+    nb, na = before['samples'][name], after['samples'][name]
     b, a = before[name], after[name]
     if nb < MIN_SAMPLE or na < MIN_SAMPLE or b is None or a is None:
         return 'inconclusive'
+    if name == 'cost_usd_per_day' and (before['missing_cost_rows'] or after['missing_cost_rows']):
+        return 'inconclusive'  # unpriced rows would read as free
     if name == 'success_rate':  # two-proportion check: within two standard errors is noise
         pooled = (b * nb + a * na) / (nb + na)
         noise = abs(a - b) <= 2 * math.sqrt(pooled * (1 - pooled) * (1 / nb + 1 / na))
@@ -185,9 +266,9 @@ def compare_at(telemetry, db, change, at, span=DEFAULT_WINDOW, *, now=None):
             'change': change, 'pivot': iso(at), 'window': span, 'min_sample': MIN_SAMPLE,
             'before': before, 'after': after,
             'metrics': [{'metric': name, 'before': before[name], 'after': after[name],
-                         'n_before': before[sample], 'n_after': after[sample], 'sample': sample,
-                         'verdict': verdict(name, before, after, sample)}
-                        for name, sample, _ in METRICS]}
+                         'n_before': before['samples'][name], 'n_after': after['samples'][name],
+                         'sample': unit, 'verdict': verdict(name, before, after)}
+                        for name, unit, _ in METRICS]}
 
 
 def show(value, name=''):
@@ -210,14 +291,14 @@ def render_compare(telemetry, report):
     lines += telemetry.bounded_table(
         ('metric', 'before', 'after', 'n', 'verdict'),
         [(row['metric'], show(row['before'], row['metric']), show(row['after'], row['metric']),
-          f"{row['n_before']}/{row['n_after']} {'lanes' if row['sample'] == 'lanes' else 'rows'}", row['verdict'])
+          f"{row['n_before']}/{row['n_after']} {row['sample']}", row['verdict'])
          for row in report['metrics']], always=('before', 'after'))
     errors = Counter(report['after']['error_classes']).most_common(5)
     if errors:
         lines.append('after errors: ' + ', '.join(f'{name}:{count}' for name, count in errors))
     lines.append(f'Verdicts need n>={MIN_SAMPLE} on both sides; smaller samples are inconclusive, '
                  'never a win. Full report: --json')
-    return '\n'.join(lines)
+    return fit(lines)
 
 
 def attention(db, since):
@@ -280,7 +361,7 @@ def render_retro(telemetry, report, limit):
             compared = change['compare']
             marker = f"#{change['pr']}" if change['pr'] is not None else 'marker'
             lines.append(f"  {marker} {change['merged_at'][:10]} {(change['title'] or '')[:40]}: "
-                         f"{summary} n={compared['before']['lanes']}/{compared['after']['lanes']}")
+                         f"{summary} lanes={compared['before']['lanes']}/{compared['after']['lanes']}")
         if len(report['changes']) > limit:
             lines.append(f"  {len(report['changes']) - limit} more; use --json")
     else:
@@ -302,7 +383,7 @@ def render_retro(telemetry, report, limit):
         lines.append('Events: ' + ' '.join(f'{kind}:{count}' for kind, count in kinds[:limit])
                      + (f' (+{len(kinds) - limit} kinds)' if len(kinds) > limit else ''))
     lines.append('Detail: provenant stats --compare <PR#|rev|date> [--window 7d] [--json]')
-    return '\n'.join(lines)
+    return fit(lines)
 
 
 def render_changes(telemetry, rows, limit):
@@ -312,4 +393,4 @@ def render_changes(telemetry, rows, limit):
           ','.join(row['labels'])[:30] or None, (row['title'] or '')[:60]) for row in rows], limit)
     if len(rows) > limit:
         lines.append(f'{len(rows) - limit} more; use --json')
-    return '\n'.join(lines if rows else ['No change markers; run `provenant telemetry changes --sync`.'])
+    return fit(lines if rows else ['No change markers; run `provenant telemetry changes --sync`.'])

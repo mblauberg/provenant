@@ -120,7 +120,9 @@ ts, session, run_id, lane, task_id, pr, provider, account, model, harness_rev,
 attrs, source_ref)`. `kind` is a free string, so a new kind needs no migration;
 `EVENT_KINDS` in `scripts/telemetry.py` names the known ones. `source_ref`
 points back to the receipt, snapshot, transcript or collector line
-(`path@offset`). Event IDs are content keys, so re-ingest adds nothing.
+(`path@offset`). Event IDs hash the content key with a random ledger id kept
+in `meta`, never the host name, so re-ingest adds nothing even after a
+`local_host` rename.
 
 | Kind | From |
 |---|---|
@@ -150,9 +152,13 @@ provenant stats --compare 1050 [--window 7d] [--json]
 provenant retro [--since DATE] [--window 7d] [--json]
 ```
 
-`changes --sync` runs `gh pr list --state merged` in the product checkout,
-at most 200 PRs per run, and continues from the newest synced merge date.
-It stores PR number, merge commit, merge time, title and labels; a re-sync
+`changes --sync` runs `gh pr list --state merged` in the product checkout over
+a merge-time range: the first sweep from 2008, later sweeps from a day before
+the last completed sweep. Search results are not ordered by merge time, so a
+page that reaches the 200-row limit splits its range at the median merge time
+and reads both halves. Pending ranges persist in the ledger, so a sweep capped
+at 25 queries, or stopped by a `gh` failure, resumes on the next `--sync`. It
+stores PR number, merge commit, merge time, title and labels; a re-sync
 updates a renamed PR in place. Manual markers record a label and time.
 
 `--compare` pivots on a PR's merge time, a merge commit or other revision's
@@ -160,9 +166,13 @@ commit time, or an ISO date, and compares the window before with the window
 after (default 7 days each; the after side stops at now). Metrics come from
 the same row selection as stats: lane success rate, retries per lane, p50
 wall time, cache-read share, known API-equivalent cost per day and limit
-events per day, each with its sample size (lanes or usage rows). A side with
-fewer than 10 (`MIN_SAMPLE` in `scripts/telemetry_changes.py`) is
-`inconclusive`, never a win. Otherwise success rate is `within_noise` when the
+events per day. Each metric's n counts the observations that produce it:
+lanes for success and retries, attempts with a start time for latency, rows
+with every input field for cache share, priced rows for cost and usage rows
+for limits. A metric with n below 10 on either side (`MIN_SAMPLE` in
+`scripts/telemetry_changes.py`) is `inconclusive`, never a win. Cost is also
+`inconclusive` whenever either side has unpriced rows, because those would
+read as free; `cost_coverage` gives the priced share. Otherwise success rate is `within_noise` when the
 difference is within two pooled standard errors, and other metrics when it is
 within 10%; the rest are `improved` or `regressed`.
 
@@ -170,7 +180,8 @@ within 10%; the rest are `improved` or `regressed`.
 change marker in the period with its compare summary, top error classes by
 attempt, and attention proxies already in the ledger (sessions started, lanes
 awaiting input, and OTLP user prompts, tool decisions and active time when the
-collector ran). Text output stays under 4 KB; `--json` is the full report.
+collector ran). Text output of `changes`, `--compare` and `retro` stays under
+4 KB of UTF-8 and says how many lines it omitted; `--json` is the full report.
 
 ## Provider quota
 

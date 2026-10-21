@@ -142,6 +142,8 @@ def connect():
         # Events are additive tables (no version bump, so peers still read this ledger).
         # Re-read the small receipt and snapshot documents once so they backfill events.
         db.execute("DELETE FROM cursors WHERE source IN ('fabric','route_health','cooldowns')")
+        # Transcripts are not re-read: sessions already in usage rows get their event here.
+        backfill_session_events(db)
         db.execute("INSERT INTO meta VALUES ('events_backfill', ?)", (now(),))
     relabel_host(db)
     for source, pattern in patterns().items():
@@ -180,6 +182,10 @@ def put_usage(db, source, event_id, origin_path, **values):
                f'ON CONFLICT(source,event_id,host) DO UPDATE SET {update}{condition}', list(values.values()))
     db.execute('INSERT OR IGNORE INTO usage_files VALUES (?,?,?,?)',
                (source, event_id, values['host'], str(origin_path)))
+    if source != 'fabric' and values.get('session'):
+        put_event(db, 'session.start', (source, values['session']), values.get('timestamp'), str(origin_path),
+                  attrs={'source': source, 'adapter': values.get('adapter')},
+                  **{key: values.get(key) for key in ('session', 'provider', 'account', 'model')})
 
 
 def claude_record(db, row, state, path, offset):
@@ -227,12 +233,22 @@ EVENT_KINDS = {
 EVENT_FIELDS = ('session', 'run_id', 'lane', 'task_id', 'pr', 'provider', 'account', 'model', 'harness_rev')
 
 
+def ledger_id(db):
+    """Stable identity of this ledger; unlike the host label, a relabel never changes it."""
+    row = db.execute("SELECT value FROM meta WHERE key='ledger_id'").fetchone()
+    if row:
+        return row[0]
+    value = os.urandom(16).hex()
+    db.execute("INSERT INTO meta VALUES ('ledger_id', ?)", (value,))
+    return value
+
+
 def put_event(db, kind, key, ts, source_ref, attrs=None, **fields):
     """Append one metadata event; `key` identifies it, so re-ingest never duplicates it."""
     values = {'host': host_id(), 'kind': kind, 'ts': ts, 'source_ref': source_ref,
               'attrs': json.dumps({k: v for k, v in (attrs or {}).items() if v is not None}, sort_keys=True),
               **{name: fields.get(name) for name in EVENT_FIELDS}}
-    values = {'event_id': identity(kind, values['host'], *key), **values}
+    values = {'event_id': identity(kind, ledger_id(db), *key), **values}
     db.execute(f"INSERT OR IGNORE INTO events({','.join(values)}) "
                f"VALUES ({','.join('?' for _ in values)})", list(values.values()))
 
@@ -347,21 +363,16 @@ def otel_record(db, row, state, path, offset):
                               **linked)
 
 
-def derive_session_events(db):
-    """Append `session.start` for sessions first seen in usage rows added since the last ingest."""
-    mark = db.execute("SELECT value FROM meta WHERE key='events_usage_rowid'").fetchone()
-    top = db.execute('SELECT MAX(rowid) FROM usage').fetchone()[0] or 0
-    rows = db.execute(
-        "SELECT source, session, MIN(timestamp) AS ts, host, provider, account, model, adapter, "
-        "(SELECT path FROM usage_files f WHERE f.source=u.source AND f.event_id=u.event_id "
-        "AND f.host=u.host LIMIT 1) AS ref FROM usage u WHERE rowid>? AND rowid<=? "
-        "AND source!='fabric' AND session IS NOT NULL GROUP BY source, session",
-        (int(mark[0]) if mark else 0, top)).fetchall()
-    for row in rows:
+def backfill_session_events(db):
+    """One `session.start` per session already in usage rows; later rows emit it on upsert."""
+    for row in db.execute(
+            "SELECT source, session, MIN(timestamp) AS ts, provider, account, model, adapter, "
+            "(SELECT path FROM usage_files f WHERE f.source=u.source AND f.event_id=u.event_id "
+            "AND f.host=u.host LIMIT 1) AS ref FROM usage u "
+            "WHERE source!='fabric' AND session IS NOT NULL GROUP BY source, session").fetchall():
         put_event(db, 'session.start', (row['source'], row['session']), row['ts'], row['ref'],
                   attrs={'source': row['source'], 'adapter': row['adapter']},
                   **{key: row[key] for key in ('session', 'provider', 'account', 'model')})
-    db.execute("INSERT OR REPLACE INTO meta VALUES ('events_usage_rowid', ?)", (str(top),))
 
 
 def clear_file(db, source, path):
@@ -606,8 +617,6 @@ def ingest(db):
         db.execute('UPDATE sources SET last_ingest=?,status=?,row_count=? WHERE source=?',
                    (now(), status, count, source))
         db.commit()
-    with db:
-        derive_session_events(db)
     return [dict(row) for row in db.execute('SELECT * FROM sources ORDER BY source')]
 
 
@@ -814,6 +823,7 @@ def outcomes(rows):
                        'success_rate': round(group.get('succeeded', 0) / lanes, 3) if lanes else None,
                        'attempts': group['attempts'], 'retries': group.get('retries', 0),
                        'error_classes': dict(sorted(group['errors'].items())),
+                       'latency_samples': len(group['latency']),
                        'latency_p50_s': percentile(group['latency'], 0.5),
                        'latency_p90_s': percentile(group['latency'], 0.9),
                        'output_tokens_per_s': round(statistics.median(group['speed']), 2) if group['speed'] else None})
@@ -998,6 +1008,7 @@ def changes_owner():
     spec.loader.exec_module(module)
     return module
 
+
 def compact(value):
     if value is None:
         return '-'
@@ -1106,7 +1117,10 @@ def report_changes(db, args):
             text = lambda: owner.render_retro(sys.modules[__name__], report, ROW_LIMIT)
         else:
             if args.sync:
-                owner.sync(sys.modules[__name__], db)
+                _, pending = owner.sync(sys.modules[__name__], db)
+                if pending:
+                    print(f'telemetry: sync paused with {pending} time ranges left; run --sync again',
+                          file=sys.stderr)
             elif args.add:
                 owner.add(sys.modules[__name__], db, args.add, args.at)
             report = owner.changes(db, args.since)

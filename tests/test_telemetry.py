@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import subprocess
+import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -599,7 +600,7 @@ def test_outcomes_group_route_quality_with_retries_errors_latency_and_throughput
         'adapter': 'codex', 'model': 'gpt-6.1-sol', 'effort': 'high', 'task_class': 'review',
         'route': 'workhorse', 'lanes': 2, 'succeeded': 2, 'success_rate': 1.0, 'attempts': 3,
         'retries': 1, 'error_classes': {'provider_timeout': 1},
-        'latency_p50_s': 20.0, 'latency_p90_s': 30.0, 'output_tokens_per_s': 7.5}]
+        'latency_samples': 3, 'latency_p50_s': 20.0, 'latency_p90_s': 30.0, 'output_tokens_per_s': 7.5}]
     table = cli(tmp_path, 'stats').stdout
     assert 'codex/gpt-6.1-sol@high' in table and '100%' in table
 
@@ -928,7 +929,7 @@ def test_events_ledger_is_append_only_metadata_with_harness_revision(tmp_path):
     assert json.loads(api['attrs']) == {'input_tokens': 12, 'model': 'claude-test'}
     assert '@' in api['source_ref'] and api['ts'].startswith('2026-')
     session = events[-1]
-    assert (session['session'], session['ts']) == ('chair', '2026-10-21T01:00:00Z')
+    assert (session['session'], session['ts']) == ('chair', '2026-10-21T02:00:00Z')  # first ingested row
     assert session['source_ref'].endswith('session.jsonl')
     for private in ('PRIVATE_ERROR', 'PRIVATE_MESSAGE', 'PRIVATE_PROMPT', 'PRIVATE_EMAIL'):
         assert private not in dump
@@ -937,7 +938,7 @@ def test_events_ledger_is_append_only_metadata_with_harness_revision(tmp_path):
     # An older ledger without events re-reads receipts and snapshots once to backfill them.
     with sqlite3.connect(state / 'telemetry.sqlite3') as db:
         db.execute('DELETE FROM events')
-        db.execute("DELETE FROM meta WHERE key IN ('events_backfill', 'events_usage_rowid')")
+        db.execute("DELETE FROM meta WHERE key='events_backfill'")
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(state / 'telemetry.sqlite3') as db:
         assert {row[0] for row in db.execute('SELECT kind FROM events')} >= {
@@ -991,7 +992,9 @@ def test_changes_sync_is_incremental_idempotent_and_takes_manual_markers(tmp_pat
     assert rows[0]['merge_commit'] == '0000011abcdef' and rows[0]['merged_at'] == '2026-10-05T12:00:00Z'
     calls = [json.loads(line) for line in (bin_dir / 'calls.jsonl').read_text().splitlines()]
     assert calls[0][:4] == ['pr', 'list', '--state', 'merged'] and '--limit' in calls[0]
-    assert '--search' not in calls[0] and calls[1][-2:] == ['--search', 'merged:>=2026-10-01']
+    assert calls[0][-2] == '--search' and calls[0][-1].startswith('merged:>=2008-01-01T00:00:00+00:00 merged:<=')
+    # The next sweep starts a day before the last completed one, not at the first sweep's floor.
+    assert calls[1][-1].startswith('merged:>=20') and '2008' not in calls[1][-1]
     added = cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--add', 'switched default reviewer',
                      '--at', '2026-10-03')
     assert added.returncode == 0, added.stderr
@@ -1075,3 +1078,227 @@ def test_retro_is_a_compact_digest_of_changes_errors_and_attention(tmp_path):
     report = json.loads(cli_with(tmp_path, bin_dir, 'retro', '--since', '2026-10-01', '--json').stdout)
     assert len(report['changes']) == 15 and report['changes'][0]['compare']['metrics']
     assert report['events_by_kind']['lane.attempt'] == 13
+
+
+def test_session_start_survives_transcript_replacement(tmp_path):
+    """Regression: a rewritten, smaller transcript must still announce its new session."""
+    path = tmp_path / 'home/.claude/projects/repo/session.jsonl'
+    def message(session, index):
+        return {'type': 'assistant', 'sessionId': session, 'timestamp': f'2026-10-21T0{index}:00:00Z',
+                'message': {'id': f'{session}-m{index}', 'model': 'claude-test',
+                            'usage': {'input_tokens': 1, 'output_tokens': 1}}}
+    jsonl(path, message('s1', 1), message('s1', 2), message('s1', 3))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    path.write_text(json.dumps(message('s2', 4)) + '\n')
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        sessions = dict(db.execute("SELECT session, ts FROM events WHERE kind='session.start'"))
+    assert sessions == {'s1': '2026-10-21T01:00:00Z', 's2': '2026-10-21T04:00:00Z'}
+
+
+def test_event_ids_survive_a_host_rename(tmp_path):
+    """Regression: renaming the host and re-reading sources must not duplicate events."""
+    hosts = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
+    write_json(hosts, {'schema_version': 1, 'local_host': 'studio'})
+    path = receipt(tmp_path, 'run-h', 1, status='usage_limited', account='work',
+                   provenance=route('codex', 'gpt-6.1-sol'))
+    write_json(tmp_path / 'state/cooldowns.json', {'cooldowns': {'codex/gpt-6.1-sol': {
+        'adapter': 'codex', 'model': 'gpt-6.1-sol', 'account': 'work', 'status': 'usage_limited',
+        'recorded_at': '2026-10-21T01:00:00Z', 'cooling_until': '2026-10-21T05:00:00Z'}}})
+    session = tmp_path / 'home/.claude/projects/repo/session.jsonl'
+    def message(index):
+        return {'type': 'assistant', 'sessionId': 'chair', 'timestamp': f'2026-10-21T0{index}:00:00Z',
+                'message': {'id': f'm{index}', 'model': 'claude-test',
+                            'usage': {'input_tokens': 1, 'output_tokens': 1}}}
+    jsonl(session, message(1))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    database = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(database) as db:
+        before = sorted(db.execute('SELECT kind, COUNT(*) FROM events GROUP BY kind'))
+    assert {kind for kind, _ in before} >= {'lane.attempt', 'session.start', 'cooldown'}
+    write_json(hosts, {'schema_version': 1, 'local_host': 'renamed'})
+    path.write_text(path.read_text() + '\n')
+    os.utime(path, (2_000_000_000, 2_000_000_000))
+    jsonl(session, message(2))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(database) as db:
+        assert sorted(db.execute('SELECT kind, COUNT(*) FROM events GROUP BY kind')) == before
+
+
+def compare_lanes(project, prefix, count, day, model='gpt-6.1-sol', timed=None, cached=None):
+    """Lanes on one day; only the first `timed` carry a start time, the first `cached` full cache fields."""
+    for index in range(count):
+        context = {'input_tokens': 100, 'output_tokens': 10, 'reasoning_tokens': 0}
+        if cached is None or index < cached:
+            context.update(cached_input_tokens=50, cache_write_tokens=0)
+        start = {} if timed is not None and index >= timed else {'started_at': f'{day}T01:00:00Z'}
+        receipt(project, f'{prefix}-{index:02d}', 1, status='ok', provenance=route('codex', model, 'high'),
+                ended_at=f'{day}T01:00:{10 + index:02d}Z', context=context, **start)
+
+
+def compare_report(tmp_path, pivot='2026-10-10'):
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    result = cli(tmp_path, 'stats', '--compare', pivot, '--window', '7d', '--json')
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    return report, {row['metric']: row for row in report['metrics']}
+
+
+def test_compare_never_reads_unpriced_rows_as_savings(tmp_path):
+    """Regression: an unpriced model's $0 must not make cost/day look improved."""
+    compare_lanes(tmp_path, 'before', 12, '2026-10-08')
+    compare_lanes(tmp_path, 'after', 10, '2026-10-11')
+    compare_lanes(tmp_path, 'unpriced', 4, '2026-10-11', model='unpriced-model')
+    report, metrics = compare_report(tmp_path)
+    cost = metrics['cost_usd_per_day']
+    assert (cost['n_before'], cost['n_after'], cost['sample']) == (12, 10, 'priced rows')
+    assert report['after']['cost_usd_per_day'] < 0.9 * report['before']['cost_usd_per_day']
+    assert cost['verdict'] == 'inconclusive'
+    assert (report['before']['cost_coverage'], report['after']['cost_coverage']) == (1.0, 0.714)
+    assert report['after']['missing_cost_rows'] == 4
+    text = cli(tmp_path, 'stats', '--compare', '2026-10-10').stdout
+    assert '12/10 priced rows' in text
+
+
+def test_compare_counts_the_observations_behind_each_metric(tmp_path):
+    """Regression: latency and cache n are timed attempts and complete rows, not lanes or usage rows."""
+    compare_lanes(tmp_path, 'before', 12, '2026-10-08')
+    compare_lanes(tmp_path, 'after', 12, '2026-10-11', timed=1, cached=3)
+    report, metrics = compare_report(tmp_path)
+    assert (metrics['success_rate']['n_before'], metrics['success_rate']['n_after']) == (12, 12)
+    assert metrics['success_rate']['verdict'] == 'within_noise'
+    latency, cache = metrics['latency_p50_s'], metrics['cache_read_share']
+    assert (latency['n_before'], latency['n_after'], latency['sample']) == (12, 1, 'timed attempts')
+    assert (cache['n_before'], cache['n_after'], cache['sample']) == (12, 3, 'complete rows')
+    assert latency['after'] is not None and cache['after'] is not None
+    assert latency['verdict'] == cache['verdict'] == 'inconclusive'
+    assert report['after']['samples']['limit_events_per_day'] == 12
+
+
+FILTERING_GH = """#!{python}
+import json, pathlib, re, sys
+from datetime import datetime
+bin_dir = pathlib.Path({bin_dir!r})
+with (bin_dir / 'calls.jsonl').open('a') as stream:
+    stream.write(json.dumps(sys.argv[1:]) + '\\n')
+args = sys.argv[1:]
+limit = int(args[args.index('--limit') + 1])
+search = args[args.index('--search') + 1] if '--search' in args else ''
+when = lambda value: datetime.fromisoformat(value.replace('Z', '+00:00'))
+rows = json.loads((bin_dir / 'prs.json').read_text())
+for op, bound in re.findall(r'merged:(>=|<=)(\\S+)', search):
+    rows = [row for row in rows if when(row['mergedAt']) == when(bound)
+            or (when(row['mergedAt']) > when(bound)) == (op == '>=')]
+print(json.dumps(sorted(rows, key=lambda row: row['mergedAt'])[:limit]))
+"""
+
+
+def filtering_gh(tmp_path, pulls):
+    """A `gh` stub that honours --limit and merged:>= / merged:<=, returning the OLDEST matches first,
+    so a full page silently drops the newest PRs as an unsorted search can."""
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir(exist_ok=True)
+    (bin_dir / 'prs.json').write_text(json.dumps(pulls))
+    script = bin_dir / 'gh'
+    script.write_text(FILTERING_GH.format(python=sys.executable, bin_dir=str(bin_dir)))
+    script.chmod(0o755)
+    return bin_dir
+
+
+def hourly_pulls(count, start='2026-09-01T00:00:00'):
+    from datetime import datetime, timedelta
+    first = datetime.fromisoformat(start)
+    return [pull(1 + index, (first + timedelta(hours=index)).isoformat() + 'Z') for index in range(count)]
+
+
+def test_changes_sync_splits_full_pages_and_finds_later_merges(tmp_path):
+    """Regression: 201 merges with a 200-row page must all land, and a later merge must too."""
+    from datetime import UTC, datetime, timedelta
+    pulls = hourly_pulls(201)
+    bin_dir = filtering_gh(tmp_path, pulls)
+    result = cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--sync', '--json')
+    assert result.returncode == 0, result.stderr
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute("SELECT COUNT(*) FROM changes WHERE kind='pr'").fetchone()[0] == 201
+    calls = [json.loads(line) for line in (bin_dir / 'calls.jsonl').read_text().splitlines()]
+    assert len(calls) <= 5 and all(call[call.index('--limit') + 1] == '200' for call in calls)
+    recent = (datetime.now(UTC) - timedelta(hours=1)).replace(microsecond=0, tzinfo=None).isoformat() + 'Z'
+    (bin_dir / 'prs.json').write_text(json.dumps([*pulls, pull(500, recent, 'Later merge')]))
+    assert cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--sync').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute("SELECT title FROM changes WHERE pr=500").fetchone() == ('Later merge',)
+        assert db.execute("SELECT COUNT(*) FROM changes WHERE kind='pr'").fetchone()[0] == 202
+    last = json.loads((bin_dir / 'calls.jsonl').read_text().splitlines()[-1])
+    assert '2008' not in last[-1]  # a completed sweep is durable; the next one starts near it
+
+
+def test_capped_changes_sync_resumes_its_pending_ranges(tmp_path, monkeypatch):
+    """Regression: a sweep stopped by the query cap or a gh failure resumes without losing PRs."""
+    import importlib.util
+    def load(name, filename):
+        spec = importlib.util.spec_from_file_location(name, ROOT / 'scripts' / filename)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    telemetry = load('sync_telemetry_test', 'telemetry.py')
+    owner = load('sync_changes_test', 'telemetry_changes.py')
+    monkeypatch.setattr(owner, 'SYNC_LIMIT', 5)
+    monkeypatch.setattr(owner, 'SYNC_PAGES', 2)
+    monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
+    bin_dir = filtering_gh(tmp_path, hourly_pulls(12))
+    monkeypatch.setenv('PATH', os.pathsep.join((str(bin_dir), os.environ['PATH'])))
+    with telemetry.connect() as db:
+        added, pending = owner.sync(telemetry, db)
+        assert pending > 0 and added < 12
+        (bin_dir / 'gh').rename(bin_dir / 'gh-real')
+        (bin_dir / 'gh').write_text('#!/bin/sh\nexit 3\n')
+        (bin_dir / 'gh').chmod(0o755)
+        try:
+            owner.sync(telemetry, db)
+        except owner.ChangeError:
+            pass
+        else:
+            raise AssertionError('a failing gh must raise')
+        (bin_dir / 'gh-real').replace(bin_dir / 'gh')
+        state = json.loads(db.execute("SELECT value FROM meta WHERE key='changes_sync'").fetchone()[0])
+        assert len(state['pending']) == pending and state['through'] is None
+        runs = 1
+        while pending:
+            added, pending = owner.sync(telemetry, db)
+            runs += 1
+            assert runs < 20
+        assert db.execute("SELECT COUNT(*) FROM changes WHERE kind='pr'").fetchone()[0] == 12
+        state = json.loads(db.execute("SELECT value FROM meta WHERE key='changes_sync'").fetchone()[0])
+        assert state['pending'] == [] and state['through']
+
+
+def test_rendered_reports_fit_four_kilobytes_of_utf8(tmp_path):
+    """Regression: wide Unicode titles and long error classes stay under the 4 KB byte budget."""
+    title = '数据遥测🚀' + '🚀' * 80
+    pulls = [pull(300 + index, f'2026-10-{10 + index // 4:02d}T{index % 4 * 6:02d}:00:00Z', title,
+                  ['範囲:' + '🚀' * 40]) for index in range(20)]
+    bin_dir = filtering_gh(tmp_path, pulls)
+    for index in range(6):
+        receipt(tmp_path, f'fail-{index}', 1, status='failed', ended_at='2026-10-12T01:00:00Z',
+                error_class=f'错误类别_{index}_' + '🧯' * 300, provenance=route('codex', 'gpt-6.1-sol'))
+    assert cli_with(tmp_path, bin_dir, 'telemetry', 'ingest').returncode == 0
+    assert cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--sync').returncode == 0
+    outputs = {}
+    for args in (('telemetry', 'changes'), ('retro', '--since', '2026-10-01'), ('stats', '--compare', '#300')):
+        result = cli_with(tmp_path, bin_dir, *args)
+        assert result.returncode == 0, result.stderr
+        assert len(result.stdout.encode()) < 4096, (args, len(result.stdout.encode()))
+        outputs[args[0]] = result.stdout
+    assert 'lines omitted to fit 4 KB; use --json' in outputs['telemetry']
+    assert 'lines omitted to fit 4 KB; use --json' in outputs['retro']
+
+
+def test_fit_keeps_whole_lines_within_the_byte_budget():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('fit_changes_test', ROOT / 'scripts/telemetry_changes.py')
+    owner = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(owner)
+    assert owner.fit(['short', 'lines']) == 'short\nlines'
+    text = owner.fit([f'{index} ' + '🚀' * 200 for index in range(10)])
+    assert len(text.encode()) <= owner.BUDGET and text.endswith('lines omitted to fit 4 KB; use --json')
+    assert all(line.startswith(str(index)) for index, line in enumerate(text.splitlines()[:-1]))
