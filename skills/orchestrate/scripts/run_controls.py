@@ -100,6 +100,10 @@ def _create_cancel_marker(run_dir: Path, directory: Path) -> None:
         raise ControlError(str(exc)) from exc
 
 
+# Bounded wait for a rewritten receipt's digest sidecar; a persistent mismatch is still invalid.
+DIGEST_SETTLE_SECONDS = 1.0
+
+
 def _attempt_terminal(run_dir: Path, task_id: str, attempt_id: str) -> dict[str, Any] | None:
     attempt_path = run_dir / "dispatch" / "tasks" / task_id / attempt_id / "attempt.json"
     try:
@@ -110,15 +114,23 @@ def _attempt_terminal(run_dir: Path, task_id: str, attempt_id: str) -> dict[str,
         raise ControlError("attempt evidence is unavailable") from exc
     if attempt_path.is_symlink() or not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
         raise ControlError("attempt evidence is invalid")
-    try:
-        record, _, _, _ = _attempt(run_dir, task_id, attempt_id)
-    except ControlError as exc:
-        # Receipt publication is the terminal bundle commit point.  The
-        # receipt can briefly precede its digest sidecar or an atomically
-        # renamed evidence file; callers wait for that bundle to settle.
-        if _attempt_bundle_incomplete(run_dir, task_id, attempt_id):
-            return None
-        raise ControlError("attempt evidence is invalid") from exc
+    settle_deadline = time.monotonic() + DIGEST_SETTLE_SECONDS
+    while True:
+        try:
+            record, _, _, _ = _attempt(run_dir, task_id, attempt_id)
+            break
+        except ControlError as exc:
+            # Receipt publication is the terminal bundle commit point.  The
+            # receipt can briefly precede its digest sidecar or an atomically
+            # renamed evidence file; callers wait for that bundle to settle.
+            if _attempt_bundle_incomplete(run_dir, task_id, attempt_id):
+                return None
+            # The writer renames attempt.json, then attempt.sha256, so a
+            # reader can pair the new receipt with the previous digest.
+            if "attempt digest does not match" in str(exc) and time.monotonic() < settle_deadline:
+                time.sleep(0.02)
+                continue
+            raise ControlError("attempt evidence is invalid") from exc
     process = record.get("process")
     if not isinstance(process, dict) or process.get("observed_exit") is not True:
         raise ControlError("attempt evidence does not prove observed completion")
