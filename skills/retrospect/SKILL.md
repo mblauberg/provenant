@@ -1,6 +1,6 @@
 ---
 name: retrospect
-description: "Use after delivery, release, incident, evaluation, or a long run to derive evidence-backed process improvements and regression gates. Not for session cleanup, one skill audit, or an active defect; use session, skill-craft, or implement."
+description: "Use after delivery, release, incidents, evals or long runs for process improvements and regression gates. Not for cleanup (session), skill audits (skill-craft) or active defects (diagnose/implement)."
 ---
 
 # Retrospect

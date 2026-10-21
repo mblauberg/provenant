@@ -1,6 +1,6 @@
 ---
 name: orchestrate
-description: "Use when bounded fan-out, multi-agent research, cross-family review, parallel audits, Herdr control, or autonomous ready-issue implementation helps. Not for tiny work, coupled debugging, or run-until-STOP jobs; use diagnose or autopilot."
+description: "Use for bounded fan-out, multi-agent research, cross-family reviews, audits, Herdr control and ready-issue automation. Not for tiny work; coupled defects: diagnose; run-until-STOP: autopilot."
 ---
 
 # Multi-agent orchestration
@@ -36,9 +36,10 @@ description: "Use when bounded fan-out, multi-agent research, cross-family revie
   - Give a native Claude subagent its [tier pool's Claude member](references/routing-and-tiers.md#native-tiers): `haiku` junior, `sonnet` senior, `opus` only for principal work.
   - Brief native subagents with paths, not pasted content. End one once its deliverable lands; continue it only for follow-up on that deliverable.
   - Brief in five fields: goal, scope/paths, constraints, output shape and length, verification.
+  - agy lanes are OS-confined to their `cwd` and `add_dirs`; pass briefs through `prompt` or `prompt_file` (read by Fabric), rather than paths for the lane to open.
   - Keep tool output bounded: output over a bound goes to a file, and the command returns a pointer and a short tail. Avoid unbounded `gh ... --limit 1000` and `rg --files` over run directories. A polling loop prints one line.
   - Wait once: run one `provenant lanes --wait` in the background, or one status wait. Never sleep or poll loops.
-  - No subagent or lane blocks in a foreground wait longer than about four minutes. Long waits run in the background (the harness notifies on completion) or belong to the chair. A gap over five minutes turns the next call into a full cache rewrite.
+  - No subagent or lane blocks in a foreground wait longer than about four minutes. Long waits run in the background (the harness notifies on completion) or belong to the chair. Cache lifetimes vary by provider (Anthropic's default is five minutes; others differ), so keep waits short and let receipts record cache reads.
   - Shape briefs for the cache: stable shared preamble and context pack first, task-specific content last. Resume the lane's session for follow-ups rather than dispatching fresh, and let sibling lanes share one context pack. Cached reads cost roughly 5 to 50 times less than fresh input, depending on provider.
   - Size lanes by context, not minutes: one logical unit and one commit per lane. The lane keeps a short progress notes file; near its context budget it stops, and the chair restarts it fresh from the brief, contract and notes rather than letting it work from a rotted context.
   - Research: when a decision rests on external facts (docs, papers, prices, prior art), dispatch research lanes with network access proactively, fanned out across juniors with a senior synthesis.
@@ -65,6 +66,6 @@ Preflight authority, isolation, disclosure and receipts. Dispatch independent wa
 
 ## Depth on demand
 
-Use [orchestration-contract.md](references/orchestration-contract.md) for worker contracts, [routing-and-tiers.md](references/routing-and-tiers.md) for catalogue choices, [direct-cli-fallback.md](references/direct-cli-fallback.md) only when Fabric cannot express the task, and [codex-capabilities.md](references/codex-capabilities.md) for Codex capability probing. [lane-safety.md](references/lane-safety.md) for lane and reviewer failure modes and false greens. Other references in `references/` cover paired primary work, Herdr, verification, memory and domain adaptation. Direct CLI is a degraded path; record its route and result artifact.
+Use [orchestration-contract.md](references/orchestration-contract.md) for worker contracts, [routing-and-tiers.md](references/routing-and-tiers.md) for catalogue choices, [direct-cli-fallback.md](references/direct-cli-fallback.md) only when Fabric cannot express the task, and [codex-capabilities.md](references/codex-capabilities.md) for Codex capability probing. [lane-safety.md](references/lane-safety.md) for lane and reviewer failure modes and false greens. [trigger-boundary.md](references/trigger-boundary.md) for skill activation boundaries, [retrieval-and-tool-routing.md](references/retrieval-and-tool-routing.md) for source and tool selection, and [evaluation-and-observability.md](references/evaluation-and-observability.md) for checks and trace review. Other references in `references/` cover paired primary work, Herdr, verification, memory and domain adaptation. Direct CLI is a degraded path; record its route and result artifact.
 
 The portable artifact is [coordination summary schema](portable-workflow.v1.json).

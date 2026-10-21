@@ -1,6 +1,6 @@
 ---
 name: work-map
-description: "Use when a multi-session effort needs one durable, curated route linking its specification and work items. Not for live status, ownership, dependencies, user gates or session handoffs; use the project's work tracker and session."
+description: "Use for a durable spec-to-work-item route across sessions. Not for live status, ownership, dependencies or user gates (project tracker), or session handoffs (session)."
 ---
 
 # work-map: the map for multi-session efforts

@@ -1,6 +1,6 @@
 ---
 name: engineering-writing
-description: "Use for drafting or condensing software-engineering artefacts such as requirements/specs, READMEs, commits, PRs, runbooks, errors, design notes, and thesis or paper LaTeX invariants. Not for general, academic-prose, or Australian legal writing; use natural-writing or legal-writing."
+description: "Use for software docs, specs, READMEs, commits, PRs, runbooks, errors and thesis LaTeX invariants. Not for general/academic prose (natural-writing) or Australian legal prose (legal-writing)."
 ---
 
 # Engineering writing
@@ -51,8 +51,8 @@ interpretation; attach numbers to comparatives. Verify every package, API,
 version, flag and URL against code or documentation, otherwise mark
 `[FLAG: verify]`. Never invent facts to fill a document. Keep genuine caveats
 and honest negatives while cutting padding, marketing language, AI tells,
-instruction-leaking absence tombstones and internal process language from
-reader-facing prose. Match existing repository conventions without copying
+statements about omitted implementation details and internal process language
+from reader-facing prose. Match existing repository conventions without copying
 signature phrases.
 
 For condensation, follow the reference stop and integrity checks and report the

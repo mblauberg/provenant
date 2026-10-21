@@ -80,7 +80,8 @@ Documentation claims sit in three tiers, and the third is deliberate:
    projections remain review-owned. Relative Markdown links in `docs/` and each
    `SKILL.md` are machine-checked; skill-reference links and other links remain
    review-owned.
-   `HARNESS.md` stays compact because it is an always-loaded constitution.
+   `HARNESS.md` stays compact because it is read before cross-provider dispatch,
+   risk-tier, authority or memory decisions; see [`AGENTS.md`](AGENTS.md).
 3. **Unchecked prose.** Design intent and rationale carry no machine gate,
    on purpose; review keeps them honest, not tooling.
 
