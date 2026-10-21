@@ -244,7 +244,7 @@ describe("task-level cancel", () => {
     const log = join(root, "controls.jsonl");
     writeFileSync(join(product, "skills/orchestrate/scripts/run_controls.py"),
       `#!/usr/bin/env python3\nimport json,sys\nopen(${JSON.stringify(log)},'a').write(json.dumps(sys.argv[1:])+'\\n')\n`);
-    const runDir = join(workspace, ".agent-run", "mcp-batchx");
+    const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-batch-batchx-abcdef");
     for (const task of ["one", "two"]) {
       const dir = join(runDir, "tasks", task, "attempt-001");
       mkdirSync(dir, { recursive: true });
@@ -276,7 +276,7 @@ describe("task-level cancel", () => {
     const log = join(root, "controls.jsonl");
     writeFileSync(join(product, "skills/orchestrate/scripts/run_controls.py"),
       `#!/usr/bin/env python3\nimport json,sys\nopen(${JSON.stringify(log)},'a').write(json.dumps(sys.argv[1:])+'\\n')\n`);
-    const runDir = join(workspace, ".agent-run", "mcp-noscope");
+    const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-noscope-abcdef");
     for (const task of ["one", "two"]) {
       const dir = join(runDir, "tasks", task, "attempt-001");
       mkdirSync(dir, { recursive: true });
@@ -305,7 +305,7 @@ describe("task-level cancel", () => {
     const log = join(root, "controls.jsonl");
     writeFileSync(join(product, "skills/orchestrate/scripts/run_controls.py"),
       `#!/usr/bin/env python3\nimport json,sys\nopen(${JSON.stringify(log)},'a').write(json.dumps(sys.argv[1:])+'\\n')\n`);
-    const runDir = join(workspace, ".agent-run", "mcp-queuedx");
+    const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-batch-queuedx-abcdef");
     mkdirSync(runDir, { recursive: true });
     writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ id: "mcp-queuedx", batch_id: "batch-001", task_ids: ["one", "two"],
       started_at: new Date().toISOString(), status: "running" }));
@@ -314,7 +314,7 @@ describe("task-level cancel", () => {
     const identity = { project: workspace, cwd: workspace, agentId: "lean", provider: "codex" };
     const result = await cancelConfiguredRun("two", identity, undefined, env) as any;
     expect(result).toMatchObject({ status: "rejected", error: "task_not_started" });
-    expect(result.fix).toContain("mcp-queuedx");
+    expect(result.fix).toContain("mcp-abcdef");
     expect(existsSync(log)).toBe(false);
     const unknown = await cancelConfiguredRun("three", identity, undefined, env) as any;
     expect(unknown.status).toBe("rejected");
@@ -326,7 +326,7 @@ describe("task-level cancel", () => {
     const workspace = join(root, "workspace"), product = join(root, "product");
     mkdirSync(workspace);
     installFixtureOwners(product);
-    const runDir = join(workspace, ".agent-run", "mcp-unmatched");
+    const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-batch-unmatched-abcdef");
     // Metadata without a batch id: the task cannot be positively matched to this run, so cancellation must not widen to it.
     mkdirSync(runDir, { recursive: true });
     writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ id: "mcp-unmatched", task_ids: ["one", "two"],
@@ -349,7 +349,7 @@ describe("task-level cancel", () => {
     const log = join(root, "controls.jsonl");
     writeFileSync(join(product, "skills/orchestrate/scripts/run_controls.py"),
       `#!/usr/bin/env python3\nimport json,sys\nopen(${JSON.stringify(log)},'a').write(json.dumps(sys.argv[1:])+'\\n')\n`);
-    const runDir = join(workspace, ".agent-run", "mcp-resumex");
+    const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-resumex-abcdef");
     const dir = join(runDir, "tasks", "two", "attempt-001");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "attempt.json"), JSON.stringify({ schema: "fabric.attempt.v1", run_id: "mcp-resumex", task_id: "two",

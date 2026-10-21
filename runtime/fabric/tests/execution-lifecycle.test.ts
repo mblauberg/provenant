@@ -225,6 +225,14 @@ function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'"'"'`)}'`;
 }
 
+function hostInstance(): string {
+  const instance = join(temporaryDirectory, "host-instance");
+  mkdirSync(join(instance, ".agent-fabric"), { recursive: true });
+  writeFileSync(join(instance, ".agent-fabric/hosts.json"), JSON.stringify({ schema_version: 1,
+    local_host: "laptop", peers: { peer: { ssh_destination: "peer" } } }));
+  return instance;
+}
+
 /** A product root whose dispatch owners are the lifecycle fixture. */
 function buildProduct(root: string): string {
   const fake = join(root, "product");
@@ -735,12 +743,12 @@ describe("dispatch CLI", () => {
     store.announce({ ...identity, project, cwd: project });
     store.announce({ ...identity, project: oldProject, cwd: oldProject });
     store.close();
-    const runDir = join(workspace, ".agent-run", "mcp-resume-discovery");
+    const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-resume-discovery-abcdef");
     const attempt = join(runDir, "tasks/task-1/attempt-001");
     mkdirSync(attempt, { recursive: true });
     mkdirSync(join(runDir, "_owner"));
     const row = JSON.parse(readFileSync(join(testDirectory, "fixtures/attempt.json"), "utf8"));
-    Object.assign(row, { run_id: "mcp-resume-discovery", cwd: oldProject, read_roots: [oldProject, project] });
+    Object.assign(row, { run_id: "mcp-abcdef", cwd: oldProject, read_roots: [oldProject, project] });
     writeFileSync(join(attempt, "attempt.json"), JSON.stringify(row));
     writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ task_id: "task-1", status: "ok",
       finished_at: new Date().toISOString(), cwd_projects: { "task-1": oldProject } }));
@@ -874,7 +882,7 @@ describe("dispatch CLI", () => {
 
 describe("cancellation", () => {
   it("prints an unconfirmed stop reason from dispatch kill", async () => {
-    const runDir = join(workspace, ".agent-run", "mcp-cli-reason");
+    const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-cli-reason-abcdef");
     mkdirSync(runDir, { recursive: true });
     const provider = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
       detached: true,
@@ -947,7 +955,7 @@ describe("cancellation", () => {
   }, 40_000);
 
   it("fails dispatch kill after signalling only the owner of a live provider", async () => {
-    const runDir = join(workspace, ".agent-run", "mcp-cli-signalled-owner");
+    const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-cli-signalled-owner-abcdef");
     mkdirSync(runDir, { recursive: true });
     const owner = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
       detached: true,
@@ -1159,7 +1167,7 @@ describe("orphan reaping", () => {
   }, 40_000);
 
   it("does not mask a still-running orphan with the host-gone reason", async () => {
-    const runDir = join(workspace, ".agent-run", "mcp-still-running");
+    const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-still-running-abcdef");
     mkdirSync(runDir, { recursive: true });
     const provider = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
       detached: true,
@@ -1333,7 +1341,7 @@ describe("orphan reaping", () => {
 describe("compact status", () => {
   it("reads a retained succeeded owner attempt as ok", async () => {
     const { compactBatch, compactDispatch } = await import("../src/owner-output.js");
-    const runDir = join(workspace, ".agent-run", "mcp-legacy-output");
+    const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-legacy-output-abcdef");
     const attemptDir = join(runDir, "dispatch", "tasks", "legacy", "attempt-001");
     mkdirSync(attemptDir, { recursive: true });
     const attemptPath = join(attemptDir, "attempt.json");
@@ -1365,7 +1373,7 @@ describe("compact status", () => {
   it("selects the newest directory when repeated ids have equal start timestamps", async () => {
     const started = new Date().toISOString();
     for (const name of ["mcp-older", "mcp-younger"]) {
-      const dir = join(workspace, ".agent-run", name);
+      const dir = join(workspace, ".agent-run", "runs", `20260801-1200-dispatch-${name.slice(4)}-abcdef`);
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "dispatch-status.json"), JSON.stringify({ id: name, task_id: "same-task",
         status: "ok", started_at: started }));
@@ -1375,14 +1383,17 @@ describe("compact status", () => {
   });
 
   it("prefers a unique run id over a newer run's matching task id", async () => {
-    for (const [name, task, age] of [["mcp-original", "original", 1000], ["mcp-newer", "mcp-original", 0]] as const) {
-      const dir = join(workspace, ".agent-run", name);
+    for (const [name, task, age, id, suffix] of [
+      ["original", "original", 1000, "mcp-123456", "123456"],
+      ["newer", "mcp-123456", 0, "mcp-abcdef", "abcdef"],
+    ] as const) {
+      const dir = join(workspace, ".agent-run", "runs", `20260801-1200-dispatch-${name}-${suffix}`);
       mkdirSync(dir, { recursive: true });
-      writeFileSync(join(dir, "dispatch-status.json"), JSON.stringify({ id: name, task_id: task,
+      writeFileSync(join(dir, "dispatch-status.json"), JSON.stringify({ id, task_id: task,
         status: "ok", started_at: new Date(Date.now() - age).toISOString() }));
     }
-    expect(await fabricStatus(workspace, "mcp-original")).toMatchObject({
-      id: "mcp-original", run_dir: realpathSync(join(workspace, ".agent-run", "mcp-original")),
+    expect(await fabricStatus(workspace, "mcp-123456")).toMatchObject({
+      id: "mcp-123456", run_dir: realpathSync(join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-original-123456")),
     });
   });
 
@@ -1408,7 +1419,7 @@ describe("compact status", () => {
   });
 
   it("does not report an interrupted partial batch as completed", async () => {
-    const dir = join(workspace, ".agent-run", "mcp-partial");
+    const dir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-partial-abcdef");
     const attemptDir = join(dir, "dispatch", "tasks", "done", "attempt-001");
     mkdirSync(attemptDir, { recursive: true });
     writeFileSync(join(dir, "dispatch-status.json"), JSON.stringify({ id: "partial", kind: "batch",
@@ -1757,6 +1768,8 @@ describe("native-first routing", () => {
   it("atomically refuses a mixed batch, naming its offending task, with zero placements", async () => {
     const placed = join(temporaryDirectory, "batch-placed");
     const hostOwner = join(product, "scripts/fabric-hosts");
+    const env = poolEnvironment();
+    env.AGENT_FABRIC_INSTANCE_ROOT = hostInstance();
     writeFileSync(hostOwner, `#!/bin/sh\ntouch ${shellQuote(placed)}\nprintf '%s\\n' '{"status":"ok","host":"peer"}'\n`);
     chmodSync(hostOwner, 0o755);
     vi.stubEnv("AGENT_FABRIC_PRODUCT_ROOT", product);
@@ -1766,7 +1779,7 @@ describe("native-first routing", () => {
         { id: "safe", adapter: "codex", prompt: "p" },
         { id: "forbidden", adapter: "claude", model: "haiku", prompt: "p" },
         { adapter: "codex", prompt: "p" },
-      ] }, claudeSeat(), new AbortController().signal, { ...poolEnvironment(), PROVENANT_HOST_LOCAL_ONLY: "" });
+      ] }, claudeSeat(), new AbortController().signal, { ...env, PROVENANT_HOST_LOCAL_ONLY: "" });
       expect(result).toMatchObject({ status: "rejected", error: "native_seat_model" });
       const rows = result.tasks as Record<string, unknown>[];
       expect(rows.map((row) => row.task_id)).toEqual(["safe", "forbidden", "task-3"]);
@@ -1783,6 +1796,7 @@ describe("native-first routing", () => {
   it("refuses a qualified session's explicit own-seat route before placement", async () => {
     const placed = join(temporaryDirectory, "session-placed");
     const hostOwner = join(product, "scripts/fabric-hosts");
+    vi.stubEnv("AGENT_FABRIC_INSTANCE_ROOT", hostInstance());
     writeFileSync(hostOwner, `#!/bin/sh\ntouch ${shellQuote(placed)}\nprintf '%s\\n' '{"status":"ok","host":"peer"}'\n`);
     chmodSync(hostOwner, 0o755);
     const store = new Store(databasePath(ownerEnvironment));
@@ -1804,7 +1818,7 @@ describe("native-first routing", () => {
   });
 
   it("refuses an explicit own-seat Claude route before any peer placement, and lets an inherited continuation through", async () => {
-    const seat = claudeSeat(), env = { ...poolEnvironment(), PROVENANT_HOST_LOCAL_ONLY: "" };
+    const seat = claudeSeat(), env = { ...poolEnvironment(), AGENT_FABRIC_INSTANCE_ROOT: hostInstance(), PROVENANT_HOST_LOCAL_ONLY: "" };
     const signal = new AbortController().signal;
     const refused = (done: any) => expect(done).toMatchObject({ status: "rejected", error: "native_seat_model" });
     refused(await dispatchConfiguredProvider({ host: "peer", adapter: "claude", model: "haiku", prompt: "p" } as any, seat, signal, env));
@@ -1867,12 +1881,12 @@ describe("native-first routing", () => {
 describe("status list bounds", () => {
   it("lists only twenty recent runs and reads an older run by id without modifying it", async () => {
     for (let i = 0; i < 25; i++) {
-      const dir = join(workspace, ".agent-run", `mcp-${i}`);
+      const dir = join(workspace, ".agent-run", "runs", `20260801-1200-dispatch-${i}-abcdef`);
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "dispatch-status.json"), JSON.stringify({ id: `task-${i}`, status: "failed",
         started_at: new Date(Date.now() - (i === 24 ? 90_000_000 : i * 1000)).toISOString() }));
     }
-    const path = join(workspace, ".agent-run", "mcp-24", "dispatch-status.json");
+    const path = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-24-abcdef", "dispatch-status.json");
     const before = readFileSync(path, "utf8");
     expect((await fabricStatus(workspace)).runs).toHaveLength(20);
     expect(await fabricStatus(workspace, "task-24", 1)).toMatchObject({ id: "task-24", status: "failed" });
@@ -1883,7 +1897,7 @@ describe("status list bounds", () => {
 
 describe("status liveness", () => {
   it("reads final files when the owner finishes during the liveness probe", async () => {
-    const dir = join(workspace, ".agent-run", "mcp-race");
+    const dir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-race-abcdef");
     const attemptDir = join(dir, "dispatch", "tasks", "race", "attempt-001");
     mkdirSync(attemptDir, { recursive: true });
     writeFileSync(join(dir, OWNER_RECORD_NAME), JSON.stringify({ schema_version: 1, kind: "dispatch",
@@ -1904,7 +1918,7 @@ describe("status liveness", () => {
   });
 
   it("marks silence only beyond the mode timeout threshold", async () => {
-    const dir = join(workspace, ".agent-run", "mcp-silent");
+    const dir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-silent-abcdef");
     mkdirSync(dir, { recursive: true });
     const started = new Date(Date.now() - 1_000_000).toISOString();
     writeFileSync(join(dir, OWNER_RECORD_NAME), JSON.stringify({ schema_version: 1, kind: "dispatch",
@@ -1936,7 +1950,7 @@ describe("status liveness", () => {
   });
 
   it("waits for terminal output and reads a completed batch task separately", async () => {
-    const dir = join(workspace, ".agent-run", "mcp-wait");
+    const dir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-wait-abcdef");
     const taskDir = join(dir, "dispatch", "tasks", "child", "attempt-001");
     mkdirSync(taskDir, { recursive: true });
     const worker = spawn(process.execPath, ["-e", "setTimeout(() => {}, 400)"], { stdio: "ignore" });
@@ -2003,7 +2017,7 @@ describe("status CLI flags", () => {
     ["--json", "--wait-seconds", "10", "cli-task"],
     ["cli-task", "--json", "--wait-seconds", "10"],
   ])("finds the run with arguments %j", (...args) => {
-    const dir = join(workspace, ".agent-run", "mcp-cli");
+    const dir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-cli-abcdef");
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "dispatch-status.json"), JSON.stringify({ id: "cli-task", status: "failed" }));
     expect(JSON.parse(fabricCli(["status", ...args]))).toMatchObject({ id: "cli-task", status: "failed" });
@@ -2025,7 +2039,7 @@ it('reads v1 attempts verbatim from the shared run root with ledger fields', asy
 });
 
 it('reads a retained succeeded registry attempt as ok', async () => {
- const runDir = join(workspace,'.agent-run/mcp-legacy-registry');
+ const runDir = join(workspace,'.agent-run/runs/20260801-1200-dispatch-legacy-registry-abcdef');
  const attemptDir = join(runDir,'dispatch/tasks/old/attempt-001');
  mkdirSync(attemptDir,{recursive:true});
  writeFileSync(join(runDir,'dispatch-status.json'),JSON.stringify({id:'mcp-legacy-registry',status:'succeeded'}));
@@ -2051,11 +2065,11 @@ it('places logs and staging files inside a named run directory', async () => {
 });
 
 it.each([[[]], [['--interval','2']]])('watch prints a terminal state once and exits with %j', (options) => {
- const dir=join(workspace,'.agent-run/mcp-watch');mkdirSync(dir,{recursive:true});
- writeFileSync(join(dir,'dispatch-status.json'),JSON.stringify({id:'mcp-watch',status:'failed'}));
- const output = fabricCli(['watch','mcp-watch',...options]);
+ const dir=join(workspace,'.agent-run/runs/20260801-1200-dispatch-watch-0watch');mkdirSync(dir,{recursive:true});
+ writeFileSync(join(dir,'dispatch-status.json'),JSON.stringify({id:'mcp-0watch',status:'failed'}));
+ const output = fabricCli(['watch','mcp-0watch',...options]);
  expect(output).toContain('failed');
- expect(output).toContain('mcp-watch');
+ expect(output).toContain('mcp-0watch');
 });
 
 it('lists a batch in manifest order whatever the directory or clock order', async () => {
@@ -2126,7 +2140,7 @@ it('resumes a cross-project run with its saved read roots, and refuses one whose
  const other=realpathSync(mkdtempSync(join(temporaryDirectory,'resume-other-')));mkdirSync(join(other,'src'));
  const brief=join(other,'brief.md');writeFileSync(brief,'continue');
  const caller={...identity,registeredProjects:[workspace,other]};
- const dir=join(workspace,'.agent-run/mcp-resume-cross');
+ const dir=join(workspace,'.agent-run/runs/20260801-1200-dispatch-resume-cross-abcdef');
  const path=join(dir,'tasks/task-1/attempt-001');mkdirSync(path,{recursive:true});
  const row=JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
  Object.assign(row,{run_id:'mcp-resume-cross',cwd:join(other,'src'),read_roots:[join(other,'src'),other]});
@@ -2182,7 +2196,7 @@ it('keeps non-Git cwd dispatches in the caller run root', async () => {
 
 it('terminalises a stopped v1 run before removing its owner record', async () => {
  const {terminateRecordedRun}=await import('../src/run-registry.js');
- const dir=join(workspace,'.agent-run/mcp-stopped');
+ const dir=join(workspace,'.agent-run/runs/20260801-1200-dispatch-stopped-abcdef');
  const path=join(dir,'tasks/task-1/attempt-001');mkdirSync(path,{recursive:true});
  const row=JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
  row.run_id='mcp-stopped';row.state='running';row.status=null;
@@ -2192,7 +2206,7 @@ it('terminalises a stopped v1 run before removing its owner record', async () =>
 });
 
 it('preserves a rejected resume and its fix without advising a terminal poll', async () => {
- const dir=join(workspace,'.agent-run/mcp-resume-rejected');
+ const dir=join(workspace,'.agent-run/runs/20260801-1200-dispatch-resume-rejected-abcdef');
  const path=join(dir,'tasks/task-1/attempt-001');mkdirSync(path,{recursive:true});
  const row=JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
  row.run_id='mcp-resume-rejected';
@@ -2205,7 +2219,7 @@ it('preserves a rejected resume and its fix without advising a terminal poll', a
 
 it('paginates UTF-8 without replacement characters and reads bounded live tails', async () => {
  const {fabricOutput}=await import('../src/run-registry.js');
- const dir=join(workspace,'.agent-run/mcp-utf8');const attempt=join(dir,'tasks/task-1/attempt-001');mkdirSync(attempt,{recursive:true});
+ const dir=join(workspace,'.agent-run/runs/20260801-1200-dispatch-utf8-abcdef');const attempt=join(dir,'tasks/task-1/attempt-001');mkdirSync(attempt,{recursive:true});
  const row=JSON.parse(readFileSync(join(testDirectory,'fixtures/attempt.json'),'utf8'));
  row.run_id='mcp-utf8';row.paths.result='tasks/task-1/attempt-001/result.md';row.state='running';row.status=null;
  writeFileSync(join(attempt,'attempt.json'),JSON.stringify(row));
@@ -2231,7 +2245,7 @@ it('retains custody when a live owner has no verifiable start identity', async (
  const {terminateRecordedRun}=await import('../src/run-registry.js');
  const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'});
  spawnedPids.push(child.pid!);
- const dir=join(workspace,'.agent-run/mcp-unverified');mkdirSync(dir,{recursive:true});
+ const dir=join(workspace,'.agent-run/runs/20260801-1200-dispatch-unverified-abcdef');mkdirSync(dir,{recursive:true});
  const record={schema_version:1 as const,kind:'dispatch' as const,run_dir:dir,workspace,run_token:'unknown',owner_pid:child.pid!,owner_pgid:child.pid!,owner_started_at:null,host_pid:process.pid,host_started_at:null,started_at:new Date().toISOString(),owner_stdout:'',owner_stderr:''};
  writeFileSync(join(dir,OWNER_RECORD_NAME),JSON.stringify(record));
  const result=await terminateRecordedRun({...record,run_id:'mcp-unverified',running:true,orphaned:false,provider:null},0);
@@ -2241,11 +2255,11 @@ it('retains custody when a live owner has no verifiable start identity', async (
 
 it('binds termination writes to the discovered run directory', async () => {
  const {findRecordedRun,terminateRecordedRun}=await import('../src/run-registry.js');
- const dir=join(workspace,'.agent-run/mcp-forged'),outside=join(workspace,'outside');
+ const dir=join(workspace,'.agent-run/runs/20260801-1200-dispatch-forged-abcdef'),outside=join(workspace,'outside');
  mkdirSync(dir,{recursive:true});mkdirSync(outside);
  const target=join(outside,'dispatch-status.json');writeFileSync(target,'untouched');
  writeFileSync(join(dir,OWNER_RECORD_NAME),JSON.stringify({schema_version:1,kind:'dispatch',run_dir:outside,workspace,run_token:'gone',owner_pid:999991,owner_pgid:999991,owner_started_at:null,host_pid:999992,host_started_at:null,started_at:new Date().toISOString(),owner_stdout:'',owner_stderr:''}));
- const record=findRecordedRun(workspace,'mcp-forged')!;
+ const record=findRecordedRun(workspace,'mcp-abcdef')!;
  await terminateRecordedRun(record);
  expect(readFileSync(target,'utf8')).toBe('untouched');
  expect(JSON.parse(readFileSync(join(dir,'dispatch-status.json'),'utf8')).status).toBe('interrupted');

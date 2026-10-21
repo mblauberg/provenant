@@ -7,21 +7,21 @@ needs:
 
 | Task/mode or content | Load |
 |---|---|
-| submissions / written advocacy | `argument-structure-and-paragraphing.md` |
-| forms, affidavits, orders, annexures | `forum-and-document-recipes.md` |
-| statutory declarations, or choosing between a declaration, an affidavit and a witness statement | `statutory-declarations.md` |
-| deeds, agreements, releases, guarantees, variations | `deeds-and-agreements.md` |
-| tribunal work and merits review | `tribunals-and-merits-review.md` |
-| correspondence | `legal-correspondence-style.md` |
-| letters of demand, pre-action letters, settlement offers | `demands-and-pre-action-correspondence.md` |
-| AGLC citation in academic work, advices and research memoranda | `aglc4-citation.md` |
-| non-filing legal decision overview | `decision-overviews.md` |
-| family-violence or redaction-sensitive material | `family-violence-and-redaction.md` |
-| house style questions | `australian-english-house-style.md` |
-| source anchors and citations | `source-boundary-and-citations.md` |
-| banned phrasing/patterns | `forbidden-patterns.md` |
-| checking the finished draft | this file (`validation-checklists.md`) |
-| current-source and user-authority gates | `verification-and-escalation.md` |
+| submissions / written advocacy | [argument-structure-and-paragraphing.md](argument-structure-and-paragraphing.md) |
+| forms, affidavits, orders, annexures | [forum-and-document-recipes.md](forum-and-document-recipes.md) |
+| statutory declarations, or choosing between a declaration, an affidavit and a witness statement | [statutory-declarations.md](statutory-declarations.md) |
+| deeds, agreements, releases, guarantees, variations | [deeds-and-agreements.md](deeds-and-agreements.md) |
+| tribunal work and merits review | [tribunals-and-merits-review.md](tribunals-and-merits-review.md) |
+| correspondence | [legal-correspondence-style.md](legal-correspondence-style.md) |
+| letters of demand, pre-action letters, settlement offers | [demands-and-pre-action-correspondence.md](demands-and-pre-action-correspondence.md) |
+| AGLC citation in academic work, advices and research memoranda | [aglc4-citation.md](aglc4-citation.md) |
+| non-filing legal decision overview | [decision-overviews.md](decision-overviews.md) |
+| family-violence or redaction-sensitive material | [family-violence-and-redaction.md](family-violence-and-redaction.md) |
+| house style questions | [australian-english-house-style.md](australian-english-house-style.md) |
+| source anchors and citations | [source-boundary-and-citations.md](source-boundary-and-citations.md) |
+| banned phrasing/patterns | [forbidden-patterns.md](forbidden-patterns.md) |
+| checking the finished draft | this file ([validation-checklists.md](validation-checklists.md)) |
+| current-source and user-authority gates | [verification-and-escalation.md](verification-and-escalation.md) |
 
 Run the checks the task needs, not all of them:
 

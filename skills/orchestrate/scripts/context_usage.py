@@ -17,7 +17,7 @@ MAX_CEILING = 1000000
 # Adapters whose CLI takes a per-invocation auto-compaction threshold.
 CEILING_CONTROL = {"claude", "codex"}
 FIELDS = ("context_tokens", "input_tokens", "output_tokens", "cached_input_tokens",
-          "context_window_tokens", "context_percent", "source")
+          "cache_write_tokens", "reasoning_tokens", "context_window_tokens", "context_percent", "source")
 
 
 def _int(value):
@@ -35,12 +35,14 @@ class Meter:
     def __init__(self, adapter):
         self.adapter = adapter
         self.value = dict.fromkeys(FIELDS)
-        self.totals = {"input_tokens": None, "output_tokens": None, "cached_input_tokens": None}
+        self.totals = dict.fromkeys(("input_tokens", "output_tokens", "cached_input_tokens",
+                                    "cache_write_tokens", "reasoning_tokens"))
         self.models = {"init": None, "answered": [], "final": None, "usage": []}
 
-    def _add(self, input_tokens, output_tokens, cached):
+    def _add(self, input_tokens, output_tokens, cached, cache_write, reasoning):
         for key, value in (("input_tokens", input_tokens), ("output_tokens", output_tokens),
-                           ("cached_input_tokens", cached)):
+                           ("cached_input_tokens", cached), ("cache_write_tokens", cache_write),
+                           ("reasoning_tokens", reasoning)):
             if _int(value) is not None:
                 self.totals[key] = (self.totals[key] or 0) + value
 
@@ -52,6 +54,9 @@ class Meter:
         except (AttributeError, TypeError, KeyError, IndexError):
             pass  # A malformed usage field never fails an attempt.
 
+    # Input semantics stay provider-specific: Claude/Cursor/OpenCode add cache reads
+    # and writes; Codex passes through input (includes cached); agy passes through
+    # input with cache reads reported separately. Kiro/Copilot report no input.
     def _claude(self, event):
         kind, models = event.get("type"), self.models
         if kind == "system" and event.get("subtype") == "init" and isinstance(event.get("model"), str):
@@ -67,11 +72,14 @@ class Meter:
             self._claude_request(message.get("usage"))
         if kind == "result":
             usage = event.get("usage") or {}
+            details = usage.get("output_tokens_details")
             self.value.update(
                 input_tokens=_sum(usage.get("input_tokens"), usage.get("cache_creation_input_tokens"),
                                   usage.get("cache_read_input_tokens")),
                 output_tokens=_int(usage.get("output_tokens")),
                 cached_input_tokens=_int(usage.get("cache_read_input_tokens")),
+                cache_write_tokens=_int(usage.get("cache_creation_input_tokens")),
+                reasoning_tokens=_int(details.get("thinking_tokens")) if isinstance(details, dict) else None,
             )
             iterations = [item for item in usage.get("iterations") or [] if isinstance(item, dict)]
             if iterations:
@@ -104,6 +112,8 @@ class Meter:
             self.value.update(input_tokens=_int(usage.get("input_tokens")),
                               output_tokens=_int(usage.get("output_tokens")),
                               cached_input_tokens=_int(usage.get("cached_input_tokens")),
+                              cache_write_tokens=_int(usage.get("cache_write_input_tokens")),
+                              reasoning_tokens=_int(usage.get("reasoning_output_tokens")),
                               context_tokens=_sum(usage.get("input_tokens"), usage.get("output_tokens")),
                               source="estimated")
 
@@ -113,6 +123,7 @@ class Meter:
             total = _sum(usage.get("inputTokens"), usage.get("cacheReadTokens"), usage.get("cacheWriteTokens"))
             self.value.update(input_tokens=total, output_tokens=_int(usage.get("outputTokens")),
                               cached_input_tokens=_int(usage.get("cacheReadTokens")),
+                              cache_write_tokens=_int(usage.get("cacheWriteTokens")),
                               context_tokens=_sum(total, usage.get("outputTokens")), source="estimated")
 
     def _opencode(self, event):
@@ -121,7 +132,7 @@ class Meter:
             tokens = part["tokens"]
             cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
             self._add(_sum(tokens.get("input"), cache.get("read"), cache.get("write")), tokens.get("output"),
-                      cache.get("read"))
+                      cache.get("read"), cache.get("write"), tokens.get("reasoning"))
             size = _int(tokens.get("total")) or _sum(tokens.get("input"), tokens.get("output"),
                                                       cache.get("read"), cache.get("write"))
             self.value.update(context_tokens=size, source="observed", **self.totals)
@@ -133,11 +144,12 @@ class Meter:
             self.value.update(context_tokens=_sum(usage.get("input_tokens"), usage.get("output_tokens")),
                               source="observed")
         result = event.get("result") if event.get("event") == "result" else None
-        if isinstance(result, dict) and isinstance(result.get("usage"), dict) and _int(result["usage"].get("input_tokens")):
+        if isinstance(result, dict) and isinstance(result.get("usage"), dict):
             usage = result["usage"]
             self.value.update(input_tokens=_int(usage.get("input_tokens")),
                               output_tokens=_int(usage.get("output_tokens")),
-                              cached_input_tokens=_int(usage.get("cache_read_tokens")))
+                              cached_input_tokens=_int(usage.get("cache_read_tokens")),
+                              reasoning_tokens=_int(usage.get("thinking_tokens")))
 
     def _kiro(self, event):
         data = event.get("data")
@@ -148,6 +160,13 @@ class Meter:
 
     def result(self):
         return dict(self.value)
+
+
+def usage_source(value):
+    """Token totals are stream observations, even when context size is estimated."""
+    return "observed" if any(_int(value.get(key)) is not None for key in (
+        "input_tokens", "output_tokens", "cached_input_tokens", "cache_write_tokens", "reasoning_tokens"
+    )) else "missing"
 
 
 def _codex_rollouts(session, env):

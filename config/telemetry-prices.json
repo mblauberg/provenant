@@ -1,0 +1,162 @@
+{
+  "schema_version": 1,
+  "currency": "USD",
+  "units": "per_million_tokens",
+  "note": "Repository roster verifies model identities only. All prices remain null until dated pricing evidence is available.",
+  "models": {
+    "agy/claude-opus-4-6-thinking": {
+      "source": "config/model-routing.json",
+      "date": "2026-10-21",
+      "price_status": "unverified",
+      "usd_per_million": {
+        "input": null,
+        "cached_input": null,
+        "cache_write": null,
+        "output": null
+      }
+    },
+    "agy/claude-sonnet-4-6": {
+      "source": "config/model-routing.json",
+      "date": "2026-10-21",
+      "price_status": "unverified",
+      "usd_per_million": {
+        "input": null,
+        "cached_input": null,
+        "cache_write": null,
+        "output": null
+      }
+    },
+    "agy/gemini-3.8-flash": {
+      "source": "config/model-routing.json",
+      "date": "2026-10-21",
+      "price_status": "unverified",
+      "usd_per_million": {
+        "input": null,
+        "cached_input": null,
+        "cache_write": null,
+        "output": null
+      }
+    },
+    "claude/claude-haiku-5-5": {
+      "source": "config/model-routing.json",
+      "date": "2026-10-21",
+      "price_status": "unverified",
+      "usd_per_million": {
+        "input": null,
+        "cached_input": null,
+        "cache_write": null,
+        "output": null
+      }
+    },
+    "claude/claude-opus-5-5": {
+      "source": "config/model-routing.json",
+      "date": "2026-10-21",
+      "price_status": "unverified",
+      "usd_per_million": {
+        "input": null,
+        "cached_input": null,
+        "cache_write": null,
+        "output": null
+      }
+    },
+    "claude/claude-sonnet-5-5": {
+      "source": "config/model-routing.json",
+      "date": "2026-10-21",
+      "price_status": "unverified",
+      "usd_per_million": {
+        "input": null,
+        "cached_input": null,
+        "cache_write": null,
+        "output": null
+      }
+    },
+    "codex/gpt-6-astra": {
+      "source": "config/model-routing.json",
+      "date": "2026-10-21",
+      "price_status": "unverified",
+      "usd_per_million": {
+        "input": null,
+        "cached_input": null,
+        "cache_write": null,
+        "output": null
+      }
+    },
+    "codex/gpt-6-luna": {
+      "source": "config/model-routing.json",
+      "date": "2026-10-21",
+      "price_status": "unverified",
+      "usd_per_million": {
+        "input": null,
+        "cached_input": null,
+        "cache_write": null,
+        "output": null
+      }
+    },
+    "codex/gpt-6.1-sol": {
+      "source": "config/model-routing.json",
+      "date": "2026-10-21",
+      "price_status": "unverified",
+      "usd_per_million": {
+        "input": null,
+        "cached_input": null,
+        "cache_write": null,
+        "output": null
+      }
+    },
+    "opencode/opencode-go/deepseek-v4.1-flash": {
+      "source": "config/model-routing.json",
+      "date": "2026-10-21",
+      "price_status": "unverified",
+      "usd_per_million": {
+        "input": null,
+        "cached_input": null,
+        "cache_write": null,
+        "output": null
+      }
+    },
+    "opencode/opencode-go/gemini-4-argon-contributor": {
+      "source": "config/model-routing.json",
+      "date": "2026-10-21",
+      "price_status": "unverified",
+      "usd_per_million": {
+        "input": null,
+        "cached_input": null,
+        "cache_write": null,
+        "output": null
+      }
+    },
+    "opencode/opencode-go/glm-5.3-flash": {
+      "source": "config/model-routing.json",
+      "date": "2026-10-21",
+      "price_status": "unverified",
+      "usd_per_million": {
+        "input": null,
+        "cached_input": null,
+        "cache_write": null,
+        "output": null
+      }
+    },
+    "opencode/opencode/deepseek-v4.1-flash-free": {
+      "source": "config/model-routing.json",
+      "date": "2026-10-21",
+      "price_status": "unverified",
+      "usd_per_million": {
+        "input": null,
+        "cached_input": null,
+        "cache_write": null,
+        "output": null
+      }
+    },
+    "opencode/opencode/glm-5.3-flash-free": {
+      "source": "config/model-routing.json",
+      "date": "2026-10-21",
+      "price_status": "unverified",
+      "usd_per_million": {
+        "input": null,
+        "cached_input": null,
+        "cache_write": null,
+        "output": null
+      }
+    }
+  }
+}
