@@ -48,7 +48,7 @@ def test_missing_sources_are_manifested_not_errors(tmp_path):
     assert all(row['status'] == 'absent' and row['row_count'] == 0 for row in rows)
     assert all(row['parser_version'] == 2 and row['path_pattern'] for row in rows)
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_claude_incremental_dedup_subagents_and_content_exclusion(tmp_path):
@@ -335,7 +335,7 @@ def test_schema_migrates_existing_v1_observations(tmp_path):
     result = cli(tmp_path, 'telemetry', 'ingest')
     assert result.returncode == 0, result.stdout + result.stderr
     with sqlite3.connect(path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 3
+        assert db.execute("PRAGMA user_version").fetchone()[0] == 4
         assert db.execute('SELECT source,origin_path FROM observations').fetchone() == ('cooldowns', str(path.parent / 'cooldowns.json'))
 
 
@@ -478,3 +478,165 @@ def test_legacy_rebuild_replaces_stale_usage_for_unchanged_message_id(tmp_path):
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         assert db.execute('SELECT output_tokens FROM usage').fetchall() == [(3,)]
+
+
+def receipt(project, name, attempt=1, **values):
+    path = project / f'.agent-run/runs/{name}/tasks/lane/attempt-{attempt:03d}/attempt.json'
+    write_json(path, {'run_id': name, 'task_id': 'lane', 'attempt': attempt, 'cwd': '/repo',
+                      'ended_at': '2026-10-21T01:00:00Z', **values})
+    return path
+
+
+def route(adapter, model, effort=None):
+    return {'requested': {'adapter': adapter, 'model': model, 'effort': effort or ''},
+            'resolved_model': model, 'effort_applied': effort or ''}
+
+
+def test_stats_normalise_models_against_the_catalogue_and_keep_raw_values(tmp_path):
+    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl', {
+        'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+        'message': {'id': 'm', 'model': 'claude-haiku-4-5-20251001', 'usage': {'input_tokens': 7}}})
+    receipt(tmp_path, 'agy', status='ok', provenance=route('agy', 'gemini-3.8-flash-high', 'high'))
+    receipt(tmp_path, 'cursor', status='ok', provenance=route('cursor', 'Grok 4.7 256K High'))
+    receipt(tmp_path, 'claude', status='ok', provenance=route('claude', 'opus'))
+    receipt(tmp_path, 'sonnet5', status='ok', provenance=route('claude', 'claude-sonnet-5'))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    models = {(row['adapter'], row['model']): row['model_raw'] for row in report['usage']}
+    assert models == {('claude', 'claude-haiku-4-5'): ['claude-haiku-4-5-20251001'],
+                      ('agy', 'gemini-3.8-flash'): ['gemini-3.8-flash-high'],
+                      ('cursor', 'grok-4.7'): ['Grok 4.7 256K High'],
+                      ('claude', 'claude-opus-5-5'): ['opus'],
+                      # A versioned spelling is a distinct model, never folded onto a newer id.
+                      ('claude', 'claude-sonnet-5'): ['claude-sonnet-5']}
+
+
+def test_opencode_native_and_receipt_spellings_share_one_model_key(tmp_path):
+    from scripts import telemetry
+    catalogue = telemetry.catalogue()
+    assert telemetry.normalise_model('opencode', 'opencode-go', 'deepseek-v4.1-flash', catalogue) == 'opencode-go/deepseek-v4.1-flash'
+    assert telemetry.normalise_model('opencode', 'opencode', 'opencode-go/deepseek-v4.1-flash', catalogue) == 'opencode-go/deepseek-v4.1-flash'
+    assert telemetry.normalise_model('opencode', 'openrouter', 'z-ai/glm-5.2:free', catalogue) == 'openrouter/z-ai/glm-5.2:free'
+    assert telemetry.normalise_model('codex', 'openai', 'gpt-6-sol', catalogue) == 'gpt-6-sol'
+    assert telemetry.normalise_model('codex', 'openai', None, catalogue) is None
+
+
+def test_fixture_rows_are_excluded_and_unattributed_rows_reported_separately(tmp_path):
+    receipt(tmp_path, 'fixture', status='ok', provenance=route('codex', 'fixture'), context={'input_tokens': 5})
+    receipt(tmp_path, 'missing', status='model_unavailable', provenance=route('opencode', 'opencode/nonexistent-model'))
+    receipt(tmp_path, 'bare', status='cancelled', context={'input_tokens': 3})
+    receipt(tmp_path, 'real', status='ok', provenance=route('codex', 'gpt-6-luna'), context={'input_tokens': 9})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    assert [(row['adapter'], row['model']) for row in report['usage']] == [('codex', 'gpt-6-luna')]
+    assert report['excluded_rows'] == {'test_fixture': 2}
+    assert report['unattributed'] == [{'source': 'fabric', 'adapter': None, 'rows': 1,
+                                       'input_tokens': 3, 'statuses': {'cancelled': 1}}]
+    assert all(row['model'] not in {'fixture', 'opencode/nonexistent-model'} for row in report['outcomes'])
+    assert sum(row['attempts'] for row in report['attempts']) == 2
+
+
+def test_cache_read_share_counts_only_rows_with_every_input_field(tmp_path):
+    path = tmp_path / 'home/.claude/projects/repo/s.jsonl'
+    jsonl(path, {'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+                 'message': {'id': 'a', 'model': 'claude-opus-5-5', 'usage': {
+                     'input_tokens': 10, 'cache_read_input_tokens': 30, 'cache_creation_input_tokens': 10}}},
+          {'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+           'message': {'id': 'b', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 100}}})
+    jsonl(tmp_path / 'home/.codex/sessions/day/rollout-x.jsonl',
+          {'type': 'session_meta', 'payload': {'id': 'cx'}},
+          {'type': 'turn_context', 'payload': {'model': 'gpt-6-luna'}},
+          {'type': 'event_msg', 'timestamp': '2026-10-21T01:00:00Z', 'payload': {
+              'type': 'token_count', 'info': {'total_token_usage': {
+                  'input_tokens': 100, 'cached_input_tokens': 40, 'cache_write_input_tokens': 0,
+                  'output_tokens': 1}}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    shares = {row['adapter']: row['cache_read_share'] for row in report['usage']}
+    # Codex input already includes cached tokens; the ledger stores the uncached remainder.
+    assert shares == {'claude': 0.6, 'codex': 0.4}
+    claude = next(row for row in report['usage'] if row['adapter'] == 'claude')
+    assert claude['cache_share_rows'] == 1 and claude['rows'] == 2
+
+
+def test_outcomes_group_route_quality_with_retries_errors_latency_and_throughput(tmp_path):
+    common = {'task_class': 'review', 'requested_route': {'alias': 'workhorse', 'task_class': 'review'},
+              'provenance': route('codex', 'gpt-6.1-sol', 'high'), 'started_at': '2026-10-21T01:00:00Z'}
+    receipt(tmp_path, 'one', 1, **common, status='failed', error_class='provider_timeout',
+            ended_at='2026-10-21T01:00:30Z', timing={'phases': {'provider': 30000}})
+    receipt(tmp_path, 'one', 2, **common, status='ok', ended_at='2026-10-21T01:00:10Z',
+            timing={'phases': {'provider': 10000}}, context={'output_tokens': 100})
+    receipt(tmp_path, 'two', 1, **common, status='ok', ended_at='2026-10-21T01:00:20Z',
+            timing={'phases': {'provider': 20000}}, context={'output_tokens': 100})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    assert report['outcomes'] == [{
+        'adapter': 'codex', 'model': 'gpt-6.1-sol', 'effort': 'high', 'task_class': 'review',
+        'route': 'workhorse', 'lanes': 2, 'succeeded': 2, 'success_rate': 1.0, 'attempts': 3,
+        'retries': 1, 'error_classes': {'provider_timeout': 1},
+        'latency_p50_s': 20.0, 'latency_p90_s': 30.0, 'output_tokens_per_s': 7.5}]
+    table = cli(tmp_path, 'stats').stdout
+    assert 'codex/gpt-6.1-sol@high' in table and '100%' in table
+
+
+def test_price_table_is_dated_sourced_and_marks_free_and_subscription_routes(tmp_path):
+    table = json.loads((ROOT / 'config/telemetry-prices.json').read_text())
+    assert table['schema_version'] == 2
+    for key, entry in table['models'].items():
+        assert entry['source'] in table['sources'], key
+        assert entry['date'] and entry['price_status'] in {'verified', 'unverified', 'free'}, key
+        assert entry['billing'] in {'api', 'subscription', 'free'}, key
+        if entry['price_status'] == 'verified':
+            assert all(isinstance(entry['usd_per_million'][field], (int, float))
+                       for field in ('input', 'cached_input', 'output')), key
+    assert table['models']['claude/claude-opus-5-5']['usd_per_million'] == {
+        'input': 4, 'cached_input': 0.2, 'cache_write': 5, 'output': 20}
+    receipt(tmp_path, 'free', status='ok', provenance=route('opencode', 'opencode/mimo-v2.6-flash-free'),
+            context={'input_tokens': 1000, 'output_tokens': 10, 'cached_input_tokens': 0})
+    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl', {
+        'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+        'message': {'id': 'm', 'model': 'claude-opus-5-5', 'usage': {
+            'input_tokens': 1_000_000, 'cache_read_input_tokens': 0,
+            'cache_creation_input_tokens': 0, 'output_tokens': 0}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    usage = {row['adapter']: row for row in json.loads(cli(tmp_path, 'stats', '--json').stdout)['usage']}
+    assert (usage['opencode']['billing'], usage['opencode']['estimated_cost_usd']) == ('free', 0)
+    assert (usage['claude']['billing'], usage['claude']['estimated_cost_usd']) == ('subscription', 4)
+
+
+def test_stats_default_output_is_a_compact_table(tmp_path):
+    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl', {
+        'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+        'message': {'id': 'm', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 1234567}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    lines = cli(tmp_path, 'stats').stdout.splitlines()
+    header = next(line for line in lines if line.split()[:3] == ['provider', 'adapter', 'model'])
+    row = lines[lines.index(header) + 1].split()
+    assert row[:4] == ['anthropic', 'claude', 'claude-opus-5-5', '1']
+    assert '1.23M' in row and row[-2:] == ['-', 'subscription']
+    assert not any(line.lstrip().startswith('{') for line in lines)
+
+
+def test_fabric_discovery_ignores_legacy_mcp_run_roots(tmp_path):
+    write_json(tmp_path / '.agent-run/mcp-old/tasks/lane/attempt-001/attempt.json', {
+        'run_id': 'old', 'task_id': 'lane', 'attempt': 1, 'status': 'ok',
+        'provenance': route('codex', 'gpt-6-luna')})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    sources = {row['source']: row for row in json.loads(cli(tmp_path, 'telemetry', 'sources', '--json').stdout)}
+    assert sources['fabric']['row_count'] == 0 and 'mcp-' not in sources['fabric']['path_pattern']
+
+
+def test_ledger_rows_carry_the_configured_host_id_without_duplicates(tmp_path):
+    path = tmp_path / 'home/.claude/projects/repo/s.jsonl'
+    jsonl(path, {'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+                 'message': {'id': 'one', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 7}}})
+    receipt(tmp_path, 'run', status='ok', provenance=route('codex', 'gpt-6-luna'))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    write_json(tmp_path / 'home/.agents/.agent-fabric/hosts.json', {'schema_version': 1, 'local_host': 'studio'})
+    jsonl(path, {'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
+                 'message': {'id': 'two', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 7}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute('SELECT DISTINCT host FROM usage').fetchall() == [('studio',)]
+        assert db.execute('SELECT COUNT(*) FROM usage').fetchone()[0] == 3
+        assert db.execute('SELECT DISTINCT host FROM usage_files').fetchall() == [('studio',)]
