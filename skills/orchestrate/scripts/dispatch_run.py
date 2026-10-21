@@ -28,7 +28,7 @@ import tempfile
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 # The shared library sits one level above this skill. Resolving it from the
 # skill rather than from a repository root two levels further up keeps the
@@ -2778,8 +2778,30 @@ def _fabric_hosts_owner():
     return sys.modules[name]
 
 
+class BudgetArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser emitting one-line usage errors instead of usage dumps."""
+
+    def error(self, message: str) -> NoReturn:
+        clean = message.replace("\n", " ").strip()
+        cmd = self.prog
+        if "dispatch" in cmd:
+            fix = "provenant help dispatch"
+        elif "batch" in cmd:
+            fix = "provenant help batch"
+        else:
+            fix = f"provenant help {cmd}"
+        if clean.startswith("the following arguments are required:"):
+            args = clean.split(":", 1)[1].strip()
+            fix = f"pass {args}"
+        elif "one of the arguments" in clean and "is required" in clean:
+            args = clean.split("arguments", 1)[1].split("is required", 1)[0].strip()
+            fix = f"pass {args}"
+        sys.stderr.write(f"error: {clean}; fix: {fix}\n")
+        sys.exit(2)
+
+
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(description=__doc__)
+    root = BudgetArgumentParser(description=__doc__)
     root.add_argument("--run-dir", type=Path, required=True)
     root.add_argument("--task-id")
     root.add_argument("--host")

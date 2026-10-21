@@ -23,7 +23,7 @@ import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 # Two import roots, both derived from this file so the repo and an installed
 # instance behave the same: the shared library one level above this skill, and
@@ -888,8 +888,30 @@ def batch(args: argparse.Namespace) -> int:
         batch_lock.close()
 
 
+class BudgetArgumentParser(argparse.ArgumentParser):
+    """ArgumentParser emitting one-line usage errors instead of usage dumps."""
+
+    def error(self, message: str) -> NoReturn:
+        clean = message.replace("\n", " ").strip()
+        cmd = self.prog
+        if "dispatch" in cmd:
+            fix = "provenant help dispatch"
+        elif "batch" in cmd:
+            fix = "provenant help batch"
+        else:
+            fix = f"provenant help {cmd}"
+        if clean.startswith("the following arguments are required:"):
+            args = clean.split(":", 1)[1].strip()
+            fix = f"pass {args}"
+        elif "one of the arguments" in clean and "is required" in clean:
+            args = clean.split("arguments", 1)[1].split("is required", 1)[0].strip()
+            fix = f"pass {args}"
+        sys.stderr.write(f"error: {clean}; fix: {fix}\n")
+        sys.exit(2)
+
+
 def parser() -> argparse.ArgumentParser:
-    root = argparse.ArgumentParser(
+    root = BudgetArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""Manifest schema v1: {\"schema_version\":1,\"tasks\":[{\"id\":\"task-1\",\"prompt_file\":\"prompt.md\",\"adapter\":\"codex\",\"alias\":\"scout\",\"role\":\"worker\"}]}.
 Each task uses ordinary intent and exactly one of prompt_file/prompt plus one
