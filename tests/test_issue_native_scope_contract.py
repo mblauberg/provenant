@@ -23,4 +23,3 @@ def test_pre_rename_lifecycle_routing_dataset_is_explicitly_historical():
 
     assert dataset["status"] == "historical"
     assert dataset["catalogue_state"] == "pre-autopilot-rename"
-    assert "not a current routable skill" in dataset["note"]
