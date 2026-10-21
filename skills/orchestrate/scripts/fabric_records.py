@@ -209,14 +209,27 @@ def identity_resolver():
 
 
 _PACING_CACHE = {}
+_ROUTE_MODULES = {}
+
+
+def _route_module():
+    """Load model_route once per product and instance root, not on every policy read."""
+    try:
+        from .exec_routing import _model_route_module
+    except ImportError:
+        from exec_routing import _model_route_module
+    key = (os.environ.get("AGENT_FABRIC_PRODUCT_ROOT"), os.environ.get("AGENT_FABRIC_INSTANCE_ROOT"))
+    if key not in _ROUTE_MODULES:
+        _ROUTE_MODULES.clear()
+        _ROUTE_MODULES[key] = _model_route_module()
+    return _ROUTE_MODULES[key]
 
 
 def _catalogue_stamp():
-    """Identify the catalogue files pacing_policy reads: path, mtime and size of each."""
-    product = Path(os.environ.get("AGENT_FABRIC_PRODUCT_ROOT") or Path(__file__).resolve().parents[3])
-    instance = Path(os.environ.get("AGENT_FABRIC_INSTANCE_ROOT") or Path.home() / ".agents").expanduser()
+    """Identify the catalogue files pacing_policy reads, using the router's own paths."""
+    route = _route_module()
     stamp = []
-    for path in (product / "config/model-routing.json", instance / "config/model-routing.json"):
+    for path in (route.PRODUCT_CATALOG_PATH, route.CATALOG_PATH):
         try:
             info = path.stat()
             stamp.append((str(path), info.st_mtime_ns, info.st_size))
@@ -240,13 +253,9 @@ def pacing_policy():
 
 
 def _read_pacing_policy():
-    try:
-        from .exec_routing import _model_route_module
-    except ImportError:
-        from exec_routing import _model_route_module
     defaults = {"base_delay_seconds": 30, "cap_seconds": 900,
                 "jitter_fraction": 0.2, "minimum_budget_seconds": 30}
-    configured = _model_route_module().load_catalog().get("rate_limit_pacing", {})
+    configured = _route_module().load_catalog().get("rate_limit_pacing", {})
     for name in defaults:
         value = configured.get(name) if isinstance(configured, dict) else None
         lower = 0 if name == "jitter_fraction" else 0.001
@@ -329,7 +338,7 @@ def read_cooldowns(path=None, at=None):
         try:
             with locked(path.with_name('cooldowns.lock')):
                 return active_cooldowns(_load_cooldowns(path, at), at)
-        except (OSError, ValueError):
+        except (OSError, ValueError):  # ValueError: lock refused (hard-linked); the store may still be readable
             return active_cooldowns(_load_cooldowns(path, at, persist=False), at)
     except (OSError, ValueError, TypeError, KeyError, AttributeError):
         return {}

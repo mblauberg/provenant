@@ -1637,9 +1637,10 @@ def reset_time(text, events, at=None):
 
 def quota_window_is_short(failure_text):
     """True when the quota phrase names a minute or second window and no longer one."""
-    start = (re.search(r"quota exceeded", failure_text, re.I)
-             or re.search(r"RESOURCE_EXHAUSTED", failure_text))
-    phrase = re.split(r'\.\s|\n|"', failure_text[start.start():], maxsplit=1)[0] if start else ""
+    start = re.search(r"quota exceeded", failure_text, re.I)
+    start = start or re.search(r"RESOURCE_EXHAUSTED", failure_text)
+    # Bounded to the sentence or JSON string; a quoted metric name does not end it.
+    phrase = re.split(r'\.\s|\n|"\s*[,}\]]', failure_text[start.start():][:240], maxsplit=1)[0] if start else ""
     long_window = (re.search(r"per[ -](?:day|hour)\b|/\s*(?:day|hr|hour)\b", phrase, re.I)
                    or re.search(r"Per(?:Day|Hour)(?![a-z])", failure_text))
     short_window = (re.search(r"per[ -](?:minute|second)\b|/\s*(?:min(?:ute)?|sec(?:ond)?)\b", phrase, re.I)

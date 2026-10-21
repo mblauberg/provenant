@@ -7400,9 +7400,12 @@ def test_resource_exhausted_classifies_the_quota_window(adapter, window, status)
     ("Quota exceeded for GenerateRequestsPerDayPerProjectPerModel", "usage_limited"),
     ("Quota exceeded for RequestsPerHour and RequestsPerMinute", "usage_limited"),
     ('{"error":{"message":"Quota exceeded for requests per minute"},"docs":"limits per day"}', "rate_limited"),
+    ("RESOURCE_EXHAUSTED: limit: 60 per minute", "rate_limited"),
+    ('RESOURCE_EXHAUSTED: Quota metric "generativelanguage.googleapis.com/generate_requests" per minute', "rate_limited"),
+    ("RESOURCE_EXHAUSTED: limit: 60 per day", "usage_limited"),
 ])
 def test_quota_window_comes_from_the_quota_phrase_not_the_whole_event(message, status):
-    parsed = supervisor().parse_output("agy", "", "429 RESOURCE_EXHAUSTED: " + message, 1)
+    parsed = supervisor().parse_output("agy", "", (message if "RESOURCE_EXHAUSTED" in message else "429 RESOURCE_EXHAUSTED: " + message), 1)
     assert parsed["status"] == status
 
 
