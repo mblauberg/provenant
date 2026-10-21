@@ -164,8 +164,20 @@ Verification status: codex-cli 0.159.0 binary strings confirm the `[otel]` keys
 `tls` fields. The exact TOML shape above (inline table keyed by exporter kind)
 and whether Codex appends signal paths to `endpoint` were not verified against
 a running Codex; the Codex endpoint is therefore given as the full `/v1/logs`
-URL, and Codex metrics and traces stay off. Claude Code variable behaviour is
-from its documented names and was not exercised here.
+URL, and Codex metrics and traces stay off.
+
+Verified on 2026-10-22 (laptop, Claude Code 2.1.306): a throwaway agent under
+the real launchd had no process before the first request, started on it (0.56 s
+for the first load, 72 ms on a later wake, 15 ms warm), exited when idle and
+woke again on the next request, at about 7 MB RSS. The source also compiles with
+Swift 6.1 (workshop). A `claude -p` run with the Claude Code exports above wrote
+logs (`user_prompt`, `api_request`, `assistant_response`, hook and MCP events)
+and metrics (`active_time.total`, `cost.usage`, `session.count`,
+`token.usage`). `api_request` carries model, effort, input, output and cache
+tokens (5-minute and 1-hour writes separately), cost, duration, time to first
+token and request id. Prompt and response text arrived as `<REDACTED>`, with
+lengths only. Every record carries account and user identity attributes,
+including the account email, so the files stay local and private.
 
 Lane linkage (follow-up, not implemented): the dispatcher should set
 `OTEL_RESOURCE_ATTRIBUTES=provenant.run_id=<run>,provenant.lane=<lane>,provenant.account=<account>`
