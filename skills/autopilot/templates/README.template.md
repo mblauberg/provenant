@@ -16,7 +16,10 @@ and every decision/software change to `implement`/`deliver`, records the
 durable pointers, and builds real artifacts **up to the build ceiling** —
 pausing at **human-in-the-loop (HITL) gates** for the calls only you can
 make. It is a continuous process, **run until you write STOP**, not a
-finished report.
+finished report. Delivery acceptance follows objective checks and tier-required
+review, or the project's named landing gate. Explicit user acceptance applies
+only to `terminal` work or when approved scope asks for it. The conductor
+reports the outcome and you may reject it. External actions remain gated.
 
 ## Status & what's waiting on you
 

@@ -4,7 +4,7 @@ cases:
   - {id: q217, relation: positive, prompt: "Read the repository process declaration and put this feature's change scope in its issue-native parent before writing accepted content.", tags: [direct, sufficient-context], expected: {primary_skill: scope, companion_skills: []}}
   - {id: q218, relation: positive, prompt: "Compare the architecture options, record the one-way decision, and park unresolved owner calls.", tags: [direct], expected: {primary_skill: scope, companion_skills: []}}
   - {id: q219, relation: positive, prompt: "Define the risk tier, authority bounds, failure modes, and observable done state before execution.", tags: [direct], expected: {primary_skill: scope, companion_skills: []}}
-  - {id: q220, relation: negative, prompt: "The spec is approved; implement it through verification and human acceptance.", tags: [adjacent], expected: {primary_skill: implement, companion_skills: []}}
+  - {id: q220, relation: negative, prompt: "The spec is approved; implement it through verification and tier-required review to acceptance.", tags: [adjacent], expected: {primary_skill: implement, companion_skills: []}}
   - {id: q221, relation: negative, prompt: "Review this completed diff source-read-only for defects.", tags: [adjacent], expected: {primary_skill: code-review, companion_skills: []}}
   - {id: q222, relation: negative, prompt: "What is the capital of France?", tags: [no-skill], expected: {primary_skill: null, companion_skills: []}}
   - {id: q223, relation: boundary, prompt: "Scope this feature by grilling me one high-leverage decision at a time.", tags: [composition], expected: {primary_skill: scope, companion_skills: [grill-me]}}

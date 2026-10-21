@@ -38,7 +38,7 @@ cases:
   - id: m05
     category: promotion-after-acceptance
     critical: true
-    prompt: The exact artifact digest has human acceptance and separate promotion authority. Activate it for the named external recipients, prove the visible outcome, and retain containment and observation evidence.
+    prompt: The exact artifact digest has met acceptance through objective checks and tier-required review and has separate promotion authority. Activate it for the named external recipients, prove the visible outcome, and retain containment and observation evidence.
     expected:
       primary_skill: release
       required_companion_skills: []

@@ -90,7 +90,8 @@ body:
       label: Risk, authority and user gates
       description: >-
         State the likely risk tier, authorised write/external scope, prohibited
-        actions, and any decision, acceptance or release that still needs a user.
+        actions, and any remaining user decision. Explicit final acceptance needs
+        a user only for terminal work or when approved scope asks for it.
     validations:
       required: true
 

@@ -1,5 +1,14 @@
 # Delivery contract
 
+Delivery acceptance is met by objective checks and tier-required review; the
+chair reports the outcome and the user may still reject it. Explicit user
+acceptance is required only for `terminal` work or when the approved scope
+asks for it. A project may name its landing gate as acceptance. The current
+receipt code still enforces explicit human approval; the field descriptions
+below document that compatibility constraint, not a universal user gate.
+Do not fabricate approval. See the
+[acceptance sweep](../../../docs/acceptance-sweep-2026-10-21.md) for code sites.
+
 `RUN.json` with `contract: delivery-run` and `schema_version: 1` is the single
 canonical lifecycle receipt. The profile registry
 declares minimum deterministic and judgement gates; project profiles may add

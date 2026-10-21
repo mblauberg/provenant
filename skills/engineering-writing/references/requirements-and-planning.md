@@ -81,7 +81,10 @@ Skeleton:
 4. Deliverables: each tangible output, with its acceptance definition.
 5. Assumptions and dependencies (environments, third parties, client-provided inputs).
 6. Constraints (budget, deadline, technology, compliance).
-7. Milestones and acceptance: how each deliverable is signed off.
+7. Milestones and acceptance: the objective checks and tier-required review
+   for each deliverable, including any project landing gate. Explicit user
+   acceptance applies only to `terminal` work or when the approved scope asks
+   for it.
 8. (SOW only) commercial terms, timeline, and change-control process.
 
 Discipline: the out-of-scope list is as important as the in-scope list. State acceptance in observable terms. Name a change-control path so new requests do not silently expand scope. Do not restate the full requirements here; reference the SRS or backlog.

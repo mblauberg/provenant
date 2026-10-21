@@ -31,4 +31,6 @@ Record each matrix cell as tested, failed, not tested, or not applicable and
 preserve evidence paths. Browser automation results do not establish WCAG
 certification, real assistive-technology compatibility, cross-browser
 completeness, or field performance. Final acceptance belongs to the enclosing
-lifecycle and user, not this design method.
+lifecycle through objective checks and tier-required review. Explicit user
+acceptance is required only for `terminal` work or when approved scope asks
+for it; a project may name its landing gate as acceptance.

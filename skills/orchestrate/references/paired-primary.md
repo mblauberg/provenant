@@ -101,4 +101,4 @@ other primary owns bounded stages, workflows or audits, never a competing loop.
 | Verification | non-author where practical | trajectory evidence supplier |
 | Repair | implementation owner | original non-author re-verifies |
 | Final synthesis | chair | fresh-context final challenge |
-| Acceptance | user | neither primary substitutes |
+| Acceptance | objective checks and tier-required review; chair reports | independent evidence; explicit user acceptance for `terminal` or approved scope |

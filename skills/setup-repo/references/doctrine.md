@@ -16,7 +16,7 @@ weaker; copy it and cut only what does not apply.
 | Ready | Accepted with bounded scope, authority and acceptance evidence. |
 | In progress | An owner is executing the accepted work. |
 | In review | The pull request, checks or independent review is active. |
-| Awaiting user | Machine work is ready but a user decision or acceptance remains. |
+| Awaiting user | A user decision remains, including explicit acceptance for terminal work or approved scope. |
 | Done | The item is integrated, or closed with its terminal reason recorded. |
 
 Project Status is the sole workflow state; labels describe content or
@@ -72,7 +72,7 @@ closure. Reference the issue from every commit body instead (`Refs #<n>`).
 | `Backlog` to `Ready`, `Done` or unchanged | Triage: user, or an agent inside granted authority | The triage result is recorded in an issue comment |
 | `Ready` to `In progress` | Implementing agent | Work on the accepted scope starts |
 | `In progress` to `In review` | Implementing agent | The pull request, exact-head checks or independent review is active |
-| `In review` to `Awaiting user` | Implementing agent | Machine gates pass; a user decision or acceptance remains |
+| `In review` to `Awaiting user` | Implementing agent | Machine gates pass; a required user decision remains |
 | Any later state to `Done` | Merging agent or user; merge auto-closes a `Closes #<n>` issue | No gate remains; the terminal reason or integrated pull request is recorded |
 
 Triage records exactly one result per issue comment: **Accepted** (bounded
