@@ -13,7 +13,8 @@ const roots: string[] = [];
 afterEach(() => { for (const root of roots.splice(0)) rmSync(root, { recursive: true, force: true }); });
 
 function fixture() {
-  const root = mkdtempSync(join(tmpdir(), "fabric-reader-"));
+  // Canonical, as dispatch writes projects: macOS tmpdir is a /var -> /private/var symlink.
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "fabric-reader-")));
   roots.push(root);
   return root;
 }
@@ -231,6 +232,54 @@ it("prunes a pointer when its source run is gone", async () => {
   const target = fixture(), source = fixture();
   const pointer = pointTo(target, source, "20261021-1012-dispatch-gone-abcdef", ["gone"]);
   expect((await readRuns(target)).runs).toEqual([]);
+  expect(existsSync(pointer)).toBe(false);
+});
+
+it("canonicalises a symlinked cwd_projects spelling from a hand-made status", async () => {
+  const target = fixture(), source = fixture(), aliases = fixture();
+  const alias = join(aliases, "target-alias");
+  symlinkSync(target, alias, "dir");
+  const { run } = attempt(source, "tasks", "aliased", "terminal", "ok");
+  writeFileSync(join(source, ".agent-run/runs", run, "dispatch-status.json"),
+    JSON.stringify({ cwd_projects: { aliased: alias } }));
+  const pointer = pointTo(target, source, run, ["aliased"]);
+  expect((await readRuns(target)).runs.map((row) => row.task_id)).toEqual(["aliased"]);
+  expect(existsSync(pointer)).toBe(true);
+});
+
+it("prunes a pointer once its source maps the task to another project", async () => {
+  const target = fixture(), moved = fixture(), source = fixture();
+  const { run } = attempt(source, "tasks", "moved", "terminal", "ok");
+  writeFileSync(join(source, ".agent-run/runs", run, "dispatch-status.json"),
+    JSON.stringify({ cwd_projects: { moved } }));
+  const pointer = pointTo(target, source, run, ["moved"]);
+  expect((await readRuns(target)).runs).toEqual([]);
+  expect(existsSync(pointer)).toBe(false);
+});
+
+it("skips a terminal pointer outside the lanes window before reading its receipts", async () => {
+  const target = fixture(), source = fixture();
+  const { run } = attempt(source, "tasks", "aged", "terminal", "ok");
+  writeFileSync(join(source, ".agent-run/runs", run, "dispatch-status.json"), JSON.stringify({ status: "ok",
+    finished_at: new Date(Date.now() - 2 * 86400000).toISOString(), cwd_projects: { aged: target } }));
+  const pointer = pointTo(target, source, run, ["aged"]);
+  const reads = vi.spyOn(fs, "readdirSync");
+  try {
+    expect((await readRuns(target)).runs).toEqual([]);
+    expect(reads.mock.calls.map(([path]) => String(path)).filter((path) => path.startsWith(source))).toEqual([]);
+  } finally { reads.mockRestore(); }
+  expect(existsSync(pointer)).toBe(true);
+  expect((await readRuns(target, undefined, 0, undefined, null, undefined, true)).runs.map((row) => row.task_id))
+    .toEqual(["aged"]);
+});
+
+it("prunes a terminal pointer older than run retention", async () => {
+  const target = fixture(), source = fixture();
+  const { run } = attempt(source, "tasks", "expired", "terminal", "ok");
+  writeFileSync(join(source, ".agent-run/runs", run, "dispatch-status.json"), JSON.stringify({ status: "ok",
+    finished_at: new Date(Date.now() - 30 * 86400000).toISOString(), cwd_projects: { expired: target } }));
+  const pointer = pointTo(target, source, run, ["expired"]);
+  expect((await readRuns(target, undefined, 0, undefined, null, undefined, true)).runs).toEqual([]);
   expect(existsSync(pointer)).toBe(false);
 });
 

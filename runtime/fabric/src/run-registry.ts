@@ -1047,7 +1047,29 @@ export async function statusRows(
         const metadata = readJson(join(runDir, "dispatch-status.json"));
         if (!metadata) throw new Error(`run_read_failed: ${runDir}`);
         const projects = metadata.cwd_projects;
-        if (!projects || typeof projects !== "object" || Array.isArray(projects)) continue;
+        // Dispatch writes canonical projectRoot values. A hand-made or older
+        // status may hold a symlinked spelling (/var vs /private/var), so each
+        // value is realpath-canonicalised on read; a value that still does not
+        // name this project (for example a worktree path rather than its
+        // project root) is treated as another project's.
+        const named = (task: unknown): boolean => {
+          const value = projects && typeof projects === "object" && !Array.isArray(projects) && typeof task === "string"
+            ? (projects as Record<string, unknown>)[task] : undefined;
+          if (typeof value !== "string" || !isAbsolute(value)) return false;
+          if (value === project) return true;
+          try { return realpathSync.native(value) === project; } catch { return false; }
+        };
+        // A resume that moved every pointed task elsewhere leaves this index stale.
+        if (!pointer.task_ids.some(named)) { unlinkSync(pointerPath); continue; }
+        const finished = metadata.status !== "running" && typeof metadata.finished_at === "string"
+          ? Date.parse(metadata.finished_at) : Number.NaN;
+        if (Number.isFinite(finished)) {
+          // Same retention that reaps the source run, so a source project that
+          // is never reaped cannot grow this index without bound.
+          if (finished < Date.now() - retentionHours(process.env) * 3_600_000) { unlinkSync(pointerPath); continue; }
+          // Outside the lanes window: skip before reading any receipt.
+          if (!includeHistory && finished <= Date.now() - 86400000) continue;
+        }
         const taskIds = Array.isArray(metadata.task_ids) ? metadata.task_ids : [];
         const routes = Array.isArray(metadata.routes) ? metadata.routes : [];
         const recorded = v1Rows(runDir);
@@ -1066,7 +1088,7 @@ export async function statusRows(
           (positiveInteger(metadata.owner_pid) && typeof metadata.run_token === "string" &&
             (metadata.kind === "dispatch" || metadata.kind === "batch"));
         const tasks = pointer.task_ids.filter((task): task is string => {
-          if (typeof task !== "string" || (projects as Record<string, unknown>)[task] !== project) return false;
+          if (typeof task !== "string" || !named(task)) return false;
           const index = taskIds.indexOf(task);
           return (owned && index >= 0 && hasRoute(routes[index])) ||
             recorded.some((row) => row.task_id === task && (hasRoute(row) || row.attempts?.some(hasRoute)));

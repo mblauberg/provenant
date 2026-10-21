@@ -402,11 +402,19 @@ export function startOwner(
     host_started_at: launcherStartedAt(),
   };
   writeFileSync(statusPath, JSON.stringify(metadata) + "\n", { mode: 0o600 });
-  let child: ChildProcess;
+  // The pointer is only a discovery index: an unwritable target run root must
+  // not fail the dispatch. The lane then stays visible from its source project.
   try {
     const sourceRoot = basename(dirname(runDir)) === "runs" ? dirname(dirname(runDir)) : dirname(runDir);
-    const sourceProject = projectRoot(dirname(sourceRoot), env);
-    writeLanePointers(runDir, cwdProjects, sourceProject, env);
+    writeLanePointers(runDir, cwdProjects, projectRoot(dirname(sourceRoot), env), env);
+  } catch (error) {
+    Object.assign(metadata, { warnings: [`lane_pointer_failed: ${error instanceof Error ? error.message : String(error)}; ` +
+      "the lane is listed only from its source project"] });
+    try { writeFileSync(statusPath, JSON.stringify(metadata) + "\n", { mode: 0o600 }); }
+    catch { /* The owner stamp below rewrites status with the warning. */ }
+  }
+  let child: ChildProcess;
+  try {
     const stdout = openSync(stdoutPath, "wx", 0o600);
     let stderr: number | undefined;
     try {

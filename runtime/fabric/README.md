@@ -141,8 +141,16 @@ records the cwd-derived project per task, so `lanes` and `lanes --wait` in that
 project also find the task, including from its registered worktrees. Dispatch
 writes a pointer under the target project's `.agent-run/runs/pointers/`;
 discovery reads its own run root and these pointers, corroborating tasks and
-routes against the source owner record or receipts. Missing source runs have
-their pointers pruned. Other tasks in a mixed-project batch stay private to
+routes against the source owner record or receipts. The pointer is
+best effort: when the target run root cannot be written, dispatch still
+starts, records a `lane_pointer_failed` warning in the run's
+`dispatch-status.json`, and the lane is listed only from its source project. A
+pointer is pruned when its source run is missing, when the source no longer
+maps any pointed task to this project (for example after a resume moved it), or
+when the run finished longer ago than the run retention window. A run that
+finished outside the 24-hour lanes window is skipped before its receipts are
+read unless history is requested. Recorded cwd projects are compared after
+resolving symlinks. Other tasks in a mixed-project batch stay private to
 their projects. Runs created before this change stay under the chair's project;
 there is no registry-wide backfill. A resume recomputes the resumed task's
 project from its effective cwd and writes its target pointer. The secret scan

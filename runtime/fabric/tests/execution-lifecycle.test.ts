@@ -321,7 +321,8 @@ async function startSleepingRun(prompt: string): Promise<Record<string, unknown>
 }
 
 beforeEach(() => {
-  temporaryDirectory = mkdtempSync(join(tmpdir(), "fabric-lifecycle-"));
+  // Canonical, as dispatch writes projects: macOS tmpdir is a /var -> /private/var symlink.
+  temporaryDirectory = realpathSync(mkdtempSync(join(tmpdir(), "fabric-lifecycle-")));
   workspace = join(temporaryDirectory, "workspace");
   mkdirSync(workspace, { recursive: true });
   product = buildProduct(temporaryDirectory);
@@ -647,21 +648,41 @@ describe("dispatch CLI", () => {
     return { started, options, args, project, worktree, runDir: run.run_dir };
   }
 
+  async function dispatchToUnindexableTarget(project: string) {
+    const result = await dispatchConfiguredProvider({ adapter: "codex", cwd: project,
+      prompt: "sleep without provider", task_id: "unindexed-target", wait_seconds: 0 },
+    { ...identity, registeredProjects: [workspace, project] }, new AbortController().signal, ownerEnvironment);
+    if (typeof result.pid === "number") spawnedPids.push(result.pid);
+    // The pointer is a best-effort index: the lane still runs, listed from its source.
+    expect(result.status, JSON.stringify(result)).toBe("running");
+    const run = listRecordedRuns(workspace).find((record) => record.run_id === result.id)!;
+    const status = JSON.parse(readFileSync(join(run.run_dir, "dispatch-status.json"), "utf8"));
+    expect(status.warnings).toEqual([expect.stringContaining("lane_pointer_failed")]);
+    return result;
+  }
+
   it.each([".agent-run", ".agent-run/runs", ".agent-run/runs/pointers"])(
-    "rejects a symlinked target pointer ancestor %s", async (component) => {
+    "never writes through a symlinked target pointer ancestor %s", async (component) => {
       const project = realpathSync(mkdtempSync(join(temporaryDirectory, "linked-target-")));
       const outside = realpathSync(mkdtempSync(join(temporaryDirectory, "outside-target-")));
       const link = join(project, component);
       mkdirSync(dirname(link), { recursive: true });
       symlinkSync(outside, link, "dir");
-      const result = await dispatchConfiguredProvider({ adapter: "codex", cwd: project,
-        prompt: "sleep without provider", task_id: "linked-target", wait_seconds: 0 },
-      { ...identity, registeredProjects: [workspace, project] }, new AbortController().signal, ownerEnvironment);
-      if (typeof result.pid === "number") spawnedPids.push(result.pid);
-      expect(result.status, JSON.stringify(result)).toBe("rejected");
+      await dispatchToUnindexableTarget(project);
       expect(readdirSync(outside)).toEqual([]);
     }, 20_000,
   );
+
+  it("still dispatches when the target run root is unwritable", async () => {
+    const project = realpathSync(mkdtempSync(join(temporaryDirectory, "readonly-target-")));
+    mkdirSync(join(project, ".agent-run"), { mode: 0o500 });
+    try {
+      await dispatchToUnindexableTarget(project);
+      expect(readdirSync(join(project, ".agent-run"))).toEqual([]);
+    } finally {
+      chmodSync(join(project, ".agent-run"), 0o700);
+    }
+  }, 20_000);
 
   it("lists a lane from its explicit cwd project when the chair is in another project", async () => {
     const { started, options, args, project, worktree, runDir } = await crossProjectLane();
