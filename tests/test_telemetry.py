@@ -656,6 +656,11 @@ def test_peer_stats_are_versioned_aggregates_and_read_only(tmp_path):
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     database = tmp_path / 'state/telemetry.sqlite3'
     before = database.read_bytes()
+    write_json(tmp_path / 'state/quota/fake--work.json', {
+        'schema': 'provenant.quota.v1', 'provider': 'fake', 'account': 'work',
+        'host': __import__('socket').gethostname(), 'access_token': 'PRIVATE_TOKEN',
+        'credits': {'reset_credits': 1, 'credential': 'PRIVATE_TOKEN'},
+        'windows': [{'name': 'custom', 'used_percent': 20, 'credential': 'PRIVATE_TOKEN'}]})
     result = subprocess.run([str(ROOT / 'scripts/provenant'), 'peer'],
                             input=json.dumps({'protocol_version': 1, 'verb': 'telemetry.stats',
                                               'params': {'schema_version': 1, 'since': '2026-10-21'}}),
@@ -667,6 +672,8 @@ def test_peer_stats_are_versioned_aggregates_and_read_only(tmp_path):
     assert len(groups) == 1 and groups[0]['session'] == 'same-session'
     assert groups[0]['rows'] == 2 and groups[0]['input_tokens'] == 20
     assert 'PRIVATE_CONTENT' not in result.stdout and 'event_id' not in result.stdout and 'origin_path' not in result.stdout
+    assert 'PRIVATE_TOKEN' not in result.stdout
+    assert summary['quota_snapshots'][0]['windows'][0] == {'name': 'custom', 'used_percent': 20}
     assert database.read_bytes() == before
 
 
@@ -771,6 +778,15 @@ def test_malformed_peer_is_partial_instead_of_breaking_local_stats(tmp_path, mon
                     'model': 'test', 'rows': '1'}]}
         report = federation.collect(telemetry, db, None, ['all'])
         assert report['partial'] and report['hosts'][-1]['reason'] == 'bad_response'
+        response = {**good, 'quota_observations': [{'used_percent': 'bad'}]}
+        report = federation.collect(telemetry, db, None, ['all'])
+        assert report['partial'] and report['hosts'][-1]['reason'] == 'bad_response'
+        local_quota = {'schema': 'provenant.quota.v1', 'provider': 'codex', 'account': 'default',
+                       'host': telemetry.host_id(), 'observed_at': '2026-10-21T12:00:00Z', 'windows': []}
+        write_json(tmp_path / 'state/quota/codex--default.json', local_quota)
+        response = {**good, 'quota_snapshots': [{**local_quota, 'host': 'peer', 'observed_at': 5}]}
+        report = federation.collect(telemetry, db, None, ['all'])
+        assert report['partial'] and report['hosts'][-1]['reason'] == 'bad_response'
 
 
 def test_unreadable_peer_ledger_returns_a_typed_error(tmp_path):
@@ -784,3 +800,16 @@ def test_unreadable_peer_ledger_returns_a_typed_error(tmp_path):
                             env=environment(tmp_path), capture_output=True, text=True)
     assert result.returncode == 1 and result.stderr == ''
     assert json.loads(result.stdout)['error']['code'] == 'telemetry_unavailable'
+
+
+def test_stats_reports_time_since_last_limit_per_account_and_host(tmp_path):
+    receipt(tmp_path, 'limit-old', status='usage_limited', account='work',
+            ended_at='2026-10-20T01:00:00Z', provenance=route('codex', 'gpt-6-luna'))
+    receipt(tmp_path, 'limit-new', status='rate_limited', account='work',
+            ended_at='2026-10-21T02:00:00Z', provenance=route('codex', 'gpt-6-luna'))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    limit = report['last_limit_events'][0]
+    assert (limit['provider'], limit['account'], limit['timestamp']) == ('openai', 'work', '2026-10-21T02:00:00Z')
+    assert limit['host'] == report['host'] and limit['age_seconds'] >= 0
+    assert 'Last limit events' in cli(tmp_path, 'stats').stdout

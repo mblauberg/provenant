@@ -97,7 +97,9 @@ in `model_raw`. Test and fixture rows are excluded; unattributed rows are listed
 separately. Outcomes group by model, effort, task class and route alias, with
 success rate, retries, error classes, wall-time percentiles and output tokens per
 provider second where recorded. The ingested sources do not currently supply a
-first-token timestamp, so time to first token is unreported. Fabric `ok` records
+first-token timestamp, so time to first token is unreported. `last_limit_events` reports the latest
+recorded limit and its age per provider, account and host; accounts missing in a
+source remain unattributed. Fabric `ok` records
 execution success, not user acceptance or a passed delivery gate.
 
 

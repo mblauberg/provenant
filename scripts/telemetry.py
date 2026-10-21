@@ -724,9 +724,16 @@ def stats(db, since=None, prices=None, *, summary=False):
             latest[key] = row
     lanes = Counter((row['status'], row['error_class']) for row in latest.values())
     limits = Counter()
+    last_limits = {}
+    def remember_limit(row):
+        key = (row['host'], row['provider'], row['account'])
+        stamp = row.get('timestamp')
+        if stamp and (key not in last_limits or since_time(stamp) > since_time(last_limits[key])):
+            last_limits[key] = stamp
     receipt_outcomes = set()
     for row in selected:
         if row['source'] == 'fabric' and row['status'] in {'rate_limited', 'usage_limited'}:
+            remember_limit(row)
             run = row['run_id']
             receipt_outcomes.add((row['adapter'], row['model_raw'], run, row['status']))
             day = since_time(row['timestamp']).date().isoformat() if row['timestamp'] else None
@@ -736,6 +743,7 @@ def stats(db, since=None, prices=None, *, summary=False):
         row = dict(item)
         if not included(row) or row['status'] not in {'rate_limited', 'usage_limited'}:
             continue
+        remember_limit(row)
         if (row['adapter'], row['model'], row['run_id'], row['status']) in receipt_outcomes:
             continue
         day = since_time(row['timestamp']).date().isoformat() if row['timestamp'] else None
@@ -765,6 +773,9 @@ def stats(db, since=None, prices=None, *, summary=False):
                          for (status, error), count in sorted(attempts.items(), key=str)],
             'limits_per_day': [dict(zip(('day','provider','account','status','events'), (*key, count)))
                                for key, count in sorted(limits.items(), key=str)],
+            'last_limit_events': [dict(host=host, provider=provider, account=account, timestamp=stamp,
+                                       age_seconds=max(0, round((since_time(now()) - since_time(stamp)).total_seconds())))
+                                  for (host, provider, account), stamp in sorted(last_limits.items(), key=str)],
             'quota_observations': sorted(windows.values(), key=lambda row: tuple(str(row[k] or '') for k in ('provider', 'account', 'window'))),
             'excluded_rows': dict(excluded),
             'unattributed': [{'source': source, 'adapter': adapter, 'rows': group['rows'],
@@ -787,7 +798,8 @@ def peer_summary(db, since=None, host=None):
         for row in report['session_usage']:
             row['host'] = host
     report['schema'] = 'provenant.telemetry.summary.v1'
-    report['quota_snapshots'] = [value for value in quota_owner().snapshots() if value.get('host') == host_id()]
+    report['quota_snapshots'] = [public_snapshot(value) for value in quota_owner().snapshots()
+                                 if value.get('host') == host_id()]
     report['quota_observations'] = [
         {key: row.get(key) for key in ('host', 'provider', 'account', 'window', 'used_percent',
                                      'window_minutes', 'reset_at', 'timestamp')}
@@ -795,6 +807,19 @@ def peer_summary(db, since=None, host=None):
     return report
 
 
+
+
+def public_snapshot(value):
+    """Only documented quota metadata may cross the peer boundary."""
+    result = {key: value[key] for key in ('schema', 'provider', 'account', 'host', 'plan', 'active', 'priority',
+                                         'observed_at', 'attempted_at', 'status', 'error', 'source', 'unreported')
+              if key in value}
+    result['windows'] = [{key: row[key] for key in ('name', 'used_percent', 'window_minutes', 'reset_at',
+                                                   'raw_kind', 'window_start') if key in row}
+                         for row in value.get('windows', []) if isinstance(row, dict)]
+    if isinstance(value.get('credits'), dict):
+        result['credits'] = {key: value['credits'][key] for key in ('reset_credits', 'source') if key in value['credits']}
+    return result
 
 def quota_owner():
     spec = importlib.util.spec_from_file_location('provenant_telemetry_quota', Path(__file__).with_name('provider_quota.py'))
@@ -849,6 +874,9 @@ def render_stats(report):
     for title, rows in (('Lanes', [(row['status'], row['error_class'] or '-', row['lanes']) for row in report['lanes']]),
                         ('Limit events', [(row['day'] or '-', row['provider'] or '-', row['status'], row['events'])
                                           for row in report['limits_per_day'][-14:]]),
+                        ('Last limit events', [(row['provider'] or '-', row['account'] or 'unattributed',
+                                               row['timestamp'], f"{row['age_seconds']}s ago")
+                                              for row in report.get('last_limit_events', [])]),
                         ('Latest quota observations', [(row['provider'] or '-', row['window'], f"{row['used_percent']:g}%",
                                                         row['reset_at'] or '-', row['timestamp'] or '-')
                                                        for row in report['quota_observations']])):
