@@ -89,7 +89,10 @@ def parse(payload, now=None):
             unreported.append(name)
         if isinstance(value, dict) and 'utilization' in value:
             windows.append({'name': name, 'raw_kind': name, 'used_percent': value.get('utilization'),
-                            'window_minutes': io_window_name(name), 'reset_at': value.get('resets_at')})
+                            'window_minutes': io_window_name(name), 'reset_at': value.get('resets_at'),
+                            # Dollar budgets, such as cloud session credits, report their amounts.
+                            'used_amount': value.get('used_dollars'), 'limit_amount': value.get('limit_dollars'),
+                            'currency': 'USD' if value.get('limit_dollars') is not None else None})
     for index, limit in enumerate(payload.get('limits') or []):
         if not isinstance(limit, dict) or limit.get('is_active') is False:
             continue
@@ -99,7 +102,20 @@ def parse(payload, now=None):
         windows.append({'name': f"{limit.get('kind') or 'limit'}:{label}", 'raw_kind': limit.get('kind'),
                         'used_percent': limit.get('percent'), 'reset_at': limit.get('resets_at'),
                         'window_minutes': limit.get('window_minutes') or io_window_name(str(limit.get('group') or ''))})
-    return {'windows': windows, 'unreported': unreported}
+    return {'windows': windows, 'unreported': unreported, 'usage_credits': usage_credits(payload.get('spend'))}
+
+
+def usage_credits(spend):
+    """The prepaid balance that covers use past the plan limits, when the endpoint reports one."""
+    if not isinstance(spend, dict):
+        return None
+    used = spend.get('used') if isinstance(spend.get('used'), dict) else {}
+    balance, currency = spend.get('balance'), used.get('currency')
+    if isinstance(balance, dict):  # The same minor-unit form as `used`.
+        currency = balance.get('currency') or currency
+        minor, exponent = balance.get('amount_minor'), balance.get('exponent')
+        balance = minor / 10 ** exponent if type(minor) is int and type(exponent) is int else None
+    return [{'kind': 'usage_credits', 'balance': balance, 'currency': currency}] if balance is not None else None
 
 
 WORDS = {'one': 1, 'two': 2, 'three': 3, 'four': 4, 'five': 5, 'six': 6, 'seven': 7,

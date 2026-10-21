@@ -169,7 +169,33 @@ def test_codex_app_server_speaks_json_rpc_and_never_inherits_a_token(quota, monk
     monkeypatch.setattr(quota, 'executable', lambda name: '/bin/' + name)
     account = quota.Account('codex', 'default', tmp_path / 'codex-home', True)
     assert quota.provider('codex').app_server(account, quota.IO, timeout=1) == {'rateLimits': {'primary': {'usedPercent': 7}}}
-    assert sent == [(['/bin/codex', '-s', 'read-only', '-a', 'untrusted', 'app-server'], str(tmp_path / 'codex-home'))]
+    # codex-cli 0.159 rejects `-a untrusted` and exits before answering.
+    assert sent == [(['/bin/codex', '-s', 'read-only', '-a', 'never', 'app-server'], str(tmp_path / 'codex-home'))]
+
+
+def test_codex_reports_its_credit_balance_and_banked_resets_with_expiry(quota):
+    # The shape `account/rateLimits/read` returned from codex-cli 0.159, identifiers removed.
+    expires = int((NOW + timedelta(days=16)).timestamp())
+    payload = {'rateLimits': {'primary': {'usedPercent': 77, 'windowDurationMins': WEEK},
+                              'credits': {'hasCredits': True, 'unlimited': False, 'balance': '27406.2146797500'},
+                              'planType': 'prolite'},
+               'rateLimitResetCredits': {'availableCount': 1, 'credits': [
+                   {'id': 'opaque', 'resetType': 'codexRateLimits', 'status': 'available', 'grantedAt': 1,
+                    'expiresAt': expires, 'title': 'Full reset'},
+                   {'id': 'spent', 'resetType': 'codexRateLimits', 'status': 'redeemed', 'grantedAt': 1,
+                    'expiresAt': expires + 1}]}}
+    parsed = quota.provider('codex').parse(payload, NOW)
+    assert parsed['credits'] == {'reset_credits': 1, 'source': 'provider'}
+    assert quota.normalise_resets(parsed['resets']) == {'available': 1, 'expires_at': [iso(NOW + timedelta(days=16))],
+                                                        'source': 'provider'}
+    assert quota.normalise_usage_credits(parsed['usage_credits']) == [{
+        'kind': 'credits', 'balance': 27406.21, 'unlimited': False, 'currency': None, 'unit': 'credits',
+        'expires_at': None, 'source': 'provider'}]
+    # Rollout events spell the balance in snake case; no balance and no count mean nothing to show.
+    assert quota.provider('codex').parse({'rate_limits': {}, 'credits': None})['usage_credits'] is None
+    empty = quota.provider('codex').parse({'rateLimits': {'credits': {'has_credits': False, 'balance': '0'}},
+                                           'rateLimitResetCredits': {'availableCount': 0, 'credits': None}})
+    assert empty['usage_credits'] is None and quota.normalise_resets(empty['resets']) is None
 
 
 def test_codex_falls_back_to_rollout_rate_limits_already_in_the_ledger(quota, monkeypatch, tmp_path):
@@ -225,6 +251,23 @@ def test_claude_usage_endpoint_uses_the_token_in_process_only(quota, monkeypatch
     for secret in (TOKEN, 'owner@example.com'):
         assert secret not in stored and secret not in json.dumps(result)
     assert TOKEN not in capsys.readouterr().out
+
+
+def test_claude_dollar_windows_and_usage_credit_balance(quota):
+    claude = quota.provider('claude')
+    parsed = claude.parse({'iguana_necktie': {'utilization': 54.5, 'resets_at': iso(NOW + timedelta(days=14)),
+                                              'limit_dollars': 250, 'used_dollars': 136.29385},
+                           'five_hour': {'utilization': 10, 'limit_dollars': None, 'used_dollars': None},
+                           'spend': {'used': {'amount_minor': 0, 'currency': 'USD', 'exponent': 2}, 'balance': None}})
+    rows = {row['name']: quota.normalise_window(row) for row in parsed['windows']}
+    assert (rows['iguana_necktie']['used_amount'], rows['iguana_necktie']['limit_amount']) == (136.29, 250)
+    assert rows['iguana_necktie']['currency'] == 'USD' and 'limit_amount' not in rows['five_hour']
+    # Every account seen so far reports a null balance, so none is shown.
+    assert parsed['usage_credits'] is None
+    balance = claude.usage_credits({'balance': {'amount_minor': 4250, 'currency': 'USD', 'exponent': 2}})
+    assert quota.normalise_usage_credits(balance)[0] == {
+        'kind': 'usage_credits', 'balance': 42.5, 'unlimited': False, 'currency': 'USD', 'unit': None,
+        'expires_at': None, 'source': 'provider'}
 
 
 def test_claude_refuses_expiring_credentials_without_calling_the_endpoint(quota, monkeypatch, tmp_path):
@@ -437,6 +480,57 @@ def test_reset_events_are_recorded_in_the_ledger_and_pace_follows_the_latest_sna
 
 # Credits and use-it-or-lose-it ----------------------------------------------------------------
 
+def test_credits_and_resets_appear_only_for_accounts_that_have_them(quota, monkeypatch, capsys):
+    expires = NOW + timedelta(days=16)
+    replies = {'default': {'windows': [window(77, WEEK, timedelta(days=4), 'primary')],
+                           'usage_credits': [{'kind': 'credits', 'balance': '27406.21', 'unit': 'credits'}],
+                           'resets': {'available': 1, 'expires_at': [int(expires.timestamp())]}},
+               'spare': {'windows': [window(10, WEEK, timedelta(days=4), 'primary')],
+                         'usage_credits': [{'kind': 'credits', 'balance': '0'}], 'resets': {'available': 0}}}
+    monkeypatch.setattr(quota, 'fetch', lambda account, now: replies[account.label])
+    values = [quota.refresh(quota.Account('codex', label, Path('/nowhere') / label, label == 'default'), NOW, force=True)
+              for label in replies]
+    assert 'usage_credits' not in values[1] and 'resets' not in values[1]
+    rows = {row['account']: row for row in quota.report(values, NOW)['accounts']}
+    assert rows['default']['usage_credits'][0]['balance'] == 27406.21
+    assert rows['default']['resets'] == {'available': 1, 'expires_at': [iso(expires)], 'source': 'provider'}
+    assert 'usage_credits' not in rows['spare'] and 'resets' not in rows['spare']
+    quota.render(quota.report(values, NOW))
+    out = capsys.readouterr().out
+    local = expires.astimezone()
+    assert f'codex/default: 27,406 credits available; 1 banked reset (expires {local.day} {local:%b})' in out
+    assert 'codex/spare:' not in out
+
+
+def test_budget_windows_show_amounts_under_a_configurable_label(quota, tmp_path, monkeypatch, capsys):
+    budget = {**window(54.5, None, timedelta(days=14), 'iguana_necktie'), 'used_amount': 136.29, 'limit_amount': 250,
+              'currency': 'USD'}
+    monkeypatch.setattr(quota, 'fetch', lambda account, now: {'windows': [budget, window(3, WEEK, timedelta(days=6))]})
+    value = quota.refresh(quota.Account('claude', 'max-a', Path('/nowhere'), True), NOW, force=True)
+    rows = {row['name']: row for row in quota.report([value], NOW)['accounts'][0]['windows']}
+    assert rows['iguana_necktie']['label'] == 'Cloud session credits' and 'label' not in rows['seven_day']
+    quota.render(quota.report([value], NOW))
+    out = capsys.readouterr().out
+    assert 'Cloud session credits' in out and '$136 of $250' in out and '3%' in out
+    configure(tmp_path, {'quota': {'window_labels': {'iguana_necktie': 'Cloud credits', 'seven_day': 'Week'}}})
+    rows = {row['name']: row for row in quota.report([value], NOW)['accounts'][0]['windows']}
+    assert (rows['iguana_necktie']['label'], rows['seven_day']['label']) == ('Cloud credits', 'Week')
+
+
+def test_peer_snapshots_carry_only_sanitised_credits_resets_and_amounts(quota):
+    telemetry = load('telemetry_for_quota_peer', ROOT / 'scripts/telemetry.py')
+    value = {'schema': quota.SCHEMA, 'provider': 'codex', 'account': 'default', 'host': 'studio',
+             'windows': [{'name': 'budget', 'used_percent': 5, 'used_amount': 'x', 'limit_amount': 250}],
+             'usage_credits': [{'kind': 'credits', 'balance': 12, 'credential': TOKEN}, {'balance': 'NaN'}],
+             'resets': {'available': 2, 'expires_at': [TOKEN, iso(NOW)], 'id': TOKEN}}
+    public = telemetry.public_snapshot(value)
+    assert TOKEN not in json.dumps(public)
+    assert public['windows'] == [{'name': 'budget', 'used_percent': 5}]
+    assert [row['balance'] for row in public['usage_credits']] == [12]
+    assert public['resets'] == {'available': 2, 'expires_at': [iso(NOW)], 'source': 'provider'}
+    assert 'resets' not in telemetry.public_snapshot({**value, 'resets': {'available': 0}})
+
+
 def test_manual_reset_credits_and_redeem_advice(quota, capsys):
     assert quota.main(['credit', 'codex', 'add']) == 0
     assert quota.main(['credit', 'codex', '--account', 'default', 'add']) == 0
@@ -449,6 +543,9 @@ def test_manual_reset_credits_and_redeem_advice(quota, capsys):
     assert advice(40, timedelta(days=3))['action'] == 'hold'
     assert advice(100, timedelta(hours=2))['action'] == 'wait'
     assert advice(100, timedelta(days=3))['action'] == 'redeem'
+    # A hand-recorded reset is still a banked reset; it has no known expiry.
+    row = quota.report([snapshot(quota, 'codex', [window(40, WEEK, timedelta(days=3))])], NOW)['accounts'][0]
+    assert row['resets'] == {'available': 1, 'expires_at': [], 'source': 'manual'}
     with pytest.raises(SystemExit):
         quota.main(['credit', 'codex', 'redeem'])
 

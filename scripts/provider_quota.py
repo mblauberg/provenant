@@ -62,6 +62,8 @@ CLOCK_SKEW_SECONDS = 300
 RESET_NOISE = 5         # a smaller drop is reporting noise, not a granted reset
 NEAR_EXHAUSTED = 95
 WAIT_HOURS = 6
+# Providers name some windows by codename; `quota.window_labels` in telemetry.json adds or overrides labels.
+WINDOW_LABELS = {'iguana_necktie': 'Cloud session credits'}
 SEVERITY = ('exhausted', 'unknown', 'unreported', 'deficit', 'on_pace', 'reserve', 'early', 'not_started')
 _identity_spec = importlib.util.spec_from_file_location('provider_identity', HERE / 'provider_identity.py')
 identity = sys.modules.get('provider_identity')
@@ -339,7 +341,46 @@ def normalise_window(raw):
         minutes = int(minutes)
     return {'name': name, 'raw_kind': str(raw['raw_kind']) if raw.get('raw_kind') is not None else None,
             'used_percent': round(max(0.0, min(100.0, used)), 2), 'window_minutes': minutes,
-            'reset_at': iso(reset), 'window_start': iso(start)}
+            'reset_at': iso(reset), 'window_start': iso(start), **window_amounts(raw)}
+
+
+def _code(value, pattern):
+    return value if isinstance(value, str) and re.fullmatch(pattern, value) else None
+
+
+def window_amounts(raw):
+    """The amounts behind a budget window, such as dollars of cloud session credit, when reported."""
+    used, limit = number(raw.get('used_amount')), number(raw.get('limit_amount'))
+    if used is None or limit is None or limit <= 0:
+        return {}
+    return {'used_amount': round(used, 2), 'limit_amount': round(limit, 2),
+            'currency': _code(raw.get('currency'), r'[A-Z]{3}')}
+
+
+def normalise_usage_credits(raw):
+    """Credit balances the provider reports; a zero, missing or malformed balance is left out."""
+    rows = []
+    for entry in raw if isinstance(raw, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        balance, unlimited = number(entry.get('balance')), entry.get('unlimited') is True
+        if not unlimited and (balance is None or balance <= 0):
+            continue
+        rows.append({'kind': _code(entry.get('kind'), r'[a-z][a-z0-9_]{0,31}') or 'credits',
+                     'balance': None if unlimited else round(balance, 2), 'unlimited': unlimited,
+                     'currency': _code(entry.get('currency'), r'[A-Z]{3}'),
+                     'unit': _code(entry.get('unit'), r'[a-z][a-z_]{0,15}'),
+                     'expires_at': iso(parse_time(entry.get('expires_at'))), 'source': 'provider'})
+    return rows or None
+
+
+def normalise_resets(raw):
+    """Banked resets available now; zero or an unreported count is left out, never shown as zero."""
+    if not isinstance(raw, dict) or type(raw.get('available')) is not int or raw['available'] <= 0:
+        return None
+    expiries = raw.get('expires_at') if isinstance(raw.get('expires_at'), list) else []
+    return {'available': raw['available'], 'expires_at': sorted(filter(None, map(iso, map(parse_time, expiries)))),
+            'source': raw.get('source') if raw.get('source') in ('manual', 'provider') else 'provider'}
 
 
 def cache_path(provider_name, label, host=None, identity_dir=None):
@@ -515,10 +556,13 @@ def _refresh(account, now=None, force=False):
         unreported += [row['name'] for row in (previous or {}).get('windows', [])
                        if row['name'] not in names and row['name'] not in unreported]
         plan = account.plan or result.get('plan')
+        extras = {'usage_credits': normalise_usage_credits(result.get('usage_credits')),
+                  'resets': normalise_resets(result.get('resets'))}
         value = {**blank(account, 'ok' if windows else 'unreported', now=now),
                  'plan': str(plan) if plan else None, 'observed_at': result.get('observed_at') or iso(now),
                  'source': result.get('source'), 'windows': windows, 'unreported': unreported,
-                 'credits': result.get('credits') if isinstance(result.get('credits'), dict) else None}
+                 'credits': result.get('credits') if isinstance(result.get('credits'), dict) else None,
+                 **{key: extra for key, extra in extras.items() if extra}}
         record_events(previous, value)
         save_snapshot(value, account.identity_dir)
         return value
@@ -646,8 +690,16 @@ def freshest(values):
     return [best[key] for key in sorted(best, key=lambda key: tuple(str(part) for part in key))]
 
 
+def window_labels():
+    configured = settings().get('window_labels')
+    configured = configured if isinstance(configured, dict) else {}
+    return {**WINDOW_LABELS, **{str(key): value for key, value in configured.items() if isinstance(value, str)}}
+
+
 def describe(value, banked, now):
-    rows = [{**row, 'pace': pace(row, now)} for row in value.get('windows') or []]
+    labels = window_labels()
+    rows = [{**row, 'pace': pace(row, now), **({'label': labels[row['name']]} if labels.get(row['name']) else {})}
+            for row in value.get('windows') or []]
     worst = governing(rows)
     unreported = list(value.get('unreported') or [])
     dated = [row for row in rows if row.get('reset_at') and row.get('window_minutes')]
@@ -663,7 +715,16 @@ def describe(value, banked, now):
         'use_it_or_lose_it': {'window': longest['name'], 'reset_at': longest['reset_at'],
                               'unused_percent': longest['pace']['headroom_percent'],
                               'expiring_headroom_percent': longest['pace']['expiring_headroom_percent']}
-                             if longest else None}
+                             if longest else None} | optional_credits(value, banked)
+
+
+def optional_credits(value, banked):
+    """Usage credits and banked resets, present only when an account has some."""
+    counted = value.get('credits') or banked or {}
+    resets = (normalise_resets(value.get('resets')) or
+              normalise_resets({'available': counted.get('reset_credits'), 'source': counted.get('source', 'manual')}))
+    extras = {'usage_credits': normalise_usage_credits(value.get('usage_credits')), 'resets': resets}
+    return {key: extra for key, extra in extras.items() if extra}
 
 
 def report(values, now=None):
@@ -751,6 +812,36 @@ def apply_to_cooldowns(records, now=None):
 
 # Command line --------------------------------------------------------------------------------
 
+def day(stamp):
+    moment = parse_time(stamp).astimezone()
+    return f'{moment.day} {moment:%b}'
+
+
+def amount(value, currency):
+    return f'${value:,.0f}' if currency == 'USD' else f'{value:,.0f}' + (f' {currency}' if currency else '')
+
+
+def used_text(window):
+    """`$136 of $250` for a budget window, otherwise the reported percentage."""
+    if window.get('limit_amount'):
+        currency = window.get('currency')
+        return f"{amount(window['used_amount'], currency)} of {amount(window['limit_amount'], currency)}"
+    return f"{window['used_percent']:g}%"
+
+
+def credit_text(entry):
+    text = 'unlimited credits' if entry['unlimited'] else \
+        f"{amount(entry['balance'], entry['currency'])} credit" if entry['currency'] else \
+        f"{entry['balance']:,.0f} {entry['unit'] or 'credits'}"
+    return text + ' available' + (f" (expires {day(entry['expires_at'])})" if entry['expires_at'] else '')
+
+
+def reset_text(resets):
+    count, expiries = resets['available'], resets['expires_at']
+    lead = 'next expires' if len(expiries) > 1 else 'expires'
+    return f"{count} banked reset{'s' if count != 1 else ''}" + (f' ({lead} {day(expiries[0])})' if expiries else '')
+
+
 def render(value):
     table = _telemetry().table
     lines = [f"Provider quota on {value['host']}" + ('' if value['enabled'] else ' (fetching disabled)')]
@@ -758,7 +849,8 @@ def render(value):
     for row in value['accounts']:
         head = (row['provider'], row['account'] + ('*' if row['active'] else ''), row['plan'] or '-')
         for window in row['windows']:
-            rows.append((*head, window['name'], f"{window['used_percent']:g}%", window_length(window['window_minutes']),
+            rows.append((*head, window.get('label') or window['name'], used_text(window),
+                         window_length(window['window_minutes']),
                          (window['reset_at'] or '-')[:16].replace('T', ' '), window['pace']['state'], window['pace']['summary']))
         if not row['windows']:
             rows.append((*head, '-', '-', '-', '-', row['status'], row['error'] or ''))
@@ -768,11 +860,14 @@ def render(value):
         if row['unreported']:
             lines.append(f"{row['provider']}/{row['account']}: {len(row['unreported'])} window(s) not reported "
                          "(missing does not mean 0%); use --json")
+    # Credits and banked resets appear only for an account that has some.
     for row in value['accounts']:
+        parts = [credit_text(entry) for entry in row.get('usage_credits') or []]
+        parts += [reset_text(row['resets'])] if row.get('resets') else []
         advice = row['credit_advice']
-        if advice['action'] != 'none':
-            lines.append(f"{row['provider']}/{row['account']}: {advice['reset_credits']} reset credit(s); "
-                         f"{advice['action']}: {advice['reason']}")
+        parts += [f"{advice['action']}: {advice['reason']}"] if advice['action'] != 'none' else []
+        if parts:
+            lines.append(f"{row['provider']}/{row['account']}: " + '; '.join(parts))
     lines.append('* active account (the CLI default identity); routing reads only cached readings')
     print('\n'.join(lines))
 
