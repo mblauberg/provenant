@@ -228,8 +228,8 @@ function realPath(path: string): string {
 
 /**
  * Fixture attempts are test scaffolding. They may only land in a run root under
- * the OS temp dir, and never in a .agent-run tree that itself sits in temp (a
- * lane's TMPDIR; issue #1002).
+ * the OS temp dir or a throwaway .agent-run/scratch tree, and never in a
+ * .agent-run tree that itself sits in temp (a lane's TMPDIR; issue #1002).
  */
 export function assertFixtureRunRoot(
   agentRun: string,
@@ -242,10 +242,16 @@ export function assertFixtureRunRoot(
   const tempRoots = [...new Set([temp, "/tmp"].map(realPath))];
   const acceptableTempRoots = tempRoots.filter((tempRoot) => !tempRoot.split(sep).includes(".agent-run"));
   const underTemp = acceptableTempRoots.some((tempRoot) => root.startsWith(tempRoot + sep));
-  if (underTemp) return;
+  if (underTemp || underScratch(root)) return;
   throw new Error(
-    `fixture run refused: ${root} is not under an acceptable temp root (${acceptableTempRoots.join(" or ")}); fixture attempts must not write into a project .agent-run (issue #1002)`,
+    `fixture run refused: ${root} is not under an acceptable temp root (${acceptableTempRoots.join(" or ")}) or a .agent-run/scratch tree; fixture attempts must not write into a project .agent-run (issue #1002)`,
   );
+}
+
+/** True when root sits strictly inside a `.agent-run/scratch` directory, which `provenant clean` expires. */
+function underScratch(root: string): boolean {
+  const parts = root.split(sep);
+  return parts.some((part, index) => part === ".agent-run" && parts[index + 1] === "scratch" && index + 2 < parts.length);
 }
 
 function createRunDirectory(identity: Identity, kind: "dispatch" | "batch", routes: readonly { model?: unknown; cli_version?: unknown }[]): string {

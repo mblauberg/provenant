@@ -55,6 +55,19 @@ describe("assertFixtureRunRoot", () => {
       .not.toThrow();
   });
 
+  it("allows a fixture run inside a project's throwaway .agent-run/scratch tree", () => {
+    expect(() => assertFixtureRunRoot(
+      "/repo/.agent-run/scratch/hosts-lanes-1/workshop/Repos/project/.agent-run",
+      [{ model: "fixture" }],
+      temp,
+    )).not.toThrow();
+  });
+
+  it("refuses a fixture run rooted at the scratch directory itself", () => {
+    expect(() => assertFixtureRunRoot("/repo/.agent-run/scratch", [{ model: "fixture" }], temp))
+      .toThrow(/fixture run refused/u);
+  });
+
   it("allows real runs anywhere", () => {
     expect(() => assertFixtureRunRoot("/Users/example/Repos/project/.agent-run", [{ model: "gpt-5" }], temp))
       .not.toThrow();
