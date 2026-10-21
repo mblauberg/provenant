@@ -1,6 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -11,6 +10,7 @@ import { DISPATCH_ADAPTERS, dispatchConfiguredBatch, dispatchConfiguredProvider 
 import { catalogueSnapshot } from "../src/catalogue.js";
 import { normaliseRoute } from "../src/execution-input.js";
 import type { Identity } from "../src/identity.js";
+import { scratchRoot } from "./helpers/temp-root.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 const catalogue = JSON.parse(
@@ -124,7 +124,7 @@ describe("adapter rejection", () => {
   let identity: Identity;
 
   beforeEach(() => {
-    workspace = mkdtempSync(join(tmpdir(), "fabric-adapter-"));
+    workspace = scratchRoot("fabric-adapter-");
     identity = { project: workspace, cwd: workspace, agentId: "test-agent", provider: "claude" };
   });
 
@@ -210,7 +210,7 @@ describe("adapter rejection", () => {
 
 describe("instance catalogue", () => {
   it("deep merges live instance aliases and preserves the product on malformed overlay", () => {
-    const root = mkdtempSync(join(tmpdir(), "fabric-catalogue-"));
+    const root = scratchRoot("fabric-catalogue-");
     try {
       mkdirSync(join(root, "config"));
       const path = join(root, "config", "model-routing.json");

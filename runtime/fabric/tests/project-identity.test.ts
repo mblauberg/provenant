@@ -1,8 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import {
-  cpSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
+import { cpSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
@@ -13,6 +10,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { identify, projectRoot } from "../src/identity.js";
 import { workingIdentity } from "../src/execution-input.js";
 import { Store } from "../src/store.js";
+import { scratchRoot } from "./helpers/temp-root.js";
 
 const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 const serverPath = fileURLToPath(new URL("../src/server.ts", import.meta.url));
@@ -66,7 +64,7 @@ function toolPayload(result: unknown): unknown {
 }
 
 beforeEach(() => {
-  fixture = mkdtempSync(join(tmpdir(), "fabric-project-identity-"));
+  fixture = scratchRoot("fabric-project-identity-");
   primary = join(fixture, "primary");
   linked = join(primary, ".worktrees", "linked");
   copied = join(fixture, "copied");

@@ -35,6 +35,7 @@ import {
   terminateRecordedRun,
 } from "../src/run-registry.js";
 import type { Identity } from "../src/identity.js";
+import { scratchRoot } from "./helpers/temp-root.js";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(testDirectory, "../../..");
@@ -209,7 +210,7 @@ describe("Fabric input corrections", () => {
   });
 
   it("resolves relative read-only cwd against the caller directory", () => {
-    const base = mkdtempSync(join(tmpdir(), "fabric-cwd-"));
+    const base = scratchRoot("fabric-cwd-");
     const child = join(base, "child");
     mkdirSync(child);
     expect(workingIdentity({ cwd: "child" }, { ...identity, project: base, cwd: base }).cwd).toBe(realpathSync(child));
@@ -217,7 +218,7 @@ describe("Fabric input corrections", () => {
   });
 
   it("names the working route when a cwd is outside every registered project", () => {
-    const base = mkdtempSync(join(tmpdir(), "fabric-unregistered-"));
+    const base = scratchRoot("fabric-unregistered-");
     try {
       expect(() => workingIdentity({ cwd: base }, { ...identity, registeredProjects: [identity.project] }))
         .toThrow(expect.objectContaining({ code: "cwd_unavailable",
@@ -228,8 +229,8 @@ describe("Fabric input corrections", () => {
   });
 
   it("grants a read root only for another registered project", () => {
-    const other = realpathSync(mkdtempSync(join(tmpdir(), "fabric-read-root-")));
-    const stray = realpathSync(mkdtempSync(join(tmpdir(), "fabric-stray-")));
+    const other = realpathSync(scratchRoot("fabric-read-root-"));
+    const stray = realpathSync(scratchRoot("fabric-stray-"));
     try {
       mkdirSync(join(other, "src"));
       const caller = { ...identity, registeredProjects: [identity.project, other] };
@@ -246,7 +247,7 @@ describe("Fabric input corrections", () => {
   });
 
   it("accepts read-only cwd under another registered project", () => {
-    const base = mkdtempSync(join(tmpdir(), "fabric-other-project-"));
+    const base = scratchRoot("fabric-other-project-");
     const child = join(base, "child");
     mkdirSync(child);
     const caller = { ...identity, registeredProjects: [identity.project, base] };
@@ -364,7 +365,7 @@ async function startSleepingRun(prompt: string): Promise<Record<string, unknown>
 
 beforeEach(() => {
   // Canonical, as dispatch writes projects: macOS tmpdir is a /var -> /private/var symlink.
-  temporaryDirectory = realpathSync(mkdtempSync(join(tmpdir(), "fabric-lifecycle-")));
+  temporaryDirectory = realpathSync(scratchRoot("fabric-lifecycle-"));
   workspace = join(temporaryDirectory, "workspace");
   mkdirSync(workspace, { recursive: true });
   product = buildProduct(temporaryDirectory);

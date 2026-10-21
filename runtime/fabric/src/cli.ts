@@ -51,7 +51,8 @@ const USAGE = `fabric <command>
   activity [--after-seq N]    list activity, optionally after a cursor
            [--limit N]
   watch [ids…] [--interval N] print run state changes; exit when all terminal
-  lanes [--json] [id…]       run states; use an id to see rows past the 20-row cap
+  lanes [--json] [--all] [id…]
+                              run states; default shows active and recent terminal lanes (--all lists all)
   lanes --wait [--all] [--timeout N] [id…]
                               wait for a lane to finish or need input; --all waits
                               for every listed lane; exit 124 on timeout
@@ -196,9 +197,9 @@ if (command === "lanes") {
   const timeoutSeconds = timeout === undefined ? undefined : Number(timeout);
   const ids = args.filter((value) => !["--json", "--wait", "--all"].includes(value));
   if (["--json", "--wait", "--all"].some((name) => args.filter((value) => value === name).length > 1) ||
-      (json && wait) || ((all || timeout !== undefined) && !wait) || ids.some((value) => value.startsWith("--")) ||
+      (json && wait) || (timeout !== undefined && !wait) || ids.some((value) => value.startsWith("--")) ||
       (timeoutSeconds !== undefined && !(timeoutSeconds >= 0))) {
-    console.error("fabric: usage: fabric lanes [--json] [--project P] [id…] | lanes --wait [--all] [--timeout N] [id…]");
+    console.error("fabric: usage: fabric lanes [--json] [--all] [--project P] [id…] | lanes --wait [--all] [--timeout N] [id…]");
     process.exit(2);
   }
   if (wait) {
@@ -222,7 +223,7 @@ if (command === "lanes") {
     }
     process.exit(code);
   }
-  const result = await readRuns(laneWho.project, ids.length ? ids : undefined);
+  const result = await readRuns(laneWho.project, ids.length ? ids : undefined, 0, undefined, (all || !json) ? null : undefined);
   if (json) {
     console.log(JSON.stringify(result, null, 2));
   } else if (result.status === "ok") {
@@ -233,17 +234,36 @@ if (command === "lanes") {
       return seconds < 60 ? `${seconds}s` : seconds < 3600
         ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
     };
-    const rows = [...result.runs].sort((a, b) => {
-      const active = (row: typeof a) => row.state === "running" ? 0 : 1;
-      return active(a) - active(b) || Date.parse(b.started_at ?? "") - Date.parse(a.started_at ?? "");
-    });
+    const active = (row: (typeof result.runs)[number]) => row.state !== "terminal";
+    const needsAttention = (row: (typeof result.runs)[number]) =>
+      row.status === "quarantined" ||
+      row.status === "input_required" ||
+      row.state === "input_required" ||
+      row.landable === false ||
+      Boolean(row.quarantine) ||
+      (typeof row.status === "string" && row.status.includes("review"));
+    const activeRows = result.runs.filter(active);
+    const terminalRows = result.runs.filter((row) => !active(row));
+    terminalRows.sort((a, b) => Date.parse(b.started_at ?? "") - Date.parse(a.started_at ?? ""));
+    activeRows.sort((a, b) => Date.parse(b.started_at ?? "") - Date.parse(a.started_at ?? ""));
+
+    let rows: typeof result.runs;
+    let omitted = 0;
+    if (ids.length || all) {
+      rows = [...activeRows, ...terminalRows];
+    } else {
+      const shownTerminal = terminalRows.filter((row, index) => index < 5 || needsAttention(row));
+      omitted = terminalRows.length - shownTerminal.length;
+      rows = [...activeRows, ...shownTerminal];
+    }
+
     if (!rows.length)
       console.log(`no lanes for project ${laneWho.project}` +
         (laneWho.cwd === laneWho.project ? "" : ` (cwd ${laneWho.cwd} resolves to it; --project reads another)`));
     for (const row of rows)
       console.log(`${row.status ?? row.state}  ${row.id}  ${row.route ?? "-"}  ${age(row.started_at)}${row.status === "quarantined" ? ` · ${quarantineAction(row)}` : ""}`);
-    if (result.omitted)
-      console.log(`${result.omitted} lanes omitted; use provenant lanes ID to see a lane past the 20-row cap`);
+    if (omitted > 0)
+      console.log(`${omitted} more; use --all`);
   } else {
     console.log(JSON.stringify(result));
   }

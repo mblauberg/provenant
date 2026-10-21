@@ -1,7 +1,6 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { appendFileSync, existsSync, chmodSync, copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync, readFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { appendFileSync, existsSync, chmodSync, copyFileSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { createRequire } from "node:module";
 import { execFileSync } from "node:child_process";
@@ -10,6 +9,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { cancelConfiguredRun } from "../src/execution.js";
 import { fullView, lanesDigest, cancelDigest } from "../src/surface.js";
 import { readRuns } from "../src/run-reader.js";
+import { scratchRoot } from "./helpers/temp-root.js";
 
 const roots: string[] = [];
 afterAll(() => { for (const root of roots) rmSync(root, { recursive: true, force: true }); });
@@ -34,7 +34,7 @@ function installFixtureOwners(product: string): void {
 }
 
 async function connect() {
-  const root = mkdtempSync(join(tmpdir(), "fabric-lean-"));
+  const root = scratchRoot("fabric-lean-");
   roots.push(root);
   const workspace = join(root, "workspace"), product = join(root, "product"), state = join(root, "state");
   mkdirSync(workspace);
@@ -229,14 +229,14 @@ describe("lean views", () => {
     expect(cancelDigest({ runs: rows.slice(0, 2) })).toContain("row 0");
   });
   it("filters readRuns by state", async () => {
-    const empty = await readRuns(mkdtempSync(join(tmpdir(), "fabric-lean-empty-")), undefined, 0, undefined, 5, "running");
+    const empty = await readRuns(scratchRoot("fabric-lean-empty-"), undefined, 0, undefined, 5, "running");
     expect(empty).toMatchObject({ status: "ok", runs: [] });
   });
 });
 
 describe("task-level cancel", () => {
   it("cancels one batch task through run_controls without stopping its siblings", async () => {
-    const root = mkdtempSync(join(tmpdir(), "fabric-lean-cancel-"));
+    const root = scratchRoot("fabric-lean-cancel-");
     roots.push(root);
     const workspace = join(root, "workspace"), product = join(root, "product");
     mkdirSync(workspace);
@@ -268,7 +268,7 @@ describe("task-level cancel", () => {
 
   it.each([["missing", undefined], ["without batch_id", { id: "mcp-noscope", status: "running" }]])(
     "cancels a task through run_controls, never the whole run, when metadata is %s", async (_name, metadata) => {
-    const root = mkdtempSync(join(tmpdir(), "fabric-lean-scope-"));
+    const root = scratchRoot("fabric-lean-scope-");
     roots.push(root);
     const workspace = join(root, "workspace"), product = join(root, "product");
     mkdirSync(workspace);
@@ -297,7 +297,7 @@ describe("task-level cancel", () => {
   }, 60_000);
 
   it("never widens a task cancel to the run when the task has not started", async () => {
-    const root = mkdtempSync(join(tmpdir(), "fabric-lean-queued-"));
+    const root = scratchRoot("fabric-lean-queued-");
     roots.push(root);
     const workspace = join(root, "workspace"), product = join(root, "product");
     mkdirSync(workspace);
@@ -321,7 +321,7 @@ describe("task-level cancel", () => {
   }, 60_000);
 
   it("rejects a task id that matches no run or batch instead of falling through to the whole run", async () => {
-    const root = mkdtempSync(join(tmpdir(), "fabric-lean-unmatched-"));
+    const root = scratchRoot("fabric-lean-unmatched-");
     roots.push(root);
     const workspace = join(root, "workspace"), product = join(root, "product");
     mkdirSync(workspace);
@@ -341,7 +341,7 @@ describe("task-level cancel", () => {
   }, 60_000);
 
   it("never cancels the previous attempt for a queued resume whose attempt is not published", async () => {
-    const root = mkdtempSync(join(tmpdir(), "fabric-lean-resume-"));
+    const root = scratchRoot("fabric-lean-resume-");
     roots.push(root);
     const workspace = join(root, "workspace"), product = join(root, "product");
     mkdirSync(workspace);
