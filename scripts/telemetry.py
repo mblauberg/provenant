@@ -99,6 +99,11 @@ def connect():
             provider TEXT, adapter TEXT, model TEXT, account TEXT, session TEXT,
             origin_path TEXT, lane TEXT, run_id TEXT, timestamp TEXT, window TEXT, used_percent REAL,
             window_minutes REAL, reset_at TEXT, status TEXT);
+        CREATE TABLE IF NOT EXISTS quota_events (
+            provider TEXT NOT NULL, account TEXT NOT NULL, host TEXT NOT NULL, window TEXT NOT NULL,
+            kind TEXT NOT NULL, observed_at TEXT NOT NULL, previous_observed_at TEXT,
+            previous_used_percent REAL, used_percent REAL, previous_reset_at TEXT, reset_at TEXT,
+            PRIMARY KEY(provider,account,host,window,observed_at));
 
     ''')
     observation_columns = {row[1] for row in db.execute('PRAGMA table_info(observations)')}
