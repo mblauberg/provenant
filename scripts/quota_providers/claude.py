@@ -17,7 +17,11 @@ KEYCHAIN_SERVICE = 'Claude Code-credentials'
 
 
 def keychain_service(identity_dir):
-    """Claude Code suffixes the item with a path hash for any non-default config directory."""
+    """Claude Code suffixes the item with a path hash for any non-default config directory.
+
+    It hashes the CLAUDE_CONFIG_DIR value, so this assumes the configured path is absolute,
+    expanded and has no trailing slash. A mismatch only makes the reading unavailable.
+    """
     if identity_dir == Path.home() / '.claude':
         return KEYCHAIN_SERVICE
     return f"{KEYCHAIN_SERVICE}-{hashlib.sha256(str(identity_dir).encode()).hexdigest()[:8]}"

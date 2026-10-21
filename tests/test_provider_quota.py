@@ -246,6 +246,11 @@ def test_claude_keychain_item_follows_the_config_directory(quota, monkeypatch, t
     assert value['status'] == 'unavailable'
 
 
+def test_claude_keychain_service_matches_a_known_claude_code_name(quota):
+    # Claude Code's item for CLAUDE_CONFIG_DIR=/Users/user/.claude-pro, observed on a real Mac.
+    assert quota.provider('claude').keychain_service(Path('/Users/user/.claude-pro')) == 'Claude Code-credentials-90930409'
+
+
 def test_cursor_session_cookie_comes_from_the_local_jwt_and_cycle_dates(quota, tmp_path, monkeypatch):
     claims = base64.urlsafe_b64encode(json.dumps({'sub': 'auth0|user_42', 'exp': int((NOW + timedelta(days=1)).timestamp())}).encode()).decode().rstrip('=')
     jwt = f'header.{claims}.signature'

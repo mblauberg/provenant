@@ -121,7 +121,8 @@ its default identity. Claude reads its own OAuth usage endpoint using the
 identity's credentials in process. On macOS it falls back to the identity's
 Keychain item, which Claude Code names `Claude Code-credentials` for `~/.claude`
 and adds an 8-character path hash for any other config directory. The first
-read of each item may ask you to allow access. Cursor reads its usage-summary endpoint using its local session.
+read of each item may ask you to allow access. Cursor reads its usage-summary
+endpoint using its local session.
 Authenticated HTTP requests refuse redirects, so credentials stay at the
 provider endpoint. Tokens never enter the ledger, cache, logs, receipts or
 stdout and are never shown to agents. The owner authorised this credential use
