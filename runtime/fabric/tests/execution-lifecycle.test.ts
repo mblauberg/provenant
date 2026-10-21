@@ -771,6 +771,30 @@ describe("dispatch CLI", () => {
     }
   }, 25_000);
 
+  it("awaits a writer lane from the project of its worktree", async () => {
+    const project = join(temporaryDirectory, "writer-target");
+    const worktree = join(temporaryDirectory, "writer-target-worktree");
+    execFileSync("git", ["init", "-q", project]);
+    execFileSync("git", ["-C", project, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+      "commit", "-q", "--allow-empty", "-m", "fixture"]);
+    execFileSync("git", ["-C", project, "worktree", "add", "-q", "-b", "writer-lane", worktree]);
+    const store = new Store(databasePath(ownerEnvironment));
+    store.announce(identity);
+    store.announce({ ...identity, project, cwd: worktree });
+    store.close();
+    const started = await dispatchConfiguredBatch({ tasks: [{ id: "writer-lane", adapter: "codex", mode: "worktree_write",
+      worktree, prompt: "sleep with provider" }], wait_seconds: 0 }, { ...identity, registeredProjects: [workspace, project] },
+    new AbortController().signal, ownerEnvironment);
+    expect(started.status, JSON.stringify(started)).toBe("running");
+    spawnedPids.push(Number(started.pid));
+    const run = listRecordedRuns(workspace).find((record) => record.run_id === started.id)!;
+    await waitForFile(join(run.run_dir, "sleeping.pid"));
+    const poll = spawnSync(process.execPath, ["--import", tsxLoader, join(packageRoot, "src/cli.ts"),
+      "lanes", "--wait", "--all", "--timeout", "0"], { cwd: worktree, encoding: "utf8", env: ownerEnvironment, timeout: 15_000 });
+    expect(poll.status, poll.stdout + poll.stderr).toBe(124);
+    expect(poll.stdout).toContain("writer-lane");
+  }, 25_000);
+
   it("recomputes the project pointer when a resume supplies a new cwd", async () => {
     const project = realpathSync(mkdtempSync(join(temporaryDirectory, "resume-target-")));
     const oldProject = realpathSync(mkdtempSync(join(temporaryDirectory, "old-resume-target-")));
