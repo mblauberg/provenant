@@ -359,8 +359,10 @@ and record it.
 
 Invoke it as `agy --add-dir DIR --model gemini-3.8-flash-high -p PROMPT`.
 The model flag is `--model`, not `-m`, and the value is the identifier shown
-by `agy models`. Never pass `--dangerously-skip-permissions`; `agy` prints that
-suggestion on every denial, and following it hands Gemini every tool at once.
+by `agy models`. Use Fabric for worktree writers: its agy adapter adds
+`--dangerously-skip-permissions` in `worktree_write` mode, and execution
+requires usable `sandbox-exec` confinement. Do not add that flag to a direct
+CLI invocation.
 
 Headless mode cannot prompt, so it auto-denies anything not already allowed.
 The three tool families behave differently, and the differences were measured,
@@ -381,22 +383,23 @@ The practical consequence: do not ask Gemini to write its own output file.
 Generate any diff yourself, pass the directory with `--add-dir`, and redirect
 the CLI's stdout to capture the review. That path needs no allow-rules at all.
 
-## Entries awaiting owner assessment
+## Entries without comparative dossier assessments
 
-The models below are named by `config/model-routing.json` but the owner has not
-characterised them. **The lines here are configuration facts, not the owner's
-opinion, and should not be read as one.** Anyone may replace a line with a real
-assessment; until then, route these on the hard axis alone.
+The entries below lack comparative behaviour and cost assessments in this
+dossier. **The lines here are configuration facts, not the owner's opinion,
+and do not imply an absence of policy approval or route eligibility.** Anyone
+may replace a line with a grounded assessment; until then, route on the hard
+axis alone.
 
 | Model | Configured position | Status |
 |---|---|---|
-| Grok | reachable through the `cursor` adapter, `xai` family | needs owner review |
-| Cursor Composer | reachable through the `cursor` adapter | needs owner review |
-| DeepSeek | `deepseek` endpoint, reached through the `claude` adapter | needs owner review |
-| Moonshot Kimi | `moonshot-kimi` endpoint, reached through the `claude` adapter | needs owner review |
-| Zhipu GLM | `zai-glm` endpoint, reached through the `claude` adapter | needs owner review |
-| OpenRouter (any slug) | `openrouter-anthropic` / `openrouter-openai` endpoints; caller picks live slug; not alias-pinned | needs owner review; free/stealth windows rotate |
-| OpenCode free / Zen | `opencode` adapter with explicit `opencode/<model>` (discover via `opencode models`) | needs owner review; not distinct-family assurance; data terms vary per model |
+| Grok | reachable through the `cursor` adapter, `xai` family | no comparative assessment in this dossier |
+| Cursor Composer | reachable through the `cursor` adapter | no comparative assessment in this dossier |
+| DeepSeek | `deepseek` endpoint, reached through the `claude` adapter | no comparative assessment in this dossier |
+| Moonshot Kimi | `moonshot-kimi` endpoint, reached through the `claude` adapter | no comparative assessment in this dossier |
+| Zhipu GLM | `zai-glm` endpoint, reached through the `claude` adapter | no comparative assessment in this dossier |
+| OpenRouter (any slug) | `openrouter-anthropic` / `openrouter-openai` endpoints; caller picks live slug; not alias-pinned | no comparative assessment in this dossier; free/stealth windows rotate |
+| OpenCode free / Zen | `opencode` adapter with explicit `opencode/<model>` (discover via `opencode models`) | no comparative assessment in this dossier; not distinct-family assurance; data terms vary per model |
 
 ## Recording the preference
 

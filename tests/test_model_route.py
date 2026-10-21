@@ -3496,13 +3496,13 @@ def test_openai_catalog_declares_effort_policy_only():
     assert family["effort_fallback_order"] == ["max", "xhigh", "high", "medium", "low"]
 
 
-def test_cli_headless_enumerates_no_effort_available():
+def test_codex_capabilities_documents_historical_no_effort_status():
     reference = (
-        ROOT / "skills" / "orchestrate" / "references" / "cli-headless.md"
+        ROOT / "skills" / "orchestrate" / "references" / "codex-capabilities.md"
     ).read_text()
 
     assert "`no_effort_available`" in reference, (
-        "CLI headless status guidance omits no_effort_available"
+        "historical resolver guidance omits no_effort_available"
     )
 
 
