@@ -32,7 +32,22 @@ Before each new attempt starts its provider, the owner compares available host m
 
 Many routes have 1M-token windows, so resuming a large session can cost far more than starting fresh. Fabric measures each attempt's context, caps it where the provider allows, and warns rather than blocks.
 
-Each attempt records `context: {context_tokens, input_tokens, output_tokens, cached_input_tokens, context_window_tokens, context_percent, source}`. `context_tokens` is the session's current size after the turn. `input_tokens` counts all prompt tokens, cached ones included; `cached_input_tokens` is the cached share. `source` is `observed` when the provider reported its latest request, `estimated` when only turn totals exist (these overstate context when a turn made several requests), and `null` when nothing was reported. Fields the provider did not report stay `null`; Fabric never invents them. The field paths come from one live turn per adapter, retained as `tests/fixtures/fabric-context/`:
+Each attempt records `context: {context_tokens, input_tokens, output_tokens, cached_input_tokens, cache_write_tokens, reasoning_tokens, context_window_tokens, context_percent, source}`. `context_tokens` is the session's current size after the turn. `cached_input_tokens` records cache reads, `cache_write_tokens` records cache writes, and `reasoning_tokens` records reported reasoning or thinking tokens. These are breakdowns of provider usage, not extra tokens to add to existing input/output totals. Fields the provider did not report stay `null`, including cache writes and reasoning; an explicit zero stays zero.
+
+Input totals retain their adapter-specific meanings:
+
+| Adapter | `input_tokens` | Cache writes | Reasoning |
+|---|---|---|---|
+| claude | `result.usage.input_tokens` + cache creation + cache read; includes cached tokens | `cache_creation_input_tokens` | `output_tokens_details.thinking_tokens` |
+| codex | `turn.completed.usage.input_tokens`, passed through including cached input | `cache_write_input_tokens` | `reasoning_output_tokens` |
+| cursor | `result.usage.inputTokens` + `cacheReadTokens` + `cacheWriteTokens`; includes cached tokens | `cacheWriteTokens` | not reported |
+| opencode | sum of each step's `input` + `cache.read` + `cache.write`; includes cached tokens | sum of `step_finish.part.tokens.cache.write` | sum of `step_finish.part.tokens.reasoning` |
+| agy | `result.usage.input_tokens`, passed through; `cache_read_tokens` is recorded separately without adding it to input | not reported | `thinking_tokens` |
+| kiro, copilot | not reported (`null`) | not reported | not reported |
+
+For agy the receipt preserves the provider's input total; the retained zero-cache sample does not establish whether its input includes cache reads. Consumers must not assume a uniform uncached-input definition across adapters.
+
+`context.source` is `observed` when the provider reported its latest request, `estimated` when only turn totals exist (these overstate context when a turn made several requests), and `null` when nothing was reported. The field paths come from live turns retained as `tests/fixtures/fabric-context/`:
 
 | Adapter | Context source | Window | Ceiling control |
 |---|---|---|---|
@@ -62,6 +77,10 @@ Each attempt records the sorted list in `applied.capabilities`; an omitted or
 empty list is `[]`.
 
 An owner writes `fabric.attempt.v1` at `tasks/<id>/attempt-NNN/attempt.json` and aggregates it into `RUN_RECEIPT.json`. A status row is `fabric.status.v1`: the latest attempt plus attempt history, batch id where relevant, and live worktree ledger fields. The attempt records state, status, mode, cwd, workspace_root, worktree, timing, process group, session id, retry fields, evidence, question, applied sandbox/network/additional directories/confinement/guarantee/context ceiling, context, warnings, provenance, paths and digest. `workspace.cwd` is the provider's actual cwd; `workspace.root` remains the caller workspace root. Dispatch attempts, batch task rows and run receipts write `ok` for success. Readers accept `succeeded` in retained older receipts and present it as `ok`. Unknown fields may be ignored; removals bump the version.
+
+Every attempt has `usage_source`: `observed` when token counters were read from the provider stream, `estimated` when usage was estimated, or `missing` when no token counters were reported. Current adapters do not estimate token usage; `estimated` is reserved for an estimator and preserved when supplied by an adapter. A context percentage alone is `missing` usage. This field is independent of `context.source`: Codex/Cursor turn totals are observed usage even when their context size is estimated. The meter result is retained on unsuccessful attempts, including non-zero provider exits.
+
+Terminal adapter, dispatch and Fabric attempt receipts also record `error_class`, derived only from that receipt's final status and existing evidence signature. The fixed vocabulary is `none`, `rate_limited`, `usage_limited`, `auth`, `model_unavailable`, `timeout`, `empty_output`, `sandbox_denied`, `provider_error`, and `unknown`. Successful and input-required statuses map to `none`; named failure statuses take precedence over signatures. Signatures refine generic outcomes (for example `failed` + `empty_output`). Stalls and startup deadlines map to `timeout`; permission blocks map to `sandbox_denied`. Generic failures, rejected requests and missing tools map to `provider_error`; cancellation, interruption, quarantine and unrecognised outcomes default to `unknown`. This telemetry field does not affect routing, retries or health.
 
 `timing.phases` records milliseconds for available dispatch phases: TypeScript validation and catalogue snapshot, run directory setup, owner startup and attempt setup, route planning, provider spawn, provider execution and finalisation. A direct Python owner has no TypeScript phase measurements. The writer watchdog scans at most 2,000 entries per probe, checks a 25 ms budget between entries and retains its scan position; a full cycle on a large tree may take several one-second probes. Stall detection waits for a complete scan covering the idle interval so a late file is not missed.
 

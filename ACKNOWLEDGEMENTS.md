@@ -34,10 +34,6 @@ not the legal record.
 - The structural-review lens is inspired by Cursor Team Kit's
   [Thermo-Nuclear Code Quality Review](https://github.com/cursor/plugins/blob/main/cursor-team-kit/skills/thermo-nuclear-code-quality-review/SKILL.md).
   No plugin code is incorporated.
-- `caveman` is an original, safety-bounded cross-agent rewrite informed by
-  [Julius Brussee's Caveman](https://github.com/JuliusBrussee/caveman), audited
-  at commit `0d95a81d35a9f2d123a5e9430d1cfc43d55f1bb0`. No upstream savings claim,
-  hook, compressor, worker agent or substantial wording is incorporated.
 
 Thank you to these authors and maintainers for making their work inspectable and
 reusable.

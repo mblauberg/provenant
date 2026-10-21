@@ -349,6 +349,34 @@ def test_terminal_attempt_carries_nested_owner_spared_count(tmp_path: Path) -> N
     assert row["spared"] == 2
 
 
+@pytest.mark.parametrize("adapter_status,legacy_status,signature,source,expected", [
+    ("failed", "failed", None, "observed", "provider_error"),
+    ("ok", "timed_out", None, "observed", "timeout"),
+    ("ok", "ok", None, "estimated", "none"),
+    ("failed", "failed", "empty_output", None, "empty_output"),
+])
+def test_terminal_attempt_keeps_usage_and_classifies_final_status(
+    tmp_path, adapter_status, legacy_status, signature, source, expected
+):
+    module = load_dispatch_module()
+    args = SimpleNamespace(tool="codex", alias="", model="fixture", effort="high",
+                           task_id="task-1", access_mode="read_only", worktree=None, _last_plan={})
+    legacy = {"started_at": "2026-09-23T00:00:00Z", "finished_at": "2026-09-23T00:00:01Z",
+              "outcome": legacy_status, "status": legacy_status, "result": None,
+              "attempt_path": "tasks/task-1/attempt-001", "requested_route": {}}
+    adapter = {"status": adapter_status, "evidence": {"signature": signature},
+               "error_class": "stale_adapter_class"}
+    if source:
+        adapter.update(context={"input_tokens": 10, "cache_write_tokens": 3, "reasoning_tokens": 2},
+                       usage_source=source)
+    row = module.terminal_contract(args, tmp_path, legacy, adapter, 1,
+                                   tmp_path / "tasks/task-1/attempt-001")
+    assert row["error_class"] == expected
+    assert row["usage_source"] == (source or "missing")
+    if source:
+        assert row["context"] == adapter["context"]
+
+
 def test_terminalised_confidential_run_stays_confidential_on_resume(tmp_path: Path) -> None:
     module = load_dispatch_module()
     args = SimpleNamespace(tool="codex", alias="", model="fixture", effort="low", confidential=True,
@@ -522,6 +550,8 @@ exit 99
     attempt = json.loads((run_dir / "dispatch/tasks/bad-floor/attempt-001/attempt.json").read_text())
     state = json.loads((run_dir / "tasks/bad-floor/attempt-001/attempt.json").read_text())
     assert attempt["status"] == state["status"] == "failed"
+    assert attempt["usage_source"] == state["usage_source"] == "missing"
+    assert attempt["error_class"] == state["error_class"] == "provider_error"
     assert state["fix"] == "Set .agents/fabric-policy.json memory_floor_percent to numbers from 0 to 100."
     assert "memory_floor_percent" in attempt["process_error"]
 
@@ -1981,6 +2011,7 @@ def test_read_only_manifest_is_rejected_before_launch(tmp_path: Path, monkeypatc
 
 
 def test_manifest_append_failure_retains_terminal_attempt(tmp_path: Path, monkeypatch) -> None:
+    disable_memory_admission_floor(tmp_path)
     run_dir = make_run(tmp_path, "manifest-write")
     prompt = tmp_path / "prompt.md"
     prompt.write_text("manifest write\n", encoding="utf-8")
@@ -1999,6 +2030,7 @@ def test_manifest_append_failure_retains_terminal_attempt(tmp_path: Path, monkey
     record = json.loads(attempt.read_text(encoding="utf-8"))
     assert record["status"] == "failed"
     assert record["failure_code"] == "manifest_write_error"
+    assert record["error_class"] == "provider_error"
     assert (attempt.parent / "attempt.sha256").is_file()
 
 
