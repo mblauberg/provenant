@@ -162,13 +162,18 @@ actual use with even use since the reported window start, projects run-out and
 states whether use lasts until reset. Pace is recomputed at report time from
 the latest observation. `use_it_or_lose_it` reports the current unused fraction and projected headroom
 expiring at the longest reported reset. Each window also reports headroom.
-A missing reset, a future window start or a passed reset means the window has
-not started and is treated as full pending a fresh reading.
+Usage of 100% or more is exhausted even when timing is missing or inconsistent.
+Only zero use can mean a window has not started. Positive use with a missing or
+passed reset has unknown pace pending a fresh reading; it retains its reported
+headroom. A reset up to five minutes beyond the window length is clamped for
+pace calculations; larger discrepancies have unknown pace.
 
 Successive observations record `natural`, `granted_date_kept`,
 `granted_window_restarted`, `window_moved`, `not_started` or `window_started`
 events in `quota_events`, per provider, account, host and window. These describe
-observed changes, not a presumed billing calendar.
+observed changes, not a presumed billing calendar. Natural rollover compares
+the new provider window start against the previous provider reset. Restarted
+windows must start within five minutes of the observation.
 
 ```sh
 provenant quota credit codex --account work add
@@ -178,18 +183,24 @@ provenant quota credit codex --account work use
 
 This example banks one Codex reset credit. `use` records a credit the user has
 already consumed; it never redeems anything with a provider. Credit records are
-local advice, keyed by provider, account and host. Agents never redeem credits.
+local advice, keyed by provider, account and host. Existing two-part
+provider/account keys remain host-agnostic when updated; an exact host key takes
+precedence when present. Agents never redeem credits.
 Advice is to hold until near exhaustion, wait if the natural reset is within
 six hours, and prefer a reset that keeps the date when that date is days away.
 
 Only the currently selected CLI identity affects routing (`CLAUDE_CONFIG_DIR`,
 `CODEX_HOME`, or the provider's default directory). Changing that identity is
-reflected on the next routing read, including when snapshots are cached. The
-report orders other configured accounts by priority and reset proximity as
+reflected on the next routing read, including when snapshots are cached. Cache
+and lock paths include the resolved identity directory; older unbound caches
+require a fresh reading before they can affect routing. The report orders other
+configured accounts by priority and reset proximity as
 placement advice; it never switches credentials. An exhausted selected account
 blocks that adapter until the latest exhausted window resets. A newer provider
-reading replaces stale usage cooldowns; a reserve or on-pace reading clears
-contradictory usage cooldowns. Short-term `rate_limited` cooldowns remain.
+reading with a reset date updates the adapter cooldown. Exhaustion without a
+reset date preserves existing usage cooldowns. Reserve, on-pace, early and
+not-started readings clear older contradictory usage cooldowns; unknown readings
+preserve them. Short-term `rate_limited` cooldowns remain.
 Deficit is shown in `provenant routes` and JSON only; it does not lower weights.
 
 ### Adding a provider
@@ -198,8 +209,11 @@ Deficit is shown in `provenant routes` and JSON only; it does not lower weights.
    `provider_quota.REGISTRY`. No provider-name branches belong in the core.
 2. Implement `ADAPTER`, `default_identity()` and `fetch(account, io, now)`.
    Fetch returns `windows`, optionally `plan`, `source`, `unreported`, `credits`
-   and `observed_at`. Each window has `name`, `used_percent`, `window_minutes`,
-   `reset_at` and `raw_kind`; names are free strings. Report unknown lengths or
+   and `observed_at`. Provider-specific account config keys are passed through
+   in `account.options`; `identity_dir`, `enabled`, `plan` and `priority` are
+   handled by the core. Options stay out of snapshots and reports. Each window
+   has `name`, `used_percent`, `window_minutes`, `reset_at` and `raw_kind`; names
+   are free strings. Report unknown lengths or
    resets as null. Core code normalises, caches and computes pace.
 3. Use the bounded `io` HTTP/process functions and fixed, sanitised failures.
    Return only quota metadata. Keep tokens inside the provider call chain.

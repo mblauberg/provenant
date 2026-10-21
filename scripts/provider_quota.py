@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 import importlib.util
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -57,10 +58,11 @@ PROCESS_TIMEOUT = 10.0
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 PACE_TOLERANCE = 4      # percentage points either side of even use
 EARLY_SHARE = 0.03      # too little of a window has passed to judge its pace
+CLOCK_SKEW_SECONDS = 300
 RESET_NOISE = 5         # a smaller drop is reporting noise, not a granted reset
 NEAR_EXHAUSTED = 95
 WAIT_HOURS = 6
-SEVERITY = ('exhausted', 'deficit', 'on_pace', 'reserve', 'early', 'not_started', 'unknown', 'unreported')
+SEVERITY = ('exhausted', 'unknown', 'unreported', 'deficit', 'on_pace', 'reserve', 'early', 'not_started')
 LABEL = re.compile(r'[a-z0-9][a-z0-9._-]{0,63}')
 DISABLED = {'0', 'false', 'no', 'off'}
 
@@ -75,14 +77,51 @@ class Unavailable(Exception):
 
 
 # A non-secret label, the CLI identity directory, and whether that is the CLI's default.
-Account = namedtuple('Account', 'provider label identity_dir active plan priority', defaults=(False, None, None))
+class Account(namedtuple('Account', 'provider label identity_dir active plan priority options')):
+    __slots__ = ()
+
+    def __new__(cls, provider, label, identity_dir, active=False, plan=None, priority=None, options=None):
+        return super().__new__(cls, provider, label, identity_dir, active, plan, priority,
+                               options if options is not None else {})
 
 
 class _Io:
-    """What provider modules may use; resolved at call time so tests can replace it."""
+    """Explicit provider I/O; functions resolve at call time for boundary replacement."""
 
-    def __getattr__(self, name):
-        return globals()[name]
+    Unavailable = Unavailable
+    TimeoutExpired = TimeoutExpired
+    PROCESS_TIMEOUT = PROCESS_TIMEOUT
+    MAX_RESPONSE_BYTES = MAX_RESPONSE_BYTES
+    PIPE = PIPE
+    DEVNULL = DEVNULL
+
+    @staticmethod
+    def executable(name):
+        return executable(name)
+
+    @staticmethod
+    def run_process(*args, **kwargs):
+        return run_process(*args, **kwargs)
+
+    @staticmethod
+    def open_process(*args, **kwargs):
+        return open_process(*args, **kwargs)
+
+    @staticmethod
+    def monotonic():
+        return monotonic()
+
+    @staticmethod
+    def parse_time(value):
+        return parse_time(value)
+
+    @staticmethod
+    def http_json(url, headers):
+        return http_json(url, headers)
+
+    @staticmethod
+    def ledger_windows(adapter, now):
+        return ledger_windows(adapter, now)
 
 
 IO = _Io()
@@ -240,7 +279,9 @@ def accounts():
             priority = number(entry.get('priority'))
             found.append(Account(name, label, identity, default is not None and same_path(identity, default),
                                  str(entry['plan']) if entry.get('plan') else None,
-                                 int(priority) if priority is not None else None))
+                                 int(priority) if priority is not None else None,
+                                 {key: value for key, value in entry.items()
+                                  if key not in ('identity_dir', 'enabled', 'plan', 'priority')}))
     return found
 
 
@@ -313,15 +354,22 @@ def normalise_window(raw):
             'reset_at': iso(reset), 'window_start': iso(start)}
 
 
-def cache_path(provider_name, label, host=None):
+def cache_path(provider_name, label, host=None, identity_dir=None):
     host = host or telemetry_host()
-    return state_root() / 'quota' / f'{provider_name}--{label}--{host}.json'
+    identity = ''
+    if identity_dir is not None:
+        resolved = str(Path(identity_dir).expanduser().resolve())
+        identity = '--' + hashlib.sha256(resolved.encode()).hexdigest()[:16]
+    return state_root() / 'quota' / f'{provider_name}--{label}--{host}{identity}.json'
 
 
-def load_snapshot(provider_name, label):
+def load_snapshot(provider_name, label, identity_dir=None):
     try:
-        value = json.loads(cache_path(provider_name, label).read_text())
+        value = json.loads(cache_path(provider_name, label, identity_dir=identity_dir).read_text())
     except (OSError, ValueError):
+        # Unbound legacy snapshots cannot establish which identity supplied them.
+        if identity_dir is not None:
+            return None
         # Read the previous two-part filename only when its host matches this host.
         try:
             value = json.loads((state_root() / 'quota' / f'{provider_name}--{label}.json').read_text())
@@ -354,8 +402,8 @@ def atomic_json(path, value):
             temporary.unlink(missing_ok=True)
 
 
-def save_snapshot(value):
-    atomic_json(cache_path(value['provider'], value['account'], value['host']), value)
+def save_snapshot(value, identity_dir=None):
+    atomic_json(cache_path(value['provider'], value['account'], value['host'], identity_dir), value)
 
 
 def snapshots():
@@ -382,18 +430,19 @@ def classify_reset(previous, current, previous_observed, observed):
     before, after = parse_time(previous.get('reset_at')), parse_time(current.get('reset_at'))
     drop = (number(previous.get('used_percent')) or 0) - (number(current.get('used_percent')) or 0)
     observed = parse_time(observed) if isinstance(observed, str) else observed
+    minutes = number(current.get('window_minutes')) or number(previous.get('window_minutes')) or 0
+    start = after - timedelta(minutes=minutes) if after and minutes else None
     kind = None
     if after is None:
         kind = 'not_started' if before is not None or drop > RESET_NOISE else None
     elif before is None:
         kind = 'window_started'
-    elif observed and observed >= before:
+    elif start and after > before and abs((start - before).total_seconds()) <= CLOCK_SKEW_SECONDS:
         kind = 'natural'
     else:
-        minutes = number(current.get('window_minutes')) or number(previous.get('window_minutes')) or 0
-        moved = abs((after - before).total_seconds()) > max(300, minutes * 0.6)
+        moved = abs((after - before).total_seconds()) > CLOCK_SKEW_SECONDS
         if drop > RESET_NOISE:
-            restarted = minutes and abs((after - observed).total_seconds() - minutes * 60) <= max(300, minutes * 6)
+            restarted = start and observed and abs((start - observed).total_seconds()) <= CLOCK_SKEW_SECONDS
             kind = 'granted_window_restarted' if moved and after > before and restarted else \
                 'window_moved' if moved else 'granted_date_kept'
         elif moved:
@@ -442,19 +491,19 @@ def refresh(account, now=None, force=False):
     """The account's snapshot, fetched at most once per cache period unless forced."""
     if not enabled():
         return _refresh(account, now, force)
-    with locked(cache_path(account.provider, account.label).with_suffix('.lock')):
+    with locked(cache_path(account.provider, account.label, identity_dir=account.identity_dir).with_suffix('.lock')):
         return _refresh(account, now, force)
 
 
 def _refresh(account, now=None, force=False):
     now = now or utcnow()
     if not enabled():
-        previous = load_snapshot(account.provider, account.label) or blank(account, 'disabled')
+        previous = load_snapshot(account.provider, account.label, account.identity_dir) or blank(account, 'disabled')
         return {**previous, 'active': account.active, 'priority': account.priority,
                 'plan': account.plan or previous.get('plan')}
     if provider(account.provider) is None:
         return blank(account, 'unreported', f'no quota source is registered for {account.provider}')
-    previous = load_snapshot(account.provider, account.label)
+    previous = load_snapshot(account.provider, account.label, account.identity_dir)
     attempted = parse_time((previous or {}).get('attempted_at'))
     if previous and not force and attempted and (now - attempted).total_seconds() < cache_seconds():
         return {**previous, 'active': account.active, 'priority': account.priority,
@@ -483,12 +532,12 @@ def _refresh(account, now=None, force=False):
                  'source': result.get('source'), 'windows': windows, 'unreported': unreported,
                  'credits': result.get('credits') if isinstance(result.get('credits'), dict) else None}
         record_events(previous, value)
-        save_snapshot(value)
+        save_snapshot(value, account.identity_dir)
         return value
     value = {**(previous or blank(account, 'unavailable')), 'attempted_at': iso(now), 'error': error,
              'status': 'stale' if previous and previous.get('windows') else 'unavailable',
              'active': account.active, 'priority': account.priority}
-    save_snapshot(value)
+    save_snapshot(value, account.identity_dir)
     return value
 
 
@@ -505,16 +554,21 @@ def pace(window, now):
               'will_last_to_reset': None, 'runs_out_at': None, 'headroom_percent': round(100 - actual, 1),
               'expiring_headroom_percent': 0, 'summary': ''}
     remaining = (reset - now).total_seconds() if reset else None
-    if reset is not None and remaining <= 0:
-        return {**result, 'state': 'not_started', 'headroom_percent': 100,
-                'summary': f'reset passed at {iso(reset)}; awaiting a fresh reading'}
-    if reset is None or minutes and remaining > minutes * 60:
-        return {**result, 'state': 'not_started', 'headroom_percent': 100, 'summary': 'window starts on first use'}
     if actual >= 100:
         return {**result, 'state': 'exhausted', 'will_last_to_reset': False, 'runs_out_at': iso(now),
-                'summary': 'exhausted' + (f'; resets in {duration(remaining)}' if reset else '')}
-    if not minutes or remaining > minutes * 60:
+                'summary': 'exhausted' + (f'; resets in {duration(remaining)}' if remaining and remaining > 0 else '')}
+    if actual == 0 and (reset is None or remaining <= 0 or
+                        minutes and remaining > minutes * 60 + CLOCK_SKEW_SECONDS):
+        return {**result, 'state': 'not_started', 'summary': 'window starts on first use'}
+    if reset is None:
+        return {**result, 'summary': 'reset time unreported; pace unknown'}
+    if remaining <= 0:
+        return {**result, 'summary': f'reset passed at {iso(reset)}; awaiting a fresh reading'}
+    if not minutes:
         return {**result, 'summary': f'resets in {duration(remaining)}; window length unreported'}
+    if remaining > minutes * 60 + CLOCK_SKEW_SECONDS:
+        return {**result, 'summary': 'reset time exceeds the reported window; pace unknown'}
+    remaining = min(remaining, minutes * 60)
     elapsed = minutes * 60 - remaining
     expected = elapsed / (minutes * 60) * 100
     delta = actual - expected
@@ -538,7 +592,7 @@ def governing(rows):
     return min(rows, key=lambda row: (SEVERITY.index(row['pace']['state']), -row['used_percent']), default=None)
 
 
-def credits():
+def credits(*, raw=False):
     try:
         value = json.loads((state_root() / 'quota/credits.json').read_text())
     except (OSError, ValueError):
@@ -547,7 +601,12 @@ def credits():
     for key, entry in value.items() if isinstance(value, dict) else []:
         parts = key.split('/')
         if isinstance(entry, dict) and len(parts) in (2, 3):
-            result[tuple(parts) if len(parts) == 3 else (*parts, telemetry_host())] = entry
+            if raw:
+                result[key] = entry
+            elif len(parts) == 3:
+                result[tuple(parts)] = entry
+            else:
+                result.setdefault((*parts, telemetry_host()), entry)
     return result
 
 
@@ -556,8 +615,11 @@ def change_credits(provider_name, label, delta):
         raise ValueError('provider and account must be short lowercase labels')
     path = state_root() / 'quota/credits.json'
     with locked(path.with_suffix('.lock')):
-        current = {'/'.join(key): entry for key, entry in credits().items()}
+        current = credits(raw=True)
         key = f'{provider_name}/{label}/{telemetry_host()}'
+        generic = f'{provider_name}/{label}'
+        if key not in current and generic in current:
+            key = generic
         count = int((current.get(key) or {}).get('reset_credits') or 0) + delta
         if count < 0:
             raise ValueError(f'{key} has no banked reset credit to use')
@@ -653,10 +715,9 @@ def route_states(now=None):
     except ValueError:
         return {}
     states = {}
-    for value in freshest(snapshots()):
-        name, label = value.get('provider'), value.get('account')
-        account = current.get((name, label))
-        if not account or not account.active or value.get('status') not in ('ok', 'stale'):
+    for (name, label), account in current.items():
+        value = load_snapshot(name, label, account.identity_dir)
+        if not account.active or not value or value.get('status') not in ('ok', 'stale'):
             continue
         module = provider(name)
         row = describe(value, None, now)
@@ -681,7 +742,7 @@ def apply_to_cooldowns(records, now=None):
             continue
         observed = parse_time(state['observed_at'])
         until = parse_time(state['cooling_until'])
-        if observed and state['state'] in ('exhausted', 'reserve', 'on_pace', 'not_started'):
+        if observed and state['state'] in ('reserve', 'on_pace', 'early', 'not_started'):
             for key, record in records.items():
                 recorded = parse_time((record or {}).get('recorded_at'))
                 if (str(key).split('/', 1)[0] == adapter and record.get('status') in ('usage_limited', 'quota_exhausted')
@@ -689,7 +750,11 @@ def apply_to_cooldowns(records, now=None):
                     result.pop(key, None)
         if state['state'] == 'exhausted' and until and until > now:
             key = f'{adapter}/*'
-            if str((result.get(key) or {}).get('cooling_until', '')) < state['cooling_until']:
+            record = result.get(key) or {}
+            recorded = parse_time(record.get('recorded_at'))
+            if (str(record.get('cooling_until', '')) < state['cooling_until'] or
+                    record.get('status') in ('usage_limited', 'quota_exhausted') and
+                    observed and recorded and observed > recorded):
                 result[key] = {'adapter': adapter, 'model': '*', 'account': state['account'],
                                'status': 'quota_exhausted', 'cooling_until': state['cooling_until'],
                                'recorded_at': state['observed_at'], 'source': 'provider quota'}

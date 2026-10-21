@@ -8,6 +8,7 @@ import hashlib
 import importlib.util
 from collections import Counter
 from datetime import UTC, datetime
+from functools import cache
 import json
 import math
 import os
@@ -824,12 +825,14 @@ def public_snapshot(value):
             result['credits']['source'] = credits['source']
     return result
 
+@cache
 def quota_owner():
     spec = importlib.util.spec_from_file_location('provenant_telemetry_quota', Path(__file__).with_name('provider_quota.py'))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
+@cache
 def host_owner():
     spec = importlib.util.spec_from_file_location('provenant_telemetry_hosts', Path(__file__).with_name('telemetry_hosts.py'))
     module = importlib.util.module_from_spec(spec)

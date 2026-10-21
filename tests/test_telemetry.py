@@ -819,3 +819,10 @@ def test_stats_reports_time_since_last_limit_per_account_and_host(tmp_path):
     assert (limit['provider'], limit['account'], limit['timestamp']) == ('openai', 'work', '2026-10-21T02:00:00Z')
     assert limit['host'] == report['host'] and limit['age_seconds'] >= 0
     assert 'Last limit events' in cli(tmp_path, 'stats').stdout
+
+
+def test_telemetry_reuses_loaded_quota_and_host_owners():
+    from scripts import telemetry
+
+    assert telemetry.quota_owner() is telemetry.quota_owner()
+    assert telemetry.host_owner() is telemetry.host_owner()
