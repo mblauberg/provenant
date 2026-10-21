@@ -297,20 +297,25 @@ def normalise_window(raw):
             'reset_at': iso(reset), 'window_start': iso(start)}
 
 
-def cache_path(provider_name, label):
-    return state_root() / 'quota' / f'{provider_name}--{label}.json'
+def cache_path(provider_name, label, host=None):
+    host = host or telemetry_host()
+    return state_root() / 'quota' / f'{provider_name}--{label}--{host}.json'
 
 
 def load_snapshot(provider_name, label):
     try:
         value = json.loads(cache_path(provider_name, label).read_text())
     except (OSError, ValueError):
-        return None
-    return value if isinstance(value, dict) and value.get('schema') == SCHEMA else None
+        # Read the previous two-part filename only when its host matches this host.
+        try:
+            value = json.loads((state_root() / 'quota' / f'{provider_name}--{label}.json').read_text())
+        except (OSError, ValueError):
+            return None
+    return value if isinstance(value, dict) and value.get('schema') == SCHEMA and value.get('host') == telemetry_host() else None
 
 
 def save_snapshot(value):
-    path = cache_path(value['provider'], value['account'])
+    path = cache_path(value['provider'], value['account'], value['host'])
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix('.tmp')
     temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + '\n')
@@ -347,13 +352,14 @@ def classify_reset(previous, current, previous_observed, observed):
     elif before is None:
         kind = 'window_started'
     elif observed and observed >= before:
-        kind = 'natural_reset'
+        kind = 'natural'
     else:
         minutes = number(current.get('window_minutes')) or number(previous.get('window_minutes')) or 0
         moved = abs((after - before).total_seconds()) > max(300, minutes * 0.6)
         if drop > RESET_NOISE:
-            kind = 'granted_reset_window_restarted' if moved and after > before else \
-                'window_moved' if moved else 'granted_reset_date_kept'
+            restarted = minutes and abs((after - observed).total_seconds() - minutes * 60) <= max(300, minutes * 6)
+            kind = 'granted_window_restarted' if moved and after > before and restarted else \
+                'window_moved' if moved else 'granted_date_kept'
         elif moved:
             kind = 'window_moved'
     if kind is None:
@@ -456,11 +462,11 @@ def pace(window, now):
     if reset is not None and remaining <= 0:
         return {**result, 'state': 'not_started', 'headroom_percent': 100,
                 'summary': f'reset passed at {iso(reset)}; awaiting a fresh reading'}
+    if reset is None:
+        return {**result, 'state': 'not_started', 'headroom_percent': 100, 'summary': 'window starts on first use'}
     if actual >= 100:
         return {**result, 'state': 'exhausted', 'will_last_to_reset': False, 'runs_out_at': iso(now),
                 'summary': 'exhausted' + (f'; resets in {duration(remaining)}' if reset else '')}
-    if reset is None:
-        return {**result, 'state': 'not_started', 'summary': 'window starts on first use'}
     if not minutes or remaining > minutes * 60:
         return {**result, 'summary': f'resets in {duration(remaining)}; window length unreported'}
     elapsed = minutes * 60 - remaining
@@ -491,14 +497,20 @@ def credits():
         value = json.loads((state_root() / 'quota/credits.json').read_text())
     except (OSError, ValueError):
         return {}
-    return {tuple(key.split('/', 1)): entry for key, entry in value.items()
-            if isinstance(entry, dict) and '/' in key} if isinstance(value, dict) else {}
+    result = {}
+    for key, entry in value.items() if isinstance(value, dict) else []:
+        parts = key.split('/')
+        if isinstance(entry, dict) and len(parts) in (2, 3):
+            result[tuple(parts) if len(parts) == 3 else (*parts, telemetry_host())] = entry
+    return result
 
 
 def change_credits(provider_name, label, delta):
     path = state_root() / 'quota/credits.json'
-    current = {f'{name}/{account}': entry for (name, account), entry in credits().items()}
-    key = f'{provider_name}/{label}'
+    if not LABEL.fullmatch(provider_name) or not LABEL.fullmatch(label):
+        raise ValueError('provider and account must be short lowercase labels')
+    current = {'/'.join(key): entry for key, entry in credits().items()}
+    key = f'{provider_name}/{label}/{telemetry_host()}'
     count = int((current.get(key) or {}).get('reset_credits') or 0) + delta
     if count < 0:
         raise ValueError(f'{key} has no banked reset credit to use')
@@ -560,7 +572,7 @@ def describe(value, banked, now):
 def report(values, now=None):
     now = now or utcnow()
     banked = credits()
-    rows = [describe(value, banked.get((value.get('provider'), value.get('account'))), now)
+    rows = [describe(value, banked.get((value.get('provider'), value.get('account'), telemetry_host())), now)
             for value in freshest(values)]
     preference = {}
     for row in rows:
@@ -590,15 +602,14 @@ def route_states(now=None):
     if not enabled():
         return {}
     try:
-        listed = configured()
+        current = {(account.provider, account.label): account for account in accounts()}
     except ValueError:
         return {}
     states = {}
     for value in freshest(snapshots()):
         name, label = value.get('provider'), value.get('account')
-        if not value.get('active') or value.get('status') not in ('ok', 'stale'):
-            continue
-        if name in listed and (label not in listed[name] or (listed[name][label] or {}).get('enabled') is False):
+        account = current.get((name, label))
+        if not account or not account.active or value.get('status') not in ('ok', 'stale'):
             continue
         module = provider(name)
         row = describe(value, None, now)
@@ -623,18 +634,18 @@ def apply_to_cooldowns(records, now=None):
             continue
         observed = parse_time(state['observed_at'])
         until = parse_time(state['cooling_until'])
+        if observed and state['state'] in ('exhausted', 'reserve', 'on_pace', 'not_started'):
+            for key, record in records.items():
+                recorded = parse_time((record or {}).get('recorded_at'))
+                if (str(key).split('/', 1)[0] == adapter and record.get('status') in ('usage_limited', 'quota_exhausted')
+                        and recorded and observed > recorded):
+                    result.pop(key, None)
         if state['state'] == 'exhausted' and until and until > now:
             key = f'{adapter}/*'
             if str((result.get(key) or {}).get('cooling_until', '')) < state['cooling_until']:
                 result[key] = {'adapter': adapter, 'model': '*', 'account': state['account'],
                                'status': 'quota_exhausted', 'cooling_until': state['cooling_until'],
                                'recorded_at': state['observed_at'], 'source': 'provider quota'}
-        elif state['state'] in ('reserve', 'on_pace') and observed:
-            for key, record in records.items():
-                recorded = parse_time((record or {}).get('recorded_at'))
-                if (str(key).split('/', 1)[0] == adapter and record.get('status') == 'usage_limited'
-                        and recorded and observed > recorded):
-                    result.pop(key, None)
     return result
 
 
@@ -665,6 +676,18 @@ def render(value):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv[:2] == ['credit', 'list']:
+        parser = argparse.ArgumentParser(prog='provenant quota credit list')
+        parser.add_argument('--json', action='store_true')
+        args = parser.parse_args(argv[2:])
+        rows = [dict(provider=name, account=account, host=host, **entry)
+                for (name, account, host), entry in sorted(credits().items()) if host == telemetry_host()]
+        if args.json:
+            print(json.dumps(rows, indent=2))
+        else:
+            for row in rows:
+                print(f"{row['provider']}/{row['account']}@{row['host']}: {row['reset_credits']} reset credit(s)")
+        return 0
     if argv[:1] == ['credit']:
         parser = argparse.ArgumentParser(prog='provenant quota credit',
                                          description='Record a banked reset credit by hand. Advice only.')

@@ -67,6 +67,8 @@ def snapshot(quota, provider='codex', windows=(), observed=NOW, account='default
              'active': True, 'priority': None, 'observed_at': iso(observed), 'attempted_at': iso(observed),
              'source': 'test', 'status': 'ok', 'error': None, 'unreported': [], 'credits': None,
              'windows': [quota.normalise_window(row) for row in windows], **extra}
+    if account == 'default' and quota.provider(provider):
+        quota.provider(provider).default_identity().mkdir(parents=True, exist_ok=True)
     quota.save_snapshot(value)
     return value
 
@@ -204,7 +206,7 @@ def test_claude_usage_endpoint_uses_the_token_in_process_only(quota, monkeypatch
     assert result['plan'] == 'max' and result['account'] == 'max-b' and result['host'] == 'studio'
     assert [(row['name'], row['window_minutes']) for row in result['windows']] == [
         ('five_hour', 300), ('seven_day', WEEK), ('seven_day_opus', WEEK), ('weekly_scoped:fable', WEEK)]
-    stored = (tmp_path / 'state/quota/claude--max-b.json').read_text()
+    stored = (tmp_path / 'state/quota/claude--max-b--studio.json').read_text()
     for secret in (TOKEN, 'owner@example.com'):
         assert secret not in stored and secret not in json.dumps(result)
     assert TOKEN not in capsys.readouterr().out
@@ -296,9 +298,9 @@ def test_accounts_come_from_config_and_default_to_one_discovered_identity(quota,
 # Reset events -------------------------------------------------------------------------------
 
 @pytest.mark.parametrize(('previous', 'current', 'observed', 'kind'), [
-    ((80, timedelta(hours=1)), (5, timedelta(hours=5)), NOW + timedelta(hours=2), 'natural_reset'),
-    ((80, timedelta(days=3)), (10, timedelta(days=3)), NOW + timedelta(hours=1), 'granted_reset_date_kept'),
-    ((80, timedelta(days=3)), (2, timedelta(days=7, hours=1)), NOW + timedelta(hours=1), 'granted_reset_window_restarted'),
+    ((80, timedelta(hours=1)), (5, timedelta(hours=5)), NOW + timedelta(hours=2), 'natural'),
+    ((80, timedelta(days=3)), (10, timedelta(days=3)), NOW + timedelta(hours=1), 'granted_date_kept'),
+    ((80, timedelta(days=3)), (2, timedelta(days=7, hours=1)), NOW + timedelta(hours=1), 'granted_window_restarted'),
     ((40, timedelta(days=3)), (41, timedelta(days=4)), NOW + timedelta(hours=1), 'window_moved'),
     ((40, timedelta(days=3)), (0, None), NOW + timedelta(hours=1), 'not_started'),
     ((0, None), (3, timedelta(days=7)), NOW + timedelta(hours=1), 'window_started'),
@@ -319,7 +321,7 @@ def test_reset_events_are_recorded_in_the_ledger_and_pace_follows_the_latest_sna
     latest = quota.refresh(account, NOW + timedelta(hours=1), force=True)
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         rows = db.execute('SELECT provider,account,host,window,kind,previous_used_percent,used_percent FROM quota_events').fetchall()
-    assert rows == [('codex', 'default', 'studio', 'seven_day', 'granted_reset_date_kept', 80, 10)]
+    assert rows == [('codex', 'default', 'studio', 'seven_day', 'granted_date_kept', 80, 10)]
     assert quota.report([latest], NOW + timedelta(hours=1))['accounts'][0]['windows'][0]['pace']['state'] == 'reserve'
 
 
@@ -329,7 +331,7 @@ def test_manual_reset_credits_and_redeem_advice(quota, capsys):
     assert quota.main(['credit', 'codex', 'add']) == 0
     assert quota.main(['credit', 'codex', '--account', 'default', 'add']) == 0
     assert quota.main(['credit', 'codex', 'use']) == 0
-    assert quota.credits()[('codex', 'default')]['reset_credits'] == 1
+    assert quota.credits()[('codex', 'default', 'studio')]['reset_credits'] == 1
     assert quota.main(['credit', 'codex', '--account', 'spare', 'use']) == 1
 
     def advice(used, reset_in):
@@ -423,6 +425,9 @@ def test_quota_cli_reports_config_accounts_from_cache_without_fetching(tmp_path)
         'source': 'test', 'status': 'ok', 'error': None, 'unreported': [], 'credits': None,
         'windows': [{'name': 'secondary', 'raw_kind': 'secondary', 'used_percent': 55, 'window_minutes': WEEK,
                      'reset_at': iso(observed + timedelta(days=3)), 'window_start': None}]}))
+    hosts = home / '.agents/.agent-fabric/hosts.json'
+    hosts.parent.mkdir(parents=True)
+    hosts.write_text(json.dumps({'schema_version': 1, 'local_host': 'studio'}))
     config = home / '.agents/config/telemetry.json'
     config.parent.mkdir(parents=True)
     config.write_text(json.dumps({'accounts': {'agy': {'work': {'identity_dir': '~/.gemini'}},
@@ -444,3 +449,42 @@ def test_quota_cli_reports_config_accounts_from_cache_without_fetching(tmp_path)
     assert rows[('agy', 'work')]['status'] == 'disabled'
     table = subprocess.run([str(ROOT / 'scripts/provenant'), 'quota'], env=env, capture_output=True, text=True, check=False)
     assert table.returncode == 0 and 'codex' in table.stdout and 'max-b' in table.stdout
+
+
+def test_cache_is_keyed_by_provider_account_and_host(quota, monkeypatch):
+    first = snapshot(quota, windows=[window(10, WEEK, timedelta(days=3))])
+    monkeypatch.setattr(quota, 'telemetry_host', lambda: 'peer')
+    assert quota.load_snapshot('codex', 'default') is None
+    second = snapshot(quota, host='peer', windows=[window(90, WEEK, timedelta(days=3))])
+    assert quota.load_snapshot('codex', 'default')['host'] == 'peer'
+    assert len(quota.snapshots()) == 2
+    assert quota.freshest([first, second])[0]['host'] in ('studio', 'peer')
+
+
+def test_provider_reset_overrides_later_usage_cooldown_and_identity_switch_rechecks_accounts(quota, tmp_path, monkeypatch):
+    configure(tmp_path, {'accounts': {'claude': {'a': {'identity_dir': '~/.claude'},
+                                               'b': {'identity_dir': '~/.claude-b'}}}})
+    snapshot(quota, 'claude', [window(100, WEEK, timedelta(days=2))], account='a')
+    snapshot(quota, 'claude', [window(3, 300, timedelta(hours=2))], account='b', active=False)
+    cooldown = {'claude/*': {'status': 'usage_limited', 'recorded_at': iso(NOW - timedelta(hours=1)),
+                             'cooling_until': iso(NOW + timedelta(days=5))}}
+    assert quota.apply_to_cooldowns(cooldown, NOW)['claude/*']['cooling_until'] == iso(NOW + timedelta(days=2))
+    assert quota.apply_to_cooldowns(cooldown, NOW + timedelta(days=2, minutes=1)) == {}
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'home/.claude-b'))
+    assert quota.route_states(NOW)['claude']['account'] == 'b'
+    assert quota.route_states(NOW)['claude']['state'] == 'reserve'
+    assert quota.apply_to_cooldowns(cooldown, NOW) == {}
+
+
+def test_no_reset_date_is_full_even_if_usage_was_exhausted(quota):
+    state = quota.pace(window(100, WEEK, None), NOW)
+    assert state['state'] == 'not_started' and state['headroom_percent'] == 100
+
+
+def test_credit_list_is_local_advice_and_does_not_fetch(quota, capsys):
+    quota.main(['credit', 'codex', '--account', 'work', 'add'])
+    capsys.readouterr()
+    assert quota.main(['credit', 'list', '--json']) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert rows == [{'provider': 'codex', 'account': 'work', 'host': 'studio', 'reset_credits': 1,
+                     'updated_at': rows[0]['updated_at']}]

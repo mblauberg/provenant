@@ -786,6 +786,9 @@ def test_routes_follow_provider_quota_over_stale_cooldowns_and_report_deficit(tm
     """Claude at 3% must not stay cooling on a stale usage cooldown; Codex 45% over pace stays available."""
     env = overlay_environment(tmp_path, {})
     env["PROVENANT_QUOTA"] = "1"
+    hosts = Path(env['AGENT_FABRIC_INSTANCE_ROOT']) / '.agent-fabric/hosts.json'
+    hosts.parent.mkdir(parents=True, exist_ok=True)
+    hosts.write_text(json.dumps({'schema_version': 1, 'local_host': 'studio'}))
     state = tmp_path / "state"
     state.mkdir()
     now = datetime.now(timezone.utc)
