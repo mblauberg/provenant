@@ -2225,7 +2225,10 @@ def parser() -> argparse.ArgumentParser:
     routes = commands.add_parser(
         "routes", help="print each route pool with live availability",
         description="Print every global route pool (junior, senior, principal, design, writing) with each model's weight, "
-                    "effort band, caveats and live availability.")
+                    "effort band, caveats and live availability. By default available models print in full and the "
+                    "unavailable or cooling ones collapse to a per-pool count line; `--all` lists every entry.")
+    routes.add_argument("--all", action="store_true",
+                        help="print every pool entry, including unavailable and cooling models")
     routes.add_argument("--json", action="store_true", help="print one fabric.routes.v1 JSON document")
     routes.add_argument("--health", action="store_true",
                         help="also print task-class routes and recent route health (the `route health` view)")
@@ -2311,7 +2314,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.json:
             print(json.dumps(document, sort_keys=True))
         else:
-            print(_pools.render(document))
+            print(_pools.render(document, full=args.all))
             if args.health:
                 print("\ntask-class routes and recent health (route health --json):")
                 print(json.dumps(document["health"], indent=2, sort_keys=True))

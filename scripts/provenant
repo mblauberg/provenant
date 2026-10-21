@@ -126,10 +126,11 @@ COMMAND_DETAILS: dict[str, str] = {
         "`route reset [adapter[/model]] [--account LABEL]` clears cooldowns."
     ),
     "routes": (
-        "usage: provenant routes [--json] [--health]\n\n"
+        "usage: provenant routes [--all] [--json] [--health]\n\n"
         "Delegates to scripts/model-route routes ...\n"
-        "Each global route pool with live availability; --health adds\n"
-        "task-class routes and recent health."
+        "Each global route pool with live availability; unavailable or cooling\n"
+        "models collapse to a per-pool count line, --all lists every entry, and\n"
+        "--health adds task-class routes and recent health."
     ),
     "capabilities": (
         "usage: provenant capabilities ...\n\n"
@@ -197,9 +198,11 @@ COMMAND_DETAILS: dict[str, str] = {
         "Local metadata-only usage ledger."
     ),
     "stats": (
-        "usage: provenant stats [--since ISO-DATE] [--json]\n\n"
+        "usage: provenant stats [--since ISO-DATE] [--json] [--detail]\n\n"
         "Delegates to scripts/provenant-telemetry.\n"
-        "Usage, costs and outcomes."
+        "Usage, costs and outcomes. The default is the summary tables only;\n"
+        "per-account rows and the full tables are behind --detail, and --json\n"
+        "prints the full report."
     ),
     "quota": (
         "usage: provenant quota [--refresh] [--json] | credit list | credit <provider> [--account L] add|use\n\n"
