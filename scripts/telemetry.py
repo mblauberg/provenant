@@ -864,14 +864,16 @@ def _nullable_compact(value):
     return compact(value) if value is not None else None
 
 
-def bounded_table(headers, rows, limit=None):
+def bounded_table(headers, rows, limit=None, always=()):
     """Render a table of nullable cells; columns missing in every row are dropped.
 
     None prints as '-' and callers report an elided tail beyond `limit`, so no
-    identifier, status or next-step hint is lost.
+    identifier, status or next-step hint is lost. Columns in `always` stay even
+    when empty, because their absence is itself the signal.
     """
     shown = rows if limit is None else rows[:limit]
-    keep = [index for index, _ in enumerate(headers) if any(row[index] is not None for row in rows)]
+    keep = [index for index, name in enumerate(headers)
+            if name in always or any(row[index] is not None for row in rows)]
     cells = [[('-' if row[index] is None else str(row[index])) for index in keep] for row in shown]
     return table(keep and [headers[index] for index in keep] or list(headers), cells)
 
@@ -888,7 +890,7 @@ def render_stats(report, detail=False):
           *(compact(row[field]) if row[field] is not None else None for field in TOKEN_FIELDS),
           None if row['cache_read_share'] is None else f"{row['cache_read_share']:.0%}",
           None if row['estimated_cost_usd'] is None else f"{row['estimated_cost_usd']:.2f}",
-          row['billing'] or '-') for row in report['usage']], limit)
+          row['billing'] or '-') for row in report['usage']], limit, always=('cost_usd',))
     if not detail and len(report['usage']) > ROW_LIMIT:
         lines.append(f"{len(report['usage']) - ROW_LIMIT} more; use --detail/--json")
     outcomes = [(f"{row['adapter']}/{row['model']}" + (f"@{row['effort']}" if row['effort'] else ''),
@@ -905,21 +907,22 @@ def render_stats(report, detail=False):
              'p50_s', 'p90_s', 'out_tok/s'), outcomes, limit)
         if not detail and len(outcomes) > ROW_LIMIT:
             lines.append(f"{len(outcomes) - ROW_LIMIT} more; use --detail/--json")
-    for title, rows in (('Lanes', [(row['status'], row['error_class'] or '-', row['lanes']) for row in report['lanes']]),
-                        ('Limit events', [(row['day'] or '-', row['provider'] or '-', row['status'], row['events'])
-                                          for row in report['limits_per_day'][-14:]])):
+    last_limits = [(row['provider'] or '-', row['account'] or 'unattributed', row['timestamp'], f"{row['age_seconds']}s ago")
+                   for row in report.get('last_limit_events', [])]
+    sections = [('Lanes', [(row['status'], row['error_class'] or '-', row['lanes']) for row in report['lanes']]),
+                ('Limit events', [(row['day'] or '-', row['provider'] or '-', row['status'], row['events'])
+                                  for row in report['limits_per_day'][-14:]]),
+                ('Last limit events', last_limits if detail else last_limits[:ROW_LIMIT])]
+    # Quota observations stay behind `--detail` in the default summary view.
+    if detail:
+        sections.append(('Latest quota observations', [(row['provider'] or '-', row['window'], f"{row['used_percent']:g}%",
+                                                        row['reset_at'] or '-', row['timestamp'] or '-')
+                                                       for row in report['quota_observations']]))
+    for title, rows in sections:
         if rows:
             lines += ['', f'{title}:', *('  ' + '  '.join(str(cell) for cell in row) for row in rows)]
-    # Per-account rows stay behind `--detail` in the default summary view.
-    if detail:
-        for title, rows in (('Last limit events', [(row['provider'] or '-', row['account'] or 'unattributed',
-                                                    row['timestamp'], f"{row['age_seconds']}s ago")
-                                                  for row in report.get('last_limit_events', [])]),
-                            ('Latest quota observations', [(row['provider'] or '-', row['window'], f"{row['used_percent']:g}%",
-                                                            row['reset_at'] or '-', row['timestamp'] or '-')
-                                                           for row in report['quota_observations']])):
-            if rows:
-                lines += ['', f'{title}:', *('  ' + '  '.join(str(cell) for cell in row) for row in rows)]
+    if not detail and len(last_limits) > ROW_LIMIT:
+        lines.append(f"{len(last_limits) - ROW_LIMIT} more limit events; use --detail/--json")
     if report['unattributed'] or report['excluded_rows']:
         lines += ['', 'Not attributed to a model: ' + '; '.join(
             f"{row['source']}/{row['adapter'] or '-'} rows={row['rows']}" for row in report['unattributed']) +
