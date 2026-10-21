@@ -659,7 +659,7 @@ def test_peer_stats_are_versioned_aggregates_and_read_only(tmp_path):
     write_json(tmp_path / 'state/quota/fake--work.json', {
         'schema': 'provenant.quota.v1', 'provider': 'fake', 'account': 'work',
         'host': __import__('socket').gethostname(), 'access_token': 'PRIVATE_TOKEN',
-        'credits': {'reset_credits': 1, 'credential': 'PRIVATE_TOKEN'},
+        'credits': {'reset_credits': 1, 'credential': 'PRIVATE_TOKEN', 'source': {'token': 'PRIVATE_TOKEN'}},
         'windows': [{'name': 'custom', 'used_percent': 20, 'credential': 'PRIVATE_TOKEN'}]})
     result = subprocess.run([str(ROOT / 'scripts/provenant'), 'peer'],
                             input=json.dumps({'protocol_version': 1, 'verb': 'telemetry.stats',
@@ -787,6 +787,12 @@ def test_malformed_peer_is_partial_instead_of_breaking_local_stats(tmp_path, mon
         response = {**good, 'quota_snapshots': [{**local_quota, 'host': 'peer', 'observed_at': 5}]}
         report = federation.collect(telemetry, db, None, ['all'])
         assert report['partial'] and report['hosts'][-1]['reason'] == 'bad_response'
+        response = {**good, 'quota_snapshots': [{**local_quota, 'host': 'peer',
+                    'observed_at': '2026-10-21T13:00:00Z', 'windows': [{'name': 'custom', 'used_percent': 30, 'window_minutes': 300,
+                                 'reset_at': None, 'credential': 'PRIVATE_TOKEN'}],
+                    'credits': {'reset_credits': 1, 'source': 'provider', 'credential': 'PRIVATE_TOKEN'}}]}
+        report = federation.collect(telemetry, db, None, ['all'])
+        assert 'PRIVATE_TOKEN' not in json.dumps(report)
 
 
 def test_unreadable_peer_ledger_returns_a_typed_error(tmp_path):

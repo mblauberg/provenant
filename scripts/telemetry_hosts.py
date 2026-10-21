@@ -151,7 +151,8 @@ def validate_snapshots(telemetry, values, host):
                 raise ValueError('invalid quota window')
         credits = value.get('credits')
         if credits is not None and (not isinstance(credits, dict) or type(credits.get('reset_credits')) is not int
-                                    or credits['reset_credits'] < 0):
+                                    or credits['reset_credits'] < 0
+                                    or credits.get('source') not in (None, 'manual', 'provider')):
             raise ValueError('invalid quota credits')
 
 def collect(telemetry, db, since, selectors):
@@ -181,6 +182,8 @@ def collect(telemetry, db, since, selectors):
             value = response['result']
             validate(telemetry, value, host)
             validate_snapshots(telemetry, value.get('quota_snapshots', []), host)
+            value = {**value, 'quota_snapshots': [telemetry.public_snapshot(snapshot)
+                                                for snapshot in value.get('quota_snapshots', [])]}
             # Validate the summable numeric contract before accepting a peer.
             merge(telemetry, [value], [], since)
             return value, {'host': host, 'status': 'ok'}

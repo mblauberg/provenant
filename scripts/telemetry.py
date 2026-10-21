@@ -817,8 +817,11 @@ def public_snapshot(value):
     result['windows'] = [{key: row[key] for key in ('name', 'used_percent', 'window_minutes', 'reset_at',
                                                    'raw_kind', 'window_start') if key in row}
                          for row in value.get('windows', []) if isinstance(row, dict)]
-    if isinstance(value.get('credits'), dict):
-        result['credits'] = {key: value['credits'][key] for key in ('reset_credits', 'source') if key in value['credits']}
+    credits = value.get('credits')
+    if isinstance(credits, dict) and type(credits.get('reset_credits')) is int and credits['reset_credits'] >= 0:
+        result['credits'] = {'reset_credits': credits['reset_credits']}
+        if credits.get('source') in ('manual', 'provider'):
+            result['credits']['source'] = credits['source']
     return result
 
 def quota_owner():
