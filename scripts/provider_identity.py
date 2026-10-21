@@ -71,11 +71,13 @@ def account_key(provider, identity_dir, entries=None):
     if identity_dir is None:
         return None
     entries = configured().get(provider, {}) if entries is None else entries
-    for label, entry in sorted(entries.items()):
-        if isinstance(entry, dict) and entry.get('enabled') is not False:
-            identity = entry.get('identity_dir') or selected_identity(provider)
-            if identity is not None and same_path(identity_dir, identity):
-                return label
+    enabled_entries = [(label, entry) for label, entry in entries.items()
+                       if isinstance(entry, dict) and entry.get('enabled') is not False]
+    # Explicit paths take precedence over labels that implicitly name the default.
+    for label, entry in sorted(enabled_entries, key=lambda item: (not bool(item[1].get('identity_dir')), item[0])):
+        identity = entry.get('identity_dir') or default_identity(provider)
+        if identity is not None and same_path(identity_dir, identity):
+            return label
     if same_path(identity_dir, default_identity(provider)):
         return 'default'
     resolved = str(Path(identity_dir).expanduser().resolve())

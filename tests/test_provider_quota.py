@@ -35,7 +35,7 @@ def quota(tmp_path, monkeypatch):
     monkeypatch.setenv('HOME', str(home))
     monkeypatch.setenv('AGENT_FABRIC_STATE_ROOT', str(tmp_path / 'state'))
     monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(home / '.agents'))
-    for name in ('PROVENANT_QUOTA', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME'):
+    for name in ('PROVENANT_QUOTA', 'CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_DATA_HOME'):
         monkeypatch.delenv(name, raising=False)
     module = load('provider_quota_under_test', ROOT / 'scripts/provider_quota.py')
 
@@ -315,6 +315,31 @@ def test_cache_and_routing_are_bound_to_the_selected_identity(quota, monkeypatch
     assert cached['windows'][0]['used_percent'] == 10
     assert quota.route_states(NOW)[provider_name]['state'] == 'reserve'
     assert calls == [first_identity, second_identity]
+
+
+@pytest.mark.parametrize(('provider_name', 'environment'), [
+    ('claude', 'CLAUDE_CONFIG_DIR'), ('codex', 'CODEX_HOME'), ('opencode', 'XDG_DATA_HOME')])
+def test_configured_accounts_without_identity_dir_keep_default_directory(
+        quota, tmp_path, monkeypatch, provider_name, environment):
+    default = quota.identity.default_identity(provider_name)
+    monkeypatch.setenv(environment, str(tmp_path / 'alternate'))
+    alternate = quota.identity.selected_identity(provider_name)
+    configure(tmp_path, {'accounts': {provider_name: {'a': {}, 'b': {'identity_dir': str(alternate)}}}})
+    rows = {row.label: row for row in quota.accounts()}
+    assert rows['a'].identity_dir == default and not rows['a'].active
+    assert rows['b'].identity_dir == alternate and rows['b'].active
+
+    monkeypatch.delenv(environment)
+    assert {row.label: row.active for row in quota.accounts()} == {'a': True, 'b': False}
+
+    configure(tmp_path, {'accounts': {provider_name: {'a': {}, 'b': {'identity_dir': str(default)}}}})
+    assert {row.label: row.active for row in quota.accounts()} == {'a': False, 'b': True}
+
+    monkeypatch.setenv(environment, str(tmp_path / 'alternate'))
+    configure(tmp_path, {'accounts': {provider_name: {'a': {}}}})
+    account, = quota.accounts()
+    assert account.identity_dir == default and not account.active
+    assert quota.identity.scope(provider_name)['account'].startswith('path-')
 
 
 def test_accounts_come_from_config_and_default_to_one_discovered_identity(quota, tmp_path):

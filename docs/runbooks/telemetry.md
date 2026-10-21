@@ -133,6 +133,7 @@ Configure accounts in `<instance-root>/config/telemetry.json`. These are the
 object in this dedicated file. Labels are short non-secret names, never email
 addresses or tokens. Plan labels are optional display text; priority is an
 optional integer, with smaller numbers preferred.
+An entry without `identity_dir` means the provider's default directory.
 
 ```json
 {

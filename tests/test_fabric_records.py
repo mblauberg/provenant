@@ -28,6 +28,28 @@ def stored_routes(path):
             for entry in json.loads(path.read_text())['cooldowns'].values()}
 
 
+@pytest.mark.parametrize(('provider', 'environment'), [
+    ('claude', 'CLAUDE_CONFIG_DIR'), ('codex', 'CODEX_HOME'), ('opencode', 'XDG_DATA_HOME')])
+def test_unannotated_account_names_default_identity(tmp_path, monkeypatch, provider, environment):
+    resolver = records().identity_resolver()
+    monkeypatch.setenv(environment, str(tmp_path / 'alternate'))
+    alternate = resolver.selected_identity(provider)
+    config = tmp_path / 'instance/config/telemetry.json'
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'accounts': {provider: {
+        'a': {}, 'b': {'identity_dir': str(alternate)}}}}))
+    assert resolver.scope(provider)['account'] == 'b'
+    assert resolver.scope(provider, default=True)['account'] == 'a'
+
+    config.write_text(json.dumps({'accounts': {provider: {'a': {}}}}))
+    assert resolver.scope(provider)['account'].startswith('path-')
+    assert resolver.scope(provider, default=True)['account'] == 'a'
+
+    config.write_text(json.dumps({'accounts': {provider: {
+        'a': {}, 'b': {'identity_dir': str(resolver.default_identity(provider))}}}}))
+    assert resolver.scope(provider, default=True)['account'] == 'b'
+
+
 def test_cooldowns_follow_selected_claude_identity(tmp_path, monkeypatch):
     monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'a'))
     path = tmp_path / 'cooldowns.json'

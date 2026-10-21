@@ -256,13 +256,14 @@ def accounts():
                 found.append(Account(name, identity.account_key(name, default, entries={}), Path(default), True))
             continue
         active_label = identity.account_key(name, default, listed[name])
+        configured_default = identity.default_identity(name)
         for label, entry in sorted(listed[name].items()):
             entry = entry if isinstance(entry, dict) else {}
             if entry.get('enabled') is False:
                 continue
-            if not entry.get('identity_dir') and default is None:
+            if not entry.get('identity_dir') and configured_default is None:
                 raise ValueError(f'{name}/{label} requires identity_dir')
-            identity_dir = Path(entry.get('identity_dir') or default).expanduser()
+            identity_dir = Path(entry.get('identity_dir') or configured_default).expanduser()
             priority = number(entry.get('priority'))
             found.append(Account(name, label, identity_dir, default is not None and label == active_label,
                                  str(entry['plan']) if entry.get('plan') else None,
