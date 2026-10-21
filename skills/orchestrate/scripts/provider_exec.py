@@ -627,9 +627,9 @@ def os_confinement_profile(plan, search_path=None):
                 [cwd, *add_dirs, *([run_dir] if run_dir else []), codex_home]
             )
         profile += _state_write_guards(home, state)
+        profile += _provider_config_write_denies(home)
         profile += _sbpl_rule("deny", "file-write*", plan.get("protected_paths", []))
         profile += _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
-        profile += _provider_config_write_denies(home)
         return profile
     configured_xdg = Path(os.environ.get("XDG_CONFIG_HOME", "")).expanduser()
     xdg_config_home = configured_xdg if configured_xdg.is_absolute() else home / ".config"
@@ -682,8 +682,8 @@ def os_confinement_profile(plan, search_path=None):
         + _sbpl_rule("deny", "file-read-data", [home / path for path in
                                                 (*EXTRA_DENIED_READS, *state.get("read_denied", ()))])
         + (_claude_session_reads(home, plan) if plan.get("adapter") == "claude" else "")
-        + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
         + _provider_config_write_denies(home)
+        + _sbpl_rule("deny", "file-read*", plan.get("protected_paths", []))
     )
 
 
