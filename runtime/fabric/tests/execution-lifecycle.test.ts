@@ -147,6 +147,40 @@ describe("Fabric input corrections", () => {
       .toThrow(expect.objectContaining({ code: "adapter_required" }));
   });
 
+  it("resolves documented model aliases without correction warnings", () => {
+    const snapshot = catalogueSnapshot(repositoryRoot);
+    for (const alias of ["glm-free", "deepseek-free", "sol", "luna"]) {
+      const route = normaliseRoute({ alias }, identity, snapshot);
+      expect(route.model, alias).toBeDefined();
+      expect((route.warnings ?? []).filter((warning) => !warning.startsWith("NATIVE:")), alias).toEqual([]);
+    }
+    const typo = normaliseRoute({ adapter: "codex", model: "gpt-6-lunx" }, identity, snapshot);
+    expect(typo.model).toBe("gpt-6-luna");
+    expect(typo.warnings).toContain("corrected model gpt-6-lunx to gpt-6-luna");
+  });
+
+  it("resolves catalogue model suffixes and carries or defers their effort", () => {
+    const snapshot = { adapters: [{ name: "agy", models: ["gemini-3.8-flash", "plain-model"], aliases: {},
+      model_details: [
+        { id: "gemini-3.8-flash", efforts: ["low", "medium", "high"], effort_transport: "model-suffix",
+          suffix: { low: "-low", medium: "-medium", high: "-high" } },
+        { id: "plain-model", efforts: ["high"], effort_transport: "flag" },
+      ] }] } as any;
+    const implied = normaliseRoute({ adapter: "agy", model: "gemini-3.8-flash-high" }, identity, snapshot);
+    expect(implied).toMatchObject({ model: "gemini-3.8-flash", effort: "high" });
+    expect(implied.warnings ?? []).toEqual([]);
+    expect(normaliseRoute({ adapter: "agy", model: "Gemini-3.8-Flash-HIGH" }, identity, snapshot))
+      .toMatchObject({ model: "gemini-3.8-flash", effort: "high" });
+
+    const explicit = normaliseRoute({ adapter: "agy", model: "gemini-3.8-flash-high", effort: "medium" }, identity, snapshot);
+    expect(explicit).toMatchObject({ model: "gemini-3.8-flash", effort: "medium" });
+    expect(explicit.warnings).toContain("effort high in model ignored: effort medium was named");
+
+    const unsupported = normaliseRoute({ adapter: "agy", model: "plain-model-high" }, identity, snapshot);
+    expect(unsupported.model).toBe("plain-model-high");
+    expect(unsupported.effort).toBeUndefined();
+  });
+
   it("passes version-free family names through for model_route.py to resolve to the latest model", () => {
     const entry = (latest: boolean) => ({ name: "codex", latest_aliases: latest, aliases: {},
       models: ["gpt-6.1-sol", "gpt-6-luna"],
