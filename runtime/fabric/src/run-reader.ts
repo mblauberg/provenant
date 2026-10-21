@@ -2,9 +2,9 @@ import { existsSync, lstatSync, realpathSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 
-import { runRoot } from "./identity.js";
+import { databasePath, runRoot } from "./identity.js";
 import { processMatches, processStartedAt, readOwnerRecord, readProviderRecord, statusRows } from "./run-registry.js";
-import type { Message } from "./store.js";
+import { inspectDatabase, type Message } from "./store.js";
 import { federatedLane } from "./hosts.js";
 
 export interface RunRead {
@@ -16,6 +16,7 @@ export interface RunRead {
   run_id: string;
   task_id: string | null;
   run_path: string;
+  source_project?: string;
   state: string;
   status: string | null;
   landable?: false;
@@ -38,6 +39,7 @@ export interface RunReadResponse {
   schema: "fabric.runs.v1" | "fabric.runs.v2";
   status: "ok" | "unknown";
   error?: string;
+  discovery_error?: string;
   runs: RunRead[];
   omitted?: number;
   omitted_hint?: string;
@@ -94,7 +96,9 @@ export async function readRuns(
     signal?.throwIfAborted();
   }
   try {
-    const source = await statusRows(workspace, ids, waitSeconds, "all", signal, "brief", false, null, includeHistory);
+    const registry = inspectDatabase(databasePath(), workspace, "status");
+    const source = await statusRows(workspace, ids, waitSeconds, "all", signal, "brief", false, null, includeHistory,
+      registry.projects);
     if (!source.runs) return { schema: "fabric.runs.v1", status: "unknown" as const,
       error: String(source.error ?? "run_read_failed"), runs: [] as RunRead[] };
     const root = existsSync(runRoot(workspace)) ? realpathSync.native(runRoot(workspace)) : resolve(runRoot(workspace));
@@ -124,6 +128,7 @@ export async function readRuns(
         run_id: String(row.run_id),
         task_id: typeof row.task_id === "string" ? row.task_id : null,
         run_path: rootPath(root, root, runDir) ?? "",
+        ...(typeof row.source_project === "string" ? { source_project: row.source_project } : {}),
         state: String(row.state ?? "unknown"),
         status: typeof row.status === "string" ? row.status : null,
         ...(row.landable === false ? { landable: false as const, quarantine: row.quarantine } : {}),
@@ -153,6 +158,7 @@ export async function readRuns(
     const omitted = capped ? Math.max(0, matching.length - limit) : 0;
     return { schema: "fabric.runs.v1", status: "ok" as const,
       runs: capped ? matching.slice(0, limit ?? matching.length) : matching,
+      ...(registry.status === "error" ? { discovery_error: registry.error ?? "project_registry_unavailable" } : {}),
       ...(omitted ? { omitted, omitted_hint: `Use provenant lanes ID to see a lane past the ${limit}-row cap.` } : {}) };
   } catch (error) {
     return { schema: "fabric.runs.v1", status: "unknown" as const,

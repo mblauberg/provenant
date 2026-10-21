@@ -1109,6 +1109,7 @@ export interface DatabaseDiagnostic {
   database: string;
   project: string;
   counts?: Record<string, number>;
+  projects?: string[];
   checks?: Array<{ name: string; ok: boolean; detail: string }>;
   error?: string;
 }
@@ -1206,7 +1207,10 @@ export function inspectDatabase(
     counts.activity = count("activity");
 
     if (mode === "status") {
-      return { status: "ok", exists: true, readOnly: true, database: path, project, counts };
+      const projects = tables.has("agents")
+        ? (db.prepare(`SELECT DISTINCT project FROM agents ORDER BY project`).all() as Array<{ project: string }>)
+          .map((row) => row.project) : [];
+      return { status: "ok", exists: true, readOnly: true, database: path, project, counts, projects };
     }
 
     const missing = REQUIRED_TABLES.filter((table) => !tables.has(table));

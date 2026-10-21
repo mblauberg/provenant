@@ -11,7 +11,7 @@
  * owner handles its descendants. When an owner cannot finish cleanup, these
  * records do not authorise a broader group kill that could hit a shared host.
  */
-import { runRoot, withoutGitRedirects } from "./identity.js";
+import { projectRoot, runRoot, withoutGitRedirects } from "./identity.js";
 import { federatedLane } from "./hosts.js";
 import { canonicalSuccessStatus, isSuccessStatus } from "./success-status.js";
 export { runRoot } from "./identity.js";
@@ -985,6 +985,7 @@ export async function statusRows(
   includeLedger = true,
   limit: number | null = 20,
   includeHistory = false,
+  sourceProjects: string[] = [],
 ): Promise<StatusResult> {
   if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 55)
     return { status: "rejected", error: "wait_invalid", fix: "Pass wait_seconds from 0 to 55." };
@@ -995,7 +996,37 @@ export async function statusRows(
     signal?.throwIfAborted();
     const root = runRoot(workspace);
     const candidates = runDirectoryNames(workspace).map((name) => join(root, name));
-    const v1 = candidates.flatMap(v1Rows);
+    const project = projectRoot(workspace);
+    // Keep owner custody at the launching project. Only explicitly targeted
+    // tasks are imported; a mixed-project batch must not expose its siblings.
+    const sources = [...new Map(sourceProjects.map((source) => [runRoot(source), source]))]
+      .filter(([sourceRoot]) => sourceRoot !== root).map(([, source]) => source);
+    const targeted = sources.flatMap((source) => runDirectoryNames(source).flatMap((name) => {
+      const runDir = join(runRoot(source), name);
+      const metadata = readJson(join(runDir, "dispatch-status.json"));
+      const projects = metadata?.cwd_projects;
+      if (projects === null || typeof projects !== "object" || Array.isArray(projects)) return [];
+      const tasks = Object.entries(projects).filter(([, target]) => target === project).map(([task]) => task);
+      return tasks.length ? [{ source, runDir, metadata, tasks }] : [];
+    }));
+    const imported = (await Promise.all(targeted.map(async ({ source, runDir, metadata, tasks }) => {
+      // An exact run lookup bypasses the legacy reader's recent-row cap too.
+      const result = await statusRows(source, [runDir], 0, "all", signal, "brief", false, null, true);
+      if (!result.runs) throw new Error(String(result.error ?? "run_read_failed"));
+      return result.runs.flatMap((row): Record<string, any>[] => {
+        if (typeof row.task_id === "string")
+          return tasks.includes(row.task_id) ? [{ ...row, source_project: source }] : [];
+        // Before its first receipt a batch has only an owner row. Project it
+        // onto its targeted tasks until the normal receipt reader takes over.
+        return tasks.map((task) => {
+          const index = Array.isArray(metadata?.task_ids) ? metadata.task_ids.indexOf(task) : -1;
+          const route = Array.isArray(metadata?.routes) ? metadata.routes[index] : undefined;
+          return { ...row, id: task, task_id: task, source_project: source,
+            adapter: route?.adapter ?? null, model: route?.resolved_model ?? route?.model ?? null };
+        });
+      });
+    }))).flat();
+    const v1 = [...candidates.flatMap(v1Rows), ...imported];
     const v1Dirs = new Set(v1.map((row) => row.run_dir));
     const wrap = (row: Record<string, any>): Record<string, any> => {
       const metadata = readJson(join(row.run_dir, "dispatch-status.json"));

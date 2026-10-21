@@ -46,7 +46,7 @@ import { promisify } from "node:util";
 
 import { catalogueSnapshot, type CatalogueSnapshot } from "./catalogue.js";
 import { expandPools, nativeFirst, usesPool, withoutEmptySelectors, POOL_FIELDS } from "./pools.js";
-import { runRoot, databasePath, withoutGitRedirects, type Identity } from "./identity.js";
+import { runRoot, databasePath, projectRoot, withoutGitRedirects, type Identity } from "./identity.js";
 import {
   shortRunId,
   fabricStatus,
@@ -316,6 +316,7 @@ export interface OwnerIdentification {
   batchId?: string;
   nextAttempt?: number;
   workspace?: string;
+  cwdProjects?: Record<string, string>;
 }
 
 export function startOwner(
@@ -352,6 +353,12 @@ export function startOwner(
   const stderrPath = join(runDir, "_owner", `stderr${suffix}.log`);
   // Persist required status before spawning: a failed write cannot orphan a provider.
   const statusPath = join(runDir, "dispatch-status.json");
+  let cwdProjects = identification.cwdProjects;
+  if (cwdProjects === undefined && identification.resume) {
+    try {
+      cwdProjects = (JSON.parse(readFileSync(statusPath, "utf8")) as { cwd_projects?: Record<string, string> }).cwd_projects;
+    } catch { /* Older runs may have only receipts. */ }
+  }
   const metadata = {
     id: shortRunId(runDir),
     ...(identification.kind === "dispatch"
@@ -362,6 +369,7 @@ export function startOwner(
     started_at: new Date().toISOString(),
     routes: identification.routes,
     task_ids: identification.taskIds,
+    cwd_projects: cwdProjects,
     timeout_seconds: identification.timeout,
     status: "running",
     owner_stdout: stdoutPath,
@@ -800,6 +808,7 @@ async function dispatchConfiguredProviderUnchecked(
       identifier: taskId,
       routes: checked.routes,
       taskIds: [taskId],
+      cwdProjects: input.cwd === undefined ? undefined : { [taskId]: projectRoot(providerIdentity.cwd, env) },
       timeout,
     },
     input.prompt === undefined ? [] : [promptPath],
@@ -988,6 +997,8 @@ async function dispatchConfiguredBatchUnchecked(
       identifier: FIRST_BATCH_ID,
       routes: checked.routes,
       taskIds: tasks.map((task) => String(task.id)),
+      cwdProjects: Object.fromEntries(tasks.filter((task) => typeof task.cwd === "string")
+        .map((task) => [String(task.id), projectRoot(String(task.cwd), env)])),
       timeout: Math.max(...tasks.map((task) => Number(task.timeout))),
     },
     [manifestPath],

@@ -14,7 +14,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { cancelActiveExecutions, dispatchConfiguredBatch, dispatchConfiguredProvider, rejectOwnSeatClaude } from "../src/execution.js";
+import { cancelActiveExecutions, cancelConfiguredRun, dispatchConfiguredBatch, dispatchConfiguredProvider, rejectOwnSeatClaude } from "../src/execution.js";
 import { handoffDispatch } from "../src/resume.js";
 import { sessionDispatch } from "../src/sessions.js";
 import { namesExplicitRoute, normaliseRoute, readRoots, routeArguments, savedReadRoots, workingIdentity, type BatchTaskInput } from "../src/execution-input.js";
@@ -622,6 +622,93 @@ describe("dispatch CLI", () => {
     expect(output).toBeTruthy();
   });
 
+  async function crossProjectLane() {
+    const project = join(temporaryDirectory, "target-project");
+    const worktree = join(temporaryDirectory, "target-worktree");
+    execFileSync("git", ["init", "-q", project]);
+    execFileSync("git", ["-C", project, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test",
+      "commit", "-q", "--allow-empty", "-m", "fixture"]);
+    execFileSync("git", ["-C", project, "worktree", "add", "-q", "-b", "lane", worktree]);
+    const cwd = join(worktree, "nested");
+    mkdirSync(cwd);
+    const store = new Store(databasePath(ownerEnvironment));
+    store.announce(identity);
+    store.announce({ ...identity, project, cwd });
+    store.close();
+    const started = await dispatchConfiguredProvider({ adapter: "codex", cwd, prompt: "sleep without provider",
+      task_id: "cross-project-lane", wait_seconds: 0 }, { ...identity, registeredProjects: [workspace, project] },
+    new AbortController().signal, ownerEnvironment);
+    expect(started.status, JSON.stringify(started)).toBe("running");
+    spawnedPids.push(Number(started.pid));
+    const run = listRecordedRuns(workspace).find((record) => record.run_id === started.id)!;
+    await waitForFile(join(run.run_dir, "sleeping.pid"));
+    const options = { cwd, encoding: "utf8" as const, env: ownerEnvironment, timeout: 15_000 };
+    const args = ["--import", tsxLoader, join(packageRoot, "src/cli.ts"), "lanes"];
+    return { started, options, args, project, worktree };
+  }
+
+  it("lists a lane from its explicit cwd project when the chair is in another project", async () => {
+    const { started, options, args, project, worktree } = await crossProjectLane();
+    for (const cwd of [project, worktree, options.cwd]) {
+      const result = JSON.parse(execFileSync(process.execPath, [...args, "--json"], { ...options, cwd }));
+      expect(result.runs).toEqual([expect.objectContaining({ run_id: started.id,
+        task_id: "cross-project-lane", state: "running", source_project: workspace,
+        run_path: "", result_path: null, receipt_path: null })]);
+    }
+    const original = JSON.parse(execFileSync(process.execPath, [...args, "--json"], { ...options, cwd: workspace }));
+    expect(original.runs[0].run_id).toBe(started.id);
+    expect(original.runs[0].run_path).toMatch(/^runs\//u);
+  }, 20_000);
+
+  it("awaits a lane from its explicit cwd project when the chair is in another project", async () => {
+    const { started, options, args } = await crossProjectLane();
+    const poll = spawnSync(process.execPath, [...args, "--wait", "--all", "--timeout", "0"], options);
+    expect(poll.status, poll.stdout + poll.stderr).toBe(124);
+    expect(poll.stdout).toContain("cross-project-lane");
+    const waiter = spawn(process.execPath, [...args, "--wait", "--all", "--timeout", "10"], options);
+    let output = "";
+    waiter.stdout.on("data", (chunk) => { output += chunk; });
+    const exited = new Promise<number | null>((done, fail) => {
+      waiter.once("error", fail);
+      waiter.once("close", done);
+    });
+    try {
+      await cancelConfiguredRun(String(started.id), identity, "fixture complete", ownerEnvironment);
+      expect(await exited).toBe(0);
+      expect(output).toContain("cross-project-lane");
+      expect(output).toContain("cancelled");
+      expect(output).not.toContain("no lanes are running");
+    } finally {
+      waiter.kill();
+      await exited;
+    }
+  }, 25_000);
+
+  it("keeps a cross-project lane discoverable while it resumes", async () => {
+    const project = realpathSync(mkdtempSync(join(temporaryDirectory, "resume-target-")));
+    const store = new Store(databasePath(ownerEnvironment));
+    store.announce(identity);
+    store.announce({ ...identity, project, cwd: project });
+    store.close();
+    const runDir = join(workspace, ".agent-run", "mcp-resume-discovery");
+    const attempt = join(runDir, "tasks/task-1/attempt-001");
+    mkdirSync(attempt, { recursive: true });
+    mkdirSync(join(runDir, "_owner"));
+    const row = JSON.parse(readFileSync(join(testDirectory, "fixtures/attempt.json"), "utf8"));
+    Object.assign(row, { run_id: "mcp-resume-discovery", cwd: project, read_roots: [project] });
+    writeFileSync(join(attempt, "attempt.json"), JSON.stringify(row));
+    writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ task_id: "task-1", status: "ok",
+      finished_at: new Date().toISOString(), cwd_projects: { "task-1": project } }));
+    const resumed = await resumeConfiguredProvider({ resume: row.run_id, prompt: "sleep without provider", wait_seconds: 0 },
+      { ...identity, registeredProjects: [workspace, project] }, new AbortController().signal, ownerEnvironment);
+    expect(resumed.state, JSON.stringify(resumed)).toBe("queued");
+    spawnedPids.push(listRecordedRuns(workspace).find((run) => run.run_id === row.run_id)!.owner_pid);
+    await waitForFile(join(runDir, "sleeping.pid"));
+    const result = JSON.parse(execFileSync(process.execPath, ["--import", tsxLoader, join(packageRoot, "src/cli.ts"),
+      "lanes", "--json"], { cwd: project, encoding: "utf8", env: ownerEnvironment }));
+    expect(result.runs).toEqual([expect.objectContaining({ run_id: row.run_id, task_id: "task-1", state: "queued" })]);
+  }, 20_000);
+
   it("forwards read roots for a task manifest in another registered project", () => {
     const otherProject = join(temporaryDirectory, "other-project");
     mkdirSync(otherProject);
@@ -643,6 +730,30 @@ describe("dispatch CLI", () => {
     const manifest = JSON.parse(readFileSync(join(workspace, ".agent-run", "runs", run!, "_owner", "task-manifest.json"), "utf8"));
     expect(manifest.tasks[0]).toMatchObject({ cwd: realpathSync(otherProject), read_roots: [realpathSync(otherProject)] });
   }, 40_000);
+
+  it("lists only the targeted tasks of a cross-project batch before receipts exist", async () => {
+    const targets = [join(temporaryDirectory, "project-b"), join(temporaryDirectory, "project-c")];
+    const store = new Store(databasePath(ownerEnvironment));
+    store.announce(identity);
+    for (const project of targets) {
+      mkdirSync(project);
+      store.announce({ ...identity, project, cwd: project });
+    }
+    store.close();
+    const started = await dispatchConfiguredBatch({ tasks: targets.map((cwd, index) => ({
+      id: `target-${index}`, adapter: "codex", cwd, prompt: "sleep with provider",
+    })), wait_seconds: 0 }, { ...identity, registeredProjects: [workspace, ...targets] },
+    new AbortController().signal, ownerEnvironment);
+    expect(started.status, JSON.stringify(started)).toBe("running");
+    spawnedPids.push(Number(started.pid));
+    const run = listRecordedRuns(workspace).find((record) => record.run_id === started.id)!;
+    await waitForFile(join(run.run_dir, "sleeping.pid"));
+    for (const [index, cwd] of targets.entries()) {
+      const result = JSON.parse(execFileSync(process.execPath, ["--import", tsxLoader, join(packageRoot, "src/cli.ts"),
+        "lanes", "--json"], { cwd, encoding: "utf8", env: ownerEnvironment }));
+      expect(result.runs.map((row: { task_id: string }) => row.task_id)).toEqual([`target-${index}`]);
+    }
+  }, 20_000);
 
   it("keeps typed correction details when dispatch input is rejected", () => {
     const promptPath = join(temporaryDirectory, "cli-invalid-prompt.md");

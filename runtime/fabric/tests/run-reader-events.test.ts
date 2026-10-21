@@ -82,6 +82,24 @@ it("reads both receipt layouts through one versioned root-relative run interface
   }
 });
 
+it("keeps local runs readable when the project registry is unavailable", async () => {
+  const workspace = fixture();
+  attempt(workspace, "tasks", "local", "terminal", "ok");
+  const state = fixture();
+  writeFileSync(join(state, "fabric.sqlite3"), "invalid database");
+  const previous = process.env.AGENT_FABRIC_STATE_DIRECTORY;
+  process.env.AGENT_FABRIC_STATE_DIRECTORY = state;
+  try {
+    const result = await readRuns(workspace);
+    expect(result.status).toBe("ok");
+    expect(result.runs.map((row) => row.task_id)).toEqual(["local"]);
+    expect(result.discovery_error).toBeTypeOf("string");
+  } finally {
+    if (previous === undefined) delete process.env.AGENT_FABRIC_STATE_DIRECTORY;
+    else process.env.AGENT_FABRIC_STATE_DIRECTORY = previous;
+  }
+});
+
 it("omits the effort suffix when an adapter applies no effort", async () => {
   const workspace = fixture();
   const { row, run } = attempt(workspace, "tasks", "noeffort", "terminal", "ok");
