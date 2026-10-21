@@ -54,6 +54,6 @@ Updated: <YYYY-MM-DDTHH:MM:SSZ>
 -->
 
 - **Note (iter0):** Mission scaffolded from templates by
-  `scripts/bootstrap-autopilot.sh`. `GOAL.md` CONFIG KNOBS block
+  `scripts/bootstrap-autopilot.py`. `GOAL.md` CONFIG KNOBS block
   {{filled?}}. `QUEUE.md` empty. STATUS: RUN. Next: seed `QUEUE.md` from the
   first work-enumeration pass, then dispatch via `orchestrate`.
