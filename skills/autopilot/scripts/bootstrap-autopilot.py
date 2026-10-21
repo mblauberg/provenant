@@ -343,11 +343,16 @@ def main(argv: list[str] | None = None) -> int:
         note(f"Creating new mission directory: {mission_dir}")
         if not dry_run:
             mission_dir.mkdir(parents=True, exist_ok=True)
-    mission = mission_dir.resolve() if mission_dir.is_dir() else mission_dir
-    try:
-        mission.relative_to(runs_root.resolve())
-    except ValueError:
-        die(f"refusing: resolved mission path escaped the .agent-run/ boundary: {mission}")
+    if mission_dir.is_dir():
+        mission = mission_dir.resolve()
+        # A substituted symlink must not escape the resolved runs root.
+        try:
+            mission.relative_to(runs_root.resolve())
+        except ValueError:
+            die(f"refusing: resolved mission path escaped the .agent-run/ boundary: {mission}")
+    else:
+        # Dry run with nothing created yet: report the path that would be used.
+        mission = mission_dir
     marker = mission / ".mission-id"
     if marker.is_file():
         existing_id = (safe_read(marker) or "").splitlines()
@@ -432,21 +437,21 @@ def main(argv: list[str] | None = None) -> int:
         if unfilled:
             knobs_filled = False
             warning("required CONFIG KNOBS not yet filled in GOAL.md:" + " " + " ".join(unfilled))
-        if dry_run:
-            note("  (no filled knobs to substitute yet)")
-        else:
+        if substitutions:
             for target in SUBST_TARGETS:
                 target_path = mission / target
                 if not target_path.is_file():
+                    continue
+                if dry_run:
+                    note(f"  [dry-run] would substitute knobs in {target}")
                     continue
                 content = target_path.read_text()
                 for key, value in substitutions.items():
                     content = content.replace("{{" + key + "}}", value)
                 target_path.write_text(content)
-                if substitutions:
-                    note(f"  substituted knobs in {target}")
-                else:
-                    note("  (no filled knobs to substitute yet)")
+                note(f"  substituted knobs in {target}")
+        else:
+            note("  (no filled knobs to substitute yet)")
 
     note("")
     note("[3/3] scanning for unsubstituted {{...}} placeholders")

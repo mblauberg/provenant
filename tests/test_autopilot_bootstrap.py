@@ -183,3 +183,44 @@ def test_bootstrap_seeds_domain_metacharacters_literally(tmp_path):
     mission = mission_path(tmp_path)
     assert f"DOMAIN            = {domain}" in (mission / "GOAL.md").read_text()
     assert f"# Autopilot mission: {domain} — start here" in (mission / "README.md").read_text()
+
+
+def fill_required_knobs(mission: Path) -> None:
+    goal = mission / "GOAL.md"
+    contents = goal.read_text()
+    for placeholder, value in (
+        ("{{DOMAIN}}", "Example domain"),
+        ("{{MISSION}}", "Example mission"),
+        ("{{LOCKED_CONSTRAINTS}}", "Stay in scope"),
+        ("{{BUILD_CEILING}}", "No build"),
+        ("{{ESCALATION_GATES}}", "Ask the user"),
+        ("{{RUNAWAY_CAPS}}", "bounded"),
+    ):
+        contents = contents.replace(placeholder, value)
+    goal.write_text(contents)
+
+
+def test_bootstrap_dry_run_previews_knob_substitution(tmp_path):
+    run_bootstrap("--repo-root", str(tmp_path), "mission-id", "Example domain")
+    mission = mission_path(tmp_path)
+    fill_required_knobs(mission)
+    before = (mission / "README.md").read_text()
+
+    result = run_bootstrap("--dry-run", "--repo-root", str(tmp_path), "mission-id")
+
+    output = result.stdout + result.stderr
+    assert "[dry-run] would substitute knobs in README.md" in output
+    assert "(no filled knobs to substitute yet)" not in output
+    assert (mission / "README.md").read_text() == before
+
+
+def test_bootstrap_dry_run_accepts_a_symlinked_repo_root(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(real)
+
+    result = run_bootstrap("--dry-run", "--repo-root", str(link), "mission-id", "Example domain")
+
+    assert result.returncode == 0, result.stderr
+    assert not (real / ".agent-run").exists()
