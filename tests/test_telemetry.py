@@ -45,7 +45,7 @@ def test_missing_sources_are_manifested_not_errors(tmp_path):
     assert result.returncode == 0, result.stderr
     rows = json.loads(result.stdout)
     assert {row['source'] for row in rows} == {
-        'fabric', 'route_health', 'cooldowns', 'claude', 'codex', 'opencode'}
+        'fabric', 'route_health', 'cooldowns', 'claude', 'codex', 'opencode', 'otel'}
     assert all(row['status'] == 'absent' and row['row_count'] == 0 for row in rows)
     assert all(row['parser_version'] == 2 and row['path_pattern'] for row in rows)
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
@@ -869,3 +869,209 @@ def test_telemetry_reuses_loaded_quota_and_host_owners():
 
     assert telemetry.quota_owner() is telemetry.quota_owner()
     assert telemetry.host_owner() is telemetry.host_owner()
+
+
+def otlp_line(signal, body):
+    return {'received_at': '2026-10-21T03:00:00Z', 'signal': signal, 'body': body}
+
+
+def otlp_value(value):
+    return {'intValue': str(value)} if isinstance(value, int) else {'stringValue': value}
+
+
+def otlp_attributes(**values):
+    return [{'key': key.replace('__', '.'), 'value': otlp_value(value)} for key, value in values.items()]
+
+
+def test_events_ledger_is_append_only_metadata_with_harness_revision(tmp_path):
+    state = tmp_path / 'state'
+    receipt(tmp_path, 'run-e', 1, status='ok', session_id='lane-session',
+            provenance={**route('codex', 'gpt-6.1-sol', 'high'), 'harness_rev': 'abc123'},
+            evidence={'excerpt': 'PRIVATE_ERROR'})
+    receipt(tmp_path, 'run-r', 1, status='running', ended_at=None, provenance=route('codex', 'gpt-6.1-sol'))
+    write_json(state / 'route-health.json', {'routes': {'key': {'adapter': 'codex', 'model': 'gpt-6.1-sol', 'recent': [
+        {'status': 'usage_limited', 'run_id': 'run-e', 'at': '2026-10-21T01:00:00Z'},
+        {'status': 'ok', 'run_id': 'run-e', 'at': '2026-10-21T01:00:01Z'}]}}})
+    write_json(state / 'cooldowns.json', {'cooldowns': {'codex/gpt-6.1-sol': {
+        'adapter': 'codex', 'model': 'gpt-6.1-sol', 'account': 'work', 'status': 'usage_limited',
+        'recorded_at': '2026-10-21T01:00:00Z', 'cooling_until': '2026-10-21T05:00:00Z'}}})
+    jsonl(tmp_path / 'home/.claude/projects/repo/session.jsonl', *(
+        {'type': 'assistant', 'sessionId': 'chair', 'timestamp': f'2026-10-21T0{index}:00:00Z',
+         'message': {'id': f'm{index}', 'model': 'claude-test', 'content': 'PRIVATE_MESSAGE',
+                     'usage': {'input_tokens': 1, 'output_tokens': 1}}} for index in (2, 1)))
+    resource = {'attributes': otlp_attributes(provenant__run_id='run-e', user__email='PRIVATE_EMAIL')}
+    jsonl(state / 'otel/logs-20261021.ndjson', otlp_line('logs', {'resourceLogs': [{
+        'resource': resource, 'scopeLogs': [{'logRecords': [{
+            'timeUnixNano': '1792544400000000000',
+            'attributes': otlp_attributes(event__name='api_request', session__id='chair', model='claude-test',
+                                          input_tokens=12, prompt='PRIVATE_PROMPT')}]}]}]}))
+    jsonl(state / 'otel/metrics-20261021.ndjson', otlp_line('metrics', {'resourceMetrics': [{
+        'resource': resource, 'scopeMetrics': [{'metrics': [{
+            'name': 'claude_code.active_time.total', 'sum': {'aggregationTemporality': 1, 'dataPoints': [
+                {'asDouble': 90.0, 'attributes': otlp_attributes(type='user', session__id='chair')},
+                {'asDouble': 30.0, 'attributes': otlp_attributes(type='cli', session__id='chair')}]}}]}]}]}))
+    for _ in range(2):
+        assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(state / 'telemetry.sqlite3') as db:
+        db.row_factory = sqlite3.Row
+        events = [dict(row) for row in db.execute('SELECT * FROM events ORDER BY kind, ts')]
+        dump = '\n'.join(db.iterdump())
+    assert [row['kind'] for row in events] == [
+        'cooldown', 'lane.attempt', 'limit.usage_limited', 'otel.api_request', 'otel.metric', 'otel.metric',
+        'session.start']
+    lane = events[1]
+    assert (lane['run_id'], lane['task_id'], lane['session'], lane['harness_rev']) == ('run-e', 'lane', 'lane-session', 'abc123')
+    assert json.loads(lane['attrs'])['status'] == 'ok' and lane['source_ref'].endswith('attempt-001/attempt.json')
+    assert all(row['harness_rev'] is None for row in events if row['kind'] != 'lane.attempt')
+    api = events[3]
+    assert (api['session'], api['run_id'], api['model']) == ('chair', 'run-e', 'claude-test')
+    assert json.loads(api['attrs']) == {'input_tokens': 12, 'model': 'claude-test'}
+    assert '@' in api['source_ref'] and api['ts'].startswith('2026-')
+    session = events[-1]
+    assert (session['session'], session['ts']) == ('chair', '2026-10-21T01:00:00Z')
+    assert session['source_ref'].endswith('session.jsonl')
+    for private in ('PRIVATE_ERROR', 'PRIVATE_MESSAGE', 'PRIVATE_PROMPT', 'PRIVATE_EMAIL'):
+        assert private not in dump
+    sources = {row['source']: row for row in json.loads(cli(tmp_path, 'telemetry', 'sources', '--json').stdout)}
+    assert sources['otel']['status'] == 'ok' and sources['otel']['row_count'] == 3
+    # An older ledger without events re-reads receipts and snapshots once to backfill them.
+    with sqlite3.connect(state / 'telemetry.sqlite3') as db:
+        db.execute('DELETE FROM events')
+        db.execute("DELETE FROM meta WHERE key IN ('events_backfill', 'events_usage_rowid')")
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(state / 'telemetry.sqlite3') as db:
+        assert {row[0] for row in db.execute('SELECT kind FROM events')} >= {
+            'lane.attempt', 'limit.usage_limited', 'cooldown', 'session.start'}
+        assert db.execute('SELECT COUNT(*) FROM usage').fetchone()[0] == 4  # re-reading adds no usage rows
+
+
+def fake_gh(tmp_path, *pages):
+    """A `gh` stub on PATH: each call prints the next page and logs its arguments."""
+    bin_dir = tmp_path / 'bin'
+    bin_dir.mkdir(exist_ok=True)
+    for index, page in enumerate(pages):
+        (bin_dir / f'page-{index}.json').write_text(json.dumps(page))
+    script = bin_dir / 'gh'
+    script.write_text(f'''#!/usr/bin/env python3
+import json, pathlib, sys
+log = pathlib.Path({str(bin_dir / 'calls.jsonl')!r})
+calls = log.read_text().splitlines() if log.exists() else []
+with log.open('a') as stream:
+    stream.write(json.dumps(sys.argv[1:]) + '\\n')
+page = pathlib.Path({str(bin_dir)!r}) / f'page-{{min(len(calls), {len(pages) - 1})}}.json'
+print(page.read_text())
+''')
+    script.chmod(0o755)
+    return bin_dir
+
+
+def cli_with(tmp_path, bin_dir, *args):
+    env = environment(tmp_path)
+    env['PATH'] = os.pathsep.join((str(bin_dir), env['PATH']))
+    return subprocess.run([str(ROOT / 'scripts/provenant'), *args], env=env, cwd=tmp_path,
+                          capture_output=True, text=True)
+
+
+def pull(number, merged_at, title='Change', labels=()):
+    return {'number': number, 'mergeCommit': {'oid': f'{number:07d}abcdef'}, 'mergedAt': merged_at,
+            'title': title, 'labels': [{'name': name} for name in labels]}
+
+
+def test_changes_sync_is_incremental_idempotent_and_takes_manual_markers(tmp_path):
+    first = [pull(10, '2026-10-01T00:00:00Z', 'Lighter review ladder', ['area:review'])]
+    second = [pull(10, '2026-10-01T00:00:00Z', 'Lighter review ladder (renamed)', ['area:review']),
+              pull(11, '2026-10-05T12:00:00Z', 'Quota-aware routing', ['area:routing'])]
+    bin_dir = fake_gh(tmp_path, first, second)
+    assert cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--sync').returncode == 0
+    result = cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--sync', '--json')
+    assert result.returncode == 0, result.stderr
+    rows = json.loads(result.stdout)
+    assert [(row['pr'], row['title'], row['labels']) for row in rows] == [
+        (11, 'Quota-aware routing', ['area:routing']), (10, 'Lighter review ladder (renamed)', ['area:review'])]
+    assert rows[0]['merge_commit'] == '0000011abcdef' and rows[0]['merged_at'] == '2026-10-05T12:00:00Z'
+    calls = [json.loads(line) for line in (bin_dir / 'calls.jsonl').read_text().splitlines()]
+    assert calls[0][:4] == ['pr', 'list', '--state', 'merged'] and '--limit' in calls[0]
+    assert '--search' not in calls[0] and calls[1][-2:] == ['--search', 'merged:>=2026-10-01']
+    added = cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--add', 'switched default reviewer',
+                     '--at', '2026-10-03')
+    assert added.returncode == 0, added.stderr
+    assert cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--add', 'switched default reviewer',
+                    '--at', '2026-10-03').returncode == 0
+    text = cli_with(tmp_path, bin_dir, 'telemetry', 'changes').stdout
+    assert text.count('switched default reviewer') == 1 and '#11' in text and 'manual' in text
+    assert cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--add', 'x').returncode == 2
+    failing = tmp_path / 'failing'
+    failing.mkdir()
+    (failing / 'gh').write_text('#!/bin/sh\necho PRIVATE_GH_OUTPUT >&2\nexit 4\n')
+    (failing / 'gh').chmod(0o755)
+    result = cli_with(tmp_path, failing, 'telemetry', 'changes', '--sync')
+    assert result.returncode == 1 and 'exit 4' in result.stderr and 'PRIVATE_GH_OUTPUT' not in result.stderr
+
+
+def lanes_around(project, prefix, count, ok, day):
+    for index in range(count):
+        receipt(project, f'{prefix}-{index:02d}', 1, status='ok' if index < ok else 'failed',
+                error_class=None if index < ok else 'provider_timeout',
+                provenance=route('codex', 'gpt-6.1-sol', 'high'),
+                started_at=f'{day}T01:00:00Z', ended_at=f'{day}T01:00:{10 + index:02d}Z',
+                context={'input_tokens': 100, 'cached_input_tokens': 50, 'cache_write_tokens': 0,
+                         'output_tokens': 10, 'reasoning_tokens': 0})
+
+
+def test_stats_compare_reports_sample_sizes_and_never_calls_a_small_side_a_win(tmp_path):
+    bin_dir = fake_gh(tmp_path, [pull(20, '2026-10-10T00:00:00Z', 'Evidence-based acceptance')])
+    lanes_around(tmp_path, 'before', 12, 6, '2026-10-08')
+    lanes_around(tmp_path, 'after', 3, 3, '2026-10-11')
+    assert cli_with(tmp_path, bin_dir, 'telemetry', 'ingest').returncode == 0
+    assert cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--sync').returncode == 0
+    result = cli_with(tmp_path, bin_dir, 'stats', '--compare', '20', '--window', '7d', '--json')
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    assert report['pivot'] == '2026-10-10T00:00:00Z' and report['change']['pr'] == 20
+    assert (report['before']['lanes'], report['after']['lanes']) == (12, 3)
+    assert report['before']['success_rate'] == 0.5 and report['after']['success_rate'] == 1.0
+    assert report['after']['inconclusive'] is True and report['before']['inconclusive'] is False
+    metrics = {row['metric']: row for row in report['metrics']}
+    assert metrics['success_rate']['verdict'] == 'inconclusive'
+    assert (metrics['success_rate']['n_before'], metrics['success_rate']['n_after']) == (12, 3)
+    assert report['before']['error_classes'] == {'provider_timeout': 6}
+    assert report['before']['cache_read_share'] == 0.5
+    text = cli_with(tmp_path, bin_dir, 'stats', '--compare', '#20')
+    assert text.returncode == 0, text.stderr
+    assert len(text.stdout.encode()) < 4096
+    assert 'inconclusive (n<10)' in text.stdout and '12/3 lanes' in text.stdout and 'improved' not in text.stdout
+    # A large enough after side gets a verdict; a date pivots the same way.
+    lanes_around(tmp_path, 'later', 12, 12, '2026-10-12')
+    assert cli_with(tmp_path, bin_dir, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli_with(tmp_path, bin_dir, 'stats', '--compare', '2026-10-10', '--json').stdout)
+    metrics = {row['metric']: row for row in report['metrics']}
+    assert report['change'] is None and report['after']['lanes'] == 15
+    assert metrics['success_rate']['verdict'] == 'improved'
+    assert metrics['cache_read_share']['verdict'] == 'within_noise'
+    missing = cli_with(tmp_path, bin_dir, 'stats', '--compare', '999')
+    assert missing.returncode == 1 and 'changes --sync' in missing.stderr
+    assert cli_with(tmp_path, bin_dir, 'stats', '--compare', '20', '--window', 'soon').returncode == 1
+    assert cli_with(tmp_path, bin_dir, 'stats', '--window', '7d').returncode == 2
+
+
+def test_retro_is_a_compact_digest_of_changes_errors_and_attention(tmp_path):
+    pulls = [pull(100 + index, f'2026-10-{10 + index // 2:02d}T{index % 2 * 12:02d}:00:00Z',
+                  'A fairly long pull request title that will be truncated in the digest') for index in range(15)]
+    bin_dir = fake_gh(tmp_path, pulls)
+    lanes_around(tmp_path, 'lane', 12, 9, '2026-10-12')
+    receipt(tmp_path, 'waiting', 1, status='input_required', provenance=route('codex', 'gpt-6.1-sol'),
+            ended_at='2026-10-12T02:00:00Z')
+    jsonl(tmp_path / 'home/.claude/projects/repo/session.jsonl', {
+        'type': 'assistant', 'sessionId': 'chair', 'timestamp': '2026-10-12T01:00:00Z',
+        'message': {'id': 'm1', 'model': 'claude-test', 'usage': {'input_tokens': 1, 'output_tokens': 1}}})
+    assert cli_with(tmp_path, bin_dir, 'telemetry', 'ingest').returncode == 0
+    assert cli_with(tmp_path, bin_dir, 'telemetry', 'changes', '--sync').returncode == 0
+    result = cli_with(tmp_path, bin_dir, 'retro', '--since', '2026-10-01')
+    assert result.returncode == 0, result.stderr
+    assert len(result.stdout.encode()) < 4096
+    assert '#114' in result.stdout and '3 more; use --json' in result.stdout
+    assert 'Top error classes (attempts): provider_timeout:3' in result.stdout
+    assert 'sessions started 1' in result.stdout and 'lanes awaiting input 1' in result.stdout
+    report = json.loads(cli_with(tmp_path, bin_dir, 'retro', '--since', '2026-10-01', '--json').stdout)
+    assert len(report['changes']) == 15 and report['changes'][0]['compare']['metrics']
+    assert report['events_by_kind']['lane.attempt'] == 13

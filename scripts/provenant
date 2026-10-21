@@ -81,14 +81,14 @@ def resolve_product_root(instance_root: Path | None = None) -> Path:
 
 
 def usage() -> None:
-    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|check|gate|telemetry|stats|quota|fabric|hosts|peer|lanes|events|dispatch|batch|run> [arguments...]", file=sys.stderr)
+    print("usage: provenant <help|root|route|routes|capabilities|worktree|clean|check|gate|telemetry|stats|retro|quota|fabric|hosts|peer|lanes|events|dispatch|batch|run> [arguments...]", file=sys.stderr)
 
 
 def help_text() -> None:
     print(
         """usage: provenant <command> [arguments...]
 
-Thin front door delegating to owners:
+Thin front door to owners:
   root           print resolved product checkout
   route ...      scripts/model-route ...
   routes ...     scripts/model-route routes
@@ -103,7 +103,7 @@ Thin front door delegating to owners:
   lanes ...      runtime/fabric/bin/fabric lanes
   events ...     runtime/fabric/bin/fabric events
   telemetry ...  scripts/provenant-telemetry
-  stats ...      scripts/provenant-telemetry stats
+  stats|retro    scripts/provenant-telemetry stats|retro
   quota ...      scripts/provenant-quota
   dispatch ...   skills/orchestrate/scripts/dispatch_run.py ...
   batch ...      skills/orchestrate/scripts/batch_run.py ...
@@ -193,16 +193,26 @@ COMMAND_DETAILS: dict[str, str] = {
         "Foreground/streaming Fabric task and inbox event stream."
     ),
     "telemetry": (
-        "usage: provenant telemetry ingest|sources [--json]\n\n"
+        "usage: provenant telemetry ingest|sources [--json]\n"
+        "       provenant telemetry changes [--sync | --add LABEL --at ISO] [--since ISO] [--json]\n\n"
         "Delegates to scripts/provenant-telemetry.\n"
-        "Local metadata-only usage ledger."
+        "Local metadata-only usage and event ledger. `changes --sync` records merged\n"
+        "PRs through gh; `--add` records a manual change marker."
     ),
     "stats": (
-        "usage: provenant stats [--since ISO-DATE] [--json] [--detail]\n\n"
+        "usage: provenant stats [--since ISO-DATE] [--json] [--detail]\n"
+        "       provenant stats --compare <PR#|rev|date> [--window 7d] [--json]\n\n"
         "Delegates to scripts/provenant-telemetry.\n"
         "Usage, costs and outcomes. The default is the summary tables only;\n"
         "per-account rows and the full tables are behind --detail, and --json\n"
-        "prints the full report."
+        "prints the full report. --compare gives before/after metrics with sample\n"
+        "sizes; a side with fewer than 10 lanes or rows is inconclusive."
+    ),
+    "retro": (
+        "usage: provenant retro [--since ISO-DATE] [--window 7d] [--json]\n\n"
+        "Delegates to scripts/provenant-telemetry retro.\n"
+        "Compact digest for retrospectives: change markers in the period with their\n"
+        "before/after summary, top error classes and attention proxies (default 7 days)."
     ),
     "quota": (
         "usage: provenant quota [--refresh] [--json] | credit list | credit <provider> [--account L] add|use\n\n"
@@ -438,8 +448,8 @@ def main(arguments: list[str]) -> int:
             return 3
         return 0
 
-    if command == "stats":
-        command_arguments = ["stats", *command_arguments]
+    if command in {"stats", "retro"}:
+        command_arguments = [command, *command_arguments]
 
     if command in {"peer", "hosts"}:
         command_arguments = [command, *command_arguments]
@@ -447,6 +457,7 @@ def main(arguments: list[str]) -> int:
     owners = {
         "telemetry": "scripts/provenant-telemetry",
         "stats": "scripts/provenant-telemetry",
+        "retro": "scripts/provenant-telemetry",
         "quota": "scripts/provenant-quota",
         "peer": "scripts/fabric-hosts",
         "hosts": "scripts/fabric-hosts",

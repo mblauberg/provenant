@@ -7377,3 +7377,15 @@ def test_provider_state_accepts_normal_provider_under_symlink_home(monkeypatch, 
     assert mod.os_confinement_profile(plan).startswith("(version 1)")
     relative = ".gemini" if adapter == "agy" else f".{adapter}"
     assert plan["provider_home"] == str(home / relative)
+
+
+def test_lane_provenance_stamps_the_installed_harness_revision(tmp_path):
+    code = """import json
+print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'DONE'}}), flush=True)
+print(json.dumps({'type':'turn.completed'}), flush=True)
+"""
+    record = supervisor().execute(fixture_plan(tmp_path, code), tmp_path / "result.md")
+    head = subprocess.run(["git", "-C", str(Path(supervisor().__file__).resolve().parents[3]), "rev-parse", "HEAD"],
+                          capture_output=True, text=True)
+    assert record["status"] == "ok"
+    assert record["provenance"]["harness_rev"] == (head.stdout.strip() if head.returncode == 0 else None)

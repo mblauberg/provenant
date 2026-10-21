@@ -26,13 +26,19 @@ command contacts provider quota services on demand.
    timestamp, inclusive; dates and daily buckets use UTC. Undated records are
    included only when no date filter is supplied. Stats reads the last ingest;
    it does not refresh sources.
+4. Run `provenant telemetry changes --sync` to record merged PRs as change
+   markers, then `provenant stats --compare <PR#|rev|date>` for before/after
+   metrics or `provenant retro` for a digest. See
+   [Events, change markers and comparison](#events-change-markers-and-comparison).
 
 ## Storage and inputs
 
 The versioned SQLite database is
 `$AGENT_FABRIC_STATE_ROOT/telemetry.sqlite3`, defaulting to
 `~/.local/state/agent-harness/fabric/telemetry.sqlite3`. Schema version 4
-migrates versions 1–3 metadata; unknown newer schemas are refused.
+migrates versions 1–3 metadata; unknown newer schemas are refused. The
+`events` and `changes` tables are additive and keep version 4, so peers on
+this version still read the ledger.
 
 | Source | Discovery and cursor |
 |---|---|
@@ -42,6 +48,7 @@ migrates versions 1–3 metadata; unknown newer schemas are refused.
 | Claude Code | `~/.claude/projects/**/*.jsonl`, including subagents; byte offset, file identity and consumed-prefix digest |
 | Codex | `~/.codex/sessions/**/rollout-*.jsonl`; byte offset, file identity, consumed-prefix digest and cumulative token counters |
 | OpenCode | `~/.local/share/opencode/opencode.db`, opened with SQLite `mode=ro`; inclusive `time_updated` watermark and file identity |
+| OTLP collector | `$AGENT_FABRIC_STATE_ROOT/otel/*.ndjson` when the optional collector ran; byte offset as for JSONL. Feeds events only |
 
 The Fabric registry follows its existing `AGENT_FABRIC_STATE_DIRECTORY`
 setting, defaulting to the same state directory. This differs from the
@@ -105,6 +112,65 @@ recorded limit and its age per provider, account and host; accounts missing in a
 source remain unattributed. Fabric `ok` records
 execution success, not user acceptance or a passed delivery gate.
 
+
+## Events, change markers and comparison
+
+Ingest appends metadata events to the `events` table: `(event_id, host, kind,
+ts, session, run_id, lane, task_id, pr, provider, account, model, harness_rev,
+attrs, source_ref)`. `kind` is a free string, so a new kind needs no migration;
+`EVENT_KINDS` in `scripts/telemetry.py` names the known ones. `source_ref`
+points back to the receipt, snapshot, transcript or collector line
+(`path@offset`). Event IDs are content keys, so re-ingest adds nothing.
+
+| Kind | From |
+|---|---|
+| `lane.attempt` | A Fabric receipt's first terminal status: adapter, effort, attempt, status, error class, task class, route alias, wall time |
+| `limit.rate_limited`, `limit.usage_limited`, `cooldown` | Route-health and cooldown snapshots |
+| `session.start` | The first ingested usage row of a Claude, Codex or OpenCode session; one event per session, not per message |
+| `otel.<event.name>`, `otel.metric` | Collector log records and metric data points |
+
+Events never hold prompt, output or error text. OTLP attributes keep numeric
+values plus `model`, `effort`, `type`, `tool_name`, `decision`, `source`,
+`success` and `status_code`; every other string, including identity and email
+attributes, is dropped. Resource attributes `provenant.run_id`,
+`provenant.lane` and `provenant.harness_rev` link a record to its lane when the
+exporter sets them.
+
+`harness_rev` is the installed Provenant revision. Fabric lanes stamp it into
+attempt provenance (`provenance.harness_rev`); older receipts, sessions and
+unlinked OTLP records leave it null. An existing ledger re-reads its receipts
+and snapshots once to backfill events; transcripts are not re-read, because
+session events derive from usage rows already stored.
+
+```sh
+provenant telemetry changes --sync           # merged PRs via gh, incremental
+provenant telemetry changes --add "switched default reviewer" --at 2026-10-20
+provenant telemetry changes [--since DATE] [--json]
+provenant stats --compare 1050 [--window 7d] [--json]
+provenant retro [--since DATE] [--window 7d] [--json]
+```
+
+`changes --sync` runs `gh pr list --state merged` in the product checkout,
+at most 200 PRs per run, and continues from the newest synced merge date.
+It stores PR number, merge commit, merge time, title and labels; a re-sync
+updates a renamed PR in place. Manual markers record a label and time.
+
+`--compare` pivots on a PR's merge time, a merge commit or other revision's
+commit time, or an ISO date, and compares the window before with the window
+after (default 7 days each; the after side stops at now). Metrics come from
+the same row selection as stats: lane success rate, retries per lane, p50
+wall time, cache-read share, known API-equivalent cost per day and limit
+events per day, each with its sample size (lanes or usage rows). A side with
+fewer than 10 (`MIN_SAMPLE` in `scripts/telemetry_changes.py`) is
+`inconclusive`, never a win. Otherwise success rate is `within_noise` when the
+difference is within two pooled standard errors, and other metrics when it is
+within 10%; the rest are `improved` or `regressed`.
+
+`provenant retro` defaults to the last 7 days: overall lanes and cost, each
+change marker in the period with its compare summary, top error classes by
+attempt, and attention proxies already in the ledger (sessions started, lanes
+awaiting input, and OTLP user prompts, tool decisions and active time when the
+collector ran). Text output stays under 4 KB; `--json` is the full report.
 
 ## Provider quota
 
@@ -296,8 +362,9 @@ size-reduction claim. No live database was opened for this measurement.
 Transcript and receipt ingestion above remains the baseline. When the
 collector is absent nothing changes. The collector is an opt-in, on-demand
 macOS receiver for OTLP/HTTP JSON that Claude Code and Codex can export to.
-Its first slice only stores what it receives; ledger ingestion is a separate
-change.
+The collector stores what it receives; `provenant telemetry ingest` turns its
+lines into metadata events (see
+[Events, change markers and comparison](#events-change-markers-and-comparison)).
 
 Source: [tools/otlp-collector](../../tools/otlp-collector/otlp-collector.swift),
 Swift with no packages. It listens on `127.0.0.1:4318` only, through launchd
