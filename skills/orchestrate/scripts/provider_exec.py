@@ -50,6 +50,8 @@ CONFINED_STATE = {
         # ~/.opencode is the install script's home and OpenCode v2's legacy global config directory;
         # its config discovery stats it at startup and fails with a 500 when that is denied.
         "read": (".config/opencode", ".opencode"),
+        # Discovery lstats these names in the cwd and every ancestor even with Claude compatibility off.
+        "ancestor_metadata": (".claude", ".codex"),
     },
     "claude": {
         "read_write": (".claude", ".claude.json*", ".cache/claude", ".npm"),
@@ -496,12 +498,9 @@ def os_confinement_profile(plan, search_path=None):
     add_dirs = [Path(path) for path in plan.get("applied", {}).get("add_dirs", [])]
     run_dir = Path(plan["run_dir"]) if plan.get("run_dir") else None
     state_writes = _state_paths(home, state.get("read_write", ()))
-    discovery_metadata = []
-    if plan.get("adapter") == "opencode":
-        cwd_path = Path(plan["cwd"]).resolve()
-        discovery_metadata = [ancestor / name for ancestor in (cwd_path, *cwd_path.parents)
-                              for name in (".claude", ".codex")]
-    # Discovery still lstats foreign config directories with Claude compatibility disabled.
+    cwd_path = Path(plan["cwd"]).resolve()
+    discovery_metadata = [ancestor / name for ancestor in (cwd_path, *cwd_path.parents)
+                          for name in state.get("ancestor_metadata", ())]
     # Literal metadata grants must follow protected-path denies, without following a leaf symlink.
     metadata_grant = _sbpl_rule("allow", "file-read-metadata", discovery_metadata, literal=True, keep_leaf=True)
     if plan.get("mode") == "worktree_write":
