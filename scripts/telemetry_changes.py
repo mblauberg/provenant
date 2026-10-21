@@ -91,8 +91,8 @@ def sync(telemetry, db):
 
     A sweep covers [last completed sweep minus a day, sweep start]. A page that
     reaches its limit may have dropped PRs, so its range splits in half and both
-    halves are read again; a full range of a second or less is re-read up to
-    SEARCH_LIMIT, and if that is full too it stays listed as incomplete. Pending
+    halves are read again, down to single seconds; a full single second is re-read
+    up to SEARCH_LIMIT, and if that is full too it stays listed as incomplete. Pending
     ranges are durable, so a sweep capped at SYNC_PAGES queries, or interrupted
     by a `gh` failure, resumes where it stopped.
     """
@@ -115,12 +115,12 @@ def sync(telemetry, db):
         first, last = telemetry.since_time(low), telemetry.since_time(high)
         if len(rows) < limit:
             pass
-        elif last - first > timedelta(seconds=1):
+        elif last - first >= timedelta(seconds=1):
             middle = split(telemetry, rows, first, last)
             # Merge times have one-second precision, so the halves need not share a second.
             state['pending'] += [[low, iso(middle - timedelta(seconds=1))], [iso(middle), high]]  # newer first
         elif limit < SEARCH_LIMIT:
-            state['pending'].append([low, high, SEARCH_LIMIT])  # cannot narrow further; read deeper
+            state['pending'].append([low, high, SEARCH_LIMIT])  # a single second: read deeper
         elif [low, high] not in state['incomplete']:
             state['incomplete'].append([low, high])
         save_sync(db, state)
@@ -131,12 +131,12 @@ def sync(telemetry, db):
 
 
 def split(telemetry, rows, first, last):
-    """Median merge time of a full page, kept a second inside the range so both halves shrink."""
+    """Start of the newer half: the page's median merge time, kept in (first, last] so both halves shrink."""
     stamps = sorted(telemetry.since_time(row['mergedAt']).replace(microsecond=0) for row in rows
                     if isinstance(row, dict) and isinstance(row.get('mergedAt'), str))
     middle = stamps[len(stamps) // 2] if stamps else first + (last - first) // 2
     # A median on a bound means one second is crowded: cut it off so it can be read deeper.
-    return min(max(middle.replace(microsecond=0), first + timedelta(seconds=1)), last - timedelta(seconds=1))
+    return min(max(middle.replace(microsecond=0), first + timedelta(seconds=1)), last)
 
 
 def save_sync(db, state):

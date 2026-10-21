@@ -1348,30 +1348,6 @@ def test_peer_outcomes_carry_latency_samples_and_old_peers_still_validate(tmp_pa
         raise AssertionError('a non-count latency_samples must be rejected')
 
 
-def test_upgraded_ledger_keeps_its_host_keyed_event_ids(tmp_path, monkeypatch):
-    """Regression: events written under the host-keyed namespace must not duplicate on re-ingest."""
-    use_environment(tmp_path, monkeypatch)
-    write_json(tmp_path / 'home/.agents/.agent-fabric/hosts.json', {'schema_version': 1, 'local_host': 'studio'})
-    receipt(tmp_path, 'run-l', 1, status='ok', provenance=route('codex', 'gpt-6.1-sol'))
-    jsonl(tmp_path / 'home/.claude/projects/repo/session.jsonl', {
-        'type': 'assistant', 'sessionId': 'chair', 'timestamp': '2026-10-21T01:00:00Z',
-        'message': {'id': 'm1', 'model': 'claude-test', 'usage': {'input_tokens': 1, 'output_tokens': 1}}})
-    legacy = load_script('legacy_namespace_telemetry', 'telemetry.py')
-    legacy.ledger_id = lambda db: legacy.host_id()  # the earlier namespace hashed the host label
-    with legacy.connect() as db:
-        legacy.ingest(db)
-        db.execute("DELETE FROM meta WHERE key='ledger_id'")
-        db.commit()
-        before = sorted(tuple(row) for row in db.execute('SELECT kind, COUNT(*) FROM events GROUP BY kind'))
-    assert dict(before)['lane.attempt'] == 1 and dict(before)['session.start'] == 1
-    database = tmp_path / 'state/telemetry.sqlite3'
-    with sqlite3.connect(database) as db:
-        db.execute('DELETE FROM cursors')  # force every source to be read again
-    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
-    with sqlite3.connect(database) as db:
-        assert sorted(db.execute('SELECT kind, COUNT(*) FROM events GROUP BY kind')) == before
-
-
 def test_ledgers_backfilled_before_session_events_get_them_once(tmp_path):
     """Regression: an existing `events_backfill` marker must not skip the session.start repair."""
     jsonl(tmp_path / 'home/.claude/projects/repo/session.jsonl', {
@@ -1387,23 +1363,6 @@ def test_ledgers_backfilled_before_session_events_get_them_once(tmp_path):
         assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(database) as db:
         assert db.execute("SELECT session FROM events WHERE kind='session.start'").fetchall() == [('missed',)]
-
-
-def test_ledger_id_creation_tolerates_a_concurrent_first_writer(tmp_path, monkeypatch):
-    """Regression: a ledger id inserted between our read and our write wins without an error."""
-    use_environment(tmp_path, monkeypatch)
-    telemetry = load_script('ledger_race_telemetry', 'telemetry.py')
-    with telemetry.connect() as real:
-        real.execute("DELETE FROM meta WHERE key='ledger_id'")
-        class Racing:
-            raced = False
-            def execute(self, sql, *args):
-                if "key='ledger_id'" in sql and sql.lstrip().startswith('SELECT') and not self.raced:
-                    self.raced = True  # another process inserts after this read
-                    real.execute("INSERT INTO meta VALUES ('ledger_id', 'other-process')")
-                    return real.execute('SELECT 1 WHERE 0')
-                return real.execute(sql, *args)
-        assert telemetry.ledger_id(Racing()) == 'other-process'
 
 
 def test_saturated_one_second_ranges_page_further_and_stay_marked_incomplete(tmp_path, monkeypatch):
@@ -1438,3 +1397,63 @@ def test_fit_keeps_whole_long_lines_that_fit():
     assert owner.fit(['head', long, 'tail']) == f'head\n{long}\ntail'
     text = owner.fit(['head', 'y' * 5000, 'tail'])
     assert text == 'head\ntail\n1 lines omitted to fit 4 KB; use --json'
+
+
+def test_upgrade_reconciles_events_from_relabelled_and_mixed_namespaces(tmp_path):
+    """Regression: event rows keyed under any earlier namespace, including a host label changed
+    before the upgrade, reconcile by their stored identity instead of duplicating on re-ingest."""
+    hosts = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
+    write_json(hosts, {'schema_version': 1, 'local_host': 'studio'})
+    receipt(tmp_path, 'run-m', 1, status='ok', provenance=route('codex', 'gpt-6.1-sol'))
+    write_json(tmp_path / 'state/cooldowns.json', {'cooldowns': {'codex/gpt-6.1-sol': {
+        'adapter': 'codex', 'model': 'gpt-6.1-sol', 'account': 'work', 'status': 'usage_limited',
+        'recorded_at': '2026-10-21T01:00:00Z', 'cooling_until': '2026-10-21T05:00:00Z'}}})
+    jsonl(tmp_path / 'home/.claude/projects/repo/session.jsonl', {
+        'type': 'assistant', 'sessionId': 'chair', 'timestamp': '2026-10-21T01:00:00Z',
+        'message': {'id': 'm1', 'model': 'claude-test', 'usage': {'input_tokens': 1, 'output_tokens': 1}}})
+    jsonl(tmp_path / 'state/otel/metrics-20261021.ndjson', otlp_line('metrics', {'resourceMetrics': [{
+        'resource': {'attributes': []}, 'scopeMetrics': [{'metrics': [{
+            'name': 'claude_code.active_time.total', 'sum': {'aggregationTemporality': 1, 'dataPoints': [
+                {'asDouble': 90.0, 'timeUnixNano': '1792544400000000000',
+                 'attributes': otlp_attributes(type='user', session__id='chair')},
+                {'asDouble': 30.0, 'timeUnixNano': '1792544400000000000',
+                 'attributes': otlp_attributes(type='cli', session__id='chair')}]}}]}]}]}))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    database = tmp_path / 'state/telemetry.sqlite3'
+    with sqlite3.connect(database) as db:
+        truth = sorted(db.execute('SELECT kind, COUNT(*) FROM events GROUP BY kind'))
+        assert dict(truth) == {'cooldown': 1, 'lane.attempt': 1, 'otel.metric': 2, 'session.start': 1}
+        # Rewrite the ledger as an earlier build left it: IDs hashed under two old host labels
+        # (one changed before the upgrade), a duplicate from that relabel, and no re-key marker.
+        rows = db.execute('SELECT rowid, kind FROM events ORDER BY rowid').fetchall()
+        for position, (rowid, kind) in enumerate(rows):
+            label = 'old-studio' if position % 2 else 'older-name'
+            db.execute('UPDATE events SET event_id=? WHERE rowid=?', (f'{label}:{kind}:{rowid}', rowid))
+        db.execute("INSERT INTO events SELECT 'relabel-dup', host, kind, ts, session, run_id, lane, task_id, pr, "
+                   "provider, account, model, harness_rev, attrs, source_ref FROM events WHERE kind='lane.attempt'")
+        db.execute("DELETE FROM meta WHERE key IN ('event_ids', 'ledger_id')")
+        db.execute("UPDATE meta SET value='old-studio' WHERE key='host_id'")
+        db.execute('DELETE FROM cursors')  # every source is read again
+    write_json(hosts, {'schema_version': 1, 'local_host': 'renamed'})
+    for _ in range(2):
+        assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(database) as db:
+        assert sorted(db.execute('SELECT kind, COUNT(*) FROM events GROUP BY kind')) == truth
+
+
+def test_a_full_two_second_range_splits_before_it_is_called_saturated(tmp_path, monkeypatch):
+    """Regression: [T, T+1s] holds two timestamps; split it before reading deeper or warning."""
+    use_environment(tmp_path, monkeypatch)
+    telemetry = load_script('two_second_telemetry', 'telemetry.py')
+    owner = load_script('two_second_changes', 'telemetry_changes.py')
+    monkeypatch.setattr(owner, 'SYNC_LIMIT', 5)
+    monkeypatch.setattr(owner, 'SEARCH_LIMIT', 6)
+    pulls = [pull(800 + index, f'2026-10-05T12:00:0{index % 2}Z', f'Burst {index}') for index in range(8)]
+    bin_dir = filtering_gh(tmp_path, pulls)
+    monkeypatch.setenv('PATH', os.pathsep.join((str(bin_dir), os.environ['PATH'])))
+    with telemetry.connect() as db:
+        state = {'through': None, 'sweep': '2026-10-06T00:00:00Z', 'incomplete': [],
+                 'pending': [['2026-10-05T12:00:00Z', '2026-10-05T12:00:01Z']]}
+        db.execute("INSERT INTO meta VALUES ('changes_sync', ?)", (json.dumps(state),))
+        added, pending, incomplete = owner.sync(telemetry, db)
+        assert (added, pending, incomplete) == (8, 0, 0)

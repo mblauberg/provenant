@@ -138,12 +138,16 @@ def connect():
         # Version 4 reads route, task class and timing from receipts; re-read them in place.
         db.execute("DELETE FROM cursors WHERE source='fabric'")
     db.execute('PRAGMA user_version = 4')
-    ledger_id(db)  # fixed before any event is written, and before a relabel moves the host label
+    if db.execute("SELECT 1 FROM meta WHERE key='event_ids'").fetchone() is None:
+        # Earlier builds keyed events by host label or ledger id; derive every ID from its row.
+        rekey_events(db)
+        db.execute("DELETE FROM meta WHERE key='ledger_id'")
+        db.execute("INSERT OR IGNORE INTO meta VALUES ('event_ids', 'row')")
     if db.execute("SELECT 1 FROM meta WHERE key='events_backfill'").fetchone() is None:
         # Events are additive tables (no version bump, so peers still read this ledger).
         # Re-read the small receipt and snapshot documents once so they backfill events.
         db.execute("DELETE FROM cursors WHERE source IN ('fabric','route_health','cooldowns')")
-        db.execute("INSERT INTO meta VALUES ('events_backfill', ?)", (now(),))
+        db.execute("INSERT OR IGNORE INTO meta VALUES ('events_backfill', ?)", (now(),))
     if db.execute("SELECT 1 FROM meta WHERE key='session_events_backfill'").fetchone() is None:
         # A separate marker: ledgers backfilled by an earlier build may lack session events.
         # Transcripts are not re-read; sessions already in usage rows get their event here.
@@ -188,7 +192,7 @@ def put_usage(db, source, event_id, origin_path, **values):
     db.execute('INSERT OR IGNORE INTO usage_files VALUES (?,?,?,?)',
                (source, event_id, values['host'], str(origin_path)))
     if source != 'fabric' and values.get('session'):
-        put_event(db, 'session.start', (source, values['session']), values.get('timestamp'), str(origin_path),
+        put_event(db, 'session.start', values.get('timestamp'), str(origin_path),
                   attrs={'source': source, 'adapter': values.get('adapter')},
                   **{key: values.get(key) for key in ('session', 'provider', 'account', 'model')})
 
@@ -238,31 +242,40 @@ EVENT_KINDS = {
 EVENT_FIELDS = ('session', 'run_id', 'lane', 'task_id', 'pr', 'provider', 'account', 'model', 'harness_rev')
 
 
-def ledger_id(db):
-    """Stable event-ID namespace; unlike the host label, a relabel never changes it.
+def event_key(row):
+    """An event's ID from fields stored in its own row, never a host or ledger namespace.
 
-    A new ledger gets a random id. A ledger that already holds events was keyed by
-    its host label, so it keeps that label as its id and re-ingest matches them.
+    Any ledger can therefore re-derive every ID: a relabel, an upgrade or a re-read
+    source reconciles with the rows already there instead of duplicating them.
     """
-    query = "SELECT value FROM meta WHERE key='ledger_id'"
-    row = db.execute(query).fetchone()
-    if row:
-        return row[0]
-    value = os.urandom(16).hex()
-    if db.execute('SELECT 1 FROM events LIMIT 1').fetchone():
-        label = db.execute("SELECT value FROM meta WHERE key='host_id'").fetchone()
-        value = label[0] if label else socket.gethostname()
-    # Insert-if-absent, then read: a concurrent first writer's id wins without an error.
-    db.execute("INSERT OR IGNORE INTO meta VALUES ('ledger_id', ?)", (value,))
-    return db.execute(query).fetchone()[0]
+    attrs = json.loads(row['attrs']) if isinstance(row['attrs'], str) else row['attrs']
+    if row['kind'] == 'session.start':
+        parts = (attrs.get('source'), row['session'])
+    elif row['kind'] == 'lane.attempt':
+        parts = (row['run_id'], row['task_id'], attrs.get('attempt'))
+    else:  # snapshot and collector records: their source plus the record's own content
+        parts = (row['source_ref'], row['ts'], *(row[name] for name in EVENT_FIELDS), attrs)
+    return identity('event', row['kind'], *parts)
 
 
-def put_event(db, kind, key, ts, source_ref, attrs=None, **fields):
-    """Append one metadata event; `key` identifies it, so re-ingest never duplicates it."""
+def rekey_events(db):
+    """Move rows keyed by an earlier scheme to `event_key`; the earliest of any duplicates stays."""
+    for row in db.execute('SELECT rowid, * FROM events ORDER BY rowid').fetchall():
+        key = event_key(row)
+        if key == row['event_id']:
+            continue
+        if db.execute('SELECT 1 FROM events WHERE event_id=?', (key,)).fetchone():
+            db.execute('DELETE FROM events WHERE rowid=?', (row['rowid'],))
+        else:
+            db.execute('UPDATE events SET event_id=? WHERE rowid=?', (key, row['rowid']))
+
+
+def put_event(db, kind, ts, source_ref, attrs=None, **fields):
+    """Append one metadata event; its stored fields identify it, so re-ingest never duplicates it."""
     values = {'host': host_id(), 'kind': kind, 'ts': ts, 'source_ref': source_ref,
               'attrs': json.dumps({k: v for k, v in (attrs or {}).items() if v is not None}, sort_keys=True),
               **{name: fields.get(name) for name in EVENT_FIELDS}}
-    values = {'event_id': identity(kind, ledger_id(db), *key), **values}
+    values = {'event_id': event_key(values), **values}
     db.execute(f"INSERT OR IGNORE INTO events({','.join(values)}) "
                f"VALUES ({','.join('?' for _ in values)})", list(values.values()))
 
@@ -349,7 +362,6 @@ def otel_record(db, row, state, path, offset):
     """One collector line becomes metadata events: log records by name, metric points by value."""
     body, signal = row.get('body') or {}, row.get('signal')
     resources = body.get('resourceLogs' if signal == 'logs' else 'resourceMetrics' if signal == 'metrics' else '') or ()
-    index = 0
     for resource in resources:
         context = otel_attributes((resource.get('resource') or {}).get('attributes'))
         linked = {'run_id': context.get('provenant.run_id'), 'lane': context.get('provenant.lane'),
@@ -359,7 +371,6 @@ def otel_record(db, row, state, path, offset):
                 points = ([record] if signal == 'logs' else
                           ((record.get('sum') or record.get('gauge') or {}).get('dataPoints') or ()))
                 for point in points:
-                    index += 1
                     attributes = otel_attributes(point.get('attributes'))
                     kept = {key: value for key, value in attributes.items()
                             if key in OTEL_STRINGS or isinstance(value, (int, float))}
@@ -370,8 +381,7 @@ def otel_record(db, row, state, path, offset):
                         kind, value = 'otel.metric', point.get('asInt', point.get('asDouble'))
                         kept.update(name=record.get('name'), value=float(value) if value is not None else None,
                                     temporality=(record.get('sum') or {}).get('aggregationTemporality'))
-                    put_event(db, kind, (str(path), offset, index),
-                              otel_stamp(point.get('timeUnixNano'), row.get('received_at')),
+                    put_event(db, kind, otel_stamp(point.get('timeUnixNano'), row.get('received_at')),
                               f'{path}@{offset}', attrs=kept, session=attributes.get('session.id'),
                               model=attributes.get('model') if isinstance(attributes.get('model'), str) else None,
                               **linked)
@@ -384,7 +394,7 @@ def backfill_session_events(db):
             "(SELECT path FROM usage_files f WHERE f.source=u.source AND f.event_id=u.event_id "
             "AND f.host=u.host LIMIT 1) AS ref FROM usage u "
             "WHERE source!='fabric' AND session IS NOT NULL GROUP BY source, session").fetchall():
-        put_event(db, 'session.start', (row['source'], row['session']), row['ts'], row['ref'],
+        put_event(db, 'session.start', row['ts'], row['ref'],
                   attrs={'source': row['source'], 'adapter': row['adapter']},
                   **{key: row[key] for key in ('session', 'provider', 'account', 'model')})
 
@@ -535,7 +545,7 @@ def ingest_document(db, source, path):
         put_usage(db, source, identity(str(path.resolve())), origin_path=path, **fields)
         if row.get('ended_at') and fields['status'] not in (None, 'running'):
             # First terminal sighting only: an attempt's outcome is appended once.
-            put_event(db, 'lane.attempt', (str(path.resolve()),), fields['timestamp'], str(path),
+            put_event(db, 'lane.attempt', fields['timestamp'], str(path),
                       attrs={key: fields[key] for key in ('adapter', 'effort', 'attempt', 'status', 'error_class',
                                                           'task_class', 'route', 'duration_ms')},
                       harness_rev=provenance.get('harness_rev'), **fields)
@@ -553,7 +563,7 @@ def ingest_document(db, source, path):
                 kind = ('cooldown' if source == 'cooldowns' else
                         f"limit.{values['status']}" if values['status'] in {'rate_limited', 'usage_limited'} else None)
                 if kind:
-                    put_event(db, kind, (source, *values.values()), values['timestamp'], str(path),
+                    put_event(db, kind, values['timestamp'], str(path),
                               attrs={key: values[key] for key in ('adapter', 'status', 'reset_at')},
                               **{key: values[key] for key in ('run_id', 'provider', 'account', 'model')})
     db.execute('INSERT OR REPLACE INTO cursors VALUES (?,?,?,?,?,?)',
