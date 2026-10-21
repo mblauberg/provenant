@@ -269,6 +269,14 @@ without user action; `/usage` checks fall below one per active day.
    rewrites, tier and role mix, first-pass gate rate, escalations, user
    interventions per hundred messages, cache-read share per provider, and
    quota burn per account.
+   Owner requirement, 2026-10-21: the ledger supports evaluating per-model
+   effectiveness (gate pass, acceptance and cost per accepted task), graph
+   efficiency once graphs exist, routing quality (chosen route versus
+   outcome, fallbacks and escalations), and provider pacing. Pacing records
+   observed usage per provider, account and window: for example, Cursor usage
+   against its monthly allowance, and OpenCode free-model request rate
+   against rate-limit incidence so bursts can be smoothed. These measures
+   support continuous improvement of routing and spend.
 5. Quota deltas around a Claude node are account-level aggregates and are
    labelled as such. Native versus headless quota comparisons use a
    controlled run with one node per account at a time.
