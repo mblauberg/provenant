@@ -738,7 +738,7 @@ try {
     if(ids.some(id=>id.startsWith("--"))) throw new Error("usage: fabric watch [ids…] [--interval N]");
     const seen=new Map<string,string>();
     for(;;) {
-      const result=await statusRows(who.project,ids.length ? ids : undefined);
+      const result=await statusRows(who.project,ids.length ? ids : undefined, 0, "all", undefined, "brief", true, 20, false, true);
       if(!result.runs) throw new Error(digest(result));
       for(const row of result.runs) {
         const key=`${row.run_id}:${row.task_id}`;
