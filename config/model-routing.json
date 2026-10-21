@@ -55,10 +55,6 @@
         "weight": "high"
       },
       {
-        "model": "opencode/opencode/mimo-v2.6-flash-free",
-        "weight": "high"
-      },
-      {
         "model": "claude/claude-haiku-5-5",
         "weight": "high",
         "effort": [

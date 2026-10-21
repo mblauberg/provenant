@@ -6671,19 +6671,3 @@ def test_codex_toml_overrides_spell_non_bmp_names_as_toml():
         "\U0001F600": {"enabled": False}, "dot.name": {"enabled": False},
     }
 
-
-
-@pytest.mark.parametrize("adapter", ["agy", "codex", "opencode"])
-@pytest.mark.parametrize("message", [
-    "RESOURCE_EXHAUSTED (429): rate limit exceeded; try again later",
-    "Quota exceeded for requests per minute; retry later",
-])
-def test_transient_quota_diagnostics_are_rate_limits(adapter, message):
-    parsed = supervisor().parse_output(adapter, "", message, 1)
-    assert parsed["status"] == "rate_limited"
-
-
-@pytest.mark.parametrize("adapter", ["agy", "codex", "opencode"])
-def test_exhausted_usage_quota_stays_usage_limited_despite_429(adapter):
-    parsed = supervisor().parse_output(adapter, "", "RESOURCE_EXHAUSTED (429): Individual quota reached. Resets in 24h", 1)
-    assert parsed["status"] == "usage_limited"

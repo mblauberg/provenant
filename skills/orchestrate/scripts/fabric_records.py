@@ -397,7 +397,7 @@ def write_cooldown(row, *, path=None, at=None):
     if until is None or until <= at:
         delay = row.get("retry_after")
         if not isinstance(delay, (int, float)) or delay <= 0:
-            delay = 30 if row["status"] == "rate_limited" else 3600
+            delay = 900 if row["status"] == "rate_limited" else 3600
         until = at + timedelta(seconds=delay)
     with locked(path.with_name("cooldowns.lock")):
         values = read_cooldowns(path, at)

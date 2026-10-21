@@ -24,7 +24,6 @@ CATALOG = {**SEED, "routes": {**SEED["routes"], "strong": [
     {"model": "claude/claude-opus-5-5", "weight": "normal"},
     {"model": "opencode/opencode-go/deepseek-v4.1-flash", "weight": "sparing"},
     {"model": "opencode/opencode-go/glm-5.3-flash", "weight": "sparing"},
-    {"model": "opencode/opencode/muse-spark-1.3-contributor-free", "weight": "sparing"},
     {"model": "opencode/opencode/mimo-v2.6-flash-free", "weight": "sparing"},
     {"model": "codex/gpt-6-astra", "weight": "sparing"}]}}
 
@@ -74,6 +73,17 @@ def test_seed_routes_name_registered_models_with_the_tiny_weight_vocabulary():
                 assert effort in registered["efforts"]
     assert all(target in CATALOG["routes"] for target in CATALOG["route_synonyms"].values())
     assert set(CATALOG["task_class_routes"]) <= set(CATALOG["route_synonyms"]) | set(CATALOG["routes"])
+
+
+def test_default_pools_only_promote_free_models_with_explicit_no_training():
+    for name, entries in SEED["routes"].items():
+        for entry in entries:
+            if entry["weight"] == "sparing":
+                continue
+            adapter, model = pools.split_model(router, SEED, entry["model"])
+            if "free" in pools.model_traits(router, SEED, adapter, model):
+                registered, _ = router._registered_match(adapter, model, SEED)
+                assert registered.get("trains_on_prompts") is False, f"{name}: {entry['model']}"
 
 
 def test_top_is_the_highest_weight_available_and_deterministic(tmp_path):
@@ -159,7 +169,7 @@ def test_council_larger_than_the_pool_repeats_with_a_warning(tmp_path):
 
 
 def test_confidential_skips_free_training_models_and_otherwise_warns(tmp_path):
-    free = "opencode/opencode/muse-spark-1.3-contributor-free"
+    free = "opencode/opencode/mimo-v2.6-flash-free"
     open_council = [pick({"route": "design", "council": 8}, tmp_path, seed=seed) for seed in range(20)]
     chosen = [result for result in open_council if free in models(result)]
     assert chosen, "free models stay in an ordinary pool"
@@ -362,7 +372,10 @@ def test_pick_command_answers_every_request_and_types_rejections(tmp_path):
 
 
 def test_routes_prints_each_pool_with_live_availability(tmp_path):
-    env = overlay_environment(tmp_path, {})
+    env = overlay_environment(tmp_path, {"routes": {"junior": [
+        *SEED["routes"]["junior"],
+        {"model": "opencode/opencode/mimo-v2.6-flash-free", "weight": "sparing"},
+    ]}})
     env["PATH"] = str(tmp_path / "empty-bin")
     state = tmp_path / "state"
     state.mkdir()
