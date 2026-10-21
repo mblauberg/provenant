@@ -33,7 +33,7 @@ AGENTIC_RISKS = (
 )
 
 
-def make_reference_run(profile_name: str, root: Path = ROOT, *, high_stakes: bool = False) -> dict[str, Any]:
+def make_reference_run(profile_name: str, root: Path = ROOT, *, high_stakes: bool = False, acceptance_basis: str | None = None) -> dict[str, Any]:
     registry = json.loads((root / "config" / "delivery-profiles.json").read_text())
     profile = registry["profiles"][profile_name]
     digest_a = "sha256:" + "a" * 64
@@ -117,7 +117,7 @@ def make_reference_run(profile_name: str, root: Path = ROOT, *, high_stakes: boo
             "qualified_domain_review": {"status": "pass", "evidence_id": "high-domain-review", "domain": "reference-domain", "reviewer": "qualified-reference-reviewer", "qualification": "scenario-fixture-authority"},
             "explicit_human_action_gate": {"status": "pass", "evidence_id": "high-action", "action": "accept-reference-artifact", "approved_by": "human-maintainer"},
         }
-    return {
+    run = {
         "schema_version": 1,
         "contract": "delivery-run",
         "run_id": f"REF-{profile_name.upper()}",
@@ -253,6 +253,21 @@ def make_reference_run(profile_name: str, root: Path = ROOT, *, high_stakes: boo
         "checkpoint": {"generation": 0, "current_slice": "accepted", "next_action": "human release", "in_flight": [], "artifact_paths": ["RUN.json"]},
         "degradation": None,
     }
+
+    if acceptance_basis is not None:
+        if acceptance_basis not in {"checks-and-review", "project-landing", "user"}:
+            raise ValueError("unknown acceptance basis")
+        if acceptance_basis == "user":
+            evidence_ids = [item["id"] for item in evidence if item["kind"] in {"deterministic", "judgement"}] + ["acceptance-approval"]
+        else:
+            run["human_gates"]["acceptance"] = {"status": "pending", "approver": "", "evidence": ""}
+            if acceptance_basis == "project-landing":
+                landing = dict(next(item for item in evidence if item["kind"] == "deterministic"))
+                landing.update(id="project-landing", gate="project-landing", method="reference project landing gate")
+                evidence.append(landing)
+            evidence_ids = [item["id"] for item in evidence if item["kind"] in {"deterministic", "judgement"}]
+        run["delivery_acceptance"] = {"basis": acceptance_basis, "evidence_ids": evidence_ids}
+    return run
 
 
 def main(argv: list[str] | None = None) -> int:

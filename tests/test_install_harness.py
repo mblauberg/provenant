@@ -2,6 +2,7 @@ from pathlib import Path
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tomllib
@@ -25,6 +26,38 @@ UNMANAGED_WORKFLOW_BYTES = (
 def instance_root_for(home: Path) -> Path:
     """Where `install-harness` seeds the instance under a scratch HOME."""
     return home / ".agents"
+
+
+@pytest.mark.parametrize("existing", ["new", "directory", "symlink"])
+def test_otel_installer_restricts_storage_permissions(tmp_path, existing):
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    swiftc = tools / "swiftc"
+    swiftc.write_text('#!/bin/bash\nwhile [[ "$1" != -o ]]; do shift; done\ntouch "$2"\n')
+    swiftc.chmod(0o755)
+    state = tmp_path / "state"
+    directory = state / "otel"
+    if existing == "directory":
+        directory.mkdir(parents=True, mode=0o755)
+    elif existing == "symlink":
+        state.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir(mode=0o755)
+        directory.symlink_to(outside, target_is_directory=True)
+    result = subprocess.run(
+        ["bash", "-c", 'umask 022; exec "$1"', "bash", str(ROOT / "scripts/install-otel-collector")],
+        env={**os.environ, "HOME": str(tmp_path), "AGENT_FABRIC_STATE_ROOT": str(state),
+             "PROVENANT_BIN_DIR": str(tmp_path / "bin"), "PROVENANT_OTEL_NO_LAUNCHCTL": "1",
+             "PATH": f"{tools}{os.pathsep}{os.environ['PATH']}"},
+        text=True, capture_output=True, timeout=5,
+    )
+    if existing == "symlink":
+        assert result.returncode != 0
+        assert stat.S_IMODE(outside.stat().st_mode) == 0o755
+        assert list(outside.iterdir()) == []
+        return
+    assert result.returncode == 0, result.stderr
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700
 
 
 def run(platform: str, home: Path, *arguments: str, bash=None, **extra_env):

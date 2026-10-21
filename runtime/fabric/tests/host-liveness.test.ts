@@ -1,7 +1,7 @@
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, it, vi } from "vitest";
+import { scratchRoot } from "./helpers/temp-root.js";
 
 // A process-identity probe can fail transiently; that alone must not orphan a
 // live host's run, because the next dispatch's orphan reap would kill it.
@@ -31,7 +31,7 @@ afterEach(() => {
 
 function recordRun(hostStartedAt: string | null, selfHosted = false, hostPid = process.pid,
   ownerPid = process.ppid) {
-  const workspace = realpathSync(mkdtempSync(join(tmpdir(), "fabric-host-")));
+  const workspace = realpathSync(scratchRoot("fabric-host-"));
   roots.push(workspace);
   const runDir = join(workspace, ".agent-run", "runs", "20260801-1200-dispatch-host-abcdef");
   mkdirSync(runDir, { recursive: true });
