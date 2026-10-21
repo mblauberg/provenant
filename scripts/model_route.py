@@ -553,17 +553,55 @@ def _canonical_model(adapter: str, model: str, catalog: dict[str, Any]) -> str:
     return match["id"] if match else model
 
 
+_QUOTA_PATH = Path(__file__).resolve().parent / "provider_quota.py"
+_quota: Any = None
+
+
+def _provider_quota() -> Any:
+    """The provider quota module, loaded once; None when it cannot load, so routing never fails on it."""
+    global _quota
+    if _quota is None:
+        try:
+            spec = importlib.util.spec_from_file_location("provenant_provider_quota", _QUOTA_PATH)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _quota = module
+        except Exception:  # noqa: BLE001 - quota is advisory input to routing
+            _quota = False
+    return _quota or None
+
+
+def _with_quota(records: dict[str, Any]) -> dict[str, Any]:
+    """Cool exhausted providers until reset and drop usage cooldowns a newer quota reading contradicts."""
+    quota = _provider_quota()
+    try:
+        return quota.apply_to_cooldowns(records) if quota else records
+    except Exception:  # noqa: BLE001 - quota is advisory input to routing
+        return records
+
+
+def _quota_states() -> dict[str, Any]:
+    """Cached pace state per route adapter, for `provenant routes`; never fetches."""
+    quota = _provider_quota()
+    try:
+        states = quota.route_states() if quota else {}
+    except Exception:  # noqa: BLE001 - quota is advisory input to routing
+        return {}
+    return {state["adapter"]: state for state in states.values() if state.get("adapter")}
+
+
 def _cooldowns(catalog: dict[str, Any]) -> dict[str, Any]:
     path = _state_root() / "cooldowns.json"
     try:
         data = json.loads(path.read_text())
     except (OSError, ValueError):
-        return {}
+        data = {}
     if not isinstance(data, dict):
-        return {}
+        data = {}
     records = data.get("cooldowns", data)
     if not isinstance(records, dict):
-        return {}
+        records = {}
+    records = _with_quota(records)
     normalised: dict[str, Any] = {}
     for key, record in records.items():
         if not isinstance(key, str) or "/" not in key:
