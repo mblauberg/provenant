@@ -44,8 +44,9 @@ reconciliation run.
 3. Run fast checks (lint, types, targeted tests) and pass them before review.
    Slow checks (full suites, CI) run in parallel with review. Map each
    criterion to evidence. When project instructions defer test execution to
-   a later gate, report those tests as deferred and unverified; that gate runs them before merge. When required,
-   run `evaluate` and attach its passing receipt.
+   a later gate, report those tests as deferred and unverified; that gate
+   runs them before merge. When required, run `evaluate` and attach its
+   passing receipt.
 4. Invoke read-only `code-review` under the current `HARNESS.md` risk ladder.
    Record each `adapter/model@effort` route from its attempt receipt and derive
    family. A change that affects UI produces screenshots at set viewports and
