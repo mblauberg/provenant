@@ -58,6 +58,8 @@ def _validate_route(
         or route.get("reviewer_id") != review.get("reviewer_id")
         or route.get("resolved_model", route.get("model")) != review.get("model")
         or route.get("model_family") != review.get("provider_family")
+        or not isinstance(route.get("provider_family"), str)
+        or not route.get("provider_family", "").strip()
         or (
             route.get("certification_eligible") is not True
             and not (
@@ -68,10 +70,10 @@ def _validate_route(
         ),
         f"review {review.get('id')} route receipt identity does not match review lineage",
     )
-    if review.get("role") == "other-primary":
-        fail(route.get("cross_family") is not True, "other-primary review requires a cross-family route receipt")
-    provider = route.get("provider_family")
-    return provider if isinstance(provider, str) and provider else review["provider_family"]
+    family = route["provider_family"].strip()
+    if family != chair_family:
+        fail(route.get("cross_family") is not True, "cross-family review requires a cross-family route receipt")
+    return family
 
 
 def _validate_reviews(
@@ -91,7 +93,11 @@ def _validate_reviews(
         fail(not item.get("provider_family") or not item.get("adapter") or not item.get("role"), f"review {index} lacks lineage")
         fail(item.get("role") not in REVIEW_ROLES, f"review {index} role is invalid")
         fail(item.get("independent_of_authorship") is not True, f"review {index} is not independent")
-        fail(not item.get("lenses"), f"review {index} requires lenses")
+        lenses = _list(item.get("lenses"), f"review {index} lenses")
+        fail(
+            not lenses or any(not isinstance(lens, str) or not lens.strip() for lens in lenses),
+            f"review {index} requires non-blank lenses",
+        )
         family = item["provider_family"]
         if item.get("status") == "pass":
             fail(not item.get("model"), f"passing review {index} requires actual model identity")
@@ -114,8 +120,11 @@ def _validate_reviews(
             fail(not item.get("reason"), f"non-passing review {index} requires reason")
         reviews.append(item)
         families.append(family)
-    optional = [item for item in reviews if item.get("role") == "distinct-family"]
-    fail(any(item.get("provider_family") in {"openai", "anthropic"} for item in optional), "distinct-family review must use a non-primary family")
+    passing = [item for item in reviews if item.get("status") == "pass"]
+    fail(
+        len({item["reviewer_id"] for item in passing}) != len(passing),
+        "passing reviews require distinct reviewer_id values",
+    )
     if not required:
         return
     chair_family = run.get("chair_family")

@@ -784,7 +784,7 @@ def test_substantial_run_requires_design_and_one_passing_review():
         module.validate(candidate, ROOT)
 
 
-@pytest.mark.parametrize("role", ["targeted", "other-primary"])
+@pytest.mark.parametrize("role", ["targeted", "other-primary", "distinct-family"])
 def test_substantial_accepts_one_cross_family_review_in_existing_roles(role):
     module = load_validator()
     candidate = fixture("research")
@@ -792,6 +792,30 @@ def test_substantial_accepts_one_cross_family_review_in_existing_roles(role):
     review["role"] = role
     candidate["reviews"] = [review]
     module._validate_reviews(candidate, {item["id"]: item for item in candidate["evidence"]}, required=True)
+
+
+@pytest.mark.parametrize("risk", ["routine", "substantial", "crucial", "terminal"])
+@pytest.mark.parametrize("lenses", [["   "], ["correctness", "   "]])
+def test_review_requires_non_blank_lenses_at_every_tier(risk, lenses):
+    module = load_validator()
+    candidate = fixture("research")
+    candidate["risk_tier"] = risk
+    candidate["reviews"][1]["lenses"] = lenses
+    with pytest.raises(module.Invalid, match="review 1 requires non-blank lenses"):
+        module._validate_reviews(
+            candidate, {item["id"]: item for item in candidate["evidence"]},
+            required=risk != "routine",
+        )
+
+
+def test_repeated_pass_by_same_reviewer_is_not_independent():
+    module = load_validator()
+    candidate = fixture("research")
+    candidate["reviews"][1]["reviewer_id"] = candidate["reviews"][0]["reviewer_id"]
+    with pytest.raises(module.Invalid, match="distinct reviewer_id"):
+        module._validate_reviews(
+            candidate, {item["id"]: item for item in candidate["evidence"]}, required=True,
+        )
 
 
 def test_review_ladder_accepts_targeted_lenses_without_whole_change_leg():

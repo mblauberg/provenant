@@ -859,7 +859,14 @@ def test_review_add_requires_certification_by_provider_lineage(tmp_path, model_f
         )
 
 
-def test_validator_rechecks_other_primary_route_receipt_cross_family(tmp_path):
+@pytest.mark.parametrize("role", ["targeted", "other-primary", "distinct-family"])
+@pytest.mark.parametrize(("field", "value", "error"), [
+    ("cross_family", False, "cross-family route receipt"),
+    ("provider_family", None, "identity does not match"),
+    ("provider_family", "", "identity does not match"),
+    ("provider_family", "   ", "identity does not match"),
+])
+def test_validator_rechecks_cross_family_route_lineage_regardless_of_role(tmp_path, role, field, value, error):
     run_dir = initialise(tmp_path)
     (tmp_path / "approval.json").write_text(
         '{"approved":true,"approver":"human-owner"}\n'
@@ -875,7 +882,7 @@ def test_validator_rechecks_other_primary_route_receipt_cross_family(tmp_path):
     route["cross_family"] = True
     (tmp_path / "route.json").write_text(json.dumps(route))
     added = run_cli(
-        tmp_path, *review_args(run_dir, role="other-primary", family="anthropic")
+        tmp_path, *review_args(run_dir, role=role, family="anthropic")
     )
     assert added.returncode == 0, added.stderr
 
@@ -884,7 +891,7 @@ def test_validator_rechecks_other_primary_route_receipt_cross_family(tmp_path):
     receipt = json.loads(receipt_path.read_text())
     validator.validate(receipt, ROOT, workspace_root=tmp_path, verify_hashes=True)
 
-    route["cross_family"] = False
+    route[field] = value
     raw = json.dumps(route).encode()
     (tmp_path / "route.json").write_bytes(raw)
     digest = digest_of(raw)
@@ -899,8 +906,48 @@ def test_validator_rechecks_other_primary_route_receipt_cross_family(tmp_path):
     )["route_receipt_digest"] = digest
     receipt_path.write_text(json.dumps(receipt))
 
-    with pytest.raises(validator.Invalid, match="cross-family route receipt"):
+    with pytest.raises(validator.Invalid, match=error):
         validator.validate(receipt, ROOT, workspace_root=tmp_path, verify_hashes=True)
+
+
+@pytest.mark.parametrize("provider_family", [None, "", "   "])
+def test_review_add_requires_non_blank_route_provider_family(tmp_path, provider_family):
+    run_dir = initialise(tmp_path)
+    (tmp_path / "review.md").write_text("# Review\n\nClean.\n")
+    route = route_receipt(family="anthropic")
+    route.update({"provider_family": provider_family, "cross_family": True})
+    (tmp_path / "route.json").write_text(json.dumps(route))
+
+    rejected = run_cli(tmp_path, *review_args(run_dir, family="anthropic"))
+
+    assert rejected.returncode != 0
+    assert "identity does not match" in rejected.stderr
+
+
+@pytest.mark.parametrize("role", ["targeted", "other-primary", "distinct-family"])
+def test_review_add_checks_cross_family_route_regardless_of_role(tmp_path, role):
+    run_dir = initialise(tmp_path)
+    (tmp_path / "review.md").write_text("# Review\n\nClean.\n")
+    (tmp_path / "route.json").write_text(json.dumps(route_receipt(family="anthropic")))
+
+    rejected = run_cli(tmp_path, *review_args(run_dir, role=role, family="anthropic"))
+
+    assert rejected.returncode != 0
+    assert "cross-family route receipt" in rejected.stderr
+    assert json.loads((run_dir / "RUN.json").read_text())["reviews"] == []
+
+
+def test_review_add_rejects_whitespace_only_lens(tmp_path):
+    run_dir = initialise(tmp_path)
+    (tmp_path / "review.md").write_text("# Review\n\nClean.\n")
+    (tmp_path / "route.json").write_text(json.dumps(route_receipt()))
+    args = review_args(run_dir)
+    args[-1] = "   "
+
+    rejected = run_cli(tmp_path, *args)
+
+    assert rejected.returncode != 0
+    assert "non-empty lens" in rejected.stderr
 
 
 def test_bounded_execution_times_out_and_truncates_output():

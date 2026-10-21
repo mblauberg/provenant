@@ -120,7 +120,7 @@ def bind_complete_reviews(run, plan):
             "read_only_guarantee": "enforced",
             "tool": row["adapter"],
             "route_alias": row["tier"], "reviewer_id": row["reviewer_id"],
-            "cross_family": row["scope"] == "primary",
+            "cross_family": row["family"] != plan["chair_family"],
             "certification_eligible": row["scope"] == "primary",
         }))
         route_value = json.loads(route.read_text())
@@ -315,6 +315,7 @@ def test_broker_review_certification_uses_provider_family(tmp_path, model_family
     route_path = tmp_path / broker["route_receipt"]["path"]
     route = json.loads(route_path.read_text())
     route.update({"provider_family": provider_family, "endpoint_provider": "cursor"})
+    route["cross_family"] = provider_family != plan["chair_family"]
     del route["read_only_guarantee"]
     route_path.write_text(json.dumps(route))
     broker["route_receipt"]["digest"] = (
@@ -330,19 +331,25 @@ def test_broker_review_certification_uses_provider_family(tmp_path, model_family
         assert any("passing independent leg" in error for error in errors)
 
 
-def test_clean_distinct_provider_route_does_not_need_route_certification_flags(tmp_path):
+@pytest.mark.parametrize("scope", ["targeted", "primary"])
+@pytest.mark.parametrize("cross_family", [False, None, "true"])
+def test_cross_family_review_requires_true_route_flag_regardless_of_scope(tmp_path, scope, cross_family):
     plan = substantial_plan()
+    row = plan["reviews"][3]
+    row["scope"] = scope
     bind_complete_reviews(tmp_path, plan)
-    route_path = tmp_path / plan["reviews"][3]["route_receipt"]["path"]
+    route_path = tmp_path / row["route_receipt"]["path"]
     route = json.loads(route_path.read_text())
-    route["cross_family"] = False
-    route["certification_eligible"] = False
+    route["cross_family"] = cross_family
     route_path.write_text(json.dumps(route))
-    plan["reviews"][3]["route_receipt"]["digest"] = (
+    row["route_receipt"]["digest"] = (
         "sha256:" + __import__("hashlib").sha256(route_path.read_bytes()).hexdigest()
     )
 
-    assert run_dir_finalize._validate_review_plan(plan, tmp_path) == []
+    assert any(
+        "cross-family route receipt" in error
+        for error in run_dir_finalize._validate_review_plan(plan, tmp_path)
+    )
 
 
 def test_inline_fabricated_terminal_result_is_not_a_retained_worker_result(tmp_path):
@@ -544,6 +551,14 @@ def test_review_topology_binds_explicit_codex_route_and_review_evidence(tmp_path
     assert any("identity does not match" in error for error in run_dir_finalize._validate_review_plan(plan, tmp_path))
 
 
+@pytest.mark.parametrize("risk", ["routine", "substantial", "crucial", "terminal"])
+@pytest.mark.parametrize("field", ["lens", "family"])
+def test_completed_review_requires_non_blank_lens_and_family_at_every_tier(risk, field):
+    plan = substantial_plan(risk)
+    plan["reviews"][0][field] = "   "
+    assert any(f"{field} is required" in error for error in run_dir_finalize._validate_review_plan(plan))
+
+
 def test_review_topology_rejects_malformed_fields_and_symlink_escape(tmp_path):
     plan = substantial_plan()
     plan["reviews"][0]["lens"] = []
@@ -588,8 +603,12 @@ def test_review_topology_rejects_malformed_fields_and_symlink_escape(tmp_path):
     assert any("evidence is missing" in error for error in run_dir_finalize._validate_review_plan(routine, run))
 
 
-def test_targeted_reviews_require_distinct_reviewer_and_artifact_identity():
-    plan = substantial_plan()
+@pytest.mark.parametrize("risk", ["routine", "substantial", "crucial", "terminal"])
+@pytest.mark.parametrize("scopes", [("targeted", "targeted", "targeted"), ("primary", "primary", "primary"), ("targeted", "primary", "primary")])
+def test_completed_reviews_require_distinct_reviewer_and_artifact_identity(risk, scopes):
+    plan = substantial_plan(risk)
+    for row, scope in zip(plan["reviews"], scopes):
+        row["scope"] = scope
     shared_evidence = plan["reviews"][0]["evidence"]
     shared_route = plan["reviews"][0]["route_receipt"]
     for row in plan["reviews"][:3]:
@@ -600,7 +619,9 @@ def test_targeted_reviews_require_distinct_reviewer_and_artifact_identity():
     assert any("distinct reviewer_id" in error for error in errors)
     assert any("distinct evidence" in error for error in errors)
     assert any("distinct route_receipt" in error for error in errors)
-    plan = substantial_plan()
+    plan = substantial_plan(risk)
+    for row, scope in zip(plan["reviews"], scopes):
+        row["scope"] = scope
     evidence_digest = plan["reviews"][0]["evidence"]["digest"]
     route_digest = plan["reviews"][0]["route_receipt"]["digest"]
     for index, row in enumerate(plan["reviews"][:3]):
@@ -612,12 +633,12 @@ def test_targeted_reviews_require_distinct_reviewer_and_artifact_identity():
 
 
 @pytest.mark.parametrize(("family", "tier"), (("openai", "flagship"), ("anthropic", "flagship")))
-def test_recorded_blocker_counts_regardless_of_family(family, tier):
+def test_chair_or_already_passing_family_blocker_does_not_cover_missing_family(family, tier):
     plan = substantial_plan("crucial")
     plan["reviews"].append(
         review("invalid-extra", "primary", "terminal-challenge", family, tier=tier, status="omitted", substitution_for="additional-distinct-family", wave=0)
     )
-    assert run_dir_finalize._validate_review_plan(plan) == []
+    assert any("two non-chair families" in error for error in run_dir_finalize._validate_review_plan(plan))
 
 
 def test_recorded_distinct_family_skip_counts_regardless_of_tier():

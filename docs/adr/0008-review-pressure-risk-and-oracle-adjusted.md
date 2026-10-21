@@ -27,13 +27,15 @@ count fixed optional-provider attempts.
 
 The earlier addenda retain the policy at their dates. The owner has adopted a
 lighter default ladder in `HARNESS.md`: routine work uses the chair and objective
-checks; substantial work adds one passing independent review, preferably from
-another provider family; crucial work needs two passing independent reviews
+checks; substantial work adds one passing independent review from another
+provider family when available; crucial work needs two passing independent reviews
 with distinct lenses and two non-chair families when available. Terminal work
-adds an adversarial lens to crucial coverage. A blocked cross-family review
-records an unavailable or omitted leg with a reason; substantial fallback also
-needs a passing same-family review with a lens. Failed reviews supply neither
-coverage nor blocker records. Receipt roles no longer determine ladder coverage.
+adds an adversarial lens to crucial coverage. Each missing non-chair family needs
+its own unavailable or omitted leg with a non-blank reason and a passing
+same-family replacement. A blocker for the chair's family or an already passing
+family does not cover a missing family. Every passing review needs a non-blank
+lens and a distinct reviewer. Failed reviews supply neither coverage nor blocker
+records. Receipt roles no longer determine ladder coverage.
 
 Projects may set their own ladders in their contributing guides while retaining
 the constitution's minimum independence. Objective checks and the required review

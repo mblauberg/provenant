@@ -241,14 +241,15 @@ scan/extract stages to the `junior` tier and reserve `principal` for synthesis/a
 
 Review pressure follows the [`HARNESS.md` Review ladder](../../../HARNESS.md#review-ladder).
 Routine work uses the chair and objective checks. Substantial work adds one
-passing independent review, preferably cross-family. Crucial work needs at least
+passing independent cross-family review when available. Crucial work needs at least
 two passing reviews with distinct lens sets and two non-chair families when
 available. Terminal work adds an adversarial lens to crucial coverage.
 
-When passing reviews lack the required cross-family coverage, record an
-unavailable or omitted leg with a non-empty reason. Substantial fallback also
-requires a passing same-family review with a lens. A failed leg never supplies
-coverage or a blocker record; receipt roles do not determine coverage.
+Every passing review needs a non-blank lens and a distinct reviewer. For each
+missing non-chair family, record an unavailable or omitted leg with a non-empty
+reason and a passing same-family replacement. Count each blocked family once,
+excluding the chair's family and families already passing. A failed leg never
+supplies coverage or a blocker record; receipt roles do not determine coverage.
 
 The chair schedules reviews under a per-run configurable concurrency ceiling
 and may sequence them around deterministic checks. It need not wait for a

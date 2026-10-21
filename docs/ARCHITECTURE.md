@@ -21,7 +21,7 @@ harness without rediscovering it from individual skills.
 
 Review pressure follows the [`HARNESS.md` Review ladder](../HARNESS.md#review-ladder).
 Routine work uses the chair and objective checks. Substantial work adds one
-independent review, preferably cross-family. Crucial work requires two passing
+independent cross-family review when available. Crucial work requires two passing
 independent reviews with distinct lenses and two non-chair families when
 available. Terminal work adds an adversarial lens to crucial coverage. The
 shared ladder checker enforces this coverage for delivery and orchestration
@@ -225,12 +225,14 @@ authoring with fresh independent reviewers for the tier's required coverage.
 The chair and authoring subagents cannot certify their own work. Independent
 reviews count by provider family and lens rather than receipt role.
 
-When required cross-family coverage is unavailable, a leg records an unavailable
-or omitted status with a non-empty reason. At substantial risk, a passing same-family review must also
-carry a lens. At crucial and terminal risk, fallback still needs two passing
-reviews with distinct lens sets covering at least two lenses. A failed leg never
-supplies coverage or a blocker record. Projects may set their own ladders while
-retaining the constitution's minimum independence.
+Every passing review needs a non-blank lens and a distinct reviewer. When required
+cross-family coverage is unavailable, each missing non-chair family records an
+unavailable or omitted leg with a non-empty reason and receives an independent
+same-family replacement. At crucial and terminal risk, fallback still needs two
+passing reviews with distinct lens sets covering at least two lenses. A blocker
+for the chair's family or an already passing family supplies no missing-family
+coverage. A failed leg supplies neither coverage nor a blocker record. Projects
+may set their own ladders while retaining the constitution's minimum independence.
 
 Provider-backed external workers, including the other primary and
 distinct families, are dispatched through Fabric MCP or the direct command

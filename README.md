@@ -19,8 +19,8 @@ author as the only reviewer. Provenant puts structure around that:
 - it **scopes** work in dialogue with the user, returning open decisions as
   questions, and requires approval before implementation starts;
 - it runs **deterministic checks** before any result surfaces for review;
-- substantial work adds **one independent review**, preferably from another
-  provider family, with review depth increasing at higher risk tiers; and
+- substantial work adds **one independent review** from another provider
+  family when available, with review depth increasing at higher risk tiers; and
 - it keeps **acceptance and release separate**, with explicit user acceptance
   for terminal work or when scope requires it.
 
@@ -263,7 +263,7 @@ full lifecycle lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 ## What the harness guarantees
 
 **Review pressure scales with risk.** Routine work uses the chair and objective
-checks. Substantial work adds one independent review, preferably cross-family;
+checks. Substantial work adds one independent cross-family review when available;
 crucial work needs two with distinct lenses and two non-chair families when
 available. Terminal work adds an adversarial lens. The
 [`HARNESS.md` Review ladder](HARNESS.md#review-ladder) owns the thresholds and

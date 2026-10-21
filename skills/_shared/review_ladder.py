@@ -34,13 +34,14 @@ def _lenses(leg: Mapping[str, Any]) -> set[str]:
         values = (values,)
     if not isinstance(values, Iterable):
         return set()
-    return {value for value in values if isinstance(value, str) and value.strip()}
+    return {value.strip() for value in values if isinstance(value, str) and value.strip()}
 
 
 def _provider_family(leg: Mapping[str, Any]) -> object:
     """Use validated endpoint lineage when the caller has retained it."""
     provider = leg.get("provider_family")
-    return provider if isinstance(provider, str) and provider else leg.get("family")
+    family = provider if isinstance(provider, str) and provider else leg.get("family")
+    return family.strip() if isinstance(family, str) else family
 
 
 def _has_reason(leg: Mapping[str, Any]) -> bool:
@@ -62,13 +63,17 @@ def check_review_ladder(
 
     if risk_tier not in {"substantial", "crucial", "terminal"}:
         return []
+    if not isinstance(chair_family, str) or not chair_family.strip():
+        return ["chair_family is required"]
 
     checked = list(legs)
-    passing = [leg for leg in checked if leg.get("status") == "pass"]
-    blocker = any(
-        leg.get("status") in BLOCKER_STATUSES and _has_reason(leg)
-        for leg in checked
-    )
+    passing = [leg for leg in checked if leg.get("status") == "pass" and _lenses(leg)]
+    blocked_families = {
+        family for leg in checked
+        if leg.get("status") in BLOCKER_STATUSES and _has_reason(leg)
+        and isinstance(family := _provider_family(leg), str)
+        and family and family != chair_family
+    }
     non_chair_families = {
         family for leg in passing
         if isinstance(family := _provider_family(leg), str)
@@ -79,7 +84,7 @@ def check_review_ladder(
         if not passing:
             errors.append("substantial review requires at least one passing independent leg")
         if not non_chair_families:
-            if not blocker:
+            if not blocked_families:
                 errors.append("substantial review requires cross-family coverage or a recorded blocker with a reason")
             if not any(_provider_family(leg) == chair_family and _lenses(leg) for leg in passing):
                 errors.append("substantial fallback requires a passing same-family review with a lens")
@@ -94,8 +99,12 @@ def check_review_ladder(
         for right in lens_sets[index + 1:]
     ):
         errors.append(f"{risk_tier} review requires distinct lens sets covering at least two lenses")
-    if len(non_chair_families) < 2 and not blocker:
-        errors.append(f"{risk_tier} review requires two non-chair families or a recorded blocker with a reason")
+    if len(non_chair_families | blocked_families) < 2:
+        errors.append(f"{risk_tier} review requires two non-chair families or a recorded blocker with a reason for each missing family")
+    missing_families = max(0, 2 - len(non_chair_families))
+    same_family_passes = sum(_provider_family(leg) == chair_family for leg in passing)
+    if same_family_passes < missing_families:
+        errors.append(f"{risk_tier} fallback requires a passing same-family review for each missing non-chair family")
 
     if risk_tier == "terminal":
         if not any(
