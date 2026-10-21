@@ -629,7 +629,8 @@ class LaneFederation:
         try:
             named = self.h.project_identity(path)
         except self.h.HostError:
-            return chair, path
+            # Outside home: path rewriting refuses it with invalid_remote_path.
+            return chair, None
         if named in self.config.projects:
             return named, None
         return chair, None if named == chair else path
