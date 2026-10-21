@@ -62,7 +62,7 @@ import secret_scan
 import exec_routing
 import context_usage
 import attempt_storage
-from fabric_records import render_digest, write_cooldown, write_route_health, append_index, TERMINAL_STATUSES
+from fabric_records import identity_resolver, render_digest, write_cooldown, write_route_health, append_index, TERMINAL_STATUSES
 from _shared.custody import (
     OwnedFileError, OwnedLinkError, atomic_write_contained, contained_regular_path,
     ensure_contained_directory, create_contained_directory, open_contained_regular, read_bound_bytes,
@@ -1630,6 +1630,17 @@ def with_pick_reason(line, reason):
     return line[:-1] + "; " + reason + ")"
 
 
+def attempt_scope(args, number):
+    # Terminal construction reuses the scope captured before provider startup.
+    scopes = getattr(args, '_attempt_scopes', None)
+    if scopes is None:
+        scopes = args._attempt_scopes = {}
+    key = (number, args.tool)
+    if key not in scopes:
+        scopes[key] = identity_resolver().scope(args.tool)
+    return scopes[key]
+
+
 def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
     route=plan.get("route",{})
     model=plan.get("model") or route.get("resolved_model") or args.model or ""
@@ -1652,7 +1663,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         note = f'local fallback from {placement["from_host"]}: {placement["reason"]}' + (f': {placement["detail"]}' if placement.get('detail') else '')
         if note not in plan.setdefault('warnings', []):
             plan['warnings'].append(note)
-    return {"schema":"fabric.attempt.v1", **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
+    return {"schema":"fabric.attempt.v1", **attempt_scope(args,number), **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
         **({"batch_id":args.batch_id} if getattr(args,"batch_id",None) else {}),
         "attempt":number,"state":"running","status":None,"usage_source":"missing","mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
         "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
@@ -1856,6 +1867,7 @@ def prepare_resume(args):
 def _dispatch(args: argparse.Namespace, custody=None) -> int:
     args._last_plan={}
     args._last_row=None
+    args._attempt_scopes={}
     owner_started_ms = None
     try:
         incoming = ({} if getattr(args, "retry_of", None) or getattr(args, "fallback_from", None)
@@ -2614,6 +2626,7 @@ def _dispatch(args: argparse.Namespace, custody=None) -> int:
     record: dict[str, Any] = {
         "schema_version": 1,
         "record_type": "dispatch-attempt",
+        **attempt_scope(args, attempt_number),
         "usage_source": adapter.get("usage_source") or provider_exec.context_usage.usage_source(adapter.get("context") or {}),
         "error_class": provider_exec.error_class(status, (adapter.get("evidence") or {}).get("signature")),
         **({"landable": False, "quarantine": adapter.get("quarantine")} if adapter_status == "quarantined" else {}),

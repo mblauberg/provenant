@@ -143,13 +143,19 @@ optional integer, with smaller numbers preferred.
       "max-b": {"identity_dir": "~/.claude-b", "plan": "Max", "priority": 2}
     },
     "agy": {
-      "work": {"identity_dir": "~/.gemini-work"},
-      "personal": {"identity_dir": "~/.gemini-personal", "enabled": true}
+      "work": {"plan": "work"}
     },
     "codex": {"work": {"identity_dir": "~/.codex"}}
   }
 }
 ```
+
+The agy example is this Mac's account. Its sign-in lives in the shared macOS
+login Keychain: another `identity_dir`, `AGY_CONFIG_DIR` or HOME on this Mac does
+not isolate a second account. Configure the personal agy account on the workshop
+Mac, for example `"agy": {"personal": {}}` in that host's telemetry config.
+Give the Macs distinct `local_host` ids in `.agent-fabric/hosts.json`; host scope
+keeps their cooldowns apart. No agy HOME switching is performed.
 
 A provider absent from config gets one discovered default account when its
 identity directory exists. An explicitly empty provider object disables that
@@ -191,15 +197,17 @@ six hours, and prefer a reset that keeps the date when that date is days away.
 
 Only the currently selected CLI identity affects routing (`CLAUDE_CONFIG_DIR`,
 `CODEX_HOME`, or the provider's default directory). Changing that identity is
-reflected on the next routing read, including when snapshots are cached. Cache
+reflected on the next routing read, including when snapshots are cached. Cooldowns use the same account key and host as quota. See
+[model routing](model-routing.md) for identity sources and scoped reset. Cache
 and lock paths include the resolved identity directory; older unbound caches
 require a fresh reading before they can affect routing. The report orders other
 configured accounts by priority and reset proximity as
 placement advice; it never switches credentials. An exhausted selected account
 blocks that adapter until the latest exhausted window resets. A newer provider
-reading with a reset date updates the adapter cooldown. Exhaustion without a
+reading with a reset date updates that account and host's adapter cooldown. Exhaustion without a
 reset date preserves existing usage cooldowns. Reserve, on-pace, early and
-not-started readings clear older contradictory usage cooldowns; unknown readings
+not-started readings clear older contradictory usage cooldowns in the same
+account and host; unknown readings
 preserve them. Short-term `rate_limited` cooldowns remain.
 Deficit is shown in `provenant routes` and JSON only; it does not lower weights.
 

@@ -435,9 +435,9 @@ def test_peer_readings_of_one_account_keep_the_freshest(quota):
 # Routing input -------------------------------------------------------------------------------
 
 def test_reserve_snapshot_lifts_a_stale_claude_usage_cooldown(quota):
-    cooldowns = {'claude/*': {'adapter': 'claude', 'model': '*', 'status': 'usage_limited',
+    cooldowns = {'claude/*': {'account': 'default', 'host': 'studio', 'adapter': 'claude', 'model': '*', 'status': 'usage_limited',
                               'recorded_at': iso(NOW - timedelta(hours=1)), 'cooling_until': '2026-10-22T22:00:00Z'},
-                 'claude/opus': {'adapter': 'claude', 'model': 'opus', 'status': 'rate_limited',
+                 'claude/opus': {'account': 'default', 'host': 'studio', 'adapter': 'claude', 'model': 'opus', 'status': 'rate_limited',
                                  'recorded_at': iso(NOW - timedelta(hours=1)), 'cooling_until': '2026-10-22T22:00:00Z'}}
     snapshot(quota, 'claude', [window(3, 300, timedelta(hours=2), 'five_hour'), window(20, WEEK, timedelta(days=4))],
              observed=NOW - timedelta(minutes=5))
@@ -453,7 +453,7 @@ def test_reserve_snapshot_lifts_a_stale_claude_usage_cooldown(quota):
     [window(25, 300), window(3, 300, timedelta(hours=2), 'five_hour')],
 ])
 def test_indefinite_quota_never_evicts_an_existing_usage_cooldown(quota, windows):
-    cooldowns = {'claude/*': {'status': 'usage_limited',
+    cooldowns = {'claude/*': {'account': 'default', 'host': 'studio', 'status': 'usage_limited',
                               'recorded_at': iso(NOW - timedelta(hours=1)),
                               'cooling_until': iso(NOW + timedelta(hours=6))}}
     snapshot(quota, 'claude', windows)
@@ -461,7 +461,7 @@ def test_indefinite_quota_never_evicts_an_existing_usage_cooldown(quota, windows
 
 
 def test_early_headroom_clears_stale_usage_cooldowns_after_reset(quota):
-    cooldowns = {'claude/*': {'status': 'usage_limited',
+    cooldowns = {'claude/*': {'account': 'default', 'host': 'studio', 'status': 'usage_limited',
                               'recorded_at': iso(NOW - timedelta(hours=1)),
                               'cooling_until': iso(NOW + timedelta(hours=6))}}
     snapshot(quota, 'claude', [window(1, 300, timedelta(hours=4, minutes=59))])
@@ -563,7 +563,7 @@ def test_provider_reset_overrides_later_usage_cooldown_and_identity_switch_reche
                                                'b': {'identity_dir': '~/.claude-b'}}}})
     snapshot(quota, 'claude', [window(100, WEEK, timedelta(days=2))], account='a')
     snapshot(quota, 'claude', [window(3, 300, timedelta(hours=2))], account='b', active=False)
-    cooldown = {'claude/*': {'status': 'usage_limited', 'recorded_at': iso(NOW - timedelta(hours=1)),
+    cooldown = {'claude/*': {'account': 'a', 'host': 'studio', 'status': 'usage_limited', 'recorded_at': iso(NOW - timedelta(hours=1)),
                              'cooling_until': iso(NOW + timedelta(days=5))}}
     assert quota.apply_to_cooldowns(cooldown, NOW)['claude/*']['cooling_until'] == iso(NOW + timedelta(days=2))
     assert quota.apply_to_cooldowns(cooldown, NOW + timedelta(days=2, minutes=1)) == cooldown
@@ -574,7 +574,7 @@ def test_provider_reset_overrides_later_usage_cooldown_and_identity_switch_reche
     assert {row['account']: row['active'] for row in quota.gather(NOW)} == {'a': False, 'b': True}
     monkeypatch.delenv('PROVENANT_QUOTA')
     assert quota.route_states(NOW)['claude']['state'] == 'reserve'
-    assert quota.apply_to_cooldowns(cooldown, NOW) == {}
+    assert quota.apply_to_cooldowns(cooldown, NOW) == cooldown  # account a is retained after switching to b
 
 
 @pytest.mark.parametrize('reset_in', [None, timedelta(hours=8), timedelta(hours=-1)])
@@ -708,3 +708,33 @@ def test_configured_provider_without_a_default_requires_an_identity_directory(qu
     configure(tmp_path, {'accounts': {'fake': {'work': {}}}})
     with pytest.raises(ValueError, match='identity_dir'):
         quota.accounts()
+
+
+@pytest.mark.parametrize('account,host', [('other', 'studio'), ('default', 'peer'), (None, 'studio')])
+def test_quota_headroom_cannot_clear_another_scope(quota, account, host):
+    snapshot(quota, 'claude', [window(3, 300, timedelta(hours=2))])
+    cooldown = {'claude/*': {'account': account, 'host': host, 'status': 'usage_limited',
+                             'recorded_at': iso(NOW - timedelta(hours=1)),
+                             'cooling_until': iso(NOW + timedelta(hours=4))}}
+    assert quota.apply_to_cooldowns(cooldown, NOW) == cooldown
+
+
+def test_unconfigured_selected_identity_uses_same_path_token_in_quota_and_cooldowns(quota, monkeypatch, tmp_path):
+    identity = tmp_path / 'private-email@example.test'
+    identity.mkdir()
+    monkeypatch.setenv('CODEX_HOME', str(identity))
+    monkeypatch.setattr(quota, 'fetch', lambda account, now: {'windows': [window(100, 300, timedelta(hours=2))]})
+    account, = quota.accounts()
+    assert account.label.startswith('path-') and 'email' not in account.label
+    quota.refresh(account, NOW)
+    cooldown = quota.apply_to_cooldowns({}, NOW)['codex/*']
+    assert cooldown['account'] == quota.identity.scope('codex')['account']
+    assert cooldown['host'] == 'studio'
+
+
+def test_agy_identity_is_the_os_login_keychain_even_with_another_home(quota, monkeypatch, tmp_path):
+    first = quota.identity.selected_identity('agy')
+    monkeypatch.setenv('HOME', str(tmp_path / 'another-home'))
+    monkeypatch.setenv('AGY_CONFIG_DIR', str(tmp_path / 'another-config'))
+    assert quota.identity.selected_identity('agy') == first
+    assert quota.identity.scope('agy')['account'] == 'default'

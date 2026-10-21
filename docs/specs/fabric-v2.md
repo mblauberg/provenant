@@ -260,8 +260,43 @@ covers `.git-credentials`, `.pypirc`, `.pgpass`, `.vault-token`,
 `.password-store`, `.boto`, `.s3cfg`, `.terraform.d`, Cargo and Gem credentials,
 `.config/git/credentials`, `.config/hub` and `.config/op`.
 
-An `ok` attempt clears the cooldown for the model that answered, using the
-resolved model when the provider reports no model. It also clears the adapter's
+Every attempt records top-level `account` and `host` before provider startup;
+terminal records retain that scope. Quota and cooldown routing share
+`scripts/provider_identity.py`. Account identity comes from paths, without
+reading credential contents:
+
+| Adapter | Selected identity source |
+|---|---|
+| claude | `CLAUDE_CONFIG_DIR`, else `~/.claude` |
+| codex | `CODEX_HOME`, else `~/.codex` |
+| agy | OS user's `~/Library/Keychains/login.keychain-db`, independent of HOME and `AGY_CONFIG_DIR`; a second account requires a second host |
+| cursor | `~/Library/Application Support/Cursor/User/globalStorage` on macOS, else `~/.config/Cursor/User/globalStorage` |
+| opencode | `$XDG_DATA_HOME/opencode`, else `~/.local/share/opencode` (the authentication store, not `OPENCODE_CONFIG_DIR`) |
+| kiro | `~/.kiro` |
+| copilot | `~/.copilot` |
+
+A selected path matching an enabled configured
+`telemetry.accounts.<provider>.<label>.identity_dir` resolves to `<label>`.
+Otherwise the provider's default directory resolves to `default`, and another
+resolved path to `path-<sha256 prefix>`. Paths, emails and tokens are never used
+as account keys. An unresolved identity is `null` and matches only `null`.
+For inspection and reset commands, see [model routing](../runbooks/model-routing.md).
+Host is the telemetry host id (`local_host` in `.agent-fabric/hosts.json`, else
+hostname). Neither account nor host acts as a wildcard.
+
+`fabric.cooldowns.v1` entries carry `adapter`, `model`, `account` and `host`.
+Storage keys are JSON-encoded `[adapter, account, host, model]` tuples, allowing
+live scopes to coexist; readers expose only the active scope as `adapter/model`
+keys. Exact model entries precede `*` within that scope. Reads prune expired
+entries and retain other accounts and hosts. Under `cooldowns.lock`, a legacy
+entry without `host` and with a null account migrates once to the provider's
+default identity on this host, even if an alternate identity is selected.
+A new explicit null scope is never migrated. Cached quota adds and reconciles
+cooldowns only for its matching account and host.
+
+An `ok` attempt clears the cooldown for the model that answered in that
+attempt's account and host, using the resolved model when the provider reports
+no model. It also clears the adapter's
 account-wide `*` cooldown when the attempt started after that entry was recorded
 (never for per-model adapters `agy` and `opencode`). Other model cooldowns remain
 intact; `provenant route reset` clears them explicitly. OpenCode runs with error logs on stderr so a quota

@@ -63,7 +63,13 @@ RESET_NOISE = 5         # a smaller drop is reporting noise, not a granted reset
 NEAR_EXHAUSTED = 95
 WAIT_HOURS = 6
 SEVERITY = ('exhausted', 'unknown', 'unreported', 'deficit', 'on_pace', 'reserve', 'early', 'not_started')
-LABEL = re.compile(r'[a-z0-9][a-z0-9._-]{0,63}')
+_identity_spec = importlib.util.spec_from_file_location('provider_identity', HERE / 'provider_identity.py')
+identity = sys.modules.get('provider_identity')
+if identity is None:
+    identity = importlib.util.module_from_spec(_identity_spec)
+    sys.modules['provider_identity'] = identity
+    _identity_spec.loader.exec_module(identity)
+LABEL = identity.LABEL
 DISABLED = {'0', 'false', 'no', 'off'}
 
 PIPE, DEVNULL, TimeoutExpired = subprocess.PIPE, subprocess.DEVNULL, subprocess.TimeoutExpired
@@ -191,20 +197,14 @@ def _telemetry():
 
 
 def telemetry_host():
-    return _telemetry().host_id()
+    return identity.host_id()
 
 
 def state_root():
     return _telemetry().state_root()
 
 
-def config():
-    root = Path(os.environ.get('AGENT_FABRIC_INSTANCE_ROOT') or '~/.agents').expanduser()
-    try:
-        value = json.loads((root / 'config/telemetry.json').read_text())
-    except (OSError, ValueError):
-        return {}
-    return value if isinstance(value, dict) else {}
+config = identity.config
 
 
 def settings():
@@ -240,22 +240,8 @@ def registered():
     return sorted(set(REGISTRY) | set(_LOADED))
 
 
-def same_path(left, right):
-    try:
-        return Path(left).expanduser().resolve() == Path(right).expanduser().resolve()
-    except OSError:
-        return False
-
-
-def configured():
-    value = config().get('accounts') or {}
-    if not isinstance(value, dict) or not all(isinstance(entries, dict) for entries in value.values()):
-        raise ValueError('telemetry accounts must map provider to {label: {identity_dir}}')
-    for entries in value.values():
-        for label in entries:
-            if not LABEL.fullmatch(str(label)):
-                raise ValueError(f'account label {label!r} must be a short lowercase name, never an email or token')
-    return value
+same_path = identity.same_path
+configured = identity.configured
 
 
 def accounts():
@@ -264,20 +250,21 @@ def accounts():
     found = []
     for name in sorted(set(registered()) | set(listed)):
         module = provider(name)
-        default = module.default_identity() if module else None
+        default = module.default_identity() if module else identity.selected_identity(name)
         if name not in listed:
             if default is not None and Path(default).exists():
-                found.append(Account(name, 'default', Path(default), True))
+                found.append(Account(name, identity.account_key(name, default, entries={}), Path(default), True))
             continue
+        active_label = identity.account_key(name, default, listed[name])
         for label, entry in sorted(listed[name].items()):
             entry = entry if isinstance(entry, dict) else {}
             if entry.get('enabled') is False:
                 continue
             if not entry.get('identity_dir') and default is None:
                 raise ValueError(f'{name}/{label} requires identity_dir')
-            identity = Path(entry.get('identity_dir') or default).expanduser()
+            identity_dir = Path(entry.get('identity_dir') or default).expanduser()
             priority = number(entry.get('priority'))
-            found.append(Account(name, label, identity, default is not None and same_path(identity, default),
+            found.append(Account(name, label, identity_dir, default is not None and label == active_label,
                                  str(entry['plan']) if entry.get('plan') else None,
                                  int(priority) if priority is not None else None,
                                  {key: value for key, value in entry.items()
@@ -722,7 +709,7 @@ def route_states(now=None):
         module = provider(name)
         row = describe(value, None, now)
         exhausted = [window['reset_at'] for window in row['windows'] if window['pace']['state'] == 'exhausted']
-        states[name] = {'adapter': getattr(module, 'ADAPTER', None), 'account': label, 'state': row['state'],
+        states[name] = {'adapter': getattr(module, 'ADAPTER', None), 'account': label, 'host': telemetry_host(), 'state': row['state'],
                         'summary': row['summary'], 'observed_at': value.get('observed_at'),
                         'cooling_until': max(exhausted) if exhausted and all(exhausted) else None}
     return states
@@ -745,7 +732,7 @@ def apply_to_cooldowns(records, now=None):
         if observed and state['state'] in ('reserve', 'on_pace', 'early', 'not_started'):
             for key, record in records.items():
                 recorded = parse_time((record or {}).get('recorded_at'))
-                if (str(key).split('/', 1)[0] == adapter and record.get('status') in ('usage_limited', 'quota_exhausted')
+                if (identity.matches(record, state) and str(key).split('/', 1)[0] == adapter and record.get('status') in ('usage_limited', 'quota_exhausted')
                         and recorded and observed > recorded):
                     result.pop(key, None)
         if state['state'] == 'exhausted' and until and until > now:
@@ -755,7 +742,7 @@ def apply_to_cooldowns(records, now=None):
             if (str(record.get('cooling_until', '')) < state['cooling_until'] or
                     record.get('status') in ('usage_limited', 'quota_exhausted') and
                     observed and recorded and observed > recorded):
-                result[key] = {'adapter': adapter, 'model': '*', 'account': state['account'],
+                result[key] = {'adapter': adapter, 'model': '*', 'account': state['account'], 'host': state['host'],
                                'status': 'quota_exhausted', 'cooling_until': state['cooling_until'],
                                'recorded_at': state['observed_at'], 'source': 'provider quota'}
     return result
