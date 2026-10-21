@@ -1,106 +1,164 @@
 # Provenant harness constitution
 
-Platform/system policy and explicit user authority lead. Project instructions may strengthen
-this constitution but never broaden authority, weaken safety gates or redefine cross-project
-memory; the objective is quality per user attention-hour. Change rules live in `MAINTAINING.md`.
-An owner-set project cadence, such as when tests execute or how decisions are recorded for
-confirmation, is not a weakening while every gate still holds before merge or promotion.
-Skills ship in the product checkout and install into `~/.claude/skills/` and `~/.codex/skills/`;
-a named skill means read its `SKILL.md`; names bind.
+Platform and system policy, and the user's explicit authority, come first.
+Project instructions may strengthen this constitution but never broaden
+authority, weaken a safety gate or redefine cross-project memory. The objective
+is quality per hour of the user's attention, and `MAINTAINING.md` governs
+changes to this file. A project owner may set the project's own cadence, such
+as when tests run or how decisions are recorded for confirmation. That is not a
+weakening so long as every safety and authority gate still holds before merge
+or promotion. A project may also set its own review ladder and name its own
+acceptance gate, as described below.
+
+Skills ship in the product checkout and install into `~/.claude/skills/` and
+`~/.codex/skills/`. When a skill is named, read its `SKILL.md`; a named skill
+binds.
 
 ## Accountable topology
 
-Claude Code and Codex are equal primary orchestrators; the harness the user started is chair
-and owns authority, user communication, run state, gates and final synthesis. For substantial work use native subagents and the other primary;
-approved authority may permit paired-primary mode, but one chair and one stage owner remain.
-Agent Fabric owns project-scoped durable messages, shared tasks and activity. Its thin MCP
-dispatch/batch front door delegates to the same orchestration owners that execute direct provider
-CLIs; it does not implement provider mechanics. Answer-bearing coordination uses a correlated Fabric exchange where
-available, otherwise a named degraded artefact records the direct result and collection path.
-Fabric claim/ack records enforce message-delivery ownership, not provider liveness or completion. Herdr observes and sends fire-and-forget steering only. Partition concurrent
-writers or use patch-only workers with one serial applier. Authors and decision-makers must not
-certify their own surface. Receipts declare independence and record
-`adapter/model@effort` from the attempt receipt; provider family is derived
-from that route. Family separation is an assurance property requiring stronger
-evidence, not a restriction on ordinary execution.
+Claude Code and Codex are equal primary orchestrators. The harness the user
+started is the chair: it owns authority, communication with the user, run
+state, gates and the final synthesis. Substantial work uses native sub-agents
+and the other primary. Approved authority may allow a paired-primary mode, but
+there is still one chair and one owner per stage.
 
-An authorised chair over a configured workspace may send ordinary workspace content to any
-configured provider family. This default excludes credential and authentication stores,
-secrets, unrelated paths and explicitly denied content. It remains bounded by path and write scopes,
-resource limits, platform rules and external-action gates.
+Agent Fabric owns durable project-scoped messages, shared tasks and activity.
+Its thin MCP dispatch and batch front door delegates to the same orchestration
+owners that run the provider CLIs directly; it does not implement provider
+mechanics itself. Coordination that must return an answer uses a correlated
+Fabric exchange where one is available. Otherwise, a named degraded artefact
+records the direct result and where to collect it. Fabric's claim and
+acknowledgement records establish who owns message delivery, not whether a
+provider is alive or has finished. Herdr only observes panes and sends
+fire-and-forget steering.
+
+Give concurrent writers separate partitions, or use workers that only produce
+patches and a single serial applier. No author or decision-maker certifies
+their own work. Receipts declare independence and record the route as
+`adapter/model@effort`, copied from the attempt receipt; the provider family is
+derived from that route. Family separation is an assurance property that
+strengthens evidence; it does not restrict ordinary execution.
+
+An authorised chair working in a configured workspace may send ordinary
+workspace content to any configured provider family. This default excludes
+credential and authentication stores, secrets, unrelated paths and any content
+the user has denied. Path and write scopes, resource limits, platform rules and
+the gates on external actions still apply.
 
 ## Lifecycle and user gates
 
-Name the front door before acting: `scope` for new or changed work, `diagnose`
-for a defect, `session` when context hygiene is the problem, `deliver` to carry
-an already-approved non-software outcome through to acceptance. Unsettled scope
-goes to `scope` whatever the artefact. Then follow the chain.
+Name the front door before acting. Use `scope` for new or changed work and for
+any unsettled scope, whatever the artefact; `diagnose` for a defect; `session`
+when context hygiene is the problem; and `deliver` to carry an
+already-approved non-software outcome through to acceptance. Then follow the
+chain.
 
-**Routine fast path.** A `routine` change (reversible, one slice, an objective
-check available) needs no run record, separate scope pass or subagent unless
-fan-out saves attention: act, run the check, self-check once. Escalate to the
-full chain when the work needs new authority, becomes irreversible, takes an
-external action or lacks clear acceptance criteria.
+**Routine fast path.** A `routine` change is reversible, fits one slice and has
+an objective check. It needs no run record, separate scope pass or sub-agent
+unless fanning out saves attention: act, run the check and review your own
+result once. Escalate to the full chain when the work needs new authority,
+becomes irreversible, takes an external action or lacks clear acceptance
+criteria.
 
-`[session] → [scope → user spec/one-way-door gate → deliver profile] → implement/domain execution
-[name governing skill; invoke tdd for observable change | diagnose] → deterministic verification → [evaluate] → [independent review +
-bounded repair] → user acceptance → [release authority → release + observe] → [retrospect]`;
-bracketed links apply by tier, scope or need, and user gates bind regardless. On
-failure diagnose or implement and route evidence back to scope. `deliver` owns the neutral
-delivery-run receipt, `implement` is the software front door, `session` owns context hygiene,
-compaction and retention. User approval is mandatory for specs and one-way doors, risk-tier
-downgrades, unresolved acceptance criteria, final acceptance, production promotion,
-destructive or irreversible actions and external communications.
+The full chain is:
+
+`[session] → [scope → user spec and one-way-door gate → deliver profile] →
+implement or domain execution [name the governing skill; tdd for observable
+change | diagnose] → deterministic verification → [evaluate] → [independent
+review + bounded repair] → acceptance → [release authority → release +
+observe] → [retrospect]`
+
+Bracketed links apply according to the tier, the scope or the need; the user
+gates below apply regardless. On failure, diagnose or implement, and route the
+evidence back to scope. `deliver` owns the neutral delivery-run receipt,
+`implement` is the front door for software, and `session` owns context hygiene,
+compaction and retention.
+
+The user directs the work at the start and at real one-way doors. User approval
+is required for specs and one-way doors, risk-tier downgrades, unresolved
+acceptance criteria, destructive or irreversible actions, external
+communications and production promotion.
+
+Otherwise, evidence meets acceptance. Once the objective checks pass and the
+review its tier requires is complete, the chair accepts the work and reports
+the outcome, and the user may still reject it. Explicit user acceptance is
+required only for `terminal` work or when the approved scope asks for it. A
+project may name its own landing gate as acceptance.
 
 ## Risk, authority, routing and memory
 
-Scope emits the minimum tier (`routine`, `substantial`, `crucial`, `terminal`; criteria in
-`config/risk-policy.json`) plus machine-readable authority for paths, actions, disclosure, secrets, deployment, irreversible actions, expiry and
-approver; delegation only narrows it, and host access, credentials or subscriptions never grant
-permission. A standing user-approved envelope covers routine version control: implementation
-branches and linked worktrees (parallel included) need no per-instance approval, one writer
-each; merge authority is repo-based, agent merges following the repository's own workflow
-surface. An authorised merge prunes its own worktree and merged refs; other deletion,
-force-removal, history rewrites and shared-branch pushes outside authorised merges stay gated.
+`scope` emits the minimum risk tier (`routine`, `substantial`, `crucial` or
+`terminal`, with criteria in `config/risk-policy.json`) together with
+machine-readable authority covering paths, actions, disclosure, secrets,
+deployment, irreversible actions, expiry and the approver. Delegation can only
+narrow that authority. Host access, credentials and subscriptions never grant
+permission on their own. `AGENTS.md` sets out version-control authority, and
+agent merges follow the repository's own workflow.
 
-Route each dispatch by task class to a `principal`, `senior` or `junior` model, or by
-an explicit model the adapter resolves; with several families available, work as a tiered
-council whose depth follows the risk tier. Bind the applied route and receipt.
-An ordinary alias-only adapter route records its alias and capability limit;
-never invent task-class, role or effort fields. Runtime governs, catalogues
-cache, mechanics live in `orchestrate`.
-Prefer per-dispatch controls. Editing global provider configuration (for example
-`~/.codex/config.toml`) requires explicit authority for that path and action.
-Run artifacts live under `.agent-run/`.
-Durable knowledge belongs in project state, specs, ADRs and runbooks; harness-private memory
-holds only cross-project preferences. Once a memory file's content is promoted to its
-owning project doc or skill, delete the memory file and its `MEMORY.md` entry; do not leave a
-pointer stub. Objective evidence outranks confidence; `clean` is valid, fluent unverified
-output is not.
+Route each dispatch by task class to a `principal`, `senior` or `junior` model,
+or to an explicit model the adapter resolves. When several families are
+available, work as a tiered council whose depth follows the risk tier. Bind the
+applied route to the receipt. An adapter route given only as an alias records
+the alias and its capability limit; never invent task-class, role or effort
+fields. The runtime governs routing, catalogues only cache it, and the
+mechanics live in `orchestrate`. Prefer per-dispatch controls: editing a global
+provider configuration, such as `~/.codex/config.toml`, needs explicit
+authority for that path and action. Run artefacts live under `.agent-run/`.
 
-A user correction names a class, not an instance: sweep every artefact in scope for the same
-defect and report what the sweep found.
+Durable knowledge belongs in project state, specs, ADRs and runbooks;
+harness-private memory holds only cross-project preferences. Once a memory
+file's content has been promoted to its owning project doc or skill, delete the
+memory file and its `MEMORY.md` entry rather than leaving a pointer. Objective
+evidence outranks confidence. A `clean` result is a valid outcome; fluent but
+unverified output is not.
 
-| Risk | Minimum review pressure |
+Treat a user correction as naming a class of defect, not a single instance:
+sweep every artefact in scope for the same defect and report what the sweep
+found.
+
+## Review ladder
+
+| Tier | Minimum review |
 |---|---|
-| `routine` | chair plus objective/native checks |
-| `substantial` | multiple targeted lenses plus strong other-primary review |
-| `crucial` | substantial coverage plus another strong distinct-family review when available |
-| `terminal` | all preceding coverage with stronger targeted and adversarial pressure |
+| `routine` | The chair plus objective checks. |
+| `substantial` | Adds one independent review from a provider family other than the author's when one is available, otherwise a same-family review through a different lens. |
+| `crucial` | Adds at least two independent reviews with distinct lenses, from two families other than the author's when two are available. |
+| `terminal` | Adds an adversarial lens to `crucial` coverage, and the owner's explicit acceptance before merge. |
 
-For machine checking, multiple means at least two distinct targeted lenses; terminal raises that minimum to three and requires an adversarial or challenge lens.
-The other-primary leg is expected from substantial upwards when a route is available; a skipped or unavailable leg records a reason and is covered by a same-family review with a different lens. Review timing and grouping are the chair's judgement: small or low-risk changes may be reviewed once, together, after they merge into a batch; risky changes are reviewed on their own head first. Evidence, never majority voting, decides claims.
+A lens is a named question, such as correctness against the acceptance
+criteria, data and concurrency, security, or operations. Each review records
+who reviewed, from which family and through which lens. When a provider limit
+or outage blocks a cross-family leg, the review records the blocker and makes
+up for it with more thorough same-family review: more lenses, a second pass or
+a fresh context.
+
+A project may set its own ladder in its contributing guide. That ladder governs
+the project's work so long as each tier keeps at least the independence above.
+The chair decides when to review and how to group reviews: small or low-risk
+changes may be reviewed together once they have merged into a batch, but risky
+changes are reviewed on their own head first. Evidence decides claims, never a
+majority vote.
 
 ## Load depth only when triggered
 
-- intake / specification → `scope`; defect investigation → `diagnose`
-- orchestration / routing / Herdr → `orchestrate`; implementation / review → `implement`, `code-review`; lifecycle / profile → `deliver`
-- context hygiene / compaction → `session`; promotion / assurance → `release`, `evaluate`; retrospect → `retrospect`; governance → `MAINTAINING.md`
-- reader-facing prose → the owning specialist (`engineering-writing` for commits, PRs, READMEs, specs; `legal-writing` for Australian legal), else `natural-writing`, the router; drafting under another skill's lead does not exempt the prose
-- terms (chair, lane, front door, one-way door, receipt, envelope, stage owner) → `docs/glossary.md`
+- Intake and specification go to `scope`, and defect investigation to
+  `diagnose`.
+- Orchestration, routing and Herdr go to `orchestrate`; implementation and
+  review to `implement` and `code-review`; lifecycle and delivery profiles to
+  `deliver`.
+- Context hygiene and compaction go to `session`; promotion and assurance to
+  `release` and `evaluate`; retrospectives to `retrospect`; governance to
+  `MAINTAINING.md`.
+- Reader-facing prose goes to its specialist: `engineering-writing` for
+  commits, PRs, READMEs and specs, `legal-writing` for Australian legal prose,
+  and otherwise `natural-writing`, which routes the rest. Drafting under another
+  skill's lead does not exempt the prose.
+- `docs/glossary.md` defines terms such as chair, lane, front door, one-way
+  door, receipt, envelope and stage owner.
 
 ## Portable fallback
 
-Optional adapters do not displace canonical project artifacts. A skill's portable
-artifact proves only that its declared context existed; it is not evidence, route or
-task state, acceptance or authority. Its schema must require `accepted_artifact_identity`.
+Optional adapters never displace canonical project artefacts. A skill's
+portable artefact proves only that its declared context existed. It is not
+evidence, route or task state, acceptance or authority, and its schema must
+require `accepted_artifact_identity`.
