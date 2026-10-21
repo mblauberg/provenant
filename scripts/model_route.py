@@ -2248,7 +2248,8 @@ def _router() -> Any:
 
 
 def _fabric_records() -> Any:
-    path = PRODUCT_ROOT / "skills" / "orchestrate" / "scripts" / "fabric_records.py"
+    # Load code beside this router, even when its catalogue comes from an overlay.
+    path = Path(__file__).resolve().parents[1] / "skills" / "orchestrate" / "scripts" / "fabric_records.py"
     spec = importlib.util.spec_from_file_location(
         "provenant_fabric_records", path, submodule_search_locations=[str(path.parent)]
     )

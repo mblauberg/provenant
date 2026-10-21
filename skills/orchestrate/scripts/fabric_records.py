@@ -198,7 +198,7 @@ def identity_resolver():
     """Load the product's shared non-secret identity owner, including in direct CLI runs."""
     module = sys.modules.get('provider_identity')
     if module is None:
-        product = Path(os.environ.get('AGENT_FABRIC_PRODUCT_ROOT') or Path(__file__).resolve().parents[3])
+        product = Path(__file__).resolve().parents[3]
         spec = importlib.util.spec_from_file_location('provider_identity', product / 'scripts/provider_identity.py')
         module = importlib.util.module_from_spec(spec)
         sys.modules['provider_identity'] = module
