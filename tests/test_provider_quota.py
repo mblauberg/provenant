@@ -119,7 +119,7 @@ def test_missing_windows_are_unreported_never_zero(quota, monkeypatch):
 # Provider modules ---------------------------------------------------------------------------
 
 def test_registry_names_one_module_per_provider_with_the_common_interface(quota):
-    for name in ('claude', 'codex', 'cursor'):
+    for name in ('claude', 'codex', 'cursor', 'opencode'):
         module = quota.provider(name)
         assert module.ADAPTER == name and callable(module.fetch) and callable(module.default_identity)
     assert quota.provider('agy') is None
@@ -250,6 +250,60 @@ def test_cursor_session_cookie_comes_from_the_local_jwt_and_cycle_dates(quota, t
     row = quota.normalise_window(parsed['windows'][0])
     assert parsed['plan'] == 'pro'
     assert (row['name'], row['used_percent'], row['window_minutes']) == ('billing_cycle', 25, 30 * 24 * 60)
+
+
+STATS = {'models': [
+    {'model': {'id': 'deepseek-v4.1-flash', 'providerID': 'opencode-go'}, 'cost': 3.0},
+    {'model': {'id': 'glm-5.3-flash', 'providerID': 'opencode-go'}, 'cost': 1.0},
+    {'model': {'id': 'glm-5.3-flash-free', 'providerID': 'opencode'}, 'cost': 9.0}]}
+
+
+def opencode_account(quota, tmp_path, limits):
+    home = tmp_path / 'oc'
+    home.mkdir(exist_ok=True)
+    return quota.Account('opencode', 'go', home, True, options={'limits': limits} if limits else {})
+
+
+def opencode_io(quota, monkeypatch, calls):
+    monkeypatch.setattr(quota, 'executable', lambda name: '/fake/opencode')
+
+    def run(command, **kwargs):
+        calls.append(command)
+        return SimpleNamespace(returncode=0, stdout=json.dumps(STATS).encode())
+    monkeypatch.setattr(quota, 'run_process', run)
+
+
+def test_opencode_reports_paid_spend_against_configured_limits_as_a_local_estimate(quota, monkeypatch, tmp_path):
+    calls = []
+    opencode_io(quota, monkeypatch, calls)
+    account = opencode_account(quota, tmp_path, {'seven_day': 8, 'thirty_day': 40})
+    with sqlite3.connect(account.identity_dir / 'opencode.db') as db:
+        db.execute('CREATE TABLE message (id text, time_created integer, data text)')
+        for age, provider, cost in ((1, 'opencode-go', 0.5), (1, 'opencode', 5), (6, 'opencode-go', 2)):
+            when = int((NOW - timedelta(hours=age)).timestamp() * 1000)
+            db.execute('INSERT INTO message VALUES (?,?,?)', (f'{age}{provider}', when,
+                                                              json.dumps({'providerID': provider, 'cost': cost})))
+    fetched = quota.provider('opencode').fetch(account, quota.IO, NOW)
+    assert {w['name']: (w['used_percent'], w['window_minutes'], w['reset_at']) for w in fetched['windows']} == {
+        'seven_day': (50.0, WEEK, None), 'thirty_day': (10.0, 30 * 24 * 60, None)}
+    assert fetched['unreported'] == ['five_hour'] and 'local estimate' in fetched['source']
+    assert [c[-2:] for c in calls] == [['--days', '7'], ['--days', '30']]
+    account = opencode_account(quota, tmp_path, {'five_hour': 5})
+    five, = quota.provider('opencode').fetch(account, quota.IO, NOW)['windows']
+    assert (five['name'], five['used_percent']) == ('five_hour', 10.0)
+
+
+def test_opencode_without_configured_limits_is_unreported_and_never_runs_the_cli(quota, tmp_path):
+    fetched = quota.provider('opencode').fetch(opencode_account(quota, tmp_path, None), quota.IO, NOW)
+    assert fetched['windows'] == []
+    assert fetched['unreported'] == ['five_hour', 'seven_day', 'thirty_day']
+
+
+def test_opencode_cli_failure_is_a_fixed_unavailable_message(quota, monkeypatch, tmp_path):
+    monkeypatch.setattr(quota, 'executable', lambda name: '/fake/opencode')
+    monkeypatch.setattr(quota, 'run_process', lambda *a, **k: SimpleNamespace(returncode=1, stdout=b''))
+    with pytest.raises(quota.Unavailable, match='could not report local usage'):
+        quota.provider('opencode').fetch(opencode_account(quota, tmp_path, {'seven_day': 8}), quota.IO, NOW)
 
 
 def test_a_registered_provider_module_extends_quota_and_routing_without_core_changes(quota, tmp_path):

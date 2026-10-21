@@ -51,6 +51,7 @@ REGISTRY = {
     'claude': HERE / 'quota_providers/claude.py',
     'codex': HERE / 'quota_providers/codex.py',
     'cursor': HERE / 'quota_providers/cursor.py',
+    'opencode': HERE / 'quota_providers/opencode.py',
 }
 CACHE_SECONDS = 300
 HTTP_TIMEOUT = 8.0
