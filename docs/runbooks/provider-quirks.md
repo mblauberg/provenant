@@ -59,15 +59,15 @@ in `skills/orchestrate`; this page records the traps.
 
 - Sandboxed lanes run with `~/.claude.json` read-only, including atomic rewrite
   and backup siblings. Reads follow a user-managed symlink normally. A live
-  Claude smoke is pending. If Claude Code cannot start with it read-only, the
-  fallback is writable with a detect-only warning, tracked on #927.
+  read-only lane on 2026-10-22 started and answered with the file read-only
+  and left it unchanged. If a later Claude Code release cannot start that
+  way, reopen #927 rather than making the file writable.
 - Seatbelt checks `file-write*` on both ends of a hard link: a write deny on
   the existing file or on the new name blocks `ln`. Under the lane profiles'
   default write deny, a lane can only hard-link files it can already write, so
   local clones and `cp -al` work inside writable roots while protected provider
   state cannot be linked out. Keep this in mind before widening a write grant:
   anything inside the grant becomes linkable.
-
 - The in-session Agent tool picks a model tier but has no per-call effort knob;
   headless `claude -p --model <m> --effort <e>` does. `--bare` gives a clean
   minimal context for an independent verifier.
