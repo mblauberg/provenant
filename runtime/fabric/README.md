@@ -135,9 +135,31 @@ registered project, or a caller temporary directory (`TMPDIR`, `/tmp`,
 remain refused. A project is registered once any Fabric command, such as
 `fabric whoami`, has run inside it; an unregistered path is rejected with that
 route or the alternative of dispatching from the other project. For a
-directory outside the caller's, Fabric passes the owner a read root, so the run
-stays in the caller's run root, where `lanes` and `status` find it, and the
-secret scan still covers the prompt. A prompt in a credential or authentication
+directory outside the caller's, Fabric passes the owner a read root. The run
+stays in the caller's run root, where `lanes` and `status` find it. Dispatch
+records the cwd-derived project per task, so `lanes` and `lanes --wait` in that
+project also find the task, including from its registered worktrees. Dispatch
+writes a pointer under the target project's `.agent-run/runs/pointers/`;
+discovery reads its own run root and these pointers, corroborating tasks and
+routes against the source owner record or receipts. The pointer is
+best effort: when the target run root cannot be written, dispatch still
+starts, records a `lane_pointer_failed` warning in the run's
+`dispatch-status.json`, and the lane is listed only from its source project. A
+pointer is pruned only when its source run directory is gone, so the source
+reaper's retention rules decide its lifetime; a pointer whose source no longer
+maps any pointed task to this project (for example after a resume moved it) is
+skipped but kept, since a later resume may move the task back. An imported
+row shows its run, result and receipt paths absolute under the source run
+root. `fabric_status` and `fabric_output` by id still resolve from the source
+project only. A run that
+finished outside the 24-hour lanes window is skipped before its receipts are
+read unless history is requested. Recorded cwd projects are compared after
+resolving symlinks. Other tasks in a mixed-project batch stay private to
+their projects. Runs created before this change stay under the chair's project;
+there is no registry-wide backfill. A resume recomputes the resumed task's
+project from its effective cwd and writes its target pointer. The secret scan
+still covers the prompt.
+A prompt in a credential or authentication
 store is refused wherever it sits. A resume reuses the saved read roots only
 while each still resolves to the same directory in a registered project. The Python owner validates provider capabilities and
 applies controls; Fabric does not claim a stronger guarantee than its receipt.
@@ -461,7 +483,15 @@ recent runs (at most 20 task rows); an ID reads that run or task. Each row has
 `id`, `run_id`, `task_id`, `run_path`, `state`, `status`, `route`, `model`,
 `started_at`, `ended_at`, `last_progress_at`, `pgid`, `pgid_alive`,
 `result_path`, `receipt_path`, `writer`, `worktree` and `attempt`. Paths are
-relative to the project's `.agent-run` root. `ended_at` is `null` until the
+relative to the project's `.agent-run` root. A task imported from another
+project has `source_project` naming the launching project, an empty `run_path`
+and null artifact paths. Read its artifacts, status or output from that source
+project; `lanes --project <source_project>` also returns its local paths. Older
+runs without a recorded cwd project remain readable from their original root.
+`source_project` is display-only. A corrupt or unreadable pointed run leaves
+local lanes readable and reports `discovery_error`. Lane discovery does not
+consult the project registry.
+`ended_at` is `null` until the
 attempt is terminal; a closure the owner never wrote takes the run's recorded
 finish time. Missing facts are `null`; `pgid_alive: null` means
 the process identity cannot be verified. Both `tasks/<id>/attempt-NNN/` and

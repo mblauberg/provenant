@@ -11,7 +11,7 @@
  * owner handles its descendants. When an owner cannot finish cleanup, these
  * records do not authorise a broader group kill that could hit a shared host.
  */
-import { runRoot, withoutGitRedirects } from "./identity.js";
+import { projectRoot, runRoot, withoutGitRedirects } from "./identity.js";
 import { federatedLane } from "./hosts.js";
 import { canonicalSuccessStatus, isSuccessStatus } from "./success-status.js";
 export { runRoot } from "./identity.js";
@@ -608,6 +608,7 @@ async function legacyStatus(
   id?: string,
   waitSeconds = 0,
   signal?: AbortSignal,
+  onlyRunDir?: string,
 ): Promise<Record<string, unknown>> {
   if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 55) {
     return { status: "rejected", error: "wait_invalid", fix: "Pass wait_seconds from 0 to 55." };
@@ -620,9 +621,8 @@ async function legacyStatus(
   const deadline = Date.now() + waitSeconds * 1000;
   while (true) {
     signal?.throwIfAborted();
-    const candidates = runDirectoryNames(workspace)
-      .flatMap((name) => {
-        const runDir = join(runRoot(workspace), name);
+    const candidates = (onlyRunDir ? [onlyRunDir] : runDirectoryNames(workspace).map((name) => join(runRoot(workspace), name)))
+      .flatMap((runDir) => {
         try {
           const metadata = lstatSync(runDir);
           if (!metadata.isDirectory() || metadata.isSymbolicLink()) return [];
@@ -972,6 +972,25 @@ function v1Rows(runDir: string): Record<string, any>[] {
   return rows.sort((a, b) => rank(a) - rank(b) || String(a.task_id).localeCompare(String(b.task_id), "en", { numeric: true }));
 }
 
+function wrapLegacyRow(row: Record<string, any>): Record<string, any> {
+  const metadata = readJson(join(row.run_dir, "dispatch-status.json"));
+  const owner = readOwnerRecord(row.run_dir);
+  return {
+    ...row,
+    schema: "fabric.status.v1",
+    run_id: shortRunId(row.run_dir),
+    task_id: metadata?.task_id ?? owner?.task_id,
+    batch_id: metadata?.batch_id ?? owner?.batch_id,
+    state: row.status === "running" ? "running" : "terminal",
+    attempt: 1,
+    attempts: [row],
+    attempt_count: 1,
+    started_at: metadata?.started_at ?? owner?.started_at ?? new Date(statSync(row.run_dir).mtimeMs).toISOString(),
+    paths: metadata?.paths ?? { result: row.result_path },
+    worktree: metadata?.worktree ?? null,
+  };
+}
+
 /** v1 is authoritative; the old reader remains isolated for wave-1 receipts. */
 export async function statusRows(
   workspace: string,
@@ -983,6 +1002,7 @@ export async function statusRows(
   includeLedger = true,
   limit: number | null = 20,
   includeHistory = false,
+  includePointers = false,
 ): Promise<StatusResult> {
   if (!Number.isInteger(waitSeconds) || waitSeconds < 0 || waitSeconds > 55)
     return { status: "rejected", error: "wait_invalid", fix: "Pass wait_seconds from 0 to 55." };
@@ -993,26 +1013,122 @@ export async function statusRows(
     signal?.throwIfAborted();
     const root = runRoot(workspace);
     const candidates = runDirectoryNames(workspace).map((name) => join(root, name));
-    const v1 = candidates.flatMap(v1Rows);
+    const project = projectRoot(workspace);
+    const imported: Record<string, any>[] = [];
+    const discoveryErrors: string[] = [];
+    const pointers = join(root, "runs/pointers");
+    let entries: string[] = [];
+    try {
+      if (includePointers && !lstatSync(pointers).isSymbolicLink())
+        entries = readdirSync(pointers).filter((name) => name.endsWith(".json"));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") discoveryErrors.push(String(error));
+    }
+    for (const name of entries) {
+      signal?.throwIfAborted();
+      try {
+        const pointerPath = join(pointers, name);
+        const pointer = readJson(pointerPath);
+        if (!pointer || typeof pointer.run_dir !== "string" || !isAbsolute(pointer.run_dir) ||
+            !Array.isArray(pointer.task_ids) || typeof pointer.source_project !== "string") continue;
+        const runDir = pointer.run_dir;
+        const modern = /^\d{8}-\d{4}-(dispatch|batch)-/u.test(basename(runDir)) && basename(dirname(runDir)) === "runs";
+        const sourceRoot = modern ? dirname(dirname(runDir)) : dirname(runDir);
+        if (basename(sourceRoot) !== ".agent-run" || (!modern && !basename(runDir).startsWith("mcp-"))) continue;
+        let info;
+        try { info = lstatSync(runDir); }
+        catch (error) {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            // A concurrent reader may have retired the same pointer first.
+            try { unlinkSync(pointerPath); }
+            catch (unlinkError) { if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") throw unlinkError; }
+            continue;
+          }
+          throw error;
+        }
+        if (!info.isDirectory() || info.isSymbolicLink() || candidates.includes(runDir)) continue;
+        const metadata = readJson(join(runDir, "dispatch-status.json"));
+        if (!metadata) throw new Error(`run_read_failed: ${runDir}`);
+        const projects = metadata.cwd_projects;
+        // Dispatch writes canonical projectRoot values. A hand-made or older
+        // status may hold a symlinked spelling (/var vs /private/var), so each
+        // value is realpath-canonicalised on read; a value that still does not
+        // name this project (for example a worktree path rather than its
+        // project root) is treated as another project's.
+        const named = (task: unknown): boolean => {
+          const value = projects && typeof projects === "object" && !Array.isArray(projects) && typeof task === "string"
+            ? (projects as Record<string, unknown>)[task] : undefined;
+          if (typeof value !== "string" || !isAbsolute(value)) return false;
+          if (value === project) return true;
+          try { return realpathSync.native(value) === project; } catch { return false; }
+        };
+        // A resume that moved every pointed task elsewhere leaves this index
+        // stale. It is skipped, not unlinked: a later resume may move the task
+        // back and atomically replace this pointer after this read, and only
+        // the source reaper decides when a run's index may go (ENOENT above).
+        if (!pointer.task_ids.some(named)) continue;
+        const finished = metadata.status !== "running" && typeof metadata.finished_at === "string"
+          ? Date.parse(metadata.finished_at) : Number.NaN;
+        // Outside the lanes window: skip before reading any receipt. Age never
+        // prunes a pointer; the source reaper's eligibility (resumable runs,
+        // failed-run retention, liveness) governs, and its removal of the run
+        // directory is what retires the pointer.
+        if (Number.isFinite(finished) && !includeHistory && finished <= Date.now() - 86400000) continue;
+        const taskIds = Array.isArray(metadata.task_ids) ? metadata.task_ids : [];
+        const routes = Array.isArray(metadata.routes) ? metadata.routes : [];
+        const recorded = v1Rows(runDir);
+        const hasRoute = (row: Record<string, any> | undefined): boolean => {
+          const route = row?.provenance?.requested ?? row?.route ?? row;
+          return typeof route?.adapter === "string" &&
+            [row?.provenance?.resolved_model, route.resolved_model, route.model, route.alias]
+              .some((value) => typeof value === "string" && value.length > 0);
+        };
+        // The pointer is only an index. The source must independently name
+        // this target and task with a route; source_project is display-only.
+        const owner = readOwnerRecord(runDir);
+        // Closure can remove dispatch-owner.json. Its stamped identity in
+        // dispatch-status.json survives, together with the task routes.
+        const owned = (!!owner && typeof owner.workspace === "string" && runRoot(owner.workspace) === sourceRoot) ||
+          (positiveInteger(metadata.owner_pid) && typeof metadata.run_token === "string" &&
+            (metadata.kind === "dispatch" || metadata.kind === "batch"));
+        const tasks = pointer.task_ids.filter((task): task is string => {
+          if (typeof task !== "string" || !named(task)) return false;
+          const index = taskIds.indexOf(task);
+          return (owned && index >= 0 && hasRoute(routes[index])) ||
+            recorded.some((row) => row.task_id === task && (hasRoute(row) || row.attempts?.some(hasRoute)));
+        });
+        if (!tasks.length) continue;
+        let rows = recorded;
+        if (!rows.length) {
+          const legacy = await legacyStatus(workspace, runDir, 0, signal, runDir);
+          if (legacy.error) throw new Error(String(legacy.error));
+          rows = [wrapLegacyRow(legacy)];
+        }
+        for (const row of rows) {
+          // Aggregate filtering/sorting must not coerce corrupt foreign facts.
+          if ([row.started_at, row.ended_at].some((value) => value != null && typeof value !== "string"))
+            throw new Error(`run_read_failed: invalid timestamp in ${runDir}`);
+          if (typeof row.task_id === "string") {
+            if (tasks.includes(row.task_id)) imported.push({ ...row, source_project: pointer.source_project });
+          } else {
+            // A batch has only an owner row before its first task receipt.
+            for (const task of tasks) {
+              const route = routes[taskIds.indexOf(task)];
+              // Corroborated by a receipt alone, a task may be absent from
+              // metadata.task_ids; its own receipt row will carry the route.
+              if (!route) continue;
+              imported.push({ ...row, id: task, task_id: task, source_project: pointer.source_project,
+                adapter: route.adapter, model: route.resolved_model ?? route.model ?? route.alias });
+            }
+          }
+        }
+      } catch (error) {
+        if (signal?.aborted) throw error;
+        discoveryErrors.push(`${name}: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+    const v1 = [...candidates.flatMap(v1Rows), ...imported];
     const v1Dirs = new Set(v1.map((row) => row.run_dir));
-    const wrap = (row: Record<string, any>): Record<string, any> => {
-      const metadata = readJson(join(row.run_dir, "dispatch-status.json"));
-      const owner = readOwnerRecord(row.run_dir);
-      return {
-        ...row,
-        schema: "fabric.status.v1",
-        run_id: shortRunId(row.run_dir),
-        task_id: metadata?.task_id ?? owner?.task_id,
-        batch_id: metadata?.batch_id ?? owner?.batch_id,
-        state: row.status === "running" ? "running" : "terminal",
-        attempt: 1,
-        attempts: [row],
-        attempt_count: 1,
-        started_at: metadata?.started_at ?? owner?.started_at ?? new Date(statSync(row.run_dir).mtimeMs).toISOString(),
-        paths: metadata?.paths ?? { result: row.result_path },
-        worktree: metadata?.worktree ?? null,
-      };
-    };
     let rows: Record<string, any>[] = [];
     if (ids?.length) {
       for (const id of ids) {
@@ -1024,7 +1140,7 @@ export async function statusRows(
         } else {
           const legacy = await legacyStatus(workspace, id);
           if (legacy.error) return legacy;
-          rows.push(wrap(legacy));
+          rows.push(wrapLegacyRow(legacy));
         }
       }
       rows = rows.filter(
@@ -1035,7 +1151,7 @@ export async function statusRows(
       const legacy = await legacyStatus(workspace);
       rows = [
         ...v1,
-        ...((legacy.runs ?? []) as Record<string, any>[]).filter((row) => !v1Dirs.has(row.run_dir)).map(wrap),
+        ...((legacy.runs ?? []) as Record<string, any>[]).filter((row) => !v1Dirs.has(row.run_dir)).map(wrapLegacyRow),
       ]
         .filter((row) => includeHistory || row.state !== "terminal" || Date.parse(row.ended_at ?? row.started_at) > Date.now() - 86400000)
         .sort((a, b) => Date.parse(b.started_at) - Date.parse(a.started_at));
@@ -1052,7 +1168,7 @@ export async function statusRows(
         if (!cache.has(row.worktree)) cache.set(row.worktree, ledger(row.worktree));
         return { ...row, ...await cache.get(row.worktree) };
       }));
-      return { schema: "fabric.status.v1", runs: enriched, ...(omitted ? { omitted } : {}) };
+      return { schema: "fabric.status.v1", runs: enriched, ...(discoveryErrors.length ? { discovery_error: discoveryErrors.join("; ") } : {}), ...(omitted ? { omitted } : {}) };
     }
     await new Promise((done) => setTimeout(done, Math.min(100, deadline - Date.now())));
   }
