@@ -26,8 +26,12 @@ requires multiple targeted lenses and the other primary; `crucial` work adds a
 distinct-family review when available, and terminal work adds stronger targeted
 and adversarial pressure. `HARNESS.md` owns the ladder and
 `skills/deliver/scripts/validate_delivery.py` enforces its load-bearing legs.
-The three gold gates are the only places a user must decide; everything inside
-the `deliver` kernel is agent work bound to one receipt.
+Gold gates reserve scope and one-way doors, any required explicit acceptance,
+and external-action authority for the user. Objective checks and tier-required
+review meet delivery acceptance; the chair reports the outcome and the user
+may still reject it. Explicit user acceptance is required only for `terminal`
+work or when the approved scope asks for it. A project may name its landing
+gate as acceptance (Sealle: landing is acceptance for everything).
 
 The tier is derived rather than declared. `scope` rates every factor in
 `config/risk-policy.json`, the highest tier any rating maps to is the run's
@@ -72,8 +76,8 @@ which is advisory and recorded when unavailable or skipped.
 
 ```mermaid
 flowchart TB
-    accTitle: The full delivery lifecycle and its three user gates
-    accDescr: Session prepares context and scope produces the specification, risk tier and authority. A user gate approves the specification or sends it back to scope. Inside the deliver kernel, execute runs implement, tdd, refactor or diagnose, then deterministic verification runs, then a separate conditional evaluate gate runs only when behaviour is stochastic or judgement bearing, then independent targeted review and other-primary review run in fresh contexts that never authored the work. Review pressure scales with risk according to HARNESS.md, with stronger targeted and adversarial pressure at terminal. A failed check or blocking finding returns to execute under the risk-tier repair budget: routine 2 cycles, substantial 4, and crucial and terminal 5, a guardrail against unbounded loops, not a target. The user acceptance gate accepts, rescopes or stops. Any external action needs a separate user authorisation before release and observation. A failed observation opens diagnose. Every path that returns work to scope, a structural review finding, a rescope at the acceptance gate, diagnostic evidence and the retrospect flywheel, converges on one back-to-scope collector rather than five separate return edges.
+    accTitle: The full delivery lifecycle and its user gates
+    accDescr: Session prepares context and scope produces the specification, risk tier and authority. A user gate approves the specification or sends it back to scope. Inside the deliver kernel, execute runs implement, tdd, refactor or diagnose, then deterministic verification runs, then a separate conditional evaluate gate runs only when behaviour is stochastic or judgement bearing, then independent targeted review and other-primary review run in fresh contexts that never authored the work. Review pressure scales with risk according to HARNESS.md, with stronger targeted and adversarial pressure at terminal. A failed check or blocking finding returns to execute under the risk-tier repair budget: routine 2 cycles, substantial 4, and crucial and terminal 5, a guardrail against unbounded loops, not a target. Objective checks and tier-required review meet acceptance, or a project may name its landing gate. Explicit user acceptance is required only for terminal work or approved scope. The chair reports the outcome and the user may reject it. Any external action needs a separate user authorisation before release and observation. A failed observation opens diagnose. Every path that returns work to scope, a structural review finding, a rescope at the acceptance gate, diagnostic evidence and the retrospect flywheel, converges on one back-to-scope collector rather than five separate return edges.
     SE(["session"]) --> SC["scope<br/>spec, risk tier, authority"]
     SC --> G1{{"USER GATE<br/>approve spec, risk tier, one-way doors"}}
     G1 -. "send back" .-> SC
@@ -91,10 +95,14 @@ flowchart TB
       RV -. "repair by tier: routine 2, substantial 4, crucial/terminal 5" .-> EX
     end
 
-    RV --> G2{{"USER GATE<br/>acceptance"}}
+    RV --> AC["acceptance<br/>checks + required review or project landing"]
+    AC --> Q2{"terminal or explicit acceptance<br/>required by approved scope?"}
+    Q2 -- "yes" --> G2{{"USER GATE<br/>explicit acceptance"}}
+    Q2 -- "no" --> OUT["chair reports outcome"]
+    G2 -- "accept" --> OUT
     G2 -. "stop" .-> HALT(["stop"])
-    G2 -- "accept" --> RT["retrospect"]
-    G2 == "accept, external action" ==> G3{{"USER GATE<br/>authorise the external action"}}
+    OUT --> RT["retrospect"]
+    OUT == "external action" ==> G3{{"USER GATE<br/>authorise the external action"}}
     G3 --> RL["release and observe"]
     RL -. "observation failed" .-> DG["diagnose"]
     RL --> RT
@@ -144,7 +152,7 @@ User approval is required for:
 - one-way-door architecture and risk-tier downgrades;
 - destructive, irreversible or externally visible actions;
 - external communications and production promotion;
-- final acceptance.
+- final acceptance for `terminal` work or when the approved scope asks for it.
 
 Routine reversible implementation inside approved authority does not need a
 stream of micro-approvals.
@@ -169,7 +177,10 @@ rejects.
 
 Ordering is not certified, because a receipt cannot certify its own history:
 the agent that writes the transitions writes the receipt in the same turn. What
-is checked is what each recorded gate demands. Human acceptance recorded as
+is checked is what each recorded gate demands. The current schema still uses
+`human_gates.acceptance` for explicit user approval; this retained code contract
+is catalogued in [issue #1025](https://github.com/mblauberg/provenant/issues/1025) and
+must not be auto-approved from checks. Human acceptance recorded as
 approved requires the profile's deterministic and judgement evidence, the
 review ladder, the security surfaces and the measures to be present and
 passing. Release approval requires acceptance. A closed run, meaning release
@@ -205,7 +216,7 @@ evidence. `scope` owns the
 design decision and `engineering-docs` owns canonical placement. `caveman` is a presentation overlay only; it cannot narrow
 evidence, authority, high-stakes clarity or an artifact's domain-writing rules.
 
-`release` promotes one digest- or Git-revision-bound, user-accepted artifact through a separately
+`release` promotes one digest- or Git-revision-bound, accepted artifact through a separately
 authorised `deploy`, `publish`, `share`, `send` or `activate` action. Targets are
 typed as environments, recipients or audiences; execution may use an approved
 command, connector or named user operation. Completion requires target-visible

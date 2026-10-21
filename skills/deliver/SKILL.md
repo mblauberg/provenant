@@ -1,6 +1,6 @@
 ---
 name: deliver
-description: "Use for taking an approved research, analysis, document, or agent-product outcome through evidence, review, and user acceptance. For a software change, unsettled scope, or release, use implement, scope, or release."
+description: "Use for taking an approved research, analysis, document, or agent-product outcome through evidence, review, and acceptance. For a software change, unsettled scope, or release, use implement, scope, or release."
 ---
 
 # Deliver
@@ -60,8 +60,11 @@ inventing.
    `"$(provenant root)/skills/deliver/scripts/validate_delivery.py"
    .agent-run/runs/<YYYYMMDD-HHMM>-delivery-<slug>-<rand6>/RUN.json --workspace-root "$PWD" --verify-hashes` (plus
    digest-bound `--project-policy` when used).
-   A receipt that clears the machine gates is machine-ready, not complete.
-8. User acceptance and external release are separate. Define observation
+   Acceptance is met by objective checks and the review required by the tier.
+8. The chair reports the outcome; the user may still reject it. Explicit user
+   acceptance is required only for `terminal` work or when the approved scope
+   asks for it. A project may name its landing gate as acceptance. External
+   release needs separate user authority. Define observation
    before release; close only after its evidence window passes. Feed incidents
    into `retrospect`.
 

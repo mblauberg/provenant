@@ -1,5 +1,14 @@
 # Software delivery contract
 
+Delivery acceptance is met by objective checks and tier-required review; the
+chair reports the outcome and the user may still reject it. Explicit user
+acceptance is required only for `terminal` work or when the approved scope
+asks for it. A project may name its landing gate as acceptance. The current
+receipt code still enforces explicit human approval; the field descriptions
+below document that compatibility constraint, not a universal user gate.
+Do not fabricate approval. See the
+[issue #1025](https://github.com/mblauberg/provenant/issues/1025) for code sites.
+
 `implement` executes the `software` profile inside the single canonical
 `delivery-run` receipt. Use the complete `init` command in `deliver` with
 profile `software` to create `.agent-run/runs/<run-dir>/RUN.json`, then use the delivery
@@ -37,8 +46,9 @@ docs, fixtures and the PR evidence index. That curated projection is public
 evidence; it does not replace or weaken validation of the private canonical
 receipt.
 
-A receipt that clears the machine gates is machine-ready, not complete. User
-acceptance and any production promotion remain separate gates.
+Report delivery acceptance when its checks and required review pass. The
+current receipt may remain blocked on its legacy human field; report that
+separately. Production promotion requires separate user authority.
 
 ## Terminalisation
 
@@ -69,8 +79,9 @@ human acceptance is recorded, and adds:
   retained by the receipt.
 
 The merged tree must equal the reviewed PR-head tree, and `ci-status` binds the
-merge commit. Validate the updated receipt with `--verify-hashes` before asking
-for acceptance. Only explicit acceptance records the
+merge commit. Validate the updated receipt with `--verify-hashes` before
+reporting acceptance or requesting any required user decision. In the current
+schema, only explicit user acceptance records the
 `human_gates.acceptance` approval on that same receipt, and release approval is
 a separate gate; release validation will not reconstruct missing evidence
 later. Frozen schema-v1 Git-archive receipts remain readable,

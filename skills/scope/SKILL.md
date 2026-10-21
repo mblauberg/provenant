@@ -70,7 +70,11 @@ project files. In project-write mode, land only approved artifacts:
 | Work items | declared project tracker |
 | Durable context | declared project-docs owner; run state stays run-local |
 
-Write observable acceptance criteria. Preserve project schemas; pin only
+Write observable acceptance criteria. Name the objective checks, tier-required
+review and any project landing gate that meet acceptance. Record any scoped
+requirement for explicit user acceptance; it is otherwise required only for
+`terminal` work. The chair reports the outcome and the user may still reject it.
+Preserve project schemas; pin only
 decision-critical interfaces with native locks/constraints. Link or cache
 authority with its source and relevant date/version; vendor only with
 redistribution permission.

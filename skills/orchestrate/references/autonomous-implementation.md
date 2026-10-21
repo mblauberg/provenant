@@ -51,18 +51,20 @@ one.
    adds no parallel review path of its own — it delegates the entire
    verified-implementation loop, including receipt creation; it never
    pre-supposes a receipt is already sitting there.
-3. **STOP** at `implement`'s own user-acceptance gate (machine gates cleared
-   / PR opened for review) unless the nearest repository merge policy
-   authorises agent merges, in which case merge once that policy's review
-   and CI gates pass on the exact head. Where no such policy exists, do not
-   merge. Never promote, and do not carry
+3. **COMPLETE** delivery acceptance through objective checks and tier-required
+   review. The chair reports the outcome; the user may still reject it. Stop
+   for explicit user acceptance only for `terminal` work or when the approved
+   scope asks for it. A project may name its landing gate as acceptance. If
+   the nearest repository merge policy authorises agent merges, merge once
+   its review and CI gates pass on the exact head. Where no such policy exists,
+   do not merge. Never promote, and do not carry
    that issue's `RUN.json` past the state `implement` leaves it in. **Never
    fork a new receipt** — the canonical `delivery-run` from
    `deliver/templates/RUN.template.json`, created by `implement` at this
    mode's direction for this specific issue, is the only receipt; this mode
    reads and reports it, it never replaces it and never keeps a shadow
    receipt of its own.
-4. **RECORD** the stopped issue (id, receipt path, gate reached) and advance
+4. **RECORD** the completed or gated issue (id, receipt path, gate reached) and advance
    to the next ready/accepted issue.
 5. **DEFER** a blocked or repair-exhausted issue back to the user/`scope`,
    exactly as a standalone `implement` run would (its scaled repair-budget per
@@ -78,7 +80,7 @@ one.
 |---|---|---|
 | Scope source | pre-scoped accepted/ready issues only; never scopes | self-scopes open-ended missions |
 | Duration | one bounded pass over the current queue snapshot | persistent, survives sessions/crashes, until user `STATUS: STOP` |
-| User gate | per issue: user PR-review/merge by default, or the repository's agent-merge policy where one exists | user-out-of-loop during the loop; reaches users only at hard/one-way-door gates |
+| User gate | scope and one-way doors; final acceptance only for `terminal` or approved scope; repository merge policy governs landing | user-out-of-loop during the loop; reaches users only at hard/one-way-door gates |
 | State | uses `implement`/`deliver` receipts only, no durable lab state | `GOAL.md`/`STATE.md`/`QUEUE.md`/`HANDOFF.md` durable cross-session state; decision records delegated to `implement`/`deliver` |
 | Authority | lower — never proceeds past the per-issue merge gate its repository's policy sets | higher — authorised to keep driving without per-item user sign-off |
 

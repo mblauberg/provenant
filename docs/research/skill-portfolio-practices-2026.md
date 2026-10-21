@@ -1,5 +1,11 @@
 # Agent skill portfolio: 2026 research and refactor
 
+Acceptance policy note (21 October 2026): historical references below to a
+mandatory final human gate describe the policy at the recorded revision.
+Current delivery acceptance is met by objective checks and tier-required review;
+explicit user acceptance applies only to `terminal` work or approved scope.
+A project may name its landing gate as acceptance. External-action gates remain.
+
 Status: Dated implementation research and decision record with a current-state
 mapping
 Evidence cut-off: 11 July 2026

@@ -115,5 +115,7 @@ blind judge scored 256 items after deterministic checks.
   contract, not behavioural routing quality; a deliberate direct-provider
   batch run is required for the semantic result.
 - A completed routing regression establishes only its frozen synthetic cases.
-  The enclosing delivery receipt and human retain acceptance and release
-  authority.
+  The enclosing lifecycle requires objective checks and tier-required review
+  for acceptance; explicit user acceptance applies only to `terminal` work or
+  approved scope. Release retains separate user authority. Frozen results and
+  predecessor prompts retain the policy wording at their recorded revision.

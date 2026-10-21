@@ -44,8 +44,9 @@ to Git. The target is a small stable kernel plus profiles and existing skills.
   from the shared contract.
 - Bind scope, authority, design, evidence, review, acceptance, release,
   observation and improvement through typed receipts.
-- Keep users at consequential intent, one-way-door, disclosure, acceptance and
-  promotion gates.
+- Keep users at consequential intent, one-way-door, disclosure and promotion
+  gates; explicit final acceptance applies only to `terminal` work or when
+  the approved scope asks for it.
 - Make harness improvement measurable, privacy-safe and regression-tested.
 - Keep Claude Code and Codex equal primaries; use other families as additive
   dissent, never uncorroborated blockers.
@@ -73,12 +74,16 @@ context
   -> behavioural/domain evaluation where needed
   -> independent multi-lens review
   -> bounded repair loop
-  -> [USER: final acceptance]
+  -> acceptance: objective checks plus tier-required review, or project landing
+  -> [USER: explicit acceptance only for terminal or approved scope]
   -> [USER: external release/promotion]
   -> observation window
   -> retrospective proposal and regression
   -> next intent
 ```
+
+The chair reports the outcome and the user may still reject it. A project may
+name its landing gate as acceptance (Sealle: landing is acceptance for everything).
 
 A failed deterministic or review gate returns to delivery. A finding that
 changes accepted intent, authority or a one-way-door design returns to the
@@ -97,7 +102,12 @@ agent that performed the run cannot certify its own ordering.
 
 #### Recorded gates
 
-The gates a receipt records, each an independent flat fact:
+The gates the current schema records, each an independent flat fact. Its
+explicit human acceptance requirement remains a code-alignment follow-up;
+see [issue #1025](https://github.com/mblauberg/provenant/issues/1025). Do not record
+a user approval that did not occur.
+
+Recorded gates:
 
 - `intent.approval` and `design.status`, each bound to a digested artifact and
   to passing human approval evidence.
@@ -452,7 +462,10 @@ The lifecycle requirements remain satisfied when:
     budgets pass.
 11. The other-primary reviewer and fresh targeted reviewers independently report
     no unresolved blocking findings.
-12. The user accepts the lifecycle outcome; release remains a separate gate.
+12. Objective checks and tier-required review meet delivery acceptance; the
+    chair reports the outcome and the user may still reject it. Explicit user
+    acceptance is required only for `terminal` work or when approved scope
+    asks for it. Release remains a separate user gate.
 
 ## User authority boundaries
 

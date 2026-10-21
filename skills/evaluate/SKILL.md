@@ -66,7 +66,9 @@ Before you call a receipt final, read it against this checklist:
   the delivery receipt records.
 
 `pass` is a machine assurance result for the named distribution, not general
-safety or user acceptance. Attach it to the canonical delivery receipt; only
-that lifecycle's user gate can mark the outcome accepted. Unsupported receipt
+safety or delivery acceptance. Attach it to the canonical delivery receipt;
+the enclosing lifecycle combines objective checks with the review required
+by the tier to meet acceptance. Explicit user acceptance is required only
+for `terminal` work or when the approved scope asks for it. Unsupported receipt
 shapes fail closed; rerun them from a freshly frozen plan instead of migrating
 or guessing missing evidence.

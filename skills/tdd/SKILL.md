@@ -132,4 +132,5 @@ For a bug, reproduce the failing condition as the regression test, asserting
 the corrected behaviour rather than today's output or error text; watch it
 fail, then repair and watch it pass. If no correct seam reaches the bug, route
 to `diagnose`; do not bless a shallow test. `implement` owns independent review,
-repair loops, documentation and user acceptance.
+repair loops, documentation and delivery acceptance under the tier and approved
+scope.

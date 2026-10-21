@@ -42,7 +42,7 @@ mutation {
       {name: "Ready", color: BLUE, description: "Accepted with bounded scope, authority and acceptance evidence."},
       {name: "In progress", color: YELLOW, description: "An owner is executing the accepted work."},
       {name: "In review", color: ORANGE, description: "The pull request, checks or independent review is active."},
-      {name: "Awaiting user", color: PURPLE, description: "Machine work is ready but a user decision or acceptance remains."},
+      {name: "Awaiting user", color: PURPLE, description: "A user decision remains, including explicit acceptance for terminal work or approved scope."},
       {name: "Done", color: GREEN, description: "The item is integrated, or closed with its terminal reason recorded."}
     ]
   }) {

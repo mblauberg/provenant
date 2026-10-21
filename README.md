@@ -21,7 +21,7 @@ author as the only reviewer. Provenant puts structure around that:
 - it runs **deterministic checks** before any result surfaces for review;
 - it adds **review by the _other_ model family** once the work is substantial:
   Claude checks Codex, Codex checks Claude; and
-- it keeps **acceptance and release as separate user decisions**.
+- it meets **acceptance through checks and required review**, with separate user authority for release.
 
 A change therefore arrives already scoped, verified and read by a context that
 did not write it, so user attention goes to judgement rather than to catching an
@@ -229,31 +229,39 @@ Each task has a front-door skill; the agent loads it when a request matches.
 
 ## Lifecycle
 
-Every change runs the delivery loop and stops at three gates reserved to the
-user; receipts declare approval rather than authenticating it.
+Every change runs the delivery loop. Users approve scope and one-way doors;
+objective checks and tier-required review meet delivery acceptance. The chair
+reports the outcome and the user may still reject it. Explicit user acceptance
+is required only for `terminal` work or when the approved scope asks for it.
+A project may name its landing gate as acceptance. Release keeps its separate
+user authority; receipts declare approval rather than authenticating it.
 
 ```mermaid
 flowchart TB
-    accTitle: The delivery loop and its three user gates
-    accDescr: After a session sets up clean context, the deliver kernel runs the loop top to bottom: scope writes the specification and risk tier, a user gate approves it, implement writes the test first whenever observable behaviour changes, verify runs deterministic checks, and review reads the work in a fresh context that never wrote it, using targeted lenses plus the other primary from the substantial tier up. Two dotted edges return: the approval gate sends the plan back to scope, and a blocking review finding sends the work back to implement for a bounded repair. A user gate then accepts, leading to retrospect and the next cycle. Release and observe sit outside the loop, behind a third user gate that authorises the external action.
+    accTitle: The delivery loop and its user gates
+    accDescr: After a session sets up clean context, the deliver kernel runs the loop top to bottom: scope writes the specification and risk tier, a user gate approves it, implement writes the test first whenever observable behaviour changes, verify runs deterministic checks, and review reads the work in a fresh context that never wrote it, using targeted lenses plus the other primary from the substantial tier up. Two dotted edges return: the approval gate sends the plan back to scope, and a blocking review finding sends the work back to implement for a bounded repair. Checks and required review meet acceptance; terminal work and approved scope may require explicit user acceptance. The chair reports the outcome and the user may reject it. Release and observe sit outside the loop, behind a separate user gate that authorises the external action.
     SC["scope · spec, risk tier, acceptance criteria"] --> G1{{"USER · approve the spec"}}
     G1 -. "send back" .-> SC
     G1 --> IM["implement · test first when behaviour changes"]
     IM --> VF["verify · deterministic checks"]
     VF --> RV["review · fresh context<br/>targeted lenses + other primary at substantial+"]
     RV -. "blocking finding" .-> IM
-    RV --> G2{{"USER · accept"}}
-    G2 --> RT["retrospect"]
-    G2 -. "only if it ships" .-> G3{{"USER · authorise the action"}}
+    RV --> AC["acceptance · checks + required review<br/>or project landing gate"]
+    AC --> Q{"terminal or explicit acceptance<br/>required by approved scope?"}
+    Q -- "yes" --> G2{{"USER · accept"}}
+    Q -- "no" --> OUT["chair reports outcome"]
+    G2 --> OUT
+    OUT --> RT["retrospect"]
+    OUT -. "only if it ships" .-> G3{{"USER · authorise the action"}}
     G3 --> RL["release · observe"]
 
     classDef gate fill:#8a6d1f,stroke:#f0c674,color:#ffffff,stroke-width:2px
     class G1,G2,G3 gate
 ```
 
-Gold hexagons are user gates; specification approval and acceptance can also
-return work for revision. Scoping is usually a conversation: a decision packet
-with choices and a recommendation, owner calls parked as named questions rather
+Gold hexagons are user gates. Specification approval and any required explicit
+acceptance can return work for revision. Scoping is usually a conversation:
+a decision packet with choices and a recommendation, owner calls parked as named questions rather
 than guesses, and the [`grill-me`](skills/grill-me/SKILL.md) interview, one
 question per round, while material decisions stay unresolved.
 
@@ -286,7 +294,7 @@ blocking.
   post-merge pruning, force-removal and unauthorised shared-branch pushes stay
   gated;
 - no two agents write one source surface at once; and
-- specification approval, acceptance and release stay separate user decisions
+- specification approval and release remain user decisions; final acceptance needs a user only for `terminal` work or approved scope
   ([`HARNESS.md`](HARNESS.md)).
 
 Provider workers can be dispatched through Fabric MCP or the direct command
