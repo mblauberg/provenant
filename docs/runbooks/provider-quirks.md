@@ -56,10 +56,16 @@ in `skills/orchestrate`; this page records the traps.
   each of them is a link. agy rewrites some top-level state by temp-and-rename,
   which replaces the overlay's link rather than the real file. After the
   attempt the harness copies those granted files back, but never a link, a
-  token file or an oversized file. It then removes the overlay. Staging,
-  copy-back and removal walk with `O_NOFOLLOW` from the attempt `tmp` held
-  open since staging, or from `/`, so a lane that swaps `tmp`, the overlay or
-  a real state parent for a link cannot redirect them. agy signs in from the
+  token file or an oversized file. A real file another session changed since
+  staging is kept, with a warning; `history.jsonl` gets only the lines the
+  lane appended. Staging creates an empty `conversation_summaries.db` when
+  there is none, so SQLite writes through the link rather than into the
+  overlay. The harness then removes the overlay. Every supervisor step in the
+  attempt `tmp` (its cache, the `ps` shim, the prompt and output staging files,
+  and the overlay) and in the real state directory walks with `O_NOFOLLOW`
+  from `/` or from the `tmp` opened once per attempt, including a same-attempt
+  effort retry. A lane that swaps any of them for a link cannot redirect a
+  supervisor read, write or delete. agy signs in from the
   login Keychain: with the token files left out of the overlay, it still
   authenticated under `sandbox-exec`. An empty `HOME` fails with
   `authentication failed or timed out`. On 2026-10-22 a confined read-only
