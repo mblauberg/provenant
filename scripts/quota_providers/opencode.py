@@ -1,8 +1,9 @@
-"""OpenCode Go spend from its local message store, compared with limits the account configures.
+"""OpenCode Go spend per model from its local message store, against the documented caps.
 
-OpenCode documents per-model dollar limits (5 hour, weekly, monthly) but offers no usage
-endpoint or CLI read, so this is a local estimate: spend on this machine only, against
-`limits` in the account's config. Without configured limits every window is unreported.
+OpenCode Go limits each model separately: 5 hour 20%, weekly 50% and monthly 100% of that
+model's monthly dollar cap (opencode.ai/docs/go). It documents no reset semantics and offers
+no usage endpoint, so every window here is a rolling local estimate: spend on this machine
+only. Models with no known cap (unlimited promotions included) are reported as unreported.
 Free zen models cost nothing and are ignored.
 """
 
@@ -15,7 +16,23 @@ import sqlite3
 
 ADAPTER = 'opencode'
 PAID = ('opencode-go',)
-WINDOWS = (('five_hour', 5 * 60), ('seven_day', 7 * 24 * 60), ('thirty_day', 30 * 24 * 60))
+DEFAULT_PLAN = 'go'      # the cheapest documented plan ($10/month), used when none is configured
+# Window label, minutes and share of the monthly cap.
+WINDOWS = (('5h', 5 * 60, 0.2), ('7d', 7 * 24 * 60, 0.5), ('30d', 30 * 24 * 60, 1.0))
+# Documented monthly dollar caps per model id: (Go, Go Plus). Peak/off-peak and long-context
+# tiers share one cap. `limits.monthly_by_model` in the account config overrides or adds models.
+CAPS = {
+    'glm-5.3-flash': (60, 180), 'glm-5.3': (15, 120), 'glm-5.2': (60, 180),
+    'kimi-k3': (15, 60), 'kimi-k2.7-code': (60, 180), 'longcat-2.0': (60, 240),
+    'step-5-preview': (15, 60), 'mimo-v2.6-flash': (60, 120), 'mimo-v2.6-pro': (15, 60),
+    'mimo-v2.5': (60, 120), 'mimo-v2.5-pro': (15, 60), 'minimax-m3': (60, 180),
+    'muse-spark-1.3-contributor': (60, 120), 'muse-spark-1.2-contributor': (60, 120),
+    'qwen3.8-max': (15, 60), 'qwen3.8-flash': (30, 90), 'qwen3.7-plus': (60, 180),
+    'deepseek-v4.1-flash': (80, 160), 'deepseek-v4-pro': (15, 60), 'hy4-preview': (30, 120),
+    'hy3': (60, 240), 'grok-4.7': (15, 60), 'gpt-6-luna': (15, 60), 'gpt-5.6-luna': (15, 60),
+    'claude-haiku-5-5': (15, 60), 'gemini-4-argon-contributor': (60, 240),
+}
+PLANS = {'go': 0, 'go plus': 1}
 
 
 def default_identity():
@@ -23,40 +40,51 @@ def default_identity():
     return selected_identity('opencode')
 
 
-def recent_cost(database, since, providers):
-    """Dollars of paid-provider messages since `since`; None when the store cannot be read."""
+def model_spend(database, now, providers):
+    """Dollars per model for each window since now, over paid providers; None if unreadable."""
     marks = ','.join('?' * len(providers))
+    sums = ','.join("SUM(CASE WHEN time_created>=? THEN COALESCE(json_extract(data,'$.cost'),0) ELSE 0 END)"
+                    for _ in WINDOWS)
+    since = [int((now - timedelta(minutes=minutes)).timestamp() * 1000) for _, minutes, _ in WINDOWS]
     try:
         with closing(sqlite3.connect(database.resolve().as_uri() + '?mode=ro', uri=True)) as db:
-            row = db.execute("SELECT COALESCE(SUM(json_extract(data,'$.cost')),0) FROM message "
-                             f"WHERE time_created>=? AND json_extract(data,'$.providerID') IN ({marks})",
-                             (int(since.timestamp() * 1000), *providers)).fetchone()
-        return float(row[0])
+            rows = db.execute(f"SELECT json_extract(data,'$.modelID'), {sums} FROM message "
+                              f"WHERE time_created>=? AND json_extract(data,'$.providerID') IN ({marks}) "
+                              "GROUP BY 1", (*since, min(since), *providers)).fetchall()
+        return {row[0]: [float(value or 0) for value in row[1:]] for row in rows if row[0]}
     except (sqlite3.Error, OSError, TypeError, ValueError):
         return None
 
 
-def limit_for(limits, key):
+def cap_for(model, plan, overrides):
     try:
-        value = float(limits[key])
+        cap = float(overrides[model])
     except (KeyError, TypeError, ValueError):
-        return None
-    return value if value > 0 else None
+        caps = CAPS.get(model)
+        cap = caps[plan] if caps else 0
+    return cap if cap > 0 else None
 
 
 def fetch(account, io, now):
+    plan = PLANS.get(str(account.plan or DEFAULT_PLAN).strip().lower())
     limits = account.options.get('limits')
-    limits = limits if isinstance(limits, dict) else {}
+    overrides = limits.get('monthly_by_model') if isinstance(limits, dict) else None
+    overrides = overrides if isinstance(overrides, dict) else {}
     providers = tuple(account.options.get('providers') or PAID)
+    spend = model_spend(account.identity_dir / 'opencode.db', now, providers)
     windows, unreported = [], []
-    for key, minutes in WINDOWS:
-        limit = limit_for(limits, key)
-        spent = None if limit is None else recent_cost(
-            account.identity_dir / 'opencode.db', now - timedelta(minutes=minutes), providers)
-        if spent is None:
-            unreported.append(key)
+    if spend is None:
+        unreported.append('usage')
+    for model, spent in sorted((spend or {}).items()):
+        cap = cap_for(model, plan, overrides) if plan is not None or model in overrides else None
+        if cap is None:
+            unreported.append(model)
             continue
-        windows.append({'name': key, 'raw_kind': 'local_spend_usd', 'used_percent': spent / limit * 100,
-                        'window_minutes': minutes, 'reset_at': None})
+        for (label, minutes, share), dollars in zip(WINDOWS, spent):
+            windows.append({'name': f'{model}.{label}', 'raw_kind': 'local_spend_usd',
+                            'used_percent': dollars / (cap * share) * 100,
+                            'window_minutes': minutes, 'reset_at': None})
+    assumed = ', assuming Go plan' if account.plan is None else ''
     return {'windows': windows, 'unreported': unreported, 'plan': None,
-            'source': 'local estimate: opencode.db spend against configured limits (this machine only)'}
+            'source': f'local estimate: opencode.db spend per model against documented caps{assumed} '
+                      '(this machine only)'}

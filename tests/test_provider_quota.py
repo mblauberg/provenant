@@ -252,39 +252,60 @@ def test_cursor_session_cookie_comes_from_the_local_jwt_and_cycle_dates(quota, t
     assert (row['name'], row['used_percent'], row['window_minutes']) == ('billing_cycle', 25, 30 * 24 * 60)
 
 
-def opencode_account(quota, tmp_path, limits, rows=()):
+def opencode_account(quota, tmp_path, rows=(), plan=None, **options):
     home = tmp_path / 'oc'
     home.mkdir(exist_ok=True)
     with sqlite3.connect(home / 'opencode.db') as db:
         db.execute('CREATE TABLE IF NOT EXISTS message (id text, time_created integer, data text)')
-        for index, (age, provider, cost) in enumerate(rows):
-            when = int((NOW - age).timestamp() * 1000)
-            db.execute('INSERT INTO message VALUES (?,?,?)',
-                       (str(index), when, json.dumps({'providerID': provider, 'cost': cost})))
-    return quota.Account('opencode', 'go', home, True, options={'limits': limits} if limits else {})
+        for index, (age, model, cost, provider) in enumerate(rows):
+            db.execute('INSERT INTO message VALUES (?,?,?)', (
+                str(index), int((NOW - age).timestamp() * 1000),
+                json.dumps({'providerID': provider, 'modelID': model, 'cost': cost})))
+    return quota.Account('opencode', 'go', home, True, plan=plan, options=options)
 
 
-def test_opencode_windows_count_paid_messages_by_their_own_timestamps(quota, tmp_path):
+def opencode_rows(quota, account):
+    fetched = quota.provider('opencode').fetch(account, quota.IO, NOW)
+    return {w['name']: w['used_percent'] for w in fetched['windows']}, fetched
+
+
+def test_opencode_reports_each_paid_model_against_its_documented_cap_fractions(quota, tmp_path):
     hour, day = timedelta(hours=1), timedelta(days=1)
-    rows = ((hour, 'opencode-go', 0.5), (hour, 'opencode', 5), (6 * hour, 'opencode-go', 2),
-            (3 * day, 'opencode-go', 1), (20 * day, 'opencode-go', 4), (40 * day, 'opencode-go', 100))
-    account = opencode_account(quota, tmp_path, {'five_hour': 5, 'seven_day': 7, 'thirty_day': 15}, rows)
-    fetched = quota.provider('opencode').fetch(account, quota.IO, NOW)
-    assert {w['name']: (w['used_percent'], w['window_minutes'], w['reset_at']) for w in fetched['windows']} == {
-        'five_hour': (10.0, 300, None), 'seven_day': (50.0, WEEK, None), 'thirty_day': (50.0, 30 * 24 * 60, None)}
-    assert fetched['unreported'] == [] and 'local estimate' in fetched['source']
+    flash, pro = 'deepseek-v4.1-flash', 'deepseek-v4-pro'
+    rows = ((hour, flash, 1.6, 'opencode-go'), (3 * day, flash, 4.0, 'opencode-go'),
+            (20 * day, flash, 8.0, 'opencode-go'), (40 * day, flash, 99, 'opencode-go'),
+            (hour, pro, 3.0, 'opencode-go'), (hour, 'glm-5.3-flash-free', 0, 'opencode'))
+    used, fetched = opencode_rows(quota, opencode_account(quota, tmp_path, rows))
+    # Go caps: flash $80, pro $15; 5h = 20%, 7d = 50%, 30d = 100%.
+    assert used == pytest.approx({f'{flash}.5h': 10.0, f'{flash}.7d': 14.0, f'{flash}.30d': 17.0,
+                    f'{pro}.5h': 100.0, f'{pro}.7d': 40.0, f'{pro}.30d': 20.0})
+    assert fetched['unreported'] == []
+    assert 'local estimate' in fetched['source'] and 'this machine only' in fetched['source']
+    assert 'assuming Go plan' in fetched['source']
+    minutes = {w['name']: w['window_minutes'] for w in fetched['windows']}
+    assert (minutes[f'{pro}.5h'], minutes[f'{pro}.7d'], minutes[f'{pro}.30d']) == (300, WEEK, 30 * 24 * 60)
 
 
-def test_opencode_without_configured_limits_is_unreported(quota, tmp_path):
-    fetched = quota.provider('opencode').fetch(opencode_account(quota, tmp_path, None), quota.IO, NOW)
-    assert fetched['windows'] == []
-    assert fetched['unreported'] == ['five_hour', 'seven_day', 'thirty_day']
+def test_opencode_plan_and_config_choose_the_cap_and_unknown_models_are_unreported(quota, tmp_path):
+    rows = ((timedelta(hours=1), 'deepseek-v4-pro', 6.0, 'opencode-go'),
+            (timedelta(hours=1), 'mystery-model', 1.0, 'opencode-go'),
+            (timedelta(hours=1), 'longcat-2.5-preview', 1.0, 'opencode-go'))
+    used, fetched = opencode_rows(quota, opencode_account(quota, tmp_path, rows, plan='Go Plus'))
+    assert used['deepseek-v4-pro.30d'] == 10.0 and 'assuming' not in fetched['source']
+    assert fetched['unreported'] == ['longcat-2.5-preview', 'mystery-model']
+    override = opencode_account(quota, tmp_path, plan='Go', limits={'monthly_by_model': {'mystery-model': 10}})
+    used, fetched = opencode_rows(quota, override)
+    assert used['mystery-model.30d'] == 10.0 and used['deepseek-v4-pro.30d'] == 40.0
+    assert fetched['unreported'] == ['longcat-2.5-preview']
 
 
-def test_opencode_unreadable_store_leaves_windows_unreported_and_runs_no_process(quota, tmp_path):
-    account = quota.Account('opencode', 'go', tmp_path / 'missing', True, options={'limits': {'seven_day': 8}})
-    fetched = quota.provider('opencode').fetch(account, quota.IO, NOW)
-    assert fetched['windows'] == [] and fetched['unreported'] == ['five_hour', 'seven_day', 'thirty_day']
+def test_opencode_unknown_plan_or_unreadable_store_is_unreported_never_zero(quota, tmp_path):
+    rows = ((timedelta(hours=1), 'deepseek-v4-pro', 6.0, 'opencode-go'),)
+    used, fetched = opencode_rows(quota, opencode_account(quota, tmp_path, rows, plan='Enterprise'))
+    assert used == {} and fetched['unreported'] == ['deepseek-v4-pro']
+    account = quota.Account('opencode', 'go', tmp_path / 'missing', True)
+    used, fetched = opencode_rows(quota, account)
+    assert used == {} and fetched['unreported'] == ['usage']
 
 
 def test_a_registered_provider_module_extends_quota_and_routing_without_core_changes(quota, tmp_path):
