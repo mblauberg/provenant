@@ -117,6 +117,16 @@ def test_missing_windows_are_unreported_never_zero(quota, monkeypatch):
     assert quota.provider('claude').parse({'five_hour': {'utilization': 1}, 'seven_day': None})['unreported'] == ['seven_day']
 
 
+def test_render_folds_unreported_windows_into_one_line_per_account(quota, monkeypatch, capsys):
+    monkeypatch.setattr(quota, 'fetch', lambda account, now: {
+        'windows': [window(14, 300, timedelta(hours=1), 'five_hour')], 'unreported': ['seven_day_opus', 'seven_day_sonnet']})
+    account = quota.Account('claude', 'max-a', Path('/nowhere'), True)
+    quota.render(quota.report([quota.refresh(account, NOW, force=True)], NOW))
+    out = capsys.readouterr().out
+    assert 'seven_day_opus' not in out and 'five_hour' in out
+    assert 'claude/max-a: 2 window(s) not reported (missing does not mean 0%); use --json' in out
+
+
 # Provider modules ---------------------------------------------------------------------------
 
 def test_registry_names_one_module_per_provider_with_the_common_interface(quota):
