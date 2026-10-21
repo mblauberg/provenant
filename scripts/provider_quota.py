@@ -449,7 +449,9 @@ def refresh(account, now=None, force=False):
 def _refresh(account, now=None, force=False):
     now = now or utcnow()
     if not enabled():
-        return load_snapshot(account.provider, account.label) or blank(account, 'disabled')
+        previous = load_snapshot(account.provider, account.label) or blank(account, 'disabled')
+        return {**previous, 'active': account.active, 'priority': account.priority,
+                'plan': account.plan or previous.get('plan')}
     if provider(account.provider) is None:
         return blank(account, 'unreported', f'no quota source is registered for {account.provider}')
     previous = load_snapshot(account.provider, account.label)

@@ -484,6 +484,9 @@ def test_provider_reset_overrides_later_usage_cooldown_and_identity_switch_reche
     monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'home/.claude-b'))
     assert quota.route_states(NOW)['claude']['account'] == 'b'
     assert {row['account']: row['active'] for row in quota.gather(NOW)} == {'a': False, 'b': True}
+    monkeypatch.setenv('PROVENANT_QUOTA', '0')
+    assert {row['account']: row['active'] for row in quota.gather(NOW)} == {'a': False, 'b': True}
+    monkeypatch.delenv('PROVENANT_QUOTA')
     assert quota.route_states(NOW)['claude']['state'] == 'reserve'
     assert quota.apply_to_cooldowns(cooldown, NOW) == {}
 
