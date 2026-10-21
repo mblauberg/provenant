@@ -123,13 +123,3 @@ which carried no third-party attribution.
 
 
 
-## Caveman
-
-`skills/caveman/` is an original harness-specific rewrite informed by the
-behavioural idea in
-[JuliusBrussee/caveman](https://github.com/JuliusBrussee/caveman), copyright
-2026 Julius Brussee, under the MIT License, audited at commit
-`0d95a81d35a9f2d123a5e9430d1cfc43d55f1bb0` on 11 July 2026. No upstream
-expression, token-saving or fidelity claim is redistributed; this is a courtesy
-provenance record rather than an obligation, so no separate licence text is
-carried for it.
