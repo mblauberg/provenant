@@ -11,6 +11,58 @@ import { listRecordedRuns, processStartedAt, reapAttemptRuns, reapOrphanedRuns, 
 const directories: string[] = [];
 const children: ChildProcess[] = [];
 
+it.each([
+  ["closure", "interrupted"],
+  ["closure", "cancelled"],
+  ["request", "interrupted"],
+  ["request", "cancelled"],
+  ["stale-request", "lost"],
+  ["marker", "cancelled"],
+  ["other-marker", "lost"],
+  ["batch-marker", "cancelled"],
+  ["other-batch-marker", "lost"],
+  ["unbound-batch-marker", "lost"],
+])("preserves %s evidence when reaping a dead attempt as %s", async (evidence, status) => {
+  const workspace = scratchRoot("fabric-attempt-reaping-");
+  directories.push(workspace);
+  const runDir = join(workspace, ".agent-run/runs/20261021-1200-dispatch-stopped-abcdef");
+  const attemptDir = join(runDir, "tasks/stopped/attempt-001");
+  mkdirSync(attemptDir, { recursive: true });
+  writeFileSync(join(runDir, "MANIFEST.md"), "# Manifest\n");
+  writeFileSync(join(runDir, "RUN_RECEIPT.json"), JSON.stringify({ status: "active" }));
+  const row = JSON.parse(readFileSync(new URL("fixtures/attempt.json", import.meta.url), "utf8"));
+  Object.assign(row, { state: "running", status: null, task_id: "stopped", cwd: workspace,
+    pgid: 99_999_999, pgid_started_at: "gone", ended_at: null });
+  if (evidence === "batch-marker" || evidence === "other-batch-marker") row.batch_id = "batch-002";
+  const path = join(attemptDir, "attempt.json");
+  writeFileSync(path, JSON.stringify(row));
+  writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ run_token: "current",
+    owner_pid: 99_999_999, status: evidence === "closure" ? status : "running",
+    ...(evidence === "closure" ? { finished_at: new Date().toISOString() } : {}) }));
+  if (evidence === "request" || evidence === "stale-request") {
+    writeFileSync(join(runDir, "termination-request.json"), JSON.stringify({
+      run_token: evidence === "stale-request" ? "previous" : "current", signal: "SIGKILL",
+      source: status === "cancelled" ? "cancel_requested" : "orphan_reaper",
+      sender_pid: process.pid, requested_at: new Date().toISOString(), provider_pid: null,
+    }));
+  }
+  if (evidence === "marker" || evidence === "other-marker") {
+    const target = join(runDir, "dispatch/tasks", evidence === "marker" ? "stopped" : "other", "attempt-001");
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(target, "cancel.request"), "");
+  }
+  if (evidence.endsWith("batch-marker")) {
+    const target = join(runDir, "dispatch/batches", evidence === "batch-marker" ? "batch-002" : "batch-001");
+    mkdirSync(target, { recursive: true });
+    writeFileSync(join(target, "cancel.request"), "");
+  }
+  // Exercise startup reaping before the status reader can synthesise a closure.
+  await reapAttemptRuns(workspace);
+  const result = await statusRows(workspace, ["stopped"], 0, "all", undefined, "full", false);
+  expect(result.runs).toEqual([expect.objectContaining({ state: "terminal", status })]);
+  expect(JSON.parse(readFileSync(path, "utf8"))).toMatchObject({ state: "terminal", status });
+});
+
 it.each(["status", "startup"])("%s persists a SIGKILL'd attempt as lost", async (hook) => {
   const workspace = scratchRoot("fabric-attempt-reaping-");
   directories.push(workspace);

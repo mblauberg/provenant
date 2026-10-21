@@ -512,7 +512,7 @@ def acquire_run_custody(run_dir: Path):
 
 
 def reap_attempts(run_dir: Path) -> list[str]:
-    """Finalise provably lost attempts under the writer's non-blocking custody lock."""
+    """Finalise dead attempts under custody, preserving deliberate termination."""
     run_dir = Path(run_dir)
     reaped = []
     try:
@@ -533,9 +533,15 @@ def reap_attempts(run_dir: Path) -> list[str]:
                 except FileNotFoundError:
                     continue
                 owners.append(json.loads(read_bound_bytes(run_dir, name, label="run owner")))
+            terminal_status = "lost"
+            run_token = None
             for owner in owners:
                 if not isinstance(owner, dict):
                     return reaped
+                if owner.get("run_token"):
+                    run_token = owner["run_token"]
+                if owner.get("finished_at") and owner.get("status") in {"interrupted", "cancelled"}:
+                    terminal_status = owner["status"]
                 pid = owner.get("owner_pid", owner.get("pid"))
                 if not isinstance(pid, int) or pid <= 0:
                     continue
@@ -547,6 +553,18 @@ def reap_attempts(run_dir: Path) -> list[str]:
                 observed = process_info.start_time(pid) if started else None
                 if not started or observed is None or observed == started:
                     return reaped
+            # A controller publishes intent before signalling. It may die before
+            # closeStoppedRun writes dispatch-status, so honour this run's request too.
+            try:
+                (run_dir / "termination-request.json").lstat()
+                request = json.loads(read_bound_bytes(run_dir, "termination-request.json", label="termination request"))
+            except FileNotFoundError:
+                request = {}
+            if (terminal_status == "lost" and isinstance(request, dict) and run_token
+                    and request.get("run_token") == run_token
+                    and request.get("signal") in {"SIGTERM", "SIGKILL"}
+                    and request.get("source") in {"run_control", "orphan_reaper", "cancel_requested"}):
+                terminal_status = "cancelled" if request["source"] == "cancel_requested" else "interrupted"
         except (OSError, ValueError, TypeError, OwnedFileError):
             return reaped
         for tree in ("tasks", "dispatch/tasks"):
@@ -574,8 +592,15 @@ def reap_attempts(run_dir: Path) -> list[str]:
                         if not started or observed is None or observed == started:
                             continue
                         reason = "pgid_reused"
-                    row.update(state="terminal", status="lost", ended_at=now(), retryable=True,
-                               error_class=provider_exec.error_class("lost"))
+                    # Cooperative cancellation is scoped to this exact attempt;
+                    # its marker survives until the writer publishes terminal evidence.
+                    cancel_dir = run_dir / "dispatch/tasks" / path.parent.parent.name / path.parent.name
+                    batch_id = row.get("batch_id")
+                    batch_cancelled = (isinstance(batch_id, str) and BATCH_ID_RE.fullmatch(batch_id)
+                                       and cancellation_marker_present(run_dir, run_dir / "dispatch/batches" / batch_id))
+                    status = "cancelled" if batch_cancelled or cancellation_marker_present(run_dir, cancel_dir) else terminal_status
+                    row.update(state="terminal", status=status, ended_at=now(), retryable=True,
+                               error_class=provider_exec.error_class(status))
                     row["evidence"] = {**(row.get("evidence") or {}), "signature": reason,
                                        "excerpt": "Attempt process group is gone" if reason == "pgid_gone"
                                        else "Attempt process group start time no longer matches"}
@@ -1628,6 +1653,7 @@ def contract_row(args,run_dir,number,attempt_dir,plan,started_at):
         if note not in plan.setdefault('warnings', []):
             plan['warnings'].append(note)
     return {"schema":"fabric.attempt.v1", **({'placement_fallback': placement} if placement else {}),"run_id":plan.get("run_id") or run_identity(run_dir),"task_id":args.task_id,"task_class":task_class,
+        **({"batch_id":args.batch_id} if getattr(args,"batch_id",None) else {}),
         "attempt":number,"state":"running","status":None,"usage_source":"missing","mode":args.access_mode,"cwd":plan.get("cwd") or str(Path.cwd().resolve()),
         "workspace_root":plan.get("workspace_root") or str(Path(getattr(args,"workspace_root",None) or Path.cwd()).resolve()),
         **({"read_roots":[str(root) for root in args.read_roots]} if getattr(args,"read_roots",None) else {}),
