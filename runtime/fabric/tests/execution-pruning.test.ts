@@ -1,10 +1,6 @@
 import { execFileSync, spawn } from "node:child_process";
-import {
-  chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync,
-  rmSync, utimesSync, writeFileSync,
-} from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { setTimeout as delay } from "node:timers/promises";
@@ -22,6 +18,7 @@ import {
   reapOrphanedRuns,
 } from "../src/run-registry.js";
 import type { Identity } from "../src/identity.js";
+import { scratchRoot } from "./helpers/temp-root.js";
 
 const testDirectory = dirname(fileURLToPath(import.meta.url));
 const repositoryRoot = resolve(testDirectory, "../../..");
@@ -101,7 +98,7 @@ async function startSleepingRun(prompt: string): Promise<Record<string, unknown>
 }
 
 beforeEach(() => {
-  temporaryDirectory = mkdtempSync(join(tmpdir(), "fabric-lifecycle-"));
+  temporaryDirectory = scratchRoot("fabric-lifecycle-");
   workspace = join(temporaryDirectory, "workspace");
   mkdirSync(workspace, { recursive: true });
   product = buildProduct(temporaryDirectory);
