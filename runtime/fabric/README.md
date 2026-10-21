@@ -148,7 +148,10 @@ starts, records a `lane_pointer_failed` warning in the run's
 pointer is pruned only when its source run directory is gone, so the source
 reaper's retention rules decide its lifetime; a pointer whose source no longer
 maps any pointed task to this project (for example after a resume moved it) is
-skipped but kept, since a later resume may move the task back. A run that
+skipped but kept, since a later resume may move the task back. An imported
+row shows its run, result and receipt paths absolute under the source run
+root. `fabric_status` and `fabric_output` by id still resolve from the source
+project only. A run that
 finished outside the 24-hour lanes window is skipped before its receipts are
 read unless history is requested. Recorded cwd projects are compared after
 resolving symlinks. Other tasks in a mixed-project batch stay private to

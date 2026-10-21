@@ -76,8 +76,18 @@ function rootPath(root: string, runDir: string, value: unknown): string | null {
     !isAbsolute(local) && local !== ".." && !local.startsWith(`..${sep}`) ? rel : null;
 }
 
-function publicRun(row: Record<string, any>, root: string): RunRead {
+function publicRun(row: Record<string, any>, localRoot: string): RunRead {
   const runDir = String(row.run_dir);
+  // A row imported through a lane pointer lives under its source project's
+  // run root, so its paths are resolved there and shown absolute.
+  const imported = typeof row.source_project === "string";
+  let root = localRoot;
+  if (imported) {
+    const modern = basename(dirname(runDir)) === "runs";
+    try { root = realpathSync.native(modern ? dirname(dirname(runDir)) : dirname(runDir)); }
+    catch { root = resolve(modern ? dirname(dirname(runDir)) : dirname(runDir)); }
+  }
+  const shown = (path: string | null): string | null => path === null || !imported ? path : resolve(root, path);
   const latest = Array.isArray(row.attempts) ? row.attempts.at(-1) : undefined;
   const resultForReceipt = latest?.paths?.result ?? row.paths?.result;
   const taskId = typeof row.task_id === "string" ? row.task_id : "";
@@ -101,7 +111,7 @@ function publicRun(row: Record<string, any>, root: string): RunRead {
     id: String(row.task_id ?? row.id ?? row.run_id),
     run_id: String(row.run_id),
     task_id: typeof row.task_id === "string" ? row.task_id : null,
-    run_path: rootPath(root, root, runDir) ?? "",
+    run_path: shown(rootPath(root, root, runDir)) ?? "",
     ...(typeof row.source_project === "string" ? { source_project: row.source_project } : {}),
     state: String(row.state ?? "unknown"),
     status: typeof row.status === "string" ? row.status : null,
@@ -115,8 +125,8 @@ function publicRun(row: Record<string, any>, root: string): RunRead {
     pgid: typeof row.pgid === "number" ? row.pgid : provider?.provider_pgid ?? owner?.owner_pgid ?? null,
     pgid_alive: pid === undefined || started == null ? null
       : processStartedAt(pid) === null ? null : processMatches(pid, started),
-    result_path: rootPath(root, runDir, row.paths?.result ?? row.result_path),
-    receipt_path: rootPath(root, runDir, receipt),
+    result_path: shown(rootPath(root, runDir, row.paths?.result ?? row.result_path)),
+    receipt_path: shown(rootPath(root, runDir, receipt)),
     writer: row.mode === "worktree_write",
     worktree: typeof row.worktree === "string" ? row.worktree : null,
     attempt: Number(row.attempt ?? 0),

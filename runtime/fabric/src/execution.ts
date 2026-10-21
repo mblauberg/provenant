@@ -410,8 +410,12 @@ export function startOwner(
   } catch (error) {
     Object.assign(metadata, { warnings: [`lane_pointer_failed: ${error instanceof Error ? error.message : String(error)}; ` +
       "the lane is listed only from its source project"] });
-    try { writeFileSync(statusPath, JSON.stringify(metadata) + "\n", { mode: 0o600 }); }
-    catch { /* The owner stamp below rewrites status with the warning. */ }
+    // Atomic: a target reader may already be reading this status.
+    const temporary = `${statusPath}.${process.pid}.tmp`;
+    try {
+      writeFileSync(temporary, JSON.stringify(metadata) + "\n", { mode: 0o600 });
+      renameSync(temporary, statusPath);
+    } catch { /* The owner stamp below rewrites status with the warning. */ }
   }
   let child: ChildProcess;
   try {

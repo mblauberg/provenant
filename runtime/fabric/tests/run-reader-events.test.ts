@@ -132,6 +132,19 @@ it("reads only its pointers and local root, without scanning foreign run roots",
   } finally { scan.mockRestore(); }
 });
 
+it("shows an imported lane's paths absolute under its source run", async () => {
+  const target = fixture(), source = fixture();
+  const { run } = attempt(source, "tasks", "located", "terminal", "ok");
+  const runDir = join(source, ".agent-run/runs", run);
+  writeFileSync(join(runDir, "dispatch-status.json"), JSON.stringify({ cwd_projects: { located: target } }));
+  pointTo(target, source, run, ["located"]);
+  const row = (await readRuns(target)).runs[0]!;
+  expect(row.run_path).toBe(fs.realpathSync.native(runDir));
+  for (const path of [row.result_path, row.receipt_path])
+    if (path !== null) expect(path.startsWith(fs.realpathSync.native(runDir) + "/")).toBe(true);
+  expect(row.receipt_path).not.toBeNull();
+});
+
 it("isolates a corrupt foreign run and still lists and waits for local lanes", async () => {
   const target = fixture(), source = fixture();
   attempt(target, "tasks", "local", "terminal", "ok");

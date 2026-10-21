@@ -1040,7 +1040,12 @@ export async function statusRows(
         let info;
         try { info = lstatSync(runDir); }
         catch (error) {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") { unlinkSync(pointerPath); continue; }
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+            // A concurrent reader may have retired the same pointer first.
+            try { unlinkSync(pointerPath); }
+            catch (unlinkError) { if ((unlinkError as NodeJS.ErrnoException).code !== "ENOENT") throw unlinkError; }
+            continue;
+          }
           throw error;
         }
         if (!info.isDirectory() || info.isSymbolicLink() || candidates.includes(runDir)) continue;
@@ -1110,8 +1115,10 @@ export async function statusRows(
           } else {
             // A batch has only an owner row before its first task receipt.
             for (const task of tasks) {
-              const index = taskIds.indexOf(task);
-              const route = routes[index];
+              const route = routes[taskIds.indexOf(task)];
+              // Corroborated by a receipt alone, a task may be absent from
+              // metadata.task_ids; its own receipt row will carry the route.
+              if (!route) continue;
               imported.push({ ...row, id: task, task_id: task, source_project: pointer.source_project,
                 adapter: route.adapter, model: route.resolved_model ?? route.model ?? route.alias });
             }

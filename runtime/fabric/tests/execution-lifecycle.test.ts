@@ -696,7 +696,7 @@ describe("dispatch CLI", () => {
       const result = JSON.parse(execFileSync(process.execPath, [...args, "--json"], { ...options, cwd }));
       expect(result.runs).toEqual([expect.objectContaining({ run_id: started.id,
         task_id: "cross-project-lane", state: "running", source_project: workspace,
-        run_path: "", result_path: null, receipt_path: null })]);
+        run_path: realpathSync.native(runDir) })]);
     }
     const original = JSON.parse(execFileSync(process.execPath, [...args, "--json"], { ...options, cwd: workspace }));
     expect(original.runs[0].run_id).toBe(started.id);
