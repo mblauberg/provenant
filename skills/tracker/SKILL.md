@@ -1,6 +1,6 @@
 ---
 name: tracker
-description: "Use for GitHub issue and project-board stewardship on any repo: duplicate checks before filing, epic placement, board/priority upkeep, PR issue-linking, closing stale issues, or steward-mode queue triage. Not for doing the work; use implement or orchestrate."
+description: "Use for GitHub issues/boards: dedupe before filing, epic placement, priorities, PR links, stale issues and steward queues. Not for execution; use implement or orchestrate."
 ---
 
 # Tracker

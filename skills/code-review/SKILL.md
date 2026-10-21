@@ -1,6 +1,6 @@
 ---
 name: code-review
-description: "Use for source-read-only review of a PR, diff, commit, migration, refactor, or implementation through its dependency cone. Not for root-cause diagnosis, authorised fixes, or browser/UX review; use diagnose, implement, or ui-ux-design."
+description: "Use for read-only source review of PRs, diffs, commits, migrations and refactors through dependencies. Not for root cause (diagnose), fixes (implement) or browser/UX review (ui-ux-design)."
 ---
 
 # Code review
