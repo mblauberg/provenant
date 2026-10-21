@@ -84,10 +84,11 @@ enum CLI {
         let detail = run.err.split(separator: "\n").last.map(String.init) ?? "no error output"
         if run.timedOut { return (launcher, .failure(Failure(message: "provenant quota timed out after 60 seconds."))) }
         if run.signalled { return (launcher, .failure(Failure(message: "provenant quota was killed by signal \(run.status)."))) }
-        if run.status != 0 {   // 127 means the launcher no longer works: re-resolve next time
-            return (run.status == 127 ? nil : launcher,
-                    .failure(Failure(message: "\(name) exited with status \(run.status): \(detail)")))
+        if run.status == 127 {   // the launcher or its interpreter is gone: re-resolve next time
+            let hint = launcher.custom ? "" : " Check that the login shell's PATH reaches it, or set PROVENANT_BIN."
+            return (nil, .failure(Failure(message: "\(name) exited with status 127: \(detail).\(hint)")))
         }
+        if run.status != 0 { return (launcher, .failure(Failure(message: "\(name) exited with status \(run.status): \(detail)"))) }
         return (launcher, decode(run.out))
     }
 

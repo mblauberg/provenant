@@ -16,17 +16,20 @@ struct MenuBarLabel: View {
     let model: QuotaModel
 
     var body: some View {
-        let report = model.report, used = report?.headline(now: .now)
-        let level = ["0", "33", "50", "67", "100"][[20, 45, 60, 100].firstIndex { (used ?? 0) < Double($0) } ?? 4]
-        let exhausted = report?.exhausted(now: .now).count ?? 0, unavailable = report?.unavailable.count ?? 0
-        HStack(spacing: 4) {
-            Image(systemName: model.error != nil ? "exclamationmark.triangle" : "gauge.with.dots.needle.\(level)percent")
-            Text(report.map { $0.enabled ? used.map(Fmt.percent) ?? "–" : "Off" } ?? "–").monospacedDigit()
+        TimelineView(.everyMinute) { context in   // so a passed reset or exhaustion updates between refreshes
+            let report = model.report, used = report?.headline(now: context.date)
+            let level = ["0", "33", "50", "67", "100"][[20, 45, 60, 100].firstIndex { (used ?? 0) < Double($0) } ?? 4]
+            let exhausted = report?.exhausted(now: context.date).count ?? 0
+            let unavailable = report?.accounts.filter { !$0.hasReading }.count ?? 0
+            HStack(spacing: 4) {
+                Image(systemName: model.error != nil ? "exclamationmark.triangle" : "gauge.with.dots.needle.\(level)percent")
+                Text(report.map { $0.enabled ? used.map(Fmt.percent) ?? "–" : "Off" } ?? "–").monospacedDigit()
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(["Provider quota", used.map { "highest use \(Fmt.percent($0))" },
+                                 exhausted > 0 ? "\(exhausted) exhausted" : nil, unavailable > 0 ? "\(unavailable) unavailable" : nil,
+                                 model.error.map { _ in "last refresh failed" }].compactMap { $0 }.joined(separator: ", "))
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(["Provider quota", used.map { "highest use \(Int($0.rounded(.down))) percent" },
-                             exhausted > 0 ? "\(exhausted) exhausted" : nil, unavailable > 0 ? "\(unavailable) unavailable" : nil,
-                             model.error.map { _ in "last refresh failed" }].compactMap { $0 }.joined(separator: ", "))
     }
 }
 
@@ -47,11 +50,11 @@ struct QuotaPanel: View {
                         .textSelection(.enabled).padding(.horizontal, 8)
                 }
                 if !accounts.isEmpty {
-                    Separator()
+                    Divider().padding(.horizontal, 8)
                     ScrollView { rows(accounts, now: now) }   // a tall report scrolls instead of overrunning the screen
                         .frame(maxHeight: 560).fixedSize(horizontal: false, vertical: true).scrollBounceBehavior(.basedOnSize)
                 }
-                Separator()
+                Divider().padding(.horizontal, 8)
                 VStack(alignment: .leading, spacing: 0) {
                     Text(model.updatedAt.map { "Updated \(Fmt.ago($0, now: now))" } ?? "Not updated yet")
                         .font(.subheadline).foregroundStyle(.secondary).padding(.horizontal, 8).padding(.bottom, 4)
@@ -63,7 +66,8 @@ struct QuotaPanel: View {
             .padding(6)
             .frame(width: 300)
         }
-        .onAppear { model.refreshIfStale() }
+        // Fires on every panel open; .onAppear may fire only once for a menu-bar window.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didBecomeKeyNotification)) { _ in model.refreshIfStale() }
     }
 
     private func rows(_ accounts: [QuotaReport.Account], now: Date) -> some View {
@@ -90,12 +94,14 @@ struct Summary: View {
     var body: some View {
         let top = report?.top(now: now), used = report?.headline(now: now)
         let firstBack = report?.exhausted(now: now).compactMap { $0.binding(now: now)?.resetAt }.min()
-        let (title, detail): (String, String) =
-            report == nil ? (error == nil ? ("Loading…", "") : ("Quota unavailable", error!))
-            : !report!.enabled ? ("Quota is off", "Turned off in Provenant's quota settings.")
-            : report!.accounts.isEmpty ? ("No accounts", "No quota accounts are configured.")
-            : top.map { ($0.account.title, Fmt.status($0.window, now: now)) }
-            ?? (used == nil ? ("No current readings", "") : ("All accounts exhausted", "First back in \(Fmt.until(firstBack, now: now) ?? "–")"))
+        let (title, detail): (String, String) = switch (report, top) {
+        case (nil, _): error.map { ("Quota unavailable", $0) } ?? ("Loading…", "")
+        case (let report?, _) where !report.enabled: ("Quota is off", "Turned off in Provenant's quota settings.")
+        case (let report?, _) where report.accounts.isEmpty: ("No accounts", "No quota accounts are configured.")
+        case (_, let top?): (top.account.title, Fmt.status(top.window, now: now))
+        default: used == nil ? ("No current readings", "")
+            : ("All accounts exhausted", "First back in \(Fmt.until(firstBack, now: now) ?? "–")")
+        }
         HStack(spacing: 12) {
             Ring(value: used, state: top?.window.pace.state ?? (used == nil ? "unknown" : "exhausted"), size: 40)
                 .overlay { Text(used.map(Fmt.percent) ?? "–").font(.system(size: 11, weight: .semibold)).monospacedDigit() }
@@ -105,7 +111,7 @@ struct Summary: View {
             }
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel([used.map { "Highest use \(Int($0.rounded(.down))) percent" }, title, detail].compactMap { $0 }.joined(separator: ", "))
+        .accessibilityLabel([used.map { "Highest use \(Fmt.percent($0))" }, title, detail].compactMap { $0 }.joined(separator: ", "))
     }
 }
 
@@ -137,7 +143,8 @@ struct AccountRow: View {
                 }
                 .opacity(usable ? 1 : 0.55)   // exhausted and unreadable accounts recede
             }
-            .accessibilityLabel([account.title, window?.usedPercent.map { "\(Int($0.rounded(.down))) percent used" }, detail]
+            .accessibilityLabel([account.title, window?.usedPercent.map { "\(Fmt.percent($0)) used" }, detail,
+                                 aged ? account.status == "stale" ? "stale" : account.observedAt.map { "observed \(Fmt.ago($0, now: now))" } : nil]
                 .compactMap { $0 }.joined(separator: ", "))
             .accessibilityHint(expanded ? "Hides the windows" : "Shows every window")
             if expanded { WindowList(account: account, now: now).padding(.leading, 38).padding([.trailing, .bottom], 8) }
@@ -155,8 +162,7 @@ struct WindowList: View {
         VStack(alignment: .leading, spacing: 4) {
             ForEach(account.windows.filter { $0.usedPercent != nil }) { window in
                 HStack(spacing: 6) {
-                    let expired = window.resetAt.map { $0 <= now } ?? false
-                    Ring(value: window.usedPercent, state: expired ? "unknown" : window.pace.state, size: 10)
+                    Ring(value: window.usedPercent, state: window.isExpired(now) ? "unknown" : window.pace.state, size: 10)
                     Text(Fmt.status(window, now: now)).lineLimit(1)
                     Spacer(minLength: 4)
                     Text(Fmt.percent(window.usedPercent ?? 0)).monospacedDigit()
@@ -200,24 +206,20 @@ struct MenuRow<Label: View>: View {
     let action: () -> Void
     @ViewBuilder let label: Label
     @State private var hovering = false
+    @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
         Button(action: action) {
             HStack {
                 label
                 Spacer(minLength: 0)
-                if let shortcut { Text("⌘\(String(shortcut.character).uppercased())").foregroundStyle(.secondary) }
+                if let shortcut { Text("⌘\(String(shortcut.character).uppercased())").foregroundStyle(.secondary).accessibilityHidden(true) }
             }
             .padding(.horizontal, 8).padding(.vertical, 4).contentShape(Rectangle())
-            .background(.quaternary.opacity(hovering ? 1 : 0), in: RoundedRectangle(cornerRadius: 6))
+            .background(.quaternary.opacity(hovering && isEnabled ? 1 : 0), in: RoundedRectangle(cornerRadius: 6))
         }
         .buttonStyle(.plain)
         .keyboardShortcut(shortcut.map { KeyboardShortcut($0) })
         .onHover { hovering = $0 }
     }
-}
-
-/// An inset menu separator.
-struct Separator: View {
-    var body: some View { Divider().padding(.horizontal, 8) }
 }

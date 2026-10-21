@@ -27,6 +27,8 @@ struct QuotaReport: Decodable {
         let usedPercent: Double?
         let resetAt: Date?
         let pace: Pace
+        /// A passed reset makes the reading obsolete until the next fetch.
+        func isExpired(_ now: Date) -> Bool { resetAt.map { $0 <= now } ?? false }
     }
 
     /// exhausted | unknown | unreported | deficit | on_pace | reserve | early | not_started
@@ -58,7 +60,6 @@ struct QuotaReport: Decodable {
     }
 
     func exhausted(now: Date) -> [Account] { accounts.filter { $0.rank(now) == 2 } }
-    var unavailable: [Account] { accounts.filter { !$0.hasReading } }
 
     /// 100% only when no account outside exhaustion has a current reading.
     func headline(now: Date) -> Double? { top(now: now)?.window.usedPercent ?? (exhausted(now: now).isEmpty ? nil : 100) }
@@ -69,7 +70,7 @@ extension QuotaReport.Account {
     /// exhausted while an exhausted window still has a future or unknown reset; the one that resets last binds.
     /// Otherwise the current window with the highest use binds.
     func binding(now: Date) -> QuotaReport.Window? {
-        let current = windows.filter { $0.usedPercent != nil && ($0.resetAt ?? .distantFuture) > now }
+        let current = windows.filter { $0.usedPercent != nil && !$0.isExpired(now) }
         return current.filter { $0.pace.state == "exhausted" }.max { ($0.resetAt ?? .distantFuture) < ($1.resetAt ?? .distantFuture) }
             ?? current.max { $0.usedPercent! < $1.usedPercent! }
     }
@@ -108,7 +109,7 @@ enum Fmt {
 
     /// "Seven day · runs out in 23h", "Primary · resets in 5d 8h", or "Exhausted · back in 3d 2h".
     static func status(_ window: QuotaReport.Window, now: Date) -> String {
-        if window.resetAt.map({ $0 <= now }) ?? false { return "\(human(window.name)) · reset passed, awaiting a reading" }
+        if window.isExpired(now) { return "\(human(window.name)) · reset passed, awaiting a reading" }
         let reset = until(window.resetAt, now: now)
         if window.pace.state == "exhausted" { return "Exhausted · " + (reset.map { "back in \($0)" } ?? "reset time unknown") }
         if let out = until(window.pace.runsOutAt, now: now) { return "\(human(window.name)) · runs out in \(out)" }
