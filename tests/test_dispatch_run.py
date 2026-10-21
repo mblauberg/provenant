@@ -259,7 +259,7 @@ mod.publish_contract(pathlib.Path(sys.argv[2]), json.loads(sys.argv[3]))
                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
             assert child.stdout.readline().strip() == "ready"
             with pytest.raises(subprocess.TimeoutExpired):
-                child.wait(timeout=0.1)
+                child.communicate(timeout=0.1)
             assert not path.exists()
         stdout, stderr = child.communicate(timeout=5)
         assert child.returncode == 0, stderr
