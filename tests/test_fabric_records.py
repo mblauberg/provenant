@@ -14,6 +14,56 @@ def records():
     return importlib.import_module("skills.orchestrate.scripts.fabric_records")
 
 
+@pytest.fixture(autouse=True)
+def isolated_identity(tmp_path, monkeypatch):
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / 'instance'))
+    for name in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME', 'XDG_DATA_HOME'):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(records().identity_resolver(), 'host_id', lambda: 'host-a')
+
+
+def stored_routes(path):
+    return {entry['adapter'] + '/' + entry['model']: entry
+            for entry in json.loads(path.read_text())['cooldowns'].values()}
+
+
+@pytest.mark.parametrize(('provider', 'environment'), [
+    ('claude', 'CLAUDE_CONFIG_DIR'), ('codex', 'CODEX_HOME'), ('opencode', 'XDG_DATA_HOME')])
+def test_unannotated_account_names_default_identity(tmp_path, monkeypatch, provider, environment):
+    resolver = records().identity_resolver()
+    monkeypatch.setenv(environment, str(tmp_path / 'alternate'))
+    alternate = resolver.selected_identity(provider)
+    config = tmp_path / 'instance/config/telemetry.json'
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'accounts': {provider: {
+        'a': {}, 'b': {'identity_dir': str(alternate)}}}}))
+    assert resolver.scope(provider)['account'] == 'b'
+    assert resolver.scope(provider, default=True)['account'] == 'a'
+
+    config.write_text(json.dumps({'accounts': {provider: {'a': {}}}}))
+    assert resolver.scope(provider)['account'].startswith('path-')
+    assert resolver.scope(provider, default=True)['account'] == 'a'
+
+    config.write_text(json.dumps({'accounts': {provider: {
+        'a': {}, 'b': {'identity_dir': str(resolver.default_identity(provider))}}}}))
+    assert resolver.scope(provider, default=True)['account'] == 'b'
+
+
+def test_cooldowns_follow_selected_claude_identity(tmp_path, monkeypatch):
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'a'))
+    path = tmp_path / 'cooldowns.json'
+    row = json.loads((FIX / 'attempt.json').read_text())
+    row.update(status='rate_limited')
+    row['provenance']['requested']['adapter'] = 'claude'
+    records().write_cooldown(row, path=path)
+    assert records().read_cooldowns(path)
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'b'))
+    assert records().read_cooldowns(path) == {}
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'a'))
+    assert records().read_cooldowns(path)
+
+
 def test_digest_matches_shared_example_and_question():
     row = json.loads((FIX / "attempt.json").read_text())
     assert records().render_digest(row) == row["digest"]
@@ -33,12 +83,11 @@ def test_cooldown_locked_merge_expiry_and_defaults(tmp_path):
     row["provenance"]["resolved_model"] = "opus"
     at = datetime(2026, 9, 23, tzinfo=UTC)
     module.write_cooldown(row, path=path, at=at)
-    data = json.loads(path.read_text())
-    assert data["cooldowns"]["claude/claude-opus-5-5"]["cooling_until"] == "2026-09-23T01:00:00Z"
+    assert stored_routes(path)["claude/claude-opus-5-5"]["cooling_until"] == "2026-09-23T01:00:00Z"
     row["provenance"]["resolved_model"] = "sonnet"
     row.update(status="rate_limited", retry_after=30)
     module.write_cooldown(row, path=path, at=at + timedelta(hours=2))
-    assert set(json.loads(path.read_text())["cooldowns"]) == {"claude/claude-sonnet-5-5"}
+    assert set(stored_routes(path)) == {"claude/claude-sonnet-5-5"}
     assert (tmp_path / "cooldowns.lock").is_file()
 
 
@@ -76,12 +125,12 @@ def test_cooldown_normalizes_registered_id_and_preserves_origin(tmp_path, monkey
     row['provenance']['resolved_model'] = 'sol@high'
     path = tmp_path / 'cooldowns.json'
     records().write_cooldown(row, path=path)
-    first = json.loads(path.read_text())['cooldowns']
+    first = stored_routes(path)
     assert 'codex/gpt-6.1-sol' in first
     row['run_id'] = 'synthetic'
     row['evidence']['signature'] = 'cooldown_active'
     records().write_cooldown(row, path=path)
-    assert json.loads(path.read_text())['cooldowns'] == first
+    assert stored_routes(path) == first
 
 
 def test_account_usage_limit_cools_all_models(tmp_path):
@@ -91,7 +140,7 @@ def test_account_usage_limit_cools_all_models(tmp_path):
     row['evidence'].update(signature='usage_limited', excerpt="You've hit your weekly limit")
     path = tmp_path / 'cooldowns.json'
     records().write_cooldown(row, path=path)
-    assert 'claude/*' in json.loads(path.read_text())['cooldowns']
+    assert 'claude/*' in stored_routes(path)
 
 
 def test_digest_result_is_openable_from_caller_and_fallback_shows_reset(tmp_path):
@@ -111,7 +160,7 @@ def test_cooldown_identity_strips_provider_effort_suffix(tmp_path, model):
     row['provenance']['resolved_model'] = model
     path = tmp_path / 'cooldowns.json'
     records().write_cooldown(row, path=path)
-    assert set(json.loads(path.read_text())['cooldowns']) == {'cursor/grok-4.7'}
+    assert set(stored_routes(path)) == {'cursor/grok-4.7'}
 
 
 def test_cooldown_path_uses_state_root_between_override_and_default(tmp_path, monkeypatch):
@@ -173,7 +222,7 @@ def test_malformed_catalogue_keeps_cooldown_identity_and_warns(tmp_path, monkeyp
     row['provenance']['resolved_model'] = 'raw-model'
     path = tmp_path / 'cooldowns.json'
     records().write_cooldown(row, path=path)
-    assert 'codex/raw-model' in json.loads(path.read_text())['cooldowns']
+    assert 'codex/raw-model' in stored_routes(path)
     assert any('catalogue' in warning for warning in row['warnings'])
 
 
@@ -217,12 +266,12 @@ def test_agy_quota_cools_only_the_exhausted_model(tmp_path):
     row["evidence"] = {"signature": "usage_limited", "excerpt": "provider error: Individual quota reached. Resets in 41h56m11s."}
     at = datetime(2026, 9, 23, tzinfo=UTC)
     records().write_cooldown(row, path=path, at=at)
-    assert set(json.loads(path.read_text())["cooldowns"]) == {"agy/claude-sonnet-4-6"}
+    assert set(stored_routes(path)) == {"agy/claude-sonnet-4-6"}
     row["provenance"]["requested"]["adapter"] = "claude"
     row["provenance"]["resolved_model"] = "opus"
     row["evidence"]["excerpt"] = "You've hit your session limit"
     records().write_cooldown(row, path=path, at=at)
-    assert "claude/*" in json.loads(path.read_text())["cooldowns"]
+    assert "claude/*" in stored_routes(path)
 
 
 def test_quarantined_digest_keeps_result_and_review_action(tmp_path):
@@ -435,3 +484,124 @@ def test_limit_outcomes_never_become_empty_output_failures(tmp_path, monkeypatch
     assert item["recent_failures"] == 0
     assert item["rate_limits"] == 1
     assert not model_route._recent_failed_task_class_models("codex", "mechanical")
+
+
+@pytest.mark.parametrize('adapter,switch', [
+    (adapter, switch) for adapter in ('claude', 'codex', 'agy', 'cursor', 'opencode', 'kiro')
+    for switch in ('account', 'host') if adapter != 'agy' or switch == 'host'
+])
+def test_account_and_host_switches_preserve_cooldowns_and_health(tmp_path, monkeypatch, adapter, switch):
+    from scripts import model_route
+    from skills.orchestrate.scripts import exec_routing
+
+    resolver = records().identity_resolver()
+    first = resolver.selected_identity(adapter)
+    second = tmp_path / 'alternate'
+    config = tmp_path / 'instance/config/telemetry.json'
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'accounts': {adapter: {
+        'a': {'identity_dir': str(first)}, 'b': {'identity_dir': str(second)}}}}))
+    path = tmp_path / 'cooldowns.json'
+    health = tmp_path / 'route-health.json'
+    monkeypatch.setenv('FABRIC_COOLDOWNS_PATH', str(path))
+    monkeypatch.setenv('PROVENANT_QUOTA', '0')
+    row = json.loads((FIX / 'attempt.json').read_text())
+    row.update(status='rate_limited')
+    row['provenance']['requested']['adapter'] = adapter
+    row['provenance']['resolved_model'] = 'test-model'
+    records().write_cooldown(row, path=path)
+    records().write_route_health(row, path=health)
+    original = records().read_cooldowns(path)
+    assert next(iter(original.values()))['account'] == 'a'
+    assert exec_routing.cooling(adapter, 'test-model')
+    assert model_route._cooling(adapter, 'test-model', model_route._cooldowns({}), {})
+    if switch == 'host':
+        monkeypatch.setattr(resolver, 'host_id', lambda: 'host-b')
+    elif adapter in ('claude', 'codex'):
+        monkeypatch.setenv({'claude': 'CLAUDE_CONFIG_DIR', 'codex': 'CODEX_HOME'}[adapter], str(second))
+    else:
+        # These CLIs use their platform/default directory; alternate HOME selects it.
+        monkeypatch.setenv('HOME', str(tmp_path / 'other-home'))
+        second = resolver.selected_identity(adapter)
+        config.write_text(json.dumps({'accounts': {adapter: {
+            'a': {'identity_dir': str(first)}, 'b': {'identity_dir': str(second)}}}}))
+    assert records().read_cooldowns(path) == {}
+    assert exec_routing.cooling(adapter, 'test-model') is None
+    assert not model_route._cooling(adapter, 'test-model', model_route._cooldowns({}), {})
+    assert not next(iter(records().read_route_health(health, cooldowns_path=path).values()))['cooling_until']
+    # Success in B must leave A's limit intact; a new B limit must coexist with it.
+    row.update(status='ok')
+    records().write_cooldown(row, path=path)
+    row.update(status='rate_limited')
+    records().write_cooldown(row, path=path)
+    assert records().read_cooldowns(path)
+    assert len(json.loads(path.read_text())['cooldowns']) == 2
+    monkeypatch.setattr(resolver, 'host_id', lambda: 'host-a')
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    for name in ('CLAUDE_CONFIG_DIR', 'CODEX_HOME'):
+        monkeypatch.delenv(name, raising=False)
+    assert records().read_cooldowns(path) == original
+    assert exec_routing.cooling(adapter, 'test-model')
+    assert model_route._cooling(adapter, 'test-model', model_route._cooldowns({}), {})
+
+
+def test_legacy_null_scope_migrates_once_to_default_identity_not_selected_alternate(tmp_path, monkeypatch):
+    resolver = records().identity_resolver()
+    config = tmp_path / 'instance/config/telemetry.json'
+    config.parent.mkdir(parents=True)
+    config.write_text(json.dumps({'accounts': {'claude': {'main': {'identity_dir': '~/.claude'}}}}))
+    monkeypatch.setenv('CLAUDE_CONFIG_DIR', str(tmp_path / 'alternate'))
+    path = tmp_path / 'cooldowns.json'
+    until = timestamp(datetime.now(UTC) + timedelta(hours=1))
+    path.write_text(json.dumps({'schema': 'fabric.cooldowns.v1', 'cooldowns': {
+        'claude/*': {'account': None, 'cooling_until': until}}}))
+    assert records().read_cooldowns(path) == {}
+    entry, = json.loads(path.read_text())['cooldowns'].values()
+    assert (entry['account'], entry['host']) == ('main', 'host-a')
+    migrated = path.read_bytes()
+    assert (tmp_path / 'cooldowns.lock').exists()
+    monkeypatch.delenv('CLAUDE_CONFIG_DIR')
+    assert records().read_cooldowns(path)['claude/*']['account'] == 'main'
+    assert path.read_bytes() == migrated
+    monkeypatch.setattr(resolver, 'host_id', lambda: 'host-b')
+    assert records().read_cooldowns(path) == {}
+    assert path.read_bytes() == migrated
+
+
+def test_new_unknown_scope_only_matches_unknown_and_never_migrates(tmp_path, monkeypatch):
+    resolver = records().identity_resolver()
+    monkeypatch.setattr(resolver, 'selected_identity', lambda adapter: None)
+    path = tmp_path / 'cooldowns.json'
+    row = json.loads((FIX / 'attempt.json').read_text())
+    row.update(status='rate_limited', account=None, host='host-a')
+    row['provenance']['requested']['adapter'] = 'claude'
+    records().write_cooldown(row, path=path)
+    assert records().read_cooldowns(path)
+    before = path.read_bytes()
+    monkeypatch.setattr(resolver, 'selected_identity', resolver.default_identity)
+    assert records().read_cooldowns(path) == {}
+    assert path.read_bytes() == before
+
+
+def test_reset_account_cli_keeps_other_accounts_and_hosts(tmp_path, monkeypatch):
+    resolver = records().identity_resolver()
+    path = tmp_path / 'cooldowns.json'
+    row = json.loads((FIX / 'attempt.json').read_text())
+    row.update(status='rate_limited')
+    row['provenance']['requested']['adapter'] = 'codex'
+    row['provenance']['resolved_model'] = 'gpt-6.1-sol'
+    for account, host in [('a', 'host-a'), ('b', 'host-a'), ('a', 'host-b')]:
+        row.update(account=account, host=host)
+        records().write_cooldown(row, path=path)
+    hosts = tmp_path / 'instance/.agent-fabric/hosts.json'
+    hosts.parent.mkdir(parents=True)
+    hosts.write_text(json.dumps({'schema_version': 1, 'local_host': 'host-a'}))
+    command = [sys.executable, str(Path(__file__).parents[1] / 'scripts/model_route.py'), 'reset',
+               'codex/sol', '--account', 'a', '--json']
+    run = subprocess.run(command, env={**os.environ, 'FABRIC_COOLDOWNS_PATH': str(path)}, capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr
+    assert json.loads(run.stdout)['removed'] == ['codex/gpt-6.1-sol']
+    assert {(row['account'], row['host']) for row in json.loads(path.read_text())['cooldowns'].values()} == {
+        ('b', 'host-a'), ('a', 'host-b')}
+    assert records().clear_cooldowns('codex', path) == ['codex/gpt-6.1-sol']
+    assert not json.loads(path.read_text())['cooldowns']

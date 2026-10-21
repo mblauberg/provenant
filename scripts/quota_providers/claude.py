@@ -16,7 +16,8 @@ KEYCHAIN_SERVICE = 'Claude Code-credentials'
 
 
 def default_identity():
-    return Path(os.environ.get('CLAUDE_CONFIG_DIR') or Path.home() / '.claude').expanduser()
+    from provider_identity import selected_identity
+    return selected_identity('claude')
 
 
 def status(account, io):

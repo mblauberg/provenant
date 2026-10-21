@@ -142,13 +142,14 @@ the run fits inside one timeout window.
 **Second choice, only when detachment is unavoidable: use the shared detached
 helper.** Give each dispatch a unique run directory. The helper captures the
 actual provider child PID in `worker.pid`, records its own wrapper PID in
-`wrapper.pid`, waits on the child directly, writes output to
-`run_dir/transcript.txt`, and atomically writes the durable completion marker
+`wrapper.pid`, starts the provider in a new session with stdin from `/dev/null`,
+waits on the child directly, writes output to `run_dir/transcript.txt`, and
+atomically writes the durable completion marker
 to `run_dir/done`. The caller captures the wrapper PID separately:
 
 ```bash
 run_dir=.agent-run/scratch/provenant-worker-<unique-slug>
-"$(provenant root)/skills/orchestrate/scripts/run_worker_detached.sh" \
+"$(provenant root)/skills/orchestrate/scripts/run_worker_detached.py" \
   --run-dir "$run_dir" -- <worker command> &
 WRAPPER_PID=$!
 wait "$WRAPPER_PID"
@@ -156,14 +157,13 @@ STATUS=$?
 WORKER_PID="$(cat "$run_dir/worker.pid")"
 ```
 
-The helper claims `run_dir` exclusively, forwards its stdin to the direct
-provider child, and its direct wait preserves the provider exit status. If the
-original shell is gone, observe either the regular completion file or the
+The helper claims `run_dir` exclusively, and its direct wait preserves the
+provider exit status. If the original shell is gone, observe either the regular completion file or the
 recorded wrapper exit. A wrapper exit without a marker is an evidence failure,
 never a reason to accept or reuse the run:
 
 ```bash
-helper="$(provenant root)/skills/orchestrate/scripts/run_worker_detached.sh"
+helper="$(provenant root)/skills/orchestrate/scripts/run_worker_detached.py"
 while :; do
   validation="$("$helper" --validate --run-dir "$run_dir" 2>/dev/null)"
   validation_status=$?
