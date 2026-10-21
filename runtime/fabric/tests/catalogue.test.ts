@@ -6,11 +6,12 @@ import { fileURLToPath } from "node:url";
 import { expect, it } from "vitest";
 
 import { catalogueSnapshot, liveModels, resetCooldowns } from "../src/catalogue.js";
+import { scratchRoot } from "./helpers/temp-root.js";
 
 const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
 
 it("ignores a blank product root instead of running a cwd-relative script", () => {
-  const root = mkdtempSync(join(tmpdir(), "fabric-blank-root-"));
+  const root = scratchRoot("fabric-blank-root-");
   const oldCwd = process.cwd();
   try {
     mkdirSync(join(root, "scripts"));

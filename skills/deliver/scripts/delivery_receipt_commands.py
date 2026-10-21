@@ -292,7 +292,14 @@ def build_parser(api: dict[str, Any]) -> argparse.ArgumentParser:
     init.add_argument("--fabric-relationships")
     init.add_argument("--risk-tier", choices=api["RISKS"])
     init.add_argument("--risk-override")
+    init.add_argument("--requires-user-acceptance", action="store_true")
     init.set_defaults(handler=api["command_init"])
+
+    accept = subcommands.add_parser("accept")
+    accept.add_argument("--run-dir", required=True)
+    accept.add_argument("--basis", choices=("checks-and-review", "project-landing"), required=True)
+    accept.add_argument("--evidence", action="append", required=True)
+    accept.set_defaults(handler=api["command_accept"])
 
     bind = subcommands.add_parser("bind")
     bind.add_argument("--run-dir", required=True)

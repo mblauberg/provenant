@@ -1,11 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createRequire } from "node:module";
 import { afterAll, expect, it } from "vitest";
+import { scratchRoot } from "./helpers/temp-root.js";
 
-const root = realpathSync(mkdtempSync(join(tmpdir(), "fabric-lanes-cli-")));
+const root = realpathSync(scratchRoot("fabric-lanes-cli-"));
 afterAll(() => rmSync(root, { recursive: true, force: true }));
 const cli = resolve(import.meta.dirname, "../src/cli.ts");
 const loader = createRequire(import.meta.url).resolve("tsx");

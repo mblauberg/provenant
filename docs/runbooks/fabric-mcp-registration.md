@@ -63,6 +63,12 @@ adapter compatibility.
 | Kiro | `~/.kiro/settings/mcp.json` |
 | OpenCode | `~/.config/opencode/opencode.jsonc` |
 
+When `CLAUDE_CONFIG_DIR` targets an alternate account directory, `install-harness`
+links its `settings.json` to `~/.claude/settings.json`. The shared `settings.json`
+link means settings changed in one account apply to all linked accounts, and if
+Claude replaces the link with a regular file the accounts stop sharing; rerunning
+the installer does not overwrite it.
+
 Each client has its own seat (`claude`, `codex`, `cursor`, `agy`, `kiro`, or
 `opencode`) and therefore its own default inbox. A seat does not establish the
 model family chosen by a broker.
