@@ -12,6 +12,7 @@ def environment(tmp_path):
     home = tmp_path / 'home'
     home.mkdir(exist_ok=True)
     return {**os.environ, 'HOME': str(home),
+            'AGENT_FABRIC_INSTANCE_ROOT': str(home / '.agents'),
             'AGENT_FABRIC_STATE_ROOT': str(tmp_path / 'state'),
             'AGENT_FABRIC_PRODUCT_ROOT': str(ROOT),
             'AGENT_FABRIC_STATE_DIRECTORY': str(tmp_path / 'state'),
@@ -627,6 +628,8 @@ def test_fabric_discovery_ignores_legacy_mcp_run_roots(tmp_path):
 
 
 def test_ledger_rows_carry_the_configured_host_id_without_duplicates(tmp_path):
+    hosts = tmp_path / 'home/.agents/.agent-fabric/hosts.json'
+    write_json(hosts, {'schema_version': 1, 'local_host': 'runner-ci'})
     path = tmp_path / 'home/.claude/projects/repo/s.jsonl'
     jsonl(path, {'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
                  'message': {'id': 'one', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 7}}})
@@ -634,9 +637,10 @@ def test_ledger_rows_carry_the_configured_host_id_without_duplicates(tmp_path):
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         original_host = db.execute('SELECT host FROM usage LIMIT 1').fetchone()[0]
+        assert original_host == 'runner-ci'
         db.execute('INSERT INTO quota_events(provider,account,host,window,kind,observed_at) VALUES (?,?,?,?,?,?)',
                    ('codex', 'work', original_host, 'custom', 'natural', '2026-10-21T12:00:00Z'))
-    write_json(tmp_path / 'home/.agents/.agent-fabric/hosts.json', {'schema_version': 1, 'local_host': 'studio'})
+    write_json(hosts, {'schema_version': 1, 'local_host': 'studio'})
     jsonl(path, {'type': 'assistant', 'sessionId': 's', 'timestamp': '2026-10-21T01:00:00Z',
                  'message': {'id': 'two', 'model': 'claude-opus-5-5', 'usage': {'input_tokens': 7}}})
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
@@ -645,6 +649,21 @@ def test_ledger_rows_carry_the_configured_host_id_without_duplicates(tmp_path):
         assert db.execute('SELECT COUNT(*) FROM usage').fetchone()[0] == 3
         assert db.execute('SELECT DISTINCT host FROM usage_files').fetchall() == [('studio',)]
         assert db.execute('SELECT DISTINCT host FROM quota_events').fetchall() == [('studio',)]
+
+
+def test_host_id_prefers_the_instance_config_over_home_and_hostname(tmp_path, monkeypatch):
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('telemetry_host_precedence', ROOT / 'scripts/telemetry.py')
+    telemetry = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(telemetry)
+    monkeypatch.setenv('HOME', str(tmp_path / 'home'))
+    monkeypatch.setenv('AGENT_FABRIC_INSTANCE_ROOT', str(tmp_path / 'instance'))
+    monkeypatch.setattr(telemetry.socket, 'gethostname', lambda: 'runner-ci')
+    write_json(tmp_path / 'home/.agents/.agent-fabric/hosts.json',
+               {'schema_version': 1, 'local_host': 'home-host'})
+    write_json(tmp_path / 'instance/.agent-fabric/hosts.json',
+               {'schema_version': 1, 'local_host': 'studio'})
+    assert telemetry.host_id() == 'studio'
 
 
 def test_peer_stats_are_versioned_aggregates_and_read_only(tmp_path):
