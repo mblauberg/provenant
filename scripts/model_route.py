@@ -114,6 +114,36 @@ if _pools is None:
     _pools_spec.loader.exec_module(_pools)
 
 EFFORT_ORDER = _catalog_validation.EFFORT_ORDER
+# The effort ladder `effort.shift` steps along; `ultra` is opt-in only and never reached by a shift.
+SHIFT_LADDER = tuple(name for name in EFFORT_ORDER if name != "ultra")
+
+
+def _harness_profile() -> Any:
+    """The shared profile resolver, loaded by path on first use and only for task-class routes."""
+    module = sys.modules.get("provenant_harness_profile")
+    if module is None:
+        spec = importlib.util.spec_from_file_location(
+            "provenant_harness_profile", Path(__file__).resolve().parents[1] / "skills/_shared/harness_profile.py")
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["provenant_harness_profile"] = module
+        spec.loader.exec_module(module)
+    return module
+
+
+def shifted_task_class_effort(task_class: str, effort: str, minimum: str, entries: list[dict[str, Any]]) -> tuple[str, int]:
+    """Apply the profile's `effort.shift` one step, or keep `effort` when the step leaves policy or a model's efforts."""
+    shift = _harness_profile().value("effort.shift", 0, task_class=task_class)
+    if not shift or effort not in SHIFT_LADDER:
+        return effort, 0
+    target = SHIFT_LADDER.index(effort) + shift
+    if not 0 <= target < len(SHIFT_LADDER):
+        return effort, 0
+    candidate = SHIFT_LADDER[target]
+    if (EFFORT_ORDER[candidate] < EFFORT_ORDER[minimum]
+            or any(candidate not in entry.get("efforts", []) for entry in entries)):
+        return effort, 0
+    return candidate, shift
 ALIAS_ORDER = _catalog_validation.ALIAS_ORDER
 # The route-pool tier names, accepted wherever an adapter's own alias is asked for.
 TIER_ALIASES = _pools.TIER_ALIASES
@@ -1527,7 +1557,7 @@ def resolve_effort(
         return None, "", "no_effort_available", capability_source
     if (
         args.task_class_effort
-        and EFFORT_ORDER[fallback] < EFFORT_ORDER[args.task_class_effort]
+        and EFFORT_ORDER[fallback] < EFFORT_ORDER[getattr(args, "task_class_effort_floor", "") or args.task_class_effort]
     ):
         return None, "", "task_class_effort_below_floor", capability_source
     substitution = f"{requested_effort} unavailable (runtime/model capability); used {fallback}"
@@ -1593,6 +1623,8 @@ def resolve(args: argparse.Namespace, catalog: dict[str, Any]) -> int:
     if args.task_class:
         base.update({"task_class": args.task_class, "route_source": "task-class",
                      "configured_models": getattr(args, "task_class_configured_models", [])})
+        if getattr(args, "task_class_effort_shift", 0):
+            base["effort_shift"] = args.task_class_effort_shift
     elif args.model_override_tier:
         override_models = args.model_override.get("models", [])
         override_roles = args.model_override.get("roles", [])
@@ -2406,6 +2438,8 @@ def main(argv: list[str] | None = None) -> int:
             return emit(record, code)
 
         args.task_class_effort = ""
+        args.task_class_effort_floor = ""
+        args.task_class_effort_shift = 0
         args.model_override = {}
         args.endpoint_profile = {}
         if not args.alias and not args.task_class:
@@ -2528,7 +2562,7 @@ def main(argv: list[str] | None = None) -> int:
                     or any(not isinstance(model, str) or not model.strip() for model in configured_models)
                     or len(set(configured_models)) != len(configured_models)):
                 return reject("task_class_config_invalid", alias=route_alias, effort=route_effort)
-            resolved_models = []
+            resolved_models, resolved_entries = [], []
             for configured_model in configured_models:
                 entry, _ = _registered_match(args.adapter, configured_model, catalog)
                 if (entry is None or configured_model != entry["id"]
@@ -2536,6 +2570,7 @@ def main(argv: list[str] | None = None) -> int:
                         or route_effort not in entry.get("efforts", [])):
                     return reject("task_class_config_invalid", alias=route_alias, effort=route_effort)
                 resolved_models.append(entry["id"])
+                resolved_entries.append(entry)
             args.task_class_configured_models = list(resolved_models)
             if args.task_class in {"review", "critical-review", "second-opinion"}:
                 failed_models = _recent_failed_task_class_models(args.adapter, args.task_class)
@@ -2545,7 +2580,10 @@ def main(argv: list[str] | None = None) -> int:
                     resolved_models = [alternate] if alternate else []
             args.task_class_models = resolved_models
             args.alias = route_alias
-            args.task_class_effort = route_effort
+            args.task_class_effort, args.task_class_effort_shift = shifted_task_class_effort(
+                args.task_class, route_effort, policy["minimum_effort"], resolved_entries)
+            # A runtime fallback may not go below the lower of the configured and shifted effort.
+            args.task_class_effort_floor = min(route_effort, args.task_class_effort, key=EFFORT_ORDER.__getitem__)
         elif args.alias not in {"flagship", "workhorse", "scout"}:
             return reject("unknown_alias")
         if args.effort and args.effort not in EFFORT_ORDER:
