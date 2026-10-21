@@ -30,7 +30,7 @@ def state_root():
 def patterns():
     home, state = Path.home(), state_root()
     return {
-        'fabric': '<registered-projects>/.agent-run/runs/**/attempt.json',
+        'fabric': '<current-and-registered-projects>/.agent-run/{runs/**,mcp-*/**}/attempt.json',
         'route_health': os.environ.get('AGENT_FABRIC_ROUTE_HEALTH_PATH', str(state / 'route-health.json')),
         'cooldowns': os.environ.get('FABRIC_COOLDOWNS_PATH', str(state / 'cooldowns.json')),
         'claude': str(home / '.claude/projects/**/*.jsonl'),
@@ -45,10 +45,12 @@ def connect():
     db = sqlite3.connect(path)
     db.row_factory = sqlite3.Row
     version = db.execute('PRAGMA user_version').fetchone()[0]
-    if version not in (0, 1, 2):
+    if version not in (0, 1, 2, 3):
         db.close()
         raise ValueError(f'unsupported telemetry schema version: {version}')
     db.executescript('''
+        CREATE TABLE IF NOT EXISTS rebuilds (
+            source TEXT PRIMARY KEY, paths TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS sources (
             source TEXT PRIMARY KEY, path_pattern TEXT NOT NULL,
             parser_version INTEGER NOT NULL, last_ingest TEXT,
@@ -84,10 +86,17 @@ def connect():
     for name, kind in (('run_id', 'TEXT'), ('task_id', 'TEXT'), ('attempt', 'INTEGER')):
         if name not in usage_columns:
             db.execute(f'ALTER TABLE usage ADD COLUMN {name} {kind}')
-    db.execute('PRAGMA user_version = 2')
+    if version in (1, 2):
+        for source in SOURCES:
+            paths = [row[0] for row in db.execute('SELECT path FROM cursors WHERE source=?', (source,))]
+            if paths:
+                db.execute('INSERT OR REPLACE INTO rebuilds VALUES (?,?)', (source, json.dumps(paths)))
+                db.execute('DELETE FROM usage_files WHERE source=?', (source,))
+                db.execute('DELETE FROM cursors WHERE source=?', (source,))
+    db.execute('PRAGMA user_version = 3')
     for source, pattern in patterns().items():
-        db.execute('INSERT INTO sources(source,path_pattern,parser_version,status) VALUES (?,?,1,?) '
-                   'ON CONFLICT(source) DO UPDATE SET path_pattern=excluded.path_pattern',
+        db.execute('INSERT INTO sources(source,path_pattern,parser_version,status) VALUES (?,?,2,?) '
+                   'ON CONFLICT(source) DO UPDATE SET path_pattern=excluded.path_pattern,parser_version=excluded.parser_version',
                    (source, pattern, 'not_ingested'))
     db.commit()
     return db
@@ -102,7 +111,9 @@ def put_usage(db, source, event_id, origin_path, **values):
     columns = list(values)
     update = ','.join(f'{key}=excluded.{key}' for key in columns if key not in {'source', 'event_id', 'host'})
     condition = (' WHERE COALESCE(excluded.output_tokens,0)+COALESCE(excluded.reasoning_tokens,0) '
-                 '>= COALESCE(usage.output_tokens,0)+COALESCE(usage.reasoning_tokens,0)'
+                 '>= COALESCE(usage.output_tokens,0)+COALESCE(usage.reasoning_tokens,0) '
+                 'OR NOT EXISTS (SELECT 1 FROM usage_files f WHERE f.source=usage.source '
+                 'AND f.event_id=usage.event_id AND f.host=usage.host)'
                  if source == 'claude' else '')
     db.execute(f"INSERT INTO usage({','.join(columns)}) VALUES ({','.join('?' for _ in columns)}) "
                f'ON CONFLICT(source,event_id,host) DO UPDATE SET {update}{condition}', list(values.values()))
@@ -192,10 +203,13 @@ def codex_record(db, row, state, path, offset):
 
 
 def clear_file(db, source, path):
+    events = db.execute('SELECT event_id,host FROM usage_files WHERE source=? AND path=?',
+                        (source, str(path))).fetchall()
     db.execute('DELETE FROM usage_files WHERE source=? AND path=?', (source, str(path)))
-    db.execute('DELETE FROM usage WHERE source=? AND NOT EXISTS '
-               '(SELECT 1 FROM usage_files f WHERE f.source=usage.source '
-               'AND f.event_id=usage.event_id AND f.host=usage.host)', (source,))
+    for event_id, host in events:
+        db.execute('DELETE FROM usage WHERE source=? AND event_id=? AND host=? AND NOT EXISTS '
+                   '(SELECT 1 FROM usage_files f WHERE f.source=usage.source '
+                   'AND f.event_id=usage.event_id AND f.host=usage.host)', (source, event_id, host))
     db.execute('DELETE FROM observations WHERE source=? AND origin_path=?', (source, str(path)))
 
 
@@ -386,6 +400,13 @@ def ingest(db):
                         ingest_jsonl(db, source, path, codex_record if source == 'codex' else claude_record)
             except (OSError, ValueError, TypeError, AttributeError, sqlite3.Error):
                 errors += 1
+        rebuild = db.execute('SELECT paths FROM rebuilds WHERE source=?', (source,)).fetchone()
+        if rebuild and not errors and set(json.loads(rebuild['paths'])).issubset({str(path) for path in paths}):
+            db.execute('DELETE FROM usage WHERE source=? AND NOT EXISTS '
+                       '(SELECT 1 FROM usage_files f WHERE f.source=usage.source '
+                       'AND f.event_id=usage.event_id AND f.host=usage.host)', (source,))
+            db.execute('DELETE FROM observations WHERE source=? AND origin_path IS NULL', (source,))
+            db.execute('DELETE FROM rebuilds WHERE source=?', (source,))
         table = 'observations' if source in {'route_health', 'cooldowns'} else 'usage'
         count = db.execute(f'SELECT COUNT(*) FROM {table} WHERE source=?', (source,)).fetchone()[0]
         status = 'error' if errors else 'ok' if paths else 'absent'

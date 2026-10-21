@@ -46,9 +46,9 @@ def test_missing_sources_are_manifested_not_errors(tmp_path):
     assert {row['source'] for row in rows} == {
         'fabric', 'route_health', 'cooldowns', 'claude', 'codex', 'opencode'}
     assert all(row['status'] == 'absent' and row['row_count'] == 0 for row in rows)
-    assert all(row['parser_version'] == 1 and row['path_pattern'] for row in rows)
+    assert all(row['parser_version'] == 2 and row['path_pattern'] for row in rows)
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 2
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 3
 
 
 def test_claude_incremental_dedup_subagents_and_content_exclusion(tmp_path):
@@ -270,7 +270,7 @@ def test_schema_migrates_existing_v1_observations(tmp_path):
     result = cli(tmp_path, 'telemetry', 'ingest')
     assert result.returncode == 0, result.stdout + result.stderr
     with sqlite3.connect(path) as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 2
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 3
         assert db.execute('SELECT source,origin_path FROM observations').fetchone() == ('cooldowns', str(path.parent / 'cooldowns.json'))
 
 
@@ -307,3 +307,43 @@ def test_unreadable_fabric_registry_does_not_block_other_sources(tmp_path):
     rows = json.loads(cli(tmp_path, 'telemetry', 'sources', '--json').stdout)
     assert next(row for row in rows if row['source'] == 'fabric')['status'] == 'error'
     assert next(row for row in rows if row['source'] == 'claude')['row_count'] == 1
+
+
+
+
+def test_populated_v1_rebuild_reconciles_rewrites_without_losing_other_files(tmp_path):
+    directory = tmp_path / 'home/.claude/projects/repo'
+    for mid in ('one','two'):
+        jsonl(directory / f'{mid}.jsonl', {'type':'assistant','message':{
+            'id':mid,'model':'test','usage':{'input_tokens':7}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        db.execute('DELETE FROM usage_files')
+        db.execute("UPDATE cursors SET state='{}'")
+        db.execute('PRAGMA user_version=1')
+    path = directory / 'one.jsonl'
+    path.write_text(path.read_text().replace('"one"','"new"'))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute('SELECT event_id FROM usage ORDER BY event_id').fetchall() == [('new',),('two',)]
+    path.write_text(path.read_text().replace('"new"','"now"'))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute('SELECT event_id FROM usage ORDER BY event_id').fetchall() == [('now',),('two',)]
+
+
+def test_legacy_rebuild_replaces_stale_usage_for_unchanged_message_id(tmp_path):
+    path = tmp_path / 'home/.claude/projects/repo/s.jsonl'
+    row = {'type':'assistant','message':{
+        'id':'m','model':'test','usage':{'input_tokens':10,'output_tokens':30}}}
+    jsonl(path, row)
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        db.execute('DELETE FROM usage_files')
+        db.execute("UPDATE cursors SET state='{}'")
+        db.execute('PRAGMA user_version=1')
+    row['message']['usage']['output_tokens'] = 3
+    path.write_text(json.dumps(row) + '\n')
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute('SELECT output_tokens FROM usage').fetchall() == [(3,)]
