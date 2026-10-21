@@ -34,12 +34,22 @@ def app_server(account, io, timeout=None):
     except OSError:
         raise io.Unavailable('Codex could not start its account service') from None
     lines = queue.Queue()
+    deadline = io.monotonic() + timeout
 
     def pump():
-        for line in iter(process.stdout.readline, ''):
-            lines.put(line)
-        lines.put(None)
-    threading.Thread(target=pump, daemon=True).start()
+        total = 0
+        try:
+            for line in iter(lambda: process.stdout.readline(io.MAX_RESPONSE_BYTES + 1), ''):
+                total += len(line)
+                if total > io.MAX_RESPONSE_BYTES:
+                    break
+                lines.put(line)
+        except (OSError, ValueError):
+            pass
+        finally:
+            lines.put(None)
+    reader = threading.Thread(target=pump, daemon=True)
+    reader.start()
 
     def send(message):
         process.stdin.write(json.dumps({'jsonrpc': '2.0', **message}) + '\n')
@@ -48,7 +58,10 @@ def app_server(account, io, timeout=None):
     def answer(request_id):
         while True:
             try:
-                line = lines.get(timeout=timeout)
+                remaining = deadline - io.monotonic()
+                if remaining <= 0:
+                    raise queue.Empty
+                line = lines.get(timeout=remaining)
             except queue.Empty:
                 raise io.Unavailable('Codex quota request timed out') from None
             if line is None:
@@ -73,6 +86,15 @@ def app_server(account, io, timeout=None):
     finally:
         if process.poll() is None:
             process.terminate()
+        try:
+            process.wait(timeout=1)
+        except io.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=1)
+        finally:
+            process.stdin.close()
+            process.stdout.close()
+            reader.join(timeout=1)
 
 
 def _window(prefix, name, raw):

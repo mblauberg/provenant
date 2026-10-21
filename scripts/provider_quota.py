@@ -24,8 +24,18 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+from time import monotonic
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, request, response, code, message, headers, target):
+        return None
+
+
+# Authenticated quota requests must stay at the provider's exact endpoint.
+urlopen = build_opener(_NoRedirect()).open
 
 
 SCHEMA = 'provenant.quota.v1'

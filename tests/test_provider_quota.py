@@ -150,6 +150,8 @@ def test_codex_app_server_speaks_json_rpc_and_never_inherits_a_token(quota, monk
                 {'id': 2, 'result': {'rateLimits': {'primary': {'usedPercent': 7}}}})) + '\n')
         def poll(self):
             return 0
+        def wait(self, timeout=None):
+            return 0
     monkeypatch.setattr(quota, 'open_process', Process)
     monkeypatch.setattr(quota, 'executable', lambda name: '/bin/' + name)
     account = quota.Account('codex', 'default', tmp_path / 'codex-home', True)
@@ -488,3 +490,61 @@ def test_credit_list_is_local_advice_and_does_not_fetch(quota, capsys):
     rows = json.loads(capsys.readouterr().out)
     assert rows == [{'provider': 'codex', 'account': 'work', 'host': 'studio', 'reset_credits': 1,
                      'updated_at': rows[0]['updated_at']}]
+
+
+def test_http_quota_never_forwards_credentials_on_redirect(monkeypatch):
+    import http.client
+    from email.message import Message
+    opened = []
+    class Connection(http.client.HTTPSConnection):
+        debuglevel = 0
+        def __init__(self, host, **kwargs):
+            opened.append(host)
+            self.sock = None
+        def set_debuglevel(self, value):
+            pass
+        def request(self, *args, **kwargs):
+            pass
+        def close(self):
+            pass
+        def getresponse(self):
+            response = io.BytesIO(b'{}')
+            response.status = 302 if len(opened) == 1 else 200
+            response.reason = 'Found'
+            response.msg = Message()
+            response.msg['Location'] = 'https://untrusted.invalid/steal'
+            response.code = response.status
+            headers = response.msg
+            response.info = lambda: headers
+            return response
+    monkeypatch.setattr(http.client, 'HTTPSConnection', Connection)
+    monkeypatch.setenv('no_proxy', '*')
+    module = load('quota_redirect_test', ROOT / 'scripts/provider_quota.py')
+    with pytest.raises(module.Unavailable):
+        module.http_json('https://api.anthropic.com/api/oauth/usage', {'Authorization': 'Bearer ' + TOKEN})
+    assert opened == ['api.anthropic.com']
+
+
+def test_codex_quota_has_one_deadline_and_reaps_a_stubborn_child(quota, monkeypatch):
+    ticks = iter(range(100))
+    monkeypatch.setattr(quota, 'monotonic', lambda: next(ticks), raising=False)
+    monkeypatch.setattr(quota, 'executable', lambda name: '/fake/codex')
+    stopped = []
+    class Process:
+        stdin = io.StringIO()
+        stdout = io.StringIO('\n'.join(json.dumps({'method': 'noise'}) for _ in range(10)) + '\n')
+        def poll(self):
+            return None
+        def terminate(self):
+            stopped.append('terminate')
+        def kill(self):
+            stopped.append('kill')
+        def wait(self, timeout=None):
+            if 'kill' not in stopped:
+                raise subprocess.TimeoutExpired('codex', timeout)
+            stopped.append('reaped')
+    monkeypatch.setattr(quota, 'open_process', lambda *args, **kwargs: Process())
+    with pytest.raises(quota.Unavailable, match='timed out'):
+        quota.provider('codex').app_server(quota.Account('codex', 'default', Path('/fake'), True), quota.IO, timeout=2)
+    assert stopped == ['terminate', 'kill', 'reaped']
+    assert Process.stdin.closed and Process.stdout.closed
