@@ -51,8 +51,12 @@ in `skills/orchestrate`; this page records the traps.
   shim (2026-10-22). A confined lane therefore runs with a per-attempt `HOME`
   of links to the real entries. Only `antigravity-cli/bin` is the lane's own
   directory, where agy writes its shim. The real `bin/` keeps no write grant.
-  The sandbox judges every access through a link at the real path. The overlay
-  is rebuilt before and removed after each attempt. agy signs in from the
+  The sandbox judges every access through a link at the real path. Each
+  attempt stages a fresh overlay after preparing agy's state directories, so
+  each of them is a link. agy rewrites some top-level state by temp-and-rename,
+  which replaces the overlay's link rather than the real file. After the
+  attempt the harness copies those granted files back, but never a link, a
+  token file or an oversized file. It then removes the overlay. agy signs in from the
   login Keychain: with the token files left out of the overlay, it still
   authenticated under `sandbox-exec`. An empty `HOME` fails with
   `authentication failed or timed out`. On 2026-10-22 a confined read-only
