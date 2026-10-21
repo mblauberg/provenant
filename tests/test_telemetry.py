@@ -182,10 +182,75 @@ def test_partial_jsonl_line_resumes_and_malformed_source_is_visible(tmp_path):
         assert db.execute('SELECT SUM(input_tokens) FROM usage').fetchone()[0] == 7
 
 
+def test_stats_since_json_tokens_unknown_cost_and_daily_limits(tmp_path):
+    path = tmp_path / 'home/.claude/projects/repo/session.jsonl'
+    def row(mid, stamp):
+        return {'type': 'assistant', 'sessionId': 's', 'timestamp': stamp,
+                'message': {'id': mid, 'model': 'test-model', 'usage': {
+                    'input_tokens': 10, 'cache_read_input_tokens': 30,
+                    'cache_creation_input_tokens': 10, 'output_tokens': 20,
+                    'output_tokens_details': {'thinking_tokens': 5}}}}
+    jsonl(path, row('old', '2026-10-20T01:00:00Z'), row('new', '2026-10-21T01:00:00Z'))
+    state = tmp_path / 'state'
+    write_json(state / 'cooldowns.json', {'cooldowns': {'opencode/free': {
+        'adapter': 'opencode', 'model': 'free', 'status': 'rate_limited',
+        'recorded_at': '2026-10-21T01:00:00Z', 'source_run': 'r'}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    result = cli(tmp_path, 'stats', '--since', '2026-10-21', '--json')
+    assert result.returncode == 0, result.stderr
+    stats = json.loads(result.stdout)
+    usage = stats['usage'][0]
+    assert (usage['provider'], usage['model']) == ('anthropic', 'test-model')
+    assert {k: usage[k] for k in ('input_tokens','cache_read_tokens','cache_write_tokens','output_tokens','reasoning_tokens')} == {
+        'input_tokens': 10, 'cache_read_tokens': 30, 'cache_write_tokens': 10,
+        'output_tokens': 15, 'reasoning_tokens': 5}
+    assert usage['cache_read_share'] == 0.6
+    assert usage['estimated_cost_usd'] is None
+    assert usage['missing_cost_rows'] == 1
+    assert usage['cost_basis'] == 'api_equivalent_estimate'
+    assert stats['limits_per_day'] == [{'day': '2026-10-21', 'provider': 'opencode', 'account': None, 'status': 'rate_limited', 'events': 1}]
+    assert len(stats['usage_per_day']) == 1
+    assert stats['usage_per_day'][0]['day'] == '2026-10-21'
+    assert stats['usage_per_day'][0]['input_tokens'] == 10
+    plain = cli(tmp_path, 'stats', '--since', '2026-10-21')
+    assert plain.returncode == 0 and 'missing' in plain.stdout
 
 
+def test_stats_prices_preserve_missingness_and_bill_reasoning_once(tmp_path):
+    from scripts import telemetry
+    row = {'adapter': 'claude', 'model': 'synthetic', 'input_tokens': 1_000_000,
+           'cache_read_tokens': 2_000_000, 'cache_write_tokens': 3_000_000,
+           'output_tokens': 4_000_000, 'reasoning_tokens': 5_000_000}
+    prices = {'claude/synthetic': {'usd_per_million': {
+        'input': 2, 'cached_input': 0.2, 'cache_write': 3, 'output': 10}}}
+    assert telemetry.estimated_cost(row, prices) == 101.4
+    assert telemetry.estimated_cost({**row, 'cache_write_tokens': None}, prices) is None
+    assert telemetry.estimated_cost(row, {'claude/synthetic': {'usd_per_million': {
+        'input': 2, 'cached_input': 0.2, 'cache_write': None, 'output': 10}}}) is None
+    assert telemetry.estimated_cost({**row, 'cache_write_tokens': 0}, {
+        'claude/synthetic': {'usd_per_million': {
+            'input': 2, 'cached_input': 0.2, 'cache_write': None, 'output': 10}}}) == 92.4
 
 
+def test_stats_do_not_double_count_receipts_with_native_session_usage(tmp_path):
+    project = tmp_path
+    path = project / '.agent-run/runs/run/tasks/lane/attempt-001/attempt.json'
+    write_json(path, {'run_id':'r','task_id':'t','attempt':1,'session_id':'s',
+                     'status':'rate_limited','error_class':'throttle',
+                     'ended_at':'2026-10-21T01:00:00Z',
+                     'provenance': {'requested':{'adapter':'claude'}, 'resolved_model':'test'},
+                     'context':{'input_tokens':100,'output_tokens':20}})
+    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl', {
+        'type':'assistant','sessionId':'s','timestamp':'2026-10-21T01:00:00Z',
+        'message':{'id':'m','model':'test','usage':{'input_tokens':100,'output_tokens':20}}})
+    write_json(tmp_path / 'state/route-health.json', {'routes':{'key':{
+        'adapter':'claude','model':'test','recent':[{'status':'rate_limited','run_id':'r','at':'2026-10-21T01:00:01Z'}]}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    result = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    assert result['usage'][0]['input_tokens'] == 100
+    assert result['receipt_usage_rows_excluded'] == 1
+    assert result['lanes'] == [{'status':'rate_limited','error_class':'throttle','lanes':1}]
+    assert sum(row['events'] for row in result['limits_per_day']) == 1
 
 
 def test_rewritten_jsonl_reconciles_removed_ids(tmp_path):
@@ -285,14 +350,69 @@ def test_large_same_size_transcript_suffix_rewrite_is_reconciled(tmp_path):
         assert db.execute('SELECT event_id FROM usage').fetchall() == [('new',)]
 
 
+def test_since_dedup_uses_only_native_usage_in_requested_period(tmp_path):
+    write_json(tmp_path / '.agent-run/runs/run/tasks/lane/attempt-001/attempt.json', {
+        'run_id':'r','task_id':'t','attempt':1,'session_id':'s','status':'ok',
+        'ended_at':'2026-10-21T01:00:00Z',
+        'provenance':{'requested':{'adapter':'claude'},'resolved_model':'test'},
+        'context':{'input_tokens':100}})
+    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl', {
+        'type':'assistant','sessionId':'s','timestamp':'2026-10-20T01:00:00Z',
+        'message':{'id':'m','model':'test','usage':{'input_tokens':7}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--since', '2026-10-21', '--json').stdout)
+    assert report['usage'][0]['input_tokens'] == 100
+    assert report['receipt_usage_rows_excluded'] == 0
 
 
+def test_opencode_price_lookup_keeps_provider_namespace():
+    from scripts import telemetry
+    row = {'adapter':'opencode','provider':'opencode-go','model':'synthetic',
+           'input_tokens':1_000_000,'cache_read_tokens':0,'cache_write_tokens':0,
+           'output_tokens':0,'reasoning_tokens':0}
+    assert telemetry.estimated_cost(row, {'opencode/opencode-go/synthetic': {
+        'usd_per_million':{'input':2}}}) == 2
 
 
+def test_lanes_report_latest_attempt_and_preserve_attempt_outcomes(tmp_path):
+    for attempt, status in ((1,'failed'), (2,'ok')):
+        write_json(tmp_path / f'.agent-run/runs/run/tasks/lane/attempt-{attempt:03d}/attempt.json', {
+            'run_id':'r','task_id':'lane','attempt':attempt,'status':status,
+            'error_class':'test_failure' if status == 'failed' else None,
+            'ended_at':'2026-10-21T01:00:00Z', 'cwd':'/repo',
+            'provenance':{'requested':{'adapter':'codex'},'resolved_model':'test'}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    assert report['lanes'] == [{'status':'ok','error_class':None,'lanes':1}]
+    assert report['attempts'] == [{'status':'failed','error_class':'test_failure','attempts':1},
+                                  {'status':'ok','error_class':None,'attempts':1}]
 
 
+def test_unknown_token_fields_are_not_reported_as_zero(tmp_path):
+    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl', {
+        'type':'assistant','timestamp':'2026-10-21T01:00:00Z',
+        'message':{'id':'m','model':'test','usage':{'input_tokens':10}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    usage = report['usage'][0]
+    assert usage['output_tokens'] is None
+    assert usage['cache_read_share'] is None
+    assert usage['missing_token_fields']['output_tokens'] == 1
+    assert usage['adapter'] == 'claude'
 
 
+def test_fabric_context_totals_are_normalised_to_disjoint_token_buckets(tmp_path):
+    write_json(tmp_path / '.agent-run/runs/run/tasks/lane/attempt-001/attempt.json', {
+        'run_id':'r','task_id':'lane','attempt':1,'status':'ok',
+        'ended_at':'2026-10-21T01:00:00Z',
+        'provenance':{'requested':{'adapter':'codex'},'resolved_model':'test'},
+        'context':{'input_tokens':100,'cached_input_tokens':40,'cache_write_tokens':10,
+                   'output_tokens':30,'reasoning_tokens':10}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    row = report['usage'][0]
+    assert (row['input_tokens'], row['cache_read_tokens'], row['cache_write_tokens'],
+            row['output_tokens'], row['reasoning_tokens']) == (50,40,10,20,10)
 
 
 def test_unreadable_fabric_registry_does_not_block_other_sources(tmp_path):
@@ -309,6 +429,17 @@ def test_unreadable_fabric_registry_does_not_block_other_sources(tmp_path):
     assert next(row for row in rows if row['source'] == 'claude')['row_count'] == 1
 
 
+def test_limit_dedup_keeps_distinct_models_in_the_same_run(tmp_path):
+    write_json(tmp_path / '.agent-run/runs/run/tasks/lane/attempt-001/attempt.json', {
+        'run_id':'r','task_id':'lane','attempt':1,'status':'rate_limited',
+        'ended_at':'2026-10-21T01:00:00Z',
+        'provenance':{'requested':{'adapter':'codex'},'resolved_model':'one'}})
+    write_json(tmp_path / 'state/route-health.json', {'routes':{model:{
+        'adapter':'codex','model':model,'recent':[{'run_id':'r','status':'rate_limited',
+        'at':'2026-10-21T01:00:00Z'}]} for model in ('one','two')}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    report = json.loads(cli(tmp_path, 'stats', '--json').stdout)
+    assert sum(row['events'] for row in report['limits_per_day']) == 2
 
 
 def test_populated_v1_rebuild_reconciles_rewrites_without_losing_other_files(tmp_path):

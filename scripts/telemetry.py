@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+from collections import Counter
 from datetime import UTC, datetime
 import json
 import os
@@ -416,14 +417,157 @@ def ingest(db):
     return [dict(row) for row in db.execute('SELECT * FROM sources ORDER BY source')]
 
 
+TOKEN_FIELDS = ('input_tokens', 'cache_read_tokens', 'cache_write_tokens', 'output_tokens', 'reasoning_tokens')
+PRICE_TABLE = Path(__file__).resolve().parents[1] / 'config/telemetry-prices.json'
+
+
+def estimated_cost(row, prices):
+    entry = (prices.get(f"{row['adapter']}/{row['model']}") or
+             prices.get(f"{row['adapter']}/{row.get('provider')}/{row['model']}") or {})
+    rates = entry.get('usd_per_million') or {}
+    total = 0.0
+    for token, rate in (('input_tokens', 'input'), ('cache_read_tokens', 'cached_input'),
+                        ('cache_write_tokens', 'cache_write'), ('output_tokens', 'output'),
+                        ('reasoning_tokens', 'output')):
+        count = row[token]
+        price = number(rates.get(rate))
+        if count is None or (count > 0 and price is None):
+            return None
+        total += count * (price or 0) / 1_000_000
+    return total
+
+
+def aggregate(rows, keys, prices):
+    groups = {}
+    for row in rows:
+        key = tuple(row.get(k) for k in keys)
+        if key not in groups:
+            groups[key] = {**dict(zip(keys, key)), **{field: 0 for field in TOKEN_FIELDS},
+                           'rows': 0, 'missing_cost_rows': 0, 'estimated_cost_usd': 0.0,
+                           'reported_cost_usd': None, 'cost_basis': 'api_equivalent_estimate',
+                           'missing_token_rows': 0,
+                           'missing_token_fields': dict.fromkeys(TOKEN_FIELDS, 0)}
+        group = groups[key]
+        group['rows'] += 1
+        group['missing_token_rows'] += int(any(row[field] is None for field in TOKEN_FIELDS))
+        for field in TOKEN_FIELDS:
+            group[field] += row[field] or 0
+            group['missing_token_fields'][field] += int(row[field] is None)
+        cost = estimated_cost(row, prices)
+        if cost is None:
+            group['missing_cost_rows'] += 1
+        else:
+            group['estimated_cost_usd'] += cost
+        if row['reported_cost'] is not None:
+            group['reported_cost_usd'] = (group['reported_cost_usd'] or 0) + row['reported_cost']
+    for group in groups.values():
+        inputs = sum(group[field] for field in TOKEN_FIELDS[:3])
+        group['cache_read_share'] = (group['cache_read_tokens'] / inputs
+                                     if inputs and not any(group['missing_token_fields'][field]
+                                                           for field in TOKEN_FIELDS[:3]) else None)
+        for field in TOKEN_FIELDS:
+            if group['missing_token_fields'][field] == group['rows']:
+                group[field] = None
+        if group['missing_cost_rows']:
+            group['estimated_cost_usd'] = None
+    return sorted(groups.values(), key=lambda row: tuple(str(row[k] or '') for k in keys))
+
+
+def since_time(value):
+    stamp = datetime.fromisoformat(value.replace('Z', '+00:00'))
+    return stamp.replace(tzinfo=UTC) if stamp.tzinfo is None else stamp.astimezone(UTC)
+
+
+def stats(db, since=None, prices=None):
+    if prices is None:
+        prices = json.loads(PRICE_TABLE.read_text())['models']
+    boundary = since_time(since) if since else None
+    def included(row):
+        return not boundary or (row['timestamp'] is not None and since_time(row['timestamp']) >= boundary)
+    all_usage = [dict(row) for row in db.execute('SELECT * FROM usage')]
+    selected = [row for row in all_usage if included(row)]
+    native = {(row['adapter'], row['session']) for row in selected if row['source'] != 'fabric' and row['session']}
+    usage = [row for row in selected if row['source'] != 'fabric' or (row['adapter'], row['session']) not in native]
+    for row in usage:
+        row['day'] = since_time(row['timestamp']).date().isoformat() if row['timestamp'] else None
+    latest = {}
+    attempts = Counter()
+    for row in selected:
+        if row['source'] != 'fabric':
+            continue
+        attempts[(row['status'], row['error_class'])] += 1
+        key = (row['repository'], row['run_id'], row['task_id'])
+        if key not in latest or (row['attempt'] or 0) > (latest[key]['attempt'] or 0):
+            latest[key] = row
+    lanes = Counter((row['status'], row['error_class']) for row in latest.values())
+    limits = Counter()
+    receipt_outcomes = set()
+    for row in selected:
+        if row['source'] == 'fabric' and row['status'] in {'rate_limited', 'usage_limited'}:
+            run = row['run_id']
+            receipt_outcomes.add((row['adapter'], row['model'], run, row['status']))
+            day = since_time(row['timestamp']).date().isoformat() if row['timestamp'] else None
+            limits[(day, row['provider'], row['account'], row['status'])] += 1
+    seen = set()
+    for item in db.execute('SELECT * FROM observations ORDER BY source'):
+        row = dict(item)
+        if not included(row) or row['status'] not in {'rate_limited', 'usage_limited'}:
+            continue
+        if (row['adapter'], row['model'], row['run_id'], row['status']) in receipt_outcomes:
+            continue
+        day = since_time(row['timestamp']).date().isoformat() if row['timestamp'] else None
+        key = (row['adapter'], row['model'], row['run_id'] or row['timestamp'], row['status'], day)
+        if key not in seen:
+            seen.add(key)
+            limits[(day, row['provider'], row['account'], row['status'])] += 1
+    return {'schema_version': 1, 'since': since,
+            'usage': aggregate(usage, ('provider', 'adapter', 'model'), prices),
+            'usage_per_day': aggregate(usage, ('day', 'provider', 'adapter', 'account'), prices),
+            'lanes': [{'status': status, 'error_class': error, 'lanes': count}
+                      for (status, error), count in sorted(lanes.items(), key=str)],
+            'attempts': [{'status': status, 'error_class': error, 'attempts': count}
+                         for (status, error), count in sorted(attempts.items(), key=str)],
+            'limits_per_day': [dict(zip(('day','provider','account','status','events'), (*key, count)))
+                               for key, count in sorted(limits.items(), key=str)],
+            'quota_observations': [dict(row) for row in db.execute('SELECT * FROM observations WHERE used_percent IS NOT NULL') if included(row)],
+            'receipt_usage_rows_excluded': len(selected) - len(usage),
+            'pending_source_rebuilds': [row[0] for row in db.execute('SELECT source FROM rebuilds ORDER BY source')]}
+
+
+def render_stats(report):
+    print('Costs: API-equivalent estimates in USD; missing prices or usage remain missing.')
+    for row in report['usage']:
+        cost = row['estimated_cost_usd']
+        share = row['cache_read_share']
+        print(f"{row['provider']}/{row['model']}: " +
+              ' '.join(f"{field}={row[field] if row[field] is not None else 'missing'}" for field in TOKEN_FIELDS) +
+              f" cache_read_share={share if share is not None else 'missing'} "
+              f"estimated_cost_usd={cost if cost is not None else 'missing'}")
+    for category in ('lanes', 'attempts', 'limits_per_day', 'usage_per_day', 'quota_observations'):
+        print(category + ':')
+        for row in report[category]:
+            print('  ' + json.dumps(row, sort_keys=True))
+
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('command', choices=('ingest', 'sources'))
+    parser.add_argument('command', choices=('ingest', 'sources', 'stats'))
     parser.add_argument('--json', action='store_true')
+    parser.add_argument('--since', type=str)
     args = parser.parse_args(argv)
     try:
+        if args.since:
+            since_time(args.since)
+        if args.since and args.command != 'stats':
+            parser.error('--since applies only to stats')
         with connect() as db:
+            if args.command == 'stats':
+                report = stats(db, args.since)
+                if args.json:
+                    print(json.dumps(report, indent=2))
+                else:
+                    render_stats(report)
+                return 0
             rows = ingest(db) if args.command == 'ingest' else [
                 dict(row) for row in db.execute('SELECT * FROM sources ORDER BY source')]
         if args.json:
