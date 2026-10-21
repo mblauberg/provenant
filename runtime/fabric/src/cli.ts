@@ -235,6 +235,13 @@ if (command === "lanes") {
         ? `${Math.floor(seconds / 60)}m` : `${Math.floor(seconds / 3600)}h`;
     };
     const active = (row: (typeof result.runs)[number]) => row.state !== "terminal";
+    const needsAttention = (row: (typeof result.runs)[number]) =>
+      row.status === "quarantined" ||
+      row.status === "input_required" ||
+      row.state === "input_required" ||
+      row.landable === false ||
+      Boolean(row.quarantine) ||
+      (typeof row.status === "string" && row.status.includes("review"));
     const activeRows = result.runs.filter(active);
     const terminalRows = result.runs.filter((row) => !active(row));
     terminalRows.sort((a, b) => Date.parse(b.started_at ?? "") - Date.parse(a.started_at ?? ""));
@@ -245,7 +252,7 @@ if (command === "lanes") {
     if (ids.length || all) {
       rows = [...activeRows, ...terminalRows];
     } else {
-      const shownTerminal = terminalRows.slice(0, 5);
+      const shownTerminal = terminalRows.filter((row, index) => index < 5 || needsAttention(row));
       omitted = terminalRows.length - shownTerminal.length;
       rows = [...activeRows, ...shownTerminal];
     }

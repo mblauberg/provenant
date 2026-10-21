@@ -18,7 +18,7 @@ function lanes(cwd: string, ...args: string[]) {
   return { code: result.status, out: result.stdout, err: result.stderr };
 }
 
-function createAttempt(workspace: string, taskId: string, state: string, status: string | null, date: string) {
+function createAttempt(workspace: string, taskId: string, state: string, status: string | null, date: string, extra?: Record<string, any>) {
   const run = `20260924-1012-dispatch-fixture-${taskId.slice(-6).padStart(6, "a")}`;
   const dir = join(workspace, ".agent-run", "runs", run, "tasks", taskId, "attempt-001");
   mkdirSync(dir, { recursive: true });
@@ -32,6 +32,7 @@ function createAttempt(workspace: string, taskId: string, state: string, status:
     ended_at: state === "terminal" ? date : null,
     paths: { result: `tasks/${taskId}/attempt-001/result.md` },
   });
+  if (extra) Object.assign(row, extra);
   writeFileSync(join(dir, "attempt.json"), JSON.stringify(row));
   writeFileSync(join(dir, "result.md"), "result");
 }
@@ -111,4 +112,33 @@ it("defaults to active lanes plus 5 most recent terminal ones, then N more; use 
   expect(allListing.out).toContain("term-02");
   expect(allListing.out).toContain("term-03");
   expect(allListing.out).not.toContain("more; use --all");
+});
+
+it("never truncates terminal lanes needing attention (quarantined, input_required) behind the 5-terminal window", () => {
+  const repo = join(root, "repo-lanes-attention");
+  mkdirSync(repo, { recursive: true });
+  spawnSync("git", ["init", "-q", repo]);
+
+  // Create 6 terminal ok lanes with timestamps from 00:10:03 to 00:10:08
+  for (let i = 3; i <= 8; i++) {
+    const minute = String(i).padStart(2, "0");
+    createAttempt(repo, `term-${minute}`, "terminal", "ok", `2026-10-22T00:10:${minute}.000Z`);
+  }
+  // Create an older quarantined lane at 00:10:02
+  createAttempt(repo, "term-quarantine", "terminal", "quarantined", "2026-10-22T00:10:02.000Z", {
+    landable: false,
+    quarantine: { reason: "protected_instructions_changed", patches: ["p.patch"] },
+  });
+  // Create an even older input_required lane at 00:10:01
+  createAttempt(repo, "term-input-req", "terminal", "input_required", "2026-10-22T00:10:01.000Z");
+
+  const defaultListing = lanes(repo);
+  expect(defaultListing.code).toBe(0);
+  const lines = defaultListing.out.trim().split("\n");
+  // 5 most recent ok (term-08..term-04) + term-quarantine + term-input-req + "1 more; use --all" (term-03 is omitted)
+  expect(defaultListing.out).toContain("term-quarantine");
+  expect(defaultListing.out).toContain("not landable; review quarantine: protected_instructions_changed");
+  expect(defaultListing.out).toContain("term-input-req");
+  expect(defaultListing.out).not.toContain("term-03");
+  expect(lines[lines.length - 1]).toBe("1 more; use --all");
 });
