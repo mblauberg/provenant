@@ -435,7 +435,8 @@ def test_recent_progress_prevents_abandoning_dispatch(tmp_path):
 
 def test_typed_failures_expire_and_input_required_stays_resumable(tmp_path):
     root = repo(tmp_path)
-    statuses = ("usage_limited", "rate_limited", "auth_required", "model_unavailable", "permission_blocked")
+    statuses = ("usage_limited", "rate_limited", "auth_required", "model_unavailable", "permission_blocked",
+                "writer_changed")
     for index, status in enumerate(statuses):
         run = root / ".agent-run" / "runs" / f"20260801-1200-dispatch-{status.replace('_', '-')}-{index:06x}"
         run.mkdir(parents=True)

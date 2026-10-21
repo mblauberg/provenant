@@ -720,7 +720,7 @@ def test_peer_stats_are_versioned_aggregates_and_read_only(tmp_path):
     assert database.read_bytes() == before
 
 
-def test_stats_hosts_all_merges_peer_usage_and_survives_old_and_offline_peers(tmp_path):
+def test_stats_hosts_all_merges_peer_usage_and_survives_old_and_offline_peers(tmp_path, monkeypatch):
     local = tmp_path / 'home/.claude/projects/repo/local.jsonl'
     jsonl(local, {'type': 'assistant', 'sessionId': 'shared-session', 'timestamp': '2026-10-21T01:00:00Z',
                   'message': {'id': 'local', 'model': 'claude-test', 'usage': {'input_tokens': 10, 'output_tokens': 20}}})
@@ -748,6 +748,9 @@ else:
     shim.chmod(0o755)
     # Use the real aggregate encoder, then represent another host with the same session ID.
     import importlib.util
+    # The in-process encoder reads host id and quota snapshots from the environment: isolate it from the real ~/.agents.
+    for key, value in environment(tmp_path).items():
+        monkeypatch.setenv(key, value)
     spec = importlib.util.spec_from_file_location('telemetry_host_test', ROOT / 'scripts/telemetry.py')
     telemetry = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(telemetry)

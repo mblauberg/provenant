@@ -16,10 +16,13 @@ command contacts provider quota services on demand.
    status. Row counts refer to usage rows, except route health and cooldowns,
    where they refer to observations. Codex quota observations are reported
    separately by stats.
-3. Run `provenant stats --since 2026-10-21` (or add `--json`) for provider,
+3. Run `provenant stats --since 2026-10-21` (or add `--json` or `--detail`) for provider,
    adapter and model token totals, cache-read share, estimated cost, latest
    lane status, attempt outcomes, daily provider/account usage, daily limit
-   events and observed Codex quota windows. `--since` accepts an ISO date or
+   events and observed Codex quota windows. The default output is the summary
+   tables only; per-account rows (last limit events, quota observations) and
+   uncapped tables are behind `--detail`, and `--json` prints the full report.
+   `--since` accepts an ISO date or
    timestamp, inclusive; dates and daily buckets use UTC. Undated records are
    included only when no date filter is supplied. Stats reads the last ingest;
    it does not refresh sources.
@@ -115,8 +118,11 @@ provenant routes --json         # cached quota only; never fetches
 Codex prefers the credential-free `codex app-server` JSON-RPC rate-limit read,
 then falls back to the latest local rollout observations already ingested for
 its default identity. Claude reads its own OAuth usage endpoint using the
-identity's credentials in process, with Keychain fallback for the default macOS
-identity. Cursor reads its usage-summary endpoint using its local session.
+identity's credentials in process. On macOS it falls back to the identity's
+Keychain item, which Claude Code names `Claude Code-credentials` for `~/.claude`
+and adds an 8-character path hash for any other config directory. The first
+read of each item may ask you to allow access. Cursor reads its usage-summary
+endpoint using its local session.
 Authenticated HTTP requests refuse redirects, so credentials stay at the
 provider endpoint. Tokens never enter the ledger, cache, logs, receipts or
 stdout and are never shown to agents. The owner authorised this credential use
