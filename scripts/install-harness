@@ -88,6 +88,15 @@ case "$instance_root" in
   /*) ;;
   *) echo "Agent Fabric instance root must be absolute" >&2; exit 3 ;;
 esac
+if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]]; then
+  case "$CLAUDE_CONFIG_DIR" in
+    /*) ;;
+    *) echo "CLAUDE_CONFIG_DIR must be absolute" >&2; exit 3 ;;
+  esac
+  while [[ "$CLAUDE_CONFIG_DIR" != "/" && "$CLAUDE_CONFIG_DIR" == */ ]]; do
+    CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR%/}"
+  done
+fi
 
 # shellcheck source=scripts/lib/harness-python.sh
 source "$PRODUCT_ROOT/scripts/lib/harness-python.sh"
@@ -477,17 +486,16 @@ install_primary() {
     --custom-source "$instance_root/custom-skills" || return $?
   if [[ "$PLATFORM" == "claude" ]]; then
     run_stdlib "$PRODUCT_ROOT/scripts/install-workflows" --target "$platform_home/workflows" || return $?
-    if [[ -n "${CLAUDE_CONFIG_DIR:-}" ]] && run_stdlib -c '
-from pathlib import Path
-import sys
-default = (Path(sys.argv[1]) / ".claude").resolve(strict=False)
-custom = Path(sys.argv[2]).resolve(strict=False)
-sys.exit(0 if default != custom else 1)
-' "$HOME" "$platform_home"; then
+    local default_claude="${HOME%/}/.claude"
+    if [[ -n "${CLAUDE_CONFIG_DIR:-}" && "${CLAUDE_CONFIG_DIR%/}" != "$default_claude" ]]; then
       local settings_link="$platform_home/settings.json"
-      local default_settings="$HOME/.claude/settings.json"
+      local default_settings="$default_claude/settings.json"
       if [[ ! -e "$settings_link" && ! -L "$settings_link" ]]; then
-        ln -s "$default_settings" "$settings_link" || return $?
+        if [[ -f "$default_settings" ]]; then
+          ln -s "$default_settings" "$settings_link" || return $?
+        else
+          echo "claude settings link skipped: target is not a regular file: $default_settings"
+        fi
       fi
     fi
   fi

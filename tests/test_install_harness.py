@@ -173,8 +173,8 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     assert str(ROOT / "HARNESS.md") in content
     registration = json.loads((config / ".claude.json").read_text())["mcpServers"]["fabric"]
     assert not (tmp_path / ".claude.json").exists()
-    assert (config / "settings.json").is_symlink()
-    assert os.readlink(config / "settings.json") == str(tmp_path / ".claude/settings.json")
+    assert not (config / "settings.json").exists()
+    assert not (config / "settings.json").is_symlink()
     assert not (tmp_path / ".claude/settings.json").exists()
     assert registration["command"] == str(command)
     assert registration["env"] == {
@@ -192,8 +192,8 @@ def test_installs_claude_skills_and_global_instructions_idempotently(tmp_path):
     )
     assert second.returncode == 0, second.stderr
     assert instructions.exists()
-    assert (config / "settings.json").is_symlink()
-    assert os.readlink(config / "settings.json") == str(tmp_path / ".claude/settings.json")
+    assert not (config / "settings.json").exists()
+    assert not (config / "settings.json").is_symlink()
 
 
 def test_installs_codex_skills_and_global_instructions(tmp_path):
@@ -1666,8 +1666,8 @@ def test_all_primary_install_configures_both_surfaces_and_publishes_once(tmp_pat
 
     claude_mcp = json.loads((tmp_path / "claude/.claude.json").read_text())
     assert not (tmp_path / "home/.claude.json").exists()
-    assert (tmp_path / "claude/settings.json").is_symlink()
-    assert os.readlink(tmp_path / "claude/settings.json") == str(tmp_path / "home/.claude/settings.json")
+    assert not (tmp_path / "claude/settings.json").exists()
+    assert not (tmp_path / "claude/settings.json").is_symlink()
     codex_config = tomllib.loads((tmp_path / "codex/config.toml").read_text())
     assert claude_mcp["mcpServers"]["fabric"]["command"] == str(tmp_path / "bin/provenant")
     assert codex_config["mcp_servers"]["fabric"]["command"] == str(tmp_path / "bin/provenant")
@@ -1875,6 +1875,9 @@ def test_a_genuinely_foreign_instructions_file_is_still_refused(tmp_path):
 
 def test_claude_custom_config_dir_targets_mcp_config_and_links_settings(tmp_path):
     config = tmp_path / "claude-config"
+    default_settings = tmp_path / ".claude/settings.json"
+    default_settings.parent.mkdir(parents=True, exist_ok=True)
+    default_settings.write_text('{"autoCompactWindow": 200000}\n')
 
     result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
 
@@ -1882,8 +1885,51 @@ def test_claude_custom_config_dir_targets_mcp_config_and_links_settings(tmp_path
     assert (config / ".claude.json").is_file()
     assert not (tmp_path / ".claude.json").exists()
     assert (config / "settings.json").is_symlink()
-    assert os.readlink(config / "settings.json") == str(tmp_path / ".claude/settings.json")
-    assert not (tmp_path / ".claude/settings.json").exists()
+    assert os.readlink(config / "settings.json") == str(default_settings)
+    assert (config / "settings.json").read_text() == '{"autoCompactWindow": 200000}\n'
+
+
+def test_claude_custom_config_dir_skips_settings_link_when_default_does_not_exist(tmp_path):
+    config = tmp_path / "claude-config"
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=str(config))
+
+    assert result.returncode == 0, result.stderr
+    assert not (config / "settings.json").exists()
+    assert not (config / "settings.json").is_symlink()
+    assert "claude settings link skipped: target is not a regular file:" in result.stdout
+
+
+def test_claude_relative_config_dir_is_rejected(tmp_path):
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR="relative/claude")
+
+    assert result.returncode == 3
+    assert "CLAUDE_CONFIG_DIR must be absolute" in result.stderr
+
+
+def test_claude_config_dir_with_trailing_slash_matching_default_does_not_link(tmp_path):
+    default_dir = tmp_path / ".claude"
+    default_settings = default_dir / "settings.json"
+    default_settings.parent.mkdir(parents=True, exist_ok=True)
+    default_settings.write_text('{"env": "default"}\n')
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=f"{default_dir}/")
+
+    assert result.returncode == 0, result.stderr
+    assert not (default_dir / "settings.json").is_symlink()
+
+
+def test_claude_custom_config_dir_with_trailing_slash_links_settings(tmp_path):
+    config = tmp_path / "claude-config"
+    default_settings = tmp_path / ".claude/settings.json"
+    default_settings.parent.mkdir(parents=True, exist_ok=True)
+    default_settings.write_text('{"autoCompactWindow": 200000}\n')
+
+    result = run("claude", tmp_path, CLAUDE_CONFIG_DIR=f"{config}/")
+
+    assert result.returncode == 0, result.stderr
+    assert (config / "settings.json").is_symlink()
+    assert os.readlink(config / "settings.json") == str(default_settings)
 
 
 def test_claude_custom_config_dir_preserves_existing_settings_and_never_overwrites(tmp_path):
