@@ -186,6 +186,32 @@ function runDirectoryNames(workspace: string): string[] {
   return names.sort();
 }
 
+/** One Python pass over the selected active runs; the writer owns all receipt writes. */
+export async function reapAttemptRuns(workspace: string, runDirs?: string[]): Promise<string[]> {
+  const candidates = [...new Set(runDirs ?? runDirectoryNames(workspace).map((name) => join(runRoot(workspace), name)))];
+  const active = candidates.filter((dir) => readJson(join(dir, "RUN_RECEIPT.json"))?.status === "active" &&
+    !runOwners(readOwnerRecord(dir), readJson(join(dir, "dispatch-status.json")))
+      .some((owner) => observedAlive(owner.pid, owner.startedAt)));
+  if (!active.length) return [];
+  const product = process.env.AGENT_FABRIC_PRODUCT_ROOT ?? resolve(import.meta.dirname, "../../..");
+  if (!isAbsolute(product)) return [];
+  try {
+    const output = await new Promise<string>((done, reject) => {
+      const child = execFile(process.env.HARNESS_PYTHON ?? "python3",
+        [join(product, "skills/orchestrate/scripts/dispatch_run.py"), "--reap-attempts"],
+        { cwd: workspace, timeout: 10_000, maxBuffer: 64 * 1024 },
+        (error, stdout) => error ? reject(error) : done(stdout));
+      child.stdin?.on("error", () => { /* execFile reports an early exit. */ });
+      child.stdin?.end(JSON.stringify(active));
+    });
+    const changed: unknown = JSON.parse(output);
+    return Array.isArray(changed) ? changed.filter((dir): dir is string => typeof dir === "string" && active.includes(dir)) : [];
+  } catch {
+    // Probe or custody failures preserve the retained evidence for a later read.
+    return [];
+  }
+}
+
 export function shortRunId(runDir: string): string {
   const name = basename(runDir);
   return name.startsWith("mcp-") ? name : `mcp-${name.slice(-6)}`;
@@ -452,6 +478,7 @@ export function pruneDispatchRuns(workspace: string, env: NodeJS.ProcessEnv): st
         "startup_timeout",
         "timed_out",
         "interrupted",
+        "lost",
         "rejected",
         "tool_missing",
       ].includes(String(receipt?.status));
@@ -737,7 +764,7 @@ async function legacyStatus(
         const terminal =
           attempts.length > 0 &&
           attempts.every((attempt) =>
-            ["ok", "quarantined", "failed", "blocked", "timed_out", "cancelled"].includes(String(canonicalSuccessStatus(attempt.status))),
+            ["ok", "quarantined", "failed", "blocked", "timed_out", "cancelled", "lost"].includes(String(canonicalSuccessStatus(attempt.status))),
           ) &&
           (batchId === undefined ||
             (Array.isArray(status?.task_ids) &&
@@ -1155,6 +1182,13 @@ export async function statusRows(
     }
     const omitted = ids?.length || limit === null ? 0 : Math.max(0, rows.length - limit);
     if (limit !== null && !ids?.length) rows = rows.slice(0, limit);
+    const reaped = await reapAttemptRuns(workspace, rows.filter((row) =>
+      row.attempts?.some((attempt: Record<string, unknown>) => attempt.state === "running"))
+      .map((row) => row.run_dir));
+    if (reaped.length) {
+      const refreshed = reaped.flatMap(v1Rows);
+      rows = rows.map((row) => ({ ...row, ...refreshed.find((fresh) => fresh.run_dir === row.run_dir && fresh.task_id === row.task_id) }));
+    }
     const done =
       until === "any" ? rows.some((row) => row.state === "terminal") : rows.every((row) => row.state === "terminal");
     if (done || !rows.length || Date.now() >= deadline) {
