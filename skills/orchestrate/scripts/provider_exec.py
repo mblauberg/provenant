@@ -587,7 +587,7 @@ def os_confinement_profile(plan, search_path=None):
                          if common is not None else [])
         capabilities = plan.get("applied", {}).get("capabilities", [])
         profile = (
-            "(version 1)\n(allow default)\n(deny file-write*)\n(deny file-link)\n"
+            "(version 1)\n(allow default)\n(deny file-write*)\n"
             + _sbpl_rule("allow", "file-write*", allowed)
             + "".join(rule for rule, _ in _state_write_grants(home, state, ("read_write",)))
             + _sbpl_rule("deny", "file-write*", [common] if common is not None else [])
@@ -654,7 +654,7 @@ def os_confinement_profile(plan, search_path=None):
     toolchain_files, uv_project_files, toolchain_directories = _toolchain_reads(plan, root, search_path)
     launcher_links, install_directories = _adapter_binary_reads(plan, search_path)
     return (
-        "(version 1)\n(allow default)\n(deny file-write*)\n(deny file-link)\n"
+        "(version 1)\n(allow default)\n(deny file-write*)\n"
         + _sbpl_rule("allow", "file-write*", [*([run_dir] if run_dir else []), Path("/dev")])
         + "".join(rule for rule, _ in _state_write_grants(home, state, ("read_write",)))
         + _state_write_guards(home, state)

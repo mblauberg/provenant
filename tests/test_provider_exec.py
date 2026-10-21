@@ -1028,6 +1028,11 @@ def test_file_link_cannot_cross_protected_provider_state(monkeypatch, tmp_path,
     probe = subprocess.run([*command, f"printf ok > {shlex.quote(str(attempt / 'probe'))}"],
                            check=False, capture_output=True, text=True)
     assert probe.returncode == 0, probe.stderr
+    # Write rules check both link ends, so links inside writable roots (local git clones) still work.
+    inside = attempt / "probe-link"
+    result = subprocess.run([*command, f"ln {shlex.quote(str(attempt / 'probe'))} {shlex.quote(str(inside))}"],
+                            check=False, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
     link = attempt / "x"
     result = subprocess.run([*command, f"ln {shlex.quote(str(protected))} {shlex.quote(str(link))}"],
                             check=False, capture_output=True, text=True)
