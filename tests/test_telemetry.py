@@ -48,7 +48,7 @@ def test_missing_sources_are_manifested_not_errors(tmp_path):
     assert all(row['status'] == 'absent' and row['row_count'] == 0 for row in rows)
     assert all(row['parser_version'] == 1 and row['path_pattern'] for row in rows)
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
-        assert db.execute('PRAGMA user_version').fetchone()[0] == 1
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 2
 
 
 def test_claude_incremental_dedup_subagents_and_content_exclusion(tmp_path):
@@ -182,6 +182,12 @@ def test_partial_jsonl_line_resumes_and_malformed_source_is_visible(tmp_path):
         assert db.execute('SELECT SUM(input_tokens) FROM usage').fetchone()[0] == 7
 
 
+
+
+
+
+
+
 def test_rewritten_jsonl_reconciles_removed_ids(tmp_path):
     path = tmp_path / 'home/.claude/projects/repo/s.jsonl'
     row = {'type':'assistant','sessionId':'s','message':{
@@ -227,3 +233,77 @@ def test_opencode_replacement_resets_cursor(tmp_path):
     assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
     with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
         assert db.execute('SELECT event_id,input_tokens FROM usage').fetchall() == [('new',7)]
+
+
+def test_codex_only_persists_allowlisted_usage_metadata(tmp_path):
+    jsonl(tmp_path / 'home/.codex/sessions/day/rollout-test.jsonl',
+          {'type':'session_meta','payload':{'id':'s','base_instructions':'PRIVATE_BASE'}},
+          {'type':'event_msg','timestamp':'2026-10-21T01:00:00Z','payload':{
+              'type':'token_count','info':{'total_token_usage':{
+                  'input_tokens':10,'output_tokens':3,'unexpected':'PRIVATE_USAGE'}}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert 'PRIVATE_' not in '\n'.join(db.iterdump())
+
+
+def test_claude_duplicate_partial_usage_does_not_replace_complete_message(tmp_path):
+    path = tmp_path / 'home/.claude/projects/repo/s.jsonl'
+    row = {'type':'assistant','sessionId':'s','message':{
+        'id':'m','model':'test','usage':{'input_tokens':10,'output_tokens':30}}}
+    jsonl(path, row)
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    jsonl(path, {**row,'message':{**row['message'],'usage':{'input_tokens':10,'output_tokens':3}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute('SELECT output_tokens FROM usage').fetchall() == [(30,)]
+
+
+def test_schema_migrates_existing_v1_observations(tmp_path):
+    path = tmp_path / 'state/telemetry.sqlite3'
+    path.parent.mkdir()
+    with sqlite3.connect(path) as db:
+        db.execute('CREATE TABLE observations(event_id TEXT PRIMARY KEY,source TEXT,host TEXT,provider TEXT,adapter TEXT,model TEXT,account TEXT,session TEXT,lane TEXT,run_id TEXT,timestamp TEXT,window TEXT,used_percent REAL,window_minutes REAL,reset_at TEXT,status TEXT)')
+        db.execute('PRAGMA user_version=1')
+    write_json(path.parent / 'cooldowns.json', {'cooldowns':{'x':{
+        'adapter':'codex','model':'test','status':'usage_limited','source_run':'r',
+        'recorded_at':'2026-10-21T01:00:00Z'}}})
+    result = cli(tmp_path, 'telemetry', 'ingest')
+    assert result.returncode == 0, result.stdout + result.stderr
+    with sqlite3.connect(path) as db:
+        assert db.execute('PRAGMA user_version').fetchone()[0] == 2
+        assert db.execute('SELECT source,origin_path FROM observations').fetchone() == ('cooldowns', str(path.parent / 'cooldowns.json'))
+
+
+def test_large_same_size_transcript_suffix_rewrite_is_reconciled(tmp_path):
+    path = tmp_path / 'home/.claude/projects/repo/s.jsonl'
+    jsonl(path, {'type':'user','content':'x'*5000}, {'type':'assistant','message':{
+        'id':'old','model':'test','usage':{'input_tokens':10}}})
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    path.write_text(path.read_text().replace('"old"','"new"'))
+    assert cli(tmp_path, 'telemetry', 'ingest').returncode == 0
+    with sqlite3.connect(tmp_path / 'state/telemetry.sqlite3') as db:
+        assert db.execute('SELECT event_id FROM usage').fetchall() == [('new',)]
+
+
+
+
+
+
+
+
+
+
+
+
+def test_unreadable_fabric_registry_does_not_block_other_sources(tmp_path):
+    path = tmp_path / 'state/fabric.sqlite3'
+    path.parent.mkdir()
+    path.write_bytes(b'PRIVATE_CORRUPT_DB')
+    jsonl(tmp_path / 'home/.claude/projects/repo/s.jsonl', {
+        'type':'assistant','message':{'id':'m','model':'test','usage':{'input_tokens':7}}})
+    result = cli(tmp_path, 'telemetry', 'ingest')
+    assert result.returncode == 1
+    assert 'PRIVATE_CORRUPT_DB' not in result.stdout + result.stderr
+    rows = json.loads(cli(tmp_path, 'telemetry', 'sources', '--json').stdout)
+    assert next(row for row in rows if row['source'] == 'fabric')['status'] == 'error'
+    assert next(row for row in rows if row['source'] == 'claude')['row_count'] == 1

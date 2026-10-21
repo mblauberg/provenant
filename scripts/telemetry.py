@@ -45,7 +45,7 @@ def connect():
     db = sqlite3.connect(path)
     db.row_factory = sqlite3.Row
     version = db.execute('PRAGMA user_version').fetchone()[0]
-    if version not in (0, 1):
+    if version not in (0, 1, 2):
         db.close()
         raise ValueError(f'unsupported telemetry schema version: {version}')
     db.executescript('''
@@ -55,7 +55,8 @@ def connect():
             row_count INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS usage (
             source TEXT NOT NULL, event_id TEXT NOT NULL, host TEXT NOT NULL,
-            session TEXT, lane TEXT, graph_node TEXT, adapter TEXT, provider TEXT,
+            session TEXT, lane TEXT, run_id TEXT, task_id TEXT, attempt INTEGER,
+            graph_node TEXT, adapter TEXT, provider TEXT,
             model TEXT, effort TEXT, account TEXT, repository TEXT, revision TEXT,
             timestamp TEXT, input_tokens INTEGER, cache_read_tokens INTEGER,
             cache_write_tokens INTEGER, output_tokens INTEGER, reasoning_tokens INTEGER,
@@ -74,8 +75,16 @@ def connect():
             provider TEXT, adapter TEXT, model TEXT, account TEXT, session TEXT,
             origin_path TEXT, lane TEXT, run_id TEXT, timestamp TEXT, window TEXT, used_percent REAL,
             window_minutes REAL, reset_at TEXT, status TEXT);
-        PRAGMA user_version = 1;
+
     ''')
+    observation_columns = {row[1] for row in db.execute('PRAGMA table_info(observations)')}
+    if 'origin_path' not in observation_columns:
+        db.execute('ALTER TABLE observations ADD COLUMN origin_path TEXT')
+    usage_columns = {row[1] for row in db.execute('PRAGMA table_info(usage)')}
+    for name, kind in (('run_id', 'TEXT'), ('task_id', 'TEXT'), ('attempt', 'INTEGER')):
+        if name not in usage_columns:
+            db.execute(f'ALTER TABLE usage ADD COLUMN {name} {kind}')
+    db.execute('PRAGMA user_version = 2')
     for source, pattern in patterns().items():
         db.execute('INSERT INTO sources(source,path_pattern,parser_version,status) VALUES (?,?,1,?) '
                    'ON CONFLICT(source) DO UPDATE SET path_pattern=excluded.path_pattern',
@@ -92,8 +101,11 @@ def put_usage(db, source, event_id, origin_path, **values):
     values = {'source': source, 'event_id': event_id, 'host': socket.gethostname(), **values}
     columns = list(values)
     update = ','.join(f'{key}=excluded.{key}' for key in columns if key not in {'source', 'event_id', 'host'})
+    condition = (' WHERE COALESCE(excluded.output_tokens,0)+COALESCE(excluded.reasoning_tokens,0) '
+                 '>= COALESCE(usage.output_tokens,0)+COALESCE(usage.reasoning_tokens,0)'
+                 if source == 'claude' else '')
     db.execute(f"INSERT INTO usage({','.join(columns)}) VALUES ({','.join('?' for _ in columns)}) "
-               f'ON CONFLICT(source,event_id,host) DO UPDATE SET {update}', list(values.values()))
+               f'ON CONFLICT(source,event_id,host) DO UPDATE SET {update}{condition}', list(values.values()))
     db.execute('INSERT OR IGNORE INTO usage_files VALUES (?,?,?,?)',
                (source, event_id, values['host'], str(origin_path)))
 
@@ -142,6 +154,9 @@ def codex_record(db, row, state, path, offset):
         info = payload.get('info') or {}
         total = info.get('total_token_usage')
         if isinstance(total, dict):
+            total = {k: v for k, v in total.items() if k in {
+                'input_tokens', 'cached_input_tokens', 'cache_write_input_tokens',
+                'output_tokens', 'reasoning_output_tokens', 'total_tokens'} and number(v) is not None}
             previous = state.get('total') or {}
             reset = any(number(v) is not None and v < previous.get(k, 0) for k, v in total.items())
             delta = {k: max(0, v - (0 if reset else previous.get(k, 0)))
@@ -149,7 +164,9 @@ def codex_record(db, row, state, path, offset):
             state['total'] = total
             event_id = identity(meta.get('session') or str(path), offset)
         else:
-            delta = info.get('last_token_usage') or {}
+            delta = {k: v for k, v in (info.get('last_token_usage') or {}).items()
+                     if k in {'input_tokens', 'cached_input_tokens', 'cache_write_input_tokens',
+                              'output_tokens', 'reasoning_output_tokens', 'total_tokens'} and number(v) is not None}
             event_id = identity(meta.get('session') or str(path), timestamp, delta)
         if any(delta.values()):
             cached = delta.get('cached_input_tokens')
@@ -184,9 +201,16 @@ def clear_file(db, source, path):
 
 def file_identity(path, length):
     stat = path.stat()
+    digest = hashlib.sha256()
     with path.open('rb') as stream:
-        prefix = hashlib.sha256(stream.read(length)).hexdigest()
-    return [stat.st_dev, stat.st_ino, length, prefix]
+        remaining = length
+        while remaining:
+            chunk = stream.read(min(remaining, 1024 * 1024))
+            if not chunk:
+                break
+            digest.update(chunk)
+            remaining -= len(chunk)
+    return [stat.st_dev, stat.st_ino, length, digest.hexdigest()]
 
 
 def ingest_jsonl(db, source, path, parse):
@@ -194,23 +218,27 @@ def ingest_jsonl(db, source, path, parse):
     old = db.execute('SELECT * FROM cursors WHERE source=? AND path=?', (source, str(path))).fetchone()
     state = json.loads(old['state']) if old else {}
     previous_file = state.get('_file')
-    rewritten = bool(old and (stat.st_size < old['size'] or
-                     (previous_file and file_identity(path, previous_file[2]) != previous_file)))
-    if old and not rewritten and old['size'] == stat.st_size and old['mtime'] == stat.st_mtime_ns:
+    unchanged = old and old['size'] == stat.st_size and old['mtime'] == stat.st_mtime_ns
+    current_id = [stat.st_dev, stat.st_ino]
+    if unchanged and previous_file and previous_file[:2] == current_id:
         return
+    rewritten = bool(old and (stat.st_size < old['size'] or
+                     (previous_file and (previous_file[2] < old['size'] or
+                      file_identity(path, previous_file[2]) != previous_file))))
     if rewritten:
         clear_file(db, source, path)
         state = {}
     offset = old['offset'] if old and not rewritten else 0
     with path.open('rb') as stream:
         stream.seek(offset)
-        while line := stream.readline():
+        while stream.tell() < stat.st_size:
+            line = stream.readline(stat.st_size - stream.tell())
             if not line.endswith(b'\n'):
                 break
             row = json.loads(line)
             parse(db, row, state, path, offset)
             offset = stream.tell()
-    state['_file'] = file_identity(path, min(stat.st_size, 4096))
+    state['_file'] = file_identity(path, stat.st_size)
     db.execute('INSERT OR REPLACE INTO cursors VALUES (?,?,?,?,?,?)',
                (source, str(path), stat.st_size, stat.st_mtime_ns, offset, json.dumps(state)))
 
@@ -243,7 +271,7 @@ def fabric_paths():
 
 def source_paths():
     home, configured = Path.home(), patterns()
-    return {'fabric': fabric_paths(),
+    return {'fabric': [],
             'route_health': [Path(configured['route_health'])] if Path(configured['route_health']).is_file() else [],
             'cooldowns': [Path(configured['cooldowns'])] if Path(configured['cooldowns']).is_file() else [],
             'claude': sorted((home / '.claude/projects').glob('**/*.jsonl')),
@@ -266,8 +294,19 @@ def ingest_document(db, source, path):
         requested = provenance.get('requested') or {}
         adapter = requested.get('adapter')
         usage = row.get('usage') or row.get('context') or {}
+        input_count = number(usage.get('input_tokens'))
+        cached = number(usage.get('cache_read_tokens', usage.get('cached_input_tokens')))
+        written = number(usage.get('cache_write_tokens', row.get('cache_write_tokens')))
+        output = number(usage.get('output_tokens'))
+        reasoning = number(usage.get('reasoning_tokens', row.get('reasoning_tokens')))
+        if not row.get('usage'):
+            if input_count is not None:
+                input_count = max(0, input_count - (cached or 0) - (written or 0))
+            if output is not None and adapter in {'codex', 'claude', 'cursor'}:
+                output = max(0, output - (reasoning or 0))
         put_usage(db, source, identity(str(path.resolve())), origin_path=path,
-                  session=row.get('session_id'), lane='/'.join(str(row.get(k, '')) for k in ('run_id','task_id','attempt')),
+                  session=row.get('session_id'), run_id=row.get('run_id'),
+                  task_id=row.get('task_id'), attempt=row.get('attempt'), lane='/'.join(str(row.get(k, '')) for k in ('run_id','task_id','attempt')),
                   graph_node=row.get('graph_node'), adapter=adapter,
                   provider=provenance.get('provider') or PROVIDERS.get(adapter, adapter),
                   model=provenance.get('observed_model') or provenance.get('resolved_model') or requested.get('model'),
@@ -275,11 +314,8 @@ def ingest_document(db, source, path):
                   account=row.get('account') or provenance.get('account'),
                   repository=row.get('workspace_root') or row.get('cwd'),
                   revision=row.get('repository_revision'), timestamp=row.get('ended_at') or row.get('started_at'),
-                  input_tokens=number(usage.get('input_tokens')),
-                  cache_read_tokens=number(usage.get('cache_read_tokens', usage.get('cached_input_tokens'))),
-                  cache_write_tokens=number(usage.get('cache_write_tokens', row.get('cache_write_tokens'))),
-                  output_tokens=number(usage.get('output_tokens')),
-                  reasoning_tokens=number(usage.get('reasoning_tokens', row.get('reasoning_tokens'))),
+                  input_tokens=input_count, cache_read_tokens=cached, cache_write_tokens=written,
+                  output_tokens=output, reasoning_tokens=reasoning,
                   usage_source=usage.get('usage_source') or row.get('usage_source') or usage.get('source'),
                   status=row.get('status') or row.get('state'), error_class=row.get('error_class'))
     else:
@@ -334,6 +370,11 @@ def ingest_opencode(db, path):
 def ingest(db):
     for source, paths in source_paths().items():
         errors = 0
+        if source == 'fabric':
+            try:
+                paths = fabric_paths()
+            except (OSError, ValueError, sqlite3.Error):
+                errors += 1
         for path in paths:
             try:
                 with db:
