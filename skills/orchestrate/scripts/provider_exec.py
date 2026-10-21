@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 from collections import deque, namedtuple
 import ctypes
+import fcntl
 import functools
 import hashlib
 import json
@@ -3156,6 +3157,8 @@ AGY_RENAMED_STATE = ("history.jsonl", "jetbox_summaries_proto.pb", "jetski_state
                      "last_check.timestamp", "installation_id")
 AGY_STATE_COPY_MAX = 64 * 1024 * 1024
 AGY_DATABASE = "conversation_summaries.db"
+AGY_COPY_BACK_LOCK = ".provenant-copy-back.lock"
+AGY_COPY_BACK_WAIT = 10
 
 
 # The staged overlay: its path for HOME, its name in the attempt tmp, and the identity of each
@@ -3245,6 +3248,8 @@ def _read_overlay_state(lane_fd, name):
         found = os.fstat(fd)
         if not stat.S_ISREG(found.st_mode):
             return None, f"{name}: not a regular file"
+        if found.st_nlink != 1:  # a hard link would copy back another file's bytes
+            return None, f"{name}: not a single-link regular file"
         chunks, size = [], 0
         while size <= AGY_STATE_COPY_MAX and (chunk := os.read(fd, 1024 * 1024)):
             chunks.append(chunk)
@@ -3287,11 +3292,16 @@ def _append_history(directory, data, before):
     try:
         found = os.fstat(fd)
         start = 0 if before is None else before[2]
-        if not stat.S_ISREG(found.st_mode) or (before is not None and (
-                (found.st_dev, found.st_ino) != before[:2] or found.st_size < start)):
+        if not stat.S_ISREG(found.st_mode) or found.st_nlink != 1:
+            return "history.jsonl: not a single-link regular file"
+        if before is not None and ((found.st_dev, found.st_ino) != before[:2] or found.st_size < start):
             return "history.jsonl: replaced since staging"
-        if data[:start] != os.pread(fd, start, 0):
-            return "history.jsonl: rewritten rather than appended"
+        if start > len(data):  # never read a staged size the copy itself does not reach
+            return "history.jsonl: shorter than at staging"
+        for offset in range(0, start, 1024 * 1024):
+            chunk = data[offset:min(start, offset + 1024 * 1024)]
+            if os.pread(fd, len(chunk), offset) != chunk:
+                return "history.jsonl: rewritten rather than appended"
         view = memoryview(data)[start:]
         while view:
             view = view[os.write(fd, view):]
@@ -3316,6 +3326,18 @@ def finish_agy_home(plan, tmp_fd, home):
             fds.append(os.open(part, DIRECTORY_FLAGS, dir_fd=fds[-1]))
         fds.append(_open_canonical_dir(_provider_state(plan)["resolved_home"] / "antigravity-cli"))
         lane_fd, real_fd = fds[-2], fds[-1]
+        # Concurrent finishers take turns, so each compares and installs against the last install.
+        # A confined lane may read, and so lock, the file too: wait a bounded time, never forever.
+        fds.append(os.open(AGY_COPY_BACK_LOCK, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600, dir_fd=real_fd))
+        deadline = time.monotonic() + AGY_COPY_BACK_WAIT
+        while True:
+            try:
+                fcntl.flock(fds[-1], fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    raise OSError(f"{AGY_COPY_BACK_LOCK} stayed locked for {AGY_COPY_BACK_WAIT}s") from None
+                time.sleep(0.05)
         for name in AGY_RENAMED_STATE:
             try:
                 data, problem = _read_overlay_state(lane_fd, name)

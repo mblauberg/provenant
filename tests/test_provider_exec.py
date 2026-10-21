@@ -1263,7 +1263,7 @@ def test_agy_home_copies_back_renamed_state_but_never_tokens_links_or_oversized_
     assert sorted(warnings) == ["agy state not copied back: installation_id: larger than 64 bytes",
                                 "agy state not copied back: last_check.timestamp: not a regular file"]
     assert not overlay.exists()  # read-only directories and FIFOs included
-    assert sorted(path.name for path in root.iterdir() if path.name.startswith(".")) == []
+    assert sorted(path.name for path in root.iterdir() if path.name.startswith(".")) == [mod.AGY_COPY_BACK_LOCK]
 
 
 def test_confined_agy_writes_its_shim_in_the_overlay_and_never_the_live_bin(monkeypatch, tmp_path):
@@ -1414,8 +1414,100 @@ def test_agy_copy_back_keeps_a_real_file_changed_since_staging_and_appends_histo
     staged = mod.stage_agy_home(plan, tmp_fd, private_tmp)
     _rename_into(staged.path / ".gemini/antigravity-cli", "history.jsonl", '{"forged": 1}\n')
     assert mod.finish_agy_home(plan, tmp_fd, staged) == [
-        "agy state not copied back: history.jsonl: rewritten rather than appended"]
+        "agy state not copied back: history.jsonl: shorter than at staging"]
     assert (root / "history.jsonl").read_text() == '{"n": 1}\n{"other": 1}\n{"lane": 1}\n'
+
+
+def test_agy_history_copy_back_never_reads_a_sparse_staged_size(monkeypatch, tmp_path):
+    """A first lane enlarges the real history sparsely before a retry stages; the copy stays bounded."""
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    with (root / "history.jsonl").open("r+b") as history:
+        history.truncate(1 << 30)
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    _rename_into(staged.path / ".gemini/antigravity-cli", "history.jsonl", '{"lane": 1}\n')
+    real_pread, requested = os.pread, []
+
+    def bounded(fd, size, offset):
+        requested.append(size)
+        assert size <= 1024 * 1024, size
+        return real_pread(fd, size, offset)
+
+    monkeypatch.setattr(os, "pread", bounded)
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    monkeypatch.undo()
+    assert warnings == ["agy state not copied back: history.jsonl: shorter than at staging"], warnings
+    assert (root / "history.jsonl").stat().st_size == 1 << 30
+
+
+def test_agy_copy_back_refuses_hardlinked_sources_and_history_targets(monkeypatch, tmp_path):
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    (root / "history.jsonl").write_text('{"n": 1}\n', encoding="utf-8")
+    alias = tmp_path / "alias.jsonl"
+    os.link(root / "history.jsonl", alias)  # writing through the real name would also change this
+    secret = tmp_path / "secret"
+    secret.write_text("secret\n", encoding="utf-8")
+    private_tmp = tmp_path / "tmp"
+    private_tmp.mkdir()
+    plan = agy_plan()
+    staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+    lane_root = staged.path / ".gemini/antigravity-cli"
+    (lane_root / "jetski_state.pbtxt").unlink()
+    os.link(secret, lane_root / "jetski_state.pbtxt")
+    _rename_into(lane_root, "history.jsonl", '{"n": 1}\n{"lane": 1}\n')
+
+    warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    assert sorted(warnings) == ["agy state not copied back: history.jsonl: not a single-link regular file",
+                                "agy state not copied back: jetski_state.pbtxt: not a single-link regular file"]
+    assert (root / "jetski_state.pbtxt").read_text() == "original\n"
+    assert alias.read_text() == '{"n": 1}\n' and secret.read_text() == "secret\n"
+
+
+def test_overlapping_agy_finishers_never_both_install(monkeypatch, tmp_path):
+    """Two attempts staged from the same real state finish at once: the first wins, the second warns."""
+    import threading
+    mod = supervisor()
+    _, root = agy_home_fixture(mod, monkeypatch, tmp_path)
+    plan = agy_plan()
+    finishers = []
+    for name in ("first", "second"):
+        private_tmp = tmp_path / name
+        private_tmp.mkdir()
+        staged, tmp_fd = stage_agy(mod, plan, private_tmp)
+        _rename_into(staged.path / ".gemini/antigravity-cli", "jetski_state.pbtxt", name + "\n")
+        finishers.append((staged, tmp_fd))
+    results = {}
+    second = threading.Thread(target=lambda: results.update(second=mod.finish_agy_home(plan, *reversed(finishers[1]))))
+    real_install = mod._install_state
+
+    def install_while_the_second_finishes(directory, name, data):
+        if not second.is_alive() and "second" not in results:
+            second.start()
+            second.join(0.5)  # without a lock the second finisher checks and installs here
+        return real_install(directory, name, data)
+
+    monkeypatch.setattr(mod, "_install_state", install_while_the_second_finishes)
+    results["first"] = mod.finish_agy_home(plan, *reversed(finishers[0]))
+    second.join()
+    assert results["first"] == []
+    kept = "jetski_state.pbtxt: changed by another session since staging; kept it"
+    assert results["second"] == ["agy state not copied back: " + kept]
+    assert (root / "jetski_state.pbtxt").read_text() == "first\n"
+
+    # A lane holding the lock delays copy-back only for a bounded time.
+    import fcntl
+    staged, tmp_fd = stage_agy(mod, plan, tmp_path / "first")
+    _rename_into(staged.path / ".gemini/antigravity-cli", "jetski_state.pbtxt", "held\n")
+    monkeypatch.setattr(mod, "AGY_COPY_BACK_WAIT", 0.2)
+    with open(root / mod.AGY_COPY_BACK_LOCK, "rb") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        warnings = mod.finish_agy_home(plan, tmp_fd, staged)
+    assert len(warnings) == 1 and "stayed locked" in warnings[0], warnings
+    assert (root / "jetski_state.pbtxt").read_text() == "first\n" and not staged.path.exists()
 
 
 def test_agy_staging_creates_an_empty_database_so_sqlite_writes_through_the_link(monkeypatch, tmp_path):

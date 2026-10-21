@@ -56,9 +56,11 @@ in `skills/orchestrate`; this page records the traps.
   each of them is a link. agy rewrites some top-level state by temp-and-rename,
   which replaces the overlay's link rather than the real file. After the
   attempt the harness copies those granted files back, but never a link, a
-  token file or an oversized file. A real file another session changed since
-  staging is kept, with a warning; `history.jsonl` gets only the lines the
-  lane appended. Staging creates an empty `conversation_summaries.db` when
+  token file, a hard link or an oversized file. Finishers take turns on a
+  lock file, `.provenant-copy-back.lock`, in the real state directory, waiting
+  at most 10 seconds. A real file another session changed since staging is
+  kept, with a warning. `history.jsonl` gets only the lines the lane appended,
+  and only when the real file is a single-link file. Staging creates an empty `conversation_summaries.db` when
   there is none, so SQLite writes through the link rather than into the
   overlay. The harness then removes the overlay. Every supervisor step in the
   attempt `tmp` (its cache, the `ps` shim, the prompt and output staging files,

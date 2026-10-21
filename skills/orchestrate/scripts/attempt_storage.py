@@ -11,29 +11,62 @@ KEEP_FAILED_TMP_BYTES = 50 * 1024 * 1024
 KEEP_ENV = "PROVENANT_KEEP_ATTEMPT_TMP"
 
 
-def tree_bytes(path: Path) -> int:
-    """Disk usage of a tree: allocated blocks, hard links once, links never followed."""
-    seen: set[tuple[int, int]] = set()
+# tree_bytes stops here and counts what it reached: a lane may have built the tree.
+TREE_MAX_DEPTH = 64
+TREE_MAX_ENTRIES = 200_000
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 
-    def one(item: Path) -> int:
-        try:
-            info = item.lstat()
-        except OSError:
-            return 0
-        if os.path.islink(item) or (info.st_nlink > 1 and not os.path.isdir(item)
-                                    and (info.st_dev, info.st_ino) in seen):
+
+def tree_bytes(path: Path) -> int:
+    """Disk usage of a tree: allocated blocks, hard links once, links never followed.
+
+    The walk holds each directory open and opens the next with O_NOFOLLOW, so a directory
+    swapped for a link mid-walk is never entered. It stops after TREE_MAX_DEPTH levels and
+    TREE_MAX_ENTRIES entries.
+    """
+    seen: set[tuple[int, int]] = set()
+    budget = [TREE_MAX_ENTRIES]
+
+    def one(info: os.stat_result) -> int:
+        if stat.S_ISLNK(info.st_mode) or (info.st_nlink > 1 and not stat.S_ISDIR(info.st_mode)
+                                          and (info.st_dev, info.st_ino) in seen):
             return 0
         seen.add((info.st_dev, info.st_ino))
         return info.st_blocks * 512 if hasattr(info, "st_blocks") else info.st_size
 
-    if os.path.islink(path) or not os.path.isdir(path):
-        return one(path)
-    total = one(path)
-    for base, directories, files in os.walk(path, followlinks=False):
-        directories[:] = [name for name in directories if not os.path.islink(os.path.join(base, name))]
-        for name in (*directories, *files):
-            total += one(Path(base) / name)
-    return total
+    def walk(parent_fd: int, name: str, depth: int) -> int:
+        try:
+            info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        except OSError:
+            return 0
+        total = one(info)
+        if not stat.S_ISDIR(info.st_mode) or depth >= TREE_MAX_DEPTH:
+            return total
+        try:
+            fd = os.open(name, _DIR_FLAGS, dir_fd=parent_fd)
+        except OSError:
+            return total
+        try:
+            for child in os.listdir(fd):
+                if budget[0] <= 0:
+                    break
+                budget[0] -= 1
+                total += walk(fd, child, depth + 1)
+        except OSError:
+            pass
+        finally:
+            os.close(fd)
+        return total
+
+    path = Path(path)
+    try:
+        parent = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+    except OSError:
+        return 0
+    try:
+        return walk(parent, path.name, 0)
+    finally:
+        os.close(parent)
 
 
 def _open_dir(name: str, parent_fd: int, dev: int) -> int:
