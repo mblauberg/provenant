@@ -554,7 +554,7 @@ def codex_writer_shared_paths(cwd, safe_path):
 def os_confinement_profile(plan, search_path=None):
     """Apply the provider's read and write boundary to this attempt.
 
-    Hardlinks stay denied until a source/destination filter probe can run outside an outer sandbox.
+    Seatbelt checks file-write* on both ends of a hard link, so the write rules also bound `ln`.
     SBPL applies the last matching rule, so each later rule narrows or widens the one before.
     """
     root = Path(plan.get("workspace_root") or plan["cwd"]).expanduser().resolve()

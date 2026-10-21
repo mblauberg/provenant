@@ -61,12 +61,12 @@ in `skills/orchestrate`; this page records the traps.
   and backup siblings. Reads follow a user-managed symlink normally. A live
   Claude smoke is pending. If Claude Code cannot start with it read-only, the
   fallback is writable with a detect-only warning, tracked on #927.
-- Hardlinks remain blanket-denied in sandboxed lanes pending an empirical
-  Seatbelt `file-link` source/destination filter probe outside an outer sandbox
-  (#927). The repair lane could not apply even `(allow default)`:
-  `sandbox-exec: sandbox_apply: Operation not permitted` (exit 71 for baseline,
-  source-path deny and destination-path deny). Hardlinks within writable roots,
-  including local clones and `cp -al`, therefore remain unavailable.
+- Seatbelt checks `file-write*` on both ends of a hard link: a write deny on
+  the existing file or on the new name blocks `ln`. Under the lane profiles'
+  default write deny, a lane can only hard-link files it can already write, so
+  local clones and `cp -al` work inside writable roots while protected provider
+  state cannot be linked out. Keep this in mind before widening a write grant:
+  anything inside the grant becomes linkable.
 
 - The in-session Agent tool picks a model tier but has no per-call effort knob;
   headless `claude -p --model <m> --effort <e>` does. `--bare` gives a clean
